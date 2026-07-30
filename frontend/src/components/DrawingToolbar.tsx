@@ -26,6 +26,7 @@ import DrawingToolButton from "./drawing/DrawingToolButton.js";
 import DrawingVariantToolButton from "./drawing/DrawingVariantToolButton.js";
 import {
   CHART_TYPE_VARIANTS,
+  ContinuousDrawingIcon,
   CURSOR_VARIANTS,
   EraserIcon,
   FibonacciIcon,
@@ -48,6 +49,7 @@ import type { MainChartType } from "../shared/mainChartTypes.js";
 export interface DrawingToolbarProps {
   activeTool: DrawingToolId | null;
   onToolChange?: (tool: DrawingToolId | null) => void;
+  drawingInteractionReady?: boolean;
   penColor: string;
   onPenColorChange?: (color: string) => void;
   penSize: number;
@@ -57,6 +59,8 @@ export interface DrawingToolbarProps {
   onToggleDrawingsHidden(): void;
   drawingSnapEnabled?: boolean;
   onDrawingSnapEnabledChange?: (enabled: boolean) => void;
+  drawingContinuousEnabled?: boolean;
+  onDrawingContinuousEnabledChange?: (enabled: boolean) => void;
   textFontSize?: number;
   onTextFontSizeChange?: (size: number) => void;
   textBold?: boolean;
@@ -87,6 +91,7 @@ const DEFAULT_LINE_VARIANT = (() => {
 const DrawingToolbar = memo(function DrawingToolbar({
   activeTool,
   onToolChange,
+  drawingInteractionReady = true,
   penColor,
   onPenColorChange,
   penSize,
@@ -96,6 +101,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
   onToggleDrawingsHidden,
   drawingSnapEnabled = true,
   onDrawingSnapEnabledChange,
+  drawingContinuousEnabled = false,
+  onDrawingContinuousEnabledChange,
   // Text settings
   textFontSize = 14,
   onTextFontSizeChange,
@@ -232,15 +239,23 @@ const DrawingToolbar = memo(function DrawingToolbar({
       onSelectedDrawingStyleChange?.({ lineWidth });
     }
   }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
-  const drawingToolsDisabled = !drawingFeaturesEnabled;
+  const drawingCapabilitiesDisabled = !drawingFeaturesEnabled;
+  const drawingGestureToolsDisabled = drawingCapabilitiesDisabled || !drawingInteractionReady;
   const cursorToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, CURSOR_VARIANTS);
-  const freehandToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, FREEHAND_VARIANTS);
-  const eraserDisabled = !supportsDrawingTool(drawingAnchorMode, "eraser");
-  const lineToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, LINE_VARIANTS);
-  const shapeToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, SHAPE_VARIANTS);
-  const textDisabled = !supportsDrawingTool(drawingAnchorMode, "text");
-  const fibonacciDisabled = !supportsDrawingTool(drawingAnchorMode, "fibonacci");
-  const positionToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, POSITION_VARIANTS);
+  const freehandToolsDisabled = drawingGestureToolsDisabled
+    || !hasSupportedDrawingVariant(drawingAnchorMode, FREEHAND_VARIANTS);
+  const eraserDisabled = drawingGestureToolsDisabled
+    || !supportsDrawingTool(drawingAnchorMode, "eraser");
+  const lineToolsDisabled = drawingGestureToolsDisabled
+    || !hasSupportedDrawingVariant(drawingAnchorMode, LINE_VARIANTS);
+  const shapeToolsDisabled = drawingGestureToolsDisabled
+    || !hasSupportedDrawingVariant(drawingAnchorMode, SHAPE_VARIANTS);
+  const textDisabled = drawingGestureToolsDisabled
+    || !supportsDrawingTool(drawingAnchorMode, "text");
+  const fibonacciDisabled = drawingGestureToolsDisabled
+    || !supportsDrawingTool(drawingAnchorMode, "fibonacci");
+  const positionToolsDisabled = drawingGestureToolsDisabled
+    || !hasSupportedDrawingVariant(drawingAnchorMode, POSITION_VARIANTS);
   const lineVariantSupported = supportsDrawingTool(drawingAnchorMode, lineVariant);
   const displayedLineVariant = lineVariantSupported
     ? (LINE_VARIANTS.find((variant) => variant.id === lineVariant) || DEFAULT_LINE_VARIANT)
@@ -262,7 +277,20 @@ const DrawingToolbar = memo(function DrawingToolbar({
     isLineActive,
     lineVariantSupported,
   ]);
-  const drawingToolTitle = `${currentChartType.label} 当前坐标模式暂不支持此绘图工具`;
+  const drawingToolTitle = !drawingFeaturesEnabled
+    ? `${currentChartType.label} 当前坐标模式暂不支持此绘图工具`
+    : "绘图引擎正在初始化";
+  const selectedStyleType = selectedDrawing?.type ?? null;
+  const selectedStyleControls = selectedStyleType === null ? null : {
+    fibonacci: selectedStyleType === "fibonacci",
+    line: selectedStyleType === "line"
+      || selectedStyleType === "axis-line"
+      || selectedStyleType === "angle",
+    pen: selectedStyleType === "freehand" || selectedStyleType === "highlighter",
+    position: selectedStyleType === "position",
+    shape: selectedStyleType === "shape",
+    text: selectedStyleType === "text",
+  };
   const snapTitle = usesSourceLineageAnchors
     ? (drawingSnapEnabled
         ? "Snap enabled; drawings use absolute source time in future space (hold Alt to disable price snap)"
@@ -270,9 +298,16 @@ const DrawingToolbar = memo(function DrawingToolbar({
     : (drawingSnapEnabled
         ? "Snap enabled (hold Alt to disable temporarily)"
         : "Snap disabled");
+  const continuousDrawingTitle = drawingContinuousEnabled
+    ? "Continuous drawing enabled; stay on the selected tool after completing a drawing"
+    : "Continuous drawing disabled; return to the cursor after completing a drawing";
 
   return (
-    <div className="drawing-toolbar">
+    <div
+      className="drawing-toolbar"
+      data-drawing-toolbar-state={drawingInteractionReady ? "ready" : "waiting-for-engine"}
+      aria-busy={!drawingInteractionReady}
+    >
       <DrawingVariantToolButton
         active={flyoutOpen === "chart-type"}
         anchorRef={chartTypeBtnRef}
@@ -445,18 +480,29 @@ const DrawingToolbar = memo(function DrawingToolbar({
 
       <DrawingToolButton
         active={drawingSnapEnabled}
-        disabled={drawingToolsDisabled}
+        disabled={drawingCapabilitiesDisabled}
         icon={MagnetIcon}
         onClick={() => onDrawingSnapEnabledChange?.(!drawingSnapEnabled)}
-        title={drawingToolsDisabled
+        title={drawingCapabilitiesDisabled
           ? drawingToolTitle
           : snapTitle}
+      />
+
+      <DrawingToolButton
+        active={drawingContinuousEnabled}
+        dataDrawingTool="continuous"
+        disabled={drawingCapabilitiesDisabled}
+        icon={ContinuousDrawingIcon}
+        onClick={() => onDrawingContinuousEnabledChange?.(!drawingContinuousEnabled)}
+        title={drawingCapabilitiesDisabled
+          ? drawingToolTitle
+          : continuousDrawingTitle}
       />
 
       {/* Divider */}
       <div className="drawing-toolbar-divider" />
 
-      {!drawingToolsDisabled && <DrawingStyleControls
+      {!drawingCapabilitiesDisabled && <DrawingStyleControls
         freehandOptionLabel={freehandOptionLabel}
         onOpenPositionSettings={handleTogglePositionSettings}
         onPenColorChange={handleStrokeColorChange}
@@ -467,12 +513,12 @@ const DrawingToolbar = memo(function DrawingToolbar({
         penColor={penColor}
         penSize={penSize}
         positionSize={positionSize}
-        showFibonacciOptions={showFibonacciOptions}
-        showLineOptions={showLineOptions}
-        showPenOptions={showPenOptions}
-        showPositionOptions={showPositionOptions}
-        showShapeOptions={showShapeOptions}
-        showTextOptions={showTextOptions}
+        showFibonacciOptions={selectedStyleControls?.fibonacci ?? showFibonacciOptions}
+        showLineOptions={selectedStyleControls?.line ?? showLineOptions}
+        showPenOptions={selectedStyleControls?.pen ?? showPenOptions}
+        showPositionOptions={selectedStyleControls?.position ?? showPositionOptions}
+        showShapeOptions={selectedStyleControls?.shape ?? showShapeOptions}
+        showTextOptions={selectedStyleControls?.text ?? showTextOptions}
         textBold={textBold}
         textFontSize={textFontSize}
         textItalic={textItalic}

@@ -450,6 +450,24 @@ function drawEdgeHandle(
   }
 }
 
+function drawCornerHandle(
+  context: CanvasRenderingContext2D,
+  point: BitmapPoint,
+  minimumRatio: number,
+): void {
+  const size = 8 * minimumRatio;
+  const half = size / 2;
+  context.fillStyle = "#ffffff";
+  context.strokeStyle = adjustAlpha("#90a4ae", 0.9);
+  context.lineWidth = 1.5 * minimumRatio;
+  context.shadowColor = "rgba(0,0,0,0.3)";
+  context.shadowBlur = 3 * minimumRatio;
+  roundRect(context, point.x - half, point.y - half, size, size, minimumRatio);
+  context.fill();
+  context.stroke();
+  context.shadowBlur = 0;
+}
+
 /** Paint one committed, fully projected position entity. */
 export function drawPositionSceneEntity(
   context: CanvasRenderingContext2D,
@@ -522,6 +540,10 @@ export function drawPositionSceneEntity(
   let slHandle: BitmapPoint | null = null;
   let leftHandle: BitmapPoint | null = null;
   let rightHandle: BitmapPoint | null = null;
+  let topLeftHandle: BitmapPoint | null = null;
+  let topRightHandle: BitmapPoint | null = null;
+  let bottomLeftHandle: BitmapPoint | null = null;
+  let bottomRightHandle: BitmapPoint | null = null;
   if (spec.selected) {
     entryHandle = bitmapHandle(
       entity,
@@ -558,7 +580,38 @@ export function drawPositionSceneEntity(
       horizontalPixelRatio,
       verticalPixelRatio,
     );
-    if (!entryHandle || (tp && !tpHandle) || (sl && !slHandle) || !leftHandle || !rightHandle) {
+    if (tp && sl) {
+      topLeftHandle = bitmapHandle(
+        entity,
+        list,
+        "top-left",
+        horizontalPixelRatio,
+        verticalPixelRatio,
+      );
+      topRightHandle = bitmapHandle(
+        entity,
+        list,
+        "top-right",
+        horizontalPixelRatio,
+        verticalPixelRatio,
+      );
+      bottomLeftHandle = bitmapHandle(
+        entity,
+        list,
+        "bottom-left",
+        horizontalPixelRatio,
+        verticalPixelRatio,
+      );
+      bottomRightHandle = bitmapHandle(
+        entity,
+        list,
+        "bottom-right",
+        horizontalPixelRatio,
+        verticalPixelRatio,
+      );
+    }
+    if (!entryHandle || (tp && !tpHandle) || (sl && !slHandle) || !leftHandle || !rightHandle
+      || (tp && sl && (!topLeftHandle || !topRightHandle || !bottomLeftHandle || !bottomRightHandle))) {
       return;
     }
   }
@@ -644,6 +697,12 @@ export function drawPositionSceneEntity(
       verticalPixelRatio,
       minimumRatio,
     );
+    if (topLeftHandle && topRightHandle && bottomLeftHandle && bottomRightHandle) {
+      drawCornerHandle(context, topLeftHandle, minimumRatio);
+      drawCornerHandle(context, topRightHandle, minimumRatio);
+      drawCornerHandle(context, bottomLeftHandle, minimumRatio);
+      drawCornerHandle(context, bottomRightHandle, minimumRatio);
+    }
   }
   context.restore();
 }

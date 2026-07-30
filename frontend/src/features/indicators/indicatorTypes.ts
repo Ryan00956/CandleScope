@@ -5,11 +5,46 @@ export type IndicatorSecurityMode = "safe" | "research" | "unsafe";
 export type IndicatorKind = "builtin" | "script" | "custom" | "pyne";
 export type IndicatorSeriesType = "line" | "histogram" | string;
 
+export interface ScriptRuntimeDescriptor {
+  id: string;
+  name: string;
+  version: string;
+  package: string;
+  languages: ScriptLanguageIdentity[];
+  features: string[];
+  requiredHostFeatures: string[];
+  meta: Record<string, unknown>;
+}
+
+export interface ScriptLanguageIdentity {
+  id: string;
+  name: string;
+  extensions: string[];
+  aliases: string[];
+}
+
+export interface ScriptLanguageDescriptor extends ScriptLanguageIdentity {
+  runtimeId: string | null;
+  routeMode: string;
+  available: boolean;
+  features: string[];
+}
+
+export interface ScriptRuntimeCatalog {
+  schemaVersion: number;
+  defaultLanguage: string;
+  languages: ScriptLanguageDescriptor[];
+  runtimes: ScriptRuntimeDescriptor[];
+}
+
 export interface IndicatorDefinition {
   id: string;
+  /** Explicit execution ownership. Existing indicators remain hosted by default. */
+  executionTarget?: "hosted" | "local";
   name?: string;
   engineName?: string | null;
   script?: string;
+  language?: string;
   params?: IndicatorParams;
   securityMode?: IndicatorSecurityMode | string;
   visible?: boolean;
@@ -91,6 +126,9 @@ export interface IndicatorLine {
   scale?: string;
   valueFormat?: "notional" | string;
   zIndex?: number;
+  visible?: boolean;
+  base?: number;
+  trackPrice?: boolean;
   colorData?: IndicatorColorPoint[] | null;
   /** Internal renderer hint. Historical snapshot/patch/range paths reset it. */
   renderUpdate?: "tail" | "full" | null;
@@ -214,6 +252,9 @@ export interface IndicatorUnifiedSeries {
     lineWidth: number;
     lineStyle: number;
     colorData?: IndicatorColorPoint[];
+    visible?: boolean;
+    base?: number;
+    trackPrice?: boolean;
   };
   scale?: string;
   zIndex?: number;
@@ -338,6 +379,7 @@ export interface DeferredRightCatchupPlan {
 export interface IndicatorRangeRequest {
   clientId: string;
   kind?: IndicatorKind | string;
+  language?: string;
   securityMode?: IndicatorSecurityMode | string;
   name?: string;
   customId?: string;
@@ -350,6 +392,8 @@ export interface IndicatorRangeRequest {
   start: number;
   end: number;
   reason?: string;
+  requestScope?: string;
+  requestGeneration?: number;
   signal?: AbortSignal;
 }
 
@@ -365,6 +409,7 @@ export interface IndicatorRangeBatchResponse {
 
 export interface IndicatorComputeRequest {
   mode?: string;
+  language?: string;
   securityMode?: string;
   name?: string;
   script?: string;
@@ -376,10 +421,28 @@ export interface IndicatorComputeRequest {
   exchange?: string;
 }
 
+export interface IndicatorComputeBatchJob {
+  clientId: string;
+  jobKey: string;
+  request: IndicatorComputeRequest;
+}
+
+export interface IndicatorComputeBatchItem {
+  clientId: string;
+  jobKey: string;
+  payload: IndicatorPayloadEnvelope;
+}
+
+export interface IndicatorComputeBatchResponse {
+  ok: boolean;
+  results: IndicatorComputeBatchItem[];
+}
+
 export interface IndicatorPreset extends IndicatorDefinition {
   name: string;
   engineName: string;
   script: string;
+  language?: string;
   params: IndicatorParams;
   description: string;
   category: string;
@@ -409,6 +472,7 @@ export interface CustomIndicatorRecord {
   name: string;
   description: string;
   script: string;
+  language?: string;
   params: IndicatorParams;
   paramSchema: IndicatorParameterSchema[];
   renderHints: Record<string, unknown>;
@@ -493,6 +557,7 @@ export interface IndicatorCacheMetadata {
 
 export interface IndicatorCacheEntry {
   key: string;
+  contentVersion: number;
   dependencyKey: string;
   indicatorId: string;
   context: IndicatorCacheContext;
@@ -509,8 +574,21 @@ export interface IndicatorCacheEntry {
 
 export interface IndicatorCacheResult {
   indicatorId: string;
+  contentVersion: number;
   normalized: NormalizedIndicatorPayload;
   schema: IndicatorParameterSchema[];
+  outputCoverage: IndicatorCoverage | null;
+  coverage: IndicatorCoverage | null;
+  computedSegments: IndicatorRangeSegment[];
+  staleSegments: IndicatorRangeSegment[];
+  revision: IndicatorRevision | null;
+  lastUpdatedMs: number;
+}
+
+export interface IndicatorCacheResultMetadata {
+  key: string;
+  indicatorId: string;
+  contentVersion: number;
   outputCoverage: IndicatorCoverage | null;
   coverage: IndicatorCoverage | null;
   computedSegments: IndicatorRangeSegment[];
@@ -547,6 +625,7 @@ export interface IndicatorSubscribeMessage {
   name?: string;
   customId?: string;
   script?: string;
+  language?: string;
   securityMode?: string;
   resumeFrom?: number;
   serverEpoch?: string;

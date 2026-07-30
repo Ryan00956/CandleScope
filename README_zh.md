@@ -5,7 +5,7 @@
 CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻量级交易看盘软件。当前支持 Binance 与 OKX 行情、现货与永续市场、多模块 Data Engine、交易所感知的交易对元数据、实时 WebSocket、内置指标，以及通过 Pyne 提供的 Pine 风格 Python 指标脚本。
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-19+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
@@ -21,6 +21,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 - [后端](#后端)
 - [前端](#前端)
 - [指标和 Pyne](#指标和-pyne)
+- [Plugin SDK（开发者预览）](#plugin-sdk开发者预览)
 - [API 文档](#api-文档)
 - [项目结构](#项目结构)
 - [开发检查](#开发检查)
@@ -31,7 +32,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 
 环境要求：
 
-- Python 3.10+
+- Windows CPython 3.12（首方 Pyne/Pine 插件包的固定运行平台）
 - Node.js 20+
 - npm 10+
 
@@ -40,7 +41,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 Windows 下也可以直接用脚本：
@@ -49,6 +50,9 @@ Windows 下也可以直接用脚本：
 cd backend
 .\dev-server.ps1
 ```
+
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
 
 启动前端：
 
@@ -186,7 +190,7 @@ DataManager cache + EventBus
 | `app/data_engine/data_manager` | query/cache/events/streams/backfill/prices/maintenance 公共门面 |
 | `app/data_engine/backfill` | 历史 detect/plan/fetch/reconcile/report pipeline |
 | `app/data_engine/storage` | SQLite K 线仓库和 gap ledger |
-| `app/indicator` | 内置指标、Pyne runtime、指标实时流 |
+| `app/indicator` | 内置指标、sidecar runtime 路由、指标实时流 |
 
 ## 前端
 
@@ -266,14 +270,67 @@ p2 = plot(lower, "Lower", color=color.green)
 fill(p1, p2, color="rgba(59,130,246,0.08)")
 ```
 
-Pyne 支持 `safe`、`research`、`unsafe` security modes。默认使用 process executor，比 inline 执行更容易可靠地强制超时。
+Pyne 支持 `safe`、`research`、`unsafe` security modes，并在由公共 sidecar
+协议监督的隔离插件环境中运行。
 
 文档：
 
 - [Indicator Engine](backend/app/indicator/README.md)
 - [Indicator Engine 中文](backend/app/indicator/README_zh.md)
-- [Pyne Runtime](backend/app/indicator/pyne/README.md)
-- [Pyne Runtime 中文](backend/app/indicator/pyne/README_zh.md)
+- [Pyne Runtime 插件](packages/candlescope-plugin-pyne/README.md)
+- [Pyne Runtime 插件中文](packages/candlescope-plugin-pyne/README_zh.md)
+- [Pine Compatibility 插件](packages/candlescope-plugin-pine-compat/README.md)
+- [Pine Compatibility 插件中文](packages/candlescope-plugin-pine-compat/README_zh.md)
+
+## Plugin SDK（开发者预览）
+
+社区 runtime 开发者可以直接使用零运行时依赖的
+[`candlescope-plugin-sdk`](packages/candlescope-plugin-sdk/README_zh.md)。它冻结了
+版本化的 `candlescope.script-runtime/1` JSON-RPC sidecar 契约、能力协商、类型化
+OHLCV 批量输入、结构化诊断，以及第一版由 CandleScope 拥有的 line-series
+Render IR；仓库同时提供可执行的 Hello Runtime 和固定 wire transcript。
+
+Plugin platform Phase 2/3 已加入通用
+[`app.plugin_runtime`](backend/app/plugin_runtime/README_zh.md) Host/Supervisor：
+它可以从显式 activation registry 启动并监督外部 sidecar，并提供严格握手、超时、
+消息上限、重启熔断和健康汇总。Phase 3 同时提供确定性 `.cspkg`、调用者固定的
+SHA-256、每 bundle 独立 venv、离线 wheel 安装、结果探针、原子激活和逐插件回滚；
+社区发布流程见
+[`INSTALLER_zh.md`](backend/app/plugin_runtime/INSTALLER_zh.md)。Phase 4 已把 Indicator
+HTTP、range、batch 和 WebSocket 统一接入 runtime 路由；Phase 8 缺省同时切换为
+`pyne=sidecar,candlescope.pyne` 与 `pine=sidecar,candlescope.pine-compat`，任一 required
+runtime 不可用都会 fail closed。Phase 7 新增
+`GET /api/v1/indicators/runtimes` 描述符发现；编辑器接受任意已路由的社区 language ID，
+未知语言使用 plaintext fallback，且不加载插件提供的前端代码。Phase 5 新增独立可构建的
+[`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README_zh.md)，通过发行锁固定
+SDK、Pyne Runtime RC wheel 与 NumPy 版本，并已通过真实 `.cspkg` 离线安装和协议探针。
+0.2.0 bridge 通过可协商的结构化 Render IR 覆盖 marker、hline、fill 等输出并通过冻结
+golden。可信开发包已发布为
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1)；
+产品 bootstrap 固定其 URL、大小、平台和外层 SHA-256，通用社区安装器仍只接受本地
+artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
+[`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
+
+独立演进的通用 Plugin Platform v2 已完成 Phase 1–12：在 SDK、业务无关 Host、
+Bundle/Installer、权限与 Windows OS 沙箱之上，产品组合根已提供 command/settings/event/job、
+私有存储、只读市场 consumer、Host-owned 图表图层、声明式与 opaque-origin sandbox UI、受控
+HTTPS/文件/endpoint gateway、成对的公开 symbol/market-data provider，以及 Paper 与默认关闭的
+WP-A～WP-F Live Broker 技术路径。Phase 12 新增默认关闭的 Ed25519 签名 Marketplace、不可变
+artifact/index cache、SBOM/许可证绑定、透明日志、撤销、permission diff 和显式
+prepare/apply/activate/健康回滚流程。
+
+仓库默认 Marketplace roots 为空；`verified-publisher` 只证明发布来源，社区 backend 仍在 Windows
+AppContainer 中按 `untrusted` 运行，权限由 Host 单独授予。`secrets.use`、社区 Live
+`trade.submit`/`trade.cancel`、真实 Demo/真钱测试与 WP-G 仍未开放。最新执行记录见
+[`PLUGIN_PLATFORM_V2_PHASE12_zh.md`](docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md)。
+
+Phase 8 新增独立可构建的
+[`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：
+它固定公开 `pine-compat-runtime` v0.2.0 Release wheel，不包含 Pine 引擎源码快照，也不
+导入 CandleScope 私有模块，只声明闭合 K 线 batch 能力。开发 bundle 已发布为
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1)；
+realtime、strategy、`request.*`、import 和原生对象等未公开或无法忠实映射的能力继续
+fail closed。
 
 ## API 文档
 
@@ -323,10 +380,15 @@ CandleScope/
 │   │   │   ├── data_manager/
 │   │   │   ├── backfill/
 │   │   │   └── storage/
-│   │   └── indicator/
-│   │       ├── indicators/
-│   │       └── pyne/
+│   │   ├── indicator/
+│   │   │   ├── indicators/
+│   │   │   └── pyne/
+│   │   └── plugin_runtime/
 │   └── tests/
+├── packages/
+│   ├── candlescope-plugin-pyne/
+│   ├── candlescope-plugin-sdk/
+│   └── pyne-runtime/
 └── frontend/
     ├── package.json
     └── src/
@@ -369,7 +431,7 @@ drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面
 - runtime proxy 设置默认持久化到 `backend/data/proxy_settings.json`。
 - Windows 下如果后端启动时打印状态符号导致编码错误，可设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1` 后再启动。
 - SQLite 数据是本地文件，并已被 git 忽略。
-- Pyne 脚本会按配置的 security mode 在后端本地执行。只对完全信任的脚本使用 `unsafe`。
+- Pyne 脚本会按配置的 security mode 在本地隔离 sidecar 中执行。只对完全信任的脚本使用 `unsafe`。
 - 本仓库使用 GNU GPL-3.0 许可证，见 [LICENSE](LICENSE)。
 
 ## 鸣谢

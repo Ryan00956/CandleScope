@@ -13,9 +13,17 @@ import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdva
 import MarketChartWorkspace from "./MarketChartWorkspace.js";
 import { useTradeFlowPanes } from "../features/trade-flow/useTradeFlowPanes.js";
 import type { TradeFlowRuntime } from "../features/trade-flow/tradeFlowTypes.js";
+import { combineExternalMarkerSources } from "../chart-adapter/externalMarkerSource.js";
+import type { ExternalMarkerSource } from "../chart-adapter/externalMarkerSource.js";
+import type { PluginChartLayerSource } from "../features/plugins/pluginChartLayerSource.js";
+import { preloadDrawingEngineHost } from "../features/drawings/drawingEngineLoader.js";
+import { drawingToolWhenInteractionReady } from "./drawingInteractionReadiness.js";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
-const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
+const DrawingToolbar = React.lazy(() => {
+  preloadDrawingEngineHost();
+  return import("../features/drawings/DrawingToolbar");
+});
 const RightMarketRail = React.lazy(() => import("./RightMarketRail"));
 
 export interface ChartWorkspaceChartModel {
@@ -32,6 +40,8 @@ export interface ChartWorkspaceProps {
   watchlist: WatchlistSidebarProps;
   orderBook: OrderBookRuntime;
   tradeFlow: TradeFlowRuntime;
+  pluginMarkerSource?: ExternalMarkerSource | null;
+  pluginChartLayerSource?: PluginChartLayerSource | null;
   errorBoundary?: ComponentType<PropsWithChildren>;
 }
 
@@ -42,20 +52,55 @@ function ChartWorkspace({
   watchlist,
   orderBook,
   tradeFlow,
+  pluginMarkerSource = null,
+  pluginChartLayerSource = null,
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
+  const [drawingInteractionReady, setDrawingInteractionReady] = React.useState(false);
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
   const tradeFlowPanes = useTradeFlowPanes(tradeFlow, chart.chartProps.seriesStore);
+  const markerSource = React.useMemo(
+    () => combineExternalMarkerSources([tradeFlow.view.markerSource, pluginMarkerSource]),
+    [pluginMarkerSource, tradeFlow.view.markerSource],
+  );
+  const upstreamDrawingInteractionReadyChange =
+    chart.chartProps.onDrawingInteractionReadyChange;
+  const handleDrawingInteractionReadyChange = React.useCallback((ready: boolean) => {
+    setDrawingInteractionReady(ready);
+    upstreamDrawingInteractionReadyChange?.(ready);
+  }, [upstreamDrawingInteractionReadyChange]);
+  const drawingToolbarProps = React.useMemo(() => ({
+    ...drawingToolbar,
+    activeTool: drawingToolWhenInteractionReady(
+      drawingToolbar.activeTool,
+      drawingInteractionReady,
+    ),
+    drawingInteractionReady,
+  }), [drawingInteractionReady, drawingToolbar]);
   const chartProps = React.useMemo(() => ({
     ...chart.chartProps,
-    externalMarkerSource: tradeFlow.view.markerSource,
+    drawingTool: drawingToolWhenInteractionReady(
+      chart.chartProps.drawingTool,
+      drawingInteractionReady,
+    ),
+    onDrawingInteractionReadyChange: handleDrawingInteractionReadyChange,
+    externalMarkerSource: markerSource,
+    pluginChartLayerSource,
     subPanes: [
       ...tradeFlowPanes,
       ...advancedPanes,
       ...(chart.chartProps.subPanes || []),
     ],
-  }), [advancedPanes, chart.chartProps, tradeFlow.view.markerSource, tradeFlowPanes]);
+  }), [
+    advancedPanes,
+    chart.chartProps,
+    drawingInteractionReady,
+    handleDrawingInteractionReadyChange,
+    markerSource,
+    pluginChartLayerSource,
+    tradeFlowPanes,
+  ]);
 
   const chartNode = chart.error ? (
           <div className="chart-area">
@@ -85,7 +130,7 @@ function ChartWorkspace({
     <MarketChartWorkspace
       toolbar={(
         <React.Suspense fallback={<div className="drawing-toolbar drawing-toolbar-loading" aria-hidden="true" />}>
-          <DrawingToolbar {...drawingToolbar} />
+          <DrawingToolbar {...drawingToolbarProps} />
         </React.Suspense>
       )}
       exportOverlay={exportPanel.isOpen ? (

@@ -3,6 +3,7 @@ import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime"
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime";
+import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime";
 import { useIndicatorRuntime } from "../features/indicators/useIndicatorRuntime";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime";
@@ -17,6 +18,7 @@ import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/u
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability";
 import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext";
+import { usePluginPlatformRuntime } from "../features/plugins/usePluginPlatformRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
 import { loadReplayLauncherDialog } from "./lazySurfaceLoaders";
@@ -35,13 +37,21 @@ export default function App() {
   const chartSurface = useChartSurfaceRuntime();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const realtimePriceRef = useRef<number | null>(null);
+  const [foregroundPreloadGate] = useState(() => new ForegroundPreloadGate());
   const chartSession = useChartSession({
     chartSurfaceActions: chartSurface.actions,
+  });
+  const plugins = usePluginPlatformRuntime({
+    exchange: chartSession.view.exchange,
+    marketType: chartSession.view.marketType,
+    symbol: chartSession.view.symbol,
+    interval: chartSession.view.interval,
   });
 
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
+    foregroundPreloadGate,
   });
   const advancedMarketData = useAdvancedMarketDataRuntime({
     session: chartSession,
@@ -137,6 +147,7 @@ export default function App() {
   });
   useWatchlistFullCacheRuntime({
     enabled: chartSession.status.marketDataReady,
+    foregroundPreloadGate,
     watchlists: watchlist.view.watchlists,
     subscriptionTiers: watchlist.view.subscriptionTiers,
     exchangeCatalog: chartSession.view.exchangeCatalog,
@@ -269,6 +280,7 @@ export default function App() {
           alerts={alertsRuntime}
           replayEntry={replayEntry}
           onOpenReplayLauncher={openReplayLauncher}
+          plugins={plugins}
         />
         {showReplayLauncher && replayLaunchContext !== null && (
           <Suspense fallback={null}>

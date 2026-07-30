@@ -45,6 +45,7 @@ class _IntervalStorage:
     def __init__(self, rows_by_interval: dict[str, list[dict]]) -> None:
         self.rows_by_interval = rows_by_interval
         self.calls: list[dict] = []
+        self.write_calls: list[dict] = []
 
     def query_bars(self, **kwargs):
         self.calls.append(dict(kwargs))
@@ -71,6 +72,36 @@ class _IntervalStorage:
         ]
         rows.sort(key=lambda row: int(row["open_time"]))
         return rows[-int(kwargs["limit"]):]
+
+    def upsert_bars(
+        self,
+        symbol,
+        interval,
+        rows,
+        source="data_manager",
+        exchange="binance",
+        market_type="spot",
+    ):
+        self.write_calls.append({
+            "symbol": symbol,
+            "interval": interval,
+            "rows": list(rows),
+            "source": source,
+            "exchange": exchange,
+            "market_type": market_type,
+        })
+        by_open = {
+            int(row["open_time"]): dict(row)
+            for row in self.rows_by_interval.get(interval, ())
+        }
+        for raw in rows:
+            row = dict(raw)
+            row["source"] = source
+            by_open[int(row["open_time"])] = row
+        self.rows_by_interval[interval] = [
+            by_open[open_time] for open_time in sorted(by_open)
+        ]
+        return len(rows)
 
 
 def test_custom_intervals_reuse_bounded_shared_base_history() -> None:
@@ -129,7 +160,9 @@ def test_custom_intervals_reuse_bounded_shared_base_history() -> None:
         auto_backfill=False,
     )
     assert after_invalidation.bars == second.bars
-    assert after_invalidation.metadata["base_storage_reads"] == 8
+    assert after_invalidation.metadata["target_materialized"] is True
+    assert after_invalidation.metadata["base_storage_reads"] == 0
+    assert after_invalidation.metadata["target_storage_reads"] == 1
 
 
 def test_custom_query_reuses_complete_materialized_target_storage() -> None:
@@ -188,6 +221,84 @@ def test_custom_query_derives_only_after_materialized_target_is_incomplete() -> 
     assert result.metadata["target_materialized"] is False
     assert result.metadata["target_materialized_rows"] == 1
     assert "15m" in [call["interval"] for call in storage.calls]
+
+
+def test_complete_trusted_91m_rebuild_is_persisted_and_next_query_hits_target() -> None:
+    storage = _IntervalStorage({
+        "1m": [
+            _row(index * 60_000, index + 1, source="backfill")
+            for index in range(182)
+        ],
+    })
+    cache = BarCache()
+    engine = QueryEngine(
+        cache=cache,
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+
+    first = engine.query(
+        "BTCUSDT",
+        "91m",
+        start_ms=0,
+        end_ms=5_460_000,
+        limit=2,
+        auto_backfill=False,
+    )
+
+    assert [bar.time_ms for bar in first.bars] == [0, 5_460_000]
+    assert first.metadata["target_materialized_written"] == 2
+    assert first.metadata["target_materialization_role"] == "owner"
+    assert len(storage.write_calls) == 1
+    assert storage.write_calls[0]["source"] == "backfill_aggregated"
+    assert all(row["is_closed"] for row in storage.write_calls[0]["rows"])
+
+    cache.invalidate(SeriesKey("BTCUSDT", "1m"))
+    cache.invalidate(SeriesKey("BTCUSDT", "91m"))
+    storage.calls.clear()
+    storage.write_calls.clear()
+
+    second = engine.query(
+        "BTCUSDT",
+        "91m",
+        start_ms=0,
+        end_ms=5_460_000,
+        limit=2,
+        auto_backfill=False,
+    )
+
+    assert second.metadata["target_materialized"] is True
+    assert [call["interval"] for call in storage.calls] == ["91m"]
+    assert storage.write_calls == []
+
+
+def test_rebuild_with_base_gap_never_persists_target() -> None:
+    storage = _IntervalStorage({
+        "15m": [
+            _row(0, 1, source="backfill"),
+            _row(1_800_000, 3, source="backfill"),
+        ],
+    })
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=storage,  # type: ignore[arg-type]
+        config=QueryConfig(auto_backfill=False),
+    )
+
+    result = engine.query(
+        "BTCUSDT",
+        "45m",
+        start_ms=0,
+        end_ms=0,
+        limit=1,
+        auto_backfill=False,
+    )
+
+    assert result.missing_ranges
+    assert result.bars == []
+    assert result.metadata["target_materialized_written"] == 0
+    assert result.metadata["target_materialization_role"] == "skipped"
+    assert storage.write_calls == []
 
 
 def test_custom_query_rebuilds_forming_materialized_tail_from_base() -> None:
@@ -291,6 +402,80 @@ def test_identical_custom_derivations_singleflight_base_work() -> None:
     assert second_result.metadata["singleflight_role"] == "join"
     assert service.snapshot()["singleflight_owners"] == 1
     assert service.snapshot()["singleflight_joins"] == 1
+
+
+def test_different_custom_requests_join_a_covering_side_effect_free_base_window() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[dict] = []
+    base_bars = [
+        BarData(
+            time=index * 60,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            source="backfill",
+        )
+        for index in range(89)
+    ]
+
+    def _base_query(*args, **kwargs) -> QueryResult:
+        calls.append(dict(kwargs))
+        entered.set()
+        assert release.wait(timeout=2)
+        return QueryResult(
+            bars=base_bars,
+            symbol="BTCUSDT",
+            interval="1m",
+            source=QuerySource.STORAGE,
+            total=len(base_bars),
+            complete=True,
+            metadata={"all_rows_final": True},
+        )
+
+    service = CustomIntervalQueryService(
+        cache=BarCache(),
+        config=QueryConfig(default_limit=1, max_limit=1_000),
+        base_query=_base_query,
+    )
+
+    def _query(interval: str) -> QueryResult:
+        return service.query_from_base(
+            symbol="BTCUSDT",
+            interval=interval,
+            start_ms=0,
+            end_ms=0,
+            limit=1,
+            started_at=time.monotonic(),
+            auto_backfill=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        covering = executor.submit(_query, "89m")
+        assert entered.wait(timeout=1)
+        covered = executor.submit(_query, "47m")
+        time.sleep(0.05)
+        release.set()
+        covering_result = covering.result(timeout=2)
+        covered_result = covered.result(timeout=2)
+
+    assert len(calls) == 1
+    assert calls[0]["auto_backfill"] is False
+    assert covering_result.metadata["base_window_flight_role"] == "owner"
+    assert covered_result.metadata["base_window_flight_role"] == "join"
+    assert covered_result.metadata["base_window_flight_covering"] is True
+    assert covered_result.metadata["base_window_side_effect_free"] is True
+    assert covered_result.metadata["base_window_requested_auto_backfill"] is True
+    assert [bar.time_ms for bar in covering_result.bars] == [0]
+    assert [bar.time_ms for bar in covered_result.bars] == [0]
+    snapshot = service.snapshot()
+    assert snapshot["base_window_flight_owners"] == 1
+    assert snapshot["base_window_flight_joins"] == 1
+    assert snapshot["base_window_covering_joins"] == 1
+    assert snapshot["base_pages"] == 1
+    assert snapshot["base_rows"] == 89
 
 
 def test_fixed_custom_aggregation_avoids_generic_row_materialization() -> None:
@@ -578,3 +763,25 @@ def test_okx_unsupported_standard_target_is_repaired_from_native_components() ->
     assert all(task.interval != "8h" for task in plan.tasks)
     assert {task.interval for task in plan.tasks} == {"4h"}
     assert plan.custom_intervals == ["8h"]
+
+
+def test_custom_interval_planner_keeps_source_tasks_page_bounded() -> None:
+    planner = BackfillPlanner(BackfillConfig(fetch_batch_size=1_000))
+    interval_ms = 91 * 60 * 1_000
+    gap = GapInfo(
+        symbol="BTCUSDT",
+        interval="91m",
+        gap_type=GapType.INTERIOR,
+        start_ms=0,
+        end_ms=14 * interval_ms,
+        missing_bars=15,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    plan = planner.plan([gap])
+
+    assert len(plan.tasks) == 2
+    assert all(task.interval == "1m" for task in plan.tasks)
+    assert [task.estimated_bars for task in plan.tasks] == [1_000, 365]
+    assert all(task.estimated_bars <= 1_000 for task in plan.tasks)

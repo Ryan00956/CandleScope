@@ -523,6 +523,7 @@ backfill 完成消息：
 |---|---|---|
 | `GET` | `/indicators/registry` | 列出已注册内置指标 specs |
 | `GET` | `/indicators/registry/{name}` | 获取单个内置指标 spec |
+| `GET` | `/indicators/runtimes` | 列出 routed languages 与公开 runtime descriptors |
 | `GET` | `/indicators/presets` | 前端兼容 preset 列表 |
 | `GET` | `/indicators/presets/{preset_id}` | preset 详情和参考脚本 |
 
@@ -543,6 +544,7 @@ backfill 完成消息：
   "schemaVersion": 1,
   "id": "my-script",
   "kind": "script",
+  "language": "pyne",
   "name": "My Script",
   "description": "",
   "script": "plot(close)",
@@ -552,6 +554,12 @@ backfill 完成消息：
   "securityMode": "safe"
 }
 ```
+
+### `GET /indicators/runtimes`
+
+返回 schema v1 runtime discovery，包括 `defaultLanguage`、routed `languages` 和被引用的
+SDK 公开 runtime descriptors。响应来自启动时已验证的 routes 与 descriptors，不暴露进程
+命令、路径、PID、stderr 或宿主失败细节。
 
 ### `GET /indicators/pyne/security`
 
@@ -570,6 +578,7 @@ backfill 完成消息：
 ```json
 {
   "mode": "script",
+  "language": "pyne",
   "name": "MA",
   "params": { "period": 20 },
   "exchange": "binance",

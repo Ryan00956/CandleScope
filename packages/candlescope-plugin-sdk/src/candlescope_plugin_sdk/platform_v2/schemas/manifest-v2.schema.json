@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://candlescope.local/schemas/plugin-manifest-v2.schema.json",
+  "title": "CandleScope Plugin Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "plugin",
+    "backend",
+    "contributions",
+    "permissions",
+    "probes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "plugin": {
+      "$ref": "#/$defs/plugin"
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entrypoints"
+      ],
+      "properties": {
+        "entrypoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/entrypoint"
+          }
+        }
+      }
+    },
+    "frontend": {
+      "$ref": "#/$defs/frontend"
+    },
+    "contributions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/contribution"
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "optional"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/permission"
+          }
+        },
+        "optional": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/permission"
+          }
+        }
+      }
+    },
+    "probes": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/probe"
+      }
+    }
+  },
+  "$defs": {
+    "localId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"
+    },
+    "pluginId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$"
+    },
+    "permissionId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9-]*)+$"
+    },
+    "jsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string",
+          "maxLength": 262144
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "maxProperties": 10000,
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "maxProperties": 10000,
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "version",
+        "publisher",
+        "license",
+        "engines"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/pluginId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+        },
+        "publisher": {
+          "$ref": "#/$defs/localId"
+        },
+        "license": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "engines": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "candlescope"
+          ],
+          "properties": {
+            "candlescope": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "pythonModule",
+        "resourceProfile",
+        "activationEvents"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/localId"
+        },
+        "pythonModule": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+        },
+        "resourceProfile": {
+          "enum": [
+            "minimal",
+            "standard",
+            "service"
+          ]
+        },
+        "activationEvents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "onCommand",
+              "onView",
+              "onSchedule",
+              "onMarketSubscription",
+              "onStartup"
+            ]
+          }
+        }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assetsRoot",
+        "surfaces"
+      ],
+      "properties": {
+        "assetsRoot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^(?![\\\\/])(?!.*\\.\\.)(?!.*:).+$"
+        },
+        "surfaces": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "entry",
+              "slot"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/localId"
+              },
+              "type": {
+                "enum": [
+                  "declarative",
+                  "sandbox"
+                ]
+              },
+              "entry": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^(?![\\\\/])(?!.*\\.\\.)(?!.*:).+$"
+              },
+              "slot": {
+                "$ref": "#/$defs/localId"
+              }
+            }
+          }
+        }
+      }
+    },
+    "contribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "entrypoint"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/localId"
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9-]*/[1-9][0-9]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/localId"
+        },
+        "configuration": {
+          "$ref": "#/$defs/jsonObject"
+        }
+      }
+    },
+    "permission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/permissionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/jsonObject"
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "sha256",
+        "entrypoint"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/localId"
+        },
+        "kind": {
+          "const": "controlTranscript"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/localId"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.market-scanner",
+    "name": "Read-only Market Scanner",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.market_scanner",
+        "resourceProfile": "standard",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "scan",
+      "kind": "command/1",
+      "title": "Scan scoped markets",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": [
+          "commandPalette",
+          "topToolbar"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "settings",
+      "kind": "settings/1",
+      "title": "Market scanner settings",
+      "entrypoint": "main",
+      "configuration": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "quoteAsset": {
+              "type": "string",
+              "enum": [
+                "USDT"
+              ]
+            },
+            "symbolsLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "interval": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "5m",
+                "1h"
+              ]
+            },
+            "lookbackBars": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 50
+            },
+            "minimumMovePct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "quoteAsset",
+            "symbolsLimit",
+            "interval",
+            "lookbackBars",
+            "minimumMovePct"
+          ],
+          "additionalProperties": false
+        },
+        "defaults": {
+          "quoteAsset": "USDT",
+          "symbolsLimit": 3,
+          "interval": "1h",
+          "lookbackBars": 20,
+          "minimumMovePct": 0
+        }
+      }
+    },
+    {
+      "id": "results",
+      "kind": "view/1",
+      "title": "Market scanner results",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "sidePanel",
+        "renderer": "table",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": [
+            "matches"
+          ]
+        },
+        "fields": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "format": "text"
+          },
+          {
+            "field": "changePct",
+            "label": "Move",
+            "format": "percent"
+          },
+          {
+            "field": "close",
+            "label": "Close",
+            "format": "price"
+          },
+          {
+            "field": "time",
+            "label": "Closed at",
+            "format": "timestamp"
+          }
+        ],
+        "maxItems": 50,
+        "emptyState": "Run the scanner to populate results",
+        "primaryCommand": "scan"
+      }
+    },
+    {
+      "id": "summary",
+      "kind": "view/1",
+      "title": "Market scanner summary",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "statusArea",
+        "renderer": "status",
+        "source": {
+          "kind": "storage.document",
+          "name": "latest-scan",
+          "path": []
+        },
+        "fields": [
+          {
+            "field": "scannedSymbols",
+            "label": "Scanned",
+            "format": "number"
+          },
+          {
+            "field": "interval",
+            "label": "Interval",
+            "format": "text"
+          }
+        ],
+        "maxItems": 1,
+        "emptyState": "Scanner idle"
+      }
+    },
+    {
+      "id": "signals",
+      "kind": "chart-layer/1",
+      "title": "Market scanner signals",
+      "entrypoint": "main",
+      "configuration": {
+        "target": "main-chart",
+        "zOrder": "above-series",
+        "maxItems": 16,
+        "maxBytes": 16384,
+        "maxTextChars": 64
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "settings.plugin.read",
+        "scope": {}
+      },
+      {
+        "id": "market.symbols.read",
+        "scope": {
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "quoteAssets": [
+            "USDT"
+          ],
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "XRPUSDT"
+          ],
+          "maxSymbolsPerCall": 5
+        }
+      },
+      {
+        "id": "market.bars.read",
+        "scope": {
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "symbols": [
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "XRPUSDT"
+          ],
+          "intervals": [
+            "1m",
+            "5m",
+            "1h"
+          ],
+          "maxHistoryBars": 50,
+          "maxConcurrent": 1
+        }
+      },
+      {
+        "id": "storage.private",
+        "scope": {
+          "maxBytes": 1048576
+        }
+      },
+      {
+        "id": "chart.layer.publish",
+        "scope": {
+          "contexts": [
+            "live"
+          ],
+          "exchanges": [
+            "binance"
+          ],
+          "marketTypes": [
+            "spot"
+          ],
+          "layers": [
+            "signals"
+          ],
+          "maxItems": 16
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": []
+}

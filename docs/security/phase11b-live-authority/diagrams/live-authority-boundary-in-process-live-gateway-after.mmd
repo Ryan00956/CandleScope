@@ -1,0 +1,28 @@
+flowchart LR
+  subgraph Plugin["Plugin process boundary"]
+    Sidecar["Plugin sidecar<br/>OrderIntent only"]
+  end
+
+  subgraph Host["Single Host process"]
+    Trust["First-party release lock<br/>or publisher proof"]
+    Cap["Capability Broker"]
+    Risk["Live risk and scope gate"]
+    Confirm["Host-native confirmation"]
+    Live["In-process Live Gateway"]
+    Vault["OS credential vault port"]
+    Journal["Durable order journal<br/>and reconciliation"]
+    Transport["Dedicated authenticated transport"]
+    Audit["Redacted audit and export"]
+  end
+
+  Sidecar --> Cap --> Risk
+  Trust --> Risk
+  Confirm --> Risk
+  Risk --> Live
+  Live --> Journal
+  Live --> Vault
+  Journal --> Transport
+  Vault --> Transport
+  Transport --> Venue["Trading venue"]
+  Live --> Audit
+  Risk --> Audit

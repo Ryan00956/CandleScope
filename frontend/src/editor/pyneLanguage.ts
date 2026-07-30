@@ -1166,6 +1166,10 @@ function buildHoverMap(): Map<string, PyneHoverInfo> {
 
 const HOVER_MAP = buildHoverMap();
 
+function isPyneEditorModel(model: Monaco.editor.ITextModel): boolean {
+  return model.uri.path.toLowerCase().endsWith(".pyne");
+}
+
 // ══════════════════════════════════════════════════════════════
 //  Export: Registration function
 // ══════════════════════════════════════════════════════════════
@@ -1187,6 +1191,7 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
     monaco.languages.registerCompletionItemProvider("python", {
       triggerCharacters: ["."],
       provideCompletionItems(model, position) {
+        if (!isPyneEditorModel(model)) return { suggestions: [] };
         const textUntilPosition = model.getValueInRange({
           startLineNumber: position.lineNumber,
           startColumn: 1,
@@ -1340,6 +1345,7 @@ export function registerPyneLanguageSupport(monaco: typeof Monaco): () => void {
   disposables.push(
     monaco.languages.registerHoverProvider("python", {
       provideHover(model, position) {
+        if (!isPyneEditorModel(model)) return null;
         const word = model.getWordAtPosition(position);
         if (!word) return null;
 

@@ -23,6 +23,8 @@ HTTP / WS APIs
         ├── one-shot compute
         ├── custom indicator CRUD
         └── realtime indicator stream
+
+Script requests → IndicatorRuntimeService → legacy / shadow / sidecar
 ```
 
 ## Main Files
@@ -37,9 +39,12 @@ HTTP / WS APIs
 | [data_manager_bridge.py](data_manager_bridge.py) | Connects DataManager bar events to IndicatorEngine |
 | [custom_store.py](custom_store.py) | Local JSON store for user scripts |
 | [serialization.py](serialization.py) | Normalized frontend payloads for built-in and Pyne results |
+| [runtime_routes.py](runtime_routes.py) | Strict per-language `legacy/shadow/sidecar` route table |
+| [runtime_service.py](runtime_service.py) | Shared script execution, shadow comparison, and sidecar dispatch |
+| [RUNTIME_ROUTING.md](RUNTIME_ROUTING.md) | Operator and community-plugin rollout contract |
 | [errors.py](errors.py) | Structured error payload helpers |
 | [indicators](indicators/) | Built-in indicator implementations |
-| [pyne](pyne/) | Pine-style Python runtime |
+| [pyne](pyne/) | Current legacy Pyne facade, retained until the plugin cutover gate |
 
 ## Built-In Indicators
 
@@ -174,26 +179,28 @@ Important endpoints:
 |---|---|
 | `GET /registry` | List registered indicator specs |
 | `GET /registry/{name}` | Get one built-in spec |
+| `GET /runtimes` | List routed script languages and public runtime descriptors |
 | `GET /presets` / `GET /presets/{id}` | Frontend preset compatibility |
 | `GET /custom` | List saved custom indicators |
 | `POST /custom` | Create/update a saved custom indicator |
 | `DELETE /custom/{indicator_id}` | Delete a saved custom indicator |
 | `GET /pyne/security` | Current Pyne security policy |
 | `GET /diagnostics` | Indicator diagnostics |
-| `POST /compute` | Built-in or Pyne script one-shot compute |
+| `POST /compute` | Built-in or routed script one-shot compute |
 
 Realtime endpoint:
 
 | Endpoint | Purpose |
 |---|---|
-| `WS /api/v1/stream/indicators` | Subscribe/unsubscribe multiple built-in or Pyne script indicators over one connection |
+| `WS /api/v1/stream/indicators` | Subscribe/unsubscribe multiple built-in or routed script indicators over one connection |
 
 ## Built-In Vs Script Compute
 
 `POST /compute` supports two paths:
 
 - Built-in engine mode: provide `name` and `params`, or a preset marker such as `# __ENGINE__:MA`.
-- Script mode: provide `script` and optional `securityMode`; execution goes through Pyne.
+- Script mode: provide `script`, an optional descriptor-declared `language`, and
+  Pyne-only `securityMode`; execution goes through the configured runtime route.
 
 Tests assert that script mode executes the script even if a built-in name is present, while built-in mode ignores the script body and uses the optimized engine path.
 
@@ -206,13 +213,14 @@ Payload fields:
 - `schemaVersion`
 - `id`
 - `kind`: `script` or `custom`
+- `language`: routed language ID; omitted legacy records default to `pyne`
 - `name`
 - `description`
 - `script`
 - `params`
 - `paramSchema`
 - `renderHints`
-- `securityMode`: `safe`, `research`, `unsafe`, or omitted
+- `securityMode`: Pyne-only `safe`, `research`, `unsafe`, or omitted
 
 Writes are atomic through a temporary file. Invalid IDs, missing names/scripts, invalid kinds, and invalid security modes are rejected.
 

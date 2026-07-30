@@ -1,16 +1,23 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
+import { Agent as HttpAgent } from 'node:http'
+import { Agent as HttpsAgent } from 'node:https'
 import { resolve } from 'node:path'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:18080'
 const devServerPort = Number(process.env.VITE_DEV_PORT || 15173)
 const replaySoakProjectionEnabled = process.env.VITE_REPLAY_SOAK_PROJECTION_ENABLED === '1'
+const proxyAgentOptions = { keepAlive: true, maxFreeSockets: 8, maxSockets: 32 }
+const apiProxyAgent = new URL(apiProxyTarget).protocol === 'https:'
+  ? new HttpsAgent(proxyAgentOptions)
+  : new HttpAgent(proxyAgentOptions)
 const buildApiProxy = () => ({
   '/api': {
     target: apiProxyTarget,
     changeOrigin: true,
     ws: true,
+    agent: apiProxyAgent,
   },
 })
 

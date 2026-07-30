@@ -2,18 +2,27 @@ import AboutSettingsPanel from "./panels/AboutSettingsPanel.js";
 import CacheDiagnosticsPanel from "./panels/CacheDiagnosticsPanel.js";
 import CacheLimitsPanel from "./panels/CacheLimitsPanel.js";
 import ChartAppearancePanel from "./panels/ChartAppearancePanel.js";
-import DatabaseManagementPanel from "./panels/DatabaseManagementPanel.js";
+import DataWorkbenchLaunchPanel from "./panels/DataWorkbenchLaunchPanel.js";
 import ExchangeSettingsPanel from "./panels/ExchangeSettingsPanel.js";
 import ProxySettingsPanel from "./panels/ProxySettingsPanel.js";
 import StorageMaintenancePanel from "./panels/StorageMaintenancePanel.js";
+import { PluginSettingsPanel } from "../plugins/PluginPlatformSurfaces.js";
+import type { PluginPlatformRuntime } from "../plugins/pluginPlatformTypes.js";
 import type { SettingsCategory, SettingsPanelViewModel } from "./settingsTypes.js";
 
 export interface SettingsPanelHostProps {
   activeCategory: SettingsCategory;
   panelModel: SettingsPanelViewModel;
+  plugins?: PluginPlatformRuntime | undefined;
+  onOpenDataWorkbench(): void;
 }
 
-export default function SettingsPanelHost({ activeCategory, panelModel }: SettingsPanelHostProps) {
+export default function SettingsPanelHost({
+  activeCategory,
+  panelModel,
+  plugins,
+  onOpenDataWorkbench,
+}: SettingsPanelHostProps) {
   switch (activeCategory) {
     case "appearance":
       return <ChartAppearancePanel {...panelModel.appearance} />;
@@ -24,13 +33,16 @@ export default function SettingsPanelHost({ activeCategory, panelModel }: Settin
     case "data":
       return (
         <>
+          <DataWorkbenchLaunchPanel onOpen={onOpenDataWorkbench} />
           <CacheDiagnosticsPanel {...panelModel.data.cacheDiagnostics} />
           <CacheLimitsPanel {...panelModel.data.cacheLimits} />
           <StorageMaintenancePanel {...panelModel.data.maintenance} />
         </>
       );
-    case "database":
-      return <DatabaseManagementPanel {...panelModel.database} />;
+    case "plugins":
+      return plugins
+        ? <PluginSettingsPanel runtime={plugins} />
+        : <div className="st-info-box">插件平台当前不可用。</div>;
     case "about":
       return <AboutSettingsPanel />;
     default:

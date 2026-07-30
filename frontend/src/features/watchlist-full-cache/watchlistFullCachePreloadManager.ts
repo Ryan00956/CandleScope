@@ -16,6 +16,10 @@ import {
   canonicalizeIntervalValue,
   intervalsSemanticallyEquivalent,
 } from "../../utils/intervals.js";
+import type {
+  ForegroundPreloadGate,
+  PreloadLease,
+} from "../market-data/foregroundPreloadGate.js";
 
 export const WATCHLIST_FULL_CACHE_PRELOAD_LIMIT = WATCHLIST_FULL_CACHE_MIN_RETAINED_BARS;
 export const WATCHLIST_FULL_CACHE_PRELOAD_CONCURRENCY = 2;
@@ -40,6 +44,7 @@ export type FullCachePreloadFetcher = (
 export interface WatchlistFullCachePreloadManagerOptions {
   concurrency?: number;
   fetchJob?: FullCachePreloadFetcher;
+  foregroundPreloadGate?: ForegroundPreloadGate;
   limit?: number;
 }
 
@@ -54,6 +59,7 @@ export interface WatchlistFullCachePreloadManager {
 interface ActivePreload {
   controller: AbortController;
   job: FullCachePreloadJob;
+  lease?: PreloadLease;
 }
 
 function normalizeHttpRows(rows: TransportKlineBar[]): KlineBar[] {
@@ -124,6 +130,7 @@ export function createWatchlistFullCachePreloadManager(
     Math.floor(options.concurrency || WATCHLIST_FULL_CACHE_PRELOAD_CONCURRENCY),
   );
   const fetchJob = options.fetchJob || defaultFetchJob;
+  const foregroundPreloadGate = options.foregroundPreloadGate;
   const limit = Math.max(1, Math.floor(options.limit || WATCHLIST_FULL_CACHE_PRELOAD_LIMIT));
   let desired = new Map<string, FullCachePreloadJob>();
   let queuedKeys: string[] = [];
@@ -139,16 +146,28 @@ export function createWatchlistFullCachePreloadManager(
       const job = desired.get(key);
       if (!job || shouldSkipSettledFullCachePreload(job, limit)) continue;
 
-      const controller = new AbortController();
+      const lease = foregroundPreloadGate?.tryAcquirePreload(
+        `watchlist-full-cache:${key}`,
+      );
+      if (foregroundPreloadGate && !lease) {
+        queuedKeys.unshift(key);
+        return;
+      }
+      const controller = lease?.controller || new AbortController();
       const expectedRealtimeVersion = getFullCacheRealtimeVersion();
       attemptedKeys.add(key);
-      active.set(key, { controller, job });
+      active.set(key, {
+        controller,
+        job,
+        ...(lease ? { lease } : {}),
+      });
       setFullCacheEntryStatus(job.symbolKey, job.interval, "loading", { source: "latest" });
 
       void fetchJob(job, limit, controller.signal)
         .then((result) => {
           if (controller.signal.aborted || disposed) {
             restoreStatusAfterAbort(job);
+            if (!disposed && desired.has(key)) attemptedKeys.delete(key);
             return;
           }
           if (!isTrustedFullCachePreload(result)) {
@@ -170,6 +189,7 @@ export function createWatchlistFullCachePreloadManager(
         .catch((error) => {
           if (controller.signal.aborted || disposed) {
             restoreStatusAfterAbort(job);
+            if (!disposed && desired.has(key)) attemptedKeys.delete(key);
             return;
           }
           markFullCacheError(job.symbolKey, job.interval, error);
@@ -181,10 +201,13 @@ export function createWatchlistFullCachePreloadManager(
             && !attemptedKeys.has(key)
             && !queuedKeys.includes(key)
           ) queuedKeys.push(key);
+          if (lease) foregroundPreloadGate?.release(lease);
           pump();
         });
     }
   }
+
+  const unsubscribeForegroundGate = foregroundPreloadGate?.subscribe(pump) || (() => {});
 
   return {
     syncJobs(jobs, { activeSeries = null, enabled = true } = {}): void {
@@ -230,7 +253,11 @@ export function createWatchlistFullCachePreloadManager(
       desired.clear();
       queuedKeys = [];
       attemptedKeys.clear();
-      for (const running of active.values()) running.controller.abort();
+      unsubscribeForegroundGate();
+      for (const running of active.values()) {
+        running.controller.abort();
+        if (running.lease) foregroundPreloadGate?.release(running.lease);
+      }
     },
   };
 }

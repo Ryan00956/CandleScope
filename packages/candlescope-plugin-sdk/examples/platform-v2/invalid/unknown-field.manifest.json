@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.invalid-unknown",
+    "name": "Invalid Unknown Field",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    },
+    "hiddenCode": "must be rejected"
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "invalid_unknown",
+        "resourceProfile": "minimal",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "hello",
+      "kind": "command/1",
+      "title": "Invalid",
+      "entrypoint": "main"
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": []
+}

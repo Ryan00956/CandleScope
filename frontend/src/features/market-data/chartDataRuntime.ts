@@ -28,6 +28,157 @@ export function resolvePatchedChartDataStatus(
   return currentStatus === "ready" ? "ready" : "provisional";
 }
 
+const CHART_HISTORY_PROOF_FIELDS = [
+  "historyComplete",
+  "historyRepairPending",
+  "historyValidatedCountBack",
+  "lastValidatedMs",
+] as const;
+
+/**
+ * Structural/realtime commits must not erase the last explicit history proof.
+ * The window registry is the durable per-series owner; explicit fields from a
+ * new history result override it, while malformed persisted values fail closed.
+ */
+export function inheritChartHistoryProof(
+  persistedMeta: Record<string, unknown> | null | undefined,
+  explicitMeta: Record<string, unknown> | null | undefined = {},
+): Record<string, unknown> {
+  const inherited: Record<string, unknown> = {};
+  const persisted = persistedMeta || {};
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyComplete")) {
+    inherited.historyComplete = persisted.historyComplete === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyRepairPending")) {
+    inherited.historyRepairPending = persisted.historyRepairPending === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "historyValidatedCountBack")) {
+    const parsed = Number(persisted.historyValidatedCountBack);
+    inherited.historyValidatedCountBack = Number.isSafeInteger(parsed) && parsed >= 0
+      ? parsed
+      : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(persisted, "lastValidatedMs")) {
+    const parsed = Number(persisted.lastValidatedMs);
+    inherited.lastValidatedMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  const explicit = explicitMeta || {};
+  for (const field of CHART_HISTORY_PROOF_FIELDS) {
+    if (explicit[field] !== undefined) inherited[field] = explicit[field];
+  }
+  return inherited;
+}
+
+/**
+ * Async history and WebSocket callbacks may outlive the chart session that
+ * created them. They may still refresh their own warm cache, but only the
+ * exact current series is allowed to publish into the visible chart state.
+ */
+export function seriesCommitOwnsActiveChart(
+  targetSeriesKey: string | null | undefined,
+  activeSeriesKey: string | null | undefined,
+): boolean {
+  return Boolean(targetSeriesKey && targetSeriesKey === activeSeriesKey);
+}
+
+interface WarmChartPublicationMeta {
+  interval?: unknown;
+  optimistic?: unknown;
+  seriesKey?: unknown;
+  symbol?: unknown;
+  targetInterval?: unknown;
+  targetSeriesKey?: unknown;
+  targetSymbol?: unknown;
+  version?: unknown;
+}
+
+export function shouldDeferWarmChartPublication({
+  currentMeta,
+  expectedPreviousSeriesKey,
+  historyComplete,
+  historyRepairPending,
+  source,
+  targetInterval,
+  targetSeriesKey,
+  targetSymbol,
+}: {
+  currentMeta?: WarmChartPublicationMeta | null;
+  expectedPreviousSeriesKey?: string | null;
+  historyComplete?: boolean;
+  historyRepairPending?: boolean;
+  source?: string;
+  targetInterval?: string;
+  targetSeriesKey?: string;
+  targetSymbol?: string;
+}): boolean {
+  return Boolean(
+    source === "memory-cache-hit"
+    && historyComplete === true
+    && historyRepairPending !== true
+    && currentMeta?.optimistic === true
+    && currentMeta.targetSeriesKey === targetSeriesKey
+    && currentMeta.targetSymbol === targetSymbol
+    && currentMeta.targetInterval === targetInterval
+    && currentMeta.symbol === targetSymbol
+    && currentMeta.seriesKey === expectedPreviousSeriesKey
+    && typeof currentMeta.interval === "string"
+    && currentMeta.interval !== targetInterval
+  );
+}
+
+export function deferredWarmChartPublicationStillOwnsTarget({
+  activeSeriesKey,
+  currentMeta,
+  registeredStore,
+  targetSeriesKey,
+  targetStore,
+  transitionVersion,
+}: {
+  activeSeriesKey?: string | null;
+  currentMeta?: WarmChartPublicationMeta | null;
+  registeredStore?: unknown;
+  targetSeriesKey?: string;
+  targetStore?: unknown;
+  transitionVersion?: number;
+}): boolean {
+  return Boolean(
+    targetSeriesKey
+    && activeSeriesKey === targetSeriesKey
+    && currentMeta?.optimistic === true
+    && currentMeta.targetSeriesKey === targetSeriesKey
+    && currentMeta.version === transitionVersion
+    && registeredStore === targetStore
+  );
+}
+
+/**
+ * A terminal empty/NOOP history commit can beat the deferred warm-cache task.
+ * In that race the pending store must be published before the commit clears
+ * the optimistic transition metadata, otherwise the previous interval stays
+ * visible after the timer correctly rejects itself.
+ */
+export function pendingWarmPublicationMatchesCommit({
+  activeSeriesKey,
+  pendingSeriesKey,
+  pendingStore,
+  targetSeriesKey,
+  targetStore,
+}: {
+  activeSeriesKey?: string | null;
+  pendingSeriesKey?: string | null;
+  pendingStore?: unknown;
+  targetSeriesKey?: string | null;
+  targetStore?: unknown;
+}): boolean {
+  return Boolean(
+    targetSeriesKey
+    && activeSeriesKey === targetSeriesKey
+    && pendingSeriesKey === targetSeriesKey
+    && pendingStore === targetStore
+  );
+}
+
 export function klineRowsEqual(
   a: unknown,
   b: unknown,

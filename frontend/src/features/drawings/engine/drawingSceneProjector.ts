@@ -1738,6 +1738,15 @@ function projectPosition(
   }
   handleValues.push(left, middleY, right, middleY);
   handleNames.push("left", "right");
+  if (tpY !== null && slY !== null) {
+    handleValues.push(
+      left, top,
+      right, top,
+      left, bottom,
+      right, bottom,
+    );
+    handleNames.push("top-left", "top-right", "bottom-left", "bottom-right");
+  }
   return createProjectedEntity(entity, new Float64Array(values), {
     bbox: paintBbox,
     renderSpec: Object.freeze({

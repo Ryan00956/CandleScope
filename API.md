@@ -521,6 +521,7 @@ Server messages include sequence numbers and types such as:
 |---|---|---|
 | `GET` | `/indicators/registry` | List registered built-in specs |
 | `GET` | `/indicators/registry/{name}` | Get one built-in spec |
+| `GET` | `/indicators/runtimes` | List routed languages and public runtime descriptors |
 | `GET` | `/indicators/presets` | Frontend-compatible preset list |
 | `GET` | `/indicators/presets/{preset_id}` | Preset details and reference script |
 
@@ -541,6 +542,7 @@ Custom indicator payload:
   "schemaVersion": 1,
   "id": "my-script",
   "kind": "script",
+  "language": "pyne",
   "name": "My Script",
   "description": "",
   "script": "plot(close)",
@@ -550,6 +552,13 @@ Custom indicator payload:
   "securityMode": "safe"
 }
 ```
+
+### `GET /indicators/runtimes`
+
+Returns schema v1 runtime discovery with `defaultLanguage`, routed `languages`,
+and the referenced public SDK runtime descriptors. The response is derived from
+startup-validated routes and descriptors; it does not expose process commands,
+paths, PIDs, stderr, or host failure details.
 
 ### `GET /indicators/pyne/security`
 
@@ -568,6 +577,7 @@ Request body:
 ```json
 {
   "mode": "script",
+  "language": "pyne",
   "name": "MA",
   "params": { "period": 20 },
   "exchange": "binance",

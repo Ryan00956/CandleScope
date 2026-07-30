@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Protocol
 
-from .models import RawMessage, SessionHealth
+from .models import FeedMode, RawMessage, SessionHealth
 
 MessageCallback = Callable[[RawMessage], Awaitable[None]]
 HealthCallback = Callable[[SessionHealth, str], Awaitable[None]]
@@ -14,6 +14,10 @@ class SessionLike(Protocol):
 
     @property
     def health(self) -> SessionHealth:
+        ...
+
+    @property
+    def feed_mode(self) -> FeedMode:
         ...
 
     @property

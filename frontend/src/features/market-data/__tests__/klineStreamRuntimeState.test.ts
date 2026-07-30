@@ -5,9 +5,19 @@ import {
   acknowledgeKlineStreamInterval,
   createKlineStreamAcknowledgementState,
   getKlineStreamIntervalStatus,
+  planKlineRecoveryCountBack,
   reduceKlineStreamControlMessage,
   retainTrackedKlineStreamRejections,
 } from "../useKlineStreamRuntime.js";
+
+test("stream recovery shares the bounded derived-history policy", () => {
+  const nativeIntervals = ["1m", "3m", "5m", "15m", "30m", "1h"];
+
+  assert.equal(planKlineRecoveryCountBack("1m", nativeIntervals), 1_500);
+  assert.equal(planKlineRecoveryCountBack("91m", nativeIntervals), 216);
+  assert.equal(planKlineRecoveryCountBack("91m", nativeIntervals, 50), 50);
+  assert.equal(planKlineRecoveryCountBack("10001m", nativeIntervals), 0);
+});
 
 test("socket open remains connecting until the current interval is acknowledged", () => {
   const state = createKlineStreamAcknowledgementState();

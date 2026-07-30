@@ -33,27 +33,111 @@ exposes:
     ensureVisibleIndicatorRange,
     requestIndicatorRange,
   },
-  status: { computing },
+  status: { computing, realtimeMode },
 }
 ```
 
 The hook returns only `view`, `actions`, and `status`; callers must not depend
 on legacy flat fields.
 
+## Execution Routing
+
+Indicator execution is hosted by default. Existing builtin, Pyne, and custom
+script definitions with no `executionTarget`, or with
+`executionTarget: "hosted"`, use the hosted WebSocket plus
+`/indicators/range/batch` history path. The backend owns K-line lookup and can
+share it across the range batch.
+
+`executionTarget: "local"` is an explicit internal opt-in. "Local" means the
+controller sends the newest 2,000 chart OHLCV bars directly to the backend; it
+does not mean browser-side execution. That path uses
+`/indicators/compute/batch`. The catalog UI does not currently select it.
+Hosted and explicit-local definitions fail closed when they lack a valid engine
+name or non-empty script. The legacy single-item `/indicators/compute` endpoint
+is not used by the current controller.
+
+The two batch contracts are intentionally separate:
+
+- Hosted range work is grouped by exchange, market, symbol, interval, demand
+  scope, and demand generation. A 40 ms coalescing window produces ordered
+  chunks of at most 32 items, with one physical request at a time per group.
+- Explicit-local compute sends 1-32 unique `clientId`/`jobKey` items with one
+  shared context and one shared OHLCV field per HTTP request. Larger plans are
+  split into parallel chunks of at most 32, so each chunk carries its own OHLCV
+  field. Response count and identities must match exactly; an item-level engine
+  error is isolated in that item's payload.
+
+## Work, Cache, and Hydration Ownership
+
+The explicit-local lifecycle includes the dataset and normalized chart context,
+the exact bounded OHLCV content sent to the backend, and the local execution
+plan. Each bounded job key also includes indicator id, mode, name, script,
+security mode, and canonical parameters. Same-key callers join one physical
+batch and only its owner publishes results. A lifecycle change aborts old work,
+advances its epoch, clears completed ownership, and fences late responses.
+
+Successful compute is marked complete only after its immutable result is stored
+in the indicator cache. A new physical attempt first removes the old
+explicit-local cache entry. Transport failure therefore clears the submitted
+indicator's lines and auxiliary trading outputs instead of showing stale data.
+Terminal item errors remain visible across cache hydration and stop automatic
+retry until the lifecycle changes or the user forces recomputation.
+
+Cache identity includes execution target, so hosted and explicit-local results
+never share an entry. The write boundary deep-copies and freezes owned data.
+Within one `contentVersion`, payload and metadata reads return stable read-only
+views without cloning; a real mutation publishes a new version and view.
+
+At a hydration ownership change, a layout effect synchronously resets old
+auxiliary outputs and publishes cache-owned line/schema references. A cache miss
+clears stale line data but preserves an explicit-local terminal error. A later
+task, deduplicated by lifecycle, content signature, and content version, reads
+the latest cache again before refreshing lines/schema and hydrating markers,
+fills, hlines, bgcolors, barcolors, and signals in one reducer pass. Stale tasks
+are fenced, and unchanged output lanes retain their references.
+
+Hosted range lifecycle is `series + demand.scope + demand.generation`. Revision
+supersession inside that lifecycle marks prior work stale without unnecessarily
+rebuilding the scheduler epoch.
+
 ## Internal Ownership
 
-- `activeIndicatorStore.js` owns active indicator persistence and mutation.
-- `useIndicatorCatalogRuntime.js` owns preset/custom indicator catalog loading
+- `activeIndicatorStore.ts` owns active indicator persistence and mutation.
+- `useIndicatorCatalogRuntime.ts` owns preset/custom indicator catalog loading
   and custom indicator save/delete actions.
-- `indicatorComputeController.js` owns local indicator compute scheduling.
-- `indicatorRangeScheduler.js` owns hosted history coverage, request coalescing,
+- `indicatorComputeController.ts` owns explicit-local direct-OHLCV backend
+  compute scheduling and fail-closed publication.
+- `indicatorComputeJobRuntime.ts` owns local lifecycle, bounded job identities,
+  singleflight, completion acknowledgement, cancellation, and stale fencing.
+- `indicatorRangeScheduler.ts` owns hosted history coverage, request coalescing,
   in-flight barriers, cancellation, and stale-response protection.
-- `indicatorStreamController.js` owns hosted indicator WebSocket subscriptions,
+- `indicatorRangeLifecycle.ts` owns hosted scheduler lifecycle identity.
+- `indicatorStreamController.ts` owns hosted indicator WebSocket subscriptions,
   snapshots, patches, resume acknowledgements, and sequence recovery.
-- `indicatorOutputReducer.js` owns marker/fill/hline/bgcolor/barcolor/signal
-  output updates.
-- `indicatorPaneProjection.js` maps active indicator lines into main overlays and
+- `indicatorResultCacheStore.ts` owns context/execution-scoped immutable result
+  versions and stable cache views.
+- `indicatorHydrationRuntime.ts` owns deferred cache publication deduplication,
+  cancellation, and stale fencing.
+- `indicatorOutputReducer.ts` owns cache hydration and stable
+  marker/fill/hline/bgcolor/barcolor/signal output updates.
+- `indicatorPaneProjection.ts` maps active indicator lines into main overlays and
   sub panes as a pure projection.
+- `scriptRuntimeCatalog.ts` resolves descriptor-declared languages, runtimes,
+  and safe editor hints without a closed runtime-ID union.
+
+## Script Runtime Discovery
+
+`IndicatorEditor` loads `GET /api/v1/indicators/runtimes` and validates the
+schema before enabling run, save, or fork actions. The language selector is
+generated from routed descriptors. Unknown community languages use Monaco's
+plaintext mode; Pyne completion, theme, and security controls remain optional
+host enhancements rather than a plugin whitelist.
+
+Plugins may advertise `meta.ui.languages.<language-id>.monacoLanguage` and
+`starterSource` strings. These are data-only hints and never load plugin-owned
+JavaScript, CSS, or React code. The chosen language is part of HTTP/range/WS
+requests, custom-indicator persistence, result-cache identity, and stream
+configuration identity.
 
 ## Allowed Dependencies
 

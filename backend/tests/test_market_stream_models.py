@@ -89,6 +89,7 @@ def test_market_stream_enums_use_canonical_snake_case_values() -> None:
         "rest_poll",
         "rest_snapshot",
         "rest_history",
+        "plugin_stream",
     ]
     assert [delivery.value for delivery in DeliveryClass] == [
         "latest",

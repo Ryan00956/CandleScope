@@ -1,0 +1,248 @@
+{
+  "baselines": {
+    "controlAndIndicator": {
+      "controlRpc": {
+        "barsPerRequest": 10,
+        "iterations": 50,
+        "lastPointCount": 10,
+        "latency": {
+          "maxMs": 0.69,
+          "medianMs": 0.435,
+          "minMs": 0.357,
+          "p95Ms": 0.613,
+          "samples": 50
+        }
+      },
+      "hostRequestCount": 62,
+      "indicatorBatch": {
+        "barsPerRequest": 1500,
+        "iterations": 10,
+        "lastResult": {
+          "ok": true,
+          "points": 1500,
+          "series": 1
+        },
+        "latency": {
+          "maxMs": 42.985,
+          "medianMs": 33.613,
+          "minMs": 32.317,
+          "p95Ms": 42.985,
+          "samples": 10
+        }
+      },
+      "runtime": {
+        "id": "hello-runtime",
+        "languageIds": [
+          "hello"
+        ],
+        "version": "0.2.0"
+      },
+      "startupMs": 104.346,
+      "status": "measured"
+    },
+    "fullOrderBook": {
+      "accepted": 10000,
+      "deltas": 10000,
+      "deltasPerSecond": 4262.209,
+      "elapsedMs": 2346.201,
+      "gaps": 0,
+      "levelsPerSide": 1000,
+      "projectionDepth": 100,
+      "projectionMs": 0.028,
+      "revision": 10000,
+      "snapshotAvailable": true,
+      "state": "live",
+      "status": "measured"
+    },
+    "installerLifecycle": {
+      "check": {
+        "elapsedMs": 908.569,
+        "version": "0.1.0"
+      },
+      "firstInstall": {
+        "changed": true,
+        "elapsedMs": 9724.601,
+        "reusedInstallation": false
+      },
+      "quickRepeat": {
+        "changed": false,
+        "elapsedMs": 998.559,
+        "reusedInstallation": true
+      },
+      "rollback": {
+        "elapsedMs": 1032.968,
+        "fromActivationIdChanged": true,
+        "restoredVersion": "0.1.0"
+      },
+      "status": "measured",
+      "upgrade": {
+        "changed": true,
+        "elapsedMs": 9098.691,
+        "version": "0.2.0"
+      }
+    },
+    "klineEventBus": {
+      "delivered": 10000,
+      "deliveryEventsPerSecond": 193206.101,
+      "deliveryMs": 51.758,
+      "enqueueEventsPerSecond": 292950.155,
+      "enqueueMs": 34.135,
+      "events": 10000,
+      "eventsDropped": 0,
+      "status": "measured"
+    },
+    "officialRuntimes": {
+      "freshInstallTotalMs": 36479.002,
+      "health": {
+        "configured": 2,
+        "enabled": 2,
+        "failed": 0,
+        "ready": 2,
+        "status": "ok"
+      },
+      "hostStartupMs": 521.393,
+      "installs": [
+        {
+          "changed": true,
+          "elapsedMs": 15042.255,
+          "runtimeId": "candlescope.pyne",
+          "version": "0.2.0"
+        },
+        {
+          "changed": true,
+          "elapsedMs": 21435.868,
+          "runtimeId": "candlescope.pine-compat",
+          "version": "0.2.0"
+        }
+      ],
+      "probes": [
+        {
+          "languageIds": [
+            "pyne"
+          ],
+          "ok": true,
+          "points": 2,
+          "runtimeId": "candlescope.pyne",
+          "series": 1,
+          "version": "0.2.0"
+        },
+        {
+          "languageIds": [
+            "pine"
+          ],
+          "ok": true,
+          "points": 2,
+          "runtimeId": "candlescope.pine-compat",
+          "series": 1,
+          "version": "0.2.0"
+        }
+      ],
+      "status": "measured"
+    },
+    "registryColdStart": {
+      "definition": "Fresh Python process import plus RuntimeHostService construction, start, health snapshot, and stop. All entries are disabled.",
+      "scenarios": {
+        "0": {
+          "lastChild": {
+            "configured": 0,
+            "enabled": 0,
+            "internalElapsedMs": 0.481,
+            "ready": 0
+          },
+          "processColdStart": {
+            "maxMs": 270.885,
+            "medianMs": 259.934,
+            "minMs": 250.988,
+            "p95Ms": 270.885,
+            "samples": 5
+          },
+          "status": "measured"
+        },
+        "10": {
+          "lastChild": {
+            "configured": 10,
+            "enabled": 0,
+            "internalElapsedMs": 2.832,
+            "ready": 0
+          },
+          "processColdStart": {
+            "maxMs": 318.507,
+            "medianMs": 281.407,
+            "minMs": 274.887,
+            "p95Ms": 318.507,
+            "samples": 5
+          },
+          "status": "measured"
+        },
+        "50": {
+          "lastChild": {
+            "configured": 50,
+            "enabled": 0,
+            "internalElapsedMs": 12.018,
+            "ready": 0
+          },
+          "processColdStart": {
+            "maxMs": 286.034,
+            "medianMs": 265.47,
+            "minMs": 257.063,
+            "p95Ms": 286.034,
+            "samples": 5
+          },
+          "status": "measured"
+        }
+      },
+      "status": "measured"
+    },
+    "tradeFlow": {
+      "accepted": 20000,
+      "bucketsRetained": 1,
+      "duplicatesRejected": 0,
+      "elapsedMs": 488.797,
+      "events": 20000,
+      "eventsPerSecond": 40916.765,
+      "outOfOrderRejected": 0,
+      "rawTradesRetained": 20000,
+      "status": "measured"
+    }
+  },
+  "capturedAt": "2026-07-22T02:18:02.808926+00:00",
+  "contracts": {
+    "fileSha256": {
+      "indicatorTransport": "sha256:b0db39165b888522ec27055ac1bfaf949b65a34a5d42932728d37aa767d77a47",
+      "officialReleaseLock": "sha256:23e03c28a32b42a0d523aefc0bd19db34d33fb840b41cbf44e0348fc263249f2",
+      "sdkTranscript": "sha256:dd217159ab14af660481610cef5c369edbde3e7577bcf78e85bfad16cab5cf9c"
+    },
+    "schemas": {
+      "indicatorTransport": "candlescope.pyne-transport-baseline.v1",
+      "sdkTranscript": "candlescope.plugin-sdk-transcript.v1"
+    },
+    "status": "verified",
+    "wireSha256": {
+      "httpCompute": "sha256:b2467295cc14ec0e772e97fce195f236739cecb260e967190d73af305ab6f7ee",
+      "httpRange": "sha256:ba66866f0330d62f1121c3a5ff77d6339d786df796672c9795e78a293c1ebb26",
+      "indicatorWebSocket": "sha256:6326a43822000618fe2feddcfe9b28b5a02e3663be106ef1dabfa511f6e418f2",
+      "sdkTranscript": "sha256:021825fb264a63555e0eb331f24f6ea0632b0d2a0c962ef89a35673526391ba2"
+    }
+  },
+  "environment": {
+    "browser": "Chrome 150.0.7871.129",
+    "cpuCount": 32,
+    "dependencies": {
+      "fastapi": "0.115.6",
+      "pytest": "7.4.4"
+    },
+    "machine": "AMD64",
+    "node": "v22.14.0",
+    "python": "3.12.7",
+    "pythonImplementation": "CPython",
+    "release": "11",
+    "system": "Windows",
+    "version": "10.0.26200"
+  },
+  "git": {
+    "branch": "codex/plugin-platform-v1",
+    "head": "400e520a9fa8a816229a5ad64330f10e8de9ddaf"
+  },
+  "mode": "standard",
+  "schemaVersion": "candlescope.plugin-platform.phase0-baseline.v1"
+}

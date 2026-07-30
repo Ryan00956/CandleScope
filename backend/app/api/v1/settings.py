@@ -6,6 +6,7 @@ Provides endpoints for:
   * PUT  /settings/proxy       — update proxy configuration at runtime
   * POST /settings/proxy/test  — test proxy connectivity to all exchanges
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,14 +16,17 @@ import time
 from typing import Any
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
 from app.core.market import MarketType
-from app.core.config import load_proxy_settings, normalize_proxy_settings, save_proxy_settings
-from app.indicator.pyne.cache import pyne_cache
+from app.core.config import (
+    load_proxy_settings,
+    normalize_proxy_settings,
+    save_proxy_settings,
+)
 from app.exchanges.symbols import normalize_symbol
 from app.data_engine.storage.klines_repo import list_series_summaries
 from app.data_engine.data_manager.runtime_pressure import (
@@ -47,18 +51,21 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 class ProxyConfig(BaseModel):
     """Proxy configuration payload."""
-    mode: str = "system"          # "none" | "system" | "custom"
+
+    mode: str = "system"  # "none" | "system" | "custom"
     custom_proxy: str | None = None  # e.g. "http://127.0.0.1:7890"
 
 
 class ProxyTestRequest(BaseModel):
     """Request body for testing proxy connectivity."""
+
     mode: str = "system"
     custom_proxy: str | None = None
 
 
 class StorageMaintenanceRequest(BaseModel):
     """Optional scope for storage repair/gap scan operations."""
+
     symbols: list[str] = []
 
 
@@ -118,11 +125,14 @@ def _get_system_proxy() -> str | None:
 
     # Fallback: read from Windows registry / macOS scutil / etc.
     import sys
+
     if sys.platform == "win32":
         from urllib.request import getproxies_registry
+
         proxies = getproxies_registry()
     else:
         from urllib.request import getproxies
+
         proxies = getproxies()
     return proxies.get("https") or proxies.get("http") or None
 
@@ -226,10 +236,14 @@ def _storage_series_snapshot() -> dict:
         interval = str(item.get("interval") or "")
         market_key = f"{item.get('exchange', '')}:{item.get('market_type', '')}"
         rows = int(item.get("total_count", 0) or 0)
-        interval_bucket = by_interval.setdefault(interval, {"series_count": 0, "total_rows": 0})
+        interval_bucket = by_interval.setdefault(
+            interval, {"series_count": 0, "total_rows": 0}
+        )
         interval_bucket["series_count"] += 1
         interval_bucket["total_rows"] += rows
-        market_bucket = by_market.setdefault(market_key, {"series_count": 0, "total_rows": 0})
+        market_bucket = by_market.setdefault(
+            market_key, {"series_count": 0, "total_rows": 0}
+        )
         market_bucket["series_count"] += 1
         market_bucket["total_rows"] += rows
     return {
@@ -241,6 +255,149 @@ def _storage_series_snapshot() -> dict:
     }
 
 
+def _normalize_inventory_filter(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _build_storage_inventory_snapshot(
+    *,
+    exchange: str | None,
+    market_type: str | None,
+    symbol: str | None,
+    interval: str | None,
+    limit: int,
+) -> dict:
+    """Build a strictly read-only inventory snapshot for the data workbench."""
+    series = list_series_summaries(read_only=True)
+
+    def matches(item: dict) -> bool:
+        if exchange and item.get("exchange") != exchange:
+            return False
+        if market_type and item.get("market_type") != market_type:
+            return False
+        if symbol and str(item.get("symbol") or "").upper() != symbol:
+            return False
+        if interval and item.get("interval") != interval:
+            return False
+        return True
+
+    matched = [item for item in series if matches(item)]
+    matched.sort(
+        key=lambda item: (
+            -int(item.get("total_count", 0) or 0),
+            str(item.get("exchange") or ""),
+            str(item.get("market_type") or ""),
+            str(item.get("symbol") or ""),
+            str(item.get("interval") or ""),
+        )
+    )
+    returned = matched[:limit]
+    storage_files = _storage_file_snapshot()
+
+    return {
+        "snapshot": storage_files,
+        "inventory": {
+            "total_series": len(series),
+            "total_rows": sum(int(item.get("total_count", 0) or 0) for item in series),
+            "matching_series": len(matched),
+            "matching_rows": sum(int(item.get("total_count", 0) or 0) for item in matched),
+            "returned_series": len(returned),
+            "truncated": len(returned) < len(matched),
+        },
+        "series": [
+            {
+                "exchange": str(item.get("exchange") or ""),
+                "market_type": str(item.get("market_type") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "interval": str(item.get("interval") or ""),
+                "earliest_open_ms": item.get("earliest_open_time"),
+                "latest_open_ms": item.get("latest_open_time"),
+                "total_count": int(item.get("total_count", 0) or 0),
+            }
+            for item in returned
+        ],
+    }
+
+
+async def _storage_integrity_snapshot(request: Request) -> dict:
+    """Return known gap-ledger state without running any scan or repair."""
+    backfill_coordinator = _get_backfill_coordinator(request)
+    if backfill_coordinator is None:
+        return {
+            "available": False,
+            "reason": "BackfillCoordinator 尚未初始化，不能将完整性状态视为正常",
+        }
+
+    try:
+        snapshot_async = getattr(backfill_coordinator, "snapshot_async", None)
+        snapshot = (
+            await snapshot_async()
+            if callable(snapshot_async)
+            else backfill_coordinator.snapshot()
+        )
+        if not isinstance(snapshot, dict):
+            raise TypeError("BackfillCoordinator returned an invalid snapshot")
+    except Exception as exc:
+        logger.exception("Storage integrity snapshot failed")
+        return {
+            "available": False,
+            "reason": f"无法读取 gap ledger: {exc}",
+        }
+
+    try:
+        ledger_health = snapshot.get("gap_ledger_health") or {}
+        open_gaps = snapshot.get("gap_ledger_open") or []
+        if not isinstance(ledger_health, dict) or not isinstance(open_gaps, list):
+            raise TypeError("gap ledger snapshot has an invalid shape")
+
+        def non_negative_int(value: Any) -> int:
+            parsed = int(value or 0)
+            if parsed < 0:
+                raise ValueError("gap ledger count cannot be negative")
+            return parsed
+
+        def optional_non_negative_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            return non_negative_int(value)
+
+        def count_map(value: Any) -> dict[str, int]:
+            if not isinstance(value, dict):
+                raise TypeError("gap ledger count map has an invalid shape")
+            return {str(key): non_negative_int(count) for key, count in value.items()}
+
+        gap_samples: list[dict] = []
+        for item in open_gaps:
+            if not isinstance(item, dict):
+                raise TypeError("gap ledger sample has an invalid shape")
+            gap_samples.append({
+                "exchange": str(item.get("exchange") or ""),
+                "market_type": str(item.get("market_type") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "interval": str(item.get("interval") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "missing_bars": non_negative_int(item.get("missing_count")),
+                "first_seen_at_ms": optional_non_negative_int(item.get("first_seen_at")),
+                "last_checked_at_ms": optional_non_negative_int(item.get("last_checked_at")),
+            })
+        return {
+            "available": True,
+            "open_gap_count": non_negative_int(ledger_health.get("open_total", len(open_gaps))),
+            "open_gap_by_status": count_map(ledger_health.get("by_status") or {}),
+            "open_gap_age_buckets": count_map(ledger_health.get("age_buckets") or {}),
+            "oldest_open_gap_at_ms": optional_non_negative_int(ledger_health.get("oldest_open_at")),
+            "gap_samples": gap_samples,
+            "sample_limit": non_negative_int(ledger_health.get("sample_limit", len(gap_samples))),
+        }
+    except (TypeError, ValueError) as exc:
+        logger.warning("Storage integrity snapshot is invalid: %s", exc)
+        return {
+            "available": False,
+            "reason": f"gap ledger 返回了无效状态: {exc}",
+        }
+
+
 async def _build_cache_diagnostics(request: Request) -> dict:
     dm = _get_data_manager(request)
     dm_snapshot = dm.snapshot() if dm is not None else None
@@ -248,7 +405,6 @@ async def _build_cache_diagnostics(request: Request) -> dict:
         run_storage(_storage_file_snapshot),
         run_storage(_storage_series_snapshot),
     )
-    pyne_stats = pyne_cache.stats()
     runtime_pressure = (dm_snapshot or {}).get("runtimePressure") or {
         "disk": disk_pressure_snapshot(storage_files.get("path") or KLINES_DB_PATH),
     }
@@ -279,7 +435,12 @@ async def _build_cache_diagnostics(request: Request) -> dict:
             "watermarks": storage_watermarks,
         },
         "indicator": {
-            "pyne_cache": dict(pyne_stats) if isinstance(pyne_stats, dict) else {},
+            "pyne_cache": {
+                "size": 0,
+                "max_items": 0,
+                "scope": "sidecar",
+                "available_to_host": False,
+            },
         },
     }
 
@@ -333,7 +494,7 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
         return {
             "status": "warning",
             "message": "IngestionConfig not available (DataManager not initialized). "
-                       "Settings saved to disk for next startup.",
+            "Settings saved to disk for next startup.",
             "mode": mode,
             "custom_proxy": custom_proxy or "",
         }
@@ -354,7 +515,8 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
     effective = _resolve_proxy_url(mode, custom_proxy)
     logger.info(
         "Proxy settings updated: mode=%s, effective=%s",
-        mode, effective or "none",
+        mode,
+        effective or "none",
     )
 
     return {
@@ -559,7 +721,8 @@ async def storage_health(request: Request) -> dict:
     )
     engine_snapshot = (
         backfill_engine.snapshot()
-        if backfill_engine is not None and callable(getattr(backfill_engine, "snapshot", None))
+        if backfill_engine is not None
+        and callable(getattr(backfill_engine, "snapshot", None))
         else None
     )
     open_gaps = snapshot.get("gap_ledger_open") or []
@@ -578,6 +741,58 @@ async def storage_health(request: Request) -> dict:
     }
 
 
+@router.get("/storage/inventory")
+async def storage_inventory(
+    request: Request,
+    exchange: str | None = None,
+    market_type: str | None = None,
+    symbol: str | None = None,
+    interval: str | None = None,
+    limit: int = Query(default=500, ge=1, le=1_000),
+) -> dict:
+    """Return a live, read-only SQLite inventory and known gap-ledger state.
+
+    This endpoint intentionally performs no backfill, repair, delete, or
+    compaction work.  When the integrity service is unavailable its state is
+    reported as unavailable instead of being inferred as healthy.
+    """
+    normalized_exchange = _normalize_exchange(exchange) if exchange else None
+    normalized_market_type = _normalize_market_type(market_type) if market_type else None
+    normalized_symbol = _normalize_inventory_filter(symbol)
+    if normalized_symbol:
+        normalized_symbol = normalized_symbol.upper()
+    normalized_interval = _normalize_inventory_filter(interval)
+    try:
+        inventory = await run_storage(
+            _build_storage_inventory_snapshot,
+            exchange=normalized_exchange,
+            market_type=normalized_market_type,
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("Storage inventory failed")
+        raise HTTPException(status_code=500, detail=f"Storage inventory failed: {exc}") from exc
+
+    integrity = await _storage_integrity_snapshot(request)
+    snapshot = inventory.get("snapshot") or {}
+    return {
+        "status": "ok",
+        "mode": "live",
+        "read_only": True,
+        "captured_at_ms": int(snapshot.get("captured_at_ms", time.time() * 1000) or 0),
+        "filters": {
+            "exchange": normalized_exchange,
+            "market_type": normalized_market_type,
+            "symbol": normalized_symbol,
+            "interval": normalized_interval,
+        },
+        **inventory,
+        "integrity": integrity,
+    }
+
+
 @router.get("/cache-diagnostics")
 async def cache_diagnostics(request: Request) -> dict:
     """Return read-only frontend-facing cache/storage diagnostics."""
@@ -585,7 +800,9 @@ async def cache_diagnostics(request: Request) -> dict:
         return await _build_cache_diagnostics(request)
     except Exception as exc:
         logger.exception("Cache diagnostics failed")
-        raise HTTPException(status_code=500, detail=f"Cache diagnostics failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Cache diagnostics failed: {exc}"
+        ) from exc
 
 
 class StoragePolicyRequest(BaseModel):
@@ -617,6 +834,7 @@ class CacheLimitsRequest(StoragePolicyRequest):
 
 class BackendMemoryGcRequest(BaseModel):
     """Optional policy overrides for backend memory GC."""
+
     cold_idle_seconds: int | None = Field(default=None, ge=0, le=30 * 24 * 60 * 60)
     max_total_bars: int | None = Field(default=None, ge=1, le=100_000_000)
     max_series: int | None = Field(default=None, ge=1, le=100_000)
@@ -644,17 +862,20 @@ class StorageGcRequest(StoragePolicyRequest):
 
 class StorageGcRunRequest(StoragePolicyRequest):
     """Confirmed request for SQLite storage GC execution."""
+
     confirm: bool = False
     batch_size: int = Field(default=1_000, ge=1, le=1_000)
 
 
 class StorageVacuumRequest(BaseModel):
     """Confirmed request for manual SQLite VACUUM."""
+
     confirm: bool = False
 
 
 class AutoGcRunRequest(BaseModel):
     """Optional conservative auto GC policy overrides."""
+
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
@@ -663,7 +884,9 @@ class AutoGcRunRequest(BaseModel):
     max_bytes_per_run: int | None = Field(default=None, ge=1, le=16 * 1024**3)
     max_entries_per_run: int | None = Field(default=None, ge=1, le=10_000)
     min_final_evict_score: float | None = Field(default=None, ge=0, le=1_000)
-    never_evict_accessed_within_ms: int | None = Field(default=None, ge=0, le=7 * 24 * 60 * 60 * 1000)
+    never_evict_accessed_within_ms: int | None = Field(
+        default=None, ge=0, le=7 * 24 * 60 * 60 * 1000
+    )
     storage_batch_size: int | None = Field(default=None, ge=1, le=1_000)
     sqlite_auto_vacuum: bool | None = None
 
@@ -683,6 +906,7 @@ class AutoGcRunRequest(BaseModel):
 
 class CacheAccessRecordRequest(BaseModel):
     """Frontend-origin cache access signal for behavior learning."""
+
     exchange: str = "binance"
     market_type: str | None = None
     marketType: str | None = None
@@ -700,8 +924,7 @@ async def record_cache_access(request: Request, body: CacheAccessRecordRequest) 
     """Record a lightweight frontend cache access signal."""
     if (
         body.occurred_at_ms is not None
-        and body.occurred_at_ms
-        > int(time.time() * 1000) + MAX_FUTURE_EVENT_SKEW_MS
+        and body.occurred_at_ms > int(time.time() * 1000) + MAX_FUTURE_EVENT_SKEW_MS
     ):
         raise HTTPException(
             status_code=422,
@@ -712,7 +935,9 @@ async def record_cache_access(request: Request, body: CacheAccessRecordRequest) 
         raise HTTPException(status_code=503, detail="DataManager 尚未初始化")
     record = getattr(dm, "record_cache_access", None)
     if not callable(record):
-        raise HTTPException(status_code=503, detail="DataManager 不支持 cache behavior learning")
+        raise HTTPException(
+            status_code=503, detail="DataManager 不支持 cache behavior learning"
+        )
     heat = await run_storage(
         record,
         body.symbol,
@@ -802,7 +1027,9 @@ async def storage_gc_dry_run(
         return await async_plan(
             db_limits=(body.db_limits if body else None),
             sqlite_budget_bytes=(body.sqlite_budget_bytes if body else None),
-            storage_row_limits_enabled=(body.storage_row_limits_enabled if body else None),
+            storage_row_limits_enabled=(
+                body.storage_row_limits_enabled if body else None
+            ),
             file_snapshot=file_snapshot,
         )
     return await run_storage(
@@ -890,8 +1117,10 @@ async def update_cache_limits(request: Request, body: CacheLimitsRequest) -> dic
 
     sqlite_budget_bytes = (
         body.sqlite_budget_bytes
-        if _model_field_was_set(body, "sqlite_budget_bytes") and body.sqlite_budget_bytes is not None
-        else 0 if _model_field_was_set(body, "sqlite_budget_bytes")
+        if _model_field_was_set(body, "sqlite_budget_bytes")
+        and body.sqlite_budget_bytes is not None
+        else 0
+        if _model_field_was_set(body, "sqlite_budget_bytes")
         else None
     )
     dm.update_retention_limits(

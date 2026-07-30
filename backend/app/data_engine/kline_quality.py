@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Mapping
 
 
 class FinalityTrust(str, Enum):
@@ -43,6 +44,11 @@ SOURCE_QUALITY: dict[str, SourceQuality] = {
     "backfill_aggregated": SourceQuality(60, FinalityTrust.TRUSTED_FINAL),
     # Direct provider history.
     "backfill": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
+    # Official closed-period archive rows carry the same semantic authority as
+    # provider REST. Checksums prove transfer integrity, not higher market-data
+    # authority, so explicit REST verification remains able to supersede them.
+    "backfill_archive_verified": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
+    "backfill_archive_confirmed": SourceQuality(70, FinalityTrust.TRUSTED_FINAL),
     # An explicit amendment is authoritative over the original close.
     "data_manager_amended": SourceQuality(80, FinalityTrust.TRUSTED_FINAL),
     # Reserved names for exact REST verification and repair lanes.
@@ -54,6 +60,12 @@ SOURCE_QUALITY: dict[str, SourceQuality] = {
 }
 
 UNKNOWN_SOURCE_QUALITY = SourceQuality(0, FinalityTrust.UNTRUSTED)
+
+# Repair requests emitted for rows that exist physically but do not carry an
+# authoritative close must not be handled like ordinary timestamp gaps.  Keep
+# this semantic policy beside the source-quality table so detection, repair,
+# and verification cannot drift apart again.
+TRUSTED_FINALITY_REPAIR_REASONS = frozenset({"query_untrusted_finality"})
 
 
 def normalize_kline_source(source: object) -> str:
@@ -74,6 +86,38 @@ def source_rank(source: object) -> int:
 
 def source_is_trusted_final(source: object) -> bool:
     return kline_source_quality(source).trusted_final
+
+
+def repair_requires_trusted_finality(
+    metadata: Mapping[str, Any] | None = None,
+    *,
+    reason: object = None,
+) -> bool:
+    """Return whether a repair must replace rows with trusted-final data.
+
+    ``requires_trusted_finality`` is the durable, merge-safe contract.  The
+    reason fields remain recognized so queued ledger rows created before that
+    flag existed are repaired correctly after an upgrade.
+    """
+
+    details = metadata or {}
+    if details.get("requires_trusted_finality") is True:
+        return True
+
+    candidates: list[object] = [
+        reason,
+        details.get("reason"),
+        details.get("query_reason"),
+    ]
+    query_reasons = details.get("query_reasons")
+    if isinstance(query_reasons, (list, tuple, set, frozenset)):
+        candidates.extend(query_reasons)
+
+    return any(
+        part.strip() in TRUSTED_FINALITY_REPAIR_REASONS
+        for candidate in candidates
+        for part in str(candidate or "").split("+")
+    )
 
 
 def incoming_source_can_replace(existing_source: object, incoming_source: object) -> bool:

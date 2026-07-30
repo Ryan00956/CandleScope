@@ -217,16 +217,19 @@ def test_symbol_refresh_retains_disappeared_instrument_for_sync_lookup(monkeypat
 
     adapter = Adapter()
     registry = SimpleNamespace(list=lambda: [adapter])
-    clock = iter((100.0, 200.0))
+    # Each successful refresh also schedules its TTL deadline from wall time.
+    clock = iter((100.0, 100.0, 200.0, 200.0))
     monkeypatch.setattr(symbols_api, "bootstrap_default_adapters", lambda: None)
     monkeypatch.setattr(symbols_api, "get_exchange_registry", lambda: registry)
     monkeypatch.setattr(symbols_api.time, "time", lambda: next(clock))
     symbols_api._symbol_cache.clear()
+    symbols_api._market_refresh_state.clear()
+    symbols_api._market_refresh_tasks.clear()
     symbols_api._cache_loaded_at = 0.0
     try:
         asyncio.run(symbols_api.refresh_exchange_metadata())
         adapter.symbols = adapter.symbols[:1]
-        asyncio.run(symbols_api.refresh_exchange_metadata())
+        asyncio.run(symbols_api.refresh_exchange_metadata(force=True))
 
         inactive = symbols_api.get_cached_symbol_metadata("test", "spot", "oldusdt")
         assert inactive is not None
@@ -244,6 +247,28 @@ def test_symbol_refresh_retains_disappeared_instrument_for_sync_lookup(monkeypat
             "spot",
             "OLDUSDT",
         )["listedAtMs"] == 1_000
+    finally:
+        symbols_api._symbol_cache.clear()
+        symbols_api._market_refresh_state.clear()
+        symbols_api._market_refresh_tasks.clear()
+        for handle in symbols_api._market_refresh_timers.values():
+            handle.cancel()
+        symbols_api._market_refresh_timers.clear()
+        symbols_api._cache_loaded_at = 0.0
+
+
+def test_symbol_cache_eviction_removes_only_the_unregistered_exchange(monkeypatch) -> None:
+    symbols_api._symbol_cache.clear()
+    symbols_api._symbol_cache[("mock", "spot")] = [{"symbol": "BTCUSDT"}]
+    symbols_api._symbol_cache[("mock", "futures")] = [{"symbol": "BTCUSDT"}]
+    symbols_api._symbol_cache[("binance", "spot")] = [{"symbol": "ETHUSDT"}]
+    symbols_api._cache_loaded_at = 10.0
+    monkeypatch.setattr(symbols_api.time, "time", lambda: 20.0)
+    try:
+        assert symbols_api.evict_exchange_metadata(" MOCK ") == 2
+        assert set(symbols_api._symbol_cache) == {("binance", "spot")}
+        assert symbols_api._cache_loaded_at == 20.0
+        assert symbols_api.evict_exchange_metadata("mock") == 0
     finally:
         symbols_api._symbol_cache.clear()
         symbols_api._cache_loaded_at = 0.0

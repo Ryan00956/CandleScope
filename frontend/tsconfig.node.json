@@ -10,6 +10,7 @@
     "src/**/__tests__/**/*.tsx",
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
+    "src/types/**/*.d.ts",
     "src/test/**/*.ts",
     "src/test/**/*.tsx"
   ],

@@ -1,10 +1,9 @@
-export type SettingsActionType = "mock" | "local_only" | "backend_endpoint";
+export type SettingsActionType = "local_only" | "backend_endpoint";
 
 import type { AboutSettingsPanelProps } from "../../components/settings/AboutSettingsPanel.js";
 import type { CacheDiagnosticsPanelProps } from "../../components/settings/CacheDiagnosticsPanel.js";
 import type { CacheLimitsPanelProps } from "../../components/settings/CacheLimitsPanel.js";
 import type { ChartAppearancePanelProps } from "../../components/settings/ChartAppearancePanel.js";
-import type { DatabaseManagementPanelProps } from "../../components/settings/DatabaseManagementPanel.js";
 import type { ExchangeSettingsPanelProps } from "../../components/settings/ExchangeSettingsPanel.js";
 import type { ProxySettingsPanelProps } from "../../components/settings/ProxySettingsPanel.js";
 import type { StorageMaintenancePanelProps } from "../../components/settings/StorageMaintenancePanel.js";
@@ -14,7 +13,7 @@ export type SettingsCategory =
   | "network"
   | "exchanges"
   | "data"
-  | "database"
+  | "plugins"
   | "about";
 
 export interface SettingsActionDescriptor {
@@ -38,7 +37,6 @@ export interface SettingsRuntimeView {
   cacheDiagnostics: CacheDiagnosticsPanelProps;
   maintenance: Omit<StorageMaintenancePanelProps,
     "onStorageRepair" | "onGapScan" | "onExchangeRefresh">;
-  database: DatabaseManagementPanelProps;
 }
 
 export interface SettingsRuntimeActions {
@@ -68,6 +66,5 @@ export interface SettingsPanelViewModel {
     cacheDiagnostics: CacheDiagnosticsPanelProps;
     maintenance: StorageMaintenancePanelProps;
   };
-  database: DatabaseManagementPanelProps;
   about: AboutSettingsPanelProps;
 }

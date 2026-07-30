@@ -154,6 +154,75 @@ def test_gap_ledger_reopen_clears_terminal_fields_and_bounds_reason(tmp_path) ->
     assert len(status["reason"]) <= 256
 
 
+def test_old_owned_lifecycle_updates_cannot_overwrite_successor_ticket(
+    tmp_path,
+) -> None:
+    ledger = GapLedger(tmp_path / "klines.sqlite")
+    operations = (
+        (
+            "started",
+            lambda request: ledger.mark_started(request, attempt=3),
+        ),
+        (
+            "verifying",
+            lambda request: ledger.mark_verifying(request),
+        ),
+        (
+            "retry_wait",
+            lambda request: ledger.mark_retry_wait(
+                request,
+                attempt=4,
+                error="stale ordinary retry",
+                next_retry_at=9_999_999_999_999,
+            ),
+        ),
+    )
+
+    for index, (operation_name, operation) in enumerate(operations):
+        predecessor = RepairRequest(
+            symbol=("BTCUSDT", "ETHUSDT", "SOLUSDT")[index],
+            interval="1m",
+            start_ms=0,
+            end_ms=60_000,
+            exchange="binance",
+            market_type="spot",
+            request_id=f"ordinary-{operation_name}",
+        )
+        successor = RepairRequest(
+            symbol=predecessor.symbol,
+            interval=predecessor.interval,
+            start_ms=predecessor.start_ms,
+            end_ms=predecessor.end_ms,
+            exchange=predecessor.exchange,
+            market_type=predecessor.market_type,
+            reason="query_untrusted_finality",
+            metadata={"requires_trusted_finality": True},
+            request_id=f"trusted-{operation_name}",
+        )
+
+        ledger.upsert_detected(predecessor)
+        ledger.upsert_detected(successor)
+        operation(predecessor)
+
+        current = ledger.get_status(successor)
+        assert current is not None
+        assert current["status"] == "queued"
+        assert current["attempts"] == 0
+        assert current["last_error"] is None
+        assert current["last_checked_at"] is None
+        assert current["next_retry_at"] is None
+        covering = ledger.get_covering_status(
+            exchange=successor.exchange,
+            market_type=successor.market_type,
+            symbol=successor.symbol,
+            interval=successor.interval,
+            start_ms=successor.start_ms,
+            end_ms=successor.end_ms,
+        )
+        assert covering is not None
+        assert covering["repair_ticket"] == successor.request_id
+
+
 def test_gap_ledger_compacts_confirmed_widening_source_empty_ranges(tmp_path) -> None:
     ledger = GapLedger(tmp_path / "klines.sqlite")
     narrow = _request()

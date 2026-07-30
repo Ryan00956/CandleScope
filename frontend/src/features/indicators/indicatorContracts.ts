@@ -4,6 +4,7 @@ import type {
   IndicatorBarColor,
   IndicatorBgColor,
   IndicatorColorPoint,
+  IndicatorComputeBatchResponse,
   CustomIndicatorRecord,
   IndicatorDeleteResponse,
   IndicatorErrorDetail,
@@ -23,6 +24,10 @@ import type {
   IndicatorUnifiedSeries,
   IndicatorValuePoint,
   PyneSecurityPolicy,
+  ScriptLanguageDescriptor,
+  ScriptLanguageIdentity,
+  ScriptRuntimeCatalog,
+  ScriptRuntimeDescriptor,
 } from "./indicatorTypes.js";
 
 export class IndicatorPayloadError extends TypeError {
@@ -143,6 +148,123 @@ function parseOptionalArray<T>(
   );
 }
 
+function parseScriptLanguageIdentity(
+  value: unknown,
+  path: string,
+): ScriptLanguageIdentity {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    extensions: indicatorStringArray(record.extensions, `${path}.extensions`),
+    aliases: indicatorStringArray(record.aliases, `${path}.aliases`),
+  };
+}
+
+function parseScriptRuntimeDescriptor(
+  value: unknown,
+  path: string,
+): ScriptRuntimeDescriptor {
+  const record = expectIndicatorRecord(value, path);
+  const languages = expectIndicatorArray(record.languages, `${path}.languages`).map(
+    (item, index) =>
+      parseScriptLanguageIdentity(item, `${path}.languages[${index}]`),
+  );
+  if (languages.length === 0) {
+    throw new IndicatorPayloadError(`${path}.languages`, "expected at least one language");
+  }
+  if (new Set(languages.map((item) => item.id)).size !== languages.length) {
+    throw new IndicatorPayloadError(`${path}.languages`, "duplicate language id");
+  }
+  return {
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    version: expectIndicatorNonEmptyString(record.version, `${path}.version`),
+    package: expectIndicatorNonEmptyString(record.package, `${path}.package`),
+    languages,
+    features: indicatorStringArray(record.features, `${path}.features`),
+    requiredHostFeatures: indicatorStringArray(
+      record.requiredHostFeatures,
+      `${path}.requiredHostFeatures`,
+    ),
+    meta: expectIndicatorRecord(record.meta, `${path}.meta`),
+  };
+}
+
+function parseScriptLanguageDescriptor(
+  value: unknown,
+  path: string,
+): ScriptLanguageDescriptor {
+  const record = expectIndicatorRecord(value, path);
+  const identity = parseScriptLanguageIdentity(record, path);
+  const runtimeId = record.runtimeId === null
+    ? null
+    : expectIndicatorNonEmptyString(record.runtimeId, `${path}.runtimeId`);
+  return {
+    ...identity,
+    runtimeId,
+    routeMode: expectIndicatorNonEmptyString(record.routeMode, `${path}.routeMode`),
+    available: expectIndicatorBoolean(record.available, `${path}.available`),
+    features: indicatorStringArray(record.features, `${path}.features`),
+  };
+}
+
+export function parseScriptRuntimeCatalog(
+  value: unknown,
+  path = "indicator.runtimes",
+): ScriptRuntimeCatalog {
+  const record = expectIndicatorRecord(value, path);
+  const schemaVersion = expectIndicatorPositiveInteger(
+    record.schemaVersion,
+    `${path}.schemaVersion`,
+  );
+  if (schemaVersion !== 1) {
+    throw new IndicatorPayloadError(`${path}.schemaVersion`, "expected 1");
+  }
+  const runtimes = expectIndicatorArray(record.runtimes, `${path}.runtimes`).map(
+    (item, index) =>
+      parseScriptRuntimeDescriptor(item, `${path}.runtimes[${index}]`),
+  );
+  const languages = expectIndicatorArray(record.languages, `${path}.languages`).map(
+    (item, index) =>
+      parseScriptLanguageDescriptor(item, `${path}.languages[${index}]`),
+  );
+  const defaultLanguage = expectIndicatorNonEmptyString(
+    record.defaultLanguage,
+    `${path}.defaultLanguage`,
+  );
+  if (!languages.some((language) => language.id === defaultLanguage)) {
+    throw new IndicatorPayloadError(
+      `${path}.defaultLanguage`,
+      "expected a routed language id",
+    );
+  }
+  if (new Set(languages.map((item) => item.id)).size !== languages.length) {
+    throw new IndicatorPayloadError(`${path}.languages`, "duplicate language id");
+  }
+  if (new Set(runtimes.map((item) => item.id)).size !== runtimes.length) {
+    throw new IndicatorPayloadError(`${path}.runtimes`, "duplicate runtime id");
+  }
+  const runtimeById = new Map(runtimes.map((item) => [item.id, item]));
+  for (const language of languages) {
+    if (language.runtimeId === null) continue;
+    const runtime = runtimeById.get(language.runtimeId);
+    if (!runtime) {
+      throw new IndicatorPayloadError(
+        `${path}.languages`,
+        `unknown runtime id ${language.runtimeId}`,
+      );
+    }
+    if (!runtime.languages.some((declared) => declared.id === language.id)) {
+      throw new IndicatorPayloadError(
+        `${path}.languages`,
+        `runtime ${language.runtimeId} does not declare ${language.id}`,
+      );
+    }
+  }
+  return { schemaVersion, defaultLanguage, languages, runtimes };
+}
+
 function parseIndicatorValuePoint(
   value: unknown,
   path: string,
@@ -261,10 +383,19 @@ function parseIndicatorLine(value: unknown, path: string): IndicatorLine {
     `${path}.zIndex`,
   );
   const overlay = optionalIndicatorBoolean(record.overlay, `${path}.overlay`);
+  const visible = optionalIndicatorBoolean(record.visible, `${path}.visible`);
+  const base = optionalIndicatorFiniteNumber(record.base, `${path}.base`);
+  const trackPrice = optionalIndicatorBoolean(
+    record.trackPrice ?? record.track_price,
+    `${path}.trackPrice`,
+  );
   if (lineWidth !== undefined) line.lineWidth = lineWidth;
   if (lineStyle !== undefined) line.lineStyle = lineStyle;
   if (zIndex !== undefined) line.zIndex = zIndex;
   if (overlay !== undefined) line.overlay = overlay;
+  if (visible !== undefined) line.visible = visible;
+  if (base !== undefined) line.base = base;
+  if (trackPrice !== undefined) line.trackPrice = trackPrice;
   if (record.colorData !== undefined || record.color_data !== undefined) {
     line.colorData = parseOptionalArray(
       record.colorData ?? record.color_data,
@@ -285,6 +416,15 @@ function parseIndicatorUnifiedSeries(
     style.colorData ?? style.color_data,
     `${path}.style.colorData`,
     parseIndicatorColorPoint,
+  );
+  const visible = optionalIndicatorBoolean(
+    style.visible,
+    `${path}.style.visible`,
+  );
+  const base = optionalIndicatorFiniteNumber(style.base, `${path}.style.base`);
+  const trackPrice = optionalIndicatorBoolean(
+    style.trackPrice ?? style.track_price,
+    `${path}.style.trackPrice`,
   );
   const series: IndicatorUnifiedSeries = {
     id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
@@ -315,6 +455,9 @@ function parseIndicatorUnifiedSeries(
           `${path}.style.lineStyle`,
         ) ?? 0,
       ...(colorData.length > 0 ? { colorData } : {}),
+      ...(visible !== undefined ? { visible } : {}),
+      ...(base !== undefined ? { base } : {}),
+      ...(trackPrice !== undefined ? { trackPrice } : {}),
     },
   };
   const indicatorId =
@@ -1014,6 +1157,7 @@ export function parseCustomIndicatorRecord(
   const normalizedSecurityMode = securityMode === null
     ? null
     : optionalIndicatorString(securityMode, `${path}.securityMode`);
+  const language = optionalIndicatorString(record.language, `${path}.language`);
   const createdAt = optionalIndicatorFiniteNumber(
     record.createdAt ?? record.created_at,
     `${path}.createdAt`,
@@ -1025,6 +1169,7 @@ export function parseCustomIndicatorRecord(
   if (normalizedSecurityMode !== undefined) {
     customIndicator.securityMode = normalizedSecurityMode;
   }
+  if (language !== undefined) customIndicator.language = language;
   if (createdAt !== undefined) customIndicator.createdAt = createdAt;
   if (updatedAt !== undefined) customIndicator.updatedAt = updatedAt;
   return customIndicator;
@@ -1077,6 +1222,49 @@ export function parseIndicatorRangeBatchResponse(
         };
       },
     ),
+  };
+}
+
+export function parseIndicatorComputeBatchResponse(
+  value: unknown,
+  path = "indicator.computeBatch",
+): IndicatorComputeBatchResponse {
+  const record = expectIndicatorRecord(value, path);
+  const seenJobKeys = new Set<string>();
+  const seenClientIds = new Set<string>();
+  const results = expectIndicatorArray(record.results, `${path}.results`).map(
+    (item, index) => {
+      const itemPath = `${path}.results[${index}]`;
+      const result = expectIndicatorRecord(item, itemPath);
+      const clientId = expectIndicatorNonEmptyString(
+        result.clientId,
+        `${itemPath}.clientId`,
+      );
+      const jobKey = expectIndicatorNonEmptyString(
+        result.jobKey,
+        `${itemPath}.jobKey`,
+      );
+      if (seenClientIds.has(clientId)) {
+        throw new IndicatorPayloadError(`${itemPath}.clientId`, "expected a unique client id");
+      }
+      if (seenJobKeys.has(jobKey)) {
+        throw new IndicatorPayloadError(`${itemPath}.jobKey`, "expected a unique job key");
+      }
+      seenClientIds.add(clientId);
+      seenJobKeys.add(jobKey);
+      return {
+        clientId,
+        jobKey,
+        payload: parseIndicatorPayloadEnvelope(
+          result.payload,
+          `${itemPath}.payload`,
+        ),
+      };
+    },
+  );
+  return {
+    ok: expectIndicatorBoolean(record.ok, `${path}.ok`),
+    results,
   };
 }
 

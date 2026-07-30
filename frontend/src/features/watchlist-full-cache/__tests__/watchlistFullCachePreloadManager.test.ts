@@ -14,6 +14,7 @@ import {
 } from "../watchlistFullCacheStore.js";
 import type { FullCachePreloadJob } from "../watchlistFullCacheTypes.js";
 import { epochSeconds, mustBeDefined } from "../../../test/testHelpers.js";
+import { ForegroundPreloadGate } from "../../market-data/foregroundPreloadGate.js";
 
 function preloadJob(symbol: string, interval: string): FullCachePreloadJob {
   const symbolKey = `binance:futures:${symbol}`;
@@ -235,4 +236,112 @@ test("disabling preload aborts active work and clears loading state", async () =
   assert.equal(aborted, true);
   assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "idle");
   manager.dispose();
+});
+
+test("shared foreground gate aborts, preserves, and resumes a desired preload exactly once", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "45m");
+  const gate = new ForegroundPreloadGate(0);
+  let calls = 0;
+  let firstAborted = false;
+  const manager = createWatchlistFullCachePreloadManager({
+    foregroundPreloadGate: gate,
+    fetchJob: async (_job, _limit, signal) => {
+      calls += 1;
+      if (calls > 1) return { all_rows_final: true, data: rows(2), source: "resumed" };
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          firstAborted = true;
+          reject(new DOMException("Preempted", "AbortError"));
+        }, { once: true });
+      });
+    },
+  });
+
+  manager.syncJobs([job]);
+  assert.equal(calls, 1);
+  const foreground = gate.enterForeground("initial-history");
+  await nextTurn();
+  assert.equal(firstAborted, true);
+  assert.equal(calls, 1, "foreground ownership keeps the preserved job paused");
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "idle");
+
+  foreground.release();
+  await nextTurn();
+  assert.equal(calls, 2);
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "warm");
+  await nextTurn();
+  assert.equal(calls, 2, "one foreground preemption produces only one resumed attempt");
+
+  manager.dispose();
+  gate.dispose();
+});
+
+test("shared gate reduces a manager configured for two workers to one speculative request globally", async () => {
+  resetWatchlistFullCache();
+  const first = preloadJob("BTCUSDT", "1h");
+  const second = preloadJob("ETHUSDT", "1h");
+  const gate = new ForegroundPreloadGate(0);
+  const calls: string[] = [];
+  let releaseFirst!: (result: FullCachePreloadFetchResult) => void;
+  const manager = createWatchlistFullCachePreloadManager({
+    concurrency: 2,
+    foregroundPreloadGate: gate,
+    fetchJob: (job) => {
+      calls.push(job.symbol);
+      if (job === first) {
+        return new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      return Promise.resolve({ all_rows_final: true, data: rows(2), source: "second" });
+    },
+  });
+
+  manager.syncJobs([first, second]);
+  assert.deepEqual(calls, ["BTCUSDT"]);
+  releaseFirst({ all_rows_final: true, data: rows(2), source: "first" });
+  await nextTurn();
+  assert.deepEqual(calls, ["BTCUSDT", "ETHUSDT"]);
+
+  manager.dispose();
+  gate.dispose();
+});
+
+test("active-chart hydration preempts a watchlist preload and the desired job resumes once", async () => {
+  resetWatchlistFullCache();
+  const job = preloadJob("BTCUSDT", "45m");
+  const gate = new ForegroundPreloadGate(0);
+  let calls = 0;
+  let firstAborted = false;
+  const manager = createWatchlistFullCachePreloadManager({
+    foregroundPreloadGate: gate,
+    fetchJob: async (_job, _limit, signal) => {
+      calls += 1;
+      if (calls > 1) return { all_rows_final: true, data: rows(2), source: "resumed" };
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          firstAborted = true;
+          reject(new DOMException("Hydration preempted watchlist", "AbortError"));
+        }, { once: true });
+      });
+    },
+  });
+
+  manager.syncJobs([job]);
+  assert.equal(calls, 1);
+  const hydration = gate.tryAcquireHydration("active-chart-history");
+  assert.ok(hydration);
+  await nextTurn();
+  assert.equal(firstAborted, true);
+  assert.equal(calls, 1, "watchlist remains queued while hydration owns the slot");
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "idle");
+
+  gate.release(hydration);
+  await nextTurn();
+  assert.equal(calls, 2);
+  assert.equal(mustBeDefined(getFullCacheEntry(job.symbolKey, job.interval)).status, "warm");
+  await nextTurn();
+  assert.equal(calls, 2, "one hydration preemption produces one resumed watchlist attempt");
+
+  manager.dispose();
+  gate.dispose();
 });

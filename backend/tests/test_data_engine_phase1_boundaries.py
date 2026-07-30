@@ -1756,6 +1756,7 @@ def test_custom_interval_omits_aggregate_with_known_base_component_gap() -> None
 
 def test_data_manager_projects_custom_base_repair_into_derived_completion_target() -> None:
     calls: list[tuple[tuple, dict]] = []
+    suppression_calls: list[tuple] = []
     dm = DataManager()
 
     def _trigger(*args, **kwargs):
@@ -1763,6 +1764,9 @@ def test_data_manager_projects_custom_base_repair_into_derived_completion_target
         return "base-repair"
 
     dm.set_backfill_trigger(_trigger)
+    dm.set_backfill_suppression_lookup(
+        lambda *args: suppression_calls.append(args) or None
+    )
     result = QueryResult(
         bars=[],
         symbol="BTCUSDT",
@@ -1784,12 +1788,18 @@ def test_data_manager_projects_custom_base_repair_into_derived_completion_target
 
     dm._submit_missing_ranges(result, reason="visible_range_gap")
 
-    assert calls[0][0][1:4] == ("15m", 900_000, 1_800_000)
-    assert calls[0][1]["metadata"]["derived_repair_targets"] == [{
-        "interval": "45m",
+    assert suppression_calls[0][1:4] == ("45m", 0, 0)
+    assert calls[0][0][1:4] == ("45m", 0, 0)
+    assert calls[0][1]["metadata"]["derived_from"] == "15m"
+    assert calls[0][1]["metadata"]["base_missing_range"] == {
+        "start_ms": 900_000,
+        "end_ms": 1_800_000,
+    }
+    assert calls[0][1]["metadata"]["requested_range"] == {
         "start_ms": 0,
         "end_ms": 0,
-    }]
+    }
+    assert calls[0][1]["metadata"]["requires_trusted_finality"] is True
 
     native_result = QueryResult(
         bars=[],
@@ -2488,14 +2498,17 @@ def test_backfill_coordinator_dedupes_inflight_request_and_loads_cache() -> None
 
         class _Storage:
             def query_bars(self, **kwargs):
-                return [{
-                    "open_time": 60_000,
-                    "open": 1,
-                    "high": 2,
-                    "low": 1,
-                    "close": 2,
-                    "volume": 3,
-                }]
+                return [
+                    {
+                        "open_time": open_time,
+                        "open": 1,
+                        "high": 2,
+                        "low": 1,
+                        "close": 2,
+                        "volume": 3,
+                    }
+                    for open_time in (0, 60_000, 120_000)
+                ]
 
         class _DataManager:
             def __init__(self) -> None:

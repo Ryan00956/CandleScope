@@ -11,14 +11,18 @@
 - 行情数据 runtime：`app/data_engine/runtime.py`
 - 交易所 registry/plugins：`app/exchanges`
 - 指标引擎和 Pyne runtime：`app/indicator`
+- 通用脚本 runtime Host/Supervisor/Installer：`app/plugin_runtime`
 - SQLite K 线存储：`app/data_engine/storage`
 
 ## 快速启动
 
+CandleScope 默认首方 Pyne/Pine 插件包要求 Windows CPython 3.12。不受支持的
+解释器会在 FastAPI 应用启动前直接报错，不会带着不兼容的运行时继续启动。
+
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8 输出：
@@ -26,6 +30,9 @@ Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8
 ```powershell
 .\dev-server.ps1
 ```
+
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
 
 默认 API base：
 
@@ -52,12 +59,18 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 1. 启动 event-loop lag 监控。
 2. 初始化 SQLite K 线 storage。
-3. best-effort 刷新交易所 symbol metadata。
-4. 通过 `start_data_engine()` 启动 Data Engine。
-5. 将稳定 runtime 句柄挂到 `app.state`。
-6. 将 IndicatorEngine 桥接到 DataManager events。
+3. 读取 runtime activation registry 并启动显式配置为 autostart 的 sidecar；默认
+   registry 不存在时是零插件。
+4. best-effort 刷新交易所 symbol metadata。
+5. 通过 `start_data_engine()` 启动 Data Engine。
+6. 将稳定 runtime 句柄挂到 `app.state`。
+7. 将 IndicatorEngine 桥接到 DataManager events。
 
-关闭时先停止 lag monitor，再停止 IndicatorEngine，最后关闭 Data Engine runtime。
+关闭时先停止 lag monitor 和 IndicatorEngine，再回收插件 sidecar，最后关闭 Data
+Engine runtime。Host 配置、`.cspkg` 安装、回滚和安全边界见
+[`app/plugin_runtime/README_zh.md`](app/plugin_runtime/README_zh.md) 与
+[`app/plugin_runtime/INSTALLER_zh.md`](app/plugin_runtime/INSTALLER_zh.md)。Phase 3
+尚未把现有 Indicator/Pyne 执行路由切换到 sidecar。
 
 ## API 总览
 
@@ -68,7 +81,7 @@ curl http://127.0.0.1:18080/debug/snapshot
 | K 线 | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
 | 高级行情 | `GET /market/snapshot`, `GET /market/history` |
 | Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices`, `WS /stream/market` |
-| Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
+| Indicators | `GET /indicators/registry`, runtime discovery, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
 | Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test、storage repair、gap scan、storage health、cache limits |
@@ -192,35 +205,43 @@ Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol sp
 指标文档：
 
 - [app/indicator](app/indicator/)
-- [app/indicator/pyne](app/indicator/pyne/)
+- [Runtime 插件 Host](app/plugin_runtime/README_zh.md)
+- [Pyne sidecar bridge](../packages/candlescope-plugin-pyne/README_zh.md)
 
 内置指标包括 `MA`、`EMA`、`MACD`、`RSI`、`BOLL`、`ATR` 和 `VOL`。
 
-Pyne 脚本通过 `execute_pyne_script()` 执行，默认使用 process executor。Security modes 为 `safe`、`research`、`unsafe`。
+Pyne 脚本只通过隔离的 `candlescope.pyne` sidecar 执行。Security modes 为
+`safe`、`research`、`unsafe`；sidecar 会继承宿主选择的策略，但后端进程不会导入
+Pyne。
 
-后端仍通过 `app.indicator.pyne` 导入 Pyne，但实际实现由本仓库内置的
-`packages/pyne-runtime` 包提供。后端会自动加载这个源码目录，所以正常安装
-后端依赖即可：
+CandleScope 已不包含 Pyne Runtime 源码快照或 in-process Pyne facade。在受支持的
+Windows CPython 3.12 环境首次启动时，产品 bootstrap 会校验并安装
+`app/official-plugin-releases.json` 固定的 prerelease `.cspkg`；后续启动只复查
+managed environment，不会再次下载：
 
 ```powershell
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
-诊断接口会在 `/api/v1/indicators/diagnostics -> pyne.runtimeBackend` 返回
-当前实际使用的 runtime 包。
+诊断接口会在 `/api/v1/indicators/diagnostics -> pyne.runtimeBackend` 返回当前
+sidecar route。
 
-如果临时要联调外部新版 Pyne，可以只在当前 shell 里覆盖源码路径：
+离线首启可显式提供同一份 digest-pinned bundle：
 
 ```powershell
-$env:CANDLESCOPE_PYNE_RUNTIME_SRC = "<path-to-pyne-runtime>\src"
+$env:CANDLESCOPE_OFFICIAL_PLUGIN_BUNDLE = "C:\release\candlescope-pyne-0.2.0-cp312-win_amd64.cspkg"
 ```
+
+只有在已经手工激活兼容 runtime 时才设置
+`CANDLESCOPE_OFFICIAL_PLUGIN_BOOTSTRAP=0`。社区 runtime 仍使用通用本地 artifact
+安装器；官方 bootstrap 不会下载或覆盖社区插件。
 
 HTTP 指标计算通过专用 executor 隔离：
 
 - 内置指标 HTTP compute 使用 one-shot engine，不会修改全局实时 `IndicatorEngine`。
-- Pyne HTTP 和 range snapshot 路径通过 Pyne wait executor 包装 process runtime。
+- Script HTTP、range、batch 和 WebSocket 路径统一向选定 sidecar 发送类型化请求。
 - 两条路径都受 `INDICATOR_HTTP_TIMEOUT_SECONDS` 保护。
 
 ## 可观测性和压测
@@ -271,6 +292,9 @@ python scripts/bench_concurrency.py --base-url http://127.0.0.1:18080
 | `CORS_ORIGINS` | 逗号分隔的前端 origins |
 | `INGESTION_*` | 实时接入 endpoints、timeout、proxy、WS/fallback 参数 |
 | `BACKFILL_*` | 历史修复 intervals、fetch limits、dedup、publish mode |
+| `HISTORY_ARCHIVE_ENABLED` | 官方历史 ZIP 路由，默认 `1` |
+| `HISTORY_ARCHIVE_CACHE_MAX_BYTES` | 持久归档 LRU 上限，默认 10 GiB |
+| `OKX_HISTORY_ARCHIVE_ENABLED` | 受保护的 OKX 网页归档支持，默认 `0` |
 | `BAR_AGG_*` | 聚合 source mode、alignment、finalization、event throttling |
 | `PYNE_*` | Pyne security、executor mode、timeouts、output limits |
 | `INDICATOR_HTTP_TIMEOUT_SECONDS` | HTTP 指标计算等待上限 |

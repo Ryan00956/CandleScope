@@ -1,3 +1,4 @@
+-e ../packages/candlescope-plugin-sdk
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 requests==2.32.3
@@ -7,5 +8,6 @@ python-dotenv==1.0.1
 websockets>=15.0.1
 httpx==0.28.1
 aiohttp==3.13.3
+cryptography==46.0.1
 pytest==7.4.4
 trio==0.28.0

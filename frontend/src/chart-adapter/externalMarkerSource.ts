@@ -28,6 +28,37 @@ export interface ExternalMarkerSource {
   subscribe(listener: () => void): () => void;
 }
 
+export function combineExternalMarkerSources(
+  values: readonly (ExternalMarkerSource | null | undefined)[],
+): ExternalMarkerSource | null {
+  const sources = values.filter((value): value is ExternalMarkerSource => value != null);
+  if (sources.length === 0) return null;
+  if (sources.length === 1) return sources[0] ?? null;
+  let revision = 0;
+  let sourceRevisions = "";
+  let cached: ExternalMarkerSnapshot = { markers: [], revision };
+  return {
+    getSnapshot(): ExternalMarkerSnapshot {
+      const snapshots = sources.map((source) => source.getSnapshot());
+      const nextRevisions = snapshots.map((snapshot) => snapshot.revision).join(":");
+      if (nextRevisions === sourceRevisions) return cached;
+      sourceRevisions = nextRevisions;
+      revision += 1;
+      cached = {
+        markers: snapshots.flatMap((snapshot) => [...snapshot.markers]),
+        revision,
+      };
+      return cached;
+    },
+    subscribe(listener: () => void): () => void {
+      const unsubscribers = sources.map((source) => source.subscribe(listener));
+      return () => {
+        for (const unsubscribe of unsubscribers) unsubscribe();
+      };
+    },
+  };
+}
+
 export function attachExternalMarkerSource({
   source,
   targetSeries,

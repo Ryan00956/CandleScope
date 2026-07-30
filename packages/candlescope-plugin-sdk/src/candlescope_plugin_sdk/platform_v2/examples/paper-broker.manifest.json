@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.paper-broker",
+    "name": "CandleScope Paper Broker",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.paper_broker",
+        "resourceProfile": "standard",
+        "activationEvents": ["onCommand"]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "accounts",
+      "kind": "account-provider/1",
+      "title": "Fixture Paper Account",
+      "entrypoint": "main",
+      "configuration": {
+        "brokerId": "fixture-paper",
+        "displayName": "Fixture Paper Broker",
+        "environment": "paper",
+        "accounts": [
+          {
+            "id": "paper-main",
+            "label": "Paper Main",
+            "baseCurrency": "USDT",
+            "initialBalances": [
+              {"asset": "USDT", "available": "100000"},
+              {"asset": "BTC", "available": "2"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "executor",
+      "kind": "order-executor/1",
+      "title": "Fixture Paper Executor",
+      "entrypoint": "main",
+      "configuration": {
+        "brokerId": "fixture-paper",
+        "environment": "paper",
+        "protocol": "candlescope.paper/1",
+        "orderTypes": ["market", "limit"],
+        "symbols": [
+          {
+            "symbol": "BTCUSDT",
+            "marketType": "spot",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT",
+            "priceTick": "0.01",
+            "quantityStep": "0.001",
+            "minQuantity": "0.001",
+            "maxQuantity": "2",
+            "minNotional": "10",
+            "maxNotional": "100000"
+          }
+        ],
+        "limits": {
+          "maxOrderQuantity": "2",
+          "maxOrderNotional": "100000",
+          "maxPositionNotional": "200000",
+          "maxOpenOrders": 16,
+          "maxOrdersPerMinute": 60,
+          "allowShort": false
+        },
+        "maxQuoteAgeMs": 10000
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "accounts.read",
+        "scope": {
+          "brokers": ["fixture-paper"],
+          "accounts": ["paper-main"]
+        }
+      },
+      {
+        "id": "trade.simulate",
+        "scope": {
+          "brokers": ["fixture-paper"],
+          "accounts": ["paper-main"],
+          "symbols": ["BTCUSDT"],
+          "marketTypes": ["spot"],
+          "orderTypes": ["market", "limit"],
+          "maxOrderQuantity": "2",
+          "maxOrderNotional": "100000",
+          "maxPositionNotional": "200000",
+          "maxOpenOrders": 16,
+          "maxOrdersPerMinute": 60,
+          "allowShort": false
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": []
+}

@@ -1,4 +1,4 @@
-import type { MarketSeries, SeriesKey } from "../marketDataTypes.js";
+import type { KlineBar, MarketSeries, SeriesKey } from "../marketDataTypes.js";
 import { asSeriesKey } from "../marketDataTypes.js";
 import { SeriesWindowStore } from "./seriesWindowStore.js";
 import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
@@ -11,6 +11,16 @@ interface StoreOptions {
   meta?: Record<string, unknown>;
 }
 
+interface DetachedStoreOptions {
+  intervalSeconds?: number | null;
+  maxBars?: number;
+}
+
+export interface SeriesWindowActivation {
+  rows: KlineBar[];
+  store: SeriesWindowStore;
+}
+
 export function buildSeriesWindowKey({
   exchange = "binance",
   marketType = "spot",
@@ -20,9 +30,24 @@ export function buildSeriesWindowKey({
   return asSeriesKey([
     String(exchange || "binance").trim().toLowerCase(),
     String(marketType || "spot").trim().toLowerCase(),
-    String(symbol || "").trim(),
+    String(symbol || "").trim().toUpperCase(),
     canonicalizeIntervalValue(interval) || String(interval || "").trim(),
   ].join("-"));
+}
+
+/**
+ * Create an empty render owner without inserting it into a registry. This is
+ * used to clear a cold transition frame while preserving every warm store.
+ */
+export function createDetachedSeriesWindowStore(
+  key: SeriesKey | string,
+  { intervalSeconds = null, maxBars }: DetachedStoreOptions = {},
+): SeriesWindowStore {
+  return new SeriesWindowStore({
+    ...(maxBars === undefined ? {} : { maxBars }),
+    intervalSeconds,
+    seriesKey: key,
+  });
 }
 
 export class SeriesWindowRegistry {
@@ -43,6 +68,12 @@ export class SeriesWindowRegistry {
   has(key: string): boolean {
     const store = this._stores.get(key);
     return Boolean(store && !store.isEmpty());
+  }
+
+  activate(key: string): SeriesWindowActivation | null {
+    const store = this._stores.get(key);
+    if (!store || store.isEmpty()) return null;
+    return { rows: store.snapshot(), store };
   }
 
   getOrCreate(key: string, options: StoreOptions = {}): SeriesWindowStore {

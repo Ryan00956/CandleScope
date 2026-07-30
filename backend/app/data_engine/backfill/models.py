@@ -286,6 +286,10 @@ class FetchedBar:
     taker_buy_quote: float = 0.0
     source: str = "backfill"
     enhanced_fields: frozenset[str] = field(default_factory=frozenset)
+    # Internal provenance used to keep one official archive object inside one
+    # SQLite transaction.  It is deliberately not part of the chart/storage
+    # wire shape; the durable receipt owns the object-level metadata.
+    archive_object_key: str | None = None
 
     def __post_init__(self) -> None:
         values = {
@@ -392,6 +396,7 @@ class FetchResult:
     exhausted_before_ms: int | None = None
     empty_reason: str | None = None
     retryable: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def bars_count(self) -> int:
@@ -409,6 +414,7 @@ class FetchResult:
             "exhausted_before_ms": self.exhausted_before_ms,
             "empty_reason": self.empty_reason,
             "retryable": self.retryable,
+            "metadata": self.metadata,
         }
 
 
@@ -473,6 +479,8 @@ class ReconcileResult:
     written_ranges: list[WrittenRange] = field(default_factory=list)
     write_errors: int = 0
     failed_batches: list[dict[str, Any]] = field(default_factory=list)
+    archive_objects_imported: int = 0
+    archive_dependent_rows_invalidated: int = 0
     elapsed_ms: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -488,6 +496,10 @@ class ReconcileResult:
             "written_ranges": [r.to_dict() for r in self.written_ranges],
             "write_errors": self.write_errors,
             "failed_batches": self.failed_batches,
+            "archive_objects_imported": self.archive_objects_imported,
+            "archive_dependent_rows_invalidated": (
+                self.archive_dependent_rows_invalidated
+            ),
             "elapsed_ms": self.elapsed_ms,
             "errors": self.errors,
         }

@@ -3,3 +3,8 @@
 backend/tests/fixtures/replay/*.json text eol=lf
 docs/perf-baselines/replay-*.json text eol=lf
 frontend/scripts/replay-rollback-drill.* text eol=lf
+
+# Plugin Platform Phase 0 freezes these fixtures by exact SHA-256.
+backend/app/official-plugin-releases.json text eol=lf
+backend/tests/fixtures/plugin_runtime/pyne_transport_v1.json text eol=lf
+packages/candlescope-plugin-sdk/tests/fixtures/hello_transcript_v1.json text eol=lf

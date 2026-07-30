@@ -278,28 +278,98 @@ async function waitForDrawingWorkerRuntime(session) {
   })}`);
 }
 
-async function exerciseDrawingWorker(session) {
-  const setup = await session.cdp.evaluateJson(`(() => {
-    const button = document.querySelector('[data-drawing-tool="pen"]');
-    const chart = document.querySelector(
-      '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]'
-    );
-    if (!(button instanceof HTMLButtonElement) || button.disabled || !(chart instanceof HTMLElement)) {
-      return { ready: false, buttonFound: Boolean(button), chartFound: Boolean(chart) };
+export async function waitForDrawingExerciseSurface(probe, {
+  timeoutMs,
+  pollMs = 50,
+  now = Date.now,
+  waitForInterval = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+} = {}) {
+  const startedAt = now();
+  let attempts = 0;
+  let latest = null;
+  let lastEvaluationError = null;
+  while (now() - startedAt <= timeoutMs) {
+    attempts += 1;
+    try {
+      latest = await probe();
+      lastEvaluationError = null;
+    } catch (error) {
+      latest = null;
+      lastEvaluationError = error;
     }
-    button.click();
-    const rect = chart.getBoundingClientRect();
-    return {
-      ready: rect.width > 200 && rect.height > 160,
-      buttonFound: true,
-      chartFound: true,
-      active: button.classList.contains('active'),
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+    const elapsedMs = now() - startedAt;
+    const diagnostic = {
+      attempts,
+      elapsedMs,
+      latest,
+      lastEvaluationError: lastEvaluationError instanceof Error
+        ? lastEvaluationError.message
+        : lastEvaluationError === null
+          ? null
+          : String(lastEvaluationError),
     };
-  })()`);
-  if (setup?.ready !== true || !setup?.rect) {
-    throw new Error(`Controlled smoke could not arm the freehand worker exercise: ${JSON.stringify(setup)}`);
+    if (latest?.errorText) {
+      throw new Error(`Controlled smoke chart entered an error state: ${JSON.stringify(diagnostic)}`);
+    }
+    if (latest?.ready === true && latest?.rect) {
+      return Object.freeze({
+        ...latest,
+        attempts,
+        waitedMs: elapsedMs,
+      });
+    }
+    if (elapsedMs >= timeoutMs) {
+      throw new Error(
+        `Controlled smoke timed out waiting for the drawing surface: ${JSON.stringify(diagnostic)}`,
+      );
+    }
+    await waitForInterval(pollMs);
   }
+  throw new Error("Controlled smoke drawing surface wait exited without a terminal result");
+}
+
+async function exerciseDrawingWorker(session) {
+  const setup = await waitForDrawingExerciseSurface(
+    () => session.cdp.evaluateJson(`(() => {
+      const toolbar = document.querySelector('.drawing-toolbar');
+      const button = document.querySelector('[data-drawing-tool="pen"]');
+      const chart = document.querySelector(
+        '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]'
+      );
+      const errorOverlay = document.querySelector('.error-overlay');
+      const buttonFound = button instanceof HTMLButtonElement;
+      const chartFound = chart instanceof HTMLElement;
+      const rect = chartFound ? chart.getBoundingClientRect() : null;
+      const toolbarState = toolbar instanceof HTMLElement
+        ? toolbar.dataset.drawingToolbarState || null
+        : null;
+      const buttonDisabled = buttonFound ? button.disabled : null;
+      const sized = Boolean(rect && rect.width > 200 && rect.height > 160);
+      return {
+        ready: toolbarState === 'ready' && buttonFound && !buttonDisabled && chartFound && sized,
+        readyState: document.readyState,
+        toolbarState,
+        buttonFound,
+        buttonDisabled,
+        chartFound,
+        chartReadyMark: Boolean(window.__CANDLESCOPE_PERF__?.report?.()?.marks?.['chart.ready']),
+        errorText: errorOverlay instanceof HTMLElement
+          ? errorOverlay.innerText.trim().slice(0, 1000)
+          : null,
+        rect: rect
+          ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          : null
+      };
+    })()`),
+    { timeoutMs: session.configuration.timeoutMs },
+  );
+  const clicked = await session.cdp.evaluate(`(() => {
+    const button = document.querySelector('[data-drawing-tool="pen"]');
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+  if (clicked !== true) throw new Error("Controlled smoke could not click the freehand tool");
   await new Promise((resolve) => setTimeout(resolve, 150));
   const armed = await session.cdp.evaluate(
     `Boolean(document.querySelector('[data-drawing-tool="pen"].active'))`,

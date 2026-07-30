@@ -459,6 +459,8 @@ class EventRouter:
         # Determine BarInputSource from MarketEvent source
         if source_str == "http_backfill":
             bar_source = BarInputSource.BACKFILL
+        elif source_str == "plugin" and bool(data.get("is_correction", False)):
+            bar_source = BarInputSource.CORRECTION
         else:
             bar_source = BarInputSource.REALTIME
 

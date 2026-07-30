@@ -3,7 +3,9 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.v1 import settings as settings_api
 from app.api.v1.settings import router as settings_router
+from app.data_engine.storage import klines_repo
 
 
 class _DataManager:
@@ -228,6 +230,120 @@ def test_storage_health_requires_data_engine() -> None:
     response = _client(with_runtime=False).get("/api/v1/settings/storage/health")
 
     assert response.status_code == 503
+
+
+def test_storage_inventory_is_live_read_only_and_filters_real_series(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    def fake_list_series_summaries(*, read_only: bool = False, **_kwargs) -> list[dict]:
+        calls.append(read_only)
+        return [
+            {
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+                "earliest_open_time": 1_700_000_000_000,
+                "latest_open_time": 1_700_000_060_000,
+                "total_count": 20,
+            },
+            {
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "ETHUSDT",
+                "interval": "5m",
+                "earliest_open_time": 1_700_000_000_000,
+                "latest_open_time": 1_700_000_300_000,
+                "total_count": 8,
+            },
+        ]
+
+    monkeypatch.setattr(settings_api, "list_series_summaries", fake_list_series_summaries)
+    monkeypatch.setattr(settings_api, "_storage_file_snapshot", lambda: {
+        "captured_at_ms": 1_700_000_400_000,
+        "exists": True,
+        "file_set_stable": True,
+        "db_size_bytes": 123,
+        "wal_size_bytes": 45,
+        "shm_size_bytes": 67,
+        "physical_size_bytes": 168,
+        "total_size_bytes": 235,
+    })
+
+    response = _client().get(
+        "/api/v1/settings/storage/inventory",
+        params={
+            "exchange": "BINANCE",
+            "market_type": "spot",
+            "symbol": "btcusdt",
+            "limit": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "live"
+    assert payload["read_only"] is True
+    assert payload["filters"] == {
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "interval": None,
+    }
+    assert payload["inventory"] == {
+        "total_series": 2,
+        "total_rows": 28,
+        "matching_series": 1,
+        "matching_rows": 20,
+        "returned_series": 1,
+        "truncated": False,
+    }
+    assert payload["series"] == [{
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "earliest_open_ms": 1_700_000_000_000,
+        "latest_open_ms": 1_700_000_060_000,
+        "total_count": 20,
+    }]
+    assert payload["snapshot"]["file_set_stable"] is True
+    assert payload["integrity"]["available"] is True
+    assert payload["integrity"]["open_gap_count"] == 173
+    assert calls == [True]
+
+
+def test_storage_inventory_reports_unavailable_integrity_without_mock_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(settings_api, "list_series_summaries", lambda **_kwargs: [])
+    monkeypatch.setattr(settings_api, "_storage_file_snapshot", lambda: {
+        "captured_at_ms": 1,
+        "exists": False,
+        "file_set_stable": True,
+        "db_size_bytes": 0,
+        "wal_size_bytes": 0,
+        "shm_size_bytes": 0,
+        "physical_size_bytes": 0,
+        "total_size_bytes": 0,
+    })
+
+    response = _client(with_runtime=False).get("/api/v1/settings/storage/inventory")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "live"
+    assert payload["inventory"]["total_series"] == 0
+    assert payload["integrity"] == {
+        "available": False,
+        "reason": "BackfillCoordinator 尚未初始化，不能将完整性状态视为正常",
+    }
+
+
+def test_read_only_series_inventory_does_not_create_an_empty_database(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "missing.db"
+    monkeypatch.setattr(klines_repo, "KLINES_DB_PATH", db_path)
+
+    assert klines_repo.list_series_summaries(read_only=True) == []
+    assert not db_path.exists()
 
 
 def test_backend_memory_gc_dry_run_endpoint_calls_data_manager_plan() -> None:

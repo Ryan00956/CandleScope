@@ -1,9 +1,9 @@
 """Indicator WebSocket payload and range computation helpers."""
+
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+import time
 from typing import Any
 
 from app.core import config
@@ -16,21 +16,28 @@ from app.data_engine.interval_policy import (
 from app.indicator import create_engine
 from app.indicator.errors import error_detail
 from app.indicator.events import IndicatorEvent, IndicatorEventType
-from app.indicator.pyne import (
-    PyneIncrementalSession,
-    PyneIncrementalSessionManager,
-    PyneResult,
-    SharedPyneIncrementalSession,
+from app.indicator.runtime_service import (
+    IndicatorRuntimeFailure,
+    IndicatorRuntimeRequest,
+    IndicatorRuntimeService,
+    IndicatorRuntimeUnavailableError,
+    build_unbound_indicator_runtime_service,
+    removed_in_process_runtime,
 )
-from app.indicator.pyne.executor import execute_pyne_script
-from app.indicator.pyne.security import PyneSecurityError, PyneTimeoutError
-from app.indicator.script_identity import script_hash
 from app.indicator.serialization import (
+    build_error_payload,
     build_indicator_snapshot_payload,
-    build_pyne_snapshot_payload,
+    build_script_runtime_snapshot_payload,
+    serialize_plugin_runtime_result,
 )
 
-_pyne_incremental_sessions = PyneIncrementalSessionManager()
+_unbound_indicator_runtime_service = build_unbound_indicator_runtime_service()
+
+# Keep the established builtin range ceiling, but apply it to the complete
+# compute dataset (target plus warmup) rather than only the visible target.
+# This prevents an otherwise tiny request with an extreme period from reading
+# and retaining an unbounded K-line prefix.
+_BUILTIN_INDICATOR_MAX_COMPUTE_BARS = 50_000
 
 
 class IndicatorRangeEmptyError(RuntimeError):
@@ -76,6 +83,30 @@ def confirmed_indicator_seed_bars(bars: list[Any]) -> list[Any]:
     return [bar for bar in bars or [] if getattr(bar, "is_closed", True)]
 
 
+def store_indicator_seed_cache(
+    cache: dict[tuple[str, str, str, str, int], dict[str, Any]],
+    key: tuple[str, str, str, str, int],
+    entry: dict[str, Any],
+) -> None:
+    """Store one WS seed query in a TTL-pruned bounded LRU dictionary."""
+    ttl_seconds = max(
+        0.0,
+        float(config.INDICATOR_WS_SEED_CACHE_SECONDS),
+    )
+    if ttl_seconds <= 0:
+        cache.clear()
+        return
+    now = time.monotonic()
+    for cached_key, cached_entry in list(cache.items()):
+        if now - float(cached_entry.get("at", 0)) > ttl_seconds:
+            cache.pop(cached_key, None)
+    cache.pop(key, None)
+    cache[key] = entry
+    max_entries = max(1, int(config.INDICATOR_WS_MAX_SUBSCRIPTIONS))
+    while len(cache) > max_entries:
+        cache.pop(next(iter(cache)), None)
+
+
 def _indicator_warmup_bars(name: str, params: dict[str, Any]) -> int:
     normalized = str(name or "").upper().strip()
 
@@ -96,6 +127,27 @@ def _indicator_warmup_bars(name: str, params: dict[str, Any]) -> int:
     if normalized == "MACD":
         return _param_int("slow", 26) * 5 + _param_int("signal", 9) * 3
     return _param_int("warmup", 200)
+
+
+def _validated_builtin_warmup_bars(
+    name: str,
+    params: dict[str, Any],
+    target_bars: int,
+) -> int:
+    """Return warmup after enforcing the builtin total-compute ceiling."""
+    warmup_bars = _indicator_warmup_bars(name, params)
+    _validate_builtin_compute_bars(target_bars, warmup_bars)
+    return warmup_bars
+
+
+def _validate_builtin_compute_bars(target_bars: int, warmup_bars: int) -> None:
+    """Reject builtin target plus warmup datasets above the existing limit."""
+    estimated_compute_bars = max(0, int(target_bars)) + warmup_bars
+    if estimated_compute_bars > _BUILTIN_INDICATOR_MAX_COMPUTE_BARS:
+        raise ValueError(
+            "Too many indicator bars: "
+            f"{estimated_compute_bars} > {_BUILTIN_INDICATOR_MAX_COMPUTE_BARS}"
+        )
 
 
 def _range_from_indicator_command(
@@ -130,7 +182,9 @@ def _range_from_indicator_command(
     return start_s, end_s, int(bars)
 
 
-def _missing_overlaps_target(missing_ranges: list[Any], start_ms: int, end_ms: int) -> bool:
+def _missing_overlaps_target(
+    missing_ranges: list[Any], start_ms: int, end_ms: int
+) -> bool:
     for missing in missing_ranges or []:
         m_start = getattr(missing, "start_ms", None)
         m_end = getattr(missing, "end_ms", None)
@@ -141,7 +195,9 @@ def _missing_overlaps_target(missing_ranges: list[Any], start_ms: int, end_ms: i
     return False
 
 
-def _filter_points_to_range(points: list[dict[str, Any]], start_s: int, end_s: int) -> list[dict[str, Any]]:
+def _filter_points_to_range(
+    points: list[dict[str, Any]], start_s: int, end_s: int
+) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
     for point in points or []:
         try:
@@ -153,7 +209,9 @@ def _filter_points_to_range(points: list[dict[str, Any]], start_s: int, end_s: i
     return filtered
 
 
-def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) -> dict[str, Any]:
+def _filter_payload_to_range(
+    payload: dict[str, Any], start_s: int, end_s: int
+) -> dict[str, Any]:
     """Trim a snapshot-like indicator payload down to a range patch."""
     next_payload = dict(payload)
 
@@ -163,7 +221,11 @@ def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) 
                 **line,
                 "data": _filter_points_to_range(line.get("data") or [], start_s, end_s),
                 **(
-                    {"colorData": _filter_points_to_range(line.get("colorData") or [], start_s, end_s)}
+                    {
+                        "colorData": _filter_points_to_range(
+                            line.get("colorData") or [], start_s, end_s
+                        )
+                    }
                     if line.get("colorData")
                     else {}
                 ),
@@ -176,19 +238,27 @@ def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) 
         for item in next_payload["series"]:
             style = dict(item.get("style") or {})
             if style.get("colorData"):
-                style["colorData"] = _filter_points_to_range(style.get("colorData") or [], start_s, end_s)
-            series.append({
-                **item,
-                "data": _filter_points_to_range(item.get("data") or [], start_s, end_s),
-                "style": style,
-            })
+                style["colorData"] = _filter_points_to_range(
+                    style.get("colorData") or [], start_s, end_s
+                )
+            series.append(
+                {
+                    **item,
+                    "data": _filter_points_to_range(
+                        item.get("data") or [], start_s, end_s
+                    ),
+                    "style": style,
+                }
+            )
         next_payload["series"] = series
 
     # Builtin snapshots also carry the legacy ``result.outputs`` envelope.
     # Leaving it unsliced would make a tiny cache hit serialize the complete
     # WS seed history even though ``lines``/``series`` were correctly trimmed.
     nested_result = next_payload.get("result")
-    if isinstance(nested_result, dict) and isinstance(nested_result.get("outputs"), dict):
+    if isinstance(nested_result, dict) and isinstance(
+        nested_result.get("outputs"), dict
+    ):
         filtered_result = dict(nested_result)
         filtered_outputs: dict[str, Any] = {}
         for name, output in nested_result["outputs"].items():
@@ -197,11 +267,15 @@ def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) 
                 continue
             filtered_outputs[name] = {
                 **output,
-                "data": _filter_points_to_range(output.get("data") or [], start_s, end_s),
+                "data": _filter_points_to_range(
+                    output.get("data") or [], start_s, end_s
+                ),
                 **(
                     {
                         "colorData": _filter_points_to_range(
-                            output.get("colorData") or [], start_s, end_s,
+                            output.get("colorData") or [],
+                            start_s,
+                            end_s,
                         )
                     }
                     if output.get("colorData")
@@ -223,7 +297,12 @@ def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) 
     for key in ("markers", "bgcolors", "barcolors", "signals"):
         if isinstance(next_payload.get(key), list):
             next_payload[key] = [
-                {**group, "data": _filter_points_to_range(group.get("data") or [], start_s, end_s)}
+                {
+                    **group,
+                    "data": _filter_points_to_range(
+                        group.get("data") or [], start_s, end_s
+                    ),
+                }
                 for group in next_payload[key]
             ]
 
@@ -238,11 +317,13 @@ def _patch_from_snapshot(
     end_s: int,
 ) -> dict[str, Any]:
     patch = _filter_payload_to_range(payload, start_s, end_s)
-    patch.update({
-        "type": "indicator.patch",
-        "reason": reason,
-        "range": {"start": start_s, "end": end_s},
-    })
+    patch.update(
+        {
+            "type": "indicator.patch",
+            "reason": reason,
+            "range": {"start": start_s, "end": end_s},
+        }
+    )
     return patch
 
 
@@ -254,11 +335,13 @@ def _replace_range_from_snapshot(
     end_s: int,
 ) -> dict[str, Any]:
     replacement = _filter_payload_to_range(payload, start_s, end_s)
-    replacement.update({
-        "type": "indicator.replace_range",
-        "reason": reason,
-        "range": {"start": start_s, "end": end_s},
-    })
+    replacement.update(
+        {
+            "type": "indicator.replace_range",
+            "reason": reason,
+            "range": {"start": start_s, "end": end_s},
+        }
+    )
     return replacement
 
 
@@ -282,7 +365,9 @@ def _series_payload_time_range(payload: dict[str, Any]) -> tuple[int, int] | Non
     return min(times), max(times)
 
 
-def _recompute_event_range(event: IndicatorEvent, payload: dict[str, Any]) -> tuple[int, int] | None:
+def _recompute_event_range(
+    event: IndicatorEvent, payload: dict[str, Any]
+) -> tuple[int, int] | None:
     detail_range = event.detail.get("range") if isinstance(event.detail, dict) else None
     if isinstance(detail_range, dict):
         try:
@@ -305,6 +390,7 @@ async def compute_indicator_range_payload_async(
     reason: str = "range",
     backfill_coordinator: Any | None = None,
     backfill_wait_seconds: float | None = None,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict[str, Any]:
     interval_ms = parse_interval_ms(meta["interval"])
     if interval_ms is None or interval_ms <= 0:
@@ -313,11 +399,15 @@ async def compute_indicator_range_payload_async(
     target_bars = ((end_s - start_s) // interval_s) + 1
     if meta.get("kind") == "script":
         params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-        warmup_bars = _indicator_warmup_bars("PYNE", params)
+        language = str(meta.get("language") or "pyne")
+        warmup_bars = _indicator_warmup_bars(language.upper(), params)
         max_pyne_bars = max(int(config.PYNE_MAX_BARS), 1)
         estimated_compute_bars = target_bars + warmup_bars
         if estimated_compute_bars > max_pyne_bars:
-            raise ValueError(f"Too many Pyne bars: {estimated_compute_bars} > {config.PYNE_MAX_BARS}")
+            label = "Pyne" if language == "pyne" else f"{language} runtime"
+            raise ValueError(
+                f"Too many {label} bars: {estimated_compute_bars} > {config.PYNE_MAX_BARS}"
+            )
         bars = await _query_indicator_compute_bars_async(
             dm,
             meta,
@@ -327,21 +417,31 @@ async def compute_indicator_range_payload_async(
             backfill_coordinator=backfill_coordinator,
             wait_seconds=backfill_wait_seconds,
         )
-        return await run_pyne_wait(
-            _compute_pyne_range_patch_from_bars,
-            client_id,
+        service = runtime_service or _unbound_indicator_runtime_service
+
+        request = _script_runtime_request(
             meta,
-            start_s,
-            end_s,
             bars,
-            reason,
-            target_bars,
+            transport="http.range",
+        )
+        return await service.execute(
+            request,
+            legacy=removed_in_process_runtime,
+            adapt_sidecar=lambda result: _compute_plugin_range_patch_from_bars(
+                client_id,
+                meta,
+                start_s,
+                end_s,
+                bars,
+                result,
+                reason=reason,
+                target_bars=target_bars,
+            ),
+            adapt_failure=_raise_plugin_runtime_failure,
         )
     name = str(meta.get("name") or "").upper()
     params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-    warmup_bars = _indicator_warmup_bars(name, params)
-    if target_bars > 50_000:
-        raise ValueError(f"Too many indicator bars: {target_bars} > 50000")
+    warmup_bars = _validated_builtin_warmup_bars(name, params, target_bars)
     bars = await _query_indicator_compute_bars_async(
         dm,
         meta,
@@ -377,7 +477,9 @@ def _query_indicator_compute_bars(
         start_s,
         end_s,
         warmup_bars=warmup_bars,
-        auto_backfill=True,
+        # Indicator history is read-only. The chart history request owns any
+        # repair of the requested target range.
+        auto_backfill=False,
     )
     return _closed_indicator_compute_bars(result, start_s, end_s, start_ms, end_ms)
 
@@ -442,15 +544,18 @@ def _query_indicator_compute_result(
         )
     else:
         needed = int((end_ms - compute_start_ms) // interval_ms) + 1
+    query_kwargs: dict[str, Any] = {
+        "start_ms": compute_start_ms,
+        "end_ms": end_ms,
+        "limit": needed + 5,
+        "exchange": meta["exchange"],
+        "market_type": meta["market_type"],
+        "auto_backfill": auto_backfill,
+    }
     result = dm.query(
         meta["symbol"],
         meta["interval"],
-        start_ms=compute_start_ms,
-        end_ms=end_ms,
-        limit=needed + 5,
-        exchange=meta["exchange"],
-        market_type=meta["market_type"],
-        auto_backfill=auto_backfill,
+        **query_kwargs,
     )
     return result, start_ms, end_ms
 
@@ -463,16 +568,14 @@ def _closed_indicator_compute_bars(
     end_ms: int,
 ) -> list[Any]:
     if _missing_overlaps_target(result.missing_ranges, start_ms, end_ms):
-        raise RuntimeError("target K-line range is still backfilling")
+        raise IndicatorRangeNotReadyError("target K-line range is still backfilling")
     raw_bars = list(result.bars or [])
     bars = [
-        bar for bar in raw_bars
-        if bar.time <= end_s and getattr(bar, "is_closed", True)
+        bar for bar in raw_bars if bar.time <= end_s and getattr(bar, "is_closed", True)
     ]
     if not any(start_s <= bar.time <= end_s for bar in bars):
         raw_target_bars = [
-            bar for bar in raw_bars
-            if start_s <= int(getattr(bar, "time", 0)) <= end_s
+            bar for bar in raw_bars if start_s <= int(getattr(bar, "time", 0)) <= end_s
         ]
         if raw_target_bars:
             raise IndicatorRangeEmptyError("target K-line range has no closed bars yet")
@@ -494,7 +597,7 @@ def _closed_indicator_compute_bars(
                 excluded_ranges=getattr(result, "excluded_ranges", None),
                 history_state=getattr(result, "history_state", None) or "ready",
             )
-        raise RuntimeError("target K-line range is not available yet")
+        raise IndicatorRangeNotReadyError("target K-line range is not available yet")
     return bars
 
 
@@ -515,19 +618,29 @@ async def _query_indicator_compute_bars_async(
         start_s,
         end_s,
         warmup_bars=warmup_bars,
-        auto_backfill=True,
+        # Indicator history is a read-only consumer. K-line history/range/
+        # before requests exclusively own repair of the requested target.
+        auto_backfill=False,
     )
     if not _missing_overlaps_target(result.missing_ranges, start_ms, end_ms):
         return _closed_indicator_compute_bars(result, start_s, end_s, start_ms, end_ms)
 
-    metadata = result.metadata if isinstance(getattr(result, "metadata", None), dict) else {}
-    request_ids = list(dict.fromkeys(
-        str(item).strip()
-        for item in metadata.get("backfill_request_ids") or []
-        if str(item).strip()
-    ))
+    metadata = (
+        result.metadata if isinstance(getattr(result, "metadata", None), dict) else {}
+    )
+    request_ids = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in metadata.get("backfill_request_ids") or []
+            if str(item).strip()
+        )
+    )
     if backfill_coordinator is None or not request_ids:
-        raise RuntimeError("target K-line range is still backfilling")
+        raise IndicatorRangeNotReadyError(
+            "target K-line range is still backfilling",
+            request_ids=request_ids,
+            waited_ms=0,
+        )
 
     timeout_seconds = (
         config.INDICATOR_RANGE_BACKFILL_WAIT_SECONDS
@@ -540,10 +653,12 @@ async def _query_indicator_compute_bars_async(
         if timeout_seconds <= 0:
             raise asyncio.TimeoutError
         await asyncio.wait_for(
-            asyncio.gather(*(
-                backfill_coordinator.wait_for_request(request_id)
-                for request_id in request_ids
-            )),
+            asyncio.gather(
+                *(
+                    backfill_coordinator.wait_for_request(request_id)
+                    for request_id in request_ids
+                )
+            ),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError as exc:
@@ -573,14 +688,12 @@ async def _query_indicator_compute_bars_async(
     return _closed_indicator_compute_bars(result, start_s, end_s, start_ms, end_ms)
 
 
-def _confirmed_target_range(bars: list[Any], start_s: int, end_s: int) -> tuple[int, int]:
-    target_times = [
-        int(bar.time)
-        for bar in bars
-        if start_s <= int(bar.time) <= end_s
-    ]
+def _confirmed_target_range(
+    bars: list[Any], start_s: int, end_s: int
+) -> tuple[int, int]:
+    target_times = [int(bar.time) for bar in bars if start_s <= int(bar.time) <= end_s]
     if not target_times:
-        raise RuntimeError("target K-line range is not available yet")
+        raise IndicatorRangeNotReadyError("target K-line range is not available yet")
     return min(target_times), max(target_times)
 
 
@@ -595,9 +708,7 @@ def _compute_builtin_range_patch(
 ) -> dict[str, Any]:
     name = str(meta.get("name") or "").upper()
     params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-    warmup = _indicator_warmup_bars(name, params)
-    if target_bars > 50_000:
-        raise ValueError(f"Too many indicator bars: {target_bars} > 50000")
+    warmup = _validated_builtin_warmup_bars(name, params, target_bars)
     bars = _query_indicator_compute_bars(dm, meta, start_s, end_s, warmup_bars=warmup)
 
     return _compute_builtin_range_patch_from_bars(
@@ -635,7 +746,8 @@ def _compute_builtin_range_patch_from_bars(
     )
     payload = build_indicator_snapshot_payload(
         client_id=client_id,
-        indicator_id=meta.get("indicatorId") or f"{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{name}",
+        indicator_id=meta.get("indicatorId")
+        or f"{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{name}",
         exchange=meta["exchange"],
         symbol=meta["symbol"],
         interval=meta["interval"],
@@ -656,15 +768,13 @@ def _compute_builtin_range_patch_from_bars(
     return patch
 
 
-def _compute_pyne_snapshot_message(
-    client_id: str,
-    dm,
-    meta: dict,
+def _query_pyne_snapshot_bars(
+    dm: Any,
+    meta: dict[str, Any],
+    *,
     bar_time: int = 0,
-) -> dict:
-    if meta.get("scriptMode") == "incremental" and not bar_time:
-        return _compute_incremental_pyne_snapshot_message(client_id, dm, meta)
-
+    seed_bars: list[Any] | None = None,
+) -> list[Any]:
     history_limit = int(meta["historyLimit"])
     if bar_time:
         history_limit = min(
@@ -672,304 +782,112 @@ def _compute_pyne_snapshot_message(
             max(int(config.PYNE_TICK_RECOMPUTE_MAX_BARS), 1),
         )
 
-    query_result = dm.query_latest(
-        meta["symbol"],
-        meta["interval"],
-        limit=history_limit,
-        exchange=meta["exchange"],
-        market_type=meta["market_type"],
-    )
-    seed_bars = confirmed_indicator_seed_bars(query_result.bars) if not bar_time else query_result.bars
-    ohlcv = [bar.to_dict() for bar in seed_bars]
-    result = execute_pyne_script(
-        script=meta["script"],
-        ohlcv=ohlcv,
-        params=meta["params"],
-        security_mode=meta.get("securityMode"),
-    )
-    payload = build_pyne_snapshot_payload(
-        client_id=client_id,
-        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
-        exchange=meta["exchange"],
-        symbol=meta["symbol"],
-        interval=meta["interval"],
-        market_type=meta["market_type"],
-        name=meta["name"],
-        params=meta["params"],
-        result=result,
-        bar_time=bar_time,
-        script_hash=meta.get("scriptHash"),
-    )
-    if bar_time:
-        return _patch_from_snapshot(
-            payload,
-            reason="bar_update",
-            start_s=int(bar_time),
-            end_s=int(bar_time),
+    if seed_bars is None:
+        query_result = dm.query_latest(
+            meta["symbol"],
+            meta["interval"],
+            limit=(history_limit + 1 if not bar_time else history_limit),
+            exchange=meta["exchange"],
+            market_type=meta["market_type"],
+            auto_backfill=False,
         )
-    return payload
-
-
-def _pyne_incremental_session_key(
-    *,
-    exchange: str,
-    market_type: str,
-    symbol: str,
-    interval: str,
-    script: str,
-    params: dict[str, Any],
-    security_mode: str | None,
-    history_limit: int,
-) -> str:
-    raw = json.dumps(
-        {
-            "exchange": exchange,
-            "marketType": market_type,
-            "symbol": symbol,
-            "interval": interval,
-            "scriptHash": script_hash(script),
-            "params": params,
-            "securityMode": security_mode or "",
-            "historyLimit": int(history_limit),
-        },
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        resolved_bars = (
+            confirmed_indicator_seed_bars(query_result.bars)[-history_limit:]
+            if not bar_time
+            else list(query_result.bars)
+        )
+    else:
+        resolved_bars = (
+            confirmed_indicator_seed_bars(seed_bars)[-history_limit:]
+            if not bar_time
+            else list(seed_bars)[-history_limit:]
+        )
+    return list(resolved_bars)
 
 
 def _release_pyne_incremental_meta(meta: dict[str, Any]) -> None:
-    key = meta.get("pyneSessionKey")
-    if isinstance(key, str) and key:
-        # Keep the shared incremental state warm across quick interval switches.
-        # The delayed release still decrements the original reference, while a
-        # reconnect can acquire the same key immediately without a full reseed.
-        delay = max(0.0, float(config.INDICATOR_ENGINE_WARM_TTL_SECONDS))
-        if delay <= 0:
-            _pyne_incremental_sessions.release(key)
-            return
-        try:
-            idle_generation = _pyne_incremental_sessions.release(key, retain=True)
-        except TypeError:
-            # Compatibility with an externally overridden older runtime.
-            _pyne_incremental_sessions.release(key)
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            drop_if_idle = getattr(_pyne_incremental_sessions, "drop_if_idle", None)
-            if callable(drop_if_idle):
-                drop_if_idle(key, idle_generation)
-            return
-        drop_if_idle = getattr(_pyne_incremental_sessions, "drop_if_idle", None)
-        if callable(drop_if_idle):
-            loop.call_later(delay, drop_if_idle, key, idle_generation)
+    """Drop stale metadata created before incremental execution moved out of process."""
+    for key in ("pyneSessionKey", "pyneSharedSession", "pyneSession", "scriptMode"):
+        meta.pop(key, None)
 
 
-def _pyne_result_from_incremental(result) -> PyneResult:
-    return PyneResult(
-        ok=result.ok,
-        error=result.error,
-        code=result.code,
-        line=result.line,
-        column=result.column,
-        hint=result.hint,
-        lines=result.lines,
-        output=result.output,
-        param_schema=result.param_schema,
-        meta=result.meta,
-    )
-
-
-def _pyne_error_result_from_exception(exc: Exception) -> PyneResult:
-    if isinstance(exc, PyneTimeoutError):
-        return PyneResult(
-            ok=False,
-            code="PYNE_TIMEOUT",
-            error=str(exc),
-            hint="脚本执行超时。请减少循环、缩小窗口，或调整 PYNE_EXEC_TIMEOUT_SECONDS。",
-        )
-    if isinstance(exc, PyneSecurityError):
-        return PyneResult(
-            ok=False,
-            code="PYNE_SECURITY_ERROR",
-            error=str(exc),
-            hint="当前 Pyne 安全策略拒绝执行该脚本。",
-        )
-    return PyneResult(
-        ok=False,
-        code="PYNE_RUNTIME_ERROR",
-        error=f"Script error: {exc}",
-        hint="脚本运行时失败。请检查 incremental state、window、helper 和 on_bar/on_preview 逻辑。",
-    )
-
-
-def _build_pyne_ws_payload_from_result(
+def _script_runtime_request(
+    meta: dict[str, Any],
+    bars: list[Any],
     *,
+    transport: str,
+) -> IndicatorRuntimeRequest:
+    return IndicatorRuntimeRequest(
+        language=str(meta.get("language") or "pyne"),
+        source=str(meta.get("script") or ""),
+        exchange=str(meta["exchange"]),
+        market_type=str(meta["market_type"]),
+        symbol=str(meta["symbol"]),
+        interval=str(meta["interval"]),
+        bars=tuple(bars),
+        params=(dict(meta["params"]) if isinstance(meta.get("params"), dict) else {}),
+        options={
+            **(
+                {"securityMode": meta.get("securityMode")}
+                if meta.get("securityMode") is not None
+                else {}
+            ),
+        },
+        transport=transport,
+    )
+
+
+def _plugin_runtime_failure_payload(
+    failure: IndicatorRuntimeFailure,
+) -> dict[str, Any]:
+    return build_error_payload(
+        failure.public_code,
+        f"Script runtime {failure.runtime_id!r} is unavailable.",
+        hint="请检查插件激活和健康状态；sidecar 模式不会静默回退到 legacy。",
+    )
+
+
+def _build_plugin_snapshot_from_payload(
     client_id: str,
-    meta: dict,
-    result: PyneResult,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    *,
     bar_time: int = 0,
-) -> dict:
-    return build_pyne_snapshot_payload(
+) -> dict[str, Any]:
+    return build_script_runtime_snapshot_payload(
         client_id=client_id,
-        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
+        indicator_id=(
+            meta.get("indicatorId")
+            or f"runtime:{meta['exchange']}:{meta['market_type']}:"
+            f"{meta['symbol']}:{meta['interval']}:{client_id}"
+        ),
         exchange=meta["exchange"],
         symbol=meta["symbol"],
         interval=meta["interval"],
         market_type=meta["market_type"],
         name=meta["name"],
-        params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
-        result=result,
+        params=(meta.get("params") if isinstance(meta.get("params"), dict) else {}),
+        payload=payload,
         bar_time=bar_time,
         script_hash=meta.get("scriptHash"),
     )
 
 
-def _compute_incremental_pyne_snapshot_message(
+def _compute_plugin_range_patch_from_bars(
     client_id: str,
-    dm,
-    meta: dict,
-) -> dict:
-    shared = meta.get("pyneSharedSession")
-    if not isinstance(shared, SharedPyneIncrementalSession):
-        session = meta.get("pyneSession")
-    else:
-        session = None
-    if shared is None and not isinstance(session, PyneIncrementalSession):
-        session = PyneIncrementalSession(
-            script=meta["script"],
-            params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
-            security_mode=meta.get("securityMode"),
-        )
-        meta["pyneSession"] = session
-
-    query_result = dm.query_latest(
-        meta["symbol"],
-        meta["interval"],
-        limit=meta["historyLimit"],
-        exchange=meta["exchange"],
-        market_type=meta["market_type"],
-    )
-    ohlcv = [bar.to_dict() for bar in confirmed_indicator_seed_bars(query_result.bars)]
-    try:
-        if isinstance(shared, SharedPyneIncrementalSession):
-            interval_ms = parse_interval_ms(meta["interval"])
-            incremental_result = _pyne_incremental_sessions.seed_or_snapshot(
-                shared,
-                ohlcv,
-                expected_step_s=(max(interval_ms // 1000, 1) if interval_ms else 0),
-            )
-        else:
-            incremental_result = session.seed(ohlcv)
-        result = _pyne_result_from_incremental(incremental_result)
-    except Exception as exc:
-        result = _pyne_error_result_from_exception(exc)
-    payload = _build_pyne_ws_payload_from_result(client_id=client_id, meta=meta, result=result)
-    if ohlcv:
-        payload["range"] = {
-            "start": int(ohlcv[0]["time"]),
-            "end": int(ohlcv[-1]["time"]),
-        }
-    return payload
-
-
-def _compute_incremental_pyne_bar_message(
-    client_id: str,
-    meta: dict,
-    bar: dict[str, Any],
-    *,
-    preview: bool,
-) -> dict:
-    shared = meta.get("pyneSharedSession")
-    try:
-        if isinstance(shared, SharedPyneIncrementalSession):
-            incremental_result = _pyne_incremental_sessions.process_bar(shared, bar, preview=preview)
-        else:
-            session = meta.get("pyneSession")
-            if not isinstance(session, PyneIncrementalSession):
-                raise RuntimeError("incremental Pyne session is not initialized")
-            incremental_result = session.on_bar_updated(bar) if preview else session.on_bar_closed(bar)
-        result = _pyne_result_from_incremental(incremental_result)
-    except Exception as exc:
-        result = _pyne_error_result_from_exception(exc)
-    bar_time = int(bar.get("time") or 0)
-    payload = _build_pyne_ws_payload_from_result(
-        client_id=client_id,
-        meta=meta,
-        result=result,
-        bar_time=bar_time,
-    )
-    return _patch_from_snapshot(
-        payload,
-        reason="bar_update" if preview else "bar_closed",
-        start_s=bar_time,
-        end_s=bar_time,
-    )
-
-
-def _compute_pyne_range_patch(
-    client_id: str,
-    dm,
-    meta: dict,
-    start_s: int,
-    end_s: int,
-    reason: str = "load_range",
-    target_bars: int | None = None,
-) -> dict:
-    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-    warmup = _indicator_warmup_bars("PYNE", params)
-    bars = _query_indicator_compute_bars(dm, meta, start_s, end_s, warmup_bars=warmup)
-    return _compute_pyne_range_patch_from_bars(
-        client_id,
-        meta,
-        start_s,
-        end_s,
-        bars,
-        reason,
-        target_bars,
-    )
-
-
-def _compute_pyne_range_patch_from_bars(
-    client_id: str,
-    meta: dict,
+    meta: dict[str, Any],
     start_s: int,
     end_s: int,
     bars: list[Any],
+    result: Any,
+    *,
     reason: str = "load_range",
     target_bars: int | None = None,
-) -> dict:
-    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
-    warmup = _indicator_warmup_bars("PYNE", params)
-    if len(bars) > max(int(config.PYNE_MAX_BARS), 1):
-        raise ValueError(f"Too many Pyne bars: {len(bars)} > {config.PYNE_MAX_BARS}")
-    ohlcv = [bar.to_dict() for bar in bars]
-    if meta.get("scriptMode") == "incremental":
-        session = PyneIncrementalSession(
-            script=meta["script"],
-            params=params,
-            security_mode=meta.get("securityMode"),
-        )
-        result = _pyne_result_from_incremental(session.seed(ohlcv, start_s=start_s, end_s=end_s))
-    else:
-        result = execute_pyne_script(
-            script=meta["script"],
-            ohlcv=ohlcv,
-            params=params,
-            security_mode=meta.get("securityMode"),
-        )
-    payload = build_pyne_snapshot_payload(
-        client_id=client_id,
-        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
-        exchange=meta["exchange"],
-        symbol=meta["symbol"],
-        interval=meta["interval"],
-        market_type=meta["market_type"],
-        name=meta["name"],
-        params=params,
-        result=result,
-        script_hash=meta.get("scriptHash"),
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        serialize_plugin_runtime_result(result),
     )
     range_start_s, range_end_s = _confirmed_target_range(bars, start_s, end_s)
     patch = _replace_range_from_snapshot(
@@ -978,10 +896,86 @@ def _compute_pyne_range_patch_from_bars(
         start_s=range_start_s,
         end_s=range_end_s,
     )
-    patch["warmupBars"] = warmup
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    language = str(meta.get("language") or "pyne")
+    patch["warmupBars"] = _indicator_warmup_bars(language.upper(), params)
     if target_bars is not None:
         patch["targetBars"] = target_bars
     return patch
+
+
+def _raise_plugin_runtime_failure(
+    failure: IndicatorRuntimeFailure,
+) -> dict[str, Any]:
+    raise IndicatorRuntimeUnavailableError(failure)
+
+
+def _plugin_snapshot_or_patch_from_result(
+    client_id: str,
+    meta: dict[str, Any],
+    bars: list[Any],
+    result: Any,
+    *,
+    bar_time: int = 0,
+    reason: str = "bar_update",
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        serialize_plugin_runtime_result(result),
+        bar_time=bar_time,
+    )
+    return _finish_plugin_snapshot_or_patch(
+        payload,
+        bars,
+        bar_time=bar_time,
+        reason=reason,
+    )
+
+
+def _plugin_snapshot_or_patch_from_failure(
+    client_id: str,
+    meta: dict[str, Any],
+    bars: list[Any],
+    failure: IndicatorRuntimeFailure,
+    *,
+    bar_time: int = 0,
+    reason: str = "bar_update",
+) -> dict[str, Any]:
+    payload = _build_plugin_snapshot_from_payload(
+        client_id,
+        meta,
+        _plugin_runtime_failure_payload(failure),
+        bar_time=bar_time,
+    )
+    return _finish_plugin_snapshot_or_patch(
+        payload,
+        bars,
+        bar_time=bar_time,
+        reason=reason,
+    )
+
+
+def _finish_plugin_snapshot_or_patch(
+    payload: dict[str, Any],
+    bars: list[Any],
+    *,
+    bar_time: int,
+    reason: str,
+) -> dict[str, Any]:
+    if bar_time:
+        return _patch_from_snapshot(
+            payload,
+            reason=reason,
+            start_s=int(bar_time),
+            end_s=int(bar_time),
+        )
+    times = [
+        int(bar.get("time") if isinstance(bar, dict) else bar.time) for bar in bars
+    ]
+    if times:
+        payload["range"] = {"start": min(times), "end": max(times)}
+    return payload
 
 
 async def _compute_pyne_snapshot_message_async(
@@ -989,51 +983,42 @@ async def _compute_pyne_snapshot_message_async(
     dm,
     meta: dict,
     bar_time: int = 0,
+    runtime_service: IndicatorRuntimeService | None = None,
+    seed_bars: list[Any] | None = None,
 ) -> dict:
-    """Compute a Pyne snapshot off the event loop."""
-    return await run_pyne_wait(
-        _compute_pyne_snapshot_message,
-        client_id,
+    """Compute a script-runtime snapshot without blocking the event loop."""
+    service = runtime_service or _unbound_indicator_runtime_service
+    bars = await run_pyne_wait(
+        _query_pyne_snapshot_bars,
         dm,
         meta,
-        bar_time,
+        bar_time=bar_time,
+        seed_bars=seed_bars,
     )
 
-
-async def _compute_incremental_pyne_bar_message_async(
-    client_id: str,
-    meta: dict,
-    bar: dict[str, Any],
-    *,
-    preview: bool,
-) -> dict:
-    return await run_pyne_wait(
-        _compute_incremental_pyne_bar_message,
-        client_id,
-        meta,
-        bar,
-        preview=preview,
-    )
-
-
-async def _compute_pyne_range_patch_async(
-    client_id: str,
-    dm,
-    meta: dict,
-    start_s: int,
-    end_s: int,
-    reason: str = "load_range",
-    target_bars: int | None = None,
-) -> dict:
-    return await run_pyne_wait(
-        _compute_pyne_range_patch,
-        client_id,
-        dm,
-        meta,
-        start_s,
-        end_s,
-        reason,
-        target_bars,
+    return await service.execute(
+        _script_runtime_request(
+            meta,
+            bars,
+            transport="websocket.snapshot",
+        ),
+        legacy=removed_in_process_runtime,
+        adapt_sidecar=lambda result: _plugin_snapshot_or_patch_from_result(
+            client_id,
+            meta,
+            bars,
+            result,
+            bar_time=bar_time,
+            reason="bar_update",
+        ),
+        adapt_failure=lambda failure: _plugin_snapshot_or_patch_from_failure(
+            client_id,
+            meta,
+            bars,
+            failure,
+            bar_time=bar_time,
+            reason="bar_update",
+        ),
     )
 
 
@@ -1060,7 +1045,8 @@ def _indicator_event_to_ws_message(
             "values": event.values,
             **(
                 {"bar": event.detail["bar"]}
-                if isinstance(event.detail, dict) and isinstance(event.detail.get("bar"), dict)
+                if isinstance(event.detail, dict)
+                and isinstance(event.detail.get("bar"), dict)
                 else {}
             ),
         }
@@ -1071,7 +1057,8 @@ def _indicator_event_to_ws_message(
             "values": event.values,
             **(
                 {"bar": event.detail["bar"]}
-                if isinstance(event.detail, dict) and isinstance(event.detail.get("bar"), dict)
+                if isinstance(event.detail, dict)
+                and isinstance(event.detail.get("bar"), dict)
                 else {}
             ),
         }
@@ -1087,12 +1074,14 @@ def _indicator_event_to_ws_message(
             "range": {"start": start_s, "end": end_s},
             **(
                 {"dirtyRange": event.detail["dirtyRange"]}
-                if isinstance(event.detail, dict) and isinstance(event.detail.get("dirtyRange"), dict)
+                if isinstance(event.detail, dict)
+                and isinstance(event.detail.get("dirtyRange"), dict)
                 else {}
             ),
             **(
                 {"dataRevision": event.detail["dataRevision"]}
-                if isinstance(event.detail, dict) and isinstance(event.detail.get("dataRevision"), dict)
+                if isinstance(event.detail, dict)
+                and isinstance(event.detail.get("dataRevision"), dict)
                 else {}
             ),
         }

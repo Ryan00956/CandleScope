@@ -44,6 +44,29 @@ ExchangePlugin
 Data Engine 代码不应该为了运行时行为调用 `plugin.adapter()`。adapter 入口只用于保持旧导入和
 symbol metadata 兼容；新代码应走 plugin contracts。
 
+## 共享 REST 预算与商品目录
+
+历史行情 transport 与商品目录 HTTP 请求共用当前 event loop 的
+`RateLimitManager` 和 endpoint semaphore。目录 endpoint 必须在 plugin policy 中声明
+真实 request cost；普通网络错误可以切备用 host，但 HTTP 418/429 或交易所等价 body
+code 会打开共享 cooldown，不能再靠轮换 host 绕过同一 IP 预算。
+
+HTTP 429 cooldown 只作用于对应 bucket。到期后先只放行一个 request-cost 作为恢复探针，
+其余预算按正常速率重新累积，不能把 `Retry-After` 期间攒满的 token 一次放出。HTTP 418
+仍是交易所级 IP circuit，恢复时重置该交易所的全部匹配 bucket。
+
+商品目录按 `(exchange, market_type)` 使用 TTL 和 physical singleflight。经过完整校验、
+带版本的 last-known-good 快照会原子写入 `backend/data`，并在 API 启动前恢复。空结果、
+异常、rate deferral 或可疑的大幅缩减都保留这份快照，并暴露 `stale`、
+`last_success_at` 与 `retry_at_ms`。如果没有任何有效目录，API 会有界等待正在执行的
+singleflight，然后明确返回可重试的 `503 symbol_catalog_unavailable`，不会伪装成
+`200` 空列表。自动刷新失败会按有界 deadline 重试；启动和 TTL 投机刷新必须等前台
+行情任务持续安静，用户主动请求目录则不受这段 dwell 限制。
+
+生产共享限流器采用保守冷启动：新 bucket 第一次只放行一次精确 request-cost 探针，
+避免进程重启把未知的交易所预算状态误当成满桶。启动时先完成核心 DataManager 初始化，
+所有上游目录刷新任务在 shutdown 时都可取消并等待收口。
+
 ## 能力元数据
 
 `ExchangeCapabilities` 是 `GET /api/v1/exchanges/` 和

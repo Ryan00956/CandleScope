@@ -5,7 +5,10 @@ import {
   buildHostedSubscriptionMessage,
   dispatchIndicatorWsMessage,
   parseIndicatorWsMessage,
+  resolveHostedSubscriptionHistoryLimit,
+  resolveHostedSubscriptionSeedHistoryLimit,
   resolveIndicatorSubscriptionCachePolicy,
+  shouldResubscribeForHostedSeedCoverage,
 } from "../indicatorWsRuntime.js";
 import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
 
@@ -116,6 +119,46 @@ test("subscription resume metadata is sent only when a cached checkpoint exists"
   assert.equal(warm.resumeFrom, 1_700_000_000);
   assert.equal(warm.serverEpoch, "boot-1");
   assert.equal(warm.correctionRevision, "7");
+});
+
+test("script subscriptions forward arbitrary descriptor language ids", () => {
+  const message = buildHostedSubscriptionMessage({
+    id: "community-1",
+    name: "Community Script",
+    script: "plot(close)",
+    language: "community-lang",
+    params: {},
+  }, {
+    chartDataLength: 100,
+    exchange: "binance",
+    interval: "1m",
+    marketType: "spot",
+    symbol: "BTCUSDT",
+  });
+
+  assert.equal(message.kind, "script");
+  assert.equal(message.language, "community-lang");
+});
+
+test("an insufficient BOLL seed refreshes once when chart coverage reaches its closed-bar warmup", () => {
+  const boll = { id: "boll", engineName: "BOLL", params: { period: 20 } };
+
+  // The backend excludes the forming bar, so a 20-period BOLL needs a 21-bar
+  // request to guarantee twenty closed seed bars.
+  assert.equal(resolveHostedSubscriptionSeedHistoryLimit(boll), 21);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 20, 20), false);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 20, 21), true);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 21, 22), false);
+  assert.equal(shouldResubscribeForHostedSeedCoverage(boll, 21, 2_000), false);
+  assert.equal(
+    shouldResubscribeForHostedSeedCoverage(
+      { id: "vol", engineName: "VOL", params: {} },
+      1,
+      2_000,
+    ),
+    false,
+  );
+  assert.equal(resolveHostedSubscriptionHistoryLimit(20_001), 2_000);
 });
 
 test("indicator.subscribed dispatches revision and resume acknowledgement", () => {

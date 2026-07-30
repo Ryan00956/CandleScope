@@ -26,7 +26,7 @@ from app.exchanges.ws_protocol import WsConnectionContext
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
-from .models import StreamDescriptor, SessionHealth, DataSource, RawMessage
+from .models import StreamDescriptor, SessionHealth, DataSource, FeedMode, RawMessage
 from .session_types import HealthCallback
 from .transport import TransportLayer, TransportError
 
@@ -75,6 +75,10 @@ class SessionLayer:
     @property
     def health(self) -> SessionHealth:
         return self._health
+
+    @property
+    def feed_mode(self) -> FeedMode:
+        return FeedMode.WEBSOCKET
 
     @property
     def manages_recovery_while_http(self) -> bool:

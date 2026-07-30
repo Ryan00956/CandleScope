@@ -5,7 +5,7 @@
 Lightweight trading chart software built with FastAPI, React, Vite, and Lightweight Charts. CandleScope supports Binance and OKX market data, spot and perpetual market types, a modular Data Engine, exchange-aware symbol metadata, realtime WebSocket streams, built-in indicators, and Pine-style Python scripting through Pyne.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-19+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
@@ -21,6 +21,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 - [Backend](#backend)
 - [Frontend](#frontend)
 - [Indicators And Pyne](#indicators-and-pyne)
+- [Plugin SDK (Developer Preview)](#plugin-sdk-developer-preview)
 - [API Documentation](#api-documentation)
 - [Project Structure](#project-structure)
 - [Development Checks](#development-checks)
@@ -31,7 +32,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 Requirements:
 
-- Python 3.10+
+- Windows CPython 3.12 (the pinned platform for first-party Pyne/Pine bundles)
 - Node.js 20+
 - npm 10+
 
@@ -40,7 +41,7 @@ Start the backend:
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 On Windows, you can use the helper script instead:
@@ -49,6 +50,9 @@ On Windows, you can use the helper script instead:
 cd backend
 .\dev-server.ps1
 ```
+
+The Windows entrypoint leaves Uvicorn reload disabled because its Selector
+event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
 
 Start the frontend:
 
@@ -410,7 +414,7 @@ Core backend modules:
 | `app/data_engine/backfill` | Historical detect/plan/fetch/reconcile/report pipeline behind the scheduler |
 | `app/data_engine/storage` | SQLite K-line repository and gap ledger |
 | `app/replay` | Deterministic replay actor, sources, paper broker, persistence, and reports |
-| `app/indicator` | Built-in indicators, Pyne runtime, indicator streaming |
+| `app/indicator` | Built-in indicators, sidecar runtime routing, indicator streaming |
 
 ## Frontend
 
@@ -490,12 +494,82 @@ p2 = plot(lower, "Lower", color=color.green)
 fill(p1, p2, color="rgba(59,130,246,0.08)")
 ```
 
-Pyne supports `safe`, `research`, and `unsafe` security modes. Process execution is the default so the backend can enforce timeouts more reliably than inline execution.
+Pyne supports `safe`, `research`, and `unsafe` security modes. It runs in an
+isolated plugin environment supervised through the public sidecar protocol.
 
 Documentation:
 
 - [Indicator Engine](backend/app/indicator/README.md)
-- [Pyne Runtime](backend/app/indicator/pyne/README.md)
+- [Pyne Runtime plugin](packages/candlescope-plugin-pyne/README.md)
+- [Pine Compatibility plugin](packages/candlescope-plugin-pine-compat/README.md)
+
+## Plugin SDK (Developer Preview)
+
+Community runtime authors can build against the dependency-free
+[`candlescope-plugin-sdk`](packages/candlescope-plugin-sdk/README.md). It
+defines the versioned `candlescope.script-runtime/1` JSON-RPC sidecar contract,
+feature negotiation, typed batch OHLCV input, diagnostics, and the first
+CandleScope-owned line-series Render IR. A runnable Hello Runtime and a frozen
+wire transcript are included.
+
+Plugin platform Phases 2 and 3 now include the generic
+[`app.plugin_runtime`](backend/app/plugin_runtime/README.md) Host/Supervisor.
+It launches and supervises explicitly activated sidecars with strict
+handshake, timeout, message-limit, restart-circuit, and health behavior. Phase
+3 also provides deterministic `.cspkg` bundles, caller-pinned SHA-256, one
+isolated venv per bundle, offline wheel install, result probes, atomic
+activation, and per-runtime rollback; see the
+[`installer guide`](backend/app/plugin_runtime/INSTALLER.md). Phase 4 routes
+Indicator HTTP, range, batch, and WebSocket execution through explicit runtime
+routing. Phase 8 defaults both Pyne and Pine to the managed
+`candlescope.pyne` and `candlescope.pine-compat` sidecars and fails closed when
+either required runtime is unavailable.
+Phase 7 adds descriptor-driven language discovery at
+`GET /api/v1/indicators/runtimes`; the editor accepts arbitrary routed
+community language IDs and uses a plaintext fallback without loading
+plugin-provided frontend code. Phase 5 adds the independently buildable
+[`candlescope-plugin-pyne`](packages/candlescope-plugin-pyne/README.md), with a
+release lock for the SDK, Pyne Runtime RC wheel, and NumPy version, plus a real
+offline `.cspkg` installation and protocol probe gate. The 0.2.0 bridge covers
+markers, horizontal lines, fills, and other output through negotiated structured
+Render IR and passes the frozen goldens. The trusted development asset is now
+published as
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1).
+The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
+generic community installer remains local-artifact-only. CandleScope no longer
+contains `packages/pyne-runtime` or an in-process Pyne facade.
+
+The separately evolving general Plugin Platform v2 has completed Phases 1–12.
+Above the SDK, business-neutral Host, Bundle/Installer, permissions, and Windows
+OS sandbox, the product composition now provides commands/settings/events/jobs,
+private storage, scoped market consumers, Host-owned chart layers, declarative
+and opaque-origin sandbox UI, controlled HTTPS/file/endpoint gateways, and
+paired public symbol/market-data providers, plus Paper and the default-off
+WP-A–WP-F Live Broker technical path. Phase 12 adds a default-off Ed25519-signed
+Marketplace with immutable artifact/index caches, SBOM/license binding,
+transparency, revocation, permission diffs, and explicit
+prepare/apply/activate/health-rollback stages.
+
+The repository ships with no Marketplace roots. `verified-publisher` proves
+release provenance, not trusted code: community backends still run as
+`untrusted` code in Windows AppContainer and Host grants remain independent.
+Community Live `trade.submit`/`trade.cancel`, real Demo/real-money testing, and
+WP-G remain unavailable. See the
+[`Phase 12 execution record`](docs/PLUGIN_PLATFORM_V2_PHASE12_zh.md).
+
+The base Plugin Platform v2 is enabled by default. Set
+`CANDLESCOPE_PLUGIN_PLATFORM_V2_ENABLED=0` only to disable it or perform an
+emergency rollback. Marketplace, Paper, and every Live Broker capability remain
+independent and default off.
+
+Phase 8 adds the independently buildable
+[`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README.md).
+It pins the public `pine-compat-runtime` v0.2.0 Release wheel, contains no Pine
+engine source snapshot or private CandleScope imports, and advertises only its
+closed-bar batch contract. The development bundle is published as
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1).
+Unsupported realtime, strategy, `request.*`, import, and native-object features
+remain fail-closed.
 
 ## API Documentation
 
@@ -545,10 +619,15 @@ CandleScope/
 │   │   │   ├── data_manager/
 │   │   │   ├── backfill/
 │   │   │   └── storage/
-│   │   └── indicator/
-│   │       ├── indicators/
-│   │       └── pyne/
+│   │   ├── indicator/
+│   │   │   ├── indicators/
+│   │   │   └── pyne/
+│   │   └── plugin_runtime/
 │   └── tests/
+├── packages/
+│   ├── candlescope-plugin-pyne/
+│   ├── candlescope-plugin-sdk/
+│   └── pyne-runtime/
 └── frontend/
     ├── package.json
     └── src/
@@ -593,7 +672,7 @@ under `docs/perf-baselines/`.
 - Runtime proxy settings are persisted under `backend/data/proxy_settings.json` by default.
 - On Windows, if backend startup fails while printing status symbols, start it with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
 - SQLite data is local and ignored by git.
-- Pyne scripts execute locally in the backend process/process pool according to the configured security mode. Only use `unsafe` for scripts you trust.
+- Pyne scripts execute locally in an isolated sidecar according to the configured security mode. Only use `unsafe` for scripts you trust.
 - This repository is licensed under GNU GPL-3.0. See [LICENSE](LICENSE).
 
 ## Acknowledgments

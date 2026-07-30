@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlescope-plugin-sdk"
+version = "0.2.0"
+description = "Typed, dependency-free SDK for CandleScope sidecar plugins."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+authors = [
+  { name = "CandleScope contributors" }
+]
+keywords = ["candlescope", "plugin", "contributions", "json-rpc", "sidecar"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Ryan00956/CandleScope"
+Repository = "https://github.com/Ryan00956/CandleScope"
+Documentation = "https://github.com/Ryan00956/CandleScope/tree/main/packages/candlescope-plugin-sdk/docs"
+Issues = "https://github.com/Ryan00956/CandleScope/issues"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1",
+  "hatchling>=1.25",
+  "jsonschema>=4.23",
+  "pytest>=7",
+  "ruff>=0.5",
+  "twine>=5",
+]
+
+[project.scripts]
+candlescope-hello-runtime = "candlescope_plugin_sdk.examples.hello_runtime:main"
+candlescope-hello-command = "candlescope_plugin_sdk.platform_v2.examples.hello_command:main"
+candlescope-scheduled-notification = "candlescope_plugin_sdk.platform_v2.examples.scheduled_notification:main"
+candlescope-market-scanner = "candlescope_plugin_sdk.platform_v2.examples.market_scanner:main"
+candlescope-sandbox-view = "candlescope_plugin_sdk.platform_v2.examples.sandbox_view:main"
+candlescope-integration-gateway = "candlescope_plugin_sdk.platform_v2.examples.integration_gateway:main"
+candlescope-mock-exchange-provider = "candlescope_plugin_sdk.platform_v2.examples.mock_exchange_provider:main"
+candlescope-paper-broker = "candlescope_plugin_sdk.platform_v2.examples.paper_broker:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/candlescope_plugin_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

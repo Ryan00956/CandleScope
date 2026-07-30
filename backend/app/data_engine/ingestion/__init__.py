@@ -289,6 +289,10 @@ class MarketDataIngress:
         self,
         descriptor: StreamDescriptor,
     ) -> Callable[[], SessionLike] | None:
+        provider_session = self._transport.create_provider_session(descriptor)
+        if provider_session is not None:
+            return lambda: provider_session
+
         shared_hub = self._shared_ws.get_hub(descriptor)
         if shared_hub is not None:
             return lambda: SharedWsSessionAdapter(shared_hub, descriptor)

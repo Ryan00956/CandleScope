@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "plugin": {
+    "id": "hello-runtime",
+    "name": "Hello Runtime",
+    "version": "0.2.0",
+    "package": "candlescope-plugin-sdk",
+    "protocol": "candlescope.script-runtime/1"
+  },
+  "python": {
+    "requires": ">=3.11",
+    "module": "candlescope_plugin_sdk.examples.hello_runtime"
+  },
+  "wheels": [
+    {
+      "path": "wheels/candlescope_plugin_sdk-0.2.0-py3-none-any.whl",
+      "package": "candlescope-plugin-sdk",
+      "version": "0.2.0"
+    }
+  ],
+  "probe": {
+    "source": "plot(close)",
+    "context": {
+      "exchange": "binance",
+      "marketType": "spot",
+      "symbol": "BTCUSDT",
+      "interval": "1m"
+    },
+    "bars": [
+      {
+        "time": 1700000000,
+        "open": 100,
+        "high": 102,
+        "low": 99,
+        "close": 101,
+        "volume": 10,
+        "isClosed": true
+      },
+      {
+        "time": 1700000060,
+        "open": 101,
+        "high": 103,
+        "low": 100,
+        "close": 102,
+        "volume": 11,
+        "isClosed": true
+      }
+    ],
+    "params": {},
+    "options": {},
+    "analysisSha256": "sha256:a931e9b41307258707b454a48b9fd50410d78d9bbe2b2df1feb3de78688f3c5b",
+    "executionSha256": "sha256:d172525318a26faed553da6a4e66098f52740c0dd6c3cc29246c599a08d62469"
+  }
+}

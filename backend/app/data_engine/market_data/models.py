@@ -40,6 +40,7 @@ class TransportMode(str, enum.Enum):
     REST_POLL = "rest_poll"
     REST_SNAPSHOT = "rest_snapshot"
     REST_HISTORY = "rest_history"
+    PLUGIN_STREAM = "plugin_stream"
 
 
 class DeliveryClass(str, enum.Enum):

@@ -10,34 +10,29 @@ from fastapi.testclient import TestClient
 from app.api.v1 import indicators as indicators_api
 from app.api.v1 import stream_indicator_payloads as payload_api
 from app.api.v1 import stream_indicators as stream_api
-from app.api.v1 import stream_pyne_subscriptions as pyne_stream_api
 from app.api.v1.indicators import ComputeRequest, CustomIndicatorPayload
 from app.indicator import create_engine
 from app.data_engine.data_manager.models import BarData
 from app.indicator.events import IndicatorEvent, IndicatorEventType
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne import (
-    PyneIncrementalSession,
-    PyneIncrementalSessionManager,
-    PyneRuntime,
-    execute_pyne_script,
-)
-from app.indicator.pyne.cache import pyne_cache
-from app.indicator.pyne.executor import execute_pyne_script_in_process
-from app.indicator.pyne import security as pyne_security
 from app.indicator.engine import indicator_code_hash
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.types import IndicatorKey
+from app.indicator.range_result_service import IndicatorRangeRevisionChangedError
 
 
 class _QueryResult:
-    def __init__(self, bars: list[BarData], missing_ranges: list[object] | None = None) -> None:
+    def __init__(
+        self, bars: list[BarData], missing_ranges: list[object] | None = None
+    ) -> None:
         self.bars = bars
         self.missing_ranges = missing_ranges or []
 
 
 class _RangeDataManager:
-    def __init__(self, bars: list[BarData], missing_ranges: list[object] | None = None) -> None:
+    def __init__(
+        self, bars: list[BarData], missing_ranges: list[object] | None = None
+    ) -> None:
         self.bars = bars
         self.missing_ranges = missing_ranges or []
 
@@ -64,337 +59,6 @@ def _bars(count: int = 30) -> list[dict]:
         }
         for i in range(count)
     ]
-
-
-@pytest.mark.anyio
-async def test_pyne_add_line_accepts_extended_args() -> None:
-    script = """
-add_line(close, title="Close", color="#ff0000", overlay=False, line_width=3, line_style=2)
-"""
-
-    payload = await indicators_api.compute(
-        ComputeRequest(mode="script", script=script, ohlcv=_bars())
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["name"] == "Close"
-    assert payload["lines"][0]["pane"] == "separate"
-    assert payload["lines"][0]["lineWidth"] == 3
-    assert payload["lines"][0]["lineStyle"] == 2
-
-
-@pytest.mark.anyio
-async def test_pyne_add_line_histogram_output_with_color_data() -> None:
-    script = """
-colors = ["#00ff00" for _ in range(len(volume))]
-add_line(volume, title="VOL", type="histogram", pane="volume", colorData=colors)
-"""
-
-    payload = await indicators_api.compute(
-        ComputeRequest(mode="script", script=script, ohlcv=_bars())
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["name"] == "VOL"
-    assert payload["lines"][0]["type"] == "histogram"
-    assert payload["lines"][0]["pane"] == "volume"
-    assert payload["lines"][0]["data"][0]["color"] == "#00ff00"
-
-
-@pytest.mark.anyio
-async def test_pyne_package_execute_export_runs_new_runtime_plot_script() -> None:
-    script = """
-plot(close * 2, title="Double close", color=color.green)
-"""
-    result = execute_pyne_script(script=script, ohlcv=_bars(5), executor_mode="inline")
-
-    assert result.error is None
-    line = result.lines[0]
-    assert line["name"] == "Double close"
-    assert [point["value"] for point in line["data"][-3:]] == [204, 206, 208]
-
-
-@pytest.mark.anyio
-async def test_compute_mode_script_runs_script_even_when_name_is_present() -> None:
-    script = 'plot(close * 2, title="Script Close", color="#00ff00")'
-
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            name="MA",
-            script=script,
-            ohlcv=_bars(),
-            params={"period": 20},
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["name"] == "Script Close"
-
-
-@pytest.mark.anyio
-async def test_builtin_reference_templates_run_as_custom_pyne_scripts() -> None:
-    for name, script in indicators_api._PRESET_SCRIPTS.items():
-        custom_script = script
-        if custom_script.startswith(indicators_api._ENGINE_SCRIPT_MARKER):
-            custom_script = custom_script.split("\n", 1)[1]
-
-        payload = await indicators_api.compute(
-            ComputeRequest(mode="script", script=custom_script, ohlcv=_bars(120))
-        )
-
-        assert payload["ok"] is True, (name, payload.get("error"))
-        assert payload["lines"], name
-        assert payload.get("param_schema"), name
-
-
-def test_pyne_inline_timeout_skips_sigalrm_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(pyne_security.signal, "SIGALRM", raising=False)
-
-    result = PyneRuntime().execute(
-        script='plot(close, title="Close")',
-        ohlcv=_bars(),
-        params={},
-    )
-
-    assert result.ok is True
-    assert result.lines[0]["name"] == "Close"
-
-
-@pytest.mark.anyio
-async def test_pyne_safe_mode_blocks_imports() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            securityMode="safe",
-            script='import os\nplot(close, title="Close")',
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is False
-    assert payload["code"] == "PYNE_IMPORT_BLOCKED"
-    assert payload["errorDetail"]["code"] == "PYNE_IMPORT_BLOCKED"
-    assert "安全模式" in payload["errorDetail"]["hint"]
-    assert "Import statements are not allowed in safe mode" in payload["error"]
-
-
-@pytest.mark.anyio
-async def test_pyne_research_mode_allows_whitelisted_imports() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            securityMode="research",
-            script='import numpy as npx\nplot(npx.ones(len(close)), title="Ones")',
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["name"] == "Ones"
-    assert payload["meta"]["securityMode"] == "research"
-
-
-@pytest.mark.anyio
-async def test_pyne_research_mode_blocks_unlisted_imports() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            securityMode="research",
-            script='import os\nplot(close, title="Close")',
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is False
-    assert payload["code"] == "PYNE_IMPORT_BLOCKED"
-    assert "Import 'os' is not allowed in research mode" in payload["error"]
-
-
-@pytest.mark.anyio
-async def test_pyne_syntax_error_has_structured_location() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            script='plot(close, title="Broken"\n',
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is False
-    assert payload["code"] == "PYNE_SYNTAX_ERROR"
-    assert payload["errorDetail"]["line"] == 1
-    assert "语法错误" in payload["errorDetail"]["hint"]
-
-
-@pytest.mark.anyio
-async def test_pyne_input_schema_exposes_ui_param_types() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            script="""
-length = input.int(20, "Length", minval=1, maxval=200)
-ratio = input.float(2.0, "Ratio", step=0.25)
-show = input.bool(true, "Show")
-mode = input.string("SMA", "Mode", options=["SMA", "EMA"])
-src = input.source(close, "Source")
-line_color = input.color(color.orange, "Line Color")
-plot(src, "Source", color=line_color)
-""",
-            ohlcv=_bars(),
-        )
-    )
-
-    schema = {item["key"]: item for item in payload["param_schema"]}
-
-    assert payload["ok"] is True
-    assert schema["Length"]["type"] == "int"
-    assert schema["Length"]["min"] == 1
-    assert schema["Ratio"]["type"] == "float"
-    assert schema["Show"]["type"] == "bool"
-    assert schema["Mode"]["options"] == ["SMA", "EMA"]
-    assert schema["Source"]["type"] == "source"
-    assert schema["Line Color"]["type"] == "color"
-
-
-def test_pyne_process_executor_kills_infinite_loop() -> None:
-    result = execute_pyne_script_in_process(
-        script="while true:\n    pass",
-        ohlcv=_bars(),
-        params={},
-        security_mode="safe",
-        timeout_seconds=0.1,
-    )
-
-    assert result.ok is False
-    assert result.code == "PYNE_TIMEOUT"
-    assert "timeout" in result.error
-
-
-def test_pyne_process_executor_runs_incremental_script() -> None:
-    script = """
-indicator("Inc EMA", mode="incremental", overlay=True)
-
-def init(ctx):
-    ctx.ta.ema("ema", period=3)
-
-def on_bar(ctx, bar):
-    ctx.plot("EMA3", ctx.ta.ema("ema").update(bar.close))
-"""
-    result = execute_pyne_script_in_process(
-        script=script,
-        ohlcv=_bars(5),
-        params={},
-        security_mode="safe",
-        timeout_seconds=2,
-    )
-
-    assert result.ok is True
-    assert result.meta["mode"] == "incremental"
-    assert result.lines[0]["name"] == "EMA3"
-    assert result.lines[0]["data"][-1] == {"time": 1_700_000_240, "value": 103.0}
-
-
-def test_pyne_process_executor_reads_large_result_before_join_timeout() -> None:
-    script = indicators_api._PRESET_SCRIPTS["MACD"].split("\n", 1)[1]
-    bars = _bars(5000)
-
-    result = execute_pyne_script_in_process(
-        script=script,
-        ohlcv=bars,
-        params={},
-        security_mode="safe",
-        timeout_seconds=5,
-    )
-
-    assert result.ok is True
-    assert len(result.lines) == 3
-    assert sum(len(line["data"]) for line in result.lines) > 4000
-
-
-def test_pyne_cache_reuses_loader_value_in_inline_runtime() -> None:
-    pyne_cache.clear()
-    runtime = PyneRuntime()
-    script = """
-counter = pyne.cache("unit-test-counter", lambda: {"count": 0})
-counter["count"] += 1
-plot(close + counter["count"], title="Cached")
-"""
-
-    first = runtime.execute(script, _bars(), {})
-    second = runtime.execute(script, _bars(), {})
-
-    assert first.ok is True
-    assert second.ok is True
-    assert first.lines[0]["data"][0]["value"] == 101
-    assert second.lines[0]["data"][0]["value"] == 102
-    assert pyne_cache.stats()["size"] == 1
-    pyne_cache.clear()
-
-
-def test_pyne_cache_ttl_reloads_expired_value() -> None:
-    pyne_cache.clear()
-    runtime = PyneRuntime()
-    calls = {"n": 0}
-
-    def load_next() -> int:
-        calls["n"] += 1
-        return calls["n"]
-
-    script = """
-value = pyne.cache("ttl-test", params["loader"], ttl=-1)
-plot(close + value, title="Cached")
-"""
-
-    first = runtime.execute(script, _bars(), {"loader": load_next})
-    second = runtime.execute(script, _bars(), {"loader": load_next})
-
-    assert first.ok is True
-    assert second.ok is True
-    assert first.lines[0]["data"][0]["value"] == 101
-    assert second.lines[0]["data"][0]["value"] == 102
-    assert calls["n"] == 2
-    pyne_cache.clear()
-
-
-@pytest.mark.anyio
-async def test_pyne_emit_signal_and_alertcondition_outputs_structured_signals() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            script="""
-buy = close >= open
-emit_signal(buy, name="Buy", side="buy", message="long setup", price=close)
-alertcondition(close <= open, title="Sell Alert", message="short setup", side="sell")
-plot(close, title="Close")
-""",
-            ohlcv=_bars(5),
-        )
-    )
-
-    signal_annotations = [item for item in payload["annotations"] if item["type"] == "signal"]
-
-    assert payload["ok"] is True
-    assert payload["signals"][0]["side"] == "buy"
-    assert payload["signals"][0]["data"][0]["message"] == "long setup"
-    assert payload["signals"][0]["data"][0]["price"] == 100
-    assert signal_annotations[0]["style"]["side"] == "buy"
-
-
-@pytest.mark.anyio
-async def test_pyne_unsafe_mode_allows_imports() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            securityMode="unsafe",
-            script='import math\nplot(close + math.sqrt(4), title="Unsafe")',
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["name"] == "Unsafe"
-    assert payload["meta"]["securityMode"] == "unsafe"
 
 
 @pytest.mark.anyio
@@ -451,6 +115,53 @@ async def test_compute_mode_builtin_accepts_engine_marker_without_name() -> None
     assert payload["lines"][0]["name"] == "MA(7)"
 
 
+def test_compute_batch_preserves_non_pyne_language_to_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_service = object()
+    observed: list[tuple[str | None, object | None]] = []
+
+    async def _compute_script(req, *, runtime_service=None):
+        observed.append((req.language, runtime_service))
+        return {"ok": True, "schemaVersion": 1, "lines": []}
+
+    monkeypatch.setattr(indicators_api, "_compute_script", _compute_script)
+    monkeypatch.setattr(
+        indicators_api,
+        "_resolve_indicator_runtime_service",
+        lambda _request: runtime_service,
+    )
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+
+    response = TestClient(app).post(
+        "/api/v1/indicators/compute/batch",
+        json={
+            "schemaVersion": 1,
+            "context": {
+                "exchange": "binance",
+                "marketType": "spot",
+                "symbol": "BTCUSDT",
+                "interval": "1m",
+            },
+            "ohlcv": _bars(1),
+            "requests": [
+                {
+                    "jobKey": "pine-job",
+                    "clientId": "pine-client",
+                    "mode": "script",
+                    "language": "pine",
+                    "script": "indicator('Close')",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert observed == [("pine", runtime_service)]
+
+
 @pytest.mark.anyio
 async def test_custom_indicator_crud_roundtrip(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
@@ -489,14 +200,40 @@ async def test_pyne_security_policy_endpoint() -> None:
 
     assert policy["mode"] in {"safe", "research", "unsafe"}
     assert "numpy" in policy["allowedImports"]
+    assert policy["owner"] == "candlescope.pyne"
+    assert policy["boundary"] == "sidecar"
+
+
+@pytest.mark.anyio
+async def test_runtime_catalog_endpoint_returns_service_projection(monkeypatch) -> None:
+    expected = {
+        "schemaVersion": 1,
+        "defaultLanguage": "pyne",
+        "languages": [],
+        "runtimes": [],
+    }
+
+    class _CatalogService:
+        async def public_catalog(self):
+            return expected
+
+    monkeypatch.setattr(
+        indicators_api,
+        "_resolve_indicator_runtime_service",
+        lambda _request: _CatalogService(),
+    )
+
+    assert await indicators_api.list_script_runtimes(object()) is expected
 
 
 def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     store = CustomIndicatorStore(tmp_path / "custom_indicators.json")
-    store.upsert({
-        "name": "Diag Script",
-        "script": "plot(close)",
-    })
+    store.upsert(
+        {
+            "name": "Diag Script",
+            "script": "plot(close)",
+        }
+    )
     engine = create_engine()
     engine.subscribe(
         "BTCUSDT",
@@ -515,13 +252,17 @@ def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     assert payload["registry"]["count"] >= 1
     assert payload["engine"]["instance_count"] == 1
     assert payload["customIndicators"]["count"] == 1
-    assert payload["pyne"]["runtimeBackend"]["package"] == "pyne_runtime"
-    assert payload["pyne"]["runtimeBackend"]["active"] == "external"
-    assert "packages" in payload["pyne"]["runtimeBackend"]["sourcePath"]
-    assert "pyne-runtime" in payload["pyne"]["runtimeBackend"]["sourcePath"]
+    assert payload["pyne"]["runtimeBackend"] == {
+        "package": "candlescope-plugin-pyne",
+        "active": "sidecar",
+        "runtimeId": "candlescope.pyne",
+    }
     assert payload["pyne"]["security"]["mode"] in {"safe", "research", "unsafe"}
-    assert payload["pyne"]["executor"]["mode"] in {"inline", "process"}
-    assert payload["pyne"]["cache"]["maxItems"] >= 1
+    assert payload["pyne"]["executor"]["mode"] == "sidecar"
+    assert payload["pyne"]["cache"] == {
+        "scope": "sidecar",
+        "availableToHost": False,
+    }
     assert payload["websocket"]["maxSubscriptions"] >= 1
     assert "heartbeat_delay" in payload["websocket"]["metrics"]
     assert payload["executors"]["indicator"]["max_workers"] >= 1
@@ -533,19 +274,22 @@ def test_indicator_range_http_allows_more_than_5000_builtin_bars() -> None:
     bars = [BarData.from_dict(item) for item in _bars(6005)]
     client = _indicator_client(_RangeDataManager(bars))
 
-    response = client.post("/api/v1/indicators/range", json={
-        "clientId": "ma-1",
-        "kind": "builtin",
-        "exchange": "binance",
-        "marketType": "spot",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "name": "MA",
-        "params": {"period": 3},
-        "start": bars[0].time,
-        "end": bars[-1].time,
-        "reason": "unit-test",
-    })
+    response = client.post(
+        "/api/v1/indicators/range",
+        json={
+            "clientId": "ma-1",
+            "kind": "builtin",
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "MA",
+            "params": {"period": 3},
+            "start": bars[0].time,
+            "end": bars[-1].time,
+            "reason": "unit-test",
+        },
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -566,7 +310,9 @@ def test_indicator_range_patch_stops_before_forming_latest_bar(
     indicator_name: str,
     params: dict,
 ) -> None:
-    closed_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(80)]
+    closed_bars = [
+        BarData.from_dict(item).with_closed_state(True) for item in _bars(80)
+    ]
     forming_bar = BarData.from_dict(_bars(81)[-1]).with_closed_state(False)
     bars = [*closed_bars, forming_bar]
 
@@ -589,11 +335,12 @@ def test_indicator_range_patch_stops_before_forming_latest_bar(
     )
 
     assert payload["type"] == "indicator.replace_range"
-    assert payload["range"] == {"start": closed_bars[-2].time, "end": closed_bars[-1].time}
+    assert payload["range"] == {
+        "start": closed_bars[-2].time,
+        "end": closed_bars[-1].time,
+    }
     returned_times = [
-        point["time"]
-        for line in payload["lines"]
-        for point in line["data"]
+        point["time"] for line in payload["lines"] for point in line["data"]
     ]
     assert returned_times
     assert max(returned_times) == closed_bars[-1].time
@@ -630,37 +377,6 @@ def test_builtin_range_patch_reports_only_actual_target_bar_coverage() -> None:
     assert payload["lines"][0]["data"][0]["time"] == available_tail[0].time
 
 
-def test_pyne_range_patch_reports_only_actual_target_bar_coverage() -> None:
-    all_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(10)]
-    available_tail = all_bars[-3:]
-
-    payload = payload_api._compute_pyne_range_patch_from_bars(
-        "script-1",
-        {
-            "kind": "script",
-            "exchange": "binance",
-            "market_type": "spot",
-            "symbol": "BTCUSDT",
-            "interval": "1m",
-            "name": "Close",
-            "script": 'plot(close, title="Close")',
-            "params": {},
-            "indicatorId": "script-1",
-        },
-        all_bars[0].time,
-        all_bars[-1].time,
-        available_tail,
-        "unit-test",
-        len(all_bars),
-    )
-
-    assert payload["range"] == {
-        "start": available_tail[0].time,
-        "end": available_tail[-1].time,
-    }
-    assert payload["lines"][0]["data"][0]["time"] == available_tail[0].time
-
-
 def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> None:
     bars = [BarData.from_dict(item) for item in _bars(5)]
 
@@ -670,8 +386,46 @@ def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> No
 
     client = _indicator_client(_RangeDataManager(bars, [Missing()]))
 
+    response = client.post(
+        "/api/v1/indicators/range",
+        json={
+            "clientId": "ma-1",
+            "kind": "builtin",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "MA",
+            "params": {"period": 3},
+            "start": bars[0].time,
+            "end": bars[-1].time,
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 202
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
+    assert payload["detail"]["retryMode"] == "event"
+    assert payload["detail"]["backfillRequestIds"] == []
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+def test_indicator_range_runtime_failure_is_not_misreported_as_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _fail_compute(**_kwargs):
+        raise RuntimeError("indicator execution failed")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _fail_compute,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
     response = client.post("/api/v1/indicators/range", json={
-        "clientId": "ma-1",
+        "clientId": "ma-runtime-error",
         "kind": "builtin",
         "symbol": "BTCUSDT",
         "interval": "1m",
@@ -682,9 +436,92 @@ def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> No
     })
 
     payload = response.json()
+    assert response.status_code == 200
+    assert payload["code"] == "INDICATOR_RANGE_COMPUTE_FAILED"
     assert payload["ok"] is False
+    assert "retryMode" not in payload.get("detail", {})
+
+
+def test_indicator_range_revision_race_is_event_driven_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    async def _revision_changed(**_kwargs):
+        raise IndicatorRangeRevisionChangedError("revision changed during compute")
+
+    monkeypatch.setattr(
+        indicators_api,
+        "compute_indicator_range_payload_async",
+        _revision_changed,
+    )
+    client = _indicator_client(_RangeDataManager(bars))
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-revision-race",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 202
     assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
-    assert payload["detail"]["retryAfterMs"] == 3000
+    assert payload["detail"]["retryMode"] == "event"
+    assert "retryAfterMs" not in payload["detail"]
+    assert payload["dataRevision"]["revisionToken"]
+
+
+@pytest.mark.parametrize(("interval", "step_seconds"), [("1m", 60), ("89m", 5_340)])
+def test_indicator_range_warmup_gap_is_read_only_and_does_not_block_target(
+    interval: str,
+    step_seconds: int,
+) -> None:
+    bars = [
+        BarData.from_dict({
+            **item,
+            "time": 1_700_000_000 + index * step_seconds,
+        })
+        for index, item in enumerate(_bars(10))
+    ]
+
+    class MissingWarmup:
+        start_ms = (bars[0].time - 2 * step_seconds) * 1000
+        end_ms = (bars[0].time - step_seconds) * 1000
+
+    class DataManager:
+        def __init__(self) -> None:
+            self.query_kwargs: list[dict] = []
+
+        def query(self, *args, **kwargs):
+            self.query_kwargs.append(dict(kwargs))
+            return _QueryResult(bars, [MissingWarmup()])
+
+    data_manager = DataManager()
+    client = _indicator_client(data_manager)
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": f"ma-warmup-{interval}",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": interval,
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert len(data_manager.query_kwargs) == 1
+    query = data_manager.query_kwargs[0]
+    assert query["auto_backfill"] is False
+    assert "backfill_metadata" not in query
+    assert query["start_ms"] == MissingWarmup.start_ms
+    assert query["end_ms"] == bars[-1].time * 1000
 
 
 def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> None:
@@ -692,16 +529,19 @@ def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> N
     forming_bar = BarData.from_dict(_bars(6)[-1]).with_closed_state(False)
     client = _indicator_client(_RangeDataManager([*closed_bars, forming_bar]))
 
-    response = client.post("/api/v1/indicators/range", json={
-        "clientId": "ma-1",
-        "kind": "builtin",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "name": "MA",
-        "params": {"period": 3},
-        "start": forming_bar.time,
-        "end": forming_bar.time,
-    })
+    response = client.post(
+        "/api/v1/indicators/range",
+        json={
+            "clientId": "ma-1",
+            "kind": "builtin",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "MA",
+            "params": {"period": 3},
+            "start": forming_bar.time,
+            "end": forming_bar.time,
+        },
+    )
 
     payload = response.json()
     assert payload["ok"] is False
@@ -709,21 +549,26 @@ def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> N
     assert "retryAfterMs" not in payload.get("detail", {})
 
 
-def test_indicator_range_http_enforces_pyne_runtime_bar_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indicator_range_http_enforces_pyne_runtime_bar_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bars = [BarData.from_dict(item) for item in _bars(10)]
     monkeypatch.setattr(indicators_api.config, "PYNE_MAX_BARS", 5)
     client = _indicator_client(_RangeDataManager(bars))
 
-    response = client.post("/api/v1/indicators/range", json={
-        "clientId": "custom-1",
-        "kind": "script",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "script": 'plot(close, title="Close")',
-        "params": {},
-        "start": bars[0].time,
-        "end": bars[-1].time,
-    })
+    response = client.post(
+        "/api/v1/indicators/range",
+        json={
+            "clientId": "custom-1",
+            "kind": "script",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "script": 'plot(close, title="Close")',
+            "params": {},
+            "start": bars[0].time,
+            "end": bars[-1].time,
+        },
+    )
 
     payload = response.json()
     assert payload["ok"] is False
@@ -731,7 +576,9 @@ def test_indicator_range_http_enforces_pyne_runtime_bar_limit(monkeypatch: pytes
     assert "Too many Pyne bars" in payload["error"]
 
 
-def test_indicator_range_http_rejects_oversized_pyne_before_query(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indicator_range_http_rejects_oversized_pyne_before_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class CountingRangeDataManager(_RangeDataManager):
         def __init__(self) -> None:
             super().__init__([])
@@ -745,20 +592,54 @@ def test_indicator_range_http_rejects_oversized_pyne_before_query(monkeypatch: p
     monkeypatch.setattr(indicators_api.config, "PYNE_MAX_BARS", 5)
     client = _indicator_client(dm)
 
+    response = client.post(
+        "/api/v1/indicators/range",
+        json={
+            "clientId": "custom-1",
+            "kind": "script",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "script": 'plot(close, title="Close")',
+            "params": {},
+            "start": 1_700_000_000,
+            "end": 1_700_000_000 + 9 * 60,
+        },
+    )
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert dm.query_calls == 0
+
+
+def test_indicator_range_http_rejects_extreme_builtin_warmup_before_query() -> None:
+    class CountingRangeDataManager(_RangeDataManager):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.query_calls = 0
+
+        def query(self, *args, **kwargs):
+            self.query_calls += 1
+            raise AssertionError("oversized builtin warmup must not query K-lines")
+
+    dm = CountingRangeDataManager()
+    client = _indicator_client(dm)
+    start = 1_700_000_000
     response = client.post("/api/v1/indicators/range", json={
-        "clientId": "custom-1",
-        "kind": "script",
+        "clientId": "ema-extreme-warmup",
+        "kind": "builtin",
         "symbol": "BTCUSDT",
         "interval": "1m",
-        "script": 'plot(close, title="Close")',
-        "params": {},
-        "start": 1_700_000_000,
-        "end": 1_700_000_000 + 9 * 60,
+        "name": "EMA",
+        "params": {"period": 10_000},
+        "start": start,
+        "end": start + 59 * 60,
     })
 
     payload = response.json()
     assert payload["ok"] is False
     assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert "Too many indicator bars" in payload["error"]
     assert dm.query_calls == 0
 
 
@@ -830,8 +711,7 @@ def test_macd_histogram_colors_follow_value_sign() -> None:
         if point.value is not None
     }
     colors_by_time = {
-        point["time"]: point["color"]
-        for point in histogram.color_data or []
+        point["time"]: point["color"] for point in histogram.color_data or []
     }
 
     assert set(colors_by_time) == set(values_by_time)
@@ -916,7 +796,9 @@ def test_indicator_ws_queue_coalesces_preview_when_full() -> None:
 
 
 def test_indicator_key_includes_exchange_in_identity_and_topic() -> None:
-    binance_key = IndicatorKey("BTCUSDT", "1m", "MA", {"period": 20}, exchange="binance")
+    binance_key = IndicatorKey(
+        "BTCUSDT", "1m", "MA", {"period": 20}, exchange="binance"
+    )
     okx_key = IndicatorKey("BTCUSDT", "1m", "MA", {"period": 20}, exchange="okx")
 
     assert binance_key != okx_key
@@ -928,14 +810,18 @@ def test_indicator_key_includes_exchange_in_identity_and_topic() -> None:
 
 def test_indicator_key_includes_backend_code_hash_in_identity() -> None:
     code_hash = indicator_code_hash("MA")
-    key = create_engine().compute(
-        symbol="BTCUSDT",
-        interval="1m",
-        market_type="spot",
-        indicator_name="MA",
-        params={"period": 3},
-        bars=[BarData.from_dict(item) for item in _bars(5)],
-    ).key
+    key = (
+        create_engine()
+        .compute(
+            symbol="BTCUSDT",
+            interval="1m",
+            market_type="spot",
+            indicator_name="MA",
+            params={"period": 3},
+            bars=[BarData.from_dict(item) for item in _bars(5)],
+        )
+        .key
+    )
 
     assert code_hash
     assert key.code_hash == code_hash
@@ -1074,7 +960,11 @@ def test_indicator_engine_routes_exchange_scoped_updates() -> None:
         exchange="okx",
     )
 
-    updated = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_UPDATED]
+    updated = [
+        event
+        for event in events
+        if event.event_type == IndicatorEventType.INDICATOR_UPDATED
+    ]
     assert [event.key for event in updated] == [okx_key]
     assert binance_key != okx_key
 
@@ -1115,14 +1005,22 @@ def test_builtin_indicator_engine_preview_does_not_commit_state() -> None:
     )
 
     engine.on_bar_updated("BTCUSDT", "1m", preview_bar)
-    preview_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_PREVIEW]
+    preview_events = [
+        event
+        for event in events
+        if event.event_type == IndicatorEventType.INDICATOR_PREVIEW
+    ]
     assert preview_events[-1].key == key
     assert preview_events[-1].values == {"ma": 401.0}
     assert preview_events[-1].detail["bar"]["close"] == 1000
     assert engine._instances[key].get_latest() == {"ma": 101.0}
 
     engine.on_bar_closed("BTCUSDT", "1m", closed_bar)
-    update_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_UPDATED]
+    update_events = [
+        event
+        for event in events
+        if event.event_type == IndicatorEventType.INDICATOR_UPDATED
+    ]
     assert update_events[-1].values == {"ma": 102.0}
     assert engine._instances[key].get_latest() == {"ma": 102.0}
 
@@ -1144,23 +1042,31 @@ def _assert_indicator_values_close(actual: dict, expected: dict) -> None:
         ("MACD", {"fast": 12, "slow": 26, "signal": 9, "source": "close"}),
     ],
 )
-def test_indicator_seed_excludes_forming_latest_bar_for_preview(indicator_name: str, params: dict) -> None:
+def test_indicator_seed_excludes_forming_latest_bar_for_preview(
+    indicator_name: str, params: dict
+) -> None:
     bars = [BarData.from_dict(item) for item in _bars(60)]
     closed_history = [bar.with_closed_state(True) for bar in bars[:-1]]
     forming_bar = bars[-1].with_closed_state(False)
     clean_closed_bars = [*closed_history, forming_bar.with_closed_state(True)]
 
-    seed_bars = payload_api.confirmed_indicator_seed_bars([*closed_history, forming_bar])
+    seed_bars = payload_api.confirmed_indicator_seed_bars(
+        [*closed_history, forming_bar]
+    )
     assert seed_bars == closed_history
 
-    expected = create_engine().compute(
-        symbol="BTCUSDT",
-        interval="1m",
-        market_type="spot",
-        indicator_name=indicator_name,
-        params=params,
-        bars=clean_closed_bars,
-    ).get_latest()
+    expected = (
+        create_engine()
+        .compute(
+            symbol="BTCUSDT",
+            interval="1m",
+            market_type="spot",
+            indicator_name=indicator_name,
+            params=params,
+            bars=clean_closed_bars,
+        )
+        .get_latest()
+    )
 
     engine = create_engine()
     key, result = engine.subscribe(
@@ -1176,7 +1082,9 @@ def test_indicator_seed_excludes_forming_latest_bar_for_preview(indicator_name: 
 
     engine.on_bar_updated("BTCUSDT", "1m", forming_bar)
     _assert_indicator_values_close(engine._instances[key].get_preview(), expected)
-    _assert_indicator_values_close(engine._instances[key].get_latest(), committed_before_preview)
+    _assert_indicator_values_close(
+        engine._instances[key].get_latest(), committed_before_preview
+    )
 
     engine.on_bar_closed("BTCUSDT", "1m", forming_bar.with_closed_state(True))
     _assert_indicator_values_close(engine._instances[key].get_latest(), expected)
@@ -1252,78 +1160,6 @@ async def test_indicator_unsubscribe_releases_stream_consumer() -> None:
     ]
 
 
-def test_pyne_ws_snapshot_message_runs_script() -> None:
-    class FakeDataManager:
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
-            class Result:
-                bars = [BarData.from_dict(item) for item in _bars(30)]
-
-            return Result()
-
-    msg = payload_api._compute_pyne_snapshot_message(
-        "custom-1",
-        FakeDataManager(),
-        {
-            "exchange": "binance",
-            "market_type": "spot",
-            "symbol": "BTCUSDT",
-            "interval": "1m",
-            "name": "Custom",
-            "script": 'plot(close * 2, title="Double")\nmarker(close > 0, text="X")',
-            "params": {},
-            "securityMode": "safe",
-            "historyLimit": 100,
-        },
-    )
-
-    assert msg["type"] == "indicator.snapshot"
-    assert msg["kind"] == "script"
-    assert msg["schemaVersion"] == 1
-    assert msg["outputSchemaVersion"] == 2
-    assert msg["ok"] is True
-    assert msg["lines"][0]["name"] == "Double"
-    assert msg["series"][0]["indicatorId"] == msg["indicatorId"]
-    assert msg["series"][0]["id"].startswith(f"{msg['indicatorId']}:")
-    assert msg["annotations"][0]["type"] == "marker"
-    assert msg["markers"][0]["data"][0]["text"] == "X"
-
-
-def test_pyne_ws_tick_snapshot_clamps_recompute_history(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeDataManager:
-        def __init__(self) -> None:
-            self.limits: list[int] = []
-
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
-            self.limits.append(limit)
-
-            class Result:
-                bars = [BarData.from_dict(item) for item in _bars(30)]
-
-            return Result()
-
-    dm = FakeDataManager()
-    monkeypatch.setattr(payload_api.config, "PYNE_TICK_RECOMPUTE_MAX_BARS", 5)
-
-    payload_api._compute_pyne_snapshot_message(
-        "custom-1",
-        dm,
-        {
-            "exchange": "binance",
-            "market_type": "spot",
-            "symbol": "BTCUSDT",
-            "interval": "1m",
-            "name": "Custom",
-            "script": 'plot(close, title="Close")',
-            "params": {},
-            "securityMode": "safe",
-            "historyLimit": 100,
-        },
-        bar_time=1_700_000_000,
-    )
-
-    assert dm.limits == [5]
-
-
 def test_indicator_range_command_supports_load_before_without_5000_clamp() -> None:
     start_s, end_s, bars = payload_api._range_from_indicator_command(
         action="load_before",
@@ -1342,15 +1178,27 @@ def test_indicator_patch_from_snapshot_filters_time_series_payloads() -> None:
         "lines": [
             {
                 "name": "MA",
-                "data": [{"time": 10, "value": 1}, {"time": 20, "value": 2}, {"time": 30, "value": 3}],
-                "colorData": [{"time": 20, "color": "#fff"}, {"time": 30, "color": "#000"}],
+                "data": [
+                    {"time": 10, "value": 1},
+                    {"time": 20, "value": 2},
+                    {"time": 30, "value": 3},
+                ],
+                "colorData": [
+                    {"time": 20, "color": "#fff"},
+                    {"time": 30, "color": "#000"},
+                ],
             }
         ],
         "series": [
             {
                 "id": "s1",
                 "data": [{"time": 10, "value": 1}, {"time": 20, "value": 2}],
-                "style": {"colorData": [{"time": 20, "color": "#fff"}, {"time": 30, "color": "#000"}]},
+                "style": {
+                    "colorData": [
+                        {"time": 20, "color": "#fff"},
+                        {"time": 30, "color": "#000"},
+                    ]
+                },
             }
         ],
         "markers": [{"id": "m1", "data": [{"time": 10}, {"time": 20}]}],
@@ -1360,7 +1208,9 @@ def test_indicator_patch_from_snapshot_filters_time_series_payloads() -> None:
         ],
     }
 
-    patch = payload_api._patch_from_snapshot(payload, reason="load_range", start_s=20, end_s=20)
+    patch = payload_api._patch_from_snapshot(
+        payload, reason="load_range", start_s=20, end_s=20
+    )
 
     assert patch["type"] == "indicator.patch"
     assert patch["range"] == {"start": 20, "end": 20}
@@ -1371,395 +1221,3 @@ def test_indicator_patch_from_snapshot_filters_time_series_payloads() -> None:
     assert patch["markers"][0]["data"] == [{"time": 20}]
     assert patch["annotations"][0]["data"] == [{"time": 20}]
     assert patch["annotations"][1]["data"] == [{"value": 5}]
-
-
-def test_pyne_ws_bar_update_sends_single_bar_patch() -> None:
-    bars = [BarData.from_dict(item) for item in _bars(30)]
-    bar_time = bars[-1].time
-
-    class FakeDataManager:
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
-            class Result:
-                pass
-
-            result = Result()
-            result.bars = bars
-            return result
-
-    msg = payload_api._compute_pyne_snapshot_message(
-        "custom-1",
-        FakeDataManager(),
-        {
-            "exchange": "binance",
-            "market_type": "spot",
-            "symbol": "BTCUSDT",
-            "interval": "1m",
-            "name": "Custom",
-            "script": 'plot(close * 2, title="Double")',
-            "params": {},
-            "securityMode": "safe",
-            "historyLimit": 100,
-        },
-        bar_time=bar_time,
-    )
-
-    assert msg["type"] == "indicator.patch"
-    assert msg["reason"] == "bar_update"
-    assert msg["range"] == {"start": bar_time, "end": bar_time}
-    assert msg["lines"][0]["data"] == [{"time": bar_time, "value": bars[-1].close * 2}]
-
-
-def test_pyne_incremental_runtime_seeds_history_with_stateful_sma() -> None:
-    script = """
-indicator("Inc MA", mode="incremental", overlay=True)
-
-def init(ctx):
-    ctx.ta.sma("ma", period=3)
-
-def on_bar(ctx, bar):
-    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
-"""
-
-    result = PyneRuntime().execute(
-        script=script,
-        ohlcv=_bars(5),
-        params={},
-        security_mode="safe",
-    )
-
-    assert result.ok is True
-    assert result.meta["mode"] == "incremental"
-    assert result.lines[0]["name"] == "MA3"
-    assert result.lines[0]["data"] == [
-        {"time": 1_700_000_120, "value": 101.0},
-        {"time": 1_700_000_180, "value": 102.0},
-        {"time": 1_700_000_240, "value": 103.0},
-    ]
-
-
-def test_pyne_incremental_preview_does_not_commit_state() -> None:
-    script = """
-indicator("Inc MA", mode="incremental", overlay=True)
-
-def init(ctx):
-    ctx.ta.sma("ma", period=3)
-
-def on_bar(ctx, bar):
-    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
-"""
-    session = PyneIncrementalSession(script=script, params={}, security_mode="safe")
-    session.seed(_bars(3))
-
-    preview_bar = {**_bars(4)[-1], "close": 1000}
-    preview = session.on_bar_updated(preview_bar)
-    closed = session.on_bar_closed(_bars(4)[-1])
-
-    assert preview.lines[0]["data"] == [{"time": 1_700_000_180, "value": 401.0}]
-    assert closed.lines[0]["data"] == [{"time": 1_700_000_180, "value": 102.0}]
-
-
-def test_pyne_ws_incremental_bar_update_uses_session_patch() -> None:
-    script = """
-indicator("Inc MA", mode="incremental", overlay=True)
-
-def init(ctx):
-    ctx.ta.sma("ma", period=3)
-
-def on_bar(ctx, bar):
-    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
-"""
-    session = PyneIncrementalSession(script=script, params={}, security_mode="safe")
-    session.seed(_bars(3))
-    bar = _bars(4)[-1]
-    meta = {
-        "kind": "script",
-        "scriptMode": "incremental",
-        "exchange": "binance",
-        "market_type": "spot",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "name": "Inc MA",
-        "indicatorId": "pyne:binance:spot:BTCUSDT:1m:inc-1",
-        "script": script,
-        "params": {},
-        "securityMode": "safe",
-        "historyLimit": 100,
-        "pyneSession": session,
-    }
-
-    msg = payload_api._compute_incremental_pyne_bar_message(
-        "inc-1",
-        meta,
-        bar,
-        preview=False,
-    )
-
-    assert msg["type"] == "indicator.patch"
-    assert msg["reason"] == "bar_closed"
-    assert msg["range"] == {"start": bar["time"], "end": bar["time"]}
-    assert msg["lines"][0]["data"] == [{"time": bar["time"], "value": 102.0}]
-
-
-def test_pyne_incremental_ta_helpers_cover_common_indicators() -> None:
-    script = """
-indicator("Inc Helpers", mode="incremental", overlay=True)
-
-def init(ctx):
-    ctx.ta.boll("bb", period=3, multiplier=2)
-    ctx.ta.macd("macd", fast=2, slow=3, signal=2)
-    ctx.ta.rsi("rsi", period=3)
-    ctx.ta.atr("atr", period=3)
-    ctx.ta.highest("highest", period=3)
-    ctx.ta.lowest("lowest", period=3)
-
-def on_bar(ctx, bar):
-    upper, mid, lower = ctx.ta.boll("bb").update(bar.close)
-    ctx.plot("BB Upper", upper)
-    ctx.plot("BB Mid", mid)
-    ctx.plot("BB Lower", lower)
-
-    dif, dea, hist = ctx.ta.macd("macd").update(bar.close)
-    ctx.plot("MACD DIF", dif)
-    ctx.plot("MACD DEA", dea)
-    ctx.plot("MACD HIST", hist, type="histogram", pane="separate")
-
-    ctx.plot("RSI", ctx.ta.rsi("rsi").update(bar.close), pane="separate")
-    ctx.plot("ATR", ctx.ta.atr("atr").update(bar), pane="separate")
-    ctx.plot("Highest", ctx.ta.highest("highest").update(bar.high))
-    ctx.plot("Lowest", ctx.ta.lowest("lowest").update(bar.low))
-"""
-
-    result = PyneRuntime().execute(
-        script=script,
-        ohlcv=_bars(5),
-        params={},
-        security_mode="safe",
-    )
-    by_name = {line["name"]: line["data"] for line in result.lines}
-
-    assert result.ok is True
-    assert by_name["BB Mid"][0] == {"time": 1_700_000_120, "value": 101.0}
-    assert by_name["BB Upper"][0] == {"time": 1_700_000_120, "value": 102.63299316}
-    assert by_name["BB Lower"][0] == {"time": 1_700_000_120, "value": 99.36700684}
-    assert by_name["MACD DIF"][-1] == {"time": 1_700_000_240, "value": 0.5}
-    assert by_name["MACD DEA"][-1] == {"time": 1_700_000_240, "value": 0.5}
-    assert by_name["MACD HIST"][-1] == {"time": 1_700_000_240, "value": 0.0}
-    assert by_name["RSI"][-1] == {"time": 1_700_000_240, "value": 100.0}
-    assert by_name["ATR"][0] == {"time": 1_700_000_120, "value": 2.0}
-    assert by_name["Highest"][0] == {"time": 1_700_000_120, "value": 103.0}
-    assert by_name["Lowest"][0] == {"time": 1_700_000_120, "value": 99.0}
-
-
-def test_pyne_incremental_safe_mode_limits_windows_and_state_keys() -> None:
-    huge_window_script = """
-indicator("Huge Window", mode="incremental")
-
-def init(ctx):
-    ctx.window("huge", size=10001)
-
-def on_bar(ctx, bar):
-    pass
-"""
-    unsafe_result = PyneRuntime().execute(
-        script=huge_window_script,
-        ohlcv=_bars(1),
-        params={},
-        security_mode="unsafe",
-    )
-    safe_result = PyneRuntime().execute(
-        script=huge_window_script,
-        ohlcv=_bars(1),
-        params={},
-        security_mode="safe",
-    )
-
-    assert unsafe_result.ok is True
-    assert safe_result.ok is False
-    assert safe_result.code == "PYNE_SECURITY_ERROR"
-    assert "safe-mode limit" in safe_result.error
-
-    many_states_script = """
-indicator("Many States", mode="incremental")
-
-def init(ctx):
-    for i in range(101):
-        ctx.state(f"s{i}", 0)
-
-def on_bar(ctx, bar):
-    pass
-"""
-    state_result = PyneRuntime().execute(
-        script=many_states_script,
-        ohlcv=_bars(1),
-        params={},
-        security_mode="safe",
-    )
-    assert state_result.ok is False
-    assert state_result.code == "PYNE_SECURITY_ERROR"
-    assert "state keys" in state_result.error
-
-
-def test_pyne_incremental_session_manager_shares_duplicate_bar_results() -> None:
-    script = """
-indicator("Shared Counter", mode="incremental")
-
-def init(ctx):
-    ctx.state("count", 0)
-
-def on_bar(ctx, bar):
-    counter = ctx.state("count")
-    counter.value += 1
-    ctx.plot("Count", counter.value)
-"""
-    manager = PyneIncrementalSessionManager()
-    shared = manager.acquire(
-        "shared-key",
-        lambda: PyneIncrementalSession(script=script, params={}, security_mode="safe"),
-    )
-    manager.acquire(
-        "shared-key",
-        lambda: PyneIncrementalSession(script=script, params={}, security_mode="safe"),
-    )
-
-    manager.seed_or_snapshot(shared, _bars(1))
-    bar = _bars(2)[-1]
-    first = manager.process_bar(shared, bar, preview=False)
-    second = manager.process_bar(shared, bar, preview=False)
-
-    assert first.lines[0]["data"] == [{"time": bar["time"], "value": 2.0}]
-    assert second.lines[0]["data"] == [{"time": bar["time"], "value": 2.0}]
-    assert manager.snapshot()["keys"]["shared-key"]["refCount"] == 2
-
-    manager.release("shared-key")
-    assert manager.snapshot()["keys"]["shared-key"]["refCount"] == 1
-    manager.release("shared-key")
-    assert manager.snapshot()["sessions"] == 0
-
-
-@pytest.mark.anyio
-async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monkeypatch) -> None:
-    store = CustomIndicatorStore(tmp_path / "custom_indicators.json")
-    saved = store.upsert({
-        "name": "Saved Double",
-        "script": 'plot(close * 2, title="Saved")',
-        "params": {"length": 5},
-        "securityMode": "safe",
-    })
-    monkeypatch.setattr(pyne_stream_api, "_stream_custom_store", store)
-
-    class FakeDataManager:
-        def __init__(self) -> None:
-            self.ensure_stream_calls: list[dict] = []
-
-        async def ensure_stream(self, *args, **kwargs):
-            self.ensure_stream_calls.append({"args": args, "kwargs": kwargs})
-            return None
-
-        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
-            class Result:
-                bars = [BarData.from_dict(item) for item in _bars(30)]
-
-            return Result()
-
-        def subscribe(self, **kwargs):
-            return "handle-1"
-
-    sent: list[dict] = []
-
-    async def send_json(payload: dict) -> bool:
-        sent.append(payload)
-        return True
-
-    custom_handles = {}
-    custom_tasks = {}
-    client_meta = {}
-    queue = asyncio.Queue()
-
-    dm = FakeDataManager()
-
-    async def unsubscribe_client(_client_id: str) -> None:
-        return None
-
-    await pyne_stream_api.handle_pyne_indicator_subscribe(
-        dm=dm,
-        custom_handles=custom_handles,
-        custom_tasks=custom_tasks,
-        queue=queue,
-        client_meta=client_meta,
-        client_id="saved-1",
-        symbol="BTCUSDT",
-        interval="1m",
-        exchange="binance",
-        market_type="spot",
-        name="",
-        custom_id=saved["id"],
-        script="",
-        params={},
-        security_mode=None,
-        history_limit=100,
-        send_json=send_json,
-        stream_consumer_id="ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test",
-        unsubscribe_client=unsubscribe_client,
-        queue_message=stream_api._queue_indicator_message,
-    )
-
-    assert sent[0]["type"] == "indicator.subscribed"
-    assert sent[0]["kind"] == "script"
-    assert sent[0]["clientId"] == "saved-1"
-    assert sent[0]["name"] == "Saved Double"
-    assert sent[0]["customId"] == saved["id"]
-    assert dm.ensure_stream_calls[0]["kwargs"]["consumer_id"] == (
-        "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
-    )
-    assert client_meta["saved-1"]["streamConsumerId"] == (
-        "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
-    )
-
-
-@pytest.mark.anyio
-async def test_pyne_overlay_false_routes_hline_and_marker_to_separate_pane() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            script="""
-indicator("Pane Signals", overlay=false)
-r = ta.rsi(close, 14)
-plot(r, "RSI")
-hline(70, "OB")
-marker(r > 50, text="M", location=location.top)
-""",
-            ohlcv=_bars(40),
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["lines"][0]["pane"] == "separate"
-    assert payload["series"][0]["pane"] == "separate"
-    assert payload["hlines"][0]["pane"] == "separate"
-    assert any(item["type"] == "hline" and item["pane"] == "separate" for item in payload["annotations"])
-    assert payload["markers"][0]["pane"] == "separate"
-    assert payload["markers"][0]["data"][0]["pane"] == "separate"
-
-
-@pytest.mark.anyio
-async def test_unified_output_scopes_fill_series_ids() -> None:
-    payload = await indicators_api.compute(
-        ComputeRequest(
-            mode="script",
-            script="""
-indicator("Bands", overlay=true)
-upper = close + 1
-lower = close - 1
-p1 = plot(upper, "Upper")
-p2 = plot(lower, "Lower")
-fill(p1, p2, color="rgba(59,130,246,0.2)")
-""",
-            ohlcv=_bars(),
-        )
-    )
-
-    assert payload["ok"] is True
-    assert payload["legacyFills"][0]["pane"] == "main"
-    assert payload["series"][0]["id"] == "plot_1"
-    assert payload["fills"][0]["seriesIds"] == ["plot_1", "plot_2"]
-    assert payload["fills"][0]["pane"] == "main"

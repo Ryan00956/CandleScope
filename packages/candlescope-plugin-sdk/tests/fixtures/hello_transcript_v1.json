@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "candlescope.plugin-sdk-transcript.v1",
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": "handshake-1",
+      "method": "handshake",
+      "params": {
+        "protocols": [
+          "candlescope.script-runtime/1"
+        ],
+        "host": {
+          "name": "CandleScope",
+          "version": "0.1.0"
+        },
+        "hostFeatures": [
+          "source-analysis/1",
+          "batch-execution/1",
+          "render.line-series/1"
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "describe-1",
+      "method": "describe",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "analyze-1",
+      "method": "analyze",
+      "params": {
+        "source": "plot(close)",
+        "context": {
+          "exchange": "binance",
+          "marketType": "spot",
+          "symbol": "BTCUSDT",
+          "interval": "1m"
+        },
+        "options": {}
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "execute-1",
+      "method": "executeBatch",
+      "params": {
+        "source": "plot(close)",
+        "context": {
+          "exchange": "binance",
+          "marketType": "spot",
+          "symbol": "BTCUSDT",
+          "interval": "1m"
+        },
+        "bars": [
+          {
+            "time": 1700000000,
+            "open": 100,
+            "high": 102,
+            "low": 99,
+            "close": 101,
+            "volume": 10,
+            "isClosed": true
+          },
+          {
+            "time": 1700000060,
+            "open": 101,
+            "high": 103,
+            "low": 100,
+            "close": 102,
+            "volume": 11,
+            "isClosed": true
+          },
+          {
+            "time": 1700000120,
+            "open": 102,
+            "high": 104,
+            "low": 101,
+            "close": 103,
+            "volume": 12,
+            "isClosed": true
+          }
+        ],
+        "params": {},
+        "options": {}
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "shutdown-1",
+      "method": "shutdown",
+      "params": {}
+    }
+  ],
+  "expected": {
+    "responseSha256": [
+      "sha256:4fef4636de77b4e9d60354863b9a15e4302f06fccb5b4918c92b538a36ae2fc0",
+      "sha256:c9a6e890b2c9c8f0dad5740d139921e4367df0085c1c18e57bfd58880e7913bf",
+      "sha256:d410ace476ee2318b7bf7c5776a0beb7d952dafc4f394e8adbf028eac8bd3110",
+      "sha256:9c3317db2d6a485dd5c76e96e69040ec4a8b7f03736c21a36640f3f25a7c1786",
+      "sha256:726741f10bf51c1d8642f7acbc95f562bdd12df5297e54de62e6c680ab6f602f"
+    ],
+    "transcriptSha256": "sha256:021825fb264a63555e0eb331f24f6ea0632b0d2a0c962ef89a35673526391ba2"
+  }
+}

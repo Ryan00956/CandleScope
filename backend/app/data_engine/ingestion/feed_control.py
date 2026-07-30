@@ -167,7 +167,7 @@ class FeedControlLayer:
             self._session.on_health_change(self._handle_health_change)
 
         await self._session.start()
-        self._set_mode(FeedMode.WEBSOCKET)
+        self._set_mode(getattr(self._session, "feed_mode", FeedMode.WEBSOCKET))
         self._metrics.inc("ws_activations")
         logger.info("Switched to WS mode: %s", self._descriptor.key)
 
@@ -230,7 +230,7 @@ class FeedControlLayer:
         await self._stop_http_poll()
         await self._stop_ws_probe()
         if self._session is not None and self._session.manages_recovery_while_http:
-            self._set_mode(FeedMode.WEBSOCKET)
+            self._set_mode(getattr(self._session, "feed_mode", FeedMode.WEBSOCKET))
             return
         # Restart session (fresh connection)
         await self._stop_session()
@@ -249,13 +249,18 @@ class FeedControlLayer:
             if self._session is not None
             else frozenset({SessionHealth.UNHEALTHY})
         )
-        if health in fallback_states and self._mode == FeedMode.WEBSOCKET:
+        session_mode = (
+            getattr(self._session, "feed_mode", FeedMode.WEBSOCKET)
+            if self._session is not None
+            else FeedMode.WEBSOCKET
+        )
+        if health in fallback_states and self._mode == session_mode:
             await self._switch_to_http(reason)
         elif health == SessionHealth.CONNECTED and self._mode == FeedMode.HTTP_POLL:
             # The active session recovered on its own — switch back.
             await self._stop_http_poll()
             await self._stop_ws_probe()
-            self._set_mode(FeedMode.WEBSOCKET)
+            self._set_mode(session_mode)
             self._metrics.inc("ws_recoveries")
             logger.info("WS self-recovered via L2: %s", self._descriptor.key)
 
@@ -280,7 +285,12 @@ class FeedControlLayer:
 
     async def _handle_ws_message(self, msg: RawMessage) -> None:
         """Forward WS message upstream (only when in WS mode)."""
-        if self._mode != FeedMode.WEBSOCKET:
+        session_mode = (
+            getattr(self._session, "feed_mode", FeedMode.WEBSOCKET)
+            if self._session is not None
+            else FeedMode.WEBSOCKET
+        )
+        if self._mode != session_mode:
             return  # ignore WS data while in HTTP fallback
         self._metrics.inc("ws_messages_forwarded")
         if self._on_data:

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.hello-command",
+    "name": "Hello Command",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.hello_command",
+        "resourceProfile": "minimal",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "hello",
+      "kind": "command/1",
+      "title": "Say hello",
+      "entrypoint": "main",
+      "configuration": {}
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": [
+    {
+      "id": "hello-transcript",
+      "kind": "controlTranscript",
+      "sha256": "sha256:d98ebd2fc9f5b0695925caf47ecf961eae47a56b5e8ec110f28acc9365afdd38",
+      "entrypoint": "main"
+    }
+  ]
+}

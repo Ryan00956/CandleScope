@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -10,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import DATA_DIR
+
+
+_SCRIPT_LANGUAGE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 
 
 class CustomIndicatorStore:
@@ -37,6 +41,16 @@ class CustomIndicatorStore:
             now = int(time.time())
             indicator_id = (item.get("id") or "").strip() or self._new_id()
             existing = items.get(indicator_id, {})
+            raw_language = item.get("language")
+            if raw_language is not None and not _SCRIPT_LANGUAGE.fullmatch(
+                str(raw_language).strip().lower()
+            ):
+                raise ValueError(
+                    "Custom indicator language must be a lowercase identifier"
+                )
+            language = str(
+                item.get("language") or existing.get("language") or "pyne"
+            ).strip().lower()
 
             record = {
                 "schemaVersion": int(item.get("schemaVersion") or existing.get("schemaVersion") or 1),
@@ -52,6 +66,8 @@ class CustomIndicatorStore:
                 "created_at": int(existing.get("created_at") or item.get("created_at") or now),
                 "updated_at": now,
             }
+            if language != "pyne":
+                record["language"] = language
 
             self._validate(record)
             items[indicator_id] = record
@@ -117,3 +133,6 @@ class CustomIndicatorStore:
             raise ValueError("Custom indicator kind must be 'script' or 'custom'")
         if item.get("securityMode") not in {None, "safe", "research", "unsafe"}:
             raise ValueError("Custom indicator securityMode must be 'safe', 'research', or 'unsafe'")
+        language = item.get("language")
+        if language is not None and not _SCRIPT_LANGUAGE.fullmatch(str(language)):
+            raise ValueError("Custom indicator language must be a lowercase identifier")

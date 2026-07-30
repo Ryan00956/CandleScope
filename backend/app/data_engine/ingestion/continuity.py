@@ -27,6 +27,7 @@ from app.data_engine.history.calendar import (
 from .config import IngestionConfig
 from .metrics import LayerMetrics
 from .models import (
+    DataSource,
     StreamDescriptor,
     StreamType,
     MarketEvent,
@@ -125,6 +126,17 @@ class ContinuityLayer:
         """Process an incoming MarketEvent: dedup → gap check → emit."""
         self._metrics.inc("events_received")
         st = event.event_type
+
+        # A provider amendment intentionally revisits an already closed bar.
+        # It must reach BarAggregator without changing the forward continuity cursor.
+        if (
+            st == StreamType.KLINE
+            and event.source == DataSource.PLUGIN
+            and event.data.get("is_correction", False)
+        ):
+            self._metrics.inc("corrections_emitted")
+            await self._emit(event)
+            return
 
         # ── Dedup ──
         dedup_key = event.dedup_key

@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildDrawingPerformanceMockBars } from "./drawing-performance-mock-data.mjs";
 
 const port = Number.parseInt(process.env.PORT || "18000", 10);
@@ -32,6 +34,7 @@ const MARKET_CHANNELS = [
   "open_interest",
   "basis",
 ];
+const KLINE_NATIVE_INTERVALS = Object.freeze(["1m", "5m", "15m", "1h", "4h", "1d"]);
 const MARKET_IDENTITY = {
   exchange: "binance",
   market_type: "futures",
@@ -304,7 +307,7 @@ function detectIndicatorName(body) {
 }
 
 function indicatorPayload(body) {
-  const sourceBars = Array.isArray(body.ohlcv) && body.ohlcv.length ? body.ohlcv : bars;
+  const sourceBars = Array.isArray(body.ohlcv) ? body.ohlcv : bars;
   const name = detectIndicatorName(body);
   if (name === "VOL" || name === "VOLUME") {
     return {
@@ -363,6 +366,108 @@ function indicatorPayload(body) {
   };
 }
 
+function filterTimedPoints(points, start, end) {
+  if (!Array.isArray(points)) return [];
+  return points.filter((point) => {
+    const time = Number(point?.time);
+    return Number.isFinite(time) && time >= start && time <= end;
+  });
+}
+
+function filterIndicatorPayloadToRange(payload, start, end) {
+  const filtered = { ...payload };
+  if (Array.isArray(payload.lines)) {
+    filtered.lines = payload.lines.map((line) => ({
+      ...line,
+      data: filterTimedPoints(line.data, start, end),
+      ...(Array.isArray(line.colorData)
+        ? { colorData: filterTimedPoints(line.colorData, start, end) }
+        : {}),
+    }));
+  }
+  if (Array.isArray(payload.series)) {
+    filtered.series = payload.series.map((series) => ({
+      ...series,
+      data: filterTimedPoints(series.data, start, end),
+      style: {
+        ...(series.style || {}),
+        ...(Array.isArray(series.style?.colorData)
+          ? { colorData: filterTimedPoints(series.style.colorData, start, end) }
+          : {}),
+      },
+    }));
+  }
+  if (Array.isArray(payload.annotations)) {
+    filtered.annotations = payload.annotations.map((annotation) => ({
+      ...annotation,
+      data: Array.isArray(annotation.data) && annotation.data.some((point) => point?.time != null)
+        ? filterTimedPoints(annotation.data, start, end)
+        : annotation.data,
+    }));
+  }
+  for (const key of ["markers", "bgcolors", "barcolors", "signals"]) {
+    if (!Array.isArray(payload[key])) continue;
+    filtered[key] = payload[key].map((group) => ({
+      ...group,
+      data: filterTimedPoints(group.data, start, end),
+    }));
+  }
+  return filtered;
+}
+
+export function indicatorRangeBatchPayload(body = {}) {
+  const requests = Array.isArray(body?.requests) ? body.requests : [];
+  const results = requests.map((value) => {
+    const request = value && typeof value === "object" ? value : {};
+    const clientId = String(request.clientId || "");
+    const start = Number(request.start);
+    const end = Number(request.end);
+    const hasValidRange = Number.isFinite(start) && Number.isFinite(end) && start <= end;
+    const targetBars = hasValidRange
+      ? bars.filter((bar) => bar.time >= start && bar.time <= end)
+      : [];
+    if (targetBars.length === 0) {
+      return {
+        clientId,
+        payload: {
+          schemaVersion: 1,
+          ok: false,
+          code: "INDICATOR_RANGE_EMPTY",
+          error: "The controlled mock has no closed K-lines in the requested range.",
+          history_state: "exhausted",
+          complete: true,
+          retryable: false,
+          terminal_reason: "source_exhausted",
+        },
+      };
+    }
+    const confirmedStart = targetBars[0].time;
+    const confirmedEnd = targetBars.at(-1).time;
+    const payload = {
+      ...filterIndicatorPayloadToRange(
+        indicatorPayload(request),
+        confirmedStart,
+        confirmedEnd,
+      ),
+      schemaVersion: 1,
+      type: "indicator.replace_range",
+      clientId,
+      reason: String(request.reason || "range"),
+      range: { start: confirmedStart, end: confirmedEnd },
+    };
+    return {
+      clientId,
+      payload,
+    };
+  });
+  return {
+    schemaVersion: 1,
+    ok: results.every(({ payload }) => payload.ok !== false),
+    type: "indicator.range_batch",
+    results,
+  };
+}
+
 function advancedChannelCapability(channel, overrides = {}) {
   return {
     channel,
@@ -389,7 +494,7 @@ function advancedChannelCapability(channel, overrides = {}) {
   };
 }
 
-function exchangePayload() {
+export function exchangePayload() {
   return {
     count: 1,
     exchanges: [{
@@ -404,6 +509,13 @@ function exchangePayload() {
         { market_type: "futures", product_type: "perpetual", label: "USD-M Futures" },
       ],
       channels: [
+        advancedChannelCapability("kline", {
+          market_types: ["spot", "futures"],
+          history: true,
+          history_transports: ["rest_history"],
+          params: { interval: [...KLINE_NATIVE_INTERVALS] },
+          available_fields: ["open", "high", "low", "close", "volume"],
+        }),
         advancedChannelCapability("mark_price", {
           available_fields: ["mark_price"],
           derived_fields: ["basis", "basis_rate", "basis_bps"],
@@ -428,7 +540,7 @@ function exchangePayload() {
           limits: { "history.max_limit": 500 },
         }),
       ],
-      native_intervals: ["1m", "5m", "15m", "1h", "4h", "1d"],
+      native_intervals: [...KLINE_NATIVE_INTERVALS],
       supports_multi_symbol_ticker: false,
       supports_symbol_search: true,
       protocol_features: [],
@@ -438,6 +550,23 @@ function exchangePayload() {
       default_history_days_by_interval: { "1h": 30 },
     }],
   };
+}
+
+export function websocketConnectedPayload(requestUrl) {
+  const pathname = new URL(requestUrl, "http://127.0.0.1").pathname;
+  if (pathname === "/api/v1/stream/market") {
+    return { type: "connected", protocol: "market.v1", max_subscriptions: 64 };
+  }
+  if (pathname === "/api/v1/stream/order-book") {
+    return { type: "connected", protocol: "orderbook.v1" };
+  }
+  if (pathname === "/api/v1/stream/full-order-book") {
+    return { type: "connected", protocol: "orderbook.full.v1" };
+  }
+  if (pathname === "/api/v1/stream/trade-flow") {
+    return { type: "connected", protocol: "tradeflow.v1" };
+  }
+  return { type: "connected" };
 }
 
 function route(req, res) {
@@ -507,6 +636,9 @@ function route(req, res) {
   if (path === "/api/v1/indicators/compute" && req.method === "POST") {
     return readBody(req).then((body) => json(res, indicatorPayload(body)));
   }
+  if (path === "/api/v1/indicators/range/batch" && req.method === "POST") {
+    return readBody(req).then((body) => json(res, indicatorRangeBatchPayload(body)));
+  }
   return json(res, { ok: true }, 200);
 }
 
@@ -571,8 +703,12 @@ server.on("upgrade", (req, socket) => {
     socket.destroy();
     return;
   }
-  const isIndicatorStream = req.url.startsWith("/api/v1/stream/indicators");
-  const isMarketStream = req.url.startsWith("/api/v1/stream/market");
+  const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+  const isIndicatorStream = pathname === "/api/v1/stream/indicators";
+  const isMarketStream = pathname === "/api/v1/stream/market";
+  const isOrderBookStream = pathname === "/api/v1/stream/order-book"
+    || pathname === "/api/v1/stream/full-order-book";
+  const isTradeFlowStream = pathname === "/api/v1/stream/trade-flow";
   const key = req.headers["sec-websocket-key"];
   const accept = crypto
     .createHash("sha1")
@@ -586,16 +722,14 @@ server.on("upgrade", (req, socket) => {
     "",
     "",
   ].join("\r\n"));
-  socket.write(wsFrame(isMarketStream
-    ? { type: "connected", protocol: "market.v1", max_subscriptions: 64 }
-    : { type: "connected" }));
-  if (!isIndicatorStream && !isMarketStream) {
+  socket.write(wsFrame(websocketConnectedPayload(req.url)));
+  if (!isIndicatorStream && !isMarketStream && !isOrderBookStream && !isTradeFlowStream) {
     socket.write(wsFrame({ type: "stream_status", interval: "1h", status: "live" }));
   }
   let seq = 0;
   let pending = Buffer.alloc(0);
   socket.on("data", (chunk) => {
-    if (!isIndicatorStream && !isMarketStream) return;
+    if (!isIndicatorStream && !isMarketStream && !isOrderBookStream && !isTradeFlowStream) return;
     const decoded = decodeClientFrames(Buffer.concat([pending, chunk]));
     pending = decoded.rest;
     for (const frame of decoded.frames) {
@@ -657,6 +791,43 @@ server.on("upgrade", (req, socket) => {
         }));
         continue;
       }
+      if (isOrderBookStream) {
+        const requestId = typeof message.request_id === "string" ? message.request_id : undefined;
+        if (message.action === "unsubscribe") {
+          socket.write(wsFrame({ type: "unsubscribed", request_id: requestId }));
+          continue;
+        }
+        if (message.action === "subscribe" && Array.isArray(message.streams)) {
+          socket.write(wsFrame({
+            type: "subscribed",
+            request_id: requestId,
+            streams: message.streams,
+          }));
+        }
+        continue;
+      }
+      if (isTradeFlowStream) {
+        const requestId = typeof message.request_id === "string" ? message.request_id : undefined;
+        if (message.action === "unsubscribe") {
+          socket.write(wsFrame({ type: "unsubscribed", request_id: requestId }));
+          continue;
+        }
+        if (message.action === "subscribe" && Array.isArray(message.streams)) {
+          socket.write(wsFrame({
+            type: "subscribed",
+            protocol: "tradeflow.v1",
+            request_id: requestId,
+            streams: message.streams,
+          }));
+          socket.write(wsFrame({
+            type: "recent",
+            protocol: "tradeflow.v1",
+            request_id: requestId,
+            data: [],
+          }));
+        }
+        continue;
+      }
       if (message.action !== "subscribe" || !message.clientId) continue;
       const payload = indicatorPayload({
         name: message.name,
@@ -675,6 +846,15 @@ server.on("upgrade", (req, socket) => {
   socket.on("error", () => {});
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`CandleScope mock API listening on http://127.0.0.1:${port}`);
-});
+const DIRECT_ENTRYPOINT = process.argv[1] ? path.resolve(process.argv[1]) : null;
+const THIS_ENTRYPOINT = fileURLToPath(import.meta.url);
+const DIRECT_EXECUTION = DIRECT_ENTRYPOINT !== null && (
+  process.platform === "win32"
+    ? DIRECT_ENTRYPOINT.toLowerCase() === THIS_ENTRYPOINT.toLowerCase()
+    : DIRECT_ENTRYPOINT === THIS_ENTRYPOINT
+);
+if (DIRECT_EXECUTION) {
+  server.listen(port, "127.0.0.1", () => {
+    console.log(`CandleScope mock API listening on http://127.0.0.1:${port}`);
+  });
+}

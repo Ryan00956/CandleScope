@@ -10,8 +10,16 @@ import {
   subtractIndicatorRange,
 } from "../indicatorRangeCoverage.js";
 import { createIndicatorRangeScheduler } from "../indicatorRangeScheduler.js";
+import { buildIndicatorRangeLifecycleKey } from "../indicatorRangeLifecycle.js";
+import { resolveDirectIndicatorRangeRevision } from "../indicatorRangeRequestDedupe.js";
+import {
+  planVisibleIndicatorHydrationRange,
+  resolveInitialHostedRange,
+  type IndicatorVisibleNavigationState,
+} from "../indicatorRangePlanning.js";
+import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import type { IndicatorRange } from "../indicatorTypes.js";
-import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 const flushMicrotask = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
 const flushTimer = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -105,6 +113,71 @@ test("warm coverage produces zero work", async () => {
   });
   await scheduler.drain();
   assert.deepEqual(requests, []);
+});
+
+test("rightward viewport gestures inside one hydration bucket produce no physical request", async () => {
+  const chartData = Array.from({ length: 5_000 }, (_, index) => structuralMock<KlineBar>({
+    time: 1_700_000_000 + index * 60,
+  }));
+  const target = { key: "ema", id: "ema" };
+  const scheduler = createIndicatorRangeScheduler<typeof target, IndicatorRange>();
+  const initialDesired = mustBeDefined(resolveInitialHostedRange(
+    chartData,
+    [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+    { logical: { from: 0, to: 419 } },
+  ));
+  let navigation: IndicatorVisibleNavigationState | null = planVisibleIndicatorHydrationRange({
+    chartData,
+    desired: initialDesired,
+    interval: "1m",
+    seriesKey: "one|1m",
+  }).nextState;
+  let covered = [{ start: initialDesired.start, end: initialDesired.end }];
+  const requests: IndicatorRange[] = [];
+
+  const navigate = async (from: number, to: number) => {
+    const desired = mustBeDefined(resolveInitialHostedRange(
+      chartData,
+      [{ id: "ema", engineName: "EMA", params: { period: 20 } }],
+      { logical: { from, to } },
+    ));
+    const plan = planVisibleIndicatorHydrationRange({
+      chartData,
+      desired,
+      interval: "1m",
+      previous: navigation,
+      seriesKey: "one|1m",
+    });
+    navigation = plan.nextState;
+    scheduler.ensureCoverage({
+      sessionKey: "one|1m",
+      targets: [target],
+      range: plan.range,
+      step: 60,
+      getCoveredSegments: () => covered,
+      execute: async ({ range }) => {
+        requests.push(range);
+        return range;
+      },
+      apply: ({ result }) => {
+        covered = mergeIndicatorRangeSegments([...covered, result], { step: 60 });
+      },
+    });
+    await scheduler.drain();
+  };
+
+  await navigate(420, 839);
+  await navigate(840, 1_259);
+  await navigate(900, 1_319);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.end, chartData[1_499]?.time);
+
+  await navigate(1_260, 1_679);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], {
+    start: chartData[1_500]?.time,
+    end: chartData[2_999]?.time,
+  });
 });
 
 test("malformed non-array targets fail closed without scheduling work", () => {
@@ -257,6 +330,7 @@ test("a newer correction revision supersedes an in-flight response in the same s
   const scheduler = createIndicatorRangeScheduler<{ key: string; id: string }, { revision: number }>();
   let resolveOld: ((value: { revision: number }) => void) | undefined;
   const oldRequest = new Promise<{ revision: number }>((resolve) => { resolveOld = resolve; });
+  let oldSignal: AbortSignal | undefined;
   const applied: number[] = [];
   const base = {
     sessionKey: "same",
@@ -268,7 +342,10 @@ test("a newer correction revision supersedes an in-flight response in the same s
   scheduler.ensureCoverage({
     ...base,
     revision: { correctionRevision: 1 },
-    execute: () => oldRequest,
+    execute: ({ signal }) => {
+      oldSignal = signal;
+      return oldRequest;
+    },
   });
   await flushMicrotask();
   scheduler.ensureCoverage({
@@ -276,9 +353,137 @@ test("a newer correction revision supersedes an in-flight response in the same s
     revision: { correctionRevision: 2 },
     execute: async () => ({ revision: 2 }),
   });
+  assert.equal(mustBeDefined(oldSignal).aborted, true);
   await flushMicrotask();
   await flushMicrotask();
   mustBeDefined(resolveOld)({ revision: 1 });
   await flushMicrotask();
   assert.deepEqual(applied, [2]);
+});
+
+test("revision supersession stays in the demand lifecycle while generation changes abort", async () => {
+  const scheduler = createIndicatorRangeScheduler<{ key: string }, { ok: boolean }>();
+  const firstLifecycle = buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 1,
+  });
+  const nextLifecycle = buildIndicatorRangeLifecycleKey("series", {
+    scope: "viewport",
+    generation: 2,
+  });
+  let signal: AbortSignal | undefined;
+  let resolveRequest: ((value: { ok: boolean }) => void) | undefined;
+  const pending = new Promise<{ ok: boolean }>((resolve) => { resolveRequest = resolve; });
+  let applied = 0;
+  scheduler.ensureCoverage({
+    sessionKey: firstLifecycle,
+    targets: [{ key: "ma" }],
+    range: { start: 60, end: 120 },
+    revision: { correctionRevision: 1 },
+    getCoveredSegments: () => [],
+    execute: ({ signal: currentSignal }) => {
+      signal = currentSignal;
+      return pending;
+    },
+    apply: () => { applied += 1; },
+  });
+  await flushMicrotask();
+  const originalEpoch = scheduler.snapshot().epoch;
+
+  scheduler.supersedeRevision({
+    abortInFlight: false,
+    revision: { correctionRevision: 2 },
+    sessionKey: firstLifecycle,
+    targetKeys: ["ma"],
+  });
+  assert.equal(scheduler.snapshot().epoch, originalEpoch);
+  assert.equal(mustBeDefined(signal).aborted, false);
+
+  scheduler.setSession(nextLifecycle);
+  assert.ok(scheduler.snapshot().epoch > originalEpoch);
+  assert.equal(mustBeDefined(signal).aborted, true);
+  mustBeDefined(resolveRequest)({ ok: true });
+  await flushMicrotask();
+  assert.equal(applied, 0);
+});
+
+test("queued correction supersedes stale apply without aborting physical work", async () => {
+  const scheduler = createIndicatorRangeScheduler<{ key: string; id: string }, { revision: number }>();
+  let resolveOld: ((value: { revision: number }) => void) | undefined;
+  const oldRequest = new Promise<{ revision: number }>((resolve) => { resolveOld = resolve; });
+  let oldSignal: AbortSignal | undefined;
+  const applied: number[] = [];
+  const settled: Array<{ ok: boolean; stale: boolean }> = [];
+  const base = {
+    sessionKey: "same",
+    targets: [{ key: "ema", id: "ema" }],
+    range: { start: 60, end: 600 },
+    getCoveredSegments: () => [],
+    apply: ({ result }: { result: { revision: number } }) => { applied.push(result.revision); },
+  };
+  scheduler.ensureCoverage({
+    ...base,
+    revision: { correctionRevision: 1 },
+    execute: ({ signal }) => {
+      oldSignal = signal;
+      return oldRequest;
+    },
+    onSettled: (ok, detail) => settled.push({ ok, stale: detail.stale === true }),
+  });
+  await flushMicrotask();
+
+  scheduler.supersedeRevision({
+    abortInFlight: false,
+    revision: { correctionRevision: 2 },
+    sessionKey: "same",
+    targetKeys: ["ema"],
+  });
+  assert.equal(mustBeDefined(oldSignal).aborted, false);
+  mustBeDefined(resolveOld)({ revision: 1 });
+  await scheduler.drain();
+  assert.deepEqual(applied, []);
+  assert.deepEqual(settled, [{ ok: false, stale: true }]);
+
+  scheduler.ensureCoverage({
+    ...base,
+    revision: { correctionRevision: 2 },
+    execute: async () => ({ revision: 2 }),
+  });
+  await scheduler.drain();
+  assert.deepEqual(applied, [2]);
+});
+
+test("released WS intent enqueues once at the already-superseded current revision", async () => {
+  const scheduler = createIndicatorRangeScheduler<{ key: string }, { revision: number }>();
+  const applied: number[] = [];
+  const executed: string[] = [];
+  const target = { key: "ema" };
+  scheduler.supersedeRevision({
+    abortInFlight: false,
+    revision: { serverEpoch: "boot-1", correctionRevision: 4 },
+    sessionKey: "same",
+    targetKeys: ["ema"],
+  });
+  const replayRevision = resolveDirectIndicatorRangeRevision(
+    { serverEpoch: "boot-1", correctionRevision: 4 },
+    { serverEpoch: "boot-1", correctionRevision: 3 },
+  );
+  scheduler.ensureCoverage({
+    apply: ({ result }) => { applied.push(result.revision); },
+    execute: async () => {
+      executed.push(replayRevision?.correctionRevision || "legacy");
+      return { revision: Number(replayRevision?.correctionRevision) };
+    },
+    getCoveredSegments: () => [],
+    range: { start: 60, end: 600 },
+    revision: replayRevision,
+    sessionKey: "same",
+    targets: [target],
+  });
+  await scheduler.drain();
+
+  assert.deepEqual(executed, ["4"]);
+  assert.deepEqual(applied, [4]);
+  assert.equal(scheduler.snapshot().inFlight.length, 0);
+  assert.equal(scheduler.snapshot().pending, 0);
 });

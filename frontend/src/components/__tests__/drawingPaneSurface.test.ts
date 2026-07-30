@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   composeDrawingPaneExportLeases,
+  drawingPaneWarmMountKeys,
   drawingPaneIdAfterPointerLeave,
   drawingToolForPane,
   drawingPaneScopeKey,
+  isDrawingInteractionReady,
+  ownsDrawingApiRegistrationCleanup,
+  reconcileRegisteredDrawingPaneMountKeys,
   reconcileDrawingPaneHostMountKeys,
   resolveDrawingInteractionPaneId,
 } from "../drawingPaneSurface.js";
@@ -57,6 +61,87 @@ test("pointer leave preserves an active drawing pane owner until chart re-entry"
   assert.equal(drawingPaneIdAfterPointerLeave("volume-vol", true), "volume-vol");
   assert.equal(drawingPaneIdAfterPointerLeave("volume-vol", false), null);
   assert.equal(drawingPaneIdAfterPointerLeave(null, true), null);
+});
+
+test("only the next pointer-owned pane is warmed and admitted for interaction", () => {
+  assert.deepEqual([...drawingPaneWarmMountKeys({
+    dataReady: true,
+    interactionDrawingKey: "BTCUSDT__volume-vol",
+    loading: false,
+  })], ["BTCUSDT__volume-vol"]);
+  assert.deepEqual([...drawingPaneWarmMountKeys({
+    dataReady: false,
+    interactionDrawingKey: "BTCUSDT__main",
+    loading: false,
+  })], []);
+
+  assert.equal(isDrawingInteractionReady({
+    interactionDrawingKey: "BTCUSDT__main",
+    registeredKeys: new Set(["BTCUSDT__main"]),
+    surfaceDataReady: true,
+    supportsDrawingFeatures: true,
+  }), true);
+  assert.equal(isDrawingInteractionReady({
+    interactionDrawingKey: "BTCUSDT__volume-vol",
+    registeredKeys: new Set(["BTCUSDT__main"]),
+    surfaceDataReady: true,
+    supportsDrawingFeatures: true,
+  }), false);
+  assert.equal(isDrawingInteractionReady({
+    interactionDrawingKey: "BTCUSDT__volume-vol",
+    registeredKeys: new Set(["BTCUSDT__volume-vol"]),
+    surfaceDataReady: false,
+    supportsDrawingFeatures: true,
+  }), false);
+  assert.equal(isDrawingInteractionReady({
+    interactionDrawingKey: null,
+    registeredKeys: new Set(),
+    surfaceDataReady: false,
+    supportsDrawingFeatures: false,
+  }), true);
+});
+
+test("late API cleanup cannot remove a newer same-key or different-scope host", () => {
+  const oldApi = {};
+  const newApi = {};
+  assert.equal(ownsDrawingApiRegistrationCleanup({
+    cleanupApi: oldApi,
+    cleanupKey: "BTCUSDT__main",
+    currentApi: newApi,
+    currentKey: "BTCUSDT__main",
+  }), false);
+  assert.equal(ownsDrawingApiRegistrationCleanup({
+    cleanupApi: oldApi,
+    cleanupKey: "BTCUSDT__main",
+    currentApi: oldApi,
+    currentKey: "BTCUSDT__main",
+  }), true);
+  assert.equal(ownsDrawingApiRegistrationCleanup({
+    cleanupApi: null,
+    cleanupKey: "BTCUSDT__main",
+    currentApi: newApi,
+    currentKey: "BTCUSDT__main",
+  }), false);
+  assert.equal(ownsDrawingApiRegistrationCleanup({
+    cleanupApi: null,
+    cleanupKey: "BTCUSDT__main",
+    currentApi: newApi,
+    currentKey: "ETHUSDT__main",
+  }), false);
+});
+
+test("registered readiness keys follow the current pane API map after late cleanup", () => {
+  const afterScopeBRegistered = reconcileRegisteredDrawingPaneMountKeys(
+    new Set(["BTCUSDT__main", "ETHUSDT__main"]),
+    new Map([["main", "ETHUSDT__main"]]).values(),
+  );
+  assert.deepEqual([...afterScopeBRegistered], ["ETHUSDT__main"]);
+
+  const sameKeyRefresh = reconcileRegisteredDrawingPaneMountKeys(
+    new Set(["BTCUSDT__main"]),
+    new Map([["main", "BTCUSDT__main"]]).values(),
+  );
+  assert.deepEqual([...sameKeyRefresh], ["BTCUSDT__main"]);
 });
 
 test("an admitted pane host remains mounted across hover routing and prunes on scope removal", () => {

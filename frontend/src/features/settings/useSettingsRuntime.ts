@@ -91,12 +91,6 @@ export function useSettingsRuntime({
         currentExchange,
         ...maintenanceRuntime,
       },
-      database: {
-        currentExchange,
-        currentMarketType,
-        currentSymbol,
-        watchlists,
-      },
       actionTypes: SETTINGS_ACTION_TYPES,
   };
 

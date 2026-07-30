@@ -403,6 +403,12 @@ class PositionRenderer implements PrimitivePaneRenderer {
         const edgeMidY = (topY + botY) / 2;
         this._drawEdgeHandle(ctx, lX, edgeMidY, topY, botY, edgeHandleColor, ratio, vRatio);
         this._drawEdgeHandle(ctx, rX, edgeMidY, topY, botY, edgeHandleColor, ratio, vRatio);
+        if (tY != null && sY != null) {
+          this._drawCornerHandle(ctx, lX, topY, ratio, vRatio);
+          this._drawCornerHandle(ctx, rX, topY, ratio, vRatio);
+          this._drawCornerHandle(ctx, lX, botY, ratio, vRatio);
+          this._drawCornerHandle(ctx, rX, botY, ratio, vRatio);
+        }
       }
 
       // Hover glow
@@ -510,6 +516,27 @@ class PositionRenderer implements PrimitivePaneRenderer {
       ctx.lineTo(hx + handleW - 1 * ratio, gy);
       ctx.stroke();
     }
+  }
+
+  _drawCornerHandle(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    ratio: number,
+    vRatio: number,
+  ): void {
+    const size = 8 * Math.min(ratio, vRatio);
+    const half = size / 2;
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = adjustAlpha("#90a4ae", 0.9);
+    ctx.lineWidth = 1.5 * Math.min(ratio, vRatio);
+    ctx.shadowColor = "rgba(0,0,0,0.3)";
+    ctx.shadowBlur = 3 * Math.min(ratio, vRatio);
+    ctx.beginPath();
+    ctx.rect(x - half, y - half, size, size);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
   }
 
   /**
@@ -1145,6 +1172,19 @@ export class PositionDrawingPrimitive {
     if (slY != null) allYs.push(slY);
     const boxTop = Math.min(...allYs);
     const boxBottom = Math.max(...allYs);
+
+    // Corner handles resize both the horizontal time span and the visual
+    // top/bottom risk-reward boundary in one gesture. They must win over the
+    // TP/SL line hit that crosses each corner.
+    if (this._selected && tpY != null && slY != null) {
+      const horizontal = Math.abs(x - minX) <= Math.abs(x - maxX) ? "left" : "right";
+      const vertical = Math.abs(y - boxTop) <= Math.abs(y - boxBottom) ? "top" : "bottom";
+      const edgeX = horizontal === "left" ? minX : maxX;
+      const edgeY = vertical === "top" ? boxTop : boxBottom;
+      if (Math.abs(x - edgeX) <= EDGE_HIT && Math.abs(y - edgeY) <= EDGE_HIT) {
+        return { zone: `${vertical}-${horizontal}`, pointIndex: -1 };
+      }
+    }
 
     // Check TP line hit (for dragging)
     if (tpY != null && Math.abs(y - tpY) <= HIT_RADIUS && x >= minX - 5 && x <= maxX + 5) {

@@ -16,6 +16,7 @@ def test_backfill_reason_audience_mapping() -> None:
     assert audience_for_backfill_reason("visible_range_gap") == "user"
     assert audience_for_backfill_reason("tail_gap") == "user"
     assert audience_for_backfill_reason("background_gap_audit") == "internal"
+    assert audience_for_backfill_reason("active_history_hydration") == "internal"
     assert audience_for_backfill_reason("related_interval_warmup") == "internal"
     assert audience_for_backfill_reason("query_gap") == "internal"
     assert audience_for_backfill_reason("visible_range_gap+query_gap") == "user"

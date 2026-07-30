@@ -10,6 +10,7 @@ from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.kline_quality import (
     FinalityTrust,
     kline_source_quality,
+    repair_requires_trusted_finality,
     source_rank,
 )
 from app.data_engine.storage import klines_repo
@@ -85,6 +86,20 @@ def test_source_quality_is_centralized_and_unknown_fails_closed() -> None:
     assert source_rank("repair_binance_rest_verified") > source_rank("backfill")
     assert source_rank("backfill") > source_rank("data_manager_exchange_closed")
     assert source_rank("data_manager_exchange_closed") > source_rank("data_manager_closed")
+
+
+def test_trusted_finality_repair_policy_supports_new_and_queued_metadata() -> None:
+    assert repair_requires_trusted_finality({"requires_trusted_finality": True})
+    assert repair_requires_trusted_finality({
+        "query_reason": "query_untrusted_finality",
+    })
+    assert repair_requires_trusted_finality(
+        {"query_reason": "query_interior_gap"},
+        reason="query_gap+query_untrusted_finality",
+    )
+    assert not repair_requires_trusted_finality({
+        "query_reason": "query_interior_gap",
+    })
 
 
 def test_bar_data_retains_quality_without_changing_legacy_json_shape() -> None:

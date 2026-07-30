@@ -6,6 +6,7 @@ import {
   normalizeIndicatorRange,
   normalizeIndicatorRevision,
 } from "./indicatorRangeCoverage.js";
+import { estimateOutputWarmupBars } from "./indicatorRangePlanning.js";
 import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
@@ -56,11 +57,58 @@ export function buildIndicatorWsSignature(
         getBuiltinIndicatorName(indicator),
         isBuiltinIndicator(indicator) ? "builtin" : "script",
         stringSignature(indicator.script || ""),
+        indicator.language || "",
         indicator.securityMode || "",
         JSON.stringify(indicator.params || {}),
       ].join(":"),
     )
     .join("|");
+}
+
+export function resolveHostedSubscriptionHistoryLimit(
+  chartDataLength: unknown,
+): number {
+  const parsed = Math.floor(Number(chartDataLength));
+  const normalized = Number.isFinite(parsed) ? parsed : 0;
+  return Math.min(
+    Math.max(normalized, 1),
+    INDICATOR_HISTORY_LIMIT,
+  );
+}
+
+/**
+ * The realtime seed deliberately excludes a forming candle. Give indicators
+ * with a warmup one additional requested bar so a chart whose latest candle is
+ * still forming can still seed the full closed-bar requirement.
+ */
+export function resolveHostedSubscriptionSeedHistoryLimit(
+  indicator: IndicatorDefinition,
+): number {
+  const warmupBars = Math.floor(estimateOutputWarmupBars(indicator));
+  if (!Number.isFinite(warmupBars) || warmupBars <= 0) return 0;
+  return Math.min(
+    Math.max(warmupBars + 2, 1),
+    INDICATOR_HISTORY_LIMIT,
+  );
+}
+
+/**
+ * Re-seed once when a previously insufficient chart window becomes large
+ * enough for the indicator's closed-bar warmup. Do not include history length
+ * in the wire identity: doing so would reconnect on every new candle.
+ */
+export function shouldResubscribeForHostedSeedCoverage(
+  indicator: IndicatorDefinition,
+  previousHistoryLimit: unknown,
+  nextHistoryLimit: unknown,
+): boolean {
+  const requiredHistoryLimit = resolveHostedSubscriptionSeedHistoryLimit(indicator);
+  if (requiredHistoryLimit <= 0) return false;
+  const previous = resolveHostedSubscriptionHistoryLimit(previousHistoryLimit);
+  const next = resolveHostedSubscriptionHistoryLimit(nextHistoryLimit);
+  return previous < requiredHistoryLimit
+    && next >= requiredHistoryLimit
+    && next > previous;
 }
 
 export function buildHostedSubscriptionMessage(
@@ -80,10 +128,7 @@ export function buildHostedSubscriptionMessage(
     symbol,
   } = context;
   const builtin = isBuiltinIndicator(indicator);
-  const historyLimit = Math.min(
-    Math.max(chartDataLength, 1),
-    INDICATOR_HISTORY_LIMIT,
-  );
+  const historyLimit = resolveHostedSubscriptionHistoryLimit(chartDataLength);
 
   const message: IndicatorSubscribeMessage = {
     action: "subscribe",
@@ -105,6 +150,7 @@ export function buildHostedSubscriptionMessage(
   } else {
     message.customId = indicator.id;
     if (indicator.script !== undefined) message.script = indicator.script;
+    if (indicator.language !== undefined) message.language = indicator.language;
     if (indicator.securityMode !== undefined) {
       message.securityMode = indicator.securityMode;
     }
@@ -141,6 +187,7 @@ export function buildHostedSubscriptionSignature(
     symbol: message.symbol,
     interval: message.interval,
     name: message.name || "",
+    language: message.language || "",
     scriptHash: stringSignature(message.script || ""),
     securityMode: message.securityMode || "",
     params: message.params || {},

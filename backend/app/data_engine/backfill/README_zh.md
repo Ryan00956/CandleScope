@@ -79,7 +79,7 @@ engine 的 fetcher snapshot 中暴露。
 |---|---|---|
 | Detect | `GapDetector` | 对比请求范围、storage 范围和 live reference，输出 `GapInfo` |
 | Plan | `BackfillPlanner` | 将缺口转为 fetch tasks，并生成自定义周期分解 |
-| Fetch | `HistoricalFetcher` | 带并发、retry、429 cooldown 的交易所 REST 分页拉取 |
+| Fetch | `HistoricalFetcher` | 已闭合大段历史走官方归档，尾部、缺口和失败回退走分页 REST |
 | Reconcile | `Reconciler` | 去重、聚合自定义周期、批量写 storage、记录 `WrittenRange` |
 | Publish | `RepairPublisher` | 通过日志/callback 发布最终 `RepairReport` |
 
@@ -178,6 +178,27 @@ Planner 会把自定义周期拆成标准组件。例如：
 - OKX 默认保守，测试覆盖超过 300 行 page cap 的分页拉取。
 - HTTP 429 会优先使用 `Retry-After`，并只对匹配的 endpoint bucket 应用 cooldown。
 
+## 官方历史归档通道
+
+归档路由对图表、指标和 WebSocket 协议透明：
+
+- Binance Spot 和 USD-M 的完整闭合月份优先月包；月包之后的完整日期仅在
+  原范围至少需要 3 页 REST 时使用日包。Binance 原生周期直接使用同周期归档；
+  `89m`、`47m` 等自定义周期仍精确使用 `1m` 基础数据。
+- 当前日、部分包周期、形成中 K 线、包内缺口、对象不存在、校验/ZIP/schema
+  失败和超时都走 REST。
+- 归档 404 或空包绝不作为历史边界证据；只有 REST 权威空页可以关闭 gap ledger。
+- ZIP 以内容寻址方式持久化在 `DATA_DIR/history_archives`，删除 K 线库后仍可本地
+  重建，并按 LRU 限额回收。网络下载并发固定为 2；归档 SQLite 写入串行，且
+  每个对象一个事务。
+- Binance `.CHECKSUM` 每 24 小时按需复核；发现修订时先失效重叠的派生自定义 K 线，
+  再重新物化。
+- OKX 默认关闭。显式开启后，启动阶段会探测其非稳定网页下载契约；URL、schema
+  或 `confirm` 语义不兼容时会关闭整条 OKX 归档能力并回退 REST。
+
+Fetcher diagnostics 会暴露选中来源、cache/object 数、下载字节、下载/解析耗时、
+REST tail/fallback 次数和 singleflight 等待数。
+
 ## 去重策略
 
 `DeduplicationStrategy`：
@@ -214,6 +235,10 @@ Planner 会把自定义周期拆成标准组件。例如：
 | `BACKFILL_RATE_LIMIT_BINANCE_FUTURES_WEIGHT_PER_MINUTE` | Binance futures request-weight 额度 |
 | `BACKFILL_RATE_LIMIT_OKX_CANDLES_REQUESTS_PER_2S` | OKX market candles 请求窗口 |
 | `BACKFILL_RATE_LIMIT_OKX_HISTORY_CANDLES_REQUESTS_PER_2S` | OKX history candles 请求窗口 |
+| `HISTORY_ARCHIVE_ENABLED` | 是否启用官方归档路由，默认 `1` |
+| `HISTORY_ARCHIVE_CACHE_DIR` | 持久 ZIP cache，默认 `DATA_DIR/history_archives` |
+| `HISTORY_ARCHIVE_CACHE_MAX_BYTES` | 归档 cache LRU 上限，默认 `10737418240`（10 GiB） |
+| `OKX_HISTORY_ARCHIVE_ENABLED` | 是否启用受保护的 OKX 探测/路由，默认 `0` |
 | `BACKFILL_RECONCILE_DEDUP_STRATEGY` | 写入冲突策略 |
 | `BACKFILL_RECONCILE_WRITE_BATCH_SIZE` | storage 写入批大小 |
 | `BACKFILL_RECONCILE_GENERATE_CUSTOM` | 是否生成自定义周期 rows |
@@ -229,6 +254,10 @@ python -m pytest -q \
   tests/test_backfill_gap_detector.py \
   tests/test_backfill_rate_limit.py \
   tests/test_backfill_reconciler.py \
+  tests/test_history_archive_providers.py \
+  tests/test_history_archive_cache.py \
+  tests/test_history_archive_routing.py \
+  tests/test_history_archive_storage.py \
   tests/test_transport_http_rate_limit_metadata.py \
   tests/test_okx_backfill_fetcher.py
 ```

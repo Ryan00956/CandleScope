@@ -1,4 +1,5 @@
 import { memo } from "react";
+import type { ReactNode } from "react";
 import MarketStatusBar from "./MarketStatusBar.js";
 
 export type ConnectionStatus = "connected" | "loading" | "disconnected" | string;
@@ -18,9 +19,10 @@ export interface StatusBarModel {
 
 export interface StatusBarProps {
   status: StatusBarModel;
+  extensions?: ReactNode;
 }
 
-function StatusBar({ status }: StatusBarProps) {
+function StatusBar({ status, extensions }: StatusBarProps) {
   const {
     connectionStatus,
     dataSource,
@@ -63,6 +65,7 @@ function StatusBar({ status }: StatusBarProps) {
         )}
       </>}
       right={<>
+        {extensions}
         <span>{dataSource === "mock" ? "Demo Mode" : `${exchangeLabel} ${marketLabel}`}</span>
         <span>{wsStatusLabel}</span>
         <span>CandleScope v0.2.0</span>

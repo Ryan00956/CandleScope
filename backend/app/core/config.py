@@ -176,6 +176,18 @@ PORT = int(os.getenv("CANDLE_PORT", "8000"))
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
+HISTORY_ARCHIVE_ENABLED = os.getenv(
+    "HISTORY_ARCHIVE_ENABLED", "1"
+).strip().lower() in {"1", "true", "yes", "on"}
+HISTORY_ARCHIVE_CACHE_DIR = Path(
+    os.getenv("HISTORY_ARCHIVE_CACHE_DIR", DATA_DIR / "history_archives")
+)
+HISTORY_ARCHIVE_CACHE_MAX_BYTES = int(
+    os.getenv("HISTORY_ARCHIVE_CACHE_MAX_BYTES", str(10 * 1024**3))
+)
+OKX_HISTORY_ARCHIVE_ENABLED = os.getenv(
+    "OKX_HISTORY_ARCHIVE_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Replay remains disabled by default and owns a database separate from K-lines.
 # These limits are frozen Phase 0 safety ceilings; environment overrides may
@@ -386,6 +398,40 @@ BINANCE_FUTURES_WS_URLS = [
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
+SYMBOL_CATALOG_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_TTL_SECONDS", "300")),
+)
+SYMBOL_CATALOG_FAILURE_RETRY_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_FAILURE_RETRY_SECONDS", "30")),
+)
+SYMBOL_CATALOG_RETRY_JITTER_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_RETRY_JITTER_SECONDS", "1")),
+)
+SYMBOL_CATALOG_EMPTY_WAIT_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_EMPTY_WAIT_SECONDS", "1")),
+)
+SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS = max(
+    0.0,
+    float(os.getenv("SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS", "1")),
+)
+SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS = max(
+    0.05,
+    float(os.getenv("SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS", "0.25")),
+)
+SYMBOL_CATALOG_MIN_RETAIN_RATIO = min(
+    1.0,
+    max(0.0, float(os.getenv("SYMBOL_CATALOG_MIN_RETAIN_RATIO", "0.5"))),
+)
+SYMBOL_CATALOG_SNAPSHOT_PATH = Path(
+    os.getenv(
+        "SYMBOL_CATALOG_SNAPSHOT_PATH",
+        DATA_DIR / "symbol_catalog.v1.json",
+    )
+)
 
 # Pyne runtime safety. This is a local-first application, so advanced users can
 # opt into broader Python capability, but the default stays conservative.
@@ -423,6 +469,8 @@ INDICATOR_RANGE_CACHE_ENABLED = os.getenv(
 ).strip().lower() not in {"0", "false", "no", "off"}
 INDICATOR_RANGE_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_RANGE_CACHE_MAX_ENTRIES", "128"))
 INDICATOR_RANGE_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_RANGE_CACHE_TTL_SECONDS", "180"))
+INDICATOR_BARS_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_BARS_CACHE_MAX_ENTRIES", "8"))
+INDICATOR_BARS_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_BARS_CACHE_TTL_SECONDS", "30"))
 INDICATOR_RANGE_BACKFILL_WAIT_SECONDS = float(os.getenv("INDICATOR_RANGE_BACKFILL_WAIT_SECONDS", "3"))
 
 # Keep unsubscribed builtin engines warm briefly so a quick interval switch can

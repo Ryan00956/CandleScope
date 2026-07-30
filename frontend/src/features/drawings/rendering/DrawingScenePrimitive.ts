@@ -15,6 +15,19 @@ export interface DrawingScenePaintAck {
 
 export type DrawingScenePaintListener = (ack: DrawingScenePaintAck) => void;
 
+type DrawingScenePaintRetryFrame = (callback: () => void) => unknown;
+type DrawingSceneCancelPaintRetryFrame = (handle: unknown) => void;
+
+function requestNativePaintRetryFrame(callback: () => void): unknown | null {
+  if (typeof requestAnimationFrame !== "function") return null;
+  return requestAnimationFrame(callback);
+}
+
+function cancelNativePaintRetryFrame(handle: unknown): void {
+  if (typeof cancelAnimationFrame !== "function") return;
+  cancelAnimationFrame(handle as number);
+}
+
 export interface DrawingScenePrimitiveOptions {
   /**
    * Called from Lightweight Charts' own view-update phase. The lifecycle uses
@@ -22,6 +35,13 @@ export interface DrawingScenePrimitiveOptions {
    * is consumed, without teaching the primitive how to project geometry.
    */
   synchronizeChartFrame?: () => void;
+  /**
+   * Test/host seam for the single post-publication paint recovery check. It
+   * deliberately has no timer fallback: server-side primitives have no chart
+   * bitmap to recover.
+   */
+  requestPaintRetryFrame?: DrawingScenePaintRetryFrame;
+  cancelPaintRetryFrame?: DrawingSceneCancelPaintRetryFrame;
 }
 
 class DrawingScenePaneView implements PrimitivePaneView {
@@ -50,18 +70,28 @@ export class DrawingScenePrimitive {
   readonly #paneView: DrawingScenePaneView;
   readonly #paneViews: readonly PrimitivePaneView[];
   readonly #synchronizeChartFrame: () => void;
+  readonly #requestPaintRetryFrame: DrawingScenePaintRetryFrame;
+  readonly #cancelPaintRetryFrame: DrawingSceneCancelPaintRetryFrame;
   readonly #paintListeners = new Set<DrawingScenePaintListener>();
   #requestUpdate: (() => void) | null = null;
   #updatingAllViews = false;
   #attachmentRevision = 0;
   #paintSequence = 0;
+  #lastPaintedPlan: DrawingScreenDisplayList | null = null;
+  #paintRetryFrame: unknown = null;
+  #paintRetryGeneration = 0;
+  #paintRetryPlan: DrawingScreenDisplayList | null = null;
   #disposed = false;
   _series: DrawingAttachedParameter["series"] | null = null;
 
   constructor({
     synchronizeChartFrame = () => {},
+    requestPaintRetryFrame = requestNativePaintRetryFrame,
+    cancelPaintRetryFrame = cancelNativePaintRetryFrame,
   }: DrawingScenePrimitiveOptions = {}) {
     this.#synchronizeChartFrame = synchronizeChartFrame;
+    this.#requestPaintRetryFrame = requestPaintRetryFrame;
+    this.#cancelPaintRetryFrame = cancelPaintRetryFrame;
     this.#renderer = new DrawingSceneRenderer((plan) => {
       this.#acknowledgePainted(plan);
     });
@@ -73,11 +103,66 @@ export class DrawingScenePrimitive {
     this.#paintListeners.clear();
   }
 
+  #cancelPaintRetry(): void {
+    this.#paintRetryGeneration += 1;
+    const frame = this.#paintRetryFrame;
+    this.#paintRetryFrame = null;
+    this.#paintRetryPlan = null;
+    if (frame === null) return;
+    try {
+      this.#cancelPaintRetryFrame(frame);
+    } catch {
+      // A host cancellation failure must not prevent credential retirement.
+    }
+  }
+
+  /**
+   * The normal path always asks LWC for an update immediately. This is only a
+   * bounded recovery for a dropped first paint: if the exact immutable plan
+   * still has no renderer acknowledgement after that update's frame, request
+   * one more chart frame. It never schedules another retry from the recovery.
+   */
+  #schedulePaintRetry(plan: DrawingScreenDisplayList): void {
+    this.#cancelPaintRetry();
+    const generation = this.#paintRetryGeneration;
+    this.#paintRetryPlan = plan;
+    const retry = () => {
+      if (generation !== this.#paintRetryGeneration
+        || this.#paintRetryPlan !== plan) return;
+      this.#paintRetryFrame = null;
+      this.#paintRetryPlan = null;
+      if (this.#disposed
+        || !this.#requestUpdate
+        || !this._series
+        || this.#renderer.plan() !== plan
+        || this.#lastPaintedPlan === plan) return;
+      this.#requestChartUpdate();
+    };
+    let frame: unknown;
+    try {
+      frame = this.#requestPaintRetryFrame(retry);
+    } catch {
+      this.#paintRetryPlan = null;
+      return;
+    }
+    // Browser rAF callbacks are asynchronous, but retain correct semantics
+    // for a synchronous host/test seam too.
+    if (generation !== this.#paintRetryGeneration
+      || this.#paintRetryPlan !== plan) return;
+    if (frame === null || typeof frame === "undefined") {
+      this.#paintRetryPlan = null;
+      return;
+    }
+    this.#paintRetryFrame = frame;
+  }
+
   #acknowledgePainted(plan: DrawingScreenDisplayList): void {
     if (this.#disposed
       || !this.#requestUpdate
       || !this._series
       || this.#renderer.plan() !== plan) return;
+    this.#lastPaintedPlan = plan;
+    if (this.#paintRetryPlan === plan) this.#cancelPaintRetry();
     this.#paintSequence += 1;
     const ack: DrawingScenePaintAck = Object.freeze({
       plan,
@@ -111,9 +196,11 @@ export class DrawingScenePrimitive {
 
   detached(): void {
     this.#attachmentRevision += 1;
+    this.#cancelPaintRetry();
     this.#clearPaintListeners();
     this._series = null;
     this.#requestUpdate = null;
+    this.#lastPaintedPlan = null;
     this.#renderer.setPlan(null);
   }
 
@@ -145,13 +232,22 @@ export class DrawingScenePrimitive {
   publishPlan(plan: DrawingScreenDisplayList): boolean {
     if (this.#disposed || !this.#requestUpdate || !this._series) return false;
     if (this.#renderer.plan() === plan) return true;
+    this.#cancelPaintRetry();
+    this.#lastPaintedPlan = null;
     this.#renderer.setPlan(plan);
     this.#requestChartUpdate();
+    // Schedule after the direct request so LWC's own rAF gets first chance to
+    // paint. A synchronous host paint above already set lastPaintedPlan.
+    if (this.#renderer.plan() === plan && this.#lastPaintedPlan !== plan) {
+      this.#schedulePaintRetry(plan);
+    }
     return true;
   }
 
   clearPlan(requestUpdate = true): void {
     if (this.#renderer.plan() === null) return;
+    this.#cancelPaintRetry();
+    this.#lastPaintedPlan = null;
     this.#renderer.setPlan(null);
     if (requestUpdate) this.#requestChartUpdate();
   }

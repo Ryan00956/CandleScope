@@ -308,7 +308,7 @@ class ComponentSnapshotOHLCVMerge:
             existing,
             candidate,
             allow_authoritative_correction=(
-                bar_input.source == BarInputSource.BACKFILL
+                bar_input.source in {BarInputSource.BACKFILL, BarInputSource.CORRECTION}
                 and bar_input.is_closed
             ),
         ):
@@ -497,7 +497,10 @@ class BarStateEngine:
             # For backfill data, we overwrite (is_new=True) instead of merge,
             # because backfill bars are complete final data and should replace
             # existing state rather than accumulate on top of it.
-            if bar_input.source == BarInputSource.BACKFILL:
+            if bar_input.source in {
+                BarInputSource.BACKFILL,
+                BarInputSource.CORRECTION,
+            }:
                 was_authoritative = old_state.finality == BarFinality.AUTHORITATIVE
                 previous_component = (
                     old_state.source_snapshots.get(bar_input.input_key)

@@ -1,4 +1,5 @@
 import type { IntervalString } from "../../utils/intervals.js";
+import type { ForegroundPreloadGate } from "./foregroundPreloadGate.js";
 import type {
   EpochMilliseconds,
   EpochSeconds,
@@ -33,6 +34,13 @@ export interface WindowDeltaDetail extends Record<string, unknown> {
   originalBars?: number;
   trimmedLeft?: number;
   trimmedRight?: number;
+  changedRanges?: WindowChangedRange[];
+}
+
+export interface WindowChangedRange {
+  start: EpochSeconds;
+  end: EpochSeconds;
+  type: "prepend" | "mid-merge" | "append";
 }
 
 interface WindowDeltaBase<TType extends WindowDeltaType, TChanged extends boolean>
@@ -68,6 +76,7 @@ export interface HistoryMissingRange extends Record<string, unknown> {
 
 export interface KlineFetchResult extends Record<string, unknown> {
   data?: KlineBar[];
+  indicatorWindowOwner?: string;
   all_rows_final?: boolean;
   has_more?: boolean;
   has_tail_gap?: boolean;
@@ -99,10 +108,25 @@ export interface BeforePageAvailability {
 
 export interface KlineRequestOptions {
   signal?: AbortSignal;
+  /** Stable chart/pane demand owner used by the backend to supersede stale work. */
+  demandScope?: string;
+  /** Monotonic generation within demandScope. */
+  demandGeneration?: number;
 }
+
+export type KlineHistoryIntent = "viewport" | "active_hydration";
 
 export interface KlineHistoryRequestOptions extends KlineRequestOptions {
   countBack?: number | null;
+  /** Backend wait budget for the requested history window. */
+  maxWaitMs?: number;
+  /** Distinguishes the first visible window from active-series hydration. */
+  intent?: KlineHistoryIntent;
+}
+
+export interface KlineBeforeRequestOptions extends KlineRequestOptions {
+  /** Backend long-poll budget. Validation probes use zero to stay non-blocking. */
+  maxWaitMs?: number;
 }
 
 export interface KlineRangeRequestOptions extends KlineRequestOptions {
@@ -127,7 +151,7 @@ export interface KlineApi {
     bars: number,
     marketType: string,
     exchange: string,
-    options: KlineRequestOptions,
+    options: KlineBeforeRequestOptions,
   ): Promise<KlineFetchResult>;
   fetchKlinesRange(
     symbol: string,
@@ -150,12 +174,18 @@ export interface KlineApi {
   getMultiStreamUrl(symbol: string, marketType: string, exchange: string): string;
 }
 
-export type FeedCommitMode = "active" | "always" | "patch-active" | "patch-cache" | "cache";
+export type FeedCommitMode = "active" | "always" | "patch-active" | "patch-cache" | "cache" | "none";
 export type FeedApplyMode = "range" | "tick";
+export type FeedRequestPriority = "foreground" | "hydrate" | "preload";
 
 export interface FeedCommitMeta {
   source: string;
   seedIfEmpty?: boolean;
+  deferIndicatorWindow?: boolean;
+  indicatorWindowOwner?: string;
+  historyComplete?: boolean;
+  historyRepairPending?: boolean;
+  historyValidatedCountBack?: number | null;
 }
 
 export interface FeedCacheMeta {
@@ -186,6 +216,7 @@ export type PatchCacheTick = (
 
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
+  foregroundPreloadGate?: ForegroundPreloadGate | null;
   canRequestSeries?: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries?: () => MarketSeries | null;
   isActiveSeries?: (series: MarketSeries, activeSeries: MarketSeries | null) => boolean;
@@ -229,6 +260,7 @@ export interface PendingBeforePage {
   completionAttempts?: number;
   pollAttempts?: number;
   nextPollAt?: number;
+  indicatorWindowOwner?: string;
 }
 
 export interface BackfillCompletedDetail extends Record<string, unknown> {
@@ -253,7 +285,9 @@ export interface BackfillCompletedMessage {
 }
 
 export interface PendingInitialSeries extends MarketSeries {
+  countBack?: number | null;
   range?: TimeRangeMs | null;
+  indicatorWindowOwner?: string;
 }
 
 export type LastPriceUpdater = (
@@ -371,6 +405,7 @@ export interface IndicatorWindowMeta {
   windowDeltaType?: unknown;
   incomingFirstTime?: unknown;
   incomingLastTime?: unknown;
+  changedRanges?: unknown;
 }
 
 export interface IndicatorRangeRequest {

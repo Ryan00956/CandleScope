@@ -1,0 +1,36 @@
+flowchart LR
+  subgraph Plugin["Plugin process boundary"]
+    Sidecar["Plugin sidecar<br/>OrderIntent only"]
+  end
+
+  subgraph Host["Host control process"]
+    Cap["Capability and scope gate"]
+    Risk["Host risk engine"]
+    Confirm["Non-overridable native confirmation"]
+    Revoke["Grant, disable and kill control"]
+    Paper["Independent Paper Runtime"]
+  end
+
+  subgraph Broker["Restricted Live Transaction Broker process"]
+    Epoch["Publisher proof and policy epoch"]
+    Accounts["Canonical account bindings"]
+    Vault["OS credential vault"]
+    Journal["Durable intent journal"]
+    Reconcile["Query-before-retry reconciler"]
+    Signer["Operation-specific signer"]
+    Transport["Dedicated venue transport"]
+    Export["Redacted audit export"]
+  end
+
+  Sidecar -->|"OrderIntent"| Cap --> Risk
+  Confirm --> Risk
+  Risk -->|"single-use authorization capsule"| Epoch
+  Revoke -->|"synchronous epoch change"| Epoch
+  Epoch --> Accounts --> Journal
+  Journal --> Signer
+  Vault --> Signer
+  Signer --> Transport --> Venue["Pinned trading venue"]
+  Transport --> Reconcile --> Journal
+  Journal --> Export
+  Sidecar -. "no secret, signer or transport handle" .-> Vault
+  Cap --> Paper

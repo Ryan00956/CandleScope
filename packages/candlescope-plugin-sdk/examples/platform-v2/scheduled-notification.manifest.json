@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.scheduled-notification",
+    "name": "Scheduled Notification",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.scheduled_notification",
+        "resourceProfile": "minimal",
+        "activationEvents": [
+          "onSchedule"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "reminder-source",
+      "kind": "notification/1",
+      "title": "Scheduled reminder",
+      "entrypoint": "main",
+      "configuration": {
+        "channels": [
+          "toast"
+        ],
+        "severities": [
+          "info"
+        ]
+      }
+    },
+    {
+      "id": "reminder-job",
+      "kind": "job/1",
+      "title": "Send scheduled reminder",
+      "entrypoint": "main",
+      "configuration": {
+        "schedule": {
+          "intervalSeconds": 60
+        },
+        "timeoutSeconds": 10,
+        "maxAttempts": 3,
+        "backoffSeconds": 1,
+        "runOnStartup": false
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "notifications.show",
+        "scope": {
+          "channels": [
+            "toast"
+          ]
+        }
+      },
+      {
+        "id": "jobs.schedule",
+        "scope": {
+          "jobs": [
+            "reminder-job"
+          ],
+          "maxRunsPerHour": 60
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": []
+}

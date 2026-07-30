@@ -814,6 +814,7 @@ USER_VISIBLE_BACKFILL_REASONS: frozenset[str] = frozenset({
 })
 
 INTERNAL_BACKFILL_REASONS: frozenset[str] = frozenset({
+    "active_history_hydration",
     "related_interval_warmup",
     "full_subscription_warmup",
     "startup_gap_scan",

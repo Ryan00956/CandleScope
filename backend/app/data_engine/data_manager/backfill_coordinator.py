@@ -37,10 +37,20 @@ from app.data_engine.interval_policy import (
     last_closed_bar_open_ms,
     parse_interval_ms,
 )
+from app.data_engine.interval_resolution import IntervalPurpose, IntervalResolver
+from app.data_engine.interval_work_plan import (
+    IntervalWorkPlan,
+    resolve_interval_work_plan,
+)
+from app.data_engine.kline_quality import (
+    repair_requires_trusted_finality,
+    source_is_trusted_final,
+)
 from app.exchanges.models import (
     HistoryAvailabilityPolicy,
     HistoryEmptyPageSemantics,
 )
+from app.exchanges.rate_limits import RateLimitDeferred
 from .models import BarData, DataEvent, DataEventType, SeriesKey, audience_for_backfill_reason
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
@@ -50,21 +60,30 @@ BACKFILL_REASON_PRIORITIES: dict[str, int] = {
     "initial_history": 10,
     "visible_load_more": 20,
     "visible_range_gap": 20,
-    "visible_seed_gap": 30,
-    "related_interval_warmup": 40,
-    "tail_gap": 50,
-    "full_subscription_warmup": 60,
+    "visible_seed_gap": 25,
+    "tail_gap": 25,
+    "latest_refresh": 30,
+    "query_gap": 35,
+    "query_empty": 35,
+    "query_tail_gap": 35,
+    "query_left_gap": 35,
+    "query_shortfall": 35,
+    "query_interior_gap": 35,
     "price_daily_open": 70,
-    "latest_refresh": 80,
-    "query_gap": 100,
-    "query_empty": 100,
-    "query_tail_gap": 100,
-    "query_left_gap": 100,
-    "query_shortfall": 100,
-    "query_interior_gap": 100,
-    "startup_gap_scan": 120,
-    "background_gap_audit": 150,
+    "active_history_hydration": 90,
+    "related_interval_warmup": 100,
+    "full_subscription_warmup": 110,
+    "startup_gap_scan": 140,
+    "background_gap_audit": 160,
 }
+
+_BACKGROUND_BACKFILL_REASONS = frozenset({
+    "active_history_hydration",
+    "related_interval_warmup",
+    "full_subscription_warmup",
+    "startup_gap_scan",
+    "background_gap_audit",
+})
 
 # Public API waits are capped at eight seconds, so one minute preserves useful
 # late-wait resolution while the count limits protect a long-running process.
@@ -185,6 +204,11 @@ class RepairRequest:
     def merged_with(self, other: RepairRequest) -> RepairRequest:
         """Return a range that covers both requests for the same series."""
         metadata = {**self.metadata, **other.metadata}
+        if (
+            repair_requires_trusted_finality(self.metadata, reason=self.reason)
+            or repair_requires_trusted_finality(other.metadata, reason=other.reason)
+        ):
+            metadata["requires_trusted_finality"] = True
         derived_targets = _merge_derived_repair_targets(
             self.metadata.get("derived_repair_targets"),
             other.metadata.get("derived_repair_targets"),
@@ -303,6 +327,16 @@ class RepairReconcileSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RepairWrittenRangeSummary:
+    exchange: str
+    market_type: str
+    symbol: str
+    interval: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepairReportSummary:
     """Report statistics retained without FetchResult bar payloads."""
 
@@ -313,6 +347,7 @@ class RepairReportSummary:
     fetch_result_count: int
     fetched_bar_count: int
     written_range_count: int
+    written_ranges: tuple[RepairWrittenRangeSummary, ...]
     elapsed_ms: int
 
 
@@ -378,6 +413,19 @@ class _FetchChunk:
     parent_id: str
     request: RepairRequest
     sequence: int
+    queue_sequence: int = 0
+    eligible_at_monotonic: float = 0.0
+    retry_at_ms: int | None = None
+    defer_reason: str | None = None
+    rate_limit_bucket: str | None = None
+    defer_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _DemandLease:
+    owner_id: str
+    scope: str | None = None
+    generation: int | None = None
 
 
 @dataclass(slots=True)
@@ -391,6 +439,11 @@ class _RequestState:
     outcomes: list[RepairOutcome] = field(default_factory=list)
     failed: RepairOutcome | None = None
     stale: bool = False
+    demand_leases: dict[str, _DemandLease] = field(default_factory=dict)
+    persistent_interest: bool = False
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
+    progress_revision: int = 0
 
     @property
     def total(self) -> int:
@@ -454,6 +507,7 @@ class _BackfillScheduler:
         complete: Callable[[RepairRequest, RepairOutcome], None],
         finalize: Callable[[RepairRequest, RepairOutcome], Awaitable[None]],
         on_queued: Callable[[RepairRequest], None],
+        on_progress: Callable[[RepairRequest, dict[str, Any]], None] | None = None,
         max_concurrency: int = 4,
         chunk_bars: int = 1000,
     ) -> None:
@@ -462,8 +516,10 @@ class _BackfillScheduler:
         self._complete = complete
         self._finalize = finalize
         self._on_queued = on_queued
+        self._on_progress = on_progress
         self._max_concurrency = max(1, max_concurrency)
         self._chunk_bars = max(1, chunk_bars)
+        self._interval_resolver = IntervalResolver()
 
         self._series: dict[tuple[str, str, str, str], _SeriesState] = {}
         self._requests: dict[str, _RequestState] = {}
@@ -478,53 +534,241 @@ class _BackfillScheduler:
         self._shutdown = False
         self._drain_timer: asyncio.TimerHandle | None = None
         self._next_drain_at: float | None = None
+        self._last_foreground_activity_at = 0.0
+        self._active_foreground_chunks: set[str] = set()
+        self._active_background_chunks: set[str] = set()
 
         self.submitted = 0
         self.deduped = 0
         self.merged = 0
         self.rate_limited_skips = 0
+        self.exchange_rate_limit_deferrals = 0
+        self.priority_promotions = 0
+        self.cancelled_pending = 0
+        self.cancelled_after_chunk = 0
+        self.background_dispatches = 0
+        self.covered_chunks_skipped = 0
 
     def submit(self, request: RepairRequest) -> tuple[str, asyncio.Future[RepairOutcome]]:
         if self._shutdown:
             raise RuntimeError("BackfillCoordinator is shut down")
+        if repair_requires_trusted_finality(
+            request.metadata,
+            reason=request.reason,
+        ):
+            # Normalize legacy reason-only demand into the durable merge-safe
+            # contract before any covering/dedupe decision is made.
+            request.metadata["requires_trusted_finality"] = True
 
         self.submitted += 1
+        if not self._is_background(request):
+            self._last_foreground_activity_at = time.monotonic()
         series_key = request.series_key
         series = self._series.setdefault(series_key, _SeriesState())
 
         active_state = self._requests.get(series.active or "")
-        if active_state is not None and self._covers(active_state.request, request):
-            self._merge_derived_targets_into_state(active_state, request)
+        if (
+            active_state is not None
+            and not active_state.stale
+            and not active_state.cancel_requested
+            and self._can_coalesce(active_state.request, request)
+            and self._covers(active_state.request, request)
+            and not self._requires_stronger_finality(
+                active_state.request,
+                request,
+            )
+        ):
+            self._merge_request_interest(active_state, request)
             self.deduped += 1
+            # A background parent can become foreground demand here.  That
+            # changes the global background-slot admission decision even when
+            # this exact series is already active, so re-evaluate the queue.
+            self._drain()
             return active_state.request.request_id, active_state.future
 
         for request_id in list(series.pending):
             state = self._requests.get(request_id)
             if state is None or state.stale:
                 continue
-            if self._covers(state.request, request):
-                self._merge_derived_targets_into_state(state, request)
+            if self._can_coalesce(state.request, request) and self._covers(
+                state.request,
+                request,
+            ):
+                stronger_finality = self._requires_stronger_finality(
+                    state.request,
+                    request,
+                )
+                if stronger_finality and state.completed > 0:
+                    # Completed chunks ran under the weaker contract and no
+                    # longer exist to upgrade in place.  Keep this ordinary
+                    # parent and enqueue a full authoritative successor.
+                    continue
+                upgraded_finality = self._merge_request_interest(state, request)
+                if upgraded_finality:
+                    # Persist the stronger contract for crash recovery.  The
+                    # original queued ledger snapshot predates this upgrade.
+                    self._on_queued(state.request)
+                    self._publish_progress(
+                        state,
+                        status="trusted_finality_upgraded",
+                    )
                 self.deduped += 1
+                # Pending background work may have just been promoted to
+                # foreground demand.  It is now runnable in a spare slot and
+                # must not wait for an unrelated active chunk to finish.
+                self._drain()
                 return state.request.request_id, state.future
             if state.completed == 0 and self._should_merge(state.request, request):
                 state.request = state.request.merged_with(request)
+                incoming_leases = self._demand_leases_from_request(request)
+                state.demand_leases.update(incoming_leases)
+                if not incoming_leases:
+                    state.persistent_interest = True
                 self._replace_pending_chunks(state)
                 self._on_queued(state.request)
+                self._publish_progress(state, status="merged")
                 self.merged += 1
+                # _replace_pending_chunks rebuilds the ready work.  A merge
+                # may occur while the only active task is stalled upstream,
+                # so explicitly wake the scheduler for the replacement.
+                self._drain()
                 return state.request.request_id, state.future
 
         future = self._future_for(request)
+        demand_leases = self._demand_leases_from_request(request)
         state = _RequestState(
             request=request,
             future=future,
             chunk_ids=[],
+            demand_leases=demand_leases,
+            persistent_interest=not bool(demand_leases),
         )
         self._requests[request.request_id] = state
         series.pending.append(request.request_id)
         self._on_queued(request)
         self._replace_pending_chunks(state)
+        self._publish_progress(state, status="queued")
         self._drain()
         return request.request_id, future
+
+    def _merge_request_interest(
+        self,
+        state: _RequestState,
+        request: RepairRequest,
+    ) -> bool:
+        self._merge_derived_targets_into_state(state, request)
+        incoming_leases = self._demand_leases_from_request(request)
+        state.demand_leases.update(incoming_leases)
+        if not incoming_leases:
+            state.persistent_interest = True
+        current_requires_trusted_finality = repair_requires_trusted_finality(
+            state.request.metadata,
+            reason=state.request.reason,
+        )
+        incoming_requires_trusted_finality = repair_requires_trusted_finality(
+            request.metadata,
+            reason=request.reason,
+        )
+        requires_trusted_finality = (
+            current_requires_trusted_finality
+            or incoming_requires_trusted_finality
+        )
+        upgraded_finality = (
+            incoming_requires_trusted_finality
+            and not current_requires_trusted_finality
+        )
+        if requires_trusted_finality:
+            state.request.metadata["requires_trusted_finality"] = True
+        reasons = [
+            part.strip()
+            for raw in (state.request.reason, request.reason)
+            for part in str(raw or "").split("+")
+            if part.strip()
+        ]
+        state.request.reason = "+".join(dict.fromkeys(reasons))
+        if state.request.requester != request.requester:
+            state.request.requester = "mixed"
+        incoming_priority = int(request.priority or 100)
+        current_priority = int(state.request.priority or 100)
+        promoted = incoming_priority < current_priority
+        if promoted:
+            state.request.priority = incoming_priority
+            self.priority_promotions += 1
+        chunk_ids: Iterable[str] = state.chunk_ids
+        if promoted and self._newest_first(state.request):
+            chunk_ids = reversed(state.chunk_ids)
+        if promoted:
+            # Priority queues do not support an in-place key update.  Remove
+            # each old heap item before inserting the promoted chunk; leaving
+            # both entries inflates ready diagnostics and can repeatedly skip
+            # the same physical chunk while its series is active.
+            promoted_chunk_ids = {
+                chunk_id
+                for chunk_id in state.chunk_ids
+                if chunk_id not in self._tasks and chunk_id in self._chunks
+            }
+            if promoted_chunk_ids:
+                self._ready = [
+                    item for item in self._ready if item[3] not in promoted_chunk_ids
+                ]
+                heapq.heapify(self._ready)
+        for chunk_id in chunk_ids:
+            if chunk_id in self._tasks and not self._is_background(state.request):
+                self._active_background_chunks.discard(chunk_id)
+                self._active_foreground_chunks.add(chunk_id)
+            chunk = self._chunks.get(chunk_id)
+            if chunk is None:
+                continue
+            chunk.request.reason = state.request.reason
+            chunk.request.requester = state.request.requester
+            if requires_trusted_finality:
+                chunk.request.metadata["requires_trusted_finality"] = True
+            if promoted:
+                chunk.request.priority = incoming_priority
+            if promoted and chunk_id not in self._tasks:
+                self._push_ready(chunk)
+        if promoted:
+            self._publish_progress(state, status="priority_promoted")
+        return upgraded_finality
+
+    @staticmethod
+    def _demand_leases_from_request(
+        request: RepairRequest,
+    ) -> dict[str, _DemandLease]:
+        metadata = request.metadata or {}
+        owner_id = str(metadata.get("demand_owner_id") or "").strip()
+        if not owner_id:
+            return {}
+        scope_raw = metadata.get("demand_scope")
+        scope = str(scope_raw).strip() if scope_raw is not None else None
+        generation_raw = metadata.get("demand_generation")
+        try:
+            generation = int(generation_raw) if generation_raw is not None else None
+        except (TypeError, ValueError):
+            generation = None
+        lease = _DemandLease(
+            owner_id=owner_id,
+            scope=scope or None,
+            generation=generation,
+        )
+        return {owner_id: lease}
+
+    @staticmethod
+    def _requires_stronger_finality(
+        current: RepairRequest,
+        incoming: RepairRequest,
+    ) -> bool:
+        """Return whether an active ordinary repair cannot satisfy incoming."""
+        return (
+            repair_requires_trusted_finality(
+                incoming.metadata,
+                reason=incoming.reason,
+            )
+            and not repair_requires_trusted_finality(
+                current.metadata,
+                reason=current.reason,
+            )
+        )
 
     def _merge_derived_targets_into_state(
         self,
@@ -547,6 +791,219 @@ class _BackfillScheduler:
                 chunk.request.metadata["derived_repair_targets"] = [
                     dict(target) for target in targets
                 ]
+
+    def acquire_demand(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        scope: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        state = self._requests.get(request_id)
+        normalized_owner = str(owner_id or "").strip()
+        if state is None or state.stale or not normalized_owner:
+            return False
+        state.demand_leases[normalized_owner] = _DemandLease(
+            owner_id=normalized_owner,
+            scope=str(scope).strip() if scope is not None and str(scope).strip() else None,
+            generation=int(generation) if generation is not None else None,
+        )
+        self._publish_progress(state, status="demand_acquired")
+        return True
+
+    async def release_demand(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        cancel_if_unobserved: bool,
+        reason: str = "demand_released",
+    ) -> bool:
+        state = self._requests.get(request_id)
+        if state is None:
+            return False
+        state.demand_leases.pop(str(owner_id or "").strip(), None)
+        if (
+            state.demand_leases
+            or state.persistent_interest
+            or not cancel_if_unobserved
+        ):
+            self._publish_progress(state, status="demand_released")
+            return False
+        return await self._request_cancel(state, reason=reason)
+
+    async def supersede_scope(self, scope: str, generation: int) -> int:
+        normalized_scope = str(scope or "").strip()
+        if not normalized_scope:
+            return 0
+        superseded = 0
+        pending_finalizers: list[
+            tuple[_RequestState, RepairOutcome, _SeriesState | None]
+        ] = []
+        for state in list(self._requests.values()):
+            old_owners = [
+                owner_id
+                for owner_id, lease in state.demand_leases.items()
+                if lease.scope == normalized_scope
+                and lease.generation is not None
+                and lease.generation < int(generation)
+            ]
+            if not old_owners:
+                continue
+            for owner_id in old_owners:
+                state.demand_leases.pop(owner_id, None)
+            if not state.demand_leases and not state.persistent_interest:
+                started, final, series = self._begin_request_cancel(
+                    state,
+                    reason=f"scope_superseded:{normalized_scope}:{generation}",
+                )
+                if started:
+                    superseded += 1
+                if final is not None:
+                    pending_finalizers.append((state, final, series))
+        if pending_finalizers:
+            await asyncio.gather(*(
+                self._finish_pending_cancellation(state, final, series)
+                for state, final, series in pending_finalizers
+            ))
+        return superseded
+
+    async def revoke_owner(self, owner_id: str, *, reason: str) -> int:
+        normalized_owner = str(owner_id or "").strip()
+        if not normalized_owner:
+            return 0
+        revoked = 0
+        pending_finalizers: list[
+            tuple[_RequestState, RepairOutcome, _SeriesState | None]
+        ] = []
+        for state in list(self._requests.values()):
+            if normalized_owner not in state.demand_leases:
+                continue
+            state.demand_leases.pop(normalized_owner, None)
+            revoked += 1
+            if not state.demand_leases and not state.persistent_interest:
+                _started, final, series = self._begin_request_cancel(
+                    state,
+                    reason=reason,
+                )
+                if final is not None:
+                    pending_finalizers.append((state, final, series))
+            else:
+                self._publish_progress(state, status="demand_revoked")
+        if pending_finalizers:
+            await asyncio.gather(*(
+                self._finish_pending_cancellation(state, final, series)
+                for state, final, series in pending_finalizers
+            ))
+        return revoked
+
+    async def _request_cancel(self, state: _RequestState, *, reason: str) -> bool:
+        started, final, series = self._begin_request_cancel(state, reason=reason)
+        if final is not None:
+            await self._finish_pending_cancellation(state, final, series)
+        return started
+
+    def _begin_request_cancel(
+        self,
+        state: _RequestState,
+        *,
+        reason: str,
+    ) -> tuple[bool, RepairOutcome | None, _SeriesState | None]:
+        """Synchronously revoke scheduler ownership before durable finalization."""
+        if state.cancel_requested or state.future.done():
+            return False, None, None
+        state.cancel_requested = True
+        state.cancel_reason = reason
+        self._discard_remaining_chunks(state)
+        series = self._series.get(state.request.series_key)
+        is_active = bool(series is not None and series.active == state.request.request_id)
+        if is_active:
+            self.cancelled_after_chunk += 1
+            self._publish_progress(state, status="cancelling_after_chunk")
+            return True, None, series
+
+        if series is not None and state.request.request_id in series.pending:
+            series.pending.remove(state.request.request_id)
+        self.cancelled_pending += 1
+        final = self._cancelled_outcome(state)
+        return True, final, series
+
+    async def _finish_pending_cancellation(
+        self,
+        state: _RequestState,
+        final: RepairOutcome,
+        series: _SeriesState | None,
+    ) -> None:
+        """Durably finalize a cancellation after all target states are inert."""
+        try:
+            try:
+                await self._finalize(state.request, final)
+            except Exception:
+                logger.exception(
+                    "Backfill cancellation finalization failed for %s",
+                    state.request.request_id,
+                )
+        finally:
+            # Cancellation of the caller is allowed to interrupt durable
+            # finalization, but it must never leave a stale scheduler state or
+            # unresolved shared future behind.
+            self._retain_outcome(state.request.request_id, final)
+            self._complete(state.request, final)
+            self._publish_progress(state, status="cancelled", terminal=True)
+            self._requests.pop(state.request.request_id, None)
+            series_key = state.request.series_key
+            if (
+                series is not None
+                and self._series.get(series_key) is series
+                and not series.pending
+                and series.active is None
+            ):
+                self._series.pop(series_key, None)
+            self._drain()
+
+    @staticmethod
+    def _cancelled_outcome(state: _RequestState) -> RepairOutcome:
+        return RepairOutcome(
+            request=state.request,
+            status="cancelled",
+            attempts=state.attempts,
+            bars_loaded=state.bars_loaded,
+            verified_contiguous=False,
+            error=state.cancel_reason or "demand_released",
+            terminal_reason="demand_released",
+            retryable=True,
+        )
+
+    def _publish_progress(
+        self,
+        state: _RequestState,
+        *,
+        status: str,
+        terminal: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        callback = self._on_progress
+        if callback is None:
+            return
+        payload: dict[str, Any] = {
+            "request_id": state.request.request_id,
+            "revision": state.progress_revision,
+            "status": status,
+            "terminal": bool(terminal),
+            "completed_chunks": state.completed,
+            "total_chunks": state.total,
+            "pending_chunks": state.pending_count,
+            "bars_loaded": state.bars_loaded,
+            "priority": state.request.priority,
+            "demand_count": len(state.demand_leases),
+            "persistent_interest": state.persistent_interest,
+            "cancel_requested": state.cancel_requested,
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        if details:
+            payload.update(details)
+        callback(state.request, payload)
 
     async def shutdown(self) -> None:
         self._shutdown = True
@@ -575,6 +1032,7 @@ class _BackfillScheduler:
     def snapshot(self) -> dict[str, Any]:
         active: list[dict[str, Any]] = []
         pending: list[dict[str, Any]] = []
+        now_monotonic = time.monotonic()
         for series_key, series in self._series.items():
             series_label = ":".join(series_key)
             if series.active:
@@ -586,16 +1044,49 @@ class _BackfillScheduler:
                 if state is not None and not state.stale:
                     pending.append(self._state_snapshot(series_label, state, active=False))
 
+        deferred = [
+            {
+                "chunk_id": chunk.chunk_id,
+                "request_id": chunk.parent_id,
+                "series": ":".join(chunk.request.series_key),
+                "priority": chunk.request.priority,
+                "sequence": chunk.sequence,
+                "retry_at_ms": chunk.retry_at_ms,
+                "retry_in_ms": max(
+                    0,
+                    int((chunk.eligible_at_monotonic - now_monotonic) * 1000),
+                ),
+                "reason": chunk.defer_reason,
+                "bucket_key": chunk.rate_limit_bucket,
+                "defer_count": chunk.defer_count,
+            }
+            for chunk in self._chunks.values()
+            if chunk.eligible_at_monotonic > now_monotonic
+        ]
+
         return {
             "submitted": self.submitted,
             "deduped": self.deduped,
             "merged": self.merged,
+            "priority_promotions": self.priority_promotions,
+            "cancelled_pending": self.cancelled_pending,
+            "cancelled_after_chunk": self.cancelled_after_chunk,
+            "background_dispatches": self.background_dispatches,
+            "covered_chunks_skipped": self.covered_chunks_skipped,
+            "running_background_chunks": self._running_background_count(),
             "active": active,
             "pending": pending,
             "ready_chunks": len(self._ready),
             "running_chunks": len(self._tasks),
+            "max_concurrency": self._max_concurrency,
             "next_drain_in_ms": self._next_drain_in_ms(),
             "rate_limited_skips": self.rate_limited_skips,
+            "exchange_rate_limit_deferrals": self.exchange_rate_limit_deferrals,
+            "deferred_chunks": len(deferred),
+            "deferred": sorted(
+                deferred,
+                key=lambda item: (int(item["retry_at_ms"] or 0), item["chunk_id"]),
+            ),
             "buckets": {
                 key: bucket.snapshot()
                 for key, bucket in sorted(self._buckets.items())
@@ -615,8 +1106,14 @@ class _BackfillScheduler:
         }
 
     def _replace_pending_chunks(self, state: _RequestState) -> None:
-        for chunk_id in state.chunk_ids:
+        replaced_chunk_ids = set(state.chunk_ids)
+        for chunk_id in replaced_chunk_ids:
             self._chunks.pop(chunk_id, None)
+        if replaced_chunk_ids:
+            self._ready = [
+                item for item in self._ready if item[3] not in replaced_chunk_ids
+            ]
+            heapq.heapify(self._ready)
         state.chunk_ids = []
         state.completed = 0
         state.failed = None
@@ -631,13 +1128,21 @@ class _BackfillScheduler:
 
     def _split_request(self, request: RepairRequest) -> list[_FetchChunk]:
         interval_ms = parse_interval_ms(request.interval) or 60_000
-        chunk_span = interval_ms * self._chunk_bars
+        work_plan = self._source_aware_chunk_plan(request, self._chunk_bars)
+        target_chunk_bars = max(1, int(work_plan.effective_target_bars or 1))
+        chunk_span = interval_ms * target_chunk_bars
         chunks: list[_FetchChunk] = []
         sequence = 0
         for planned_start, planned_end in self._planned_ranges(request):
             start = planned_start
             while start <= planned_end:
                 chunk_end = min(planned_end, start + chunk_span - interval_ms)
+                actual_target_bars = max(1, (chunk_end - start) // interval_ms + 1)
+                chunk_work_plan = self._source_aware_chunk_plan(
+                    request,
+                    actual_target_bars,
+                    source_row_budget=work_plan.source_row_budget,
+                )
                 chunk_request = RepairRequest(
                     symbol=request.symbol,
                     interval=request.interval,
@@ -651,6 +1156,7 @@ class _BackfillScheduler:
                     wait_policy=request.wait_policy,
                     metadata={
                         **request.metadata,
+                        **chunk_work_plan.to_metadata(),
                         "parent_request_id": request.request_id,
                         "chunk_sequence": sequence,
                         "ledger_range": {
@@ -672,6 +1178,62 @@ class _BackfillScheduler:
             return list(reversed(chunks))
         return chunks
 
+    def _source_aware_chunk_plan(
+        self,
+        request: RepairRequest,
+        requested_target_bars: int,
+        *,
+        source_row_budget: int | None = None,
+    ) -> IntervalWorkPlan:
+        budget = self._chunk_bars if source_row_budget is None else source_row_budget
+        try:
+            plan = resolve_interval_work_plan(
+                self._interval_resolver,
+                exchange=request.exchange,
+                market_type=request.market_type,
+                interval=request.interval,
+                requested_target_bars=max(1, int(requested_target_bars)),
+                source_row_budget=budget,
+                source_padding_bars=3,
+                purpose=IntervalPurpose.HISTORY,
+            )
+            if plan.effective_target_bars > 0:
+                return plan
+            # One derived candle can legitimately exceed the ordinary source
+            # page size (for example a monthly target sourced from minutes).
+            # Admit exactly one target with an explicit, finite source budget
+            # instead of falling back to the old unbounded target chunk.
+            minimum_budget = max(1, (plan.source_padding_bars + 1) * plan.source_factor)
+            return resolve_interval_work_plan(
+                self._interval_resolver,
+                exchange=request.exchange,
+                market_type=request.market_type,
+                interval=request.interval,
+                requested_target_bars=1,
+                source_row_budget=minimum_budget,
+                source_padding_bars=plan.source_padding_bars,
+                purpose=IntervalPurpose.HISTORY,
+            )
+        except Exception:
+            logger.debug(
+                "Source-aware chunk planning fell back to native sizing for %s@%s",
+                request.symbol,
+                request.interval,
+                exc_info=True,
+            )
+            requested = max(1, int(requested_target_bars))
+            return IntervalWorkPlan(
+                requested_target_bars=requested,
+                effective_target_bars=requested,
+                base_interval=request.interval,
+                source_factor=1,
+                source_padding_bars=0,
+                planned_source_rows=requested,
+                source_row_budget=budget,
+                budget_limited=False,
+                derived=False,
+            )
+
     @staticmethod
     def _planned_ranges(request: RepairRequest) -> list[tuple[int, int]]:
         raw_ranges = request.metadata.get("history_fetch_ranges")
@@ -692,23 +1254,36 @@ class _BackfillScheduler:
 
     @staticmethod
     def _newest_first(request: RepairRequest) -> bool:
-        return request.reason in {
+        reasons = {
+            part.strip()
+            for part in str(request.reason or "").split("+")
+            if part.strip()
+        }
+        return bool(reasons & {
             "initial_history",
+            "active_history_hydration",
             "visible_load_more",
             "visible_range_gap",
             "visible_seed_gap",
             "tail_gap",
             "latest_refresh",
-        }
+        })
 
-    def _push_ready(self, chunk: _FetchChunk) -> None:
-        self._seq += 1
+    def _push_ready(
+        self,
+        chunk: _FetchChunk,
+        *,
+        preserve_sequence: bool = False,
+    ) -> None:
+        if not preserve_sequence or chunk.queue_sequence <= 0:
+            self._seq += 1
+            chunk.queue_sequence = self._seq
         heapq.heappush(
             self._ready,
             (
                 int(chunk.request.priority or 100),
                 int(chunk.request.metadata.get("created_at_ms", 0) or 0),
-                self._seq,
+                chunk.queue_sequence,
                 chunk.chunk_id,
             ),
         )
@@ -728,8 +1303,20 @@ class _BackfillScheduler:
                 if state is None or state.stale or state.failed is not None:
                     self._chunks.pop(chunk.chunk_id, None)
                     continue
+                now_monotonic = time.monotonic()
+                if chunk.eligible_at_monotonic > now_monotonic:
+                    delay = chunk.eligible_at_monotonic - now_monotonic
+                    next_delay = delay if next_delay is None else min(next_delay, delay)
+                    skipped.append(item)
+                    continue
                 series = self._series.setdefault(chunk.request.series_key, _SeriesState())
                 if series.active is not None:
+                    skipped.append(item)
+                    continue
+                if self._is_background(chunk.request) and (
+                    self._running_background_count() >= 1
+                    or self._has_foreground_work(skipped)
+                ):
                     skipped.append(item)
                     continue
                 bucket = self._bucket_for(chunk.request)
@@ -741,6 +1328,10 @@ class _BackfillScheduler:
                     skipped.append(item)
                     continue
 
+                chunk.eligible_at_monotonic = 0.0
+                chunk.retry_at_ms = None
+                chunk.defer_reason = None
+                chunk.rate_limit_bucket = None
                 series.active = chunk.parent_id
                 if chunk.parent_id in series.pending:
                     series.pending.remove(chunk.parent_id)
@@ -754,6 +1345,17 @@ class _BackfillScheduler:
                     ),
                 )
                 self._tasks[chunk.chunk_id] = task
+                if self._is_background(chunk.request):
+                    self._active_background_chunks.add(chunk.chunk_id)
+                    self.background_dispatches += 1
+                else:
+                    self._active_foreground_chunks.add(chunk.chunk_id)
+                task.add_done_callback(
+                    lambda _task, chunk_id=chunk.chunk_id: (
+                        self._active_foreground_chunks.discard(chunk_id),
+                        self._active_background_chunks.discard(chunk_id),
+                    )
+                )
         finally:
             for item in skipped:
                 heapq.heappush(self._ready, item)
@@ -761,6 +1363,53 @@ class _BackfillScheduler:
                 self._schedule_drain(next_delay)
             elif not self._ready:
                 self._cancel_drain_timer()
+
+    @staticmethod
+    def _is_background(request: RepairRequest) -> bool:
+        reasons = {
+            part.strip()
+            for part in str(request.reason or "").split("+")
+            if part.strip()
+        }
+        return bool(reasons) and reasons.issubset(_BACKGROUND_BACKFILL_REASONS)
+
+    def _running_background_count(self) -> int:
+        return len(self._active_background_chunks)
+
+    def _has_foreground_active(self) -> bool:
+        return bool(self._active_foreground_chunks)
+
+    def _has_foreground_work(
+        self,
+        extra: Iterable[tuple[int, int, int, str]] = (),
+    ) -> bool:
+        if self._has_foreground_active():
+            return True
+        for item in (*self._ready, *tuple(extra)):
+            chunk = self._chunks.get(item[3])
+            if chunk is None or self._is_background(chunk.request):
+                continue
+            state = self._requests.get(chunk.parent_id)
+            if state is not None and not state.stale and state.failed is None:
+                return True
+        return False
+
+    def has_foreground_work(self) -> bool:
+        """Return whether unresolved user-visible work owns the scheduler.
+
+        Rate-deferred foreground chunks still count: speculative warmup must
+        not consume another exchange or worker budget merely because the
+        visible request is waiting for its exact Retry-After deadline.
+        """
+
+        return self._has_foreground_work()
+
+    def foreground_idle_seconds(self) -> float:
+        if self.has_foreground_work():
+            return 0.0
+        if self._last_foreground_activity_at <= 0:
+            return float("inf")
+        return max(0.0, time.monotonic() - self._last_foreground_activity_at)
 
     def _schedule_drain(self, delay: float) -> None:
         if self._shutdown:
@@ -800,9 +1449,17 @@ class _BackfillScheduler:
         return max(0, int((self._next_drain_at - loop.time()) * 1000))
 
     async def _run_chunk(self, chunk: _FetchChunk) -> None:
+        foreground_chunk = not self._is_background(chunk.request)
+        if foreground_chunk:
+            self._active_foreground_chunks.add(chunk.chunk_id)
+        else:
+            self._active_background_chunks.add(chunk.chunk_id)
         try:
             try:
                 outcome = await self._execute(chunk.request)
+            except RateLimitDeferred as exc:
+                await self._defer_chunk(chunk, exc)
+                return
             except asyncio.CancelledError:
                 outcome = RepairOutcome(
                     request=chunk.request,
@@ -818,8 +1475,88 @@ class _BackfillScheduler:
                 )
             await self._finish_chunk(chunk, outcome)
         finally:
+            if foreground_chunk or not self._is_background(chunk.request):
+                self._last_foreground_activity_at = time.monotonic()
+            self._active_foreground_chunks.discard(chunk.chunk_id)
+            self._active_background_chunks.discard(chunk.chunk_id)
             self._tasks.pop(chunk.chunk_id, None)
             self._drain()
+
+    async def _defer_chunk(
+        self,
+        chunk: _FetchChunk,
+        exc: RateLimitDeferred,
+    ) -> None:
+        """Return quota-blocked work to the ready heap without completing it."""
+
+        state = self._requests.get(chunk.parent_id)
+        series = self._series.get(chunk.request.series_key)
+        if series is not None and series.active == chunk.parent_id:
+            series.active = None
+
+        if state is None:
+            self._chunks.pop(chunk.chunk_id, None)
+            if series is not None and not series.pending and series.active is None:
+                self._series.pop(chunk.request.series_key, None)
+            return
+
+        # Cancellation wins every race with deferral. Never let a revoked
+        # request reappear when an old quota timer fires.
+        if state.cancel_requested:
+            self._chunks.pop(chunk.chunk_id, None)
+            if series is not None and chunk.parent_id in series.pending:
+                series.pending.remove(chunk.parent_id)
+            await self._finish_pending_cancellation(
+                state,
+                self._cancelled_outcome(state),
+                series,
+            )
+            return
+
+        if state.stale or state.failed is not None:
+            self._chunks.pop(chunk.chunk_id, None)
+            return
+
+        now_monotonic = time.monotonic()
+        eligible_at = exc.retry_at_monotonic or (
+            now_monotonic + exc.retry_after_seconds
+        )
+        eligible_at = max(now_monotonic + 0.01, eligible_at)
+        retry_at_ms = exc.retry_at_ms or (
+            int(time.time() * 1000)
+            + max(1, int((eligible_at - now_monotonic) * 1000))
+        )
+        chunk.eligible_at_monotonic = eligible_at
+        chunk.retry_at_ms = int(retry_at_ms)
+        chunk.defer_reason = exc.reason
+        chunk.rate_limit_bucket = exc.bucket_key
+        chunk.defer_count += 1
+        self.exchange_rate_limit_deferrals += 1
+        if series is None:
+            series = self._series.setdefault(
+                chunk.request.series_key,
+                _SeriesState(),
+            )
+        if chunk.parent_id not in series.pending:
+            series.pending.append(chunk.parent_id)
+        self._push_ready(chunk, preserve_sequence=True)
+        state.progress_revision += 1
+        self._publish_progress(
+            state,
+            status="rate_limit_deferred",
+            details={
+                "retry_at_ms": chunk.retry_at_ms,
+                "retry_in_ms": max(
+                    0,
+                    int((eligible_at - now_monotonic) * 1000),
+                ),
+                "rate_limit_bucket": chunk.rate_limit_bucket,
+                "rate_limit_reason": chunk.defer_reason,
+                "deferred_chunk_sequence": chunk.sequence,
+                "defer_count": chunk.defer_count,
+            },
+        )
+        self._schedule_drain(eligible_at - now_monotonic)
 
     async def _finish_chunk(self, chunk: _FetchChunk, outcome: RepairOutcome) -> None:
         self._chunks.pop(chunk.chunk_id, None)
@@ -832,10 +1569,16 @@ class _BackfillScheduler:
                 self._series.pop(chunk.request.series_key, None)
             return
 
+        skipped_covered = self._discard_chunks_covered_by_report(
+            state,
+            outcome,
+            current_chunk_id=chunk.chunk_id,
+        )
         state.completed += 1
         state.attempts += int(outcome.attempts or 0)
         state.bars_loaded += int(outcome.bars_loaded or 0)
         state.outcomes.append(outcome)
+        state.progress_revision += 1
         if self._is_failed(outcome.status):
             state.failed = outcome
             self._discard_remaining_chunks(state)
@@ -848,14 +1591,50 @@ class _BackfillScheduler:
             self._discard_remaining_chunks(state)
             state.completed = state.total
 
-        if not self._is_failed(outcome.status):
+        if state.cancel_requested:
+            self._discard_remaining_chunks(state)
+            state.completed = state.total
+
+        self._publish_progress(
+            state,
+            status=("cancelled" if state.cancel_requested else "chunk_completed"),
+            details={
+                "completed_chunk_sequence": chunk.sequence,
+                "completed_chunk_start_ms": chunk.request.start_ms,
+                "completed_chunk_end_ms": chunk.request.end_ms,
+                "completed_chunk_target_bars": int(
+                    (
+                        chunk.request.metadata.get("interval_work_plan")
+                        or {}
+                    ).get("effective_target_bars", 0)
+                    or 0
+                ),
+                "completed_chunk_source_rows": int(
+                    (
+                        chunk.request.metadata.get("interval_work_plan")
+                        or {}
+                    ).get("planned_source_rows", 0)
+                    or 0
+                ),
+                "covered_chunks_skipped": skipped_covered,
+            },
+        )
+
+        # Scheduler coverage is a continuity claim, not merely evidence that
+        # an HTTP/reconcile attempt returned without raising.  A partial
+        # verification must stay visible to later demand and ledger recovery.
+        if outcome.verified_contiguous is True:
             self._coverage.setdefault(chunk.request.series_key, []).append({
                 "start_ms": chunk.request.start_ms,
                 "end_ms": chunk.request.end_ms,
             })
 
         if state.failed is not None or state.completed >= state.total:
-            final = self._aggregate_outcome(state)
+            final = (
+                self._cancelled_outcome(state)
+                if state.cancel_requested
+                else self._aggregate_outcome(state)
+            )
             try:
                 if self._shutdown:
                     # A cancellation raised by ``_execute`` is consumed in
@@ -910,6 +1689,11 @@ class _BackfillScheduler:
                         )
                 self._retain_outcome(state.request.request_id, final)
                 self._complete(state.request, final)
+                self._publish_progress(
+                    state,
+                    status=("cancelled" if state.cancel_requested else "completed"),
+                    terminal=True,
+                )
             finally:
                 self._requests.pop(state.request.request_id, None)
                 # The finalizing parent remains the active series owner until
@@ -928,6 +1712,96 @@ class _BackfillScheduler:
                 # visible in pending diagnostics while it waits for the next turn.
                 series.pending.append(state.request.request_id)
 
+    def _discard_chunks_covered_by_report(
+        self,
+        state: _RequestState,
+        outcome: RepairOutcome,
+        *,
+        current_chunk_id: str,
+    ) -> int:
+        """Drop queued pages already covered by a broad archive import.
+
+        Archive objects intentionally write beyond the planner's current
+        1,000-source-row chunk.  The exact target-interval written ranges are
+        durable evidence that later queued chunks no longer need another
+        fetch/reconcile/materialize pass.
+        """
+        if self._is_failed(outcome.status) or outcome.report is None:
+            return 0
+        normalized = [
+            value
+            for raw in list(
+                getattr(outcome.report, "written_ranges", None) or []
+            )
+            if (value := self._normalize_summary_written_range(raw)) is not None
+            and value["exchange"] == state.request.exchange.lower().strip()
+            and value["market_type"] == state.request.market_type.lower().strip()
+            and value["symbol"] == state.request.symbol.upper().strip()
+            and value["interval"] == state.request.interval
+        ]
+        if not normalized:
+            return 0
+        interval_ms = parse_interval_ms(state.request.interval) or 1
+        ordered = sorted(
+            (int(item["start_ms"]), int(item["end_ms"]))
+            for item in normalized
+        )
+        merged: list[tuple[int, int]] = []
+        for start_ms, end_ms in ordered:
+            if not merged or start_ms > merged[-1][1] + interval_ms:
+                merged.append((start_ms, end_ms))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+
+        removed: set[str] = set()
+        for chunk_id in state.chunk_ids:
+            if chunk_id == current_chunk_id or chunk_id in self._tasks:
+                continue
+            pending = self._chunks.get(chunk_id)
+            if pending is None or pending.parent_id != state.request.request_id:
+                continue
+            if any(
+                start_ms <= pending.request.start_ms
+                and pending.request.end_ms <= end_ms
+                for start_ms, end_ms in merged
+            ):
+                removed.add(chunk_id)
+                self._chunks.pop(chunk_id, None)
+        if not removed:
+            return 0
+        state.chunk_ids = [
+            chunk_id for chunk_id in state.chunk_ids if chunk_id not in removed
+        ]
+        self._ready = [item for item in self._ready if item[3] not in removed]
+        heapq.heapify(self._ready)
+        self.covered_chunks_skipped += len(removed)
+        coverage = self._coverage.setdefault(state.request.series_key, [])
+        coverage.extend(
+            {"start_ms": start_ms, "end_ms": end_ms}
+            for start_ms, end_ms in merged
+        )
+        return len(removed)
+
+    @staticmethod
+    def _normalize_summary_written_range(raw: Any) -> dict[str, Any] | None:
+        def _value(key: str, default: Any = None) -> Any:
+            if isinstance(raw, dict):
+                return raw.get(key, default)
+            return getattr(raw, key, default)
+
+        start_ms = _value("start_ms")
+        end_ms = _value("end_ms")
+        if start_ms is None or end_ms is None:
+            return None
+        return {
+            "exchange": str(_value("exchange", "binance")).lower().strip(),
+            "market_type": str(_value("market_type", "spot")).lower().strip(),
+            "symbol": str(_value("symbol", "")).upper().strip(),
+            "interval": _value("interval", ""),
+            "start_ms": int(start_ms),
+            "end_ms": int(end_ms),
+        }
+
     def _retain_outcome(self, request_id: str, outcome: RepairOutcome) -> None:
         self._outcomes[request_id] = outcome
         while len(self._outcomes) > self._max_retained_outcomes:
@@ -935,8 +1809,16 @@ class _BackfillScheduler:
             self._outcomes.pop(oldest_request_id, None)
 
     def _discard_remaining_chunks(self, state: _RequestState) -> None:
+        discarded: set[str] = set()
         for chunk_id in state.chunk_ids:
-            self._chunks.pop(chunk_id, None)
+            if chunk_id not in self._tasks:
+                self._chunks.pop(chunk_id, None)
+                discarded.add(chunk_id)
+        if discarded:
+            self._ready = [
+                item for item in self._ready if item[3] not in discarded
+            ]
+            heapq.heapify(self._ready)
         state.stale = True
 
     def _aggregate_outcome(self, state: _RequestState) -> RepairOutcome:
@@ -1042,6 +1924,13 @@ class _BackfillScheduler:
         *,
         active: bool,
     ) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        deferred = [
+            chunk
+            for chunk_id in state.chunk_ids
+            if (chunk := self._chunks.get(chunk_id)) is not None
+            and chunk.eligible_at_monotonic > now_monotonic
+        ]
         payload = {
             "series": series,
             "request_id": state.request.request_id,
@@ -1054,9 +1943,34 @@ class _BackfillScheduler:
             "completed_chunks": state.completed,
             "pending_chunks": state.pending_count,
             "active": active,
+            "progress_revision": state.progress_revision,
+            "demand_count": len(state.demand_leases),
+            "persistent_interest": state.persistent_interest,
+            "cancel_requested": state.cancel_requested,
+            "deferred_chunks": len(deferred),
+            "retry_at_ms": min(
+                (
+                    int(chunk.retry_at_ms)
+                    for chunk in deferred
+                    if chunk.retry_at_ms is not None
+                ),
+                default=None,
+            ),
+            "rate_limit_buckets": sorted({
+                str(chunk.rate_limit_bucket)
+                for chunk in deferred
+                if chunk.rate_limit_bucket
+            }),
         }
         metadata = state.request.metadata or {}
-        for key in ("focus_scope", "subscription_tier", "current_interval"):
+        for key in (
+            "focus_scope",
+            "subscription_tier",
+            "current_interval",
+            "demand_scope",
+            "demand_generation",
+            "interval_work_plan",
+        ):
             if key in metadata:
                 payload[key] = metadata[key]
         return payload
@@ -1090,9 +2004,29 @@ class _BackfillScheduler:
         tolerance = interval_ms * 3
         return (
             existing.series_key == new.series_key
+            and cls._can_coalesce(existing, new)
             and existing.start_ms <= new.end_ms + tolerance
             and new.start_ms <= existing.end_ms + tolerance
         )
+
+    @staticmethod
+    def _can_coalesce(existing: RepairRequest, new: RepairRequest) -> bool:
+        """Keep active hydration from widening or owning foreground work.
+
+        Other background parents retain their established foreground-promotion
+        behavior. ``active_history_hydration`` is a dedicated cache-fill lane:
+        it may dedupe/merge only with the same lane, never with a viewport
+        parent whose response latency must remain bounded to visible demand.
+        """
+
+        def _is_active_hydration(request: RepairRequest) -> bool:
+            return "active_history_hydration" in {
+                part.strip()
+                for part in str(request.reason or "").split("+")
+                if part.strip()
+            }
+
+        return _is_active_hydration(existing) == _is_active_hydration(new)
 
     @staticmethod
     def _is_failed(status: Any) -> bool:
@@ -1188,6 +2122,13 @@ class BackfillCoordinator:
         self._max_retained_outcomes = _COORDINATOR_OUTCOME_HISTORY_LIMIT
         self._max_request_id_aliases = _REQUEST_ID_ALIAS_HISTORY_LIMIT
         self._retained_outcome_ttl_seconds = _RETAINED_OUTCOME_TTL_SECONDS
+        self._progress_snapshots: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._progress_waiters: dict[
+            str,
+            set[asyncio.Future[dict[str, Any]]],
+        ] = {}
+        self._scope_generations: OrderedDict[str, int] = OrderedDict()
+        self._revoked_demand_owners: OrderedDict[str, str] = OrderedDict()
         self._shutdown = False
         self._scheduler = _BackfillScheduler(
             execute=self._run_with_retries,
@@ -1195,6 +2136,7 @@ class BackfillCoordinator:
             complete=self._complete,
             finalize=self._ledger_finalize_parent,
             on_queued=self._ledger_upsert_detected,
+            on_progress=self._note_progress,
             max_concurrency=max_concurrency,
             chunk_bars=chunk_bars,
         )
@@ -1252,6 +2194,188 @@ class BackfillCoordinator:
     async def request_and_wait(self, request: RepairRequest) -> RepairOutcome:
         _request_id, future = self._request_in_loop(request)
         return await asyncio.shield(future)
+
+    def progress_for_request(self, request_id: str) -> dict[str, Any] | None:
+        canonical_id = self._canonical_request_id(request_id)
+        snapshot = self._progress_snapshots.get(canonical_id)
+        return dict(snapshot) if snapshot is not None else None
+
+    async def wait_for_progress(
+        self,
+        request_id: str,
+        *,
+        after_revision: int = 0,
+    ) -> dict[str, Any] | None:
+        """Wait for the next physical chunk revision, not the whole parent."""
+        canonical_id = self._canonical_request_id(request_id)
+        snapshot = self._progress_snapshots.get(canonical_id)
+        if snapshot is not None and (
+            int(snapshot.get("revision", 0)) > int(after_revision)
+            or bool(snapshot.get("terminal"))
+        ):
+            return dict(snapshot)
+        if canonical_id in self._outcomes:
+            return dict(snapshot) if snapshot is not None else None
+
+        waiter: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        waiters = self._progress_waiters.setdefault(canonical_id, set())
+        waiters.add(waiter)
+        snapshot = self._progress_snapshots.get(canonical_id)
+        if snapshot is not None and (
+            int(snapshot.get("revision", 0)) > int(after_revision)
+            or bool(snapshot.get("terminal"))
+        ):
+            waiter.set_result(dict(snapshot))
+        try:
+            while True:
+                observed = await waiter
+                if (
+                    int(observed.get("revision", 0)) > int(after_revision)
+                    or bool(observed.get("terminal"))
+                ):
+                    return observed
+        finally:
+            waiters.discard(waiter)
+            if not waiters:
+                self._progress_waiters.pop(canonical_id, None)
+
+    async def acquire_demand(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        scope: str | None = None,
+        generation: int | None = None,
+    ) -> bool:
+        canonical_id = self._canonical_request_id(request_id)
+        normalized_scope = str(scope or "").strip() or None
+        normalized_generation = (
+            max(0, int(generation))
+            if generation is not None
+            else None
+        )
+        stale_generation = bool(
+            normalized_scope is not None
+            and normalized_generation is not None
+            and (
+                current := self._scope_generations.get(normalized_scope)
+            ) is not None
+            and normalized_generation < current
+        )
+        acquired = self._scheduler.acquire_demand(
+            canonical_id,
+            owner_id=owner_id,
+            scope=normalized_scope,
+            generation=normalized_generation,
+        )
+        if acquired and stale_generation:
+            # Close the race where generation N schedules its repair after
+            # generation N+1 already advanced the pane scope. Acquiring then
+            # immediately releasing lets the scheduler cancel the otherwise
+            # unowned request with the same pending/chunk-boundary semantics.
+            await self._scheduler.release_demand(
+                canonical_id,
+                owner_id=owner_id,
+                cancel_if_unobserved=True,
+                reason=(
+                    f"scope_stale:{normalized_scope}:{normalized_generation}"
+                ),
+            )
+            return False
+        return acquired
+
+    async def release_demand(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        cancel_if_unobserved: bool = True,
+        reason: str = "demand_released",
+    ) -> bool:
+        canonical_id = self._canonical_request_id(request_id)
+        return await self._scheduler.release_demand(
+            canonical_id,
+            owner_id=owner_id,
+            cancel_if_unobserved=cancel_if_unobserved,
+            reason=reason,
+        )
+
+    async def advance_demand_scope(self, scope: str, generation: int) -> int:
+        normalized_scope = str(scope or "").strip()
+        if not normalized_scope:
+            return 0
+        normalized_generation = max(0, int(generation))
+        current = self._scope_generations.get(normalized_scope)
+        if current is not None and normalized_generation <= current:
+            return 0
+        self._scope_generations.pop(normalized_scope, None)
+        self._scope_generations[normalized_scope] = normalized_generation
+        while len(self._scope_generations) > _REQUEST_ID_ALIAS_HISTORY_LIMIT:
+            self._scope_generations.popitem(last=False)
+        return await self._scheduler.supersede_scope(
+            normalized_scope,
+            normalized_generation,
+        )
+
+    async def revoke_demand_owner(
+        self,
+        owner_id: str,
+        *,
+        reason: str = "demand_owner_revoked",
+    ) -> int:
+        normalized_owner = str(owner_id or "").strip()
+        if not normalized_owner:
+            return 0
+        self._revoked_demand_owners.pop(normalized_owner, None)
+        self._revoked_demand_owners[normalized_owner] = str(reason or "demand_owner_revoked")
+        while len(self._revoked_demand_owners) > _REQUEST_ID_ALIAS_HISTORY_LIMIT:
+            self._revoked_demand_owners.popitem(last=False)
+        return await self._scheduler.revoke_owner(
+            normalized_owner,
+            reason=str(reason or "demand_owner_revoked"),
+        )
+
+    def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+        normalized_scope = str(scope or "").strip()
+        if not normalized_scope:
+            return True
+        current = self._scope_generations.get(normalized_scope)
+        return current is None or int(generation) >= current
+
+    def has_foreground_work(self) -> bool:
+        """Expose scheduler foreground ownership to speculative producers."""
+
+        return self._scheduler.has_foreground_work()
+
+    def foreground_idle_seconds(self) -> float:
+        """Return continuous scheduler idle time since foreground ownership."""
+
+        return self._scheduler.foreground_idle_seconds()
+
+    def _note_progress(
+        self,
+        request: RepairRequest,
+        progress: dict[str, Any],
+    ) -> None:
+        request_id = request.request_id
+        snapshot = dict(progress)
+        previous = self._progress_snapshots.get(request_id)
+        should_notify = bool(snapshot.get("terminal")) or previous is None or (
+            int(snapshot.get("revision", 0))
+            > int(previous.get("revision", 0))
+        )
+        self._progress_snapshots.pop(request_id, None)
+        self._progress_snapshots[request_id] = snapshot
+        while len(self._progress_snapshots) > self._max_retained_outcomes:
+            self._progress_snapshots.popitem(last=False)
+        if not should_notify:
+            return
+        waiters = self._progress_waiters.pop(request_id, set())
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(dict(snapshot))
 
     async def refresh_suppressions(self) -> int:
         """Refresh the non-blocking submission cache from durable ledger state."""
@@ -2186,6 +3310,45 @@ class BackfillCoordinator:
                     continue
                 gap_count = int(scan.get("gap_count", 0) or 0)
                 scanned_bars = int(scan.get("scanned_bars", 0) or 0)
+                if (
+                    gap_count == 0
+                    and scanned_bars > 0
+                    and repair_requires_trusted_finality(
+                        request.metadata,
+                        reason=request.reason,
+                    )
+                ):
+                    _plan, history_context = self._plan_history_request(request)
+                    trusted_verification = await self._verify_request_range(
+                        request,
+                        context=history_context,
+                    )
+                    verified_trusted = trusted_verification.get(
+                        "verified_contiguous"
+                    )
+                    if verified_trusted is None:
+                        report.skipped += 1
+                        if ledger_row_id is not None:
+                            await self._defer_ledger_reconciliation(
+                                request=request,
+                                row_id=ledger_row_id,
+                                reason=(
+                                    "storage cannot verify trusted-finality "
+                                    "provenance during ledger reconciliation"
+                                ),
+                            )
+                        continue
+                    if verified_trusted is False:
+                        gap_count = max(
+                            1,
+                            int(
+                                trusted_verification.get(
+                                    "remaining_missing_bars",
+                                    1,
+                                )
+                                or 1
+                            ),
+                        )
                 if gap_count == 0 and scanned_bars > 0:
                     checkpoint = request.metadata.get(
                         "reconciliation_checkpoint"
@@ -2683,6 +3846,17 @@ class BackfillCoordinator:
         """Cancel active and pending repairs."""
         self._shutdown = True
         await self._scheduler.shutdown()
+        for request_id, waiters in list(self._progress_waiters.items()):
+            snapshot = dict(self._progress_snapshots.get(request_id) or {})
+            snapshot.update({
+                "request_id": request_id,
+                "status": "cancelled",
+                "terminal": True,
+            })
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.set_result(dict(snapshot))
+        self._progress_waiters.clear()
         ledger_task = self._ledger_write_task
         if ledger_task is not None:
             await asyncio.gather(ledger_task, return_exceptions=True)
@@ -2748,6 +3922,33 @@ class BackfillCoordinator:
             raise RuntimeError("BackfillCoordinator is shut down")
 
         self._prune_retained_state()
+        rejected_reason = self._demand_rejection_reason(request)
+        if rejected_reason is not None:
+            future = self._future_for(request)
+            outcome = RepairOutcome(
+                request=request,
+                status="cancelled",
+                verified_contiguous=False,
+                error=rejected_reason,
+                terminal_reason="demand_superseded",
+                retryable=False,
+            )
+            self._complete(request, outcome)
+            self._note_progress(request, {
+                "request_id": request.request_id,
+                "revision": 0,
+                "status": "cancelled",
+                "terminal": True,
+                "completed_chunks": 0,
+                "total_chunks": 0,
+                "pending_chunks": 0,
+                "bars_loaded": 0,
+                "priority": request.priority,
+                "demand_count": 0,
+                "cancel_requested": True,
+                "updated_at_ms": int(time.time() * 1000),
+            })
+            return request.request_id, future
         suppression = self.get_repair_suppression(
             request.symbol,
             request.interval,
@@ -2785,6 +3986,24 @@ class BackfillCoordinator:
             self._request_id_alias_expires_at[request.request_id] = None
             self._prune_retained_state()
         return canonical_id, future
+
+    def _demand_rejection_reason(self, request: RepairRequest) -> str | None:
+        metadata = request.metadata or {}
+        owner_id = str(metadata.get("demand_owner_id") or "").strip()
+        if owner_id and owner_id in self._revoked_demand_owners:
+            return self._revoked_demand_owners[owner_id]
+        scope = str(metadata.get("demand_scope") or "").strip()
+        generation_raw = metadata.get("demand_generation")
+        if not scope or generation_raw is None:
+            return None
+        try:
+            generation = int(generation_raw)
+        except (TypeError, ValueError):
+            return "invalid_demand_generation"
+        current = self._scope_generations.get(scope)
+        if current is not None and generation < current:
+            return f"scope_superseded:{scope}:{generation}<{current}"
+        return None
 
     def _prepare_history_request(
         self,
@@ -3161,6 +4380,14 @@ class BackfillCoordinator:
                     "verified_contiguous": None,
                     "remaining_missing_bars": None,
                 }
+                verification_incomplete = False
+                terminal_reason: str | None = None
+                exhausted_before_ms: int | None = None
+                boundary_checked = False
+                requires_trusted_finality = repair_requires_trusted_finality(
+                    request.metadata,
+                    reason=request.reason,
+                )
                 if not self._is_failed(report.status):
                     await self._ledger_mark_verifying(request)
                     verification = await self._verify_request_range(
@@ -3168,6 +4395,37 @@ class BackfillCoordinator:
                         context=history_context,
                         include_rows=True,
                     )
+                    verification_incomplete = bool(
+                        verification.get("verified_contiguous") is False
+                    )
+                    if verification_incomplete and not requires_trusted_finality:
+                        terminal_reason, exhausted_before_ms = (
+                            await self._record_confirmed_left_boundary(
+                                request,
+                                report,
+                                context=history_context,
+                            )
+                        )
+                        boundary_checked = True
+                    confirmed_terminal = terminal_reason is not None
+                    if (
+                        verification_incomplete
+                        and not confirmed_terminal
+                        and attempt < self._max_retries
+                    ):
+                        delay = self._backoff(attempt)
+                        remaining = verification.get("remaining_missing_bars")
+                        await self._ledger_mark_retry_wait(
+                            request,
+                            attempt=attempt,
+                            error=(
+                                "backfill verification incomplete"
+                                f" ({remaining} rows remain)"
+                            ),
+                            delay_seconds=delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
                     bars_loaded = await self._load_backfilled_to_cache(
                         request,
                         report,
@@ -3183,9 +4441,14 @@ class BackfillCoordinator:
                 if self._is_failed(report.status):
                     await self._emit_failed(request, report)
 
-                terminal_reason: str | None = None
-                exhausted_before_ms: int | None = None
-                if not self._is_failed(report.status):
+                if (
+                    not self._is_failed(report.status)
+                    and not boundary_checked
+                    and not (
+                        verification_incomplete
+                        and requires_trusted_finality
+                    )
+                ):
                     terminal_reason, exhausted_before_ms = (
                         await self._record_confirmed_left_boundary(
                             request,
@@ -3205,8 +4468,24 @@ class BackfillCoordinator:
                     error="; ".join(report.errors) if report.errors else None,
                     terminal_reason=terminal_reason,
                     exhausted_before_ms=exhausted_before_ms,
-                    retryable=self._report_retryable(report),
+                    retryable=(
+                        (
+                            verification_incomplete
+                            and terminal_reason is None
+                        )
+                        or self._report_retryable(report)
+                    ),
                 )
+            except RateLimitDeferred as exc:
+                await self._ledger_mark_retry_wait(
+                    request,
+                    attempt=attempt,
+                    error=(
+                        f"rate_limit_deferred:{exc.bucket_key}:{exc.reason}"
+                    ),
+                    delay_seconds=exc.retry_after_seconds,
+                )
+                raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -3438,7 +4717,20 @@ class BackfillCoordinator:
                 "remaining_missing_bars": None,
             }
 
-        actual = {int(row["open_time"]) for row in rows}
+        physical_actual = {int(row["open_time"]) for row in rows}
+        requires_trusted_finality = repair_requires_trusted_finality(
+            request.metadata,
+            reason=request.reason,
+        )
+        trusted_rows = [
+            row for row in rows
+            if source_is_trusted_final(row.get("source"))
+        ]
+        actual = (
+            {int(row["open_time"]) for row in trusted_rows}
+            if requires_trusted_finality
+            else physical_actual
+        )
         calendar = self._context_calendar(
             context,
             self._context_availability(context),
@@ -3480,12 +4772,20 @@ class BackfillCoordinator:
             "verified_contiguous": missing == 0,
             "remaining_missing_bars": missing,
             "expected_bars": len(expected_opens),
-            "actual_bars": len(actual),
+            "actual_bars": len(physical_actual),
         }
+        if requires_trusted_finality:
+            result.update({
+                "verified_bars": len(actual),
+                "requires_trusted_finality": True,
+                "untrusted_final_bars": len(
+                    expected_opens & (physical_actual - actual)
+                ),
+            })
         if include_rows:
             # Private handoff to cache reload: verification already paid for
             # this exact storage range, so do not immediately query it again.
-            result["_rows"] = rows
+            result["_rows"] = trusted_rows if requires_trusted_finality else rows
         return result
 
     def _ledger_upsert_detected(self, request: RepairRequest) -> None:
@@ -3611,6 +4911,15 @@ class BackfillCoordinator:
         elif outcome.verified_contiguous is True:
             status = "filled"
             missing_count = 0
+        elif (
+            outcome.verified_contiguous is False
+            and (
+                outcome.terminal_reason is None
+                or outcome.retryable
+            )
+        ):
+            status = "partial"
+            missing_count = outcome.remaining_missing_bars
         else:
             reconcile = getattr(outcome.report, "reconcile_result", None)
             written = int(getattr(reconcile, "bars_written", 0) or 0)
@@ -3640,6 +4949,35 @@ class BackfillCoordinator:
                 verified_coverage = (start_open_ms, end_exclusive_ms - 1)
 
         def _persist() -> None:
+            finalize_parent = getattr(self._gap_ledger, "finalize_parent", None)
+            if callable(finalize_parent):
+                finalize_parent(
+                    request,
+                    status=status,
+                    missing_count=missing_count,
+                    error=(
+                        outcome.terminal_reason
+                        if status == "unavailable"
+                        else outcome.error
+                    ),
+                    attempts=int(outcome.attempts or 0),
+                    coverage_start_ms=(
+                        verified_coverage[0]
+                        if verified_coverage is not None
+                        else None
+                    ),
+                    coverage_end_ms=(
+                        verified_coverage[1]
+                        if verified_coverage is not None
+                        else None
+                    ),
+                    next_retry_at=(
+                        int(time.time() * 1000) + _TERMINAL_LEDGER_RETRY_MS
+                        if status == "unavailable"
+                        else None
+                    ),
+                )
+                return
             if status == "unavailable":
                 mark_deferred = getattr(self._gap_ledger, "mark_deferred", None)
                 if callable(mark_deferred):
@@ -3709,6 +5047,11 @@ class BackfillCoordinator:
         }
         raw_metadata = row.get("metadata_json")
         decoded_metadata = _decode_metadata_object(raw_metadata)
+        if repair_requires_trusted_finality(
+            decoded_metadata,
+            reason=row.get("reason"),
+        ):
+            metadata["requires_trusted_finality"] = True
         checkpoint = decoded_metadata.get("reconciliation_checkpoint")
         if isinstance(checkpoint, dict):
             metadata["reconciliation_checkpoint"] = dict(checkpoint)
@@ -4088,7 +5431,20 @@ class BackfillCoordinator:
 
         fetch_results = cls._report_fetch_results(report)
         errors = [str(error) for error in getattr(report, "errors", None) or []]
-        report_ranges = list(getattr(report, "written_ranges", None) or [])
+        report_ranges = cls._raw_written_ranges(report)
+        range_summaries: list[RepairWrittenRangeSummary] = []
+        for raw_range in report_ranges[:256]:
+            normalized = cls._normalize_written_range(raw_range)
+            if normalized is None:
+                continue
+            range_summaries.append(RepairWrittenRangeSummary(
+                exchange=normalized["exchange"],
+                market_type=normalized["market_type"],
+                symbol=normalized["symbol"],
+                interval=normalized["interval"],
+                start_ms=normalized["start_ms"],
+                end_ms=normalized["end_ms"],
+            ))
         return RepairReportSummary(
             status=getattr(report, "status", "unknown"),
             errors=tuple(error[:500] for error in errors[:20]),
@@ -4100,6 +5456,7 @@ class BackfillCoordinator:
                 for result in fetch_results
             ),
             written_range_count=len(report_ranges),
+            written_ranges=tuple(range_summaries),
             elapsed_ms=int(getattr(report, "elapsed_ms", 0) or 0),
         )
 
@@ -4329,6 +5686,12 @@ class BackfillCoordinator:
         ]
         if ranges:
             return ranges
+        # A report that explicitly describes writes for other intervals is
+        # authoritative: it did not write this request's target series.  The
+        # full-request fallback exists only for legacy reports that carry no
+        # written-range metadata at all.
+        if raw_ranges:
+            return []
         return [{
             "exchange": request.exchange.lower().strip(),
             "market_type": request.market_type.lower().strip(),

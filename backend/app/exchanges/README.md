@@ -47,6 +47,36 @@ Data Engine code must not call `plugin.adapter()` for runtime behavior. The
 adapter entry point exists so older imports and symbol metadata callers keep
 working while new code moves through plugin contracts.
 
+## Shared REST Budgets And Catalogs
+
+Historical transports and symbol-catalog HTTP requests use the same
+event-loop `RateLimitManager` and endpoint semaphore. Catalog endpoints must
+declare their real request cost in the plugin policy; they may fail over after
+ordinary transport errors, but an HTTP 418/429 or exchange-equivalent body code
+opens the shared cooldown and must not rotate to another hostname.
+
+An HTTP 429 cooldown is bucket-scoped. When it expires, only one request-cost
+is admitted as a recovery probe; the rest of the bucket refills normally
+instead of releasing tokens accumulated during `Retry-After`. HTTP 418 remains
+an exchange-wide IP circuit and resets every matching bucket on recovery.
+
+Symbol catalogs refresh per `(exchange, market_type)` with TTL and physical
+singleflight. A validated, versioned last-known-good snapshot is atomically
+persisted under `backend/data` and restored before the API starts. Empty,
+failed, rate-deferred, or suspiciously shrunken refreshes keep that snapshot
+and expose `stale`, `last_success_at`, and `retry_at_ms`. If no validated
+catalog exists, the API performs a bounded join and returns an explicit
+retryable `503 symbol_catalog_unavailable` rather than a misleading empty
+`200` response. Failed automatic refreshes retry at a bounded deadline, and
+speculative startup/TTL refreshes wait for foreground data work to remain
+quiet. On-demand catalog requests bypass that speculative dwell.
+
+Shared production rate-limit managers start conservatively: the first request
+for a newly created bucket is an exact-cost probe, so a process restart cannot
+turn unknown exchange state into a full-bucket burst. Startup initializes the
+core DataManager first and keeps all upstream catalog refresh tasks cancellable
+through shutdown.
+
 ## Capability Metadata
 
 `ExchangeCapabilities` is the public contract exposed by

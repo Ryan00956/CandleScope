@@ -85,6 +85,18 @@ export interface SeriesDescription {
   version: DataRevision;
 }
 
+export interface CachedChartDataActivation {
+  coverage: SeriesCoverage;
+  historyComplete: boolean;
+  historyRepairPending: boolean;
+  historyValidatedCountBack: number | null;
+  lastTailUpdatedMs: number | null;
+  lastValidatedMs: number | null;
+  revision: DataRevision;
+  rightTruncated: boolean;
+  rows: KlineBar[];
+}
+
 export interface SeriesWindowSegment {
   bars: KlineBar[];
 }
@@ -116,7 +128,6 @@ export interface UseChartBackgroundPrefetchOptions
 }
 
 export interface UseSessionTransitionResetOptions {
-  clearCache(): void;
   interval: IntervalString;
   markChartDataTransition(
     symbol: SymbolCode,

@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import replace
-from typing import Callable, Any
+from typing import Callable
 
 from ..ingestion.metrics import LayerMetrics
 from app.data_engine.interval_policy import (
@@ -730,7 +730,10 @@ class BackfillPlanner:
         """Remove duplicate tasks (same symbol + interval + time range).
 
         When duplicates are found, the one with higher priority (lower
-        number) is kept.  Overlapping ranges are merged.
+        number) is kept.  Overlapping ranges are merged only while the union
+        remains within one configured provider page.  The planner deliberately
+        creates page-bounded tasks; rejoining adjacent pages here turns a
+        bounded custom repair into one enormous provider request.
         """
         if not tasks:
             return []
@@ -752,13 +755,16 @@ class BackfillPlanner:
                 last = merged[-1]
                 interval_ms = parse_interval_ms(interval) or 1
 
-                # Check for overlap or adjacency
-                if task.start_ms <= last.end_ms + interval_ms:
-                    # Merge: extend the range
-                    new_end = max(last.end_ms, task.end_ms)
-                    new_estimated = max(
-                        1, (new_end - last.start_ms) // interval_ms + 1,
-                    )
+                new_end = max(last.end_ms, task.end_ms)
+                new_estimated = max(
+                    1, (new_end - last.start_ms) // interval_ms + 1,
+                )
+
+                # Merge an overlap/adjacency only when it remains one page.
+                if (
+                    task.start_ms <= last.end_ms + interval_ms
+                    and new_estimated <= self._cfg.fetch_batch_size
+                ):
                     merged[-1] = BackfillTask(
                         symbol=symbol,
                         interval=interval,

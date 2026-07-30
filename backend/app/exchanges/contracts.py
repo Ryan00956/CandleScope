@@ -18,6 +18,7 @@ _CONNECTION_MODELS = {
     "shared_multiplex",
     "message_per_stream",
     "polling_only",
+    "plugin_sidecar",
 }
 _SEQUENCE_MODES = {
     "none",

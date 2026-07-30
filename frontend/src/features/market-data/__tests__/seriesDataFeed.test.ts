@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  aggregateResolvedGapRepairResult,
   capContinuationRanges,
   countIntervalBarsInRange,
   projectContinuousRangeToInterval,
@@ -11,9 +12,12 @@ import type {
   BackfillCompletedMessage,
   BackfillCompletedOptions,
   FeedResult,
+  FeedCommitMeta,
   KlineApi,
+  KlineBeforeRequestOptions,
   KlineFetchResult,
   KlineHistoryRequestOptions,
+  KlineRequestOptions,
   KlineStreamTickEvent,
   KlineStreamSocket,
   SeriesDataFeedConfig,
@@ -22,6 +26,7 @@ import type { KlineBar } from "../marketDataTypes.js";
 import type { EpochSeconds } from "../marketDataTypes.js";
 import { toEpochMilliseconds } from "../marketDataTypes.js";
 import { epochSeconds, mustBeDefined, partialMock } from "../../../test/testHelpers.js";
+import { ForegroundPreloadGate } from "../foregroundPreloadGate.js";
 
 type TestFeedConfig = Omit<SeriesDataFeedConfig, "api"> & {
   api?: Partial<KlineApi> | null;
@@ -182,6 +187,316 @@ test("background tracked interval cache uses the same realtime row fence", async
   const result = await request;
   assert.equal(cached.close, 15);
   assert.equal(result.data[0]?.close, 15);
+});
+
+test("only foreground K-line transports enter the foreground lease", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  const observed: Array<{ kind: string; foreground: number; preload: string | null }> = [];
+  const observe = (kind: string) => {
+    const snapshot = gate.snapshot();
+    observed.push({
+      kind,
+      foreground: snapshot.activeForeground,
+      preload: snapshot.activePreloadOwner,
+    });
+  };
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchKlinesHistory: async () => {
+        observe("history");
+        return { data: rows([10]) };
+      },
+      fetchKlinesBefore: async () => {
+        observe("before");
+        return { data: rows([10]), has_more: false };
+      },
+      fetchKlinesRange: async () => {
+        observe("range");
+        return { data: rows([10]), has_more: false };
+      },
+      fetchLatestKlines: async () => {
+        observe("latest");
+        return { data: rows([10]) };
+      },
+    },
+  });
+
+  const displacedPreload = gate.tryAcquirePreload("displaced-preload");
+  assert.ok(displacedPreload);
+  await feed.getHistory(SERIES);
+  assert.equal(displacedPreload.controller.signal.aborted, true);
+  await feed.getBefore(SERIES, { before: epochSeconds(20) });
+  await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
+  await feed.getLatest(SERIES);
+
+  const hydrateLease = gate.tryAcquireHydration("active-hydration");
+  assert.ok(hydrateLease);
+  await feed.getHistory(SERIES, {
+    priority: "hydrate",
+    intent: "active_hydration",
+    signal: hydrateLease.controller.signal,
+    source: "active-hydration",
+  });
+  assert.equal(hydrateLease.controller.signal.aborted, false);
+  gate.release(hydrateLease);
+
+  const explicitPreload = gate.tryAcquirePreload("explicit-preload");
+  assert.ok(explicitPreload);
+  await feed.getLatest(SERIES, {
+    priority: "preload",
+    signal: explicitPreload.controller.signal,
+    source: "background-prefetch",
+  });
+  gate.release(explicitPreload);
+
+  assert.deepEqual(observed.slice(0, 4).map((entry) => [entry.kind, entry.foreground]), [
+    ["history", 1],
+    ["before", 1],
+    ["range", 1],
+    ["latest", 1],
+  ]);
+  assert.deepEqual(observed.at(4), {
+    kind: "history",
+    foreground: 0,
+    preload: "active-hydration",
+  });
+  assert.deepEqual(observed.at(-1), {
+    kind: "latest",
+    foreground: 0,
+    preload: "explicit-preload",
+  });
+  assert.equal(gate.snapshot().activeForeground, 0);
+  gate.dispose();
+});
+
+test("concurrent initial latest and history retain foreground ownership until both transports settle", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  let resolveHistory!: (result: KlineFetchResult) => void;
+  let resolveLatest!: (result: KlineFetchResult) => void;
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchKlinesHistory: async () => {
+        calls += 1;
+        return new Promise((resolve) => { resolveHistory = resolve; });
+      },
+      fetchLatestKlines: async () => {
+        calls += 1;
+        return new Promise((resolve) => { resolveLatest = resolve; });
+      },
+    },
+  });
+
+  const history = feed.getHistory(SERIES, { source: "initial-history" });
+  const latest = feed.getLatest(SERIES, { source: "initial-latest" });
+  while (calls < 2) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(gate.snapshot().activeForeground, 2);
+  assert.equal(gate.tryAcquirePreload("blocked-preload"), null);
+
+  resolveLatest({ data: rows([20]) });
+  await latest;
+  assert.equal(gate.snapshot().activeForeground, 1);
+  assert.equal(gate.tryAcquirePreload("still-blocked"), null);
+
+  resolveHistory({ data: rows([10, 20]) });
+  await history;
+  assert.equal(gate.snapshot().activeForeground, 0);
+  const resumed = gate.tryAcquirePreload("resumed");
+  assert.ok(resumed);
+  gate.release(resumed);
+  gate.dispose();
+});
+
+test("a foreground preemption fences a late preload response before cache commit", async () => {
+  const gate = new ForegroundPreloadGate(0);
+  let resolveLatest!: (result: KlineFetchResult) => void;
+  let started!: () => void;
+  const transportStarted = new Promise<void>((resolve) => { started = resolve; });
+  const commits: KlineBar[][] = [];
+  const feed = new SeriesDataFeed({
+    foregroundPreloadGate: gate,
+    api: {
+      fetchLatestKlines: async () => {
+        started();
+        return new Promise((resolve) => { resolveLatest = resolve; });
+      },
+    },
+    mergeCacheData: (_symbol, _interval, incoming) => { commits.push(incoming); },
+  });
+  const preload = gate.tryAcquirePreload("late-preload");
+  assert.ok(preload);
+  const request = feed.getLatest(SERIES, {
+    commit: "cache",
+    priority: "preload",
+    signal: preload.controller.signal,
+    source: "background-prefetch",
+  });
+  await transportStarted;
+
+  const foreground = gate.enterForeground("initial-history");
+  assert.equal(preload.controller.signal.aborted, true);
+  resolveLatest({ data: rows([10]) });
+  await assert.rejects(request, (error: unknown) => (
+    error instanceof Error && error.name === "AbortError"
+  ));
+  assert.deepEqual(commits, []);
+
+  foreground.release();
+  gate.dispose();
+});
+
+test("snapshot commit mode reconciles rows without mutating active or cache windows", async () => {
+  const writes: string[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async () => ({ data: rows([10, 20]) }),
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => { writes.push("active"); },
+    mergeCacheData: () => { writes.push("cache"); },
+  });
+
+  const result = await feed.getHistory(SERIES, { commit: "none" });
+
+  assert.deepEqual(result.data.map((row) => row.time), [10, 20]);
+  assert.equal(result.committed, false);
+  assert.deepEqual(writes, []);
+});
+
+test("pending active commits defer indicator windows until the same range settles", async () => {
+  const commits: FeedCommitMeta[] = [];
+  let call = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async () => {
+        call += 1;
+        return call === 1
+          ? {
+              data: rows([100]),
+              history_state: "pending",
+              complete: false,
+              retryable: true,
+              verified_contiguous: false,
+              missing_ranges: [{ start_ms: 100_000, end_ms: 200_000 }],
+            }
+          : {
+              data: rows([100, 200]),
+              history_state: "ready",
+              complete: true,
+              retryable: false,
+              verified_contiguous: true,
+              missing_ranges: [],
+            };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: (_symbol, _interval, _rows, meta) => commits.push(meta),
+  });
+
+  await feed.getHistory(SERIES, { source: "partial-history" });
+  await feed.getHistory(SERIES, { source: "settled-history" });
+
+  assert.deepEqual(commits.map((meta) => ({
+    source: meta.source,
+    deferred: meta.deferIndicatorWindow,
+  })), [
+    { source: "partial-history", deferred: true },
+    { source: "settled-history", deferred: false },
+  ]);
+  assert.ok(commits[0]?.indicatorWindowOwner);
+  assert.equal(commits[0]?.indicatorWindowOwner, commits[1]?.indicatorWindowOwner);
+});
+
+test("parent before-page and child range repair retain distinct stable indicator owners", async () => {
+  const commits: FeedCommitMeta[] = [];
+  let beforeCall = 0;
+  let rangeCall = 0;
+  const pending = {
+    history_state: "pending" as const,
+    complete: false,
+    retryable: true,
+    verified_contiguous: false,
+    missing_ranges: [{ start_ms: 100_000, end_ms: 200_000 }],
+  };
+  const ready = {
+    history_state: "ready" as const,
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    missing_ranges: [],
+  };
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async () => (++beforeCall === 1
+        ? { ...pending, data: rows([100]) }
+        : { ...ready, data: rows([100, 200]) }),
+      fetchKlinesRange: async () => (++rangeCall === 1
+        ? { ...pending, data: rows([150]) }
+        : { ...ready, data: rows([150, 200]) }),
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: (_symbol, _interval, _rows, meta) => commits.push(meta),
+  });
+
+  await feed.getBefore(SERIES, { before: epochSeconds(300), bars: 100, source: "parent-partial" });
+  await feed.getRange(SERIES, { start: epochSeconds(100), end: epochSeconds(200), source: "child-partial" });
+  await feed.getBefore(SERIES, { before: epochSeconds(300), bars: 100, source: "parent-ready" });
+  await feed.getRange(SERIES, { start: epochSeconds(100), end: epochSeconds(200), source: "child-ready" });
+
+  const owners = commits.map((meta) => meta.indicatorWindowOwner);
+  assert.ok(owners[0]);
+  assert.ok(owners[1]);
+  assert.notEqual(owners[0], owners[1]);
+  assert.equal(owners[0], owners[2]);
+  assert.equal(owners[1], owners[3]);
+  assert.deepEqual(commits.map((meta) => meta.deferIndicatorWindow), [true, true, false, false]);
+});
+
+test("an empty terminal probe releases the indicator window owned by a partial page", async () => {
+  const commits: Array<{ rows: number; meta: FeedCommitMeta }> = [];
+  let call = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async () => {
+        call += 1;
+        return call === 1
+          ? {
+              data: rows([100]),
+              history_state: "pending",
+              complete: false,
+              retryable: true,
+              verified_contiguous: false,
+              missing_ranges: [{ start_ms: 100_000, end_ms: 200_000 }],
+            }
+          : {
+              data: [],
+              history_state: "exhausted",
+              complete: true,
+              retryable: false,
+              verified_contiguous: true,
+              missing_ranges: [],
+            };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: (_symbol, _interval, incoming, meta) => {
+      commits.push({ rows: incoming.length, meta });
+    },
+  });
+
+  await feed.getHistory(SERIES, { source: "partial-history" });
+  await feed.getHistory(SERIES, { source: "terminal-history" });
+
+  assert.deepEqual(commits.map(({ rows: count, meta }) => ({
+    rows: count,
+    source: meta.source,
+    deferred: meta.deferIndicatorWindow,
+  })), [
+    { rows: 1, source: "partial-history", deferred: true },
+    { rows: 0, source: "terminal-history", deferred: false },
+  ]);
 });
 
 test("trusted final latest may close a concurrent forming realtime row", async () => {
@@ -508,6 +823,51 @@ test("dedupes exact range requests", async () => {
   assert.equal(calls, 1);
 });
 
+test("history inflight identity includes bounded wait and intent", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const optionsSeen: KlineHistoryRequestOptions[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async (_symbol, _interval, _days, _marketType, _exchange, options) => {
+        calls += 1;
+        optionsSeen.push(options);
+        await pending;
+        return { data: rows([10, 20]) };
+      },
+    },
+  });
+  const base = {
+    commit: "none" as const,
+    source: "history-identity",
+    priority: "hydrate" as const,
+    maxWaitMs: 350,
+    intent: "viewport" as const,
+  };
+
+  const exact = feed.getHistory(SERIES, base);
+  const joined = feed.getHistory(SERIES, base);
+  const differentWait = feed.getHistory(SERIES, { ...base, maxWaitMs: 800 });
+  const differentIntent = feed.getHistory(SERIES, {
+    ...base,
+    intent: "active_hydration",
+  });
+  while (calls < 3) await new Promise((resolve) => setImmediate(resolve));
+  mustBeDefined(release)();
+  await Promise.all([exact, joined, differentWait, differentIntent]);
+
+  assert.equal(calls, 3, "only the exact max-wait/intent pair may join inflight work");
+  assert.deepEqual(
+    optionsSeen.map(({ maxWaitMs, intent }) => ({ maxWaitMs, intent })),
+    [
+      { maxWaitMs: 350, intent: "viewport" },
+      { maxWaitMs: 800, intent: "viewport" },
+      { maxWaitMs: 350, intent: "active_hydration" },
+    ],
+  );
+});
+
 test("drops stale responses after epoch advances", async () => {
   let commitCalls = 0;
   const feed = new SeriesDataFeed({
@@ -619,11 +979,15 @@ test("getBars plans countBack history using interval duration", async () => {
 
   const result = await feed.getBars(SERIES, {
     countBack: 24,
+    maxWaitMs: 450,
+    intent: "viewport",
     source: "countback-history",
   });
 
   assert.equal(requestedDays, 1);
   assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).countBack, 24);
+  assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).maxWaitMs, 450);
+  assert.equal(mustBeDefined<KlineHistoryRequestOptions>(requestedOptions).intent, "viewport");
   assert.equal(mustBeDefined(result.plan).type, "history");
 });
 
@@ -1403,6 +1767,160 @@ test("non-empty partial before pages remain pending", async () => {
   });
 });
 
+test("pending load-more completion chunks only wake one non-blocking page poll", async () => {
+  let beforeCalls = 0;
+  let rangeCalls = 0;
+  const beforeOptions: KlineBeforeRequestOptions[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async (
+        _symbol,
+        _interval,
+        _before,
+        _bars,
+        _marketType,
+        _exchange,
+        options,
+      ) => {
+        beforeCalls += 1;
+        beforeOptions.push(options);
+        if (beforeCalls === 1) {
+          return {
+            data: rows([100]),
+            history_state: "pending",
+            complete: false,
+            retryable: true,
+            verified_contiguous: false,
+            missing_ranges: [{ start_ms: 120_000, end_ms: 180_000 }],
+          };
+        }
+        return {
+          data: rows([50, 100]),
+          has_more: true,
+          history_state: "ready",
+          complete: true,
+          retryable: false,
+          verified_contiguous: true,
+          missing_ranges: [],
+        };
+      },
+      fetchKlinesRange: async () => {
+        rangeCalls += 1;
+        return { data: rows([120, 180]), verified_contiguous: true };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    pendingCooldownMs: 0,
+  });
+  const pending = mustBeDefined(feed.getPendingBeforePage(SERIES));
+  pending.nextPollAt = Date.now() + 60_000;
+
+  for (const [requestId, start] of [["chunk-a", 120], ["chunk-b", 150]] as const) {
+    assert.equal(feed.handleBackfillCompleted({
+      type: "backfill_completed",
+      ...SERIES,
+      market_type: SERIES.marketType,
+      detail: {
+        request_id: requestId,
+        reason: "visible_load_more",
+        range_start_ms: start * 1_000,
+        range_end_ms: 180_000,
+      },
+    }, {
+      activeSeries: SERIES,
+      getCacheRows: () => rows([100, 200]),
+      cooldownMs: 0,
+    }), true);
+  }
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(rangeCalls, 0, "completion chunks must not fan out into exact range reloads");
+  assert.equal(beforeCalls, 1, "completion chunks must not directly retry the full page");
+  assert.ok((pending.nextPollAt ?? Infinity) <= Date.now(), "completion must wake the central poll");
+
+  assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 1);
+  assert.equal(beforeCalls, 2);
+  assert.equal(beforeOptions[1]?.maxWaitMs, 0, "validation must not spend another long-poll budget");
+  assert.equal(feed.getPendingBeforePage(SERIES), null);
+});
+
+test("pending initial completion chunks only wake the owned exact-range poll", async () => {
+  let rangeCalls = 0;
+  let resolved = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, start, end) => {
+        rangeCalls += 1;
+        assert.deepEqual({ start, end }, { start: 100, end: 300 });
+        return {
+          data: rows([100, 200, 300]),
+          verified_contiguous: true,
+          history_state: "ready",
+          complete: true,
+          retryable: false,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+  const pendingInitial = {
+    ...SERIES,
+    range: {
+      start: mustBeDefined(toEpochMilliseconds(100_000)),
+      end: mustBeDefined(toEpochMilliseconds(300_000)),
+    },
+  };
+  const tracked = feed.trackPendingResultRepair(SERIES, {
+    data: rows([300]),
+    start_ms: 100_000,
+    end_ms: 300_000,
+    history_state: "pending",
+    complete: false,
+    retryable: true,
+    verified_contiguous: false,
+    missing_ranges: [{ start_ms: 100_000, end_ms: 300_000 }],
+  }, () => { resolved += 1; });
+  assert.deepEqual(tracked, { start: 100, end: 300 });
+
+  for (const [requestId, start, end] of [
+    ["chunk-a", 120, 180],
+    ["chunk-b", 220, 280],
+  ] as const) {
+    assert.equal(feed.handleBackfillCompleted({
+      type: "backfill_completed",
+      ...SERIES,
+      market_type: SERIES.marketType,
+      detail: {
+        request_id: requestId,
+        reason: "initial_history",
+        range_start_ms: start * 1_000,
+        range_end_ms: end * 1_000,
+      },
+    }, {
+      activeSeries: SERIES,
+      pendingInitial,
+      getPendingInitial: () => pendingInitial,
+      getCacheRows: () => rows([300]),
+      cooldownMs: 0,
+    }), true);
+  }
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(rangeCalls, 0, "physical completion chunks must not launch their own range reads");
+  assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 1);
+  assert.equal(rangeCalls, 1, "the central poll validates the complete initial range once");
+  assert.equal(resolved, 1);
+  assert.equal(feed.pendingRepairCount(SERIES), 0);
+});
+
 test("pending exact gap repairs are re-read without a websocket completion", async () => {
   let calls = 0;
   const feed = new SeriesDataFeed({
@@ -1659,6 +2177,7 @@ test("a capped initial verification finalizes only after every child range resol
   const feed = new SeriesDataFeed({ getActiveSeries: () => SERIES });
   const range = { start: epochSeconds(3_600), end: epochSeconds(32_400) };
   let resolved = 0;
+  let resolvedResult: FeedResult | null = null;
   const updatePending = (feed as unknown as {
     updatePendingGapRepairFromResult(
       series: typeof SERIES,
@@ -1666,13 +2185,15 @@ test("a capped initial verification finalizes only after every child range resol
       result: FeedResult,
       attempts: number,
       dormant: boolean,
-      onResolved?: () => void,
+      onResolved?: (result: FeedResult) => void,
     ): void;
   }).updatePendingGapRepairFromResult.bind(feed);
 
   updatePending(SERIES, range, {
     data: [],
     rows: [],
+    all_rows_final: true,
+    has_tail_gap: false,
     truncated: true,
     pagination_stop_reason: "cap",
     next_end_ms: 18_000_000,
@@ -1680,7 +2201,10 @@ test("a capped initial verification finalizes only after every child range resol
     retryable: true,
     verified_contiguous: false,
     missing_ranges: [{ start_ms: 28_800_000, end_ms: 28_800_000 }],
-  }, 1, false, () => { resolved += 1; });
+  }, 1, false, (result) => {
+    resolved += 1;
+    resolvedResult = result;
+  });
 
   updatePending(SERIES, {
     start: epochSeconds(3_600),
@@ -1688,25 +2212,218 @@ test("a capped initial verification finalizes only after every child range resol
   }, {
     data: rows([3_600, 18_000]),
     rows: rows([3_600, 18_000]),
+    history_state: "ready",
     complete: true,
     retryable: false,
     verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
     missing_ranges: [],
   }, 2, false);
   assert.equal(resolved, 0);
 
-  updatePending(SERIES, {
-    start: epochSeconds(28_800),
-    end: epochSeconds(28_800),
-  }, {
+  const finalResult = {
     data: rows([28_800]),
     rows: rows([28_800]),
+    history_state: "ready" as const,
     complete: true,
     retryable: false,
     verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
     missing_ranges: [],
-  }, 2, false);
+  };
+  updatePending(SERIES, {
+    start: epochSeconds(28_800),
+    end: epochSeconds(28_800),
+  }, finalResult, 2, false);
   assert.equal(resolved, 1);
+  assert.notStrictEqual(resolvedResult, finalResult);
+  const aggregateResult = mustBeDefined(resolvedResult as FeedResult | null);
+  assert.deepEqual({
+    source: aggregateResult.source,
+    start_ms: aggregateResult.start_ms,
+    end_ms: aggregateResult.end_ms,
+    history_state: aggregateResult.history_state,
+    complete: aggregateResult.complete,
+    retryable: aggregateResult.retryable,
+    verified_contiguous: aggregateResult.verified_contiguous,
+    all_rows_final: aggregateResult.all_rows_final,
+    has_tail_gap: aggregateResult.has_tail_gap,
+    truncated: aggregateResult.truncated,
+    missing_ranges: aggregateResult.missing_ranges,
+  }, {
+    source: "gap-repair-aggregate",
+    start_ms: 3_600_000,
+    end_ms: 32_400_000,
+    history_state: "ready",
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
+    missing_ranges: [],
+  });
+});
+
+test("a capped repair aggregate fails closed when any child lacks finality proof", () => {
+  const result = aggregateResolvedGapRepairResult(
+    {
+      all_rows_final: true,
+      truncated: true,
+      complete: false,
+      retryable: true,
+    },
+    { start: epochSeconds(3_600), end: epochSeconds(32_400) },
+    [{
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+      // all_rows_final is deliberately absent.
+    }],
+  );
+
+  assert.equal(result.complete, false);
+  assert.equal(result.verified_contiguous, false);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.history_state, "pending");
+  assert.equal(result.retryable, true);
+});
+
+test("a capped repair aggregate stays pending when the parent has an unscheduled tail gap", () => {
+  const result = aggregateResolvedGapRepairResult(
+    {
+      all_rows_final: true,
+      has_tail_gap: true,
+      truncated: true,
+      pagination_stop_reason: "cap",
+      next_end_ms: 18_000_000,
+      complete: false,
+      retryable: true,
+      verified_contiguous: false,
+      missing_ranges: [],
+    },
+    { start: epochSeconds(3_600), end: epochSeconds(32_400) },
+    [{
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+
+  assert.equal(result.complete, false);
+  assert.equal(result.verified_contiguous, false);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.has_tail_gap, true);
+  assert.equal(result.history_state, "pending");
+  assert.equal(result.retryable, true);
+  assert.deepEqual(result.missing_ranges, [{
+    start_ms: 3_600_000,
+    end_ms: 32_400_000,
+    reason: "aggregate_quality_unproven",
+  }]);
+});
+
+test("an incomplete capped aggregate restores the full parent repair before resolving", async () => {
+  const range = { start: epochSeconds(3_600), end: epochSeconds(32_400) };
+  const requests: Array<{ start: EpochSeconds; end: EpochSeconds }> = [];
+  let resolved = 0;
+  let settledResult: FeedResult | null = null;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, start, end) => {
+        requests.push({ start, end });
+        return {
+          data: rows([start, end]),
+          start_ms: start * 1_000,
+          end_ms: end * 1_000,
+          history_state: "ready",
+          complete: true,
+          retryable: false,
+          verified_contiguous: true,
+          all_rows_final: true,
+          has_tail_gap: false,
+          truncated: false,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+  const updatePending = (feed as unknown as {
+    updatePendingGapRepairFromResult(
+      series: typeof SERIES,
+      pendingRange: typeof range,
+      result: FeedResult,
+      attempts: number,
+      dormant: boolean,
+      onResolved?: (result: FeedResult) => void,
+    ): void;
+  }).updatePendingGapRepairFromResult.bind(feed);
+  const completeChild = {
+    data: rows([3_600, 18_000]),
+    rows: rows([3_600, 18_000]),
+    history_state: "ready" as const,
+    complete: true,
+    retryable: false,
+    verified_contiguous: true,
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: false,
+    missing_ranges: [],
+  };
+
+  updatePending(SERIES, range, {
+    data: [],
+    rows: [],
+    all_rows_final: true,
+    has_tail_gap: false,
+    truncated: true,
+    pagination_stop_reason: "cap",
+    next_end_ms: 18_000_000,
+    complete: false,
+    retryable: true,
+    verified_contiguous: false,
+    missing_ranges: [{ start_ms: 28_800_000, end_ms: 28_800_000 }],
+  }, 1, false, (result) => {
+    resolved += 1;
+    settledResult = result;
+  });
+  updatePending(SERIES, {
+    start: epochSeconds(3_600),
+    end: epochSeconds(18_000),
+  }, completeChild, 2, false);
+  const incompleteChild: FeedResult = {
+    ...completeChild,
+    data: rows([28_800]),
+    rows: rows([28_800]),
+  };
+  delete incompleteChild.all_rows_final;
+  updatePending(SERIES, {
+    start: epochSeconds(28_800),
+    end: epochSeconds(28_800),
+  }, incompleteChild, 2, false);
+
+  assert.equal(resolved, 0, "an unproven aggregate must not publish resolved");
+  assert.equal(feed.pendingRepairCount(SERIES), 1, "the parent range remains exact pending work");
+  assert.equal(await feed.pollPendingRepairs(SERIES, { force: true, maxRequests: 1 }), 1);
+  assert.deepEqual(requests, [range]);
+  assert.equal(resolved, 1);
+  assert.equal(feed.pendingRepairCount(SERIES), 0);
+  assert.equal(mustBeDefined(settledResult as FeedResult | null).complete, true);
 });
 
 test("clearing a capped parent removes child repairs and rejects a late in-flight response", async () => {
@@ -2110,6 +2827,48 @@ test("a stale before-page lease cannot block or release the next epoch lease", a
   await second;
 });
 
+test("a fresh-window epoch prevents an older left page from merging after replacement", async () => {
+  let beforeCalls = 0;
+  let releaseBefore: (() => void) | undefined;
+  const beforeGate = new Promise<void>((resolve) => { releaseBefore = resolve; });
+  const committed: string[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async () => {
+        beforeCalls += 1;
+        await beforeGate;
+        return { data: rows([100]) };
+      },
+      fetchKlinesHistory: async () => ({ data: rows([900, 1_000]) }),
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: (_symbol, _interval, _rows, meta) => {
+      committed.push(String(meta?.source || "unknown"));
+    },
+  });
+
+  const oldLeft = feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    source: "history-before-page",
+    cooldownMs: 0,
+  });
+  while (beforeCalls < 1) await new Promise((resolve) => setImmediate(resolve));
+
+  feed.beginEpoch(SERIES);
+  const freshWindow = await feed.getHistory(SERIES, {
+    countBack: 2,
+    source: "right-window-restore",
+    commit: "none",
+  });
+  mustBeDefined(releaseBefore)();
+  const staleLeft = await oldLeft;
+
+  assert.equal(freshWindow.stale, false);
+  assert.deepEqual(freshWindow.data.map((row) => row.time), [900, 1_000]);
+  assert.equal(staleLeft.stale, true);
+  assert.deepEqual(committed, [], "the old left request cannot merge after the fresh snapshot epoch");
+});
+
 test("cancelling a repair generation aborts before-page work and permits an immediate retry", async () => {
   let calls = 0;
   let releaseSecond: (() => void) | undefined;
@@ -2328,6 +3087,113 @@ test("multiple initial completion chunks coalesce into one full-range verificati
   assert.equal(clearCalls, 1);
 });
 
+test("chart demand generation reaches every history transport and is cleared on cancel", async () => {
+  const seen: KlineRequestOptions[] = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesHistory: async (_symbol, _interval, _days, _marketType, _exchange, options) => {
+        seen.push(options);
+        return { data: [] };
+      },
+      fetchKlinesBefore: async (_symbol, _interval, _before, _bars, _marketType, _exchange, options) => {
+        seen.push(options);
+        return { data: [] };
+      },
+      fetchKlinesRange: async (_symbol, _interval, _start, _end, _marketType, _exchange, options) => {
+        seen.push(options);
+        return { data: [] };
+      },
+    },
+  });
+  feed.setRequestDemand(SERIES, { scope: "chart:test:1", generation: 9 });
+
+  await feed.getHistory(SERIES);
+  await feed.getBefore(SERIES, { before: epochSeconds(20) });
+  await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
+
+  assert.equal(seen.length, 3);
+  for (const options of seen) {
+    assert.equal(options.demandScope, "chart:test:1");
+    assert.equal(options.demandGeneration, 9);
+  }
+
+  feed.cancelSeriesRequests(SERIES);
+  await feed.getHistory(SERIES);
+  assert.equal(seen.at(-1)?.demandScope, undefined);
+  assert.equal(seen.at(-1)?.demandGeneration, undefined);
+});
+
+test("initial completion without an exact range reuses the planned derived countBack", async () => {
+  const historyCountBacks: Array<number | null | undefined> = [];
+  let clearCalls = 0;
+  const pendingInitial = {
+    ...SERIES,
+    countBack: 216,
+    range: null,
+  };
+  let currentPending: NonNullable<BackfillCompletedOptions["pendingInitial"]> | null = pendingInitial;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async () => ({
+        data: [],
+        verified_contiguous: true,
+        history_state: "ready",
+        complete: true,
+        retryable: false,
+        missing_ranges: [],
+      }),
+      fetchKlinesHistory: async (
+        _symbol,
+        _interval,
+        _days,
+        _marketType,
+        _exchange,
+        options,
+      ) => {
+        historyCountBacks.push(options.countBack);
+        return {
+          data: rows([100, 200]),
+          verified_contiguous: true,
+          history_state: "ready",
+          complete: true,
+          retryable: false,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  feed.handleBackfillCompleted({
+    type: "backfill_completed",
+    ...SERIES,
+    market_type: SERIES.marketType,
+    detail: {
+      request_id: "derived-initial-count-back",
+      reason: "initial_history",
+      range_start_ms: 100_000,
+      range_end_ms: 200_000,
+    },
+  }, {
+    activeSeries: SERIES,
+    pendingInitial,
+    getPendingInitial: () => currentPending,
+    clearPendingInitial: () => {
+      clearCalls += 1;
+      currentPending = null;
+    },
+    getCacheRows: () => rows([100, 200]),
+    cooldownMs: 0,
+  });
+  while (feed.backfillReloadInFlight.size > 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(historyCountBacks, [216]);
+  assert.equal(clearCalls, 1);
+});
+
 test("same-series epoch rollover cannot finalize an older initial verification", async () => {
   let releaseVerification: (() => void) | undefined;
   const verificationPending = new Promise<void>((resolve) => { releaseVerification = resolve; });
@@ -2488,13 +3354,6 @@ test("an inactive backfill response clears old-series pending state without recr
     getActiveSeries: () => ({ ...SERIES, symbol: activeSymbol }),
     commitMergedChartData: () => {},
   });
-  feed.setPendingBeforePage(SERIES, {
-    before: epochSeconds(100),
-    range: {
-      start: mustBeDefined(toEpochMilliseconds(50_000)),
-      end: mustBeDefined(toEpochMilliseconds(90_000)),
-    },
-  });
   feed.trackPendingResultRepair(SERIES, {
     data: [],
     start_ms: 7_200_000,
@@ -2504,7 +3363,7 @@ test("an inactive backfill response clears old-series pending state without recr
     retryable: true,
     verified_contiguous: false,
   });
-  assert.equal(feed.pendingRepairCount(SERIES), 2);
+  assert.equal(feed.pendingRepairCount(SERIES), 1);
 
   feed.handleBackfillCompleted({
     type: "backfill_completed",
@@ -2512,7 +3371,7 @@ test("an inactive backfill response clears old-series pending state without recr
     market_type: SERIES.marketType,
     detail: {
       request_id: "inactive-range",
-      reason: "viewport_gap",
+      reason: "visible_range_gap",
       range_start_ms: 120_000,
       range_end_ms: 180_000,
     },
@@ -2522,6 +3381,15 @@ test("an inactive backfill response clears old-series pending state without recr
     cooldownMs: 0,
   });
   while (!rangeStarted) await new Promise((resolve) => setImmediate(resolve));
+
+  feed.setPendingBeforePage(SERIES, {
+    before: epochSeconds(100),
+    range: {
+      start: mustBeDefined(toEpochMilliseconds(50_000)),
+      end: mustBeDefined(toEpochMilliseconds(90_000)),
+    },
+  });
+  assert.equal(feed.pendingRepairCount(SERIES), 2);
 
   activeSymbol = "ETHUSDT";
   mustBeDefined(releaseRange)();
@@ -2576,6 +3444,8 @@ test("getRange reports a resumable pagination cap", async () => {
     api: {
       fetchKlinesRange: async () => ({
         data: rows([900, 1_000]),
+        all_rows_final: true,
+        has_tail_gap: false,
         truncated: true,
         next_end_ms: 800_000,
         verified_contiguous: true,
@@ -2593,6 +3463,84 @@ test("getRange reports a resumable pagination cap", async () => {
   assert.equal(result.next_end_ms, 800_000);
   assert.equal(result.complete, false);
   assert.equal(result.retryable, true);
+  assert.equal(result.all_rows_final, true);
+  assert.equal(result.has_tail_gap, false);
+
+  const aggregate = aggregateResolvedGapRepairResult(
+    result,
+    { start: epochSeconds(100), end: epochSeconds(1_000) },
+    [{
+      data: rows([100, 800]),
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+  assert.equal(aggregate.complete, true, "a fully final capped parent remains resolvable");
+});
+
+test("getRange preserves unsafe quality from every consumed capped page", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, _start, end) => {
+        calls += 1;
+        return {
+          data: rows([end]),
+          all_rows_final: calls !== 1,
+          has_tail_gap: calls === 1,
+          truncated: true,
+          next_end_ms: (end - 100) * 1_000,
+          history_state: "pending" as const,
+          complete: false,
+          retryable: true,
+          verified_contiguous: calls !== 1,
+          missing_ranges: [],
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  const result = await feed.getRange(SERIES, {
+    start: 100,
+    end: 1_000,
+    maxPages: 2,
+  });
+
+  assert.equal(result.pagination_stop_reason, "cap");
+  assert.deepEqual(result.pages?.map((page) => ({
+    allRowsFinal: page.all_rows_final,
+    hasTailGap: page.has_tail_gap,
+  })), [
+    { allRowsFinal: false, hasTailGap: true },
+    { allRowsFinal: true, hasTailGap: false },
+  ]);
+  assert.equal(result.all_rows_final, false);
+  assert.equal(result.has_tail_gap, true);
+
+  const aggregate = aggregateResolvedGapRepairResult(
+    result,
+    { start: epochSeconds(100), end: epochSeconds(1_000) },
+    [{
+      data: rows([100, 800]),
+      history_state: "ready",
+      complete: true,
+      retryable: false,
+      verified_contiguous: true,
+      all_rows_final: true,
+      has_tail_gap: false,
+      truncated: false,
+      missing_ranges: [],
+    }],
+  );
+  assert.equal(aggregate.complete, false, "an unsafe retained page must fail closed");
 });
 
 test("getRange exposes a stalled cursor as bounded non-retryable pagination", async () => {

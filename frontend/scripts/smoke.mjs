@@ -14,6 +14,7 @@ import { runExportMatrix } from "./export-matrix.mjs";
 import {
   resolveShortSwitchStepTransition,
   summarizeShortSwitchIndicatorReadiness,
+  summarizeShortSwitchLongTasks,
 } from "./short-switch-readiness.mjs";
 import { runChartTypeMatrix } from "./chart-type-matrix.mjs";
 import {
@@ -22,6 +23,9 @@ import {
   formatDrawingEngineDomEvidenceFailure,
   shouldRequireDrawingEngineDomEvidenceForSmoke,
 } from "./drawing-engine-dom-evidence.mjs";
+import {
+  assessTwoClickDrawingCreationEvidence,
+} from "./drawing-two-click-creation-evidence.mjs";
 
 const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -1105,6 +1109,62 @@ async function markShortSwitchStepStart(cdp, phase, interval) {
   return Number(result.result?.value) || 0;
 }
 
+async function startShortSwitchLongTaskObserver(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const previous = window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      previous?.observer?.disconnect?.();
+      const state = {
+        supported: typeof PerformanceObserver === 'function',
+        entries: [],
+        observer: null,
+      };
+      if (state.supported) {
+        try {
+          state.observer = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              state.entries.push({
+                startTime: Number(entry.startTime),
+                duration: Number(entry.duration),
+                name: String(entry.name || 'self'),
+                attribution: Array.from(entry.attribution || [], (attribution) => ({
+                  name: String(attribution?.name || ''),
+                  containerType: String(attribution?.containerType || ''),
+                  containerName: String(attribution?.containerName || ''),
+                  containerId: String(attribution?.containerId || ''),
+                  containerSrc: String(attribution?.containerSrc || ''),
+                })),
+              });
+            }
+          });
+          state.observer.observe({ type: 'longtask', buffered: false });
+        } catch {
+          state.supported = false;
+          state.observer = null;
+        }
+      }
+      window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__ = state;
+      return state.supported;
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value === true;
+}
+
+async function stopShortSwitchLongTaskObserver(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const state = window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      state?.observer?.disconnect?.();
+      const entries = Array.isArray(state?.entries) ? state.entries.slice() : [];
+      delete window.__CANDLESCOPE_SHORT_SWITCH_LONG_TASKS__;
+      return entries;
+    })()`,
+    returnByValue: true,
+  });
+  return Array.isArray(result.result?.value) ? result.result.value : [];
+}
+
 async function clickInterval(cdp, interval) {
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -1164,7 +1224,13 @@ async function waitForIntervalReady(cdp, interval, sincePerfMs, timeoutMs) {
   return { ready: false, elapsedMs: Date.now() - started, detail };
 }
 
-function buildShortSwitchReadinessOptions(interval, datasetKey, sincePerfMs, args) {
+function buildShortSwitchReadinessOptions(
+  interval,
+  datasetKey,
+  sincePerfMs,
+  args,
+  { enforceSubmissionBudget = false } = {},
+) {
   const expectedIndicatorIds = (args.overlayHeavy
     ? SMOKE_OVERLAY_HEAVY_INDICATORS
     : SMOKE_ACTIVE_INDICATORS)
@@ -1174,9 +1240,11 @@ function buildShortSwitchReadinessOptions(interval, datasetKey, sincePerfMs, arg
     : { ma: 1 };
   return {
     datasetKey,
+    ...(enforceSubmissionBudget ? { expectedMainSetDataCount: 1 } : {}),
     expectedIndicatorIds,
     expectedSeriesCounts,
     interval,
+    ...(enforceSubmissionBudget ? { maxSetDataPerSeries: 1 } : {}),
     sinceAtMs: sincePerfMs,
   };
 }
@@ -1227,6 +1295,7 @@ async function runShortSwitchStep(
     datasetKey,
     readinessSincePerfMs,
     args,
+    { enforceSubmissionBudget: phase.startsWith("short-switch-measured:") },
   );
   const indicatorBarrierWait = ready.ready
     ? await waitForShortSwitchIndicatorBarrier(cdp, readinessOptions, args)
@@ -1243,16 +1312,29 @@ async function runShortSwitchStep(
   );
   const indicatorBarrier = {
     ...indicatorBarrierWait,
-    ready: Boolean(indicatorBarrierWait.ready && finalBarrierDetail.indicatorDataReady),
+    ready: Boolean(
+      indicatorBarrierWait.ready
+      && finalBarrierDetail.indicatorDataReady
+      && finalBarrierDetail.protocolReady
+      && finalBarrierDetail.submissionReady
+    ),
     detail: finalBarrierDetail,
   };
   const indicatorDataReady = Boolean(finalBarrierDetail.indicatorDataReady);
+  const commitAtMs = Number(ready.detail?.commit?.atMs);
+  const lastSubmissionAtMs = Number(finalBarrierDetail.lastSubmissionAtMs);
+  const attributionEndPerfMs = Math.max(
+    sincePerfMs,
+    ...(Number.isFinite(commitAtMs) ? [commitAtMs] : []),
+    ...(Number.isFinite(lastSubmissionAtMs) ? [lastSubmissionAtMs] : []),
+  );
   return {
     phase,
     interval,
     startedAtMs,
     elapsedMs: Date.now() - startedAtMs,
     sincePerfMs,
+    attributionEndPerfMs,
     transitioned: transition.transitioned,
     primedFromInitial: transition.primedFromInitial,
     click,
@@ -1271,37 +1353,44 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
   }
 
   const steps = [];
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    first,
-    `short-switch-warm:${first}`,
-    args,
-    { allowInitialPrime: true },
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    second,
-    `short-switch-warm:${second}`,
-    args,
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    first,
-    `short-switch-measured:${first}`,
-    args,
-  ));
-  steps.push(await runShortSwitchStep(
-    cdp,
-    networkCapture,
-    second,
-    `short-switch-measured:${second}`,
-    args,
-  ));
+  const longTaskSupported = await startShortSwitchLongTaskObserver(cdp);
+  let observedLongTasks = [];
+  try {
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      first,
+      `short-switch-warm:${first}`,
+      args,
+      { allowInitialPrime: true },
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      second,
+      `short-switch-warm:${second}`,
+      args,
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      first,
+      `short-switch-measured:${first}`,
+      args,
+    ));
+    steps.push(await runShortSwitchStep(
+      cdp,
+      networkCapture,
+      second,
+      `short-switch-measured:${second}`,
+      args,
+    ));
+  } finally {
+    observedLongTasks = await stopShortSwitchLongTaskObserver(cdp);
+  }
 
   const measured = networkCapture.summary({ phasePrefix: "short-switch-measured:" });
+  const longTasks = summarizeShortSwitchLongTasks(observedLongTasks, steps);
   const maxIndicatorRequests = Math.max(0, args.shortSwitchMaxIndicatorRequests);
   const stepsReady = steps.every((step) => (
     step.click.ok
@@ -1316,11 +1405,20 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
     settleMs: args.shortSwitchSettleMs,
     steps,
     measured,
+    longTasks: {
+      supported: longTaskSupported,
+      ...longTasks,
+    },
     acceptance: {
       maxIndicatorRangeRequests: maxIndicatorRequests,
       actualIndicatorRangeRequests: measured.requestCount,
+      attributableLongTasksOver50Ms: longTasks.count,
+      longTaskInstrumentationSupported: longTaskSupported,
       stepsReady,
-      passed: stepsReady && measured.requestCount <= maxIndicatorRequests,
+      passed: stepsReady
+        && measured.requestCount <= maxIndicatorRequests
+        && longTaskSupported
+        && longTasks.count === 0,
     },
   };
 }
@@ -1421,6 +1519,103 @@ async function waitForSelector(cdp, selector, timeoutMs = 5_000) {
   return false;
 }
 
+async function createDrawingEngineRequestGate(cdp) {
+  const heldRequestIds = new Set();
+  const continuationErrors = [];
+  let holding = true;
+  let disabled = false;
+
+  cdp.on("Fetch.requestPaused", (event) => {
+    if (!event?.requestId) return;
+    if (holding) {
+      heldRequestIds.add(event.requestId);
+      return;
+    }
+    void cdp.send("Fetch.continueRequest", { requestId: event.requestId })
+      .catch((error) => continuationErrors.push(String(error)));
+  });
+  await cdp.send("Fetch.enable", {
+    patterns: [{
+      requestStage: "Request",
+      urlPattern: "*DrawingEngineHost*",
+    }],
+  });
+
+  return {
+    async waitForHeldRequest(timeoutMs) {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        if (heldRequestIds.size > 0) return true;
+        await wait(25);
+      }
+      return false;
+    },
+    snapshot() {
+      return {
+        continuationErrors: [...continuationErrors],
+        heldRequestCount: heldRequestIds.size,
+      };
+    },
+    async release() {
+      if (disabled) return;
+      holding = false;
+      const requestIds = [...heldRequestIds];
+      heldRequestIds.clear();
+      await Promise.all(requestIds.map(async (requestId) => {
+        try {
+          await cdp.send("Fetch.continueRequest", { requestId });
+        } catch (error) {
+          continuationErrors.push(String(error));
+        }
+      }));
+      await cdp.send("Fetch.disable");
+      disabled = true;
+    },
+  };
+}
+
+async function verifyDrawingToolbarReadinessGate(cdp, requestGate, timeoutMs) {
+  const waitingToolbarPresent = await waitForSelector(
+    cdp,
+    '[data-drawing-toolbar-state="waiting-for-engine"]',
+    timeoutMs,
+  );
+  const drawingEngineRequestHeld = await requestGate.waitForHeldRequest(timeoutMs);
+  const stateResult = await cdp.send("Runtime.evaluate", {
+    expression: `({
+      activePenPresent: Boolean(document.querySelector('[data-drawing-tool="pen"].active')),
+      clickablePenPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-tool="pen"]:not(:disabled)')),
+      disabledPenPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-tool="pen"]:disabled')),
+      chartTypePresent: Boolean(document.querySelector('.drawing-toolbar [data-chart-type]')),
+      exportPresent: Boolean(document.querySelector('.drawing-toolbar [data-drawing-action="export"]')),
+      engineReady: Boolean(document.querySelector('[data-drawing-engine="ready"]'))
+    })`,
+    returnByValue: true,
+  });
+  const state = stateResult.result?.value ?? {};
+  const gateSnapshot = requestGate.snapshot();
+  return {
+    passed: waitingToolbarPresent
+      && drawingEngineRequestHeld
+      && state.clickablePenPresent !== true
+      && state.disabledPenPresent === true
+      && state.activePenPresent !== true
+      && state.chartTypePresent === true
+      && state.exportPresent === true
+      && state.engineReady !== true
+      && gateSnapshot.continuationErrors.length === 0,
+    waitingToolbarPresent,
+    drawingEngineRequestHeld,
+    clickablePenPresentWhileEngineBlocked: state.clickablePenPresent === true,
+    disabledPenPresentWhileEngineBlocked: state.disabledPenPresent === true,
+    activePenPresentWhileEngineBlocked: state.activePenPresent === true,
+    chartTypePresentWhileEngineBlocked: state.chartTypePresent === true,
+    exportPresentWhileEngineBlocked: state.exportPresent === true,
+    engineReadyWhileBlocked: state.engineReady === true,
+    ...gateSnapshot,
+  };
+}
+
 async function getRect(cdp, selector) {
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -1505,6 +1700,50 @@ async function dispatchDrag(
   return committedFrames;
 }
 
+async function dispatchFreehandStroke(cdp, points) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  const first = points[0];
+  const last = points.at(-1);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: first.x,
+    y: first.y,
+    button: "none",
+    buttons: 0,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: first.x,
+    y: first.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await waitForAnimationFrames(cdp, 2);
+  for (let offset = 1; offset < points.length; offset += 16) {
+    const batch = points.slice(offset, offset + 16).map((point) => (
+      cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        button: "left",
+        buttons: 1,
+      })
+    ));
+    await Promise.all(batch);
+    await waitForAnimationFrames(cdp, 1);
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: last.x,
+    y: last.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  return points.length;
+}
+
 async function readSavedDrawingCount(cdp, drawingKey) {
   const drawings = await readSavedDrawings(cdp, drawingKey);
   return drawings.length;
@@ -1570,6 +1809,79 @@ async function readDrawingDocumentRecord(cdp, drawingKey) {
   return value && typeof value === "object" ? value : null;
 }
 
+async function readDrawingRuntimeSummary(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const summary = window.__CANDLESCOPE_DRAWING_PERF__?.readRuntimeSummary?.();
+      if (!summary || !Number.isSafeInteger(summary.entityCount)) return null;
+      return {
+        entityCount: summary.entityCount,
+        pointCount: Number.isSafeInteger(summary.pointCount) ? summary.pointCount : null,
+        typeCounts: summary.typeCounts && typeof summary.typeCounts === "object"
+          ? { ...summary.typeCounts }
+          : {},
+        effectiveEngineMode: summary.effectiveEngineMode ?? null,
+        scenePublicationReady: summary.scenePublicationReady === true,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const value = result.result?.value;
+  return value && typeof value === "object" ? value : null;
+}
+
+async function readDrawingCreationSnapshot(cdp, drawingKey) {
+  const [record, savedDrawings, runtimeSummary] = await Promise.all([
+    readDrawingDocumentRecord(cdp, drawingKey),
+    readSavedDrawings(cdp, drawingKey),
+    readDrawingRuntimeSummary(cdp),
+  ]);
+  const entities = Array.isArray(record?.entities) ? record.entities : [];
+  return {
+    documentRevision: Number.isSafeInteger(record?.documentRevision)
+      ? record.documentRevision
+      : null,
+    savedDrawingCount: savedDrawings.length,
+    entityCount: entities.length,
+    runtimeSummary,
+    savedDrawings: savedDrawings.map((drawing) => ({
+      id: drawing?.id ?? null,
+      type: drawing?.type ?? null,
+      lineType: drawing?.lineType ?? null,
+      dataPoints: drawing?.type === "line" && Array.isArray(drawing.dataPoints)
+        ? drawing.dataPoints
+        : null,
+    })),
+    entities: entities.map((entity) => ({
+      id: entity?.id ?? null,
+      kind: entity?.kind ?? null,
+      geometryKind: entity?.geometry?.kind ?? null,
+      lineType: entity?.geometry?.lineType ?? null,
+      dataPointCount: Array.isArray(entity?.geometry?.dataPoints)
+        ? entity.geometry.dataPoints.length
+        : 0,
+    })),
+  };
+}
+
+async function waitForDrawingCreationSnapshotCount(
+  cdp,
+  drawingKey,
+  expectedCount,
+  timeoutMs = 5_000,
+) {
+  const started = Date.now();
+  let snapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+  const converged = () => snapshot.savedDrawingCount === expectedCount
+    && snapshot.entityCount === expectedCount
+    && snapshot.runtimeSummary?.entityCount === expectedCount;
+  while (!converged() && Date.now() - started < timeoutMs) {
+    await wait(100);
+    snapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+  }
+  return snapshot;
+}
+
 async function readDrawingPersistenceSnapshot(cdp, drawingKey, drawingId) {
   const record = await readDrawingDocumentRecord(cdp, drawingKey);
   const savedDrawings = await readSavedDrawings(cdp, drawingKey);
@@ -1614,17 +1926,6 @@ async function readLatestChartLastTime(cdp) {
   });
   const value = result.result?.value;
   return Number.isFinite(value) ? value : null;
-}
-
-async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
-  const started = Date.now();
-  let count = await readSavedDrawingCount(cdp, drawingKey);
-  while (Date.now() - started < timeoutMs) {
-    if (count > 0) return count;
-    await wait(250);
-    count = await readSavedDrawingCount(cdp, drawingKey);
-  }
-  return count;
 }
 
 async function waitForSavedDrawingCountAtLeast(cdp, drawingKey, minimum, timeoutMs = 5_000) {
@@ -1706,23 +2007,29 @@ async function waitForSavedDrawingGeometryChange(
   return drawingPersistenceChangeEvidence(previousSnapshot, latestSnapshot);
 }
 
-async function verifyDrawingWorkflow(cdp, timeoutMs) {
+async function verifyDrawingWorkflow(cdp, timeoutMs, drawingToolbarGate = null) {
   const drawingKey = "binance:spot:BTCUSDT__main";
+  const penButtonSelector = '[data-drawing-tool="pen"]';
   const lineButtonSelector = '[data-drawing-tool="line-segment"]';
+  const cursorButtonSelector = '[data-drawing-tool="cursor"]';
   const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]';
 
-  const lineToolClicked = await clickSelector(cdp, lineButtonSelector);
-  await wait(250);
-  const activeResult = await cdp.send("Runtime.evaluate", {
-    expression: `Boolean(document.querySelector(${JSON.stringify(`${lineButtonSelector}.active`)}))`,
-    returnByValue: true,
-  });
-  const lineToolActive = Boolean(activeResult.result?.value);
-  const drawingEngineReady = lineToolActive
-    ? await waitForSelector(cdp, '[data-drawing-engine="ready"]')
-    : false;
+  const penToolAvailable = await waitForSelector(
+    cdp,
+    `.drawing-toolbar ${penButtonSelector}:not(:disabled)`,
+    timeoutMs,
+  );
+  let penToolClicked = false;
+  let penToolActive = false;
+  let drawingEngineMounted = false;
+  let drawingEngineReady = false;
 
   const rect = await getRect(cdp, chartSelector);
+  let lineToolClicked = false;
+  let lineToolActive = false;
+  let lineToolStayedActive = false;
+  let drawingPenCreation = null;
+  let drawingTwoClickCreation = null;
   let drawingPersistedCount = 0;
   let drawingDragPersisted = false;
   let drawingDragPersistence = null;
@@ -1737,17 +2044,150 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   let futureAnchorStored = false;
   let chartLastTime = null;
 
-  if (rect && lineToolActive && drawingEngineReady) {
+  if (rect && penToolAvailable) {
     chartLastTime = await readLatestChartLastTime(cdp);
-    const y = Math.round(rect.y + rect.height * 0.45);
-    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.35), y);
-    await wait(150);
-    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.58), Math.round(rect.y + rect.height * 0.42));
-    drawingPersistedCount = await waitForSavedDrawing(cdp, drawingKey);
+    const initialSnapshot = await readDrawingCreationSnapshot(cdp, drawingKey);
+    const penPoints = Array.from({ length: 64 }, (_, index) => ({
+      x: Math.round(rect.x + rect.width * (0.23 + index * 0.0018)),
+      y: Math.round(rect.y + rect.height * (0.62 + Math.sin(index * 0.28) * 0.035)),
+    }));
+    const toolClickStartedAtMs = Date.now();
+    penToolClicked = await clickSelector(cdp, penButtonSelector);
+    const gestureStartedAtMs = Date.now();
+    if (penToolClicked) await dispatchFreehandStroke(cdp, penPoints);
+    const afterPenSnapshot = await waitForDrawingCreationSnapshotCount(
+      cdp,
+      drawingKey,
+      initialSnapshot.savedDrawingCount + 1,
+    );
+    const penActiveResult = await cdp.send("Runtime.evaluate", {
+      expression: `Boolean(document.querySelector(${JSON.stringify(`${penButtonSelector}.active`)}))`,
+      returnByValue: true,
+    });
+    penToolActive = Boolean(penActiveResult.result?.value);
+    const drawingEngineStateResult = await cdp.send("Runtime.evaluate", {
+      expression: `({
+        mounted: Boolean(document.querySelector("[data-drawing-engine]")),
+        ready: Boolean(document.querySelector('[data-drawing-engine="ready"]'))
+      })`,
+      returnByValue: true,
+    });
+    drawingEngineMounted = Boolean(drawingEngineStateResult.result?.value?.mounted);
+    drawingEngineReady = Boolean(drawingEngineStateResult.result?.value?.ready);
+    const initialSavedIds = new Set(initialSnapshot.savedDrawings.map((drawing) => drawing.id));
+    const initialEntityIds = new Set(initialSnapshot.entities.map((entity) => entity.id));
+    const addedPenSaved = afterPenSnapshot.savedDrawings.filter(
+      (drawing) => !initialSavedIds.has(drawing.id),
+    );
+    const addedPenEntities = afterPenSnapshot.entities.filter(
+      (entity) => !initialEntityIds.has(entity.id),
+    );
+    const penDrawingId = addedPenSaved.length === 1
+      && addedPenEntities.length === 1
+      && addedPenSaved[0]?.id === addedPenEntities[0]?.id
+      ? addedPenSaved[0].id
+      : null;
+    const penCountsAdvanced = afterPenSnapshot.savedDrawingCount
+      === initialSnapshot.savedDrawingCount + 1
+      && afterPenSnapshot.entityCount === initialSnapshot.entityCount + 1
+      && afterPenSnapshot.runtimeSummary?.entityCount
+        === initialSnapshot.runtimeSummary?.entityCount + 1;
+    const penKindsMatched = addedPenSaved[0]?.type === "freehand"
+      && addedPenEntities[0]?.kind === "freehand"
+      && (afterPenSnapshot.runtimeSummary?.typeCounts?.freehand ?? 0)
+        === (initialSnapshot.runtimeSummary?.typeCounts?.freehand ?? 0) + 1;
+    drawingPenCreation = {
+      passed: penCountsAdvanced && penKindsMatched && penDrawingId !== null,
+      drawingId: penDrawingId,
+      activationToGestureMs: gestureStartedAtMs - toolClickStartedAtMs,
+      immediateAfterToolActivation: gestureStartedAtMs - toolClickStartedAtMs < 100,
+      scenePublicationReadyBeforeGesture:
+        initialSnapshot.runtimeSummary?.scenePublicationReady === true,
+      countsAdvanced: penCountsAdvanced,
+      kindsMatched: penKindsMatched,
+      before: initialSnapshot,
+      after: afterPenSnapshot,
+    };
 
-    if (drawingPersistedCount > 0) {
+    lineToolClicked = await clickSelector(cdp, lineButtonSelector);
+    lineToolActive = lineToolClicked
+      && await waitForSelector(cdp, `${lineButtonSelector}.active`);
+
+    const firstLineStart = {
+      x: Math.round(rect.x + rect.width * 0.38),
+      y: Math.round(rect.y + rect.height * 0.40),
+    };
+    const firstLineEnd = {
+      x: Math.round(rect.x + rect.width * 0.50),
+      y: Math.round(rect.y + rect.height * 0.45),
+    };
+    const secondLineStart = {
+      x: Math.round(rect.x + rect.width * 0.58),
+      y: Math.round(rect.y + rect.height * 0.53),
+    };
+    const secondLineEnd = {
+      x: Math.round(rect.x + rect.width * 0.70),
+      y: Math.round(rect.y + rect.height * 0.47),
+    };
+    let firstLineEvidence = null;
+    let secondLineEvidence = null;
+
+    if (drawingPenCreation.passed && lineToolActive) {
+      const beforeFirstLine = afterPenSnapshot;
+      await dispatchClick(cdp, firstLineStart.x, firstLineStart.y);
+      await waitForAnimationFrames(cdp, 2);
+      await wait(150);
+      const afterFirstLineFirstClick = await readDrawingCreationSnapshot(cdp, drawingKey);
+      await dispatchClick(cdp, firstLineEnd.x, firstLineEnd.y);
+      const afterFirstLineSecondClick = await waitForDrawingCreationSnapshotCount(
+        cdp,
+        drawingKey,
+        beforeFirstLine.savedDrawingCount + 1,
+      );
+      firstLineEvidence = assessTwoClickDrawingCreationEvidence({
+        beforeFirstClick: beforeFirstLine,
+        afterFirstClick: afterFirstLineFirstClick,
+        afterSecondClick: afterFirstLineSecondClick,
+      });
+
+      lineToolStayedActive = await waitForSelector(cdp, `${lineButtonSelector}.active`);
+      if (firstLineEvidence.passed && lineToolStayedActive) {
+        const beforeSecondLine = afterFirstLineSecondClick;
+        await dispatchClick(cdp, secondLineStart.x, secondLineStart.y);
+        await waitForAnimationFrames(cdp, 2);
+        await wait(150);
+        const afterSecondLineFirstClick = await readDrawingCreationSnapshot(cdp, drawingKey);
+        await dispatchClick(cdp, secondLineEnd.x, secondLineEnd.y);
+        const afterSecondLineSecondClick = await waitForDrawingCreationSnapshotCount(
+          cdp,
+          drawingKey,
+          beforeSecondLine.savedDrawingCount + 1,
+        );
+        secondLineEvidence = assessTwoClickDrawingCreationEvidence({
+          beforeFirstClick: beforeSecondLine,
+          afterFirstClick: afterSecondLineFirstClick,
+          afterSecondClick: afterSecondLineSecondClick,
+        });
+        drawingPersistedCount = afterSecondLineSecondClick.savedDrawingCount;
+      }
+    }
+
+    drawingTwoClickCreation = {
+      passed: drawingPenCreation.passed
+        && lineToolActive
+        && lineToolStayedActive
+        && firstLineEvidence?.passed === true
+        && secondLineEvidence?.passed === true,
+      penToSegment: firstLineEvidence,
+      consecutiveSegment: secondLineEvidence,
+      lineToolStayedActive,
+    };
+
+    if (drawingTwoClickCreation.passed && drawingPersistedCount > 0) {
       const beforeDragDrawings = await readSavedDrawings(cdp, drawingKey);
-      const dragDrawing = beforeDragDrawings.at(-1) || null;
+      const dragDrawing = beforeDragDrawings.find(
+        (drawing) => drawing?.id === firstLineEvidence.addedDrawingId,
+      ) || null;
       if (dragDrawing?.id && Array.isArray(dragDrawing.dataPoints)) {
         const firstPoint = dragDrawing.dataPoints[0] || null;
         const lastPoint = dragDrawing.dataPoints.at(-1) || null;
@@ -1756,9 +2196,8 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
         const beforeDragPersistence = drawingInitialGeometryValid
           ? await readDrawingPersistenceSnapshot(cdp, drawingKey, dragDrawing.id)
           : null;
-        const dragFromX = Math.round(rect.x + rect.width * ((0.35 + 0.58) / 2));
-        const dragFromY = Math.round(rect.y + rect.height * ((0.45 + 0.42) / 2));
-        const cursorButtonSelector = '[data-drawing-tool="cursor"]';
+        const dragFromX = Math.round((firstLineStart.x + firstLineEnd.x) / 2);
+        const dragFromY = Math.round((firstLineStart.y + firstLineEnd.y) / 2);
         const cursorClicked = await clickSelector(cdp, cursorButtonSelector);
         drawingCursorToolActive = cursorClicked
           && await waitForSelector(cdp, `${cursorButtonSelector}.active`);
@@ -1802,7 +2241,7 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
         }
       }
 
-      await clickSelector(cdp, '[data-drawing-tool="cursor"]');
+      await clickSelector(cdp, cursorButtonSelector);
       await wait(150);
       await dispatchDrag(
         cdp,
@@ -1838,10 +2277,17 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   }
 
   return {
+    drawingPenToolClicked: penToolClicked,
+    drawingPenToolActive: penToolActive,
     drawingLineToolClicked: lineToolClicked,
     drawingLineToolActive: lineToolActive,
+    drawingLineToolStayedActive: lineToolStayedActive,
     drawingEngineReady,
+    drawingEngineMounted,
+    drawingToolbarGate,
     drawingChartRectFound: Boolean(rect),
+    drawingPenCreation,
+    drawingTwoClickCreation,
     drawingPersistedCount,
     drawingInitialGeometryValid,
     drawingCursorToolActive,
@@ -1908,6 +2354,7 @@ async function main() {
   const requestUrls = new Map();
   let cdp;
   let indicatorRangeNetworkCapture;
+  let drawingEngineRequestGate;
 
   try {
     await waitForDevTools(debugBase);
@@ -1968,6 +2415,9 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
+    if (args.drawingCheck) {
+      drawingEngineRequestGate = await createDrawingEngineRequestGate(cdp);
+    }
     if (args.exportMatrix) {
       await cdp.send("Browser.setDownloadBehavior", {
         behavior: "allow",
@@ -2007,7 +2457,39 @@ async function main() {
     });
     await cdp.send("Page.navigate", { url: args.url });
 
-    const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const chartReadyPromise = waitForChartReady(cdp, args.timeoutMs);
+    let drawingWorkflowPromise = null;
+    if (drawingEngineRequestGate) {
+      const drawingToolbarGate = await verifyDrawingToolbarReadinessGate(
+        cdp,
+        drawingEngineRequestGate,
+        args.timeoutMs,
+      );
+      await drawingEngineRequestGate.release();
+      drawingWorkflowPromise = args.seedIndicators
+        ? (async () => {
+            // The no-seed drawing smoke exercises the first interactive frame.
+            // With seeded indicators, let native pane materialization settle so
+            // later selection/drag coordinates are measured against one layout.
+            await chartReadyPromise;
+            await waitForSeededIndicatorReport(cdp, args);
+            await indicatorRangeNetworkCapture.waitForIdle({
+              quietMs: 500,
+              timeoutMs: Math.min(args.timeoutMs, 10_000),
+            });
+            await waitForAnimationFrames(cdp, 2);
+            return verifyDrawingWorkflow(cdp, args.timeoutMs, drawingToolbarGate);
+          })()
+        : verifyDrawingWorkflow(
+            cdp,
+            args.timeoutMs,
+            drawingToolbarGate,
+          );
+    }
+    const { bodyText, loadedAt } = await chartReadyPromise;
+    const drawingWorkflow = drawingWorkflowPromise
+      ? await drawingWorkflowPromise
+      : null;
     const advancedMarket = args.marketType === "futures"
       ? await verifyAdvancedMarketStudyWorkflow(cdp, Math.min(args.timeoutMs, 15_000))
       : {
@@ -2036,7 +2518,6 @@ async function main() {
       shortSwitch = await runShortSwitchAcceptance(cdp, indicatorRangeNetworkCapture, args);
       indicatorRangeNetworkCapture.startPhase("post-short-switch");
     }
-    const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
     // drawingWorkflow reloads the page after persistence verification. Chart
     // readiness covers bars/connectivity only; seeded indicator series and
     // their native pane layout restore asynchronously after that boundary.
@@ -2094,6 +2575,12 @@ async function main() {
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
+    const criticalConsoleWarnings = warnings.filter(({ text }) => (
+      text.includes("Maximum update depth exceeded")
+      || text.includes("Drawing document-only scene failed closed")
+      || text.includes("Drawing scene runtime failed after the fallback boundary")
+      || text.includes("drawing scene publication was rejected by the current surface")
+    ));
     const report = {
       url: args.url,
       loadedAtMs: loadedAt,
@@ -2129,6 +2616,7 @@ async function main() {
       failedApiResponses: failedApiResponses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
+      criticalConsoleWarnings: criticalConsoleWarnings.slice(0, 20),
       exceptions: exceptions.slice(0, 20),
       screenshot,
       seededIndicators: args.seedIndicators,
@@ -2152,11 +2640,21 @@ async function main() {
       || !report.symbolSearchOpened
       || !report.settingsOpened
       || (args.drawingCheck && (
-        !drawingWorkflow?.drawingLineToolClicked
+        !drawingWorkflow?.drawingToolbarGate?.passed
+        || !drawingWorkflow?.drawingPenToolClicked
+        || !drawingWorkflow?.drawingPenToolActive
+        || !drawingWorkflow?.drawingPenCreation?.passed
+        || !drawingWorkflow?.drawingPenCreation?.immediateAfterToolActivation
+        || !drawingWorkflow?.drawingLineToolClicked
         || !drawingWorkflow?.drawingLineToolActive
+        || !drawingWorkflow?.drawingLineToolStayedActive
+        || !drawingWorkflow?.drawingTwoClickCreation?.passed
         || !drawingWorkflow?.drawingEngineReady
+        || !drawingWorkflow?.drawingEngineMounted
         || !drawingWorkflow?.drawingChartRectFound
-        || drawingWorkflow?.drawingPersistedCount !== 1
+        || drawingWorkflow?.drawingPersistedCount
+          !== drawingWorkflow?.drawingTwoClickCreation?.consecutiveSegment
+            ?.counts?.afterSecondClick?.saved
         || !drawingWorkflow?.drawingInitialGeometryValid
         || !drawingWorkflow?.drawingCursorToolActive
         || !drawingWorkflow?.drawingLineToolReactivated
@@ -2177,11 +2675,20 @@ async function main() {
       || (args.shortSwitch && !shortSwitch?.acceptance?.passed)
       || (args.chartTypeMatrix && !chartTypeMatrix?.passed)
       || (args.exportMatrix && !exportMatrix?.passed)
+      || criticalConsoleWarnings.length > 0
       || exceptions.length > 0
       || failedApiResponses.length > 0
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {
+    if (drawingEngineRequestGate) {
+      try {
+        await drawingEngineRequestGate.release();
+      } catch {
+        // Browser/process cleanup below is the final fallback for a broken
+        // interception session.
+      }
+    }
     if (cdp) cdp.close();
     await stopProcess(chrome);
     await removeDirectoryWithRetries(userDataDir);

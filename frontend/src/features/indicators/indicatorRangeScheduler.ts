@@ -115,8 +115,11 @@ function isAbortError(error: unknown): boolean {
 function selectReason(reasons: ReadonlySet<string>): string {
   const priority = [
     "initial-visible",
+    "initial-progressive",
     "recomputed",
     "backfill-completed",
+    "window-mid-merge",
+    "window-prepend",
     "window-delta",
     "auto-right-catchup",
     "auto-catchup",
@@ -351,6 +354,47 @@ export function createIndicatorRangeScheduler<
     queueMicrotask(flush);
   }
 
+  function supersedeRevision({
+    abortInFlight = false,
+    revision = null,
+    sessionKey: nextSessionKey,
+    targetKeys = [],
+  }: {
+    abortInFlight?: boolean;
+    revision?: unknown;
+    sessionKey?: unknown;
+    targetKeys?: Iterable<unknown>;
+  } = {}): { epoch: number; superseded: number } {
+    const nextEpoch = setSession(nextSessionKey);
+    const nextRevisionSignature = revisionSignature(revision);
+    let superseded = 0;
+    for (const value of targetKeys) {
+      const targetKey = String(value || "");
+      if (!targetKey) continue;
+      const pendingKey = `${sessionKey}|${targetKey}`;
+      latestRevisionByTarget.set(pendingKey, nextRevisionSignature);
+      const entry = pending.get(pendingKey);
+      if (entry && revisionSignature(entry.revision) !== nextRevisionSignature) {
+        pending.delete(pendingKey);
+        superseded += 1;
+        notify(entry.listeners, false, {
+          stale: true,
+          target: entry.target,
+        });
+      }
+      for (const task of inFlight.values()) {
+        if (
+          task.sessionKey !== sessionKey
+          || task.targetKey !== targetKey
+          || task.revisionSignature === nextRevisionSignature
+        ) continue;
+        superseded += 1;
+        if (abortInFlight) task.controller.abort();
+      }
+    }
+    return { epoch: nextEpoch, superseded };
+  }
+
   function ensureCoverage({
     apply,
     execute,
@@ -381,8 +425,33 @@ export function createIndicatorRangeScheduler<
       const targetKey = indicatorRangeTargetKey(target);
       if (!targetKey) continue;
       const pendingKey = `${sessionKey}|${targetKey}`;
-      latestRevisionByTarget.set(pendingKey, revisionSignature(normalizedRevision));
+      const nextRevisionSignature = revisionSignature(normalizedRevision);
+      const previousRevisionSignature = latestRevisionByTarget.get(pendingKey);
+      if (
+        previousRevisionSignature !== undefined
+        && previousRevisionSignature !== nextRevisionSignature
+      ) {
+        for (const task of inFlight.values()) {
+          if (
+            task.sessionKey === sessionKey
+            && task.targetKey === targetKey
+            && task.revisionSignature !== nextRevisionSignature
+          ) {
+            task.controller.abort();
+          }
+        }
+      }
+      latestRevisionByTarget.set(pendingKey, nextRevisionSignature);
       let entry = pending.get(pendingKey);
+      if (entry && revisionSignature(entry.revision) !== nextRevisionSignature) {
+        pending.delete(pendingKey);
+        notify(entry.listeners, false, {
+          aborted: true,
+          stale: true,
+          target: entry.target,
+        });
+        entry = undefined;
+      }
       if (!entry) {
         entry = {
           apply,
@@ -452,5 +521,6 @@ export function createIndicatorRangeScheduler<
     ensureCoverage,
     setSession,
     snapshot,
+    supersedeRevision,
   };
 }

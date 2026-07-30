@@ -151,6 +151,22 @@ test("existing SavedTextDrawing starts at data coordinates and commits through u
   unsubscribe();
 });
 
+test("continuous drawing keeps the text tool active after committing a new annotation", () => {
+  const { harness, options } = createHarness({
+    isContinuousDrawingEnabled: () => true,
+  });
+  const controller = createDrawingEntityTextEditController(options);
+  assert.equal(controller.startTextEditing(savedText({ id: "new-text", text: "" }), {
+    isNew: true,
+  }), true);
+  controller.setEditingTextValue("keep placing");
+
+  assert.equal(controller.commitTextEditing(), true);
+  assert.equal(harness.persisted.length, 1);
+  assert.deepEqual(harness.toolChanges, []);
+  assert.equal(harness.activeTool, "text");
+});
+
 test("persistence rejection retains the hidden, retryable editor state", () => {
   const { harness, options } = createHarness();
   const controller = createDrawingEntityTextEditController(options);

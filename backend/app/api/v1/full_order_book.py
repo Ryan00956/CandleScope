@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from decimal import Decimal
@@ -11,6 +12,8 @@ from threading import RLock
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTask
 
 from app.api.v1.order_book_projection import (
     PriceGrouping,
@@ -19,6 +22,7 @@ from app.api.v1.order_book_projection import (
     project_order_book_levels,
 )
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.data_engine.market_data.full_order_book_service import FullOrderBookRateLimited
 
 
 PROTOCOL = "orderbook.full.v1"
@@ -58,7 +62,7 @@ async def full_order_book_snapshot(
     limit: int = Query(default=100, ge=1, le=MAX_OUTPUT_LEVELS),
     price_grouping: str = Query(default="raw"),
     wait_ms: int = Query(default=5_000, ge=100, le=15_000),
-) -> dict[str, Any]:
+) -> Any:
     """Return one live atomic projection of the locally reconstructed book."""
 
     dm = _data_manager(request)
@@ -81,6 +85,36 @@ async def full_order_book_snapshot(
         record = await dm.wait_for_full_order_book_snapshot(
             key,
             timeout_seconds=wait_ms / 1000,
+        )
+    except FullOrderBookRateLimited as exc:
+        retry_after_seconds = max(
+            1,
+            (exc.retry_at_ms - int(time.time() * 1000) + 999) // 1000,
+        )
+        background = None
+        if leased:
+            leased = False
+            # Send the bounded 429 before waiting for the last HTTP lease to
+            # stop a physical WebSocket. Starlette runs this managed cleanup
+            # after the response body has been emitted.
+            background = BackgroundTask(
+                _release_http_lease,
+                dm,
+                key,
+                consumer_id,
+            )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": {
+                    "code": "upstream_rate_limited",
+                    "message": "full order-book upstream is temporarily rate limited",
+                    "retry_at_ms": exc.retry_at_ms,
+                    "bucket_key": exc.bucket_key,
+                },
+            },
+            headers={"Retry-After": str(retry_after_seconds)},
+            background=background,
         )
     except asyncio.TimeoutError as exc:
         raise HTTPException(
@@ -123,6 +157,22 @@ async def full_order_book_snapshot(
             price_tick_size=price_tick_size,
         ),
     }
+
+
+async def _release_http_lease(
+    dm: Any,
+    key: MarketStreamKey,
+    consumer_id: str,
+) -> None:
+    try:
+        released = await dm.release_full_order_book_stream(
+            key,
+            consumer_id=consumer_id,
+        )
+        if not released:
+            logger.warning("Full order-book HTTP lease could not be fully released")
+    except Exception:
+        logger.exception("Full order-book HTTP lease background release failed")
 
 
 def _data_manager(request: Request) -> Any:

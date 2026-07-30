@@ -5,10 +5,12 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from functools import wraps
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import app.data_engine.market_data.full_order_book_service as full_book_service_module
 from app.data_engine.ingestion.models import (
     DataSource,
     MarketEvent,
@@ -16,8 +18,12 @@ from app.data_engine.ingestion.models import (
     StreamType,
 )
 from app.data_engine.market_data.full_order_book import FullOrderBookEngine
-from app.data_engine.market_data.full_order_book_service import FullOrderBookService
+from app.data_engine.market_data.full_order_book_service import (
+    FullOrderBookRateLimited,
+    FullOrderBookService,
+)
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.exchanges.rate_limits import RateLimitAdmission
 
 
 def _async_test(function):
@@ -385,7 +391,11 @@ class _Factory:
 
     async def fetch_market(self, descriptor, **kwargs):
         assert descriptor.stream_type is StreamType.FULL_DEPTH
-        assert kwargs == {"limit": 1000, "history": False}
+        assert kwargs == {
+            "limit": 1000,
+            "history": False,
+            "defer_on_rate_limit": True,
+        }
         self.order.append("fetch")
         self.fetch_calls += 1
         plan = self.plans.popleft()
@@ -418,6 +428,45 @@ class _Factory:
         callback = self.health_callbacks[generation]
         assert callback is not None
         await callback(health, "test")
+
+
+class _QuotaAwareFactory(_Factory):
+    def __init__(self, *, defer_seconds: float) -> None:
+        super().__init__()
+        self.defer_until_monotonic = time.monotonic() + defer_seconds
+        self.defer_until_ms = int(time.time() * 1000 + defer_seconds * 1000)
+        self.admission_calls = 0
+
+    async def market_rate_limit_admission(self, descriptor, **kwargs):
+        assert descriptor.stream_type is StreamType.FULL_DEPTH
+        assert kwargs == {"limit": 1000, "history": False}
+        self.admission_calls += 1
+        remaining = self.defer_until_monotonic - time.monotonic()
+        if remaining > 0:
+            return RateLimitAdmission(
+                allowed=False,
+                bucket_key="binance:futures:request_weight:ip",
+                cost=20,
+                reason="circuit_open",
+                retry_after_seconds=remaining,
+                retry_at_monotonic=self.defer_until_monotonic,
+                retry_at_ms=self.defer_until_ms,
+                rule_name="binance_futures_depth_snapshot",
+                status_code=418,
+                body_code="-1003",
+                circuit_key="binance:ip",
+            )
+        return RateLimitAdmission(
+            allowed=True,
+            bucket_key="binance:futures:request_weight:ip",
+            cost=20,
+            reason=None,
+            retry_after_seconds=0,
+            retry_at_monotonic=None,
+            retry_at_ms=None,
+            rule_name="binance_futures_depth_snapshot",
+            circuit_key="binance:ip",
+        )
 
 
 def _service(factory: _Factory, **kwargs) -> FullOrderBookService:
@@ -456,6 +505,94 @@ async def test_websocket_starts_and_buffers_before_rest_snapshot_alignment() -> 
     assert record.event.data["last_update_id"] == 101
     assert record.event.data["live"] is True
     assert service.diagnostics()["engine_buffered"] == 1
+    await service.shutdown()
+
+
+@_async_test
+async def test_open_quota_circuit_defers_snapshot_without_timeout_or_delta_buildup() -> None:
+    factory = _QuotaAwareFactory(defer_seconds=0.12)
+    factory.plans.append(_FetchPlan([_rest_snapshot(100)]))
+    service = _service(
+        factory,
+        upstream_queue_size=2,
+        snapshot_timeout_seconds=0.03,
+    )
+    key = _key()
+
+    await service.ensure_stream(key, consumer_id="rate-limited")
+    await _wait_until(
+        lambda: (
+            (record := service.current(key, require_live=False)) is not None
+            and record.event.data.get("rate_limited") is True
+        ),
+    )
+    stale = service.current(key, require_live=False)
+    assert stale is not None
+    assert stale.event.data["stale_reason"] == "upstream_rate_limited"
+    assert stale.event.data["retry_at_ms"] == factory.defer_until_ms
+    assert stale.event.data["rate_limit_bucket"] == (
+        "binance:futures:request_weight:ip"
+    )
+    with pytest.raises(FullOrderBookRateLimited) as caught:
+        await service.wait_for_live(key, timeout_seconds=1)
+    assert caught.value.retry_at_ms == factory.defer_until_ms
+
+    for update_id in range(1, 8):
+        await factory.emit(_delta(update_id, update_id, update_id - 1))
+    diagnostics = service.diagnostics()
+    assert factory.fetch_calls == 0
+    assert diagnostics["snapshot_fetch_attempts"] == 0
+    assert diagnostics["snapshot_fetch_timeouts"] == 0
+    assert diagnostics["deltas_discarded_while_rate_limited"] == 7
+    assert diagnostics["actors"][0]["queue_pending"] == 0
+
+    await _wait_until(lambda: factory.fetch_calls == 1)
+    await factory.emit(_delta(100, 101, 99))
+    live = await service.wait_for_live(key, timeout_seconds=1)
+    assert live.event.data["last_update_id"] == 101
+    recovered = service.diagnostics()
+    assert recovered["snapshot_fetch_deferred"] == 1
+    assert recovered["snapshot_fetch_attempts"] == 1
+    assert recovered["snapshot_fetch_timeouts"] == 0
+    assert recovered["actors"][0]["rate_limited"] is False
+    await service.shutdown()
+
+
+@_async_test
+async def test_shutdown_interrupts_long_quota_deferral_without_snapshot_request() -> None:
+    factory = _QuotaAwareFactory(defer_seconds=60)
+    service = _service(factory)
+    key = _key()
+
+    await service.ensure_stream(key, consumer_id="shutdown-rate-limited")
+    await _wait_until(
+        lambda: service.diagnostics()["snapshot_fetch_deferred"] == 1,
+    )
+    await asyncio.wait_for(service.shutdown(), timeout=0.2)
+
+    assert factory.fetch_calls == 0
+    assert service.diagnostics()["state"] == "closed"
+
+
+@_async_test
+async def test_quota_recovery_uses_monotonic_deadline_when_wall_clock_rolls_back(
+    monkeypatch,
+) -> None:
+    factory = _QuotaAwareFactory(defer_seconds=0.05)
+    factory.plans.append(_FetchPlan([_rest_snapshot(100)]))
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(
+        full_book_service_module,
+        "time",
+        SimpleNamespace(time=lambda: 0.0, monotonic=real_monotonic),
+    )
+    service = _service(factory)
+
+    await service.ensure_stream(_key(), consumer_id="clock-rollback")
+    await _wait_until(lambda: factory.fetch_calls == 1, timeout=0.25)
+
+    assert factory.admission_calls == 2
+    assert service.diagnostics()["snapshot_fetch_deferred"] == 1
     await service.shutdown()
 
 

@@ -6,7 +6,15 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { assessDrawingWorkerRuntimeEvidence } from "./drawing-controlled-cdp-smoke.mjs";
+import {
+  assessDrawingWorkerRuntimeEvidence,
+  waitForDrawingExerciseSurface,
+} from "./drawing-controlled-cdp-smoke.mjs";
+import {
+  exchangePayload,
+  indicatorRangeBatchPayload,
+  websocketConnectedPayload,
+} from "./mock-api.mjs";
 
 const FRONTEND_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = path.join(FRONTEND_ROOT, "scripts", "drawing-controlled-cdp-smoke.mjs");
@@ -122,6 +130,156 @@ test("controlled CDP smoke help validates safe boundary values without creating 
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("controlled mock schema v2 advertises usable kline history and realtime intervals", () => {
+  const exchange = exchangePayload().exchanges[0];
+  const kline = exchange.channels.find((channel) => channel.channel === "kline");
+
+  assert.ok(kline);
+  assert.equal(exchange.capability_schema_version, 2);
+  assert.deepEqual(kline.market_types, ["spot", "futures"]);
+  assert.equal(kline.history, true);
+  assert.equal(kline.realtime, true);
+  assert.deepEqual(kline.history_transports, ["rest_history"]);
+  assert.deepEqual(kline.realtime_transports, ["websocket"]);
+  assert.deepEqual(kline.params.interval, exchange.native_intervals);
+});
+
+test("controlled mock advertises the product WebSocket protocol for each routed stream", () => {
+  assert.deepEqual(
+    websocketConnectedPayload("/api/v1/stream/market"),
+    { type: "connected", protocol: "market.v1", max_subscriptions: 64 },
+  );
+  assert.deepEqual(
+    websocketConnectedPayload("/api/v1/stream/order-book"),
+    { type: "connected", protocol: "orderbook.v1" },
+  );
+  assert.deepEqual(
+    websocketConnectedPayload("/api/v1/stream/full-order-book"),
+    { type: "connected", protocol: "orderbook.full.v1" },
+  );
+  assert.deepEqual(
+    websocketConnectedPayload("/api/v1/stream/trade-flow"),
+    { type: "connected", protocol: "tradeflow.v1" },
+  );
+  assert.deepEqual(
+    websocketConnectedPayload("/api/v1/stream/klines?symbol=BTCUSDT"),
+    { type: "connected" },
+  );
+});
+
+test("controlled mock returns a parseable payload for hosted indicator range batches", () => {
+  const response = indicatorRangeBatchPayload({
+    requests: [
+      {
+        clientId: "vol",
+        kind: "builtin",
+        name: "VOL",
+        start: 1,
+        end: Number.MAX_SAFE_INTEGER,
+        reason: "window-prepend",
+      },
+      {
+        clientId: "ma",
+        kind: "builtin",
+        name: "MA",
+        params: { period: 20 },
+        start: 1,
+        end: Number.MAX_SAFE_INTEGER,
+        reason: "initial-visible",
+      },
+    ],
+  });
+
+  assert.equal(response.schemaVersion, 1);
+  assert.equal(response.ok, true);
+  assert.equal(response.type, "indicator.range_batch");
+  assert.deepEqual(response.results.map((result) => result.clientId), ["vol", "ma"]);
+  for (const result of response.results) {
+    const { payload } = result;
+    assert.equal(payload.ok, true);
+    assert.equal(payload.type, "indicator.replace_range");
+    assert.equal(payload.clientId, result.clientId);
+    assert.ok(payload.range.start > 1);
+    assert.ok(payload.range.end < Number.MAX_SAFE_INTEGER);
+    assert.ok(payload.lines[0].data.length > 0);
+    assert.ok(payload.lines[0].data.every(
+      (point) => point.time >= payload.range.start && point.time <= payload.range.end,
+    ));
+  }
+
+  const fullMa = response.results[1].payload;
+  const narrowStart = fullMa.lines[0].data.at(-3).time;
+  const narrow = indicatorRangeBatchPayload({
+    requests: [{
+      clientId: "ma",
+      kind: "builtin",
+      name: "MA",
+      params: { period: 20 },
+      start: narrowStart,
+      end: fullMa.range.end,
+      reason: "window-prepend",
+    }],
+  }).results[0].payload;
+  assert.deepEqual(
+    narrow.lines[0].data,
+    fullMa.lines[0].data.filter((point) => point.time >= narrowStart),
+  );
+});
+
+test("controlled drawing surface wait tolerates React readiness lag", async () => {
+  let currentTime = 0;
+  let attempts = 0;
+  const states = [
+    { ready: false, buttonFound: true, chartFound: false, errorText: null, rect: null },
+    {
+      ready: false,
+      buttonFound: true,
+      buttonDisabled: true,
+      chartFound: true,
+      errorText: null,
+      rect: { x: 0, y: 0, width: 100, height: 100 },
+    },
+    {
+      ready: true,
+      buttonFound: true,
+      buttonDisabled: false,
+      chartFound: true,
+      errorText: null,
+      rect: { x: 40, y: 80, width: 1200, height: 700 },
+    },
+  ];
+
+  const ready = await waitForDrawingExerciseSurface(
+    async () => states[Math.min(attempts++, states.length - 1)],
+    {
+      timeoutMs: 100,
+      pollMs: 10,
+      now: () => currentTime,
+      waitForInterval: async (delayMs) => { currentTime += delayMs; },
+    },
+  );
+
+  assert.equal(ready.attempts, 3);
+  assert.equal(ready.waitedMs, 20);
+  assert.equal(ready.rect.width, 1200);
+});
+
+test("controlled drawing surface wait reports the product error instead of hiding it as timing", async () => {
+  await assert.rejects(
+    waitForDrawingExerciseSurface(
+      async () => ({
+        ready: false,
+        buttonFound: true,
+        chartFound: false,
+        errorText: "Data load failed: no kline capability",
+        rect: null,
+      }),
+      { timeoutMs: 100 },
+    ),
+    /chart entered an error state.*no kline capability/,
+  );
 });
 
 test("controlled drawing worker evidence requires a completed job-result-publish-paint identity", () => {

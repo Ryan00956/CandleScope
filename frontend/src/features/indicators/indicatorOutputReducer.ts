@@ -204,6 +204,14 @@ function mergeParamSchemas(
   schemas?: Record<string, IndicatorParameterSchema[]>,
 ): Record<string, IndicatorParameterSchema[]> {
   if (!schemas || Object.keys(schemas).length === 0) return state.paramSchemas;
+  let hasChangedSchema = false;
+  for (const [indicatorId, schema] of Object.entries(schemas)) {
+    if (state.paramSchemas[indicatorId] !== schema) {
+      hasChangedSchema = true;
+      break;
+    }
+  }
+  if (!hasChangedSchema) return state.paramSchemas;
   return { ...state.paramSchemas, ...schemas };
 }
 
@@ -211,19 +219,31 @@ function hydrateCachedOutputs(
   state: IndicatorOutputState,
   entries: IndicatorCacheResult[] = [],
 ): IndicatorOutputState {
-  let next = {
-    ...createIndicatorOutputState(),
-    paramSchemas: state.paramSchemas,
-  };
+  const latestEntryByIndicator = new Map<string, IndicatorCacheResult>();
   const schemas: Record<string, IndicatorParameterSchema[]> = {};
   for (const entry of entries) {
     if (!entry?.indicatorId || !entry.normalized) continue;
-    next = replaceIndicatorOutputs(next, entry.indicatorId, entry.normalized);
+    // Replacing an indicator used to move its outputs to the end of every lane.
+    // Delete before set so Map iteration preserves that last-occurrence ordering.
+    latestEntryByIndicator.delete(entry.indicatorId);
+    latestEntryByIndicator.set(entry.indicatorId, entry);
     if (entry.schema?.length > 0) {
       schemas[entry.indicatorId] = entry.schema;
     }
   }
-  next.paramSchemas = mergeParamSchemas(next, schemas);
+
+  const next = {
+    ...createIndicatorOutputState(),
+    paramSchemas: mergeParamSchemas(state, schemas),
+  };
+  for (const entry of latestEntryByIndicator.values()) {
+    next.markers.push(...entry.normalized.markers);
+    next.fills.push(...entry.normalized.fills);
+    next.hlines.push(...entry.normalized.hlines);
+    next.bgcolors.push(...entry.normalized.bgcolors);
+    next.barcolors.push(...entry.normalized.barcolors);
+    next.signals.push(...entry.normalized.signals);
+  }
   return next;
 }
 

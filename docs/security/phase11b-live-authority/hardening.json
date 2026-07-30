@@ -1,0 +1,642 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260723_phase11b_live_authority",
+  "sourceEvidence": {
+    "kind": "document_collection",
+    "label": "CandleScope Plugin Platform Phase 11B source and design evidence at e464c4f",
+    "collectionSha256": "b025a166090f5ff5947f5ec97f0a102c22fa52c16ca0da9312e3e5765317db6d",
+    "artifactCount": 16,
+    "targetRevision": "e464c4f7add0e64b1139692ce0daaeef71fb2159",
+    "gitTree": "c824383f391e842d1ace2dadde5233c392f55ff6",
+    "sourceDrift": "present",
+    "sourceDriftDetail": "At implementation planning revision d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca, e464c4f..d26418e contains only the ten Phase 11B0 documentation files; backend, frontend, and SDK source remain unchanged."
+  },
+  "selection": {
+    "selectedOptionId": "isolated-live-transaction-broker",
+    "selectedAt": "2026-07-23",
+    "authorizedWorkPackages": [
+      "WP-A",
+      "WP-B",
+      "WP-C",
+      "WP-D"
+    ],
+    "implementationRevision": "d26418e5d45e1e35dc80e8ae307c265ec9a1a3ca",
+    "implementationPlanPath": "implementation/isolated-live-transaction-broker.md"
+  },
+  "implementationStatus": {
+    "completedWorkPackages": [
+      "WP-A",
+      "WP-B",
+      "WP-C",
+      "WP-D"
+    ],
+    "wpACommit": "5d0128e",
+    "wpBCommit": "8aba4e9",
+    "wpCCommit": "3e4a2b9",
+    "wpDCommit": "this-stage-commit",
+    "liveEnabled": false,
+    "readOnlyAccountBindingEnabledByDefault": false,
+    "reconciliationShadowEnabledByDefault": false,
+    "networkMethodCountWhenReadOnlyEnabled": 2,
+    "networkMethodCountWhenShadowEnabled": 3,
+    "nextAuthorizedWorkPackage": null,
+    "verification": {
+      "focused": "63 passed",
+      "affectedRegression": "60 passed",
+      "backendFull": "2141 passed, 0 failed, 4 warnings",
+      "sdkFull": "80 passed",
+      "frontendFull": "2353 passed plus architecture, plugin boundary, typecheck, lint, and build",
+      "backendFullGate": "passed-with-recorded-warnings"
+    },
+    "phaseRecordPaths": [
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPA_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPB_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPC_zh.md",
+      "../../PLUGIN_PLATFORM_V2_PHASE11B_WPD_zh.md"
+    ]
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Phase 11B requires one authoritative boundary for publisher proof, credential use, canonical accounts, durable execution, reconciliation, confirmation, and revocation before Live can be enabled."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": [
+      "incremental",
+      "medium_term",
+      "foundational"
+    ],
+    "nonNegotiables": [
+      "Raw credentials, authorization headers, signatures, and OS vault handles never cross into plugin processes or plugin UI.",
+      "High-risk permissions remain unavailable until every selected implementation gate is proven.",
+      "Paper state, protocol, and rollback remain independent from Live.",
+      "Unknown exchange outcomes are queried by stable identity before any retry.",
+      "Local-developer and unsigned plugins cannot receive Live authority."
+    ],
+    "assumptions": [
+      "Windows desktop remains the first supported production platform.",
+      "The first Live connector, if implemented, is first-party and build-pinned.",
+      "No measured IPC latency, Broker memory, exchange latency, or production kill-switch budget was supplied.",
+      "Phase 12 publisher signatures and revocation are not yet available.",
+      "A compromised Host process or compromised Windows user account is outside the plugin-attacker boundary."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "live-authority-boundary",
+      "title": "Centralize and isolate Live authority",
+      "summary": "Keep plugins intent-only while one Host-owned transaction authority owns credential use, canonical accounts, persist-before-send execution, reconciliation, and revoke semantics.",
+      "diagnosis": "The current Paper-only system has strong local controls, but publisher identity, credential use, account identity, authenticated transport, order recovery, and confirmation do not yet share one authoritative state boundary. Enabling Live by extending callers independently would make funds-safety invariants convention-based.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E001",
+          "path": "docs/GENERAL_PLUGIN_PLATFORM_V2_EXECUTION_zh.md",
+          "claim": "The Phase 11B plan requires trusted publishers, a non-plaintext secret broker, exact scopes, explicit Live mode, query-before-retry, immutable exportable audit, and Paper-only fallback when secret confinement cannot be proven."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E002",
+          "path": "docs/PLUGIN_PLATFORM_V2_PHASE11A_zh.md",
+          "claim": "Phase 11A explicitly defers credential handles, Live accounts, authenticated adapters, verified publishers, and Live safety claims."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E003",
+          "path": "backend/app/plugin_security_v2/grants.py",
+          "claim": "Publisher identity is currently derived as a manifest-prefixed display string, and the Grant Store only permits selective availability for Phase 11A Paper permissions."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E004",
+          "path": "backend/app/plugin_installer_v2/bundle.py",
+          "claim": "The bundle verifier enforces an expected SHA-256, a strict digest table, compatibility, and immutable content, but its envelope contains no publisher signature, timestamp, transparency record, or revocation proof."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E005",
+          "path": "backend/app/plugin_security_v2/capabilities.py",
+          "claim": "Capability leases are generation-, digest-, publisher-, and scope-bound and notify resource owners on revoke."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E005",
+          "path": "backend/app/plugin_gateway_v2/network.py",
+          "claim": "The public HTTPS gateway pins validated DNS, constrains origins and methods, and cancels sockets on lease revoke, but intentionally exposes no authenticated trading transport."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E006",
+          "path": "backend/app/plugin_paper_v2/runtime.py",
+          "claim": "Paper persists pending intent and reservation before invocation, uses bounded idempotency records, converts recovered pending state to unknown, and does not blindly retry."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "evidenceId": "E006",
+          "path": "packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/paper.py",
+          "claim": "Paper broker/account strings and executor acknowledgements are insufficient to establish authenticated venue account identity or exchange truth for Live reconciliation."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E007",
+          "path": "backend/app/plugin_security_v2/audit.py",
+          "claim": "Audit events are sequence- and hash-chain validated."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "evidenceId": "E007",
+          "path": "backend/app/plugin_core_v2/api.py",
+          "claim": "The inspected Host API and UI do not yet expose a scoped, redacted, verifiable user audit export contract."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E008",
+          "path": "frontend/src/features/plugins/PluginPlatformSurfaces.tsx",
+          "claim": "The Plugin Manager is Host-rendered and separate from sandbox views, but it labels digest-only artifacts as signed and uses a generic browser confirmation for Paper resume rather than an intent-bound Live receipt."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "evidenceId": "E008",
+          "path": "frontend/src/features/plugins/SandboxPluginFrame.tsx",
+          "claim": "The opaque-origin credentialless iframe boundary is suitable for denying Live mutation, but a dedicated Host-owned confirmation and persistent Live state surface still needs to be designed and tested."
+        }
+      ],
+      "desiredInvariants": [
+        "Plugin processes, plugin UI, public Host APIs, logs, and audit exports never receive raw credentials, authorization headers, signatures, refresh tokens, or OS vault handles.",
+        "Live publisher eligibility derives only from a build-pinned release record or a Phase 12 verified signature and revocation proof.",
+        "Host trust labels distinguish digest-verified local, first-party pinned, and verified publisher states and never display signed without signature evidence.",
+        "Canonical Live accounts are created only after an authenticated Host-owned query and bind venue, environment, venue account, credential version, connector digest, publisher proof, and user-visible identity.",
+        "Every submit or cancel is durably recorded with intent hash, stable venue client order ID, risk decision, confirmation receipt, policy epoch, and connector version before network dispatch.",
+        "Crash, timeout, and connection revoke become unknown and are queried by stable identity before any retry or terminal claim.",
+        "Grant revoke, plugin disable, credential rotation, publisher revoke, and global kill advance a serialized policy epoch before the next network action.",
+        "Host-native confirmation is single-use, short-lived, and bound to the exact intent, account, plugin, publisher, scope, and policy epoch.",
+        "Authenticated trading transport is separate from network.connect and accepts only operation-specific, pinned-venue actions.",
+        "Audit exports validate their chain, include unresolved orders, and exclude secrets, authentication material, full signed payloads, and sensitive response bodies."
+      ],
+      "proposalPath": "proposals/live-authority-boundary.md",
+      "options": [
+        {
+          "optionId": "paper-only-gate",
+          "title": "Keep Paper-only",
+          "kind": "baseline",
+          "summary": "Retain the current high-risk permission deny and defer all Live credentials, accounts, and network actions.",
+          "diagramPaths": {
+            "before": "diagrams/live-authority-boundary-before.mmd",
+            "after": "diagrams/live-authority-boundary-paper-only-gate-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E001",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "The option preserves the documented fallback but does not deliver Live requirements."
+            },
+            {
+              "evidenceId": "E002",
+              "effect": "addresses",
+              "tacticalFixRequired": false,
+              "rationale": "All Phase 11A deferred boundaries remain explicitly closed."
+            },
+            {
+              "evidenceId": "E003",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "Manifest identity remains non-cryptographic but cannot receive Live authority."
+            },
+            {
+              "evidenceId": "E004",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Publisher signatures remain absent and no Live trust decision consumes them; the misleading signed UI label must still be corrected."
+            },
+            {
+              "evidenceId": "E005",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "Existing revoke primitives continue to serve non-Live capabilities."
+            },
+            {
+              "evidenceId": "E006",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "Paper recovery remains local and is not promoted as exchange truth."
+            },
+            {
+              "evidenceId": "E007",
+              "effect": "unaffected",
+              "tacticalFixRequired": false,
+              "rationale": "No new Live export is created."
+            },
+            {
+              "evidenceId": "E008",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "No Live confirmation surface is needed, but Host UI must stop presenting digest-only local bundles as signed."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No credential or funds-moving attack surface is added; the current fail-closed boundary remains.",
+              "validationPlan": "Continuously test that secrets.use and trade.submit/trade.cancel cannot be granted or projected as effective capabilities."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No new execution path, process, serialization, or network hop is introduced.",
+              "validationPlan": "Retain the current Phase 11A cold-start and focused regression baselines."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No vault, journal index, reconciler, or Broker process is allocated.",
+              "validationPlan": "Compare current plugin-platform idle RSS with the preserved Paper-only build."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "There is no Live availability or recovery promise; existing Paper behavior remains isolated.",
+              "validationPlan": "Run Paper crash, unknown recovery, kill-switch, and restart tests without Live feature state."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No new service, credential incident process, journal drain, or venue alerting is required.",
+              "validationPlan": "Verify product UI and documentation continuously identify the environment as Paper-only."
+            },
+            {
+              "dimension": "migration",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No credential, account, schema, or order migration occurs.",
+              "validationPlan": "Confirm backend, SDK, frontend, and package artifacts remain unchanged apart from documentation."
+            }
+          ],
+          "residualRisks": [
+            "The product does not provide Live execution.",
+            "Users may use an external execution tool outside CandleScope controls.",
+            "Publisher-signature and audit-export gaps remain deferred."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "docs/GENERAL_PLUGIN_PLATFORM_V2_EXECUTION_zh.md",
+              "docs/PLUGIN_PLATFORM_V2_PHASE11B0_zh.md",
+              "frontend/src/features/plugins/PluginPlatformSurfaces.tsx"
+            ],
+            "workPackages": [
+              "Keep the Paper-only state explicit in product and release documentation.",
+              "Correct the bundle trust label from signed to digest-verified local until signature evidence exists.",
+              "Retain negative high-risk grant and capability tests."
+            ],
+            "acceptanceCriteria": [
+              "No Live permission can be granted or minted.",
+              "No credential or authenticated trading network path exists.",
+              "No Host UI labels an artifact signed without verified signature evidence.",
+              "Paper focused and full regressions pass."
+            ],
+            "migrationNotes": [],
+            "rollback": "No runtime migration is needed; revert documentation-only state changes if required."
+          }
+        },
+        {
+          "optionId": "in-process-live-gateway",
+          "title": "In-process Host Live Gateway",
+          "kind": "incremental",
+          "summary": "Add publisher evidence, vault access, canonical accounts, durable execution, reconciliation, confirmation, and dedicated authenticated transport inside the existing Host process.",
+          "diagramPaths": {
+            "before": "diagrams/live-authority-boundary-before.mmd",
+            "after": "diagrams/live-authority-boundary-in-process-live-gateway-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E001",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "It can implement all functional gates, but credential and execution authority share the broad Host process."
+            },
+            {
+              "evidenceId": "E002",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "It fills the deferred boundaries incrementally while preserving Paper."
+            },
+            {
+              "evidenceId": "E003",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "A release-proof identity replaces manifest identity for Live decisions."
+            },
+            {
+              "evidenceId": "E004",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "A build-pinned first-party release lock can support the first connector, while community publisher trust remains deferred."
+            },
+            {
+              "evidenceId": "E005",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Existing revoke listeners and socket cancellation can be reused, but compete in the same process and event loop."
+            },
+            {
+              "evidenceId": "E006",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "A venue-backed query-before-retry state machine extends the Paper durability pattern."
+            },
+            {
+              "evidenceId": "E007",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "A scoped redacted audit export can be added to the Host management API."
+            },
+            {
+              "evidenceId": "E008",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The Host-native UI can issue intent-bound confirmation receipts above sandbox views."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Plugins remain intent-only and cannot read credentials, but the entire Host backend process becomes part of the credential and execution TCB.",
+              "validationPlan": "Run secret canary scans across plugin RPC, Host public RPC, logs, audits, crash artifacts, and temporary storage; reject the option if any plugin-visible path contains the canary."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Durable journal writes, vault access, signing, and reconciliation add local latency, but no extra process hop is introduced.",
+              "validationPlan": "Benchmark Host-local dispatch at 100 requests per second with a fake venue and require provisional p95 at or below 8 ms excluding exchange network time."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Vault state, journal indexes, account bindings, and reconciliation queues increase Host working set.",
+              "validationPlan": "Measure idle and 10,000-order Host RSS; require bounded indexes and no more than 48 MiB incremental RSS before production selection."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "One lifecycle simplifies recovery, but a Host crash or event-loop stall simultaneously removes UI, execution, kill processing, and reconciliation.",
+              "validationPlan": "Inject process exit and event-loop stalls at every journal transition during a 24-hour testnet soak; require no duplicate venue order and explicit unresolved state."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Deployment stays single-process, but credential incidents and execution faults have a broad Host blast radius.",
+              "validationPlan": "Exercise credential rotate, revoke, drain-only, audit export, and Host-start failure runbooks before enabling testnet submit."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "New trust, vault, account, journal, UI, and transport schemas are needed but no cross-process protocol is required.",
+              "validationPlan": "Stage first-party trust, vault handles, read-only accounts, shadow reconciliation, testnet execution, and production canary as independently reversible feature gates."
+            }
+          ],
+          "residualRisks": [
+            "A Host process compromise exposes credentials and execution authority.",
+            "Ordinary plugin-platform load or deadlock can delay kill and reconciliation.",
+            "Future venue work can pressure the internal gateway toward generic signing.",
+            "Community verified publishers still depend on Phase 12."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "backend/app/plugin_security_v2",
+              "backend/app/plugin_installer_v2",
+              "backend/app/plugin_core_v2",
+              "backend/app/plugin_paper_v2",
+              "frontend/src/features/plugins",
+              "packages/candlescope-plugin-sdk"
+            ],
+            "workPackages": [
+              "Add first-party publisher evidence without enabling Live.",
+              "Add an internal credential vault port and opaque bindings.",
+              "Create canonical read-only accounts.",
+              "Create a durable Live order journal and reconciliation state machine.",
+              "Add Host-native confirmation, kill, revoke, and audit export.",
+              "Enable one first-party testnet connector before any production canary."
+            ],
+            "acceptanceCriteria": [
+              "Raw secrets never cross into plugin-visible paths.",
+              "Every network action is persist-before-send and epoch-checked.",
+              "Unknown results are queried before retry.",
+              "Disable and kill stop the next network action and preserve unresolved orders.",
+              "Paper remains independently reversible."
+            ],
+            "migrationNotes": [
+              "Retain all high-risk permission denies until every pre-execution gate passes.",
+              "Retain the previous connector artifact in drain-only mode until all orders are terminal."
+            ],
+            "rollback": "Disable new submit, advance the Live policy epoch, retain the journal, run in-process drain-only query/cancel, and leave Paper untouched."
+          }
+        },
+        {
+          "optionId": "isolated-live-transaction-broker",
+          "title": "Isolated Live Transaction Broker",
+          "kind": "isolation",
+          "summary": "Use a restricted Host-owned Broker process as the sole owner of credential plaintext, operation-specific signing, authenticated venue transport, canonical accounts, durable journal, reconciliation, and policy epoch.",
+          "diagramPaths": {
+            "before": "diagrams/live-authority-boundary-before.mmd",
+            "after": "diagrams/live-authority-boundary-isolated-live-transaction-broker-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E001",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The Broker design assigns a single owner to every Phase 11B safety gate and keeps Paper-only fallback."
+            },
+            {
+              "evidenceId": "E002",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The deferred boundaries become ordered work packages without opening Live prematurely."
+            },
+            {
+              "evidenceId": "E003",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Both Host and Broker require cryptographic or build-pinned publisher evidence and a current policy epoch."
+            },
+            {
+              "evidenceId": "E004",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "A first-party release lock supports the first connector; verified community publishers remain unavailable until Phase 12."
+            },
+            {
+              "evidenceId": "E005",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Generation-bound capabilities feed single-use capsules, while Broker epoch checks and socket abort enforce revoke at the privileged boundary."
+            },
+            {
+              "evidenceId": "E006",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Persist-before-send, stable venue identity, and a Broker-owned reconciler prevent blind retry."
+            },
+            {
+              "evidenceId": "E007",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The Broker journal and Host audit can produce a scoped redacted export with verification receipt."
+            },
+            {
+              "evidenceId": "E008",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Host-native confirmation produces a single-use capsule and sandbox bridge remains unable to mutate Live state."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Credential plaintext, signing, authenticated transport, journal, and reconciliation move into one narrow process that exposes no generic signer or HTTP API to plugins.",
+              "validationPlan": "Use canary secrets, unauthorized IPC clients, replayed capsules, altered intent hashes, old epochs, and malicious plugin probes; require zero secret leakage and zero venue network action."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "Each action gains one IPC serialization hop in addition to journal, vault, signing, and transport work.",
+              "validationPlan": "Benchmark 100 requests per second against a fake venue, separating Host-to-Broker local dispatch; use provisional p95 at or below 10 ms and p99 at or below 25 ms as the production gate."
+            },
+            {
+              "dimension": "memory",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "A separate interpreter/process, IPC buffers, connector code, journal indexes, and reconciliation queues add bounded working set.",
+              "validationPlan": "Measure idle, 10,000-order, and 100-concurrent-query Broker RSS; use provisional 64 MiB idle and 128 MiB stress ceilings."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Execution faults are isolated from the Host UI and Paper runtime, while durable Broker state supports restart; new IPC, supervision, and version-skew failure modes appear.",
+              "validationPlan": "Inject Host exit, Broker exit, pipe break, power loss, network timeout, and version mismatch at every journal boundary; require no duplicate order and terminal or explicit unresolved recovery."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The design requires Broker health, policy epoch, journal lag, unresolved order, vault, connector, and drain-only observability plus incident runbooks.",
+              "validationPlan": "Run credential revoke, publisher revoke, plugin disable, global kill, Broker rollback, connector rollback, and offline audit export exercises before testnet execution."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "A private protocol, process packaging, vault backend, account binding, durable schema, UI receipt, and staged venue connector must be delivered before Live.",
+              "validationPlan": "Ship trust, zero-network Broker foundation, read-only accounts, reconciliation shadow, native control, testnet execution, and production canary as separate commits and default-off gates."
+            }
+          ],
+          "residualRisks": [
+            "The Broker, its connector, and its OS-vault integration become a high-value TCB.",
+            "A malicious build-pinned connector can still submit allowed but harmful orders within scope.",
+            "Publisher signatures establish origin, not benign behavior.",
+            "A venue that cannot query by stable client identity cannot support safe retry.",
+            "A compromised Host process can authorize harmful intents even if it cannot read credentials.",
+            "A compromised Windows user account remains outside this containment boundary."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "backend/app/plugin_security_v2",
+              "backend/app/plugin_installer_v2",
+              "backend/app/plugin_core_v2",
+              "new Host-owned Live Broker package",
+              "frontend/src/features/plugins",
+              "packages/candlescope-plugin-sdk",
+              "desktop packaging and process supervision"
+            ],
+            "workPackages": [
+              "WP-A: first-party publisher evidence and fail-closed Live eligibility.",
+              "WP-B: private Broker protocol, policy epoch, opaque credential handles, vault backends, and zero network methods.",
+              "WP-C: authenticated read-only canonical account binding.",
+              "WP-D: durable journal, stable venue identity, fault injection, and query-only reconciliation shadow.",
+              "WP-E: Host-native confirmation, persistent Live state, kill/revoke, drain-only, and audit export.",
+              "WP-F: one first-party testnet submit/cancel/query connector with per-order confirmation.",
+              "WP-G: small manual production canary after independent security review."
+            ],
+            "acceptanceCriteria": [
+              "Secret canaries are absent from every plugin-visible, public Host, log, audit, export, crash, environment, and temporary-file path.",
+              "Only current first-party release evidence can bind a credential or account before Phase 12.",
+              "Every authenticated network action is operation-specific, persist-before-send, and checked against the current Broker policy epoch.",
+              "Crash and timeout never trigger blind submit retry.",
+              "Kill/revoke linearizes before the next network action; in-flight ambiguity remains unknown until query.",
+              "Sandbox UI cannot trigger, cover, or spoof Live confirmation.",
+              "Rollback preserves journal and drain-only reconciliation while Paper remains available."
+            ],
+            "migrationNotes": [
+              "No Broker network method exists in WP-A or WP-B.",
+              "No submit/cancel method exists in WP-C or WP-D.",
+              "Verified-publisher remains unavailable until Phase 12.",
+              "Old connector artifacts remain immutable and drain-only until all related orders are terminal.",
+              "Production Live cannot be activated automatically by test completion."
+            ],
+            "rollback": "Advance the policy epoch, disable new submit, close in-flight transport, keep the Broker and previous trusted connector in drain-only query/cancel/export mode, preserve unresolved journal state, and leave Paper untouched."
+          }
+        }
+      ],
+      "recommendedOptionId": "isolated-live-transaction-broker",
+      "recommendation": "Choose the isolated Broker under the current plugin-attacker and Windows desktop constraints. Choose the in-process gateway only if the whole Host backend is explicitly accepted as the credential TCB and process isolation cost is disproportionate. Keep Paper-only if vault, query-before-retry, drain-only recovery, or non-overridable confirmation cannot be proven."
+    }
+  ],
+  "openQuestions": [
+    "Should the Windows vault backend use Credential Manager or a DPAPI-protected store, and what are the backup, rotation, ACL, and headless recovery requirements?",
+    "Which first-party venue and testnet support stable client order IDs, query-by-client-ID, least-privilege API keys, and venue-side withdrawal disable?",
+    "Should the private Broker transport use inherited anonymous pipes, ACL-restricted named pipes, or a restricted variant of the existing framed transport?",
+    "Which durable journal format meets crash consistency, export, capacity, and restart-time requirements?",
+    "Which last-known-safe connector can perform drain-only query/cancel after plugin or publisher revoke?",
+    "Does the first Live slice require per-order confirmation? The current recommendation is yes.",
+    "Are the provisional 10/25 ms local dispatch and 64/128 MiB Broker memory budgets acceptable?",
+    "When will Phase 12 verified publisher evidence be available for a separate community connector review?"
+  ]
+}

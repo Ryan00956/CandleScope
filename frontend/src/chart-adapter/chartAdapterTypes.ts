@@ -86,17 +86,33 @@ export interface NormalizedIndicatorDataEntry extends IndicatorDataEntry {
   value: number;
 }
 
+export interface NormalizedIndicatorWhitespaceEntry extends IndicatorDataEntry {
+  time: ChartTime;
+  value?: never;
+}
+
+export type NormalizedIndicatorSeriesEntry =
+  | NormalizedIndicatorDataEntry
+  | NormalizedIndicatorWhitespaceEntry;
+
 export interface IndicatorLine {
   id?: string;
   indicatorId?: string;
+  localId?: string;
+  outputName?: string | null;
   name?: string;
+  title?: string;
   pane?: string;
+  overlay?: boolean;
   type?: string;
   color?: string;
   lineWidth?: number;
   lineStyle?: number;
   scale?: string;
   valueFormat?: string;
+  visible?: boolean;
+  base?: number;
+  trackPrice?: boolean;
   data?: IndicatorDataEntry[];
   colorData?: IndicatorDataEntry[] | null;
   renderUpdate?: "tail" | "full" | null;

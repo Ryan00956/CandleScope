@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "candlescope.live-broker-benchmark/1",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.7",
+  "starts": 10,
+  "requests": 10000,
+  "startupMilliseconds": {
+    "min": 210.92,
+    "p50": 239.55,
+    "p95": 315.748,
+    "p99": 315.748,
+    "max": 315.748
+  },
+  "roundTripMilliseconds": {
+    "min": 0.066,
+    "p50": 0.114,
+    "p95": 0.223,
+    "p99": 0.319,
+    "max": 0.508
+  },
+  "idleRssBytes": 34205696,
+  "postRequestRssBytes": 34213888,
+  "rssGrowthBytes": 8192,
+  "budgets": {
+    "startupP95Milliseconds": 500,
+    "roundTripP95Milliseconds": 10,
+    "roundTripP99Milliseconds": 25,
+    "idleRssBytes": 67108864,
+    "postRequestRssBytes": 67108864,
+    "rssGrowthBytes": 16777216
+  }
+}

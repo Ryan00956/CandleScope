@@ -4,17 +4,21 @@ Indicator API — powered by the new Indicator Engine.
 Endpoints:
   GET  /indicators/registry           → list all registered indicator specs
   GET  /indicators/registry/{name}    → get single indicator spec
+  GET  /indicators/runtimes           → list routed script runtime descriptors
   POST /indicators/compute            → compute indicator on provided bars (new engine)
+  POST /indicators/compute/batch      → compute up to 32 indicators on shared bars
 
   # Preset-compatible endpoints (for frontend IndicatorPanel)
   GET  /indicators/presets            → list presets (maps to registry)
   GET  /indicators/presets/{id}       → get preset with script (maps to registry)
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
 import textwrap
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -31,31 +35,47 @@ from app.api.v1.indicator_range_batch import (
     IndicatorRangeBatchJob,
     compute_indicator_range_batch_async,
 )
+from app.api.v1.klines import (
+    _reject_stale_request_generation,
+    _revoke_request_demand_owner,
+)
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
     normalize_market_type as _normalize_market_type,
     validate_ws_interval as _validate_interval_name,
 )
 from app.core import config
-from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait, run_storage
+from app.core.executors import (
+    executors_snapshot,
+    run_indicator,
+    run_pyne_wait,
+    run_storage,
+)
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.data_manager.models import BarData
 from app.data_engine.interval_policy import parse_interval_spec
 from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne.cache import pyne_cache
-from app.indicator.pyne import is_incremental_pyne_script
-from app.indicator.pyne.executor import execute_pyne_script
-from app.indicator.pyne.external_runtime import RuntimeBackendSnapshot, cache_stats
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
-from app.indicator.pyne.security import PyneSecurityPolicy
-from app.indicator.range_result_service import IndicatorRangeResultService
+from app.indicator.range_result_service import (
+    IndicatorRangeResultService,
+    IndicatorRangeRevisionChangedError,
+)
+from app.indicator.runtime_service import (
+    IndicatorRuntimeRequest,
+    IndicatorRuntimeService,
+    IndicatorRuntimeUnavailableError,
+    build_unbound_indicator_runtime_service,
+    removed_in_process_runtime,
+)
+from app.indicator.runtime_routes import IndicatorRuntimeRoutesError
 from app.indicator.serialization import (
     build_error_payload,
+    rebind_indicator_payload_identity,
     serialize_indicator_result,
-    serialize_pyne_result,
+    serialize_plugin_runtime_result,
 )
 
 router = APIRouter(prefix="/indicators", tags=["indicators"])
@@ -63,9 +83,11 @@ router = APIRouter(prefix="/indicators", tags=["indicators"])
 # Module-level singletons
 _engine = create_engine()
 _custom_store = CustomIndicatorStore()
+_unbound_indicator_runtime_service = build_unbound_indicator_runtime_service()
 
 
 # ── Pydantic models ──────────────────────────────────────────
+
 
 class ComputeRequest(BaseModel):
     """Request body for indicator computation.
@@ -74,16 +96,81 @@ class ComputeRequest(BaseModel):
       1. Engine mode: provide ``name`` + ``params`` → uses the new engine
       2. Script mode: provide ``script`` + ``params`` → legacy Python exec
     """
+
     name: str | None = Field(None, description="Indicator name (e.g. 'MA', 'MACD')")
-    mode: str | None = Field(None, description="'builtin' for engine mode or 'script' for Pyne mode")
-    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    mode: str | None = Field(
+        None, description="'builtin' for engine mode or 'script' for Pyne mode"
+    )
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict, description="Indicator parameters"
+    )
     exchange: str = Field("binance", description="Exchange context")
     symbol: str = Field("UNKNOWN", description="Symbol for context")
     interval: str = Field("1m", description="Interval for context")
     market_type: str = Field("spot", description="Market type context")
-    ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
+    ohlcv: list[dict[str, Any]] = Field(
+        default_factory=list, description="OHLCV bar data array"
+    )
     script: str | None = Field(None, description="Legacy Python script (optional)")
-    securityMode: str | None = Field(None, description="'safe', 'research', or 'unsafe' for Pyne scripts")
+    securityMode: str | None = Field(
+        None, description="'safe', 'research', or 'unsafe' for Pyne scripts"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchComputeRequest:
+    """Validated batch item that deliberately aliases the shared OHLCV list."""
+
+    name: str | None
+    mode: str | None
+    language: str | None
+    params: dict[str, Any]
+    exchange: str
+    symbol: str
+    interval: str
+    market_type: str
+    ohlcv: list[dict[str, Any]]
+    script: str | None
+    securityMode: str | None
+
+
+ComputeRequestLike = ComputeRequest | _BatchComputeRequest
+
+
+class IndicatorComputeBatchContext(BaseModel):
+    """Series identity shared by every local-compute item in a batch."""
+
+    exchange: str = Field(..., description="Exchange context")
+    marketType: str = Field(..., description="Market type context")
+    symbol: str = Field(..., description="Trading symbol")
+    interval: str = Field(..., description="K-line interval")
+
+
+class IndicatorComputeBatchItem(BaseModel):
+    """One independently computed item in a local-compute batch."""
+
+    jobKey: str = Field(..., description="Stable compute-job identity")
+    clientId: str = Field(..., description="Frontend indicator client identity")
+    name: str | None = Field(None, description="Builtin indicator name")
+    mode: str | None = Field(None, description="'builtin' or 'script'")
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
+    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    script: str | None = Field(None, description="Pyne script")
+    securityMode: str | None = Field(None, description="Pyne security mode")
+
+
+class IndicatorComputeBatchRequest(BaseModel):
+    """Versioned local-compute batch with one shared series and OHLCV array."""
+
+    schemaVersion: int = Field(1, description="Batch contract version; must be 1")
+    context: IndicatorComputeBatchContext
+    ohlcv: list[dict[str, Any]] = Field(default_factory=list)
+    requests: list[IndicatorComputeBatchItem] = Field(default_factory=list)
 
 
 class CustomIndicatorPayload(BaseModel):
@@ -92,12 +179,19 @@ class CustomIndicatorPayload(BaseModel):
     schemaVersion: int = Field(1, description="Custom indicator schema version")
     id: str | None = Field(None, description="Stable custom indicator id")
     kind: str = Field("script", description="'script' or 'custom'")
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
     name: str = Field(..., description="Display name")
     description: str = Field("", description="Description")
     script: str = Field(..., description="Pyne/Python script")
     params: dict[str, Any] = Field(default_factory=dict, description="Default params")
-    paramSchema: list[dict[str, Any]] = Field(default_factory=list, description="Parameter schema")
-    renderHints: dict[str, Any] = Field(default_factory=dict, description="Optional rendering hints")
+    paramSchema: list[dict[str, Any]] = Field(
+        default_factory=list, description="Parameter schema"
+    )
+    renderHints: dict[str, Any] = Field(
+        default_factory=dict, description="Optional rendering hints"
+    )
     securityMode: str | None = Field(None, description="Preferred Pyne security mode")
 
 
@@ -105,7 +199,12 @@ class IndicatorRangeRequest(BaseModel):
     """HTTP request for server-side indicator history/range computation."""
 
     clientId: str = Field(..., description="Frontend indicator client id")
-    kind: str | None = Field(None, description="'builtin', 'script', 'custom', or 'pyne'")
+    kind: str | None = Field(
+        None, description="'builtin', 'script', 'custom', or 'pyne'"
+    )
+    language: str | None = Field(
+        None, description="Script language id; defaults to 'pyne'"
+    )
     exchange: str = Field("binance", description="Exchange context")
     marketType: str | None = Field(None, description="Camel-case market type context")
     market_type: str | None = Field(None, description="Snake-case market type context")
@@ -113,13 +212,27 @@ class IndicatorRangeRequest(BaseModel):
     interval: str = Field("1m", description="K-line interval")
     name: str | None = Field(None, description="Builtin indicator name or display name")
     customId: str | None = Field(None, description="Saved custom indicator id")
-    customIndicatorId: str | None = Field(None, description="Saved custom indicator id alias")
+    customIndicatorId: str | None = Field(
+        None, description="Saved custom indicator id alias"
+    )
     script: str | None = Field(None, description="Pyne/custom script")
     securityMode: str | None = Field(None, description="Pyne security mode")
-    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    params: dict[str, Any] = Field(
+        default_factory=dict, description="Indicator parameters"
+    )
     start: int = Field(..., description="Inclusive range start, unix seconds")
     end: int = Field(..., description="Inclusive range end, unix seconds")
     reason: str = Field("range", description="Client reason for the range compute")
+    requestScope: str | None = Field(
+        None,
+        max_length=256,
+        description="Stable chart demand scope shared with K-line requests",
+    )
+    requestGeneration: int | None = Field(
+        None,
+        ge=0,
+        description="Monotonic generation within requestScope",
+    )
 
 
 class IndicatorRangeBatchRequest(BaseModel):
@@ -132,11 +245,28 @@ class IndicatorRangeBatchRequest(BaseModel):
 #  Registry endpoints (new engine)
 # ═══════════════════════════════════════════════════════════════
 
+
 @router.get("/registry")
 async def list_indicators():
     """Return all registered indicator specifications."""
     specs = registry.list_specs()
     return [s.to_dict() for s in specs]
+
+
+@router.get("/runtimes")
+async def list_script_runtimes(request: Request):
+    """Return the public descriptors for currently routed script languages."""
+    service = _resolve_indicator_runtime_service(request)
+    try:
+        return await service.public_catalog()
+    except IndicatorRuntimeRoutesError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "INDICATOR_RUNTIME_CATALOG_UNAVAILABLE",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 @router.get("/registry/{name}")
@@ -176,7 +306,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         ma = ta.sma(src, period)
         plot(ma, title=f"MA({period})", color=line_color, overlay=True)
     """),
-
     "EMA": textwrap.dedent("""\
         # __ENGINE__:EMA
         indicator("EMA", overlay=True)
@@ -188,7 +317,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         ema_line = ta.ema(src, period)
         plot(ema_line, title=f"EMA({period})", color=line_color, overlay=True)
     """),
-
     "BOLL": textwrap.dedent("""\
         # __ENGINE__:BOLL
         indicator("BOLL", overlay=True)
@@ -207,7 +335,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         lower_plot = plot(lower, title="BOLL Lower", color=lower_color, overlay=True)
         fill(upper_plot, lower_plot, color=fill_color, title="BOLL Band")
     """),
-
     "RSI": textwrap.dedent("""\
         # __ENGINE__:RSI
         indicator("RSI", overlay=False)
@@ -224,7 +351,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         hline(50, title="Middle", color=color.gray, pane="separate")
         hline(oversold, title="Oversold", color=color.green, pane="separate")
     """),
-
     "MACD": textwrap.dedent("""\
         # __ENGINE__:MACD
         indicator("MACD", overlay=False)
@@ -244,7 +370,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         bar(hist, title="MACD Hist", color_up=hist_up_color, color_down=hist_down_color, pane="separate")
         hline(0, title="Zero", color=color.gray, pane="separate")
     """),
-
     "ATR": textwrap.dedent("""\
         # __ENGINE__:ATR
         indicator("ATR", overlay=False)
@@ -255,7 +380,6 @@ _PRESET_SCRIPTS: dict[str, str] = {
         atr_line = ta.atr(period)
         plot(atr_line, title=f"ATR({period})", color=line_color, overlay=False, pane="separate")
     """),
-
     "VOL": textwrap.dedent("""\
         # __ENGINE__:VOL
         indicator("VOL", overlay=False)
@@ -342,6 +466,7 @@ async def get_preset(preset_id: str):
 #  Custom indicator CRUD
 # ═══════════════════════════════════════════════════════════════
 
+
 @router.get("/custom")
 async def list_custom_indicators():
     """List all user-saved custom indicators."""
@@ -355,7 +480,9 @@ async def list_custom_indicators():
 async def save_custom_indicator(payload: CustomIndicatorPayload):
     """Create or update a user-saved custom indicator."""
     try:
-        data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        data = (
+            payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        )
         return _custom_store.upsert(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -369,14 +496,33 @@ async def delete_custom_indicator(indicator_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"Custom indicator '{indicator_id}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Custom indicator '{indicator_id}' not found"
+        )
     return {"ok": True, "id": indicator_id}
 
 
 @router.get("/pyne/security")
 async def get_pyne_security_policy():
-    """Return the default Pyne security policy advertised to the UI."""
-    return PyneSecurityPolicy.from_config().to_public_dict()
+    """Return the host policy inherited by the isolated Pyne sidecar."""
+    return _pyne_security_policy()
+
+
+def _pyne_security_policy() -> dict[str, Any]:
+    return {
+        "mode": config.PYNE_SECURITY_MODE,
+        "allowedImports": list(config.PYNE_ALLOWED_IMPORTS),
+        "timeoutSeconds": config.PYNE_EXEC_TIMEOUT_SECONDS,
+        "maxBars": config.PYNE_MAX_BARS,
+        "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
+        "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
+        "maxArraySize": 100_000,
+        "maxMapSize": 100_000,
+        "maxMatrixCells": 100_000,
+        "maxCollectionDepth": 8,
+        "owner": "candlescope.pyne",
+        "boundary": "sidecar",
+    }
 
 
 def _resolve_runtime_engine(request: Request | None) -> IndicatorEngine:
@@ -396,6 +542,7 @@ def _build_diagnostics_snapshot(
     engine: IndicatorEngine,
     store: CustomIndicatorStore,
     range_service: IndicatorRangeResultService | None = None,
+    runtime_service: IndicatorRuntimeService | None = None,
 ) -> dict[str, Any]:
     """Build a compact, stable diagnostics payload for support/debugging."""
     custom_error = None
@@ -405,7 +552,21 @@ def _build_diagnostics_snapshot(
     except ValueError as exc:
         custom_error = str(exc)
 
-    policy = PyneSecurityPolicy.from_config().to_public_dict()
+    policy = _pyne_security_policy()
+    runtime_snapshot = (
+        runtime_service.snapshot() if runtime_service is not None else None
+    )
+    runtime_routes = (
+        runtime_snapshot.get("routes", []) if isinstance(runtime_snapshot, dict) else []
+    )
+    pyne_route = next(
+        (
+            route
+            for route in runtime_routes
+            if isinstance(route, dict) and route.get("language") == "pyne"
+        ),
+        None,
+    )
 
     return {
         "ok": True,
@@ -422,19 +583,29 @@ def _build_diagnostics_snapshot(
             "error": custom_error,
         },
         "pyne": {
-            "runtimeBackend": RuntimeBackendSnapshot.current().to_dict(),
+            "runtimeBackend": {
+                "package": "candlescope-plugin-pyne",
+                "active": "sidecar",
+                "runtimeId": (
+                    pyne_route.get("runtimeId")
+                    if isinstance(pyne_route, dict)
+                    else "candlescope.pyne"
+                ),
+            },
             "security": policy,
             "executor": {
-                "mode": config.PYNE_EXECUTOR_MODE,
-                "timeoutSeconds": config.PYNE_EXEC_TIMEOUT_SECONDS,
-                "processGraceSeconds": config.PYNE_PROCESS_GRACE_SECONDS,
+                "mode": "sidecar",
+                "httpTimeoutSeconds": config.INDICATOR_HTTP_TIMEOUT_SECONDS,
             },
             "limits": {
                 "maxBars": config.PYNE_MAX_BARS,
                 "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
                 "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
             },
-            "cache": cache_stats() or pyne_cache.stats(),
+            "cache": {
+                "scope": "sidecar",
+                "availableToHost": False,
+            },
         },
         "websocket": {
             "maxSubscriptions": config.INDICATOR_WS_MAX_SUBSCRIPTIONS,
@@ -444,6 +615,7 @@ def _build_diagnostics_snapshot(
         },
         "executors": executors_snapshot(),
         "rangeCache": range_service.snapshot() if range_service is not None else None,
+        "scriptRuntimeRouting": (runtime_snapshot),
     }
 
 
@@ -454,12 +626,18 @@ async def get_indicator_diagnostics(request: Request):
         engine=_resolve_runtime_engine(request),
         store=_custom_store,
         range_service=getattr(request.app.state, "indicator_range_service", None),
+        runtime_service=getattr(
+            request.app.state,
+            "indicator_runtime_service",
+            None,
+        ),
     )
 
 
 # ═══════════════════════════════════════════════════════════════
 #  HTTP range endpoint — chart history/backfill path
 # ═══════════════════════════════════════════════════════════════
+
 
 def _require_data_manager(request: Request):
     dm = getattr(request.app.state, "data_manager", None)
@@ -473,7 +651,9 @@ def _resolve_indicator_range_service(request: Request) -> IndicatorRangeResultSe
     if isinstance(service, IndicatorRangeResultService):
         return service
     revision_registry = getattr(request.app.state, "indicator_series_revisions", None)
-    service = IndicatorRangeResultService.from_config(revision_registry=revision_registry)
+    service = IndicatorRangeResultService.from_config(
+        revision_registry=revision_registry
+    )
     request.app.state.indicator_range_service = service
     engine = getattr(request.app.state, "indicator_engine", None)
     if isinstance(engine, IndicatorEngine):
@@ -487,6 +667,109 @@ def _resolve_backfill_coordinator(request: Request) -> Any | None:
     if callable(get_coordinator):
         return get_coordinator()
     return getattr(request.app.state, "backfill_coordinator", None)
+
+
+def _resolve_indicator_runtime_service(
+    request: Request | None,
+) -> IndicatorRuntimeService:
+    if request is not None:
+        service = getattr(
+            request.app.state,
+            "indicator_runtime_service",
+            None,
+        )
+        if isinstance(service, IndicatorRuntimeService):
+            return service
+    return _unbound_indicator_runtime_service
+
+
+def _resolve_indicator_request_demand(
+    req: IndicatorRangeRequest,
+) -> tuple[str | None, int | None]:
+    scope = str(req.requestScope or "").strip() or None
+    generation = req.requestGeneration
+    if (scope is None) != (generation is None):
+        raise ValueError("requestScope and requestGeneration must be provided together")
+    return scope, int(generation) if generation is not None else None
+
+
+def _new_indicator_demand_owner_id(
+    request: Request,
+    *,
+    scope: str | None,
+    generation: int | None,
+) -> str:
+    scope_token = scope or "legacy"
+    generation_token = str(generation) if generation is not None else "none"
+    return (
+        f"indicator:{scope_token}:{generation_token}:"
+        f"{id(request)}:{time.monotonic_ns()}"
+    )
+
+
+async def _wait_for_request_disconnect(
+    request: Request,
+    stop: asyncio.Event,
+) -> bool:
+    """Wait until the ASGI receive channel reports a disconnected client."""
+    while not stop.is_set():
+        try:
+            disconnected = await request.is_disconnected()
+        except Exception:
+            # Monitoring is best-effort.  A receive-channel implementation
+            # error must not be mistaken for a real client disconnect and
+            # cancel otherwise valid indicator work.
+            return False
+        if disconnected:
+            return True
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass
+    return False
+
+
+async def _run_until_request_disconnect(
+    request: Request,
+    work: Any,
+    *,
+    task_name: str,
+) -> Any:
+    """Cancel request-owned work promptly when the browser aborts its fetch.
+
+    Uvicorn does not guarantee that a response handler is cancelled as soon as
+    an HTTP disconnect arrives.  Explicitly watching the receive channel keeps
+    old interval/range requests from continuing storage, backfill and indicator
+    work after a rapid chart switch.
+    """
+    work_task = asyncio.create_task(work, name=task_name)
+    monitor_stop = asyncio.Event()
+    disconnect_task = asyncio.create_task(
+        _wait_for_request_disconnect(request, monitor_stop),
+        name=f"{task_name}:disconnect",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {work_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work_task in done:
+            return await work_task
+        if disconnect_task.result() is False:
+            # The disconnect probe failed open; finish the normal request
+            # without further monitoring.
+            return await work_task
+        work_task.cancel()
+        await asyncio.gather(work_task, return_exceptions=True)
+        raise asyncio.CancelledError("indicator HTTP request disconnected")
+    except asyncio.CancelledError:
+        if not work_task.done():
+            work_task.cancel()
+        await asyncio.gather(work_task, return_exceptions=True)
+        raise
+    finally:
+        monitor_stop.set()
+        await asyncio.gather(disconnect_task, return_exceptions=True)
 
 
 def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
@@ -511,6 +794,8 @@ def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | N
             req.params.update(record["params"])
         if security_mode is None:
             security_mode = record.get("securityMode")
+        if req.language is None:
+            req.language = str(record.get("language") or "pyne")
     return script, name, security_mode
 
 
@@ -520,7 +805,9 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     symbol = req.symbol.upper().strip()
     requested_interval = req.interval.strip()
     interval_spec = parse_interval_spec(requested_interval)
-    interval = interval_spec.canonical if interval_spec is not None else requested_interval
+    interval = (
+        interval_spec.canonical if interval_spec is not None else requested_interval
+    )
     params = req.params if isinstance(req.params, dict) else {}
     kind = str(req.kind or "").strip().lower()
     script = req.script or ""
@@ -531,36 +818,39 @@ def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
     if interval_spec is None or not _validate_interval_name(requested_interval):
         raise ValueError(f"Unsupported interval: {requested_interval}.")
 
-    is_script = kind in {"script", "custom", "pyne"} or bool(custom_id) or (script and not indicator_name)
+    is_script = (
+        kind in {"script", "custom", "pyne"}
+        or bool(custom_id)
+        or (script and not indicator_name)
+    )
     if is_script:
         script, display_name, security_mode = _resolve_range_script(req)
+        language = "pyne" if req.language is None else str(req.language).strip().lower()
+        if not language:
+            raise ValueError("Script language must not be empty.")
         if not script.strip():
             raise ValueError("Pyne script is required.")
         digest = script_hash(script)
         meta = {
             "kind": "script",
+            "language": language,
             "exchange": exchange,
             "symbol": symbol,
             "interval": interval,
             "market_type": market_type,
             "name": display_name,
             "customId": custom_id or None,
-            "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{req.clientId}",
+            "indicatorId": f"{language}:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{req.clientId}",
             "scriptHash": digest,
             "script": script,
             "params": params,
             "securityMode": security_mode,
         }
-        try:
-            if is_incremental_pyne_script(script):
-                meta["scriptMode"] = "incremental"
-        except SyntaxError:
-            pass
         return meta
 
     if not indicator_name and script.startswith(_ENGINE_SCRIPT_MARKER):
         first_line = script.split("\n")[0]
-        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
     if not indicator_name:
         raise ValueError("Builtin indicator name is required.")
     if registry.get(indicator_name) is None:
@@ -614,9 +904,15 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
 
     try:
         meta = _build_range_meta(req)
+        demand_scope, demand_generation = _resolve_indicator_request_demand(req)
         dm = _require_data_manager(request)
         range_service = _resolve_indicator_range_service(request)
         backfill_coordinator = _resolve_backfill_coordinator(request)
+        demand_owner_id = _new_indicator_demand_owner_id(
+            request,
+            scope=demand_scope,
+            generation=demand_generation,
+        )
         record_access = getattr(dm, "record_cache_access", None)
         if callable(record_access):
             await run_storage(
@@ -642,7 +938,14 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             hint="请检查指标类型、周期、脚本和参数。",
         )
 
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=demand_scope,
+        demand_generation=demand_generation,
+    )
+
     try:
+
         async def _compute_uncached() -> dict[str, Any]:
             return await compute_indicator_range_payload_async(
                 dm=dm,
@@ -652,14 +955,28 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
                 end_s=end_s,
                 reason=req.reason or "range",
                 backfill_coordinator=backfill_coordinator,
+                runtime_service=_resolve_indicator_runtime_service(request),
             )
 
-        snapshot, cache_hit, data_revision = await range_service.get_or_compute(
-            meta=meta,
-            start=start_s,
-            end=end_s,
-            compute=_compute_uncached,
-        )
+        try:
+            snapshot, cache_hit, data_revision = await _run_until_request_disconnect(
+                request,
+                range_service.get_or_compute(
+                    meta=meta,
+                    start=start_s,
+                    end=end_s,
+                    compute=_compute_uncached,
+                    request_owner_id=demand_owner_id,
+                ),
+                task_name=f"indicator-range-http:{client_id}:{start_s}-{end_s}",
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(_revoke_request_demand_owner(
+                request,
+                demand_owner_id,
+                reason="indicator_http_disconnected",
+            ))
+            raise
         snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
         available_start = (
             int(snapshot_range.get("start", start_s))
@@ -677,6 +994,10 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             start_s=max(start_s, available_start),
             end_s=min(end_s, available_end),
         )
+        rebind_indicator_payload_identity(
+            payload,
+            str(meta.get("indicatorId") or ""),
+        )
         payload["clientId"] = client_id
         payload["dataRevision"] = data_revision
         meta_payload = payload.get("meta")
@@ -685,6 +1006,22 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             payload["meta"] = meta_payload
         meta_payload["dataRevision"] = data_revision
         payload["cacheHit"] = cache_hit
+    except IndicatorRuntimeUnavailableError as exc:
+        payload = build_error_payload(
+            exc.failure.public_code,
+            str(exc),
+            hint="脚本 runtime 插件当前不可用；sidecar 模式不会静默回退到 legacy。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
+    except IndicatorRuntimeRoutesError as exc:
+        payload = build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
     except IndicatorRangeEmptyError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
@@ -697,8 +1034,7 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
         availability = {
             "history_state": (
-                exc.history_state
-                or ("exhausted" if not exc.retryable else "pending")
+                exc.history_state or ("exhausted" if not exc.retryable else "pending")
             ),
             "complete": not exc.retryable,
             "retryable": exc.retryable,
@@ -723,19 +1059,24 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             "range": {"start": start_s, "end": end_s},
             "backfillRequestIds": exc.request_ids,
             "waitedMs": exc.waited_ms,
+            "retryMode": "event",
         }
+        payload["dataRevision"] = range_service.data_revision_for_meta(meta)
         return JSONResponse(status_code=202, content=payload)
-    except RuntimeError as exc:
+    except IndicatorRangeRevisionChangedError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",
             str(exc),
-            hint="K 线历史仍在补齐，稍后重试该指标区间。",
+            hint="K 线历史修订版本刚刚变化；等待修订事件后按最新版本重试。",
         )
         payload["detail"] = {
             "range": {"start": start_s, "end": end_s},
-            "retryAfterMs": 3000,
+            "backfillRequestIds": [],
+            "waitedMs": 0,
+            "retryMode": "event",
         }
-        return payload
+        payload["dataRevision"] = range_service.data_revision_for_meta(meta)
+        return JSONResponse(status_code=202, content=payload)
     except ValueError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_LIMIT",
@@ -761,7 +1102,19 @@ def _batch_range_error_payload(
     start_s: int,
     end_s: int,
 ) -> dict[str, Any]:
-    if isinstance(exc, IndicatorRangeEmptyError):
+    if isinstance(exc, IndicatorRuntimeUnavailableError):
+        payload = build_error_payload(
+            exc.failure.public_code,
+            str(exc),
+            hint="脚本 runtime 插件当前不可用；sidecar 模式不会静默回退到 legacy。",
+        )
+    elif isinstance(exc, IndicatorRuntimeRoutesError):
+        payload = build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
+    elif isinstance(exc, IndicatorRangeEmptyError):
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
             str(exc),
@@ -773,8 +1126,7 @@ def _batch_range_error_payload(
         )
         availability = {
             "history_state": (
-                exc.history_state
-                or ("exhausted" if not exc.retryable else "pending")
+                exc.history_state or ("exhausted" if not exc.retryable else "pending")
             ),
             "complete": not exc.retryable,
             "retryable": exc.retryable,
@@ -799,14 +1151,22 @@ def _batch_range_error_payload(
             "range": {"start": start_s, "end": end_s},
             "backfillRequestIds": exc.request_ids,
             "waitedMs": exc.waited_ms,
+            "retryMode": "event",
         }
         return payload
-    elif isinstance(exc, RuntimeError):
+    elif isinstance(exc, IndicatorRangeRevisionChangedError):
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",
             str(exc),
-            hint="K 线历史仍在补齐，等待完成事件后再请求该区间。",
+            hint="K 线历史修订版本刚刚变化；等待修订事件后按最新版本重试。",
         )
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "backfillRequestIds": [],
+            "waitedMs": 0,
+            "retryMode": "event",
+        }
+        return payload
     elif isinstance(exc, ValueError):
         payload = build_error_payload(
             "INDICATOR_RANGE_LIMIT",
@@ -819,7 +1179,8 @@ def _batch_range_error_payload(
             str(exc),
             hint="指标历史区间计算失败，请检查指标参数或脚本。",
         )
-    payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+    if not isinstance(payload.get("detail"), dict):
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
     return payload
 
 
@@ -838,6 +1199,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
         dm = _require_data_manager(request)
         range_service = _resolve_indicator_range_service(request)
         backfill_coordinator = _resolve_backfill_coordinator(request)
+        demand_keys: set[tuple[str | None, int | None]] = set()
         for item in req.requests:
             client_id = str(item.clientId or "").strip()
             start_s = int(item.start or 0)
@@ -846,6 +1208,7 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
                 raise ValueError("clientId is required for every batch item")
             if start_s <= 0 or end_s <= 0 or start_s > end_s:
                 raise ValueError("every batch item requires positive start <= end")
+            demand_keys.add(_resolve_indicator_request_demand(item))
             jobs.append(IndicatorRangeBatchJob(
                 client_id=client_id,
                 meta=_build_range_meta(item),
@@ -854,11 +1217,21 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
                 reason=item.reason or "range",
             ))
         series_keys = {
-            IndicatorRangeResultService.series_key_from_meta(job.meta)
-            for job in jobs
+            IndicatorRangeResultService.series_key_from_meta(job.meta) for job in jobs
         }
         if len(series_keys) != 1:
-            raise ValueError("all batch items must use the same exchange/market/symbol/interval")
+            raise ValueError(
+                "all batch items must use the same exchange/market/symbol/interval"
+            )
+        if len(demand_keys) != 1:
+            raise ValueError("all batch items must use the same requestScope/requestGeneration")
+
+        demand_scope, demand_generation = next(iter(demand_keys))
+        demand_owner_id = _new_indicator_demand_owner_id(
+            request,
+            scope=demand_scope,
+            generation=demand_generation,
+        )
 
         first_meta = jobs[0].meta
         record_access = getattr(dm, "record_cache_access", None)
@@ -880,12 +1253,34 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
             hint="请检查批量指标的类型、商品、周期、脚本、参数和范围。",
         )
 
-    computed = await compute_indicator_range_batch_async(
-        dm=dm,
-        jobs=jobs,
-        range_service=range_service,
-        backfill_coordinator=backfill_coordinator,
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=demand_scope,
+        demand_generation=demand_generation,
     )
+    try:
+        computed = await _run_until_request_disconnect(
+            request,
+            compute_indicator_range_batch_async(
+                dm=dm,
+                jobs=jobs,
+                range_service=range_service,
+                backfill_coordinator=backfill_coordinator,
+                runtime_service=_resolve_indicator_runtime_service(request),
+                request_owner_id=demand_owner_id,
+            ),
+            task_name=(
+                f"indicator-range-batch-http:{jobs[0].meta['symbol']}:"
+                f"{jobs[0].meta['interval']}"
+            ),
+        )
+    except asyncio.CancelledError:
+        await asyncio.shield(_revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="indicator_batch_http_disconnected",
+        ))
+        raise
     results = []
     for job, value in zip(jobs, computed, strict=True):
         payload = (
@@ -893,6 +1288,8 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
             if isinstance(value, BaseException)
             else value
         )
+        if payload.get("code") == "INDICATOR_RANGE_NOT_READY":
+            payload["dataRevision"] = range_service.data_revision_for_meta(job.meta)
         results.append({"clientId": job.client_id, "payload": payload})
     return {
         "schemaVersion": 1,
@@ -907,8 +1304,97 @@ async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request)
 #  Compute endpoint — unified
 # ═══════════════════════════════════════════════════════════════
 
+@router.post("/compute/batch")
+async def compute_batch(
+    req: IndicatorComputeBatchRequest,
+    request: Request = None,
+):
+    """Compute 1-32 local indicators over one shared OHLCV array.
+
+    Every item has a unique ``jobKey`` and ``clientId``. Results retain request
+    order and both identities; one failed item does not fail its siblings.
+    Builtin jobs share a single validated ``BarData`` conversion, while each
+    job keeps its own executor timeout and isolated one-shot engine.
+    """
+    validation_error = _validate_compute_batch(req)
+    if validation_error is not None:
+        return validation_error
+    shared_ohlcv_error = _validate_compute_ohlcv_window(req.ohlcv)
+    if shared_ohlcv_error is not None:
+        return shared_ohlcv_error
+
+    context = req.context
+    prepared: list[
+        tuple[
+            str,
+            str,
+            _BatchComputeRequest,
+            str | None,
+            str | None,
+            dict[str, Any] | None,
+        ]
+    ] = []
+    for item in req.requests:
+        # ``ComputeRequest(...)`` would make Pydantic deep-copy this 50k-bar
+        # list for every item.  The enclosing batch model and the window have
+        # already been validated above, so retain the one validated list.
+        compute_req = _BatchComputeRequest(
+            name=item.name,
+            mode=item.mode,
+            language=item.language,
+            params=item.params,
+            exchange=context.exchange,
+            symbol=context.symbol,
+            interval=context.interval,
+            market_type=context.marketType,
+            ohlcv=req.ohlcv,
+            script=item.script,
+            securityMode=item.securityMode,
+        )
+        route, indicator_name, route_error = _resolve_compute_route(compute_req)
+        prepared.append((
+            item.jobKey.strip(),
+            item.clientId.strip(),
+            compute_req,
+            route,
+            indicator_name,
+            route_error,
+        ))
+
+    shared_bars: list[BarData] | None = None
+    shared_bars_error: dict[str, Any] | None = None
+    if any(item[3] == "builtin" and item[5] is None for item in prepared):
+        shared_bars, shared_bars_error = _parse_builtin_ohlcv(req.ohlcv)
+
+    payloads = await asyncio.gather(*(
+        _compute_batch_item(
+            compute_req,
+            route=route,
+            indicator_name=indicator_name,
+            route_error=route_error,
+            shared_bars=shared_bars,
+            shared_bars_error=shared_bars_error,
+            runtime_service=_resolve_indicator_runtime_service(request),
+        )
+        for _, _, compute_req, route, indicator_name, route_error in prepared
+    ))
+    results = [
+        {
+            "jobKey": prepared_item[0],
+            "clientId": prepared_item[1],
+            "payload": payload,
+        }
+        for prepared_item, payload in zip(prepared, payloads, strict=True)
+    ]
+    return {
+        "schemaVersion": 1,
+        "ok": all(payload.get("ok") is True for payload in payloads),
+        "type": "indicator.compute_batch",
+        "results": results,
+    }
+
 @router.post("/compute")
-async def compute(req: ComputeRequest):
+async def compute(req: ComputeRequest, request: Request = None):
     """Compute an indicator on the provided OHLCV data.
 
     Supports two modes:
@@ -919,48 +1405,16 @@ async def compute(req: ComputeRequest):
     Returns ``{ok, error, lines, result}`` — ``lines`` is the flat list
     for direct frontend rendering, ``result`` is the full structured output.
     """
-    mode = req.mode.strip().lower() if req.mode else None
-    if mode and mode not in {"builtin", "script"}:
-        return build_error_payload(
-            "INVALID_MODE",
-            "mode must be 'builtin' or 'script'",
-            hint="内置指标使用 mode='builtin'，自定义 Pyne 脚本使用 mode='script'。",
+    route, indicator_name, route_error = _resolve_compute_route(req)
+    if route_error is not None:
+        return route_error
+    if route == "builtin" and indicator_name:
+        return await _compute_engine(indicator_name, req)
+    if route == "script":
+        return await _compute_script(
+            req,
+            runtime_service=_resolve_indicator_runtime_service(request),
         )
-
-    indicator_name = req.name
-
-    if mode == "script":
-        if not req.script:
-            return build_error_payload(
-                "PYNE_SCRIPT_REQUIRED",
-                "Script mode requires 'script'",
-                hint="请提交 Pyne 脚本文本，或切换到 builtin 模式。",
-            )
-        return await _compute_script(req)
-
-    if mode == "builtin":
-        if not indicator_name and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
-            first_line = req.script.split("\n")[0]
-            indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
-        if not indicator_name:
-            return build_error_payload(
-                "INDICATOR_NAME_REQUIRED",
-                "Builtin mode requires 'name'",
-                hint="请传入内置指标名称，例如 MA、MACD、RSI。",
-            )
-        return await _compute_engine(indicator_name, req)
-
-    # Legacy mode: preserve old behavior for existing frontend/localStorage data.
-    use_engine = indicator_name is not None
-    if not use_engine and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
-        first_line = req.script.split("\n")[0]
-        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
-        use_engine = True
-
-    if use_engine and indicator_name:
-        return await _compute_engine(indicator_name, req)
-    if req.script:
-        return await _compute_script(req)
     return build_error_payload(
         "INDICATOR_REQUEST_EMPTY",
         "Provide either 'name' or 'script'",
@@ -968,18 +1422,175 @@ async def compute(req: ComputeRequest):
     )
 
 
-async def _compute_engine(name: str, req: ComputeRequest) -> dict:
-    """Compute using the new indicator engine."""
-    name = name.upper()
-
-    if not registry.has(name):
-        return build_error_payload(
-            "INDICATOR_NOT_FOUND",
-            f"Indicator '{name}' not registered",
-            hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
+def _resolve_compute_route(
+    req: ComputeRequestLike,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """Resolve legacy and explicit compute modes without doing any work."""
+    mode = req.mode.strip().lower() if req.mode else None
+    if mode and mode not in {"builtin", "script"}:
+        return None, None, build_error_payload(
+            "INVALID_MODE",
+            "mode must be 'builtin' or 'script'",
+            hint="内置指标使用 mode='builtin'，自定义 Pyne 脚本使用 mode='script'。",
         )
 
-    ohlcv = req.ohlcv
+    indicator_name = req.name
+    if mode == "script":
+        if not req.script:
+            return None, None, build_error_payload(
+                "PYNE_SCRIPT_REQUIRED",
+                "Script mode requires 'script'",
+                hint="请提交 Pyne 脚本文本，或切换到 builtin 模式。",
+            )
+        return "script", None, None
+
+    if mode == "builtin":
+        if (
+            not indicator_name
+            and req.script
+            and req.script.startswith(_ENGINE_SCRIPT_MARKER)
+        ):
+            first_line = req.script.split("\n")[0]
+            indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
+        if not indicator_name:
+            return None, None, build_error_payload(
+                "INDICATOR_NAME_REQUIRED",
+                "Builtin mode requires 'name'",
+                hint="请传入内置指标名称，例如 MA、MACD、RSI。",
+            )
+        return "builtin", indicator_name, None
+
+    # Legacy mode: preserve old behavior for existing frontend/localStorage data.
+    use_engine = indicator_name is not None
+    if not use_engine and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
+        first_line = req.script.split("\n")[0]
+        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER) :].strip().upper()
+        use_engine = True
+
+    if use_engine and indicator_name:
+        return "builtin", indicator_name, None
+    if req.script:
+        return "script", None, None
+    return None, None, build_error_payload(
+        "INDICATOR_REQUEST_EMPTY",
+        "Provide either 'name' or 'script'",
+        hint="内置指标传 name，自定义指标传 script。",
+    )
+
+
+def _validate_compute_batch(
+    req: IndicatorComputeBatchRequest,
+) -> dict[str, Any] | None:
+    """Fail closed before scheduling any work for an ambiguous batch."""
+    if req.schemaVersion != 1:
+        return _invalid_compute_batch("schemaVersion must be 1")
+    if not 1 <= len(req.requests) <= 32:
+        return _invalid_compute_batch(
+            "requests must contain between 1 and 32 compute items"
+        )
+
+    context_fields = {
+        "exchange": req.context.exchange,
+        "marketType": req.context.marketType,
+        "symbol": req.context.symbol,
+        "interval": req.context.interval,
+    }
+    for field_name, value in context_fields.items():
+        if not value.strip():
+            return _invalid_compute_batch(f"context.{field_name} must not be blank")
+
+    job_keys: set[str] = set()
+    client_ids: set[str] = set()
+    for index, item in enumerate(req.requests):
+        job_key = item.jobKey.strip()
+        client_id = item.clientId.strip()
+        if not job_key or not client_id:
+            return _invalid_compute_batch(
+                f"requests[{index}] requires non-blank jobKey and clientId"
+            )
+        if item.jobKey != job_key or item.clientId != client_id:
+            return _invalid_compute_batch(
+                f"requests[{index}] jobKey and clientId must not have outer whitespace"
+            )
+        if len(job_key) > 256 or len(client_id) > 256:
+            return _invalid_compute_batch(
+                f"requests[{index}] jobKey and clientId must be at most 256 characters"
+            )
+        if job_key in job_keys:
+            return _invalid_compute_batch(f"duplicate jobKey: {job_key}")
+        if client_id in client_ids:
+            return _invalid_compute_batch(f"duplicate clientId: {client_id}")
+        job_keys.add(job_key)
+        client_ids.add(client_id)
+    return None
+
+
+def _invalid_compute_batch(message: str) -> dict[str, Any]:
+    return build_error_payload(
+        "INVALID_INDICATOR_COMPUTE_BATCH",
+        message,
+        hint="请使用 schemaVersion=1，并提交 1-32 个身份唯一的指标任务。",
+    )
+
+
+async def _compute_batch_item(
+    req: ComputeRequestLike,
+    *,
+    route: str | None,
+    indicator_name: str | None,
+    route_error: dict[str, Any] | None,
+    shared_bars: list[BarData] | None,
+    shared_bars_error: dict[str, Any] | None,
+    runtime_service: IndicatorRuntimeService | None = None,
+) -> dict[str, Any]:
+    """Compute one batch item while containing unexpected sibling failures."""
+    if route_error is not None:
+        return route_error
+    try:
+        if route == "builtin" and indicator_name:
+            return await _compute_engine(
+                indicator_name,
+                req,
+                preparsed_bars=shared_bars,
+                preparsed_bars_error=shared_bars_error,
+                use_preparsed_bars=True,
+            )
+        if route == "script":
+            return await _compute_script(req, runtime_service=runtime_service)
+        return build_error_payload(
+            "INDICATOR_REQUEST_EMPTY",
+            "Provide either 'name' or 'script'",
+            hint="内置指标传 name，自定义指标传 script。",
+        )
+    except Exception as exc:
+        return build_error_payload(
+            "INDICATOR_BATCH_ITEM_FAILED",
+            str(exc),
+            hint="当前指标任务计算失败；同批其他指标不受影响。",
+        )
+
+
+def _parse_builtin_ohlcv(
+    ohlcv: list[dict[str, Any]],
+) -> tuple[list[BarData] | None, dict[str, Any] | None]:
+    """Validate and convert a builtin OHLCV input exactly once."""
+    window_error = _validate_compute_ohlcv_window(ohlcv)
+    if window_error is not None:
+        return None, window_error
+    try:
+        return [BarData.from_dict(item) for item in ohlcv], None
+    except (KeyError, ValueError, TypeError) as exc:
+        return None, build_error_payload(
+            "INVALID_OHLCV",
+            f"Invalid OHLCV data: {exc}",
+            hint="OHLCV 每根 K 线需要包含 time/open/high/low/close/volume。",
+        )
+
+
+def _validate_compute_ohlcv_window(
+    ohlcv: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Reject unsafe shared input sizes before any batch item is scheduled."""
     if not ohlcv:
         return build_error_payload(
             "INVALID_OHLCV",
@@ -992,14 +1603,40 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
             "Too many data points (max 50000)",
             hint="请缩小历史窗口，或为后端指标计算增加分页/窗口策略。",
         )
+    return None
 
-    try:
-        bars = [BarData.from_dict(d) for d in ohlcv]
-    except (KeyError, ValueError, TypeError) as exc:
+
+async def _compute_engine(
+    name: str,
+    req: ComputeRequestLike,
+    *,
+    preparsed_bars: list[BarData] | None = None,
+    preparsed_bars_error: dict[str, Any] | None = None,
+    use_preparsed_bars: bool = False,
+) -> dict:
+    """Compute using the new indicator engine."""
+    name = name.upper()
+
+    if not registry.has(name):
+        return build_error_payload(
+            "INDICATOR_NOT_FOUND",
+            f"Indicator '{name}' not registered",
+            hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
+        )
+
+    if use_preparsed_bars:
+        if preparsed_bars_error is not None:
+            return preparsed_bars_error
+        bars = preparsed_bars
+    else:
+        bars, bars_error = _parse_builtin_ohlcv(req.ohlcv)
+        if bars_error is not None:
+            return bars_error
+    if bars is None:
         return build_error_payload(
             "INVALID_OHLCV",
-            f"Invalid OHLCV data: {exc}",
-            hint="OHLCV 每根 K 线需要包含 time/open/high/low/close/volume。",
+            "No parsed OHLCV data available",
+            hint="请确认前端已经加载 K 线数据后再计算指标。",
         )
 
     try:
@@ -1031,21 +1668,43 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
     return serialize_indicator_result(result)
 
 
-async def _compute_script(req: ComputeRequest) -> dict:
-    """Compute using Pyne runtime (with full legacy backward compatibility).
+async def _compute_script(
+    req: ComputeRequestLike,
+    *,
+    runtime_service: IndicatorRuntimeService | None = None,
+) -> dict:
+    """Compute a script through its configured isolated runtime plugin."""
+    service = runtime_service or _unbound_indicator_runtime_service
+    language = "pyne" if req.language is None else str(req.language).strip().lower()
+    if not language:
+        return build_error_payload(
+            "INDICATOR_LANGUAGE_REQUIRED",
+            "Script language must not be empty.",
+        )
 
-    The Pyne runtime provides a rich Pine-style namespace including
-    ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
-    Legacy scripts using add_line() continue to work unchanged.
-    """
+    runtime_request = IndicatorRuntimeRequest(
+        language=language,
+        source=req.script or "",
+        exchange=req.exchange,
+        market_type=req.market_type,
+        symbol=req.symbol,
+        interval=req.interval,
+        bars=tuple(req.ohlcv),
+        params=req.params or {},
+        options={
+            **(
+                {"securityMode": req.securityMode}
+                if req.securityMode is not None
+                else {}
+            ),
+        },
+        transport="http.compute",
+    )
     try:
-        result = await _run_indicator_http_compute(
-            execute_pyne_script,
-            executor_kind="pyne",
-            script=req.script,
-            ohlcv=req.ohlcv,
-            params=req.params or {},
-            security_mode=req.securityMode,
+        payload = await service.execute(
+            runtime_request,
+            legacy=removed_in_process_runtime,
+            adapt_sidecar=serialize_plugin_runtime_result,
         )
     except asyncio.TimeoutError:
         return build_error_payload(
@@ -1053,13 +1712,20 @@ async def _compute_script(req: ComputeRequest) -> dict:
             f"Pyne script exceeded {config.INDICATOR_HTTP_TIMEOUT_SECONDS:g}s HTTP timeout",
             hint="脚本执行超时，请减少循环、缩小窗口，或调整 INDICATOR_HTTP_TIMEOUT_SECONDS。",
         )
+    except IndicatorRuntimeRoutesError as exc:
+        return build_error_payload(
+            "INDICATOR_LANGUAGE_UNAVAILABLE",
+            str(exc),
+            hint="请安装支持该语言的 runtime，并在 Indicator route 文件中显式配置。",
+        )
 
-    payload = serialize_pyne_result(result)
     payload["scriptHash"] = script_hash(req.script or "")
     return payload
 
 
-async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicator", **kwargs):
+async def _run_indicator_http_compute(
+    func, *args, executor_kind: str = "indicator", **kwargs
+):
     """Run heavy HTTP indicator work off the event loop with a hard wait cap."""
     runner = run_pyne_wait if executor_kind == "pyne" else run_indicator
     return await asyncio.wait_for(
@@ -1068,7 +1734,7 @@ async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicat
     )
 
 
-def _compute_builtin_once(name: str, req: ComputeRequest, bars: list[BarData]):
+def _compute_builtin_once(name: str, req: ComputeRequestLike, bars: list[BarData]):
     """Compute a builtin indicator without touching the runtime IndicatorEngine.
 
     HTTP compute is one-shot work. Using a temporary engine keeps it isolated

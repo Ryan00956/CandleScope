@@ -159,11 +159,13 @@ class PluginSettingsStore:
                 )
                 records[key] = current
                 changed = True
-            elif current.schema_sha256 != schema_sha256:
+            else:
+                resolved = dict(defaults)
+                resolved.update(current.value)
                 try:
                     validated = validate_settings_value(
                         schema,
-                        current.value,
+                        resolved,
                         plugin_id=contribution.plugin_id,
                         contribution_id=contribution.id,
                     )
@@ -175,16 +177,20 @@ class PluginSettingsStore:
                         details={"contributionId": contribution.id},
                     ) from exc
                 assert isinstance(validated, dict)
-                current = SettingsRecord(
-                    current.plugin_id,
-                    current.publisher_identity_hash,
-                    current.contribution_id,
-                    schema_sha256,
-                    validated,
-                    _utc_now(),
-                )
-                records[key] = current
-                changed = True
+                if (
+                    current.schema_sha256 != schema_sha256
+                    or current.value != validated
+                ):
+                    current = SettingsRecord(
+                        current.plugin_id,
+                        current.publisher_identity_hash,
+                        current.contribution_id,
+                        schema_sha256,
+                        validated,
+                        _utc_now(),
+                    )
+                    records[key] = current
+                    changed = True
             self._contracts[key] = contribution
             if changed:
                 revision += 1

@@ -144,6 +144,41 @@ def test_core_contribution_contracts_are_strict_and_catalog_safe() -> None:
         core_contributions(PluginManifest.from_wire(invalid_bounds))
 
 
+def test_settings_bind_merges_new_defaults_without_overwriting_saved_values(
+    tmp_path: Path,
+) -> None:
+    store = PluginSettingsStore(tmp_path / "settings.json")
+    original = next(
+        item for item in core_contributions(_core_manifest()) if item.kind == "settings/1"
+    )
+    publisher = "manifest:acme"
+    store.bind(original, publisher_identity=publisher)
+    store.write(
+        original.plugin_id,
+        publisher,
+        original.id,
+        {"enabled": False},
+    )
+
+    upgraded_wire = _core_manifest().to_wire()
+    configuration = upgraded_wire["contributions"][1]["configuration"]
+    configuration["schema"]["properties"]["showTargets"] = {"type": "boolean"}
+    configuration["defaults"]["showTargets"] = True
+    upgraded = next(
+        item
+        for item in core_contributions(PluginManifest.from_wire(upgraded_wire))
+        if item.kind == "settings/1"
+    )
+
+    result = store.bind(upgraded, publisher_identity=publisher)
+    assert result["changed"] is True
+    assert store.read(upgraded.plugin_id, publisher, upgraded.id)["value"] == {
+        "enabled": False,
+        "showTargets": True,
+    }
+    assert store.bind(upgraded, publisher_identity=publisher)["changed"] is False
+
+
 def test_declarative_view_contract_rejects_unknown_slots_and_command_references() -> (
     None
 ):

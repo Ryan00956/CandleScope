@@ -172,6 +172,8 @@ class TrainingRunService:
             segments=self.segments,
             historical_books=self.historical_books,
             account_history=self.account_history,
+            bar_repository=replay_service.history_repository,
+            raw_trade_archive=replay_service.raw_trade_archive,
         )
         self._run_id_factory = run_id_factory
         self._random_seed_factory = random_seed_factory

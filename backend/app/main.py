@@ -138,8 +138,6 @@ async def _init_data_manager() -> None:
         TradeFlowConfigurationError,
         start_data_engine,
     )
-    from app.replay.runtime import ReplayStartupError
-
     try:
         from app.alerts.facade import AlertFacade
         from app.alerts.runtime import AlertRuntimeEngine
@@ -188,7 +186,6 @@ async def _init_data_manager() -> None:
         LiquidationConfigurationError,
         OrderBookConfigurationError,
         FullOrderBookConfigurationError,
-        ReplayStartupError,
     ) as exc:
         logger.critical(
             "Advanced market-data configuration prevents safe startup: %s",
@@ -200,6 +197,16 @@ async def _init_data_manager() -> None:
         logger.error("DataManager initialization failed: %s", exc, exc_info=True)
         print(f"[startup] DataManager init failed: {exc}")
         app.state.data_manager = None
+
+
+async def _init_replay_runtime() -> None:
+    """Start replay as an application sibling, independent of live DataEngine."""
+
+    from app.replay.runtime import start_replay_runtime
+
+    runtime = await start_replay_runtime()
+    app.state.replay_runtime = runtime
+    app.state.replay_service = runtime.service
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -321,6 +328,7 @@ async def startup_event() -> None:
     # event runs after a startup exception, so reclaim already-started sidecars
     # before propagating a fatal DataEngine configuration failure.
     try:
+        await _init_replay_runtime()
         await _init_data_manager()
         data_manager = getattr(app.state, "data_manager", None)
         if data_manager is not None:
@@ -339,6 +347,12 @@ async def startup_event() -> None:
         await plugin_platform_v2.start()
     except BaseException:
         await plugin_platform_v2.stop()
+        data_runtime = getattr(app.state, "data_engine_runtime", None)
+        if data_runtime is not None:
+            await data_runtime.shutdown()
+        replay_runtime = getattr(app.state, "replay_runtime", None)
+        if replay_runtime is not None:
+            await replay_runtime.shutdown()
         await indicator_runtime_service.stop()
         await plugin_runtime_host.stop()
         await lag_monitor.stop()
@@ -491,6 +505,9 @@ async def shutdown_event() -> None:
     runtime = getattr(app.state, "data_engine_runtime", None)
     if runtime is not None:
         await runtime.shutdown(step_timeout=5)
+    replay_runtime = getattr(app.state, "replay_runtime", None)
+    if replay_runtime is not None:
+        await replay_runtime.shutdown(step_timeout=5)
 
     print("[shutdown] All components shut down")
 

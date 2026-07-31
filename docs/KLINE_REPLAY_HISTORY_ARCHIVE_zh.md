@@ -13,14 +13,24 @@ replay-history/
   objects/sha256/<prefix>/<content-hash>.parquet
   catalogs/<exchange>/<market>/<symbol>/<interval>/<catalog-epoch>.json
   catalogs/<exchange>/<market>/<symbol>/<interval>/current.json
+  derived-cache/v1/<revision>/<query-hash>.json.zlib
 
 replay.db
-  Run、订单、成交、账户、checkpoint、已选择的有界快照
+  Run、订单、成交、账户、checkpoint、快照引用、archive pin
+
+replay.db.datasets/
+  <prefix>/<snapshot-hash>.json.zlib
 ```
 
 `REPLAY_BAR_SOURCE=archive` 是默认值。运行时只读取 manifest 和 Parquet，
 不会用实时 SQLite 填补归档缺口，也不会触发在线 backfill。
 `REPLAY_BAR_SOURCE=legacy_sqlite` 仅用于显式回滚。
+
+`replay.db` 与 `replay.db.datasets` 是同一个恢复集合。备份或恢复前必须停止
+回放后端，确保 SQLite 中的引用与内容寻址快照来自同一时点。存储 schema
+只向前迁移；回滚到旧的、仍支持回放的版本时，要么先关闭
+`REPLAY_ENABLED`，要么同时恢复升级前的这两个路径，不能让旧代码打开新
+schema。
 
 ## 连续性与随机合同
 
@@ -38,6 +48,18 @@ count       = (last_start - first_start) / interval + 1
 只有 `first_start <= last_start` 的段参与随机。所有段按 `count` 做前缀和，
 服务端的无模偏 SHA-256 随机索引映射到整个候选时间点全集。因此每个有效
 时间点等概率；并非先等概率选段。
+
+`AGG_TRADE` 还会把上述 BAR 候选范围与固定 BAR revision 的逐根兼容性索引
+取交集。仅有 checksum 和连续 aggregate-trade ID 还不够：Binance 可能把跨
+分钟边界的多笔成交聚合成一个 `aggTrade`，因此部分官方 K 线无法从聚合事件
+精确还原。离线兼容性构建器会逐根对账时间、OHLC、base/quote volume 和
+taker-buy volume，只发布最大连续匹配段。候选起点的整个前向区间必须落在
+同一个匹配段内；交集内仍按实际候选点数量等概率抽样。选中后创建 Run 时
+还会再次做对象 checksum 与逐根一致性校验。
+
+兼容性证明按 `BAR revision / raw dataset epoch / parity policy` 不可变保存。
+后续导入并校验新的日期只会追加证明，不会覆盖同一 BAR revision 已发布的
+旧日期覆盖；重叠但内容身份不同的证明会 fail closed。
 
 catalog 构建只读取 manifest 的边界和连续段，不扫描 Parquet 正文。选中
 时间后，`BarDatasetBuilder` 从已绑定 revision 读取 `warmup + forward`
@@ -58,6 +80,10 @@ Parquet 文件按自身 SHA-256 寻址。catalog epoch 是身份、周期、对�
 catalog、随机选择、冻结快照和 `ALL_AVAILABLE` 都保存并使用具体
 `source_revision`。之后导入新月份或上游修订时，既有 Run 仍读取旧
 manifest 和旧内容对象。
+
+高周期 `ALL_AVAILABLE` 页面从固定 revision 的 Parquet 分区做有界聚合，
+结果写入可重建的 `derived-cache`。缓存不参与执行、随机或数据身份；实际
+逐根推进仍只使用冻结的基础周期快照。
 
 ## Binance 导入
 
@@ -86,7 +112,8 @@ Set-Location backend
   --archive-dir .\data\replay-history
 ```
 
-已关闭月份优先使用 monthly 文件；当前未关闭月份使用已完整结束的 daily
+已关闭月份优先使用 monthly 文件；如果 monthly checksum 返回 404，导入器
+会自动改试该月所有已完整结束的 daily 文件。当前未关闭月份直接使用 daily
 文件。Binance 不存在的 pre-listing 对象默认记录为 missing，首个
 checksum-valid K 线成为 listing boundary。其他下载、checksum、ZIP、
 schema 或解析错误一律失败，不发布新的 `current.json`。
@@ -140,4 +167,22 @@ KLINES_DB_PATH=./data/replay-dev/source-candlescope.db
 ```
 
 回滚不应删除 `replay-history`。旧 Run、审计和复现仍可能引用旧 catalog
-epoch；归档对象 GC 必须在后续实现 pin-aware 引用审计后才可开放。
+epoch。Run 创建时会把 revision 写入 `replay_archive_pin`；启动迁移还会为
+旧 Run 从其持久化快照引用补 pin。GC 另外扫描所有回放 session 的引用和旧版
+内联快照，因此非 TrainingRun 的 v1 session 也受保护。归档 GC 默认只做
+dry-run；物理删除要求回放后端已停止，以取得 archive runtime lease，并
+始终保留所有 current revision、session 引用与 Run pin：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\gc_replay_history_archive.py `
+  --archive-dir .\data\replay-history `
+  --replay-db .\data\replay.db
+
+# 检查 dry-run 报告后，先停止后端，再显式执行：
+.\.venv\Scripts\python.exe scripts\gc_replay_history_archive.py `
+  --archive-dir .\data\replay-history `
+  --replay-db .\data\replay.db --apply
+```
+
+若任一 pin revision、current manifest 或保留对象缺失/校验失败，GC 会
+拒绝执行；导入 publish 与 GC sweep 也由跨进程 mutation lock 串行化。

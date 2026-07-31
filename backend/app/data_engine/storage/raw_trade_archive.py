@@ -44,6 +44,7 @@ RAW_AGG_TRADE_COLUMNS = (
 
 REPLAY_TRADE_DATASET_SCHEMA_VERSION = "raw-agg-trade-replay.v1"
 VERIFIED_IMPORT_SCHEMA_VERSION = "binance-public-agg-trade.v1"
+BAR_COMPATIBILITY_SCHEMA_VERSION = "raw-agg-trade-bar-compatibility.v1"
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -381,6 +382,65 @@ class VerifiedRawAggTradeDay:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedRawAggTradeWindow:
+    """Contiguous UTC coverage proven by one or more verified daily receipts."""
+
+    start_time_ms: int
+    end_time_ms: int
+    first_agg_trade_id: int
+    last_agg_trade_id: int
+    partition_count: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "start_time_ms",
+            "end_time_ms",
+            "first_agg_trade_id",
+            "last_agg_trade_id",
+            "partition_count",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("verified aggTrade coverage bounds are inverted")
+        if self.first_agg_trade_id > self.last_agg_trade_id:
+            raise ValueError("verified aggTrade coverage ID bounds are inverted")
+        if self.partition_count < 1:
+            raise ValueError("verified aggTrade coverage must contain a partition")
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRawAggTradeBarWindow:
+    """BAR-close coverage where the verified aggTrade projection passed parity."""
+
+    start_time_ms: int
+    end_time_ms: int
+    bar_count: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("start_time_ms", "end_time_ms", "bar_count"):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("verified aggTrade BAR bounds are inverted")
+        if self.bar_count < 1:
+            raise ValueError("verified aggTrade BAR window cannot be empty")
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "start_time_ms": self.start_time_ms,
+            "end_time_ms": self.end_time_ms,
+            "bar_count": self.bar_count,
+        }
+
+
 @runtime_checkable
 class RawAggTradeArchive(Protocol):
     """Synchronous raw-archive backend called only from a storage worker."""
@@ -439,6 +499,42 @@ class RawAggTradeArchive(Protocol):
         expected_end_agg_trade_id: int | None = None,
     ) -> "RawAggTradeCoverage":
         """Describe ID coverage and internal gaps for replay planning."""
+
+    def list_verified_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[VerifiedRawAggTradeWindow, ...]:
+        """Return exact UTC ranges backed by valid contiguous daily receipts."""
+
+    def list_verified_bar_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        interval_ms: int,
+        bar_source_revision: str,
+        parity_policy: Mapping[str, object],
+    ) -> tuple[VerifiedRawAggTradeBarWindow, ...]:
+        """Return source-revision-bound windows that passed BAR parity."""
+
+    def publish_bar_compatibility(
+        self,
+        *,
+        dataset_ref: RawAggTradeDatasetRef,
+        interval: str,
+        interval_ms: int,
+        bar_source_revision: str,
+        parity_policy: Mapping[str, object],
+        checked_bar_count: int,
+        mismatch_bar_count: int,
+        compatible_windows: Iterable[VerifiedRawAggTradeBarWindow],
+    ) -> dict[str, object]:
+        """Atomically publish an offline BAR/aggTrade compatibility proof."""
 
     def diagnostics(self) -> dict[str, Any]:
         """Return archive backend state."""
@@ -575,6 +671,25 @@ class DisabledRawAggTradeArchive:
             status="disabled",
         )
 
+    def list_verified_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[VerifiedRawAggTradeWindow, ...]:
+        del exchange, market_type, symbol
+        return ()
+
+    def list_verified_bar_windows(
+        self,
+        **_kwargs: Any,
+    ) -> tuple[VerifiedRawAggTradeBarWindow, ...]:
+        return ()
+
+    def publish_bar_compatibility(self, **_kwargs: Any) -> dict[str, object]:
+        raise RuntimeError("raw aggTrade archive is disabled")
+
     def diagnostics(self) -> dict[str, Any]:
         return {"enabled": False, "backend": "disabled"}
 
@@ -685,6 +800,7 @@ class ParquetRawAggTradeArchive:
         self,
         root: Path | str,
         *,
+        read_only: bool = False,
         max_rows_per_file: int = 100_000,
         compression: str = "zstd",
         scan_batch_size: int = 4096,
@@ -693,6 +809,7 @@ class ParquetRawAggTradeArchive:
         max_physical_scan_rows: int = 5_000_000,
     ) -> None:
         self.root = Path(root)
+        self.read_only = bool(read_only)
         self.max_rows_per_file = max(1, int(max_rows_per_file))
         self.compression = str(compression).strip() or "zstd"
         self.scan_batch_size = max(1, min(int(scan_batch_size), 65_536))
@@ -722,9 +839,14 @@ class ParquetRawAggTradeArchive:
             "last_append_error": None,
             "durability_error": durability_error,
             "health_marker_error": health_marker_error,
+            "compaction_runs": 0,
+            "compaction_files_removed": 0,
+            "compaction_files_written": 0,
         }
 
     def append(self, rows: Iterable[dict[str, Any]]) -> int:
+        if self.read_only:
+            raise RuntimeError("read-only raw aggTrade archive cannot append")
         payload = [_raw_trade_payload(row) for row in rows]
         if not payload:
             return 0
@@ -758,9 +880,142 @@ class ParquetRawAggTradeArchive:
                 self._stats["last_append_error"] = None
         return len(payload)
 
+    def compact_live_partitions(
+        self,
+        *,
+        min_files: int = 128,
+        max_input_files: int = 512,
+        max_input_rows: int = 500_000,
+        max_partitions: int = 1,
+    ) -> dict[str, int]:
+        """Compact bounded best-effort live partitions without touching receipts.
+
+        New objects are published before old objects are removed. A crash can
+        therefore leave overlap, but ordinary readers already deduplicate by
+        aggregate-trade ID and a later pass converges it.
+        """
+
+        if self.read_only:
+            raise RuntimeError("read-only raw aggTrade archive cannot compact")
+        minimum = max(2, int(min_files))
+        file_limit = max(minimum, int(max_input_files))
+        row_limit = max(1, int(max_input_rows))
+        partition_limit = max(1, int(max_partitions))
+        summary = {
+            "partitions_compacted": 0,
+            "files_removed": 0,
+            "files_written": 0,
+            "rows_written": 0,
+        }
+        with self._write_lock:
+            if self._pins:
+                return summary
+            partitions = sorted(
+                path
+                for path in self.root.rglob("date=*")
+                if path.is_dir()
+                and not (path / "_verified_import.json").exists()
+                and not (path / "_verified_import_conflict.json").exists()
+            )
+            for partition in partitions:
+                paths = sorted(partition.glob("part-*.parquet"))
+                if len(paths) < minimum:
+                    continue
+                selected: list[Path] = []
+                manifests: list[_FileManifest] = []
+                input_rows = 0
+                incompatible = False
+                for path in paths[:file_limit]:
+                    manifest = self._read_file_manifest(path)
+                    if manifest.source_quality != "live_best_effort":
+                        incompatible = True
+                        break
+                    if input_rows + manifest.row_count > row_limit:
+                        break
+                    selected.append(path)
+                    manifests.append(manifest)
+                    input_rows += manifest.row_count
+                if incompatible or len(selected) < minimum:
+                    continue
+                estimated_output_files = (
+                    input_rows + self.max_rows_per_file - 1
+                ) // self.max_rows_per_file
+                ordered_by_id = sorted(
+                    manifests,
+                    key=lambda item: (
+                        item.min_agg_trade_id,
+                        item.max_agg_trade_id,
+                    ),
+                )
+                has_overlap = any(
+                    current.min_agg_trade_id <= previous.max_agg_trade_id
+                    for previous, current in zip(
+                        ordered_by_id,
+                        ordered_by_id[1:],
+                    )
+                )
+                if estimated_output_files >= len(selected) and not has_overlap:
+                    continue
+                rows: list[dict[str, Any]] = []
+                for manifest in manifests:
+                    table = self._pq.ParquetFile(manifest.path).read(
+                        columns=list(RAW_AGG_TRADE_COLUMNS),
+                    )
+                    rows.extend(
+                        _raw_trade_payload(item)
+                        for item in table.to_pylist()
+                    )
+                compacted = _deduplicate_raw_trades(rows)
+                if not compacted:
+                    continue
+                relative = partition.relative_to(self.root)
+                components = {
+                    item.split("=", 1)[0]: item.split("=", 1)[1]
+                    for item in relative.parts
+                    if "=" in item
+                }
+                key = (
+                    components["exchange"],
+                    components["market_type"],
+                    components["symbol"],
+                    components["date"],
+                )
+                written: list[Path] = []
+                generation = uuid4().hex
+                for index, offset in enumerate(
+                    range(0, len(compacted), self.max_rows_per_file)
+                ):
+                    chunk = compacted[offset : offset + self.max_rows_per_file]
+                    written.append(
+                        self._write_file(
+                            key,
+                            chunk,
+                            deterministic_name=(
+                                f"part-compacted-{generation}-{index:06d}.parquet"
+                            ),
+                        )
+                    )
+                for path in selected:
+                    _manifest_path(path).unlink(missing_ok=True)
+                    path.unlink(missing_ok=True)
+                summary["partitions_compacted"] += 1
+                summary["files_removed"] += len(selected)
+                summary["files_written"] += len(written)
+                summary["rows_written"] += len(compacted)
+                if summary["partitions_compacted"] >= partition_limit:
+                    break
+            self._stats["compaction_runs"] += 1
+            self._stats["compaction_files_removed"] += summary["files_removed"]
+            self._stats["compaction_files_written"] += summary["files_written"]
+        return summary
+
     def record_writer_failure(self, error: str) -> None:
         """Stickily mark possible loss after the async writer exhausts retries."""
 
+        if self.read_only:
+            raise RuntimeError(
+                "read-only raw aggTrade archive cannot record writer failures"
+            )
         with self._write_lock:
             durability_error = str(error)[:500]
             self._stats["durability_error"] = durability_error
@@ -823,6 +1078,7 @@ class ParquetRawAggTradeArchive:
             return {
                 "enabled": True,
                 "backend": "parquet-pyarrow",
+                "read_only": self.read_only,
                 "state": "degraded" if durability_error else "ready",
                 "root": str(self.root),
                 "schema_version": ARCHIVE_SCHEMA_VERSION,
@@ -836,6 +1092,535 @@ class ParquetRawAggTradeArchive:
                 "verified_partitions_available": verified_partitions_available,
                 **self._stats,
             }
+
+    def list_verified_identities(self) -> list[dict[str, str]]:
+        identities: dict[tuple[str, str, str], dict[str, str]] = {}
+        for receipt_path in sorted(self.root.rglob("_verified_import.json")):
+            if (receipt_path.parent / "_verified_import_conflict.json").exists():
+                continue
+            try:
+                receipt = self._read_verified_receipt(receipt_path)
+                metadata = receipt["metadata"]
+                assert isinstance(metadata, Mapping)
+                identity = (
+                    str(metadata["exchange"]),
+                    str(metadata["market_type"]),
+                    str(metadata["symbol"]),
+                )
+            except (AssertionError, KeyError, RuntimeError, TypeError, ValueError):
+                continue
+            identities[identity] = {
+                "exchange": identity[0],
+                "market_type": identity[1],
+                "symbol": identity[2],
+            }
+        return [identities[key] for key in sorted(identities)]
+
+    def list_verified_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[VerifiedRawAggTradeWindow, ...]:
+        """Read only receipt metadata and merge truly contiguous UTC days.
+
+        A verified daily receipt proves the full UTC partition, including quiet
+        time before its first trade and after its last trade. Adjacent days are
+        merged only when their aggregate-trade IDs are also contiguous, so a
+        replay window can never cross an unresolved source gap.
+        """
+
+        identity = (
+            _identity(exchange, "exchange", lower=True),
+            _identity(market_type, "market_type", lower=True),
+            _identity(symbol, "symbol", upper=True),
+        )
+        identity_root = (
+            self.root
+            / f"exchange={_partition_value(identity[0])}"
+            / f"market_type={_partition_value(identity[1])}"
+            / f"symbol={_partition_value(identity[2])}"
+        )
+        daily_windows: list[VerifiedRawAggTradeWindow] = []
+        for receipt_path in sorted(identity_root.glob("date=*/_verified_import.json")):
+            partition = receipt_path.parent
+            if (partition / "_verified_import_conflict.json").exists():
+                continue
+            try:
+                date_component = partition.name
+                if not date_component.startswith("date="):
+                    continue
+                date = date_component.removeprefix("date=")
+                _validate_utc_date(date)
+                receipt = self._read_verified_receipt(receipt_path)
+                metadata = receipt["metadata"]
+                assert isinstance(metadata, Mapping)
+                if (
+                    metadata.get("exchange"),
+                    metadata.get("market_type"),
+                    metadata.get("symbol"),
+                    metadata.get("date"),
+                ) != (*identity, date):
+                    continue
+                self._validate_verified_receipt_objects(partition, receipt)
+                day_start = int(
+                    datetime.strptime(date, "%Y-%m-%d")
+                    .replace(tzinfo=timezone.utc)
+                    .timestamp()
+                    * 1_000
+                )
+                daily_windows.append(
+                    VerifiedRawAggTradeWindow(
+                        start_time_ms=day_start,
+                        end_time_ms=day_start + 86_400_000 - 1,
+                        first_agg_trade_id=int(metadata["first_agg_trade_id"]),
+                        last_agg_trade_id=int(metadata["last_agg_trade_id"]),
+                        partition_count=1,
+                    )
+                )
+            except (
+                AssertionError,
+                KeyError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                # Planning is fail-closed per partition. The exact freeze path
+                # still revalidates every selected Parquet object and checksum.
+                continue
+
+        merged: list[VerifiedRawAggTradeWindow] = []
+        for current in daily_windows:
+            if (
+                merged
+                and current.start_time_ms == merged[-1].end_time_ms + 1
+                and current.first_agg_trade_id == merged[-1].last_agg_trade_id + 1
+            ):
+                previous = merged[-1]
+                merged[-1] = VerifiedRawAggTradeWindow(
+                    start_time_ms=previous.start_time_ms,
+                    end_time_ms=current.end_time_ms,
+                    first_agg_trade_id=previous.first_agg_trade_id,
+                    last_agg_trade_id=current.last_agg_trade_id,
+                    partition_count=(
+                        previous.partition_count + current.partition_count
+                    ),
+                )
+            else:
+                merged.append(current)
+        return tuple(merged)
+
+    def list_verified_bar_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        interval_ms: int,
+        bar_source_revision: str,
+        parity_policy: Mapping[str, object],
+    ) -> tuple[VerifiedRawAggTradeBarWindow, ...]:
+        identity = (
+            _identity(exchange, "exchange", lower=True),
+            _identity(market_type, "market_type", lower=True),
+            _identity(symbol, "symbol", upper=True),
+        )
+        normalized_interval = _identity(interval, "interval")
+        normalized_interval_ms = _non_negative_int(interval_ms, "interval_ms")
+        if normalized_interval_ms < 1:
+            raise ValueError("interval_ms must be positive")
+        revision = _prefixed_sha256_digest(
+            bar_source_revision,
+            "bar_source_revision",
+        )
+        policy = _normalized_json_mapping(parity_policy, "parity_policy")
+        legacy_path = self._bar_compatibility_path(
+            identity=identity,
+            interval=normalized_interval,
+            bar_source_revision=revision,
+        )
+        directory = self._bar_compatibility_directory(
+            identity=identity,
+            interval=normalized_interval,
+            bar_source_revision=revision,
+        )
+        paths = (
+            ([legacy_path] if legacy_path.is_file() else [])
+            + (
+                sorted(directory.glob("*.json"))
+                if directory.is_dir()
+                else []
+            )
+        )
+        if not paths:
+            return ()
+        records: list[
+            tuple[
+                RawAggTradeDatasetRef,
+                tuple[VerifiedRawAggTradeBarWindow, ...],
+                str,
+            ]
+        ] = []
+        seen_epochs: set[str] = set()
+        for path in paths:
+            dataset_ref, windows, index_epoch = (
+                self._read_bar_compatibility_index(
+                    path,
+                    identity=identity,
+                    interval=normalized_interval,
+                    interval_ms=normalized_interval_ms,
+                    bar_source_revision=revision,
+                    parity_policy=policy,
+                )
+            )
+            if index_epoch in seen_epochs:
+                continue
+            seen_epochs.add(index_epoch)
+            records.append((dataset_ref, windows, index_epoch))
+        records.sort(
+            key=lambda item: (
+                item[0].start_time_ms,
+                item[0].end_time_ms,
+                item[2],
+            )
+        )
+        previous_dataset_end: int | None = None
+        combined: list[VerifiedRawAggTradeBarWindow] = []
+        for dataset_ref, windows, _index_epoch in records:
+            if (
+                previous_dataset_end is not None
+                and dataset_ref.start_time_ms <= previous_dataset_end
+            ):
+                raise RuntimeError(
+                    "aggregate-trade BAR compatibility indexes overlap"
+                )
+            previous_dataset_end = dataset_ref.end_time_ms
+            combined.extend(windows)
+        return tuple(combined)
+
+    def _read_bar_compatibility_index(
+        self,
+        path: Path,
+        *,
+        identity: tuple[str, str, str],
+        interval: str,
+        interval_ms: int,
+        bar_source_revision: str,
+        parity_policy: Mapping[str, object],
+    ) -> tuple[
+        RawAggTradeDatasetRef,
+        tuple[VerifiedRawAggTradeBarWindow, ...],
+        str,
+    ]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility index is unreadable"
+            ) from exc
+        expected_fields = {
+            "schema_version",
+            "identity",
+            "interval",
+            "interval_ms",
+            "bar_source_revision",
+            "parity_policy",
+            "raw_dataset_ref",
+            "checked_bar_count",
+            "mismatch_bar_count",
+            "compatible_windows",
+            "index_epoch",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected_fields:
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility index schema is invalid"
+            )
+        unsigned = {
+            key: value
+            for key, value in payload.items()
+            if key != "index_epoch"
+        }
+        if (
+            payload["schema_version"] != BAR_COMPATIBILITY_SCHEMA_VERSION
+            or payload["identity"]
+            != {
+                "exchange": identity[0],
+                "market_type": identity[1],
+                "symbol": identity[2],
+            }
+            or payload["interval"] != interval
+            or payload["interval_ms"] != interval_ms
+            or payload["bar_source_revision"] != bar_source_revision
+            or payload["parity_policy"] != parity_policy
+            or payload["index_epoch"] != _canonical_sha256(unsigned)
+            or not isinstance(payload["raw_dataset_ref"], Mapping)
+            or not isinstance(payload["compatible_windows"], list)
+        ):
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility index identity changed"
+            )
+        dataset_ref = RawAggTradeDatasetRef.from_dict(
+            payload["raw_dataset_ref"]
+        )
+        self._validate_compatibility_dataset_ref(
+            dataset_ref,
+            identity=identity,
+        )
+        checked = _non_negative_int(
+            payload["checked_bar_count"],
+            "checked_bar_count",
+        )
+        mismatches = _non_negative_int(
+            payload["mismatch_bar_count"],
+            "mismatch_bar_count",
+        )
+        windows = tuple(
+            VerifiedRawAggTradeBarWindow(**item)
+            for item in payload["compatible_windows"]
+            if isinstance(item, Mapping)
+        )
+        if len(windows) != len(payload["compatible_windows"]):
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility windows are invalid"
+            )
+        self._validate_bar_compatibility_windows(
+            windows,
+            dataset_ref=dataset_ref,
+            interval_ms=interval_ms,
+            checked_bar_count=checked,
+            mismatch_bar_count=mismatches,
+        )
+        return dataset_ref, windows, str(payload["index_epoch"])
+
+    def publish_bar_compatibility(
+        self,
+        *,
+        dataset_ref: RawAggTradeDatasetRef,
+        interval: str,
+        interval_ms: int,
+        bar_source_revision: str,
+        parity_policy: Mapping[str, object],
+        checked_bar_count: int,
+        mismatch_bar_count: int,
+        compatible_windows: Iterable[VerifiedRawAggTradeBarWindow],
+    ) -> dict[str, object]:
+        if self.read_only:
+            raise RuntimeError(
+                "read-only raw aggTrade archive cannot publish compatibility"
+            )
+        if not isinstance(dataset_ref, RawAggTradeDatasetRef):
+            raise TypeError("dataset_ref must be RawAggTradeDatasetRef")
+        normalized_interval = _identity(interval, "interval")
+        normalized_interval_ms = _non_negative_int(interval_ms, "interval_ms")
+        if normalized_interval_ms < 1:
+            raise ValueError("interval_ms must be positive")
+        revision = _prefixed_sha256_digest(
+            bar_source_revision,
+            "bar_source_revision",
+        )
+        policy = _normalized_json_mapping(parity_policy, "parity_policy")
+        checked = _non_negative_int(checked_bar_count, "checked_bar_count")
+        mismatches = _non_negative_int(
+            mismatch_bar_count,
+            "mismatch_bar_count",
+        )
+        windows = tuple(compatible_windows)
+        identity = (
+            dataset_ref.exchange,
+            dataset_ref.market_type,
+            dataset_ref.symbol,
+        )
+        self.validate_dataset(dataset_ref)
+        self._validate_bar_compatibility_windows(
+            windows,
+            dataset_ref=dataset_ref,
+            interval_ms=normalized_interval_ms,
+            checked_bar_count=checked,
+            mismatch_bar_count=mismatches,
+        )
+        payload: dict[str, object] = {
+            "schema_version": BAR_COMPATIBILITY_SCHEMA_VERSION,
+            "identity": {
+                "exchange": identity[0],
+                "market_type": identity[1],
+                "symbol": identity[2],
+            },
+            "interval": normalized_interval,
+            "interval_ms": normalized_interval_ms,
+            "bar_source_revision": revision,
+            "parity_policy": policy,
+            "raw_dataset_ref": dataset_ref.to_dict(),
+            "checked_bar_count": checked,
+            "mismatch_bar_count": mismatches,
+            "compatible_windows": [item.to_dict() for item in windows],
+        }
+        payload["index_epoch"] = _canonical_sha256(payload)
+        policy_epoch = _canonical_sha256(policy)
+        directory = self._bar_compatibility_directory(
+            identity=identity,
+            interval=normalized_interval,
+            bar_source_revision=revision,
+        )
+        path = directory / (
+            f"{dataset_ref.data_epoch.removeprefix('sha256:')}-"
+            f"{policy_epoch.removeprefix('sha256:')}.json"
+        )
+        if path.is_file():
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "existing aggregate-trade BAR compatibility index is unreadable"
+                ) from exc
+            if current != payload:
+                raise RuntimeError(
+                    "aggregate-trade BAR compatibility index conflicts with "
+                    "an existing immutable proof"
+                )
+        else:
+            _atomic_write_json(path, payload)
+        return {
+            "path": str(path),
+            "index_epoch": payload["index_epoch"],
+            "checked_bar_count": checked,
+            "mismatch_bar_count": mismatches,
+            "compatible_window_count": len(windows),
+            "eligible_bar_count": checked - mismatches,
+        }
+
+    def _bar_compatibility_path(
+        self,
+        *,
+        identity: tuple[str, str, str],
+        interval: str,
+        bar_source_revision: str,
+    ) -> Path:
+        return (
+            self.root
+            / "_bar_compatibility"
+            / f"exchange={_partition_value(identity[0])}"
+            / f"market_type={_partition_value(identity[1])}"
+            / f"symbol={_partition_value(identity[2])}"
+            / f"interval={_partition_value(interval)}"
+            / f"{bar_source_revision.removeprefix('sha256:')}.json"
+        )
+
+    def _bar_compatibility_directory(
+        self,
+        *,
+        identity: tuple[str, str, str],
+        interval: str,
+        bar_source_revision: str,
+    ) -> Path:
+        return self._bar_compatibility_path(
+            identity=identity,
+            interval=interval,
+            bar_source_revision=bar_source_revision,
+        ).with_suffix("")
+
+    def _validate_compatibility_dataset_ref(
+        self,
+        dataset_ref: RawAggTradeDatasetRef,
+        *,
+        identity: tuple[str, str, str],
+    ) -> None:
+        if (
+            dataset_ref.exchange,
+            dataset_ref.market_type,
+            dataset_ref.symbol,
+        ) != identity:
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility source identity changed"
+            )
+        expected_epoch = self._dataset_epoch(
+            identity=identity,
+            start_time_ms=dataset_ref.start_time_ms,
+            end_time_ms=dataset_ref.end_time_ms,
+            first_agg_trade_id=dataset_ref.expected_first_agg_trade_id,
+            last_agg_trade_id=dataset_ref.expected_last_agg_trade_id,
+            objects=dataset_ref.objects,
+        )
+        if dataset_ref.data_epoch != expected_epoch:
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility source epoch changed"
+            )
+        current_objects = tuple(
+            self._object_manifest(item)
+            for item in self._discover_verified_manifests(
+                exchange=identity[0],
+                market_type=identity[1],
+                symbol=identity[2],
+                start_time_ms=dataset_ref.start_time_ms,
+                end_time_ms=dataset_ref.end_time_ms,
+            )
+        )
+        if current_objects != dataset_ref.objects:
+            raise RuntimeError(
+                "aggregate-trade BAR compatibility source object changed"
+            )
+
+    @staticmethod
+    def _validate_bar_compatibility_windows(
+        windows: tuple[VerifiedRawAggTradeBarWindow, ...],
+        *,
+        dataset_ref: RawAggTradeDatasetRef,
+        interval_ms: int,
+        checked_bar_count: int,
+        mismatch_bar_count: int,
+    ) -> None:
+        if (
+            dataset_ref.start_time_ms % interval_ms != 0
+            or (dataset_ref.end_time_ms + 1) % interval_ms != 0
+        ):
+            raise ValueError(
+                "aggregate-trade compatibility range is not BAR aligned"
+            )
+        expected_checked = (
+            (dataset_ref.end_time_ms - dataset_ref.start_time_ms + 1)
+            // interval_ms
+        )
+        if checked_bar_count != expected_checked:
+            raise ValueError(
+                "aggregate-trade compatibility checked BAR count changed"
+            )
+        if mismatch_bar_count > checked_bar_count:
+            raise ValueError(
+                "aggregate-trade compatibility mismatch count is invalid"
+            )
+        previous_end: int | None = None
+        matched = 0
+        for window in windows:
+            if not isinstance(window, VerifiedRawAggTradeBarWindow):
+                raise TypeError(
+                    "compatible_windows must contain verified BAR windows"
+                )
+            if (
+                window.start_time_ms < dataset_ref.start_time_ms
+                or window.end_time_ms > dataset_ref.end_time_ms
+                or window.start_time_ms % interval_ms != 0
+                or (window.end_time_ms + 1) % interval_ms != 0
+                or window.bar_count
+                != (
+                    (window.end_time_ms - window.start_time_ms + 1)
+                    // interval_ms
+                )
+                or (
+                    previous_end is not None
+                    and window.start_time_ms <= previous_end
+                )
+            ):
+                raise ValueError(
+                    "aggregate-trade compatibility BAR windows are invalid"
+                )
+            previous_end = window.end_time_ms
+            matched += window.bar_count
+        if matched + mismatch_bar_count != checked_bar_count:
+            raise ValueError(
+                "aggregate-trade compatibility BAR accounting changed"
+            )
 
     def _verified_partitions_available(self) -> bool:
         try:
@@ -852,6 +1637,10 @@ class ParquetRawAggTradeArchive:
         rows: Iterable[dict[str, Any]],
         metadata: VerifiedRawAggTradeDay,
     ) -> int:
+        if self.read_only:
+            raise RuntimeError(
+                "read-only raw aggTrade archive cannot import verified data"
+            )
         if not isinstance(metadata, VerifiedRawAggTradeDay):
             raise TypeError("metadata must be VerifiedRawAggTradeDay")
         key = (
@@ -2182,6 +2971,9 @@ class RawAggTradeArchiveWriter:
         flush_interval_seconds: float = 1.0,
         max_pending_batches: int = 16,
         max_rows_per_batch: int = 10_000,
+        target_rows_per_file: int | None = None,
+        max_buffer_seconds: float | None = None,
+        compact_every_batches: int = 64,
         max_write_attempts: int = 3,
         retry_base_seconds: float = 0.05,
         retry_max_seconds: float = 1.0,
@@ -2192,6 +2984,23 @@ class RawAggTradeArchiveWriter:
             min(float(flush_interval_seconds), 10.0),
         )
         self._max_rows_per_batch = max(1, int(max_rows_per_batch))
+        self._target_rows_per_file = max(
+            1,
+            int(
+                self._max_rows_per_batch
+                if target_rows_per_file is None
+                else target_rows_per_file
+            ),
+        )
+        self._max_buffer_seconds = max(
+            0.0,
+            float(
+                self._flush_interval_seconds
+                if max_buffer_seconds is None
+                else max_buffer_seconds
+            ),
+        )
+        self._compact_every_batches = max(1, int(compact_every_batches))
         self._max_write_attempts = max(1, min(int(max_write_attempts), 10))
         self._retry_base_seconds = max(0.0, float(retry_base_seconds))
         self._retry_max_seconds = max(
@@ -2212,6 +3021,8 @@ class RawAggTradeArchiveWriter:
             "failed_batches": 0,
             "failed_rows": 0,
             "failure_marker_errors": 0,
+            "compaction_runs": 0,
+            "compaction_failures": 0,
             "last_error": None,
         }
         self._durability_failed = False
@@ -2289,6 +3100,9 @@ class RawAggTradeArchiveWriter:
             "limits": {
                 "pending_batches": self._queue.maxsize,
                 "rows_per_batch": self._max_rows_per_batch,
+                "target_rows_per_file": self._target_rows_per_file,
+                "max_buffer_seconds": self._max_buffer_seconds,
+                "compact_every_batches": self._compact_every_batches,
                 "write_attempts": self._max_write_attempts,
                 "retry_base_seconds": self._retry_base_seconds,
                 "retry_max_seconds": self._retry_max_seconds,
@@ -2305,18 +3119,27 @@ class RawAggTradeArchiveWriter:
                 self._queue.task_done()
                 return
             requests = [item]
-            if self._flush_interval_seconds:
-                await asyncio.sleep(self._flush_interval_seconds)
-            while True:
+            buffered_rows = len(item.rows)
+            deadline = (
+                asyncio.get_running_loop().time() + self._max_buffer_seconds
+            )
+            while buffered_rows < self._target_rows_per_file:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
                 try:
-                    pending = self._queue.get_nowait()
-                except asyncio.QueueEmpty:
+                    pending = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
                     break
                 if pending is None:
                     self._queue.task_done()
                     should_stop = True
                     break
                 requests.append(pending)
+                buffered_rows += len(pending.rows)
 
             rows = [row for request in requests for row in request.rows]
             error: Exception | None = None
@@ -2366,6 +3189,19 @@ class RawAggTradeArchiveWriter:
                 for request in requests:
                     if not request.acknowledgement.done():
                         request.acknowledgement.set_result(len(request.rows))
+                compact = getattr(self.archive, "compact_live_partitions", None)
+                if (
+                    callable(compact)
+                    and self._metrics["batches_written"]
+                    % self._compact_every_batches
+                    == 0
+                ):
+                    try:
+                        await run_storage(compact)
+                    except Exception:
+                        self._metrics["compaction_failures"] += 1
+                    else:
+                        self._metrics["compaction_runs"] += 1
             for _ in requests:
                 self._queue.task_done()
 
@@ -2620,6 +3456,41 @@ def _sha256_digest(value: Any, label: str) -> str:
     return normalized
 
 
+def _normalized_json_mapping(
+    value: Mapping[str, object],
+    label: str,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    try:
+        normalized = json.loads(
+            json.dumps(
+                dict(value),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must contain canonical JSON values") from exc
+    if not isinstance(normalized, dict):
+        raise ValueError(f"{label} must be an object")
+    return normalized
+
+
+def _canonical_sha256(value: Mapping[str, object]) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _prefixed_sha256_digest(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.startswith("sha256:"):
         raise ValueError(f"{label} must be a prefixed SHA-256 digest")
@@ -2684,6 +3555,7 @@ def _immutable_trade_payload(row: Mapping[str, object]) -> tuple[object, ...]:
 
 __all__ = [
     "ARCHIVE_SCHEMA_VERSION",
+    "BAR_COMPATIBILITY_SCHEMA_VERSION",
     "DisabledRawAggTradeArchive",
     "ParquetRawAggTradeArchive",
     "RAW_AGG_TRADE_COLUMNS",
@@ -2699,4 +3571,6 @@ __all__ = [
     "RawAggTradeArchiveWriter",
     "VERIFIED_IMPORT_SCHEMA_VERSION",
     "VerifiedRawAggTradeDay",
+    "VerifiedRawAggTradeBarWindow",
+    "VerifiedRawAggTradeWindow",
 ]

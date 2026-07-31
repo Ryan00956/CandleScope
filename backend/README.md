@@ -125,9 +125,15 @@ frozen BAR snapshot or exact paged AGG_TRADE archive
 BAR replay defaults to an independent immutable Parquet history plane and does
 not open the production K-line database. Commands, checkpoints, orders, fills,
 ledger entries, journals, bounded selected snapshots, and reports are stored in
-`REPLAY_DB_PATH`. Active dataset snapshots/partitions, mailboxes, event rings,
-subscriber queues, checkpoint history, and frontend projection windows all have
-explicit capacity limits.
+`REPLAY_DB_PATH`. Snapshot bodies are compressed, content-addressed files under
+`<REPLAY_DB_PATH>.datasets`; SQLite keeps their checksums and references.
+Active dataset snapshots/partitions, mailboxes, event rings, subscriber queues,
+checkpoint history, and frontend projection windows all have explicit capacity
+limits.
+
+Treat `REPLAY_DB_PATH` and `<REPLAY_DB_PATH>.datasets` as one recovery set.
+Stop the replay backend before copying or restoring them so SQLite references
+and content-addressed snapshot objects remain from the same point in time.
 
 Training drafts use `ALL_AVAILABLE` chart history by default. The immutable
 execution snapshot remains bounded by indicator warmup plus forward cache;
@@ -145,6 +151,8 @@ cannot reveal data after the durable virtual-time cursor.
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
 | `REPLAY_BAR_SOURCE` | `archive` | `archive` uses the isolated immutable history plane; `legacy_sqlite` is an explicit rollback mode |
 | `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Content-addressed Parquet objects plus immutable catalog manifests |
+| `REPLAY_AGG_TRADE_ENABLED` | `0` | Independent exact aggregate-trade replay gate |
+| `REPLAY_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-agg-trades` | Read-only checksum-verified aggregate-trade replay archive |
 | `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
 | `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |
 | `REPLAY_EVENT_BUFFER_SIZE` | `10000` | Resumable domain event ring |
@@ -158,8 +166,8 @@ cannot reveal data after the durable virtual-time cursor.
 | `REPLAY_EVENT_SUBSCRIBER_QUEUE` | `256` | Per-WebSocket bounded subscriber queue |
 | `REPLAY_CONTROLLER_TTL_SECONDS` | `10` | Controller heartbeat lease |
 | `REPLAY_IDLE_TTL_SECONDS` | `3600` | Configured idle-session lifetime |
-| `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | Enables archive runtime only; capability still requires exact verified coverage |
-| `RAW_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/raw_agg_trades` | Local aggregate-trade archive root |
+| `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | Enables live aggregate-trade capture only |
+| `RAW_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/raw-agg-live-spool` | Mutable live capture spool; replay never reads this path |
 
 Use [`.env.replay.example`](.env.replay.example) as a starting point. The
 frontend entry flag is separate and is not an authorization boundary.
@@ -196,6 +204,8 @@ only, set `REPLAY_BAR_SOURCE=legacy_sqlite` and use
 `scripts/snapshot_replay_klines.py`; this opt-in mode restores the previous
 read-only SQLite source. The full BAR archive contract and operations runbook
 is [`../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md).
+When a closed monthly checksum is absent, the importer automatically attempts
+that month's checksum-verified daily objects before declaring a source gap.
 
 AGG_TRADE accepts only checksum-verified official Binance USD-M daily files.
 Import is idempotent; identity, date, schema, checksum, monotonicity, or ID
@@ -204,19 +214,41 @@ conflicts are quarantined and keep the capability closed:
 ```powershell
 .\.venv\Scripts\python.exe scripts\import_binance_public_agg_trades.py `
   --exchange binance --market-type futures --symbol BTCUSDT `
-  --start 2026-06-01 --end 2026-06-02 `
-  --archive-dir .\data\replay-dev\raw_agg_trades --require-checksum
+  --start 2026-06-01 --end 2026-06-01 `
+  --archive-dir .\data\replay-agg-trades --require-checksum
 
 .\.venv\Scripts\python.exe scripts\audit_replay_trade_archive.py `
   --exchange binance --market-type futures --symbol BTCUSDT `
-  --start 2026-06-01 --end 2026-06-02 `
-  --archive-dir .\data\replay-dev\raw_agg_trades --require-exact
+  --start 2026-06-01 --end 2026-06-01 `
+  --archive-dir .\data\replay-agg-trades --require-exact
+
+.\.venv\Scripts\python.exe scripts\build_replay_trade_bar_compatibility.py `
+  --exchange binance --market-type futures --symbol BTCUSDT --interval 1m `
+  --start 2026-06-01 --end 2026-06-01 `
+  --trade-archive-dir .\data\replay-agg-trades `
+  --bar-archive-dir .\data\replay-history
 ```
+
+Random AGG_TRADE starts are sampled only from the intersection of eligible BAR
+windows and a revision-bound compatibility index built by the final command
+above. The index compares every aggregate-trade-derived BAR with one immutable
+BAR archive revision and stores only maximal matching segments. The complete
+forward replay range must fit inside one such segment. Proofs are immutable per
+BAR revision, raw dataset epoch, and parity policy, so publishing a later day
+cannot overwrite earlier verified coverage.
 
 `EXACT_BAR_COVERAGE` uses the conservative BAR execution model.
 `EXACT_AGG_TRADE_COVERAGE` uses an aggregate-tape, volume-constrained execution
 model. Replay v1 does **not** provide or claim `RAW_TRADE`, `L2_BOOK`, or
 `EXCHANGE_FUTURES_EXACT` fidelity.
+
+For AGG_TRADE sessions, bar parity remains fail-closed for timestamps, OHLC,
+base/quote volume, and taker-buy volume. Binance may aggregate individual fills
+across a minute boundary into one `aggTrade`; those affected official K-lines
+cannot be reconstructed exactly from the aggregate event and are excluded from
+random candidates. The K-line `trades` counter is never reconstructible from
+aggregate events and remains explicitly non-comparable. Session creation still
+rechecks the selected window after the metadata-only random choice.
 
 ### Failure Recovery and Rollback
 
@@ -229,12 +261,16 @@ model. Replay v1 does **not** provide or claim `RAW_TRADE`, `L2_BOOK`, or
   fail closed with bounded diagnostics or explicit resynchronization.
 - Set `REPLAY_ENABLED=0` and restart to disable the backend in one deployment.
   The capability reports persistence unopened; retain `replay.db`.
-- To roll back only aggregate-trade replay, disable
-  `RAW_AGG_TRADE_ARCHIVE_ENABLED`; BAR capability is independent. An older
-  application build with no replay routes ignores the retained replay DB.
+- To roll back only aggregate-trade replay, set
+  `REPLAY_AGG_TRADE_ENABLED=0`; live capture and BAR replay are independent.
 - To roll back only the BAR history reader, set
   `REPLAY_BAR_SOURCE=legacy_sqlite` and restart. Do not delete
   `REPLAY_HISTORY_ARCHIVE_DIR`; old catalog epochs remain Run dependencies.
+- Replay storage schema upgrades are forward-only. Before starting a build that
+  migrates `replay.db`, stop replay and back up both `replay.db` and its
+  `.datasets` directory. A full rollback to an older replay-aware build must
+  either keep `REPLAY_ENABLED=0` or restore that pre-upgrade recovery set; it
+  must not open a newer schema with the older runtime.
 
 Formal local gates are `scripts/audit_replay_determinism.py`,
 `scripts/benchmark_replay.py`, the frontend `smoke:replay` and 4-hour replay

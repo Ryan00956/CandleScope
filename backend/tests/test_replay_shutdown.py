@@ -83,6 +83,27 @@ async def test_disabled_runtime_opens_no_database_and_starts_no_replay_task(
     await runtime.shutdown()
 
 
+async def test_replay_agg_trade_gate_is_independent_from_live_capture(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        replay_settings(tmp_path / "replay.db"),
+        replay_history_archive_dir=tmp_path / "replay-history",
+        replay_agg_trade_enabled=False,
+        replay_agg_trade_archive_dir=tmp_path / "replay-agg-trades",
+    )
+    runtime = await start_replay_runtime(settings)
+    try:
+        assert runtime.service is not None
+        capability = runtime.service.capabilities()["sources"]["agg_trade"]
+        assert capability == {
+            "enabled": False,
+            "reason": ReplayErrorCode.ARCHIVE_DISABLED.value,
+        }
+    finally:
+        await runtime.shutdown()
+
+
 async def test_enabled_runtime_start_failure_closes_store_and_fails_startup(
     tmp_path: Path,
 ) -> None:

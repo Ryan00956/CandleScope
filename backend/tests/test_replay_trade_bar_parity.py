@@ -226,6 +226,15 @@ def test_parity_tolerance_is_frozen_and_release_fails_closed() -> None:
 
     wrong_count = [{**reference[0], "trades": 2}]
     assert not audit_trade_bar_parity(builder.closed_bars, wrong_count).exact_enough
+    non_comparable = assert_trade_bar_parity(
+        builder.closed_bars,
+        wrong_count,
+        compare_trade_count=False,
+    )
+    assert non_comparable.exact_enough
+    assert non_comparable.to_dict()["integer_policy"] == (
+        "timestamps_exact_kline_trade_count_not_reconstructible"
+    )
 
 
 def test_trade_bar_builder_rejects_duplicate_id_and_checkpoint_tamper() -> None:

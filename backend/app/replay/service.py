@@ -24,6 +24,7 @@ from app.data_engine.storage.raw_trade_archive import (
     DisabledRawAggTradeArchive,
     RawAggTradeArchive,
     RawAggTradeDatasetRef,
+    VerifiedRawAggTradeBarWindow,
 )
 from app.data_engine.storage.klines_repo import KlinesRepoAdapter
 
@@ -36,7 +37,7 @@ from .actor import (
 )
 from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
 from .bars.trade_builder import TradeReplayBarBuilder
-from .bars.trade_parity import assert_trade_bar_parity
+from .bars.trade_parity import assert_trade_bar_parity, trade_bar_parity_policy
 from .broker.execution import ConservativeBarBroker
 from .broker.models import (
     BrokerConfig,
@@ -47,6 +48,8 @@ from .broker.models import (
 from .canonical import canonical_json_bytes, canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError
 from .catalog import (
+    EligibleWindow,
+    EligibleWindowRange,
     KlinesReadRepository,
     ReplayCatalog,
     ReplayCatalogEntry,
@@ -249,6 +252,12 @@ class ReplayService:
 
         return self._repository  # type: ignore[return-value]
 
+    @property
+    def raw_trade_archive(self) -> RawAggTradeArchive:
+        """Expose the replay-owned read-only exact trade archive."""
+
+        return self._raw_trade_archive
+
     async def start(self) -> None:
         """Recover non-ended sessions without ever resuming PLAYING."""
 
@@ -424,6 +433,11 @@ class ReplayService:
         if not isinstance(config, ReplaySessionConfig):
             raise TypeError("config must be ReplaySessionConfig")
         self._ensure_available(blind_mode=config.blind_mode)
+        if config.source_kind is SourceKind.AGG_TRADE:
+            try:
+                self._require_trade_capability()
+            except ReplayDomainError as exc:
+                raise self._blind_safe_dataset_error(config, exc) from exc
         try:
             catalog = await asyncio.to_thread(
                 self._catalog.build,
@@ -449,7 +463,11 @@ class ReplayService:
             )
             entry = catalog.require_entry(identity)
             window = (
-                self._catalog.select_random(entry, seed=config.random_seed)
+                await self._select_random_window(
+                    self._catalog,
+                    entry,
+                    config,
+                )
                 if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
                 else self._catalog.select_manual(
                     entry,
@@ -568,7 +586,11 @@ class ReplayService:
                     )
                 else:
                     window = (
-                        catalog_owner.select_random(entry, seed=config.random_seed)
+                        await self._select_random_window(
+                            catalog_owner,
+                            entry,
+                            config,
+                        )
                         if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
                         else catalog_owner.select_manual(
                             entry,
@@ -2856,6 +2878,135 @@ class ReplayService:
                 "aggregate-trade replay archive has no verified exact dataset",
             )
 
+    async def _select_random_window(
+        self,
+        catalog: ReplayCatalog,
+        entry: ReplayCatalogEntry,
+        config: ReplaySessionConfig,
+    ) -> EligibleWindow:
+        if config.source_kind is not SourceKind.AGG_TRADE:
+            return catalog.select_random(entry, seed=config.random_seed)
+        bar_source_revision = entry.source_revision or entry.source_fingerprint
+        interval_ms = parse_interval_ms(config.base_interval)
+        if interval_ms is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "aggregate-trade random selection requires a fixed BAR interval",
+            )
+        try:
+            verified_windows = await asyncio.to_thread(
+                self._raw_trade_archive.list_verified_bar_windows,
+                exchange=config.exchange,
+                market_type=config.market_type,
+                symbol=config.symbol,
+                interval=config.base_interval,
+                interval_ms=interval_ms,
+                bar_source_revision=bar_source_revision,
+                parity_policy=trade_bar_parity_policy(
+                    compare_trade_count=False,
+                ),
+            )
+            eligible_ranges = self._intersect_trade_eligible_ranges(
+                entry,
+                verified_windows,
+            )
+        except ReplayDomainError:
+            raise
+        except Exception as exc:
+            diagnostics = self._raw_trade_archive.diagnostics()
+            code = (
+                ReplayErrorCode.ARCHIVE_DEGRADED
+                if diagnostics.get("state") != "ready"
+                else ReplayErrorCode.DATASET_INCOMPLETE
+            )
+            raise ReplayDomainError(
+                code,
+                "verified aggregate-trade coverage index is unavailable",
+            ) from exc
+        return catalog.select_random_from_ranges(
+            entry,
+            eligible_ranges=eligible_ranges,
+            seed=config.random_seed,
+            selection_namespace="agg_trade_verified_receipts.v1",
+        )
+
+    @staticmethod
+    def _intersect_trade_eligible_ranges(
+        entry: ReplayCatalogEntry,
+        verified_windows: Sequence[VerifiedRawAggTradeBarWindow],
+    ) -> tuple[EligibleWindowRange, ...]:
+        windows = tuple(
+            sorted(verified_windows, key=lambda item: item.start_time_ms)
+        )
+        previous_end: int | None = None
+        for window in windows:
+            if not isinstance(window, VerifiedRawAggTradeBarWindow):
+                raise TypeError(
+                    "verified aggregate-trade coverage contains an invalid window"
+                )
+            if previous_end is not None and window.start_time_ms <= previous_end:
+                raise ValueError(
+                    "verified aggregate-trade coverage windows overlap"
+                )
+            previous_end = window.end_time_ms
+
+        intersections: list[EligibleWindowRange] = []
+        for candidate in entry.eligible_ranges:
+            forward_span_ms = candidate.replay_bars * candidate.interval_ms
+            for coverage in windows:
+                last_start_for_coverage = (
+                    coverage.end_time_ms - forward_span_ms + 1
+                )
+                unaligned_first = max(
+                    candidate.first_start_ms,
+                    coverage.start_time_ms,
+                )
+                unaligned_last = min(
+                    candidate.last_start_ms,
+                    last_start_for_coverage,
+                )
+                if unaligned_first > unaligned_last:
+                    continue
+                first_offset = max(
+                    0,
+                    (
+                        unaligned_first
+                        - candidate.first_start_ms
+                        + candidate.interval_ms
+                        - 1
+                    )
+                    // candidate.interval_ms,
+                )
+                first_start_ms = (
+                    candidate.first_start_ms
+                    + first_offset * candidate.interval_ms
+                )
+                last_offset = (
+                    unaligned_last - candidate.first_start_ms
+                ) // candidate.interval_ms
+                last_start_ms = (
+                    candidate.first_start_ms
+                    + last_offset * candidate.interval_ms
+                )
+                if first_start_ms > last_start_ms:
+                    continue
+                intersections.append(
+                    EligibleWindowRange(
+                        interval=candidate.interval,
+                        interval_ms=candidate.interval_ms,
+                        first_start_ms=first_start_ms,
+                        last_start_ms=last_start_ms,
+                        count=(
+                            (last_start_ms - first_start_ms)
+                            // candidate.interval_ms
+                        )
+                        + 1,
+                        warmup_bars=candidate.warmup_bars,
+                        replay_bars=candidate.replay_bars,
+                    )
+                )
+        return tuple(intersections)
+
     async def _freeze_trade_dataset(
         self,
         config: ReplaySessionConfig,
@@ -2953,7 +3104,16 @@ class ReplayService:
         builder.finalize_bars(virtual_time_ms=dataset.replay_rows[-1].close_time_ms)
         replay_count = len(dataset.replay_rows)
         derived = builder.closed_bars[-replay_count:]
-        assert_trade_bar_parity(derived, dataset.replay_rows)
+        # Binance aggTrade preserves aggregate-event IDs and the inclusive raw
+        # trade-ID span, but it cannot reproduce the exchange Kline's trade
+        # counter at every minute boundary. Keep timestamps and all OHLCV /
+        # taker-volume fields fail-closed while treating that one field as
+        # explicitly non-comparable.
+        assert_trade_bar_parity(
+            derived,
+            dataset.replay_rows,
+            compare_trade_count=False,
+        )
 
     @staticmethod
     def _blind_safe_dataset_error(
@@ -2990,14 +3150,24 @@ class ReplayService:
         dataset: BarDatasetSnapshot,
         trade_dataset_ref: RawAggTradeDatasetRef | None,
     ) -> tuple[dict[str, object], dict[str, object]]:
+        bar_reference = dataset.snapshot_ref().to_dict()
+        if dataset.provenance.source_revision is not None:
+            # Keep the actor-facing BarDatasetRef byte-for-byte compatible with
+            # replay.v1 checkpoints.  The archive revision is persistence-only:
+            # it protects the immutable history objects used by this Run.
+            bar_reference["source_revision"] = dataset.provenance.source_revision
         if trade_dataset_ref is None:
-            return dataset.snapshot_ref().to_dict(), dataset.to_dict()
+            return bar_reference, dataset.to_dict()
         reference = {
             "schema_version": TRADE_SESSION_REF_SCHEMA_VERSION,
             "data_epoch": trade_dataset_ref.data_epoch,
             "bar_data_epoch": dataset.data_epoch,
             "source_kind": SourceKind.AGG_TRADE.value,
             "trade_dataset_ref": trade_dataset_ref.to_dict(),
+            # Keep BAR source classification in the lightweight row because
+            # schema v3 stores the large snapshot body outside SQLite.  Archive
+            # pins must never depend on reopening that body.
+            "bar_snapshot_ref": bar_reference,
         }
         bundle = {
             "schema_version": TRADE_SESSION_DATASET_SCHEMA_VERSION,

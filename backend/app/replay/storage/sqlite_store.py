@@ -7,9 +7,14 @@ import base64
 import binascii
 import hashlib
 import json
+import os
+import queue
+import re
 import sqlite3
 import threading
 import time
+import uuid
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -21,6 +26,7 @@ from .schema import REPLAY_SCHEMA_VERSION, migrate_replay_schema
 
 _BUSY_MARKERS = ("database is locked", "database table is locked", "database is busy")
 _WAL_AUTOCHECKPOINT_PAGES = 256
+_DATASET_OBJECT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 ExtensionWriter = Callable[[sqlite3.Connection, int], None]
 SessionSummaryWriter = Callable[
     [sqlite3.Connection, str, Mapping[str, object], Mapping[str, object], int],
@@ -59,6 +65,70 @@ def _blob_sha256(value: bytes) -> str:
 
 def _decode_json(value: str | None) -> object | None:
     return None if value is None else json.loads(value)
+
+
+class _DatasetObjectStore:
+    """Content-addressed compressed replay snapshots outside SQLite."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def put(self, payload: bytes) -> str:
+        object_id = _blob_sha256(payload)
+        destination = self._path(object_id)
+        if destination.is_file():
+            if self.get(object_id) != payload:
+                raise RuntimeError("replay dataset object content changed")
+            return object_id
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(zlib.compress(payload, level=6))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return object_id
+
+    def get(self, object_id: str) -> bytes:
+        path = self._path(object_id)
+        try:
+            payload = zlib.decompress(path.read_bytes())
+        except (OSError, zlib.error) as exc:
+            raise RuntimeError("replay dataset object is unavailable") from exc
+        if _blob_sha256(payload) != object_id:
+            raise RuntimeError("replay dataset object checksum changed")
+        return payload
+
+    def collect(self, referenced: set[str]) -> dict[str, int]:
+        removed = 0
+        removed_bytes = 0
+        for path in sorted(self.root.glob("*/*.json.zlib")):
+            token = path.name.removesuffix(".json.zlib")
+            if f"sha256:{token}" in referenced:
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            removed_bytes += size
+        return {"objects_removed": removed, "bytes_removed": removed_bytes}
+
+    def _path(self, object_id: str) -> Path:
+        if _DATASET_OBJECT_PATTERN.fullmatch(object_id) is None:
+            raise ValueError("replay dataset object id is invalid")
+        token = object_id.removeprefix("sha256:")
+        candidate = (self.root / token[:2] / f"{token}.json.zlib").resolve()
+        if not candidate.is_relative_to(self.root):
+            raise ValueError("replay dataset object escaped its root")
+        return candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +171,8 @@ class ReplaySQLiteStore:
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1_000),
         max_recent_checkpoints: int = 32,
+        read_pool_size: int = 4,
+        dataset_object_dir: str | Path | None = None,
     ) -> None:
         self.path = Path(path).expanduser().resolve()
         delays = tuple(float(value) for value in busy_retry_delays)
@@ -110,12 +182,20 @@ class ReplaySQLiteStore:
             )
         if max_recent_checkpoints < 1:
             raise ValueError("max_recent_checkpoints must be positive")
+        if read_pool_size < 1 or read_pool_size > 16:
+            raise ValueError("read_pool_size must be between 1 and 16")
         self._busy_retry_delays = delays
         self._sleep = sleep
         self._now_ms = now_ms
         self._max_recent_checkpoints = max_recent_checkpoints
         self._thread_lock = threading.RLock()
         self._async_lock = asyncio.Lock()
+        self._read_condition = threading.Condition()
+        self._active_reads = 0
+        self._read_pool_size = int(read_pool_size)
+        self._dataset_pending_lock = threading.Lock()
+        self._pending_dataset_objects: dict[str, int] = {}
+        self._dataset_gc_lock = asyncio.Lock()
         self._closed = False
         self._degraded_reason: str | None = None
         self._session_summary_writer: SessionSummaryWriter | None = None
@@ -128,9 +208,19 @@ class ReplaySQLiteStore:
             "busy_exhaustions": 0,
             "checkpoints_written": 0,
             "corrupt_checkpoints_skipped": 0,
+            "dataset_objects_removed": 0,
+            "dataset_object_bytes_removed": 0,
+            "database_compactions": 0,
+            "database_compaction_failures": 0,
         }
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        object_root = (
+            Path(dataset_object_dir).expanduser().resolve()
+            if dataset_object_dir is not None
+            else self.path.parent / f"{self.path.name}.datasets"
+        )
+        self._dataset_objects = _DatasetObjectStore(object_root)
         self._connection = sqlite3.connect(
             str(self.path),
             timeout=0,
@@ -163,7 +253,31 @@ class ReplaySQLiteStore:
                     connection, now_ms=self._validated_now_ms()
                 )
             )
+            self._compact_database_if_needed()
         except BaseException:
+            self._connection.close()
+            self._closed = True
+            raise
+        self._read_connections: queue.LifoQueue[sqlite3.Connection] = (
+            queue.LifoQueue(maxsize=self._read_pool_size)
+        )
+        try:
+            for _ in range(self._read_pool_size):
+                connection = sqlite3.connect(
+                    f"{self.path.as_uri()}?mode=ro",
+                    uri=True,
+                    timeout=5,
+                    check_same_thread=False,
+                    isolation_level=None,
+                )
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA busy_timeout=5000")
+                self._read_connections.put(connection)
+            self._collect_dataset_objects_sync()
+        except BaseException:
+            while not self._read_connections.empty():
+                self._read_connections.get_nowait().close()
             self._connection.close()
             self._closed = True
             raise
@@ -198,6 +312,20 @@ class ReplaySQLiteStore:
     ) -> None:
         now = self._validated_now_ms()
         dataset_bytes = bytes(dataset_blob)
+        expected_object_id = _blob_sha256(dataset_bytes)
+        async with self._dataset_gc_lock:
+            with self._dataset_pending_lock:
+                self._pending_dataset_objects[expected_object_id] = (
+                    self._pending_dataset_objects.get(expected_object_id, 0) + 1
+                )
+        try:
+            dataset_object_id = await asyncio.to_thread(
+                self._dataset_objects.put,
+                dataset_bytes,
+            )
+        except BaseException:
+            self._release_pending_dataset_object(expected_object_id)
+            raise
         checkpoint_bytes = bytes(initial_checkpoint)
 
         def write(connection: sqlite3.Connection) -> None:
@@ -233,16 +361,19 @@ class ReplaySQLiteStore:
                 """
                 INSERT INTO replay_dataset_ref(
                     session_id, data_epoch, snapshot_ref_json, snapshot_blob,
-                    snapshot_sha256, actual_replay_start_ms, actual_replay_end_ms,
+                    snapshot_sha256, snapshot_object_id, snapshot_size_bytes,
+                    actual_replay_start_ms, actual_replay_end_ms,
                     synthetic_origin_ms, created_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
                     state["data_epoch"],
                     canonical_json(dataset_ref),
-                    dataset_bytes,
+                    b"",
                     _blob_sha256(dataset_bytes),
+                    dataset_object_id,
+                    len(dataset_bytes),
                     actual_replay_start_ms,
                     actual_replay_end_ms,
                     synthetic_origin_ms,
@@ -273,7 +404,10 @@ class ReplaySQLiteStore:
                 now_ms=now,
             )
 
-        await self._write_async(write)
+        try:
+            await self._write_async(write)
+        finally:
+            self._release_pending_dataset_object(expected_object_id)
 
     async def delete_session(self, session_id: str) -> bool:
         """Compensate a create that persisted but was never service-registered.
@@ -291,7 +425,10 @@ class ReplaySQLiteStore:
             )
             return cursor.rowcount == 1
 
-        return await self._write_async(write, allow_degraded=True)
+        deleted = await self._write_async(write, allow_degraded=True)
+        if deleted:
+            await self.collect_dataset_objects()
+        return deleted
 
     async def commit_command(
         self,
@@ -686,7 +823,29 @@ class ReplaySQLiteStore:
             ).fetchone()
             if row is None:
                 return None
-            blob = bytes(row["snapshot_blob"])
+            stored_blob = bytes(row["snapshot_blob"])
+            object_id = row["snapshot_object_id"]
+            if object_id is not None:
+                if stored_blob:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "external replay dataset row contains an inline body",
+                    )
+                try:
+                    blob = self._dataset_objects.get(str(object_id))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted replay dataset object is unavailable",
+                    ) from exc
+                expected_size = row["snapshot_size_bytes"]
+                if expected_size is None or int(expected_size) != len(blob):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted replay dataset object size does not match",
+                    )
+            else:
+                blob = stored_blob
             if _blob_sha256(blob) != row["snapshot_sha256"]:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
@@ -907,9 +1066,31 @@ class ReplaySQLiteStore:
 
     async def close(self) -> None:
         async with self._async_lock:
-            if self._closed:
-                return
-            await asyncio.to_thread(self._close_sync)
+            async with self._dataset_gc_lock:
+                if self._closed:
+                    return
+                await asyncio.to_thread(self._close_sync)
+
+    async def collect_dataset_objects(self) -> dict[str, int]:
+        async with self._dataset_gc_lock:
+            referenced = await self._read_async(
+                lambda connection: {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT snapshot_object_id FROM replay_dataset_ref "
+                        "WHERE snapshot_object_id IS NOT NULL"
+                    ).fetchall()
+                }
+            )
+            with self._dataset_pending_lock:
+                referenced.update(self._pending_dataset_objects)
+            result = await asyncio.to_thread(
+                self._dataset_objects.collect,
+                referenced,
+            )
+        self._metrics["dataset_objects_removed"] += result["objects_removed"]
+        self._metrics["dataset_object_bytes_removed"] += result["bytes_removed"]
+        return result
 
     def register_session_summary_writer(self, writer: SessionSummaryWriter) -> None:
         """Register one additive schema projection inside v1 mutations."""
@@ -954,22 +1135,28 @@ class ReplaySQLiteStore:
             "degraded": self._degraded_reason is not None,
             "degraded_reason": self._degraded_reason,
             "busy_attempts": len(self._busy_retry_delays),
+            "read_pool_size": self._read_pool_size,
+            "dataset_object_dir": str(self._dataset_objects.root),
         }
 
     def _close_sync(self) -> None:
-        with self._thread_lock:
+        with self._read_condition:
             if self._closed:
                 return
-            self._connection.close()
             self._closed = True
+            while self._active_reads:
+                self._read_condition.wait()
+        with self._thread_lock:
+            while not self._read_connections.empty():
+                self._read_connections.get_nowait().close()
+            self._connection.close()
 
     async def _write_async(self, operation, *, allow_degraded: bool = False):
         async with self._async_lock:
             return await asyncio.to_thread(self._run_write, operation, allow_degraded)
 
     async def _read_async(self, operation):
-        async with self._async_lock:
-            return await asyncio.to_thread(self._run_read, operation)
+        return await asyncio.to_thread(self._run_read, operation)
 
     def _run_write(self, operation, allow_degraded: bool = False):
         with self._thread_lock:
@@ -1015,9 +1202,66 @@ class ReplaySQLiteStore:
             ) from last_busy
 
     def _run_read(self, operation):
-        with self._thread_lock:
+        with self._read_condition:
             self._ensure_open()
-            return operation(self._connection)
+            self._active_reads += 1
+        connection = self._read_connections.get()
+        try:
+            return operation(connection)
+        finally:
+            self._read_connections.put(connection)
+            with self._read_condition:
+                self._active_reads -= 1
+                self._read_condition.notify_all()
+
+    def _collect_dataset_objects_sync(self) -> dict[str, int]:
+        columns = {
+            str(row[1])
+            for row in self._connection.execute(
+                "PRAGMA table_info(replay_dataset_ref)"
+            ).fetchall()
+        }
+        referenced = (
+            {
+                str(row[0])
+                for row in self._connection.execute(
+                    "SELECT snapshot_object_id FROM replay_dataset_ref "
+                    "WHERE snapshot_object_id IS NOT NULL"
+                ).fetchall()
+            }
+            if "snapshot_object_id" in columns
+            else set()
+        )
+        with self._dataset_pending_lock:
+            referenced.update(self._pending_dataset_objects)
+        result = self._dataset_objects.collect(referenced)
+        self._metrics["dataset_objects_removed"] += result["objects_removed"]
+        self._metrics["dataset_object_bytes_removed"] += result["bytes_removed"]
+        return result
+
+    def _release_pending_dataset_object(self, object_id: str) -> None:
+        with self._dataset_pending_lock:
+            remaining = self._pending_dataset_objects.get(object_id, 0) - 1
+            if remaining <= 0:
+                self._pending_dataset_objects.pop(object_id, None)
+            else:
+                self._pending_dataset_objects[object_id] = remaining
+
+    def _compact_database_if_needed(self) -> None:
+        page_count = int(self._connection.execute("PRAGMA page_count").fetchone()[0])
+        free_pages = int(
+            self._connection.execute("PRAGMA freelist_count").fetchone()[0]
+        )
+        if page_count < 4_096 or free_pages * 2 < page_count:
+            return
+        try:
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            self._connection.execute("VACUUM")
+        except sqlite3.Error:
+            self._metrics["database_compaction_failures"] += 1
+        else:
+            self._metrics["database_compactions"] += 1
 
     def _write_session_summary(
         self,

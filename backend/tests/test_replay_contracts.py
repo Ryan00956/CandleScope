@@ -333,6 +333,15 @@ def test_replay_settings_reject_invalid_bool_and_unsafe_ranges(tmp_path: Path) -
             data_dir=tmp_path,
             klines_db_path=tmp_path / "candlescope.db",
         )
+    with pytest.raises(ValueError, match="REPLAY_AGG_TRADE_ARCHIVE_DIR"):
+        load_replay_settings(
+            {
+                "REPLAY_AGG_TRADE_ARCHIVE_DIR": str(tmp_path / "shared-agg"),
+                "RAW_AGG_TRADE_ARCHIVE_DIR": str(tmp_path / "shared-agg"),
+            },
+            data_dir=tmp_path,
+            klines_db_path=tmp_path / "candlescope.db",
+        )
     legacy = load_replay_settings(
         {"REPLAY_BAR_SOURCE": "legacy_sqlite"},
         data_dir=tmp_path,

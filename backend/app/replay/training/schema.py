@@ -6,6 +6,7 @@ import json
 import sqlite3
 
 from app.data_engine.interval_policy import parse_interval_ms
+from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.canonical import canonical_json, canonical_sha256
 
 
@@ -1384,6 +1385,31 @@ CREATE INDEX IF NOT EXISTS idx_replay_account_history_gc_audit_created
 ON replay_account_history_gc_audit(created_at_ms DESC, audit_id DESC);
 """
 
+TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_archive_pin (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL
+        CHECK (
+            length(source_revision) = 71
+            AND substr(source_revision, 1, 7) = 'sha256:'
+        ),
+    exchange TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    base_interval TEXT NOT NULL,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    dataset_epoch TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, source_revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_archive_pin_revision
+ON replay_archive_pin(source_revision, exchange, market_type, symbol, base_interval);
+"""
+
 
 def data_policy_hash(
     *,
@@ -1727,6 +1753,68 @@ def _backfill_phase17_policies(
         )
 
 
+def _backfill_archive_pins(
+    connection: sqlite3.Connection,
+    *,
+    now_ms: int,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT track.run_id, track.track_id, track.dataset_epoch,
+               dataset.snapshot_ref_json, dataset.snapshot_blob
+        FROM replay_training_market_track AS track
+        JOIN replay_dataset_ref AS dataset
+          ON dataset.session_id = track.adapter_session_id
+        WHERE track.adapter_session_id IS NOT NULL
+        ORDER BY track.run_id, track.track_id
+        """
+    ).fetchall()
+    for run_id, track_id, dataset_epoch, snapshot_ref_json, snapshot_blob in rows:
+        raw_bar_snapshot = persisted_bar_archive_reference(
+            snapshot_ref_json,
+            snapshot_blob,
+        )
+        if raw_bar_snapshot is None:
+            continue
+        revision = raw_bar_snapshot.get("source_revision")
+        identity = raw_bar_snapshot.get("identity")
+        if (
+            not isinstance(revision, str)
+            or len(revision) != 71
+            or not revision.startswith("sha256:")
+            or not isinstance(identity, dict)
+        ):
+            continue
+        try:
+            values = (
+                str(identity["exchange"]),
+                str(identity["market_type"]),
+                str(identity["symbol"]),
+                str(raw_bar_snapshot["interval"]),
+                int(raw_bar_snapshot["warmup_start_ms"]),
+                int(raw_bar_snapshot["replay_end_open_ms"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_archive_pin(
+                run_id, track_id, source_revision,
+                exchange, market_type, symbol, base_interval,
+                range_start_ms, range_end_ms, dataset_epoch, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(run_id),
+                str(track_id),
+                revision,
+                *values,
+                str(dataset_epoch),
+                now_ms,
+            ),
+        )
+
+
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
     """Create only v2-owned tables; never advance the replay.v1 schema row."""
 
@@ -1891,6 +1979,8 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     # account-history GC audit evidence and never interpret EVICTED objects as
     # READY archives.
     _execute_script(connection, TRAINING_SCHEMA_PHASE18_ADDITIVE)
+    _execute_script(connection, TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE)
+    _backfill_archive_pins(connection, now_ms=now_ms)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)

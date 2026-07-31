@@ -20,7 +20,11 @@ from app.data_engine.backfill.archive_cache import (  # noqa: E402
     AiohttpArchiveHttpClient,
     HistoricalArchiveCache,
 )
-from app.exchanges.archive import ArchiveDataError, ArchiveGranularity  # noqa: E402
+from app.exchanges.archive import (  # noqa: E402
+    ArchiveDataError,
+    ArchiveGranularity,
+    ArchiveObjectRef,
+)
 from app.exchanges.plugins.binance.archive import (  # noqa: E402
     BinanceKlineArchiveProvider,
 )
@@ -135,6 +139,21 @@ def _select_source_objects(refs) -> list:
     )
 
 
+def _daily_fallbacks_by_month(
+    refs: Sequence[ArchiveObjectRef],
+) -> dict[str, tuple[ArchiveObjectRef, ...]]:
+    fallbacks: dict[str, list[ArchiveObjectRef]] = {}
+    for ref in refs:
+        if ref.granularity is ArchiveGranularity.DAILY:
+            fallbacks.setdefault(ref.period[:7], []).append(ref)
+    return {
+        month: tuple(
+            sorted(items, key=lambda item: (item.start_ms, item.object_key))
+        )
+        for month, items in fallbacks.items()
+    }
+
+
 async def import_history(args: argparse.Namespace) -> dict[str, object]:
     if args.start > args.end:
         raise ReplayHistoryArchiveError("--start must not be after --end")
@@ -145,16 +164,16 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
 
     now_ms = int(time.time() * 1_000)
     provider = BinanceKlineArchiveProvider()
-    refs = _select_source_objects(
-        provider.plan_objects(
-            market_type=args.market_type,
-            symbol=args.symbol,
-            interval=args.interval,
-            start_ms=_start_ms(args.start),
-            end_ms=_end_ms(args.end),
-            now_ms=now_ms,
-        )
+    planned_refs = provider.plan_objects(
+        market_type=args.market_type,
+        symbol=args.symbol,
+        interval=args.interval,
+        start_ms=_start_ms(args.start),
+        end_ms=_end_ms(args.end),
+        now_ms=now_ms,
     )
+    refs = _select_source_objects(planned_refs)
+    daily_fallbacks = _daily_fallbacks_by_month(planned_refs)
     plan = [
         {
             "object_key": item.object_key,
@@ -170,6 +189,9 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
             "published": False,
             "plan_only": True,
             "source_object_count": len(refs),
+            "daily_fallback_candidate_count": sum(
+                len(items) for items in daily_fallbacks.values()
+            ),
             "objects": plan,
         }
     if not refs:
@@ -208,7 +230,11 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
     reused = []
     missing = []
     objects = []
-    for index, ref in enumerate(refs, start=1):
+    scheduled_keys = {item.object_key for item in refs}
+    index = 0
+    while index < len(refs):
+        ref = refs[index]
+        index += 1
         _progress(
             "source_object_started",
             position=index,
@@ -308,6 +334,23 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                 period=ref.period,
                 reason=message,
             )
+            if ref.granularity is ArchiveGranularity.MONTHLY:
+                fallback_refs = tuple(
+                    item
+                    for item in daily_fallbacks.get(ref.period, ())
+                    if item.object_key not in scheduled_keys
+                )
+                if fallback_refs:
+                    refs[index:index] = fallback_refs
+                    scheduled_keys.update(
+                        item.object_key for item in fallback_refs
+                    )
+                    _progress(
+                        "source_object_daily_fallback_scheduled",
+                        monthly_period=ref.period,
+                        daily_object_count=len(fallback_refs),
+                        total=len(refs),
+                    )
 
     manifest = await asyncio.to_thread(
         writer.publish_catalog,

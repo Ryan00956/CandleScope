@@ -30,6 +30,7 @@ from .models import (
 
 CATALOG_SCHEMA_VERSION = "replay-catalog.v1"
 CATALOG_SAMPLE_SCHEMA_VERSION = "replay-catalog-sample.v1"
+RESTRICTED_CATALOG_SAMPLE_SCHEMA_VERSION = "replay-catalog-restricted-sample.v1"
 
 
 def _is_sha256_digest(value: object) -> bool:
@@ -269,6 +270,7 @@ class ReplayCatalogEntry:
     catalog_epoch: str
     limitations: tuple[str, ...]
     source_revision: str | None = None
+    selection_epoch: str = ""
 
     @property
     def eligible_window_count(self) -> int:
@@ -448,9 +450,31 @@ class ReplayCatalog:
                 "entries": [entry.to_hash_dict() for entry in entries],
             }
             catalog_epoch = canonical_sha256(epoch_payload)
-            finalized_entries = tuple(
-                replace(entry, catalog_epoch=catalog_epoch) for entry in entries
-            )
+            finalized_entries = []
+            for entry in entries:
+                selection_entry = entry.to_hash_dict()
+                # The snapshot fingerprint intentionally covers every catalog
+                # series for prepare/create drift detection. Random selection
+                # is scoped to one series, so unrelated listings must not
+                # remap an otherwise identical seed and candidate population.
+                selection_entry.pop("source_fingerprint", None)
+                finalized_entries.append(
+                    replace(
+                        entry,
+                        catalog_epoch=catalog_epoch,
+                        selection_epoch=canonical_sha256(
+                            {
+                                "schema_version": (
+                                    "replay-catalog-selection.v1"
+                                ),
+                                "warmup_bars": warmup,
+                                "horizon_ms": horizon,
+                                "quality_mode": quality.value,
+                                "entry": selection_entry,
+                            }
+                        ),
+                    )
+                )
             snapshot = ReplayCatalogSnapshot(
                 schema_version=CATALOG_SCHEMA_VERSION,
                 source_fingerprint=source_fingerprint,
@@ -459,7 +483,7 @@ class ReplayCatalog:
                 warmup_bars=warmup,
                 horizon_ms=horizon,
                 quality_mode=quality,
-                entries=finalized_entries,
+                entries=tuple(finalized_entries),
             )
             self._cache[cache_key] = _CacheRecord(current_monotonic, snapshot)
             self._cache.move_to_end(cache_key)
@@ -503,7 +527,7 @@ class ReplayCatalog:
             )
         selected_index = self._stable_sample_index(
             seed=seed,
-            catalog_epoch=entry.catalog_epoch,
+            catalog_epoch=entry.selection_epoch or entry.catalog_epoch,
             population_size=total,
         )
         for eligible_range in entry.eligible_ranges:
@@ -511,6 +535,82 @@ class ReplayCatalog:
                 return eligible_range.materialize(selected_index)
             selected_index -= eligible_range.count
         raise RuntimeError("eligible-window index mapping drifted")
+
+    def select_random_from_ranges(
+        self,
+        entry: ReplayCatalogEntry,
+        *,
+        eligible_ranges: Sequence[EligibleWindowRange],
+        seed: int,
+        selection_namespace: str,
+    ) -> EligibleWindow:
+        """Sample uniformly from a validated source-specific candidate subset."""
+
+        if (
+            isinstance(seed, bool)
+            or not isinstance(seed, int)
+            or seed < 0
+            or seed > MAX_RANDOM_SEED
+        ):
+            raise ValueError(
+                f"random seed must be an integer between 0 and {MAX_RANDOM_SEED}"
+            )
+        namespace = str(selection_namespace).strip()
+        if not namespace:
+            raise ValueError("selection_namespace cannot be blank")
+        ranges = tuple(eligible_ranges)
+        previous_last: int | None = None
+        for candidate in ranges:
+            if candidate.count != (
+                (candidate.last_start_ms - candidate.first_start_ms)
+                // candidate.interval_ms
+            ) + 1:
+                raise ValueError("restricted eligible range count is inconsistent")
+            if previous_last is not None and candidate.first_start_ms <= previous_last:
+                raise ValueError("restricted eligible ranges overlap or are unsorted")
+            previous_last = candidate.last_start_ms
+            if not any(
+                source.interval == candidate.interval
+                and source.interval_ms == candidate.interval_ms
+                and source.warmup_bars == candidate.warmup_bars
+                and source.replay_bars == candidate.replay_bars
+                and source.contains(candidate.first_start_ms)
+                and source.contains(candidate.last_start_ms)
+                for source in entry.eligible_ranges
+            ):
+                raise ValueError(
+                    "restricted eligible range is not a subset of the catalog entry"
+                )
+        total = sum(item.count for item in ranges)
+        if total < 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.NO_ELIGIBLE_WINDOW,
+                f"no eligible replay window for {entry.identity.key}",
+                details={
+                    "identity": entry.identity.to_dict(),
+                    "selection_namespace": namespace,
+                },
+            )
+        restricted_epoch = canonical_sha256(
+            {
+                "schema_version": RESTRICTED_CATALOG_SAMPLE_SCHEMA_VERSION,
+                "entry_selection_epoch": (
+                    entry.selection_epoch or entry.catalog_epoch
+                ),
+                "selection_namespace": namespace,
+                "eligible_ranges": [item.to_dict() for item in ranges],
+            }
+        )
+        selected_index = self._stable_sample_index(
+            seed=seed,
+            catalog_epoch=restricted_epoch,
+            population_size=total,
+        )
+        for eligible_range in ranges:
+            if selected_index < eligible_range.count:
+                return eligible_range.materialize(selected_index)
+            selected_index -= eligible_range.count
+        raise RuntimeError("restricted eligible-window index mapping drifted")
 
     def select_manual(
         self,
@@ -907,10 +1007,22 @@ class ReplayCatalog:
         scan_calls = 0
         calendar_id = ""
         chunk_start = start_ms
+        indexed_revision_scan = bool(
+            source_revision is not None
+            and getattr(
+                self._repository,
+                "supports_unbounded_indexed_gap_scan",
+                False,
+            )
+        )
         while chunk_start <= end_ms:
-            chunk_end = min(
-                end_ms,
-                chunk_start + (self._max_scan_rows - 1) * interval_ms,
+            chunk_end = (
+                end_ms
+                if indexed_revision_scan
+                else min(
+                    end_ms,
+                    chunk_start + (self._max_scan_rows - 1) * interval_ms,
+                )
             )
             scan_gaps_at_revision = getattr(
                 self._repository, "scan_gaps_at_revision", None

@@ -6,7 +6,11 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from app.data_engine.interval_policy import compute_bucket_start_ms, parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
+    is_monthly_interval,
+    parse_interval_ms,
+)
 from app.replay.bars.builder import ReplayBarBuilder, ReplayDisplayBar
 from app.replay.canonical import canonical_sha256
 from app.replay.catalog import KlinesReadRepository
@@ -76,9 +80,20 @@ def _decode_bar_snapshot(
                 "blind training history snapshot is invalid",
                 status_code=503,
             )
+        repository_backend = snapshot.provenance.repository_backend
         snapshot = remap_bar_snapshot_time(
             snapshot,
             synthetic_replay_start_ms=synthetic_origin,
+        )
+        # Actor checkpoints intentionally use the redacted synthetic backend,
+        # but server-side ALL_AVAILABLE reads still need the persisted source
+        # identity to reject legacy Runs after a repository migration.
+        snapshot = replace(
+            snapshot,
+            provenance=replace(
+                snapshot.provenance,
+                repository_backend=repository_backend,
+            ),
         )
     return snapshot
 
@@ -229,6 +244,15 @@ def _query_bound_repository(
             exchange=exchange,
             market_type=market_type,
         )
+    repository_backend = (
+        f"{type(repository).__module__}.{type(repository).__qualname__}"
+    )
+    if snapshot.provenance.repository_backend != repository_backend:
+        raise _fail(
+            "HISTORY_SOURCE_MIGRATION_REQUIRED",
+            "legacy training history is not revision-bound to the active replay source",
+            status_code=409,
+        )
     return repository.query_bars(
         symbol,
         interval,
@@ -377,6 +401,8 @@ def _build_native_display_page(
             exchange=config.exchange,
             market_type=config.market_type,
         )
+    except TrainingRunError:
+        raise
     except Exception as exc:
         raise _fail(
             "HISTORY_SOURCE_UNAVAILABLE",
@@ -480,6 +506,81 @@ def _build_all_available_page(
             "training display interval is invalid",
             status_code=503,
         )
+    source_revision = snapshot.provenance.source_revision
+    query_aggregated = getattr(
+        repository,
+        "query_aggregated_bars_at_revision",
+        None,
+    )
+    can_use_archive_aggregate = (
+        source_revision is not None
+        and callable(query_aggregated)
+        and display_interval_ms > interval_ms
+        and display_interval_ms % interval_ms == 0
+        and not is_monthly_interval(config.display_interval)
+    )
+    if can_use_archive_aggregate:
+        revealed_end_ms = compute_bucket_start_ms(
+            revealed_boundary_ms + 1,
+            display_interval_ms,
+            interval=config.display_interval,
+        )
+        aggregate_public_end_ms = min(public_end_ms, revealed_end_ms)
+        aggregate_actual_end_ms = aggregate_public_end_ms - timeline_delta_ms
+        if aggregate_actual_end_ms <= actual_visible_history_start_ms:
+            return [], before_ms, False
+        try:
+            aggregated = query_aggregated(
+                source_revision,
+                config.symbol,
+                config.base_interval,
+                config.display_interval,
+                actual_start_ms=actual_visible_history_start_ms,
+                actual_end_ms=aggregate_actual_end_ms,
+                timeline_delta_ms=timeline_delta_ms,
+                limit=limit,
+                exchange=config.exchange,
+                market_type=config.market_type,
+            )
+            raw_bars = aggregated["bars"]
+            aggregate_has_more = aggregated["has_more"]
+            if not isinstance(raw_bars, list) or not isinstance(
+                aggregate_has_more,
+                bool,
+            ):
+                raise TypeError("aggregate history result is invalid")
+            aggregate_bars = [
+                ReplayDisplayBar.from_dict(raw)
+                for raw in raw_bars
+                if isinstance(raw, Mapping)
+            ]
+            if len(aggregate_bars) != len(raw_bars):
+                raise TypeError("aggregate history bars are invalid")
+        except Exception as exc:
+            raise _fail(
+                "HISTORY_SOURCE_UNAVAILABLE",
+                "replay history source could not be aggregated",
+                status_code=503,
+            ) from exc
+        eligible = [
+            bar
+            for bar in aggregate_bars
+            if bar.open_time_ms >= history_boundary_ms
+            and bar.open_time_ms < before_ms
+            and bar.close_time_ms <= revealed_boundary_ms
+            and bar.last_base_open_ms <= revealed_boundary_ms
+        ]
+        page = eligible[-limit:]
+        has_more = aggregate_has_more or len(eligible) > len(page)
+        if not page and has_more:
+            raise _fail(
+                "HISTORY_PAGE_INTERVAL_TOO_LARGE",
+                "display interval cannot form a complete history page",
+                status_code=409,
+            )
+        next_before_ms = page[0].open_time_ms if page else before_ms
+        return list(page), next_before_ms, has_more
+
     components_per_display = max(
         1,
         (display_interval_ms + interval_ms - 1) // interval_ms,
@@ -508,6 +609,8 @@ def _build_all_available_page(
             exchange=config.exchange,
             market_type=config.market_type,
         )
+    except TrainingRunError:
+        raise
     except Exception as exc:
         raise _fail(
             "HISTORY_SOURCE_UNAVAILABLE",

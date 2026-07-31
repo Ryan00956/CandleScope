@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.data_engine.interval_policy import parse_interval_ms
+from app.replay.bars.trade_parity import trade_bar_parity_policy
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .account_history import AccountHistoryArchiveManager
@@ -78,12 +80,16 @@ class ReplayStorageGovernance:
         segments: ReplaySegmentManager,
         historical_books: HistoricalBookArchiveManager,
         account_history: AccountHistoryArchiveManager,
+        bar_repository: object | None = None,
+        raw_trade_archive: object | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
         self.segments = segments
         self.historical_books = historical_books
         self.account_history = account_history
+        self.bar_repository = bar_repository
+        self.raw_trade_archive = raw_trade_archive
 
     async def inventory(self) -> dict[str, object]:
         (
@@ -100,21 +106,29 @@ class ReplayStorageGovernance:
         }
         support_matrix = self._support_matrix(categories)
         alerts = self._alerts(categories)
+        core_enabled = bool(
+            self.settings.enabled and self.settings.product_v2_enabled
+        )
         return {
             "protocol": STORAGE_INVENTORY_PROTOCOL,
             "decision": {
-                "state": "HOLD",
-                "default_flags_enabled": False,
-                "reason_codes": [
-                    "PRODUCTION_OBSERVATION_WINDOW_NOT_BOUND",
-                    "BOOK_PRODUCTION_CAPTURE_NOT_PRESENT",
-                    "EXACT_ACCOUNT_PRODUCTION_CAPTURE_NOT_PRESENT",
-                ],
-                "implementation_state": "PHASE18_IMPLEMENTED_RELEASE_HOLD",
+                "state": "ENABLE" if core_enabled else "HOLD",
+                "default_flags_enabled": core_enabled,
+                "reason_codes": (
+                    []
+                    if core_enabled
+                    else ["REPLAY_RUNTIME_FLAGS_DISABLED"]
+                ),
+                "implementation_state": (
+                    "RUNTIME_ENABLED_SOURCE_GATED"
+                    if core_enabled
+                    else "RUNTIME_DISABLED"
+                ),
             },
             "feature_flags": {
                 "replay_enabled": self.settings.enabled,
                 "product_v2_enabled": self.settings.product_v2_enabled,
+                "agg_trade_enabled": self.settings.replay_agg_trade_enabled,
                 "segment_download_worker_enabled": (
                     self.settings.replay_segment_download_worker_enabled
                 ),
@@ -704,6 +718,138 @@ class ReplayStorageGovernance:
                 for key in sorted(identities)[:MAX_OBSERVED_IDENTITIES]
             ]
 
+        def current_bar_identities() -> list[dict[str, object]]:
+            list_all = getattr(self.bar_repository, "list_all_series", None)
+            if not callable(list_all):
+                return []
+            try:
+                rows = list_all(custom_only=False)
+            except Exception:
+                return []
+            identities: dict[str, dict[str, object]] = {}
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                identity = {
+                    "exchange": str(row.get("exchange", "")),
+                    "market_type": str(row.get("market_type", "")),
+                    "symbol": str(row.get("symbol", "")),
+                    "base_interval": str(row.get("interval", "")),
+                }
+                key = "|".join(str(identity[name]) for name in sorted(identity))
+                identities[key] = identity
+            return [
+                identities[key]
+                for key in sorted(identities)[:MAX_OBSERVED_IDENTITIES]
+            ]
+
+        def current_agg_identities() -> list[dict[str, object]]:
+            list_verified = getattr(
+                self.raw_trade_archive,
+                "list_verified_identities",
+                None,
+            )
+            if not callable(list_verified):
+                return []
+            try:
+                return [
+                    dict(item)
+                    for item in list_verified()[:MAX_OBSERVED_IDENTITIES]
+                    if isinstance(item, Mapping)
+                ]
+            except Exception:
+                return []
+
+        def bar_compatible_agg_identities(
+            verified: list[dict[str, object]],
+        ) -> tuple[list[dict[str, object]], bool]:
+            list_compatible = getattr(
+                self.raw_trade_archive,
+                "list_verified_bar_windows",
+                None,
+            )
+            list_all = getattr(self.bar_repository, "list_all_series", None)
+            if not callable(list_compatible) or not callable(list_all):
+                return verified, False
+            try:
+                bar_rows = [
+                    row
+                    for row in list_all(custom_only=False)
+                    if isinstance(row, Mapping)
+                ]
+            except Exception:
+                return [], True
+            compatible: list[dict[str, object]] = []
+            for identity in verified:
+                for row in bar_rows:
+                    if (
+                        str(row.get("exchange", "")),
+                        str(row.get("market_type", "")),
+                        str(row.get("symbol", "")),
+                    ) != (
+                        str(identity.get("exchange", "")),
+                        str(identity.get("market_type", "")),
+                        str(identity.get("symbol", "")),
+                    ):
+                        continue
+                    interval = str(row.get("interval", ""))
+                    interval_ms = parse_interval_ms(interval)
+                    revision = row.get("source_revision")
+                    if interval_ms is None or not isinstance(revision, str):
+                        continue
+                    try:
+                        windows = list_compatible(
+                            exchange=identity["exchange"],
+                            market_type=identity["market_type"],
+                            symbol=identity["symbol"],
+                            interval=interval,
+                            interval_ms=interval_ms,
+                            bar_source_revision=revision,
+                            parity_policy=trade_bar_parity_policy(
+                                compare_trade_count=False,
+                            ),
+                        )
+                    except Exception:
+                        continue
+                    if windows:
+                        compatible.append(identity)
+                        break
+            return compatible, True
+
+        core_enabled = bool(
+            self.settings.enabled and self.settings.product_v2_enabled
+        )
+        bar_identities = current_bar_identities()
+        raw_agg_identities = current_agg_identities()
+        bar_identity_keys = {
+            (
+                str(item.get("exchange", "")),
+                str(item.get("market_type", "")),
+                str(item.get("symbol", "")),
+            )
+            for item in bar_identities
+        }
+        identity_matched_agg = [
+            item
+            for item in raw_agg_identities
+            if (
+                str(item.get("exchange", "")),
+                str(item.get("market_type", "")),
+                str(item.get("symbol", "")),
+            )
+            in bar_identity_keys
+        ]
+        (
+            agg_identities,
+            compatibility_index_checked,
+        ) = bar_compatible_agg_identities(identity_matched_agg)
+        bar_ready = core_enabled and bool(bar_identities)
+        agg_ready = (
+            core_enabled
+            and self.settings.replay_agg_trade_enabled
+            and bool(agg_identities)
+        )
+
         return [
             {
                 "mode": "BAR",
@@ -712,9 +858,9 @@ class ReplayStorageGovernance:
                 "fidelity": "EXACT_CLOSED_BAR_COVERAGE_INTRABAR_CONSERVATIVE",
                 "queue_exact": False,
                 "required_flags": ["REPLAY_ENABLED", "REPLAY_PRODUCT_V2_ENABLED"],
-                "observed_identities": observed(segment_items, "BAR"),
-                "production_readiness": "HOLD",
-                "reason_codes": ["PRODUCTION_OBSERVATION_WINDOW_NOT_BOUND"],
+                "observed_identities": bar_identities,
+                "production_readiness": "ENABLE" if bar_ready else "HOLD",
+                "reason_codes": [] if bar_ready else ["CURRENT_BAR_SOURCE_UNAVAILABLE"],
             },
             {
                 "mode": "AGG_TRADE",
@@ -725,11 +871,33 @@ class ReplayStorageGovernance:
                 "required_flags": [
                     "REPLAY_ENABLED",
                     "REPLAY_PRODUCT_V2_ENABLED",
-                    "RAW_AGG_TRADE_ARCHIVE_ENABLED",
+                    "REPLAY_AGG_TRADE_ENABLED",
                 ],
-                "observed_identities": observed(segment_items, "AGG_TRADE"),
-                "production_readiness": "HOLD",
-                "reason_codes": ["PRODUCTION_OBSERVATION_WINDOW_NOT_BOUND"],
+                "observed_identities": agg_identities,
+                "production_readiness": "ENABLE" if agg_ready else "HOLD",
+                "reason_codes": (
+                    []
+                    if agg_ready
+                    else (
+                        ["REPLAY_AGG_TRADE_DISABLED"]
+                        if not self.settings.replay_agg_trade_enabled
+                        else (
+                            ["VERIFIED_AGG_TRADE_SOURCE_UNAVAILABLE"]
+                            if not raw_agg_identities
+                            else (
+                                ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
+                                if not identity_matched_agg
+                                else (
+                                    [
+                                        "BAR_AGG_TRADE_COMPATIBILITY_UNAVAILABLE"
+                                    ]
+                                    if compatibility_index_checked
+                                    else ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
+                                )
+                            )
+                        )
+                    )
+                ),
             },
             {
                 "mode": "BOOK_ASSISTED",
@@ -761,8 +929,9 @@ class ReplayStorageGovernance:
         self,
         categories: Mapping[str, object],
     ) -> list[dict[str, str]]:
-        alerts: list[dict[str, str]] = [
-            {
+        alerts: list[dict[str, str]] = []
+        if not (self.settings.enabled and self.settings.product_v2_enabled):
+            alerts.append({
                 "severity": "INFO",
                 "code": "REPLAY_CORE_DEFAULT_OFF",
                 "category": "release",
@@ -770,24 +939,25 @@ class ReplayStorageGovernance:
                     "Replay remains gated by the default-off core switch; "
                     "v2 is selected when replay is enabled."
                 ),
-            },
-            {
+            })
+        if not self.settings.replay_historical_book_enabled:
+            alerts.append({
                 "severity": "WARNING",
                 "code": "BOOK_PRODUCTION_SOURCE_MISSING",
                 "category": "historical_books",
                 "message": (
                     "BOOK is continuity-gated and has no bound production capture."
                 ),
-            },
-            {
+            })
+        if not self.settings.replay_account_history_enabled:
+            alerts.append({
                 "severity": "WARNING",
                 "code": "ACCOUNT_PRODUCTION_SOURCE_MISSING",
                 "category": "account_history",
                 "message": (
                     "Exact account mode has no bound production operator capture."
                 ),
-            },
-        ]
+            })
         for name, raw_category in categories.items():
             if not isinstance(raw_category, Mapping):
                 continue

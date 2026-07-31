@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from typing import Callable, TypeVar
 
 from app.core.config import REPLAY_SETTINGS, ReplaySettings
-from app.data_engine.storage.raw_trade_archive import RawAggTradeArchive
+from app.data_engine.storage.raw_trade_archive import (
+    DisabledRawAggTradeArchive,
+    ParquetRawAggTradeArchive,
+    RawAggTradeArchive,
+)
 
+from .history_archive import ReplayHistoryArchiveRuntimeLease
 from .service import ReplayService
 from .storage import ReplaySQLiteStore
 
@@ -27,6 +32,7 @@ class ReplayRuntime:
 
     settings: ReplaySettings
     service: ReplayService | None = None
+    archive_lease: ReplayHistoryArchiveRuntimeLease | None = None
 
     @property
     def enabled(self) -> bool:
@@ -35,6 +41,9 @@ class ReplayRuntime:
     async def shutdown(self, *, step_timeout: float = 5.0) -> None:
         service = self.service
         if service is None:
+            if self.archive_lease is not None:
+                self.archive_lease.release()
+                self.archive_lease = None
             return
         shutdown_task = asyncio.create_task(
             service.shutdown(step_timeout=step_timeout),
@@ -52,8 +61,14 @@ class ReplayRuntime:
                 pass
             else:
                 self.service = None
+                if self.archive_lease is not None:
+                    self.archive_lease.release()
+                    self.archive_lease = None
             raise
         self.service = None
+        if self.archive_lease is not None:
+            self.archive_lease.release()
+            self.archive_lease = None
 
     def diagnostics(self, *, redact_paths: bool = False) -> dict[str, object]:
         if self.service is None:
@@ -82,7 +97,13 @@ async def start_replay_runtime(
     factory = store_factory or ReplaySQLiteStore
     store: ReplaySQLiteStore | None = None
     service: ReplayService | None = None
+    archive_lease: ReplayHistoryArchiveRuntimeLease | None = None
     try:
+        if settings.replay_bar_source == "archive":
+            archive_lease = ReplayHistoryArchiveRuntimeLease(
+                settings.replay_history_archive_dir
+            )
+            archive_lease.acquire()
         store_task = asyncio.create_task(
             asyncio.to_thread(factory, str(settings.db_path)),
             name="replay-store-open",
@@ -105,17 +126,31 @@ async def start_replay_runtime(
             "settings": settings,
             "store": store,
         }
+        if raw_trade_archive is None:
+            raw_trade_archive = (
+                ParquetRawAggTradeArchive(
+                    settings.replay_agg_trade_archive_dir,
+                    read_only=True,
+                )
+                if settings.replay_agg_trade_enabled
+                else DisabledRawAggTradeArchive()
+            )
         if raw_trade_archive is not None:
             service_kwargs["raw_trade_archive"] = raw_trade_archive
         service = service_factory(**service_kwargs)
         await service.start()
     except asyncio.CancelledError:
         await _cleanup_partial_start(service=service, store=store)
+        if archive_lease is not None:
+            archive_lease.release()
         raise
     except Exception as exc:
         await _cleanup_partial_start(service=service, store=store)
+        if archive_lease is not None:
+            archive_lease.release()
         raise ReplayStartupError("enabled replay runtime failed to initialize") from exc
     runtime.service = service
+    runtime.archive_lease = archive_lease
     return runtime
 
 

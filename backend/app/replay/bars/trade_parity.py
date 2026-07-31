@@ -27,6 +27,23 @@ _DECIMAL_FIELDS = (
 )
 
 
+def trade_bar_parity_policy(
+    *,
+    compare_trade_count: bool = True,
+) -> dict[str, object]:
+    return {
+        "schema_version": TRADE_BAR_PARITY_SCHEMA_VERSION,
+        "compare_trade_count": bool(compare_trade_count),
+        "integer_policy": (
+            "exact"
+            if compare_trade_count
+            else "timestamps_exact_kline_trade_count_not_reconstructible"
+        ),
+        "absolute_tolerance": format(TRADE_BAR_ABSOLUTE_TOLERANCE, "f"),
+        "relative_tolerance": format(TRADE_BAR_RELATIVE_TOLERANCE, "f"),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class TradeBarParityMismatch:
     open_time_ms: int
@@ -49,6 +66,7 @@ class TradeBarParityMismatch:
 class TradeBarParityReport:
     checked_bars: int
     mismatches: tuple[TradeBarParityMismatch, ...]
+    integer_policy: str = "exact"
     absolute_tolerance: str = "0.00000001"
     relative_tolerance: str = "0.000000000001"
     schema_version: str = TRADE_BAR_PARITY_SCHEMA_VERSION
@@ -64,7 +82,7 @@ class TradeBarParityReport:
             "exact_enough": self.exact_enough,
             "absolute_tolerance": self.absolute_tolerance,
             "relative_tolerance": self.relative_tolerance,
-            "integer_policy": "exact",
+            "integer_policy": self.integer_policy,
             "mismatches": [value.to_dict() for value in self.mismatches],
         }
 
@@ -74,6 +92,7 @@ def audit_trade_bar_parity(
     reference: Sequence[ReplayDisplayBar | ReplayBar | Mapping[str, object]],
     *,
     max_mismatches: int = 100,
+    compare_trade_count: bool = True,
 ) -> TradeBarParityReport:
     """Compare one ordered closed-bar range using the frozen Phase 8 tolerance."""
 
@@ -100,7 +119,12 @@ def audit_trade_bar_parity(
     for actual_row, expected_row in zip(actual_rows, reference_rows):
         expected_open = _timestamp(expected_row, "open_time_ms")
         actual_open = _timestamp(actual_row, "open_time_ms")
-        for field in ("open_time_ms", "close_time_ms", "trades"):
+        integer_fields = (
+            ("open_time_ms", "close_time_ms", "trades")
+            if compare_trade_count
+            else ("open_time_ms", "close_time_ms")
+        )
+        for field in integer_fields:
             expected_value = (
                 _timestamp(expected_row, field)
                 if field != "trades"
@@ -160,14 +184,25 @@ def audit_trade_bar_parity(
     return TradeBarParityReport(
         checked_bars=checked,
         mismatches=tuple(mismatches[:max_mismatches]),
+        integer_policy=(
+            "exact"
+            if compare_trade_count
+            else "timestamps_exact_kline_trade_count_not_reconstructible"
+        ),
     )
 
 
 def assert_trade_bar_parity(
     actual: Sequence[ReplayDisplayBar | ReplayBar | Mapping[str, object]],
     reference: Sequence[ReplayDisplayBar | ReplayBar | Mapping[str, object]],
+    *,
+    compare_trade_count: bool = True,
 ) -> TradeBarParityReport:
-    report = audit_trade_bar_parity(actual, reference)
+    report = audit_trade_bar_parity(
+        actual,
+        reference,
+        compare_trade_count=compare_trade_count,
+    )
     if not report.exact_enough:
         raise ReplayDomainError(
             ReplayErrorCode.DATASET_MISMATCH,
@@ -206,4 +241,5 @@ __all__ = [
     "TradeBarParityReport",
     "assert_trade_bar_parity",
     "audit_trade_bar_parity",
+    "trade_bar_parity_policy",
 ]

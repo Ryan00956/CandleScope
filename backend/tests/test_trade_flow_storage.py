@@ -437,6 +437,73 @@ async def test_parquet_archive_is_immutable_deduplicated_and_reports_gaps(
     assert writer.diagnostics()["rows_archived"] == 4
 
 
+def test_live_microfiles_compact_without_changing_replay_rows(tmp_path) -> None:
+    pytest.importorskip("pyarrow")
+    root = tmp_path / "raw-trades"
+    archive = ParquetRawAggTradeArchive(root, max_rows_per_file=100)
+    for agg_trade_id in range(1, 11):
+        archive.append(
+            [
+                _raw_trade(
+                    agg_trade_id,
+                    trade_time_ms=START_MS + agg_trade_id,
+                )
+            ]
+        )
+    before = archive.scan_range(
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+    )
+    assert len(list(root.rglob("*.parquet"))) == 10
+
+    report = archive.compact_live_partitions(
+        min_files=4,
+        max_input_files=20,
+        max_partitions=1,
+    )
+    after = archive.scan_range(
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+    )
+
+    assert report == {
+        "partitions_compacted": 1,
+        "files_removed": 10,
+        "files_written": 1,
+        "rows_written": 10,
+    }
+    assert after == before
+    assert len(list(root.rglob("*.parquet"))) == 1
+
+
+def test_live_compaction_skips_already_full_files(tmp_path) -> None:
+    pytest.importorskip("pyarrow")
+    root = tmp_path / "full-files"
+    archive = ParquetRawAggTradeArchive(root, max_rows_per_file=2)
+    for offset in range(0, 8, 2):
+        archive.append(
+            [
+                _raw_trade(
+                    agg_trade_id,
+                    trade_time_ms=START_MS + agg_trade_id,
+                )
+                for agg_trade_id in range(offset + 1, offset + 3)
+            ]
+        )
+
+    before = sorted(root.rglob("*.parquet"))
+    report = archive.compact_live_partitions(
+        min_files=4,
+        max_input_files=4,
+        max_input_rows=8,
+    )
+
+    assert report["partitions_compacted"] == 0
+    assert sorted(root.rglob("*.parquet")) == before
+
+
 def test_parquet_archive_prunes_utc_date_partitions_and_uses_sidecars(
     tmp_path,
 ) -> None:

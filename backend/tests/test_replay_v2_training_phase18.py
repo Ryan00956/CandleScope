@@ -16,6 +16,7 @@ from app.replay.training.anchor_codec import (
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
 from app.replay.training.segments import ReplaySegmentManager
+from app.replay.training.storage_governance import ReplayStorageGovernance
 from scripts.validate_replay_v2_real_sources import validate_kline_source
 from tests.fixtures.replay.account_history import build_account_history_archive
 from tests.fixtures.replay.service_fakes import replay_settings
@@ -43,6 +44,73 @@ from tests.test_replay_v2_training_api import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_agg_trade_readiness_requires_a_matching_bar_identity(
+    tmp_path: Path,
+) -> None:
+    class BarRepository:
+        def __init__(self, market_type: str) -> None:
+            self.market_type = market_type
+
+        def list_all_series(self, *, custom_only: bool) -> list[dict[str, str]]:
+            assert custom_only is False
+            return [
+                {
+                    "exchange": "binance",
+                    "market_type": self.market_type,
+                    "symbol": "BTCUSDT",
+                    "interval": "1m",
+                }
+            ]
+
+    class TradeArchive:
+        @staticmethod
+        def list_verified_identities() -> list[dict[str, str]]:
+            return [
+                {
+                    "exchange": "binance",
+                    "market_type": "futures",
+                    "symbol": "BTCUSDT",
+                }
+            ]
+
+    settings = replace(
+        replay_settings(tmp_path / "governance.db"),
+        product_v2_enabled=True,
+        replay_agg_trade_enabled=True,
+    )
+    categories = {
+        "segments": {"items": []},
+        "historical_books": {"items": []},
+        "account_history": {"items": []},
+    }
+    governance = ReplayStorageGovernance(
+        store=None,  # type: ignore[arg-type]
+        settings=settings,
+        segments=None,  # type: ignore[arg-type]
+        historical_books=None,  # type: ignore[arg-type]
+        account_history=None,  # type: ignore[arg-type]
+        bar_repository=BarRepository("spot"),
+        raw_trade_archive=TradeArchive(),
+    )
+    mismatched = next(
+        item
+        for item in governance._support_matrix(categories)
+        if item["mode"] == "AGG_TRADE"
+    )
+    assert mismatched["production_readiness"] == "HOLD"
+    assert mismatched["reason_codes"] == ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
+
+    governance.bar_repository = BarRepository("futures")
+    matched = next(
+        item
+        for item in governance._support_matrix(categories)
+        if item["mode"] == "AGG_TRADE"
+    )
+    assert matched["production_readiness"] == "ENABLE"
+    assert matched["reason_codes"] == []
+    assert matched["observed_identities"] == TradeArchive.list_verified_identities()
 
 
 def test_review_anchor_codec_is_bounded_and_integrity_checked() -> None:
@@ -409,8 +477,8 @@ async def test_account_gc_rechecks_pin_and_inventory_is_bounded_redacted(
 
         inventory = await service.training.storage_inventory()
         assert inventory["protocol"] == "replay.storage.inventory.v1"
-        assert inventory["decision"]["state"] == "HOLD"
-        assert inventory["decision"]["default_flags_enabled"] is False
+        assert inventory["decision"]["state"] == "ENABLE"
+        assert inventory["decision"]["default_flags_enabled"] is True
         assert inventory["bounds"] == {
             "max_items_per_category": 200,
             "max_observed_identities": 100,

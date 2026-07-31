@@ -112,6 +112,86 @@ def test_catalog_random_selection_is_seeded_and_matches_golden() -> None:
         catalog.select_random(entry, seed=MAX_RANDOM_SEED + 1)
 
 
+def test_catalog_restricted_random_selection_maps_only_the_supplied_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, identity, case = _fixture_repo()
+    catalog = _catalog(repo, case)
+    snapshot = catalog.build(
+        warmup_bars=int(case["warmup_bars"]),
+        horizon_ms=int(case["horizon_ms"]),
+    )
+    entry = snapshot.require_entry(
+        ReplaySeriesIdentity(identity.exchange, identity.market_type, identity.symbol)
+    )
+    restricted = (entry.eligible_ranges[1],)
+    expected_starts = [
+        restricted[0].first_start_ms,
+        restricted[0].last_start_ms,
+    ]
+
+    for selected_index, expected_start in enumerate(expected_starts):
+        monkeypatch.setattr(
+            catalog,
+            "_stable_sample_index",
+            lambda **_kwargs: selected_index,
+        )
+        selected = catalog.select_random_from_ranges(
+            entry,
+            eligible_ranges=restricted,
+            seed=7,
+            selection_namespace="test-source",
+        )
+        assert selected.replay_start_ms == expected_start
+
+    with pytest.raises(ReplayDomainError) as empty:
+        catalog.select_random_from_ranges(
+            entry,
+            eligible_ranges=(),
+            seed=7,
+            selection_namespace="test-source",
+        )
+    assert empty.value.code is ReplayErrorCode.NO_ELIGIBLE_WINDOW
+
+
+def test_random_selection_is_not_remapped_by_an_unrelated_series() -> None:
+    repo, identity, case = _fixture_repo()
+    kwargs = {
+        "warmup_bars": int(case["warmup_bars"]),
+        "horizon_ms": int(case["horizon_ms"]),
+    }
+    first_catalog = _catalog(repo, case)
+    first_snapshot = first_catalog.build(**kwargs)
+    first_entry = first_snapshot.require_entry(
+        ReplaySeriesIdentity(identity.exchange, identity.market_type, identity.symbol)
+    )
+    first_selection = first_catalog.select_random(first_entry, seed=7)
+
+    unrelated = FixtureIdentity("binance", "spot", "ETHUSDT")
+    repo.add_rows(
+        unrelated,
+        "1m",
+        [
+            make_bar(
+                int(case["start_ms"]) + offset * int(case["interval_ms"]),
+                interval_ms=int(case["interval_ms"]),
+                price=str(1_000 + offset),
+            )
+            for offset in range(int(case["bar_count"]))
+        ],
+    )
+    second_catalog = _catalog(repo, case)
+    second_snapshot = second_catalog.build(**kwargs)
+    second_entry = second_snapshot.require_entry(
+        ReplaySeriesIdentity(identity.exchange, identity.market_type, identity.symbol)
+    )
+    second_selection = second_catalog.select_random(second_entry, seed=7)
+
+    assert second_snapshot.catalog_epoch != first_snapshot.catalog_epoch
+    assert second_entry.selection_epoch == first_entry.selection_epoch
+    assert second_selection == first_selection
+
+
 def test_catalog_manual_start_fails_with_specific_alignment_gap_and_boundary_reasons() -> None:
     repo, identity, case = _fixture_repo()
     catalog = _catalog(repo, case)

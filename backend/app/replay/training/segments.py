@@ -433,7 +433,8 @@ def backfill_archive_segments(connection: sqlite3.Connection, *, now_ms: int) ->
         SELECT p.run_id, p.pin_id, p.manifest_json,
                r.source_kind, t.track_id,
                d.snapshot_ref_json, d.snapshot_sha256,
-               length(d.snapshot_blob) AS snapshot_bytes,
+               COALESCE(d.snapshot_size_bytes, length(d.snapshot_blob))
+                   AS snapshot_bytes,
                d.actual_replay_start_ms, d.actual_replay_end_ms,
                s.config_json,
                policy.effective_warmup_bars AS policy_effective_warmup_bars,

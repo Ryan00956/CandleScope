@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import cast
 
 from app.replay.canonical import canonical_json, canonical_sha256
+from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.broker.models import decimal_to_string
 from app.replay.period_summary import (
     EncodedPeriodSummaryCandidate,
@@ -325,6 +326,16 @@ class TrainingRunStore:
                 (now,),
             )
             backfill_archive_segments(connection, now_ms=now)
+            connection.execute(
+                """
+                DELETE FROM replay_data_segment
+                WHERE storage_kind = 'EMBEDDED_ARCHIVE'
+                  AND NOT EXISTS(
+                      SELECT 1 FROM replay_data_segment_ref AS ref
+                      WHERE ref.segment_id = replay_data_segment.segment_id
+                  )
+                """
+            )
             self._review.backfill(connection, now_ms=now)
 
         await self.base_store.run_extension_write(migrate)
@@ -543,6 +554,7 @@ class TrainingRunStore:
             self._insert_pin(
                 connection,
                 run_id=run_id,
+                track_id="track-1",
                 adapter_session_id=adapter_session_id,
                 dataset_epoch=str(session_state["data_epoch"]),
                 now_ms=now_ms,
@@ -3193,6 +3205,7 @@ class TrainingRunStore:
             self._insert_pin(
                 connection,
                 run_id=child_run_id,
+                track_id="track-1",
                 adapter_session_id=session_id,
                 dataset_epoch=str(parent["dataset_epoch"]),
                 now_ms=now_ms,
@@ -3629,6 +3642,16 @@ class TrainingRunStore:
                             status_code=503,
                             details={"session_id": session_id},
                         )
+                connection.execute(
+                    """
+                    DELETE FROM replay_data_segment
+                    WHERE storage_kind = 'EMBEDDED_ARCHIVE'
+                      AND NOT EXISTS(
+                          SELECT 1 FROM replay_data_segment_ref AS ref
+                          WHERE ref.segment_id = replay_data_segment.segment_id
+                      )
+                    """
+                )
                 return session_ids
 
             legacy = connection.execute(
@@ -3678,10 +3701,12 @@ class TrainingRunStore:
                 )
             return (run_id,)
 
-        return await self.base_store.run_extension_write(
+        deleted_sessions = await self.base_store.run_extension_write(
             write,
             allow_degraded=True,
         )
+        await self.base_store.collect_dataset_objects()
+        return deleted_sessions
 
     async def migrate_legacy(
         self,
@@ -3886,6 +3911,7 @@ class TrainingRunStore:
             self._insert_pin(
                 connection,
                 run_id=run_id,
+                track_id="track-1",
                 adapter_session_id=session_id,
                 dataset_epoch=str(row["dataset_epoch"]),
                 now_ms=now_ms,
@@ -7935,26 +7961,13 @@ class TrainingRunStore:
                         track_id,
                     ),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO replay_training_pin(
-                        run_id, pin_id, dataset_epoch, pin_kind,
-                        manifest_json, created_at_ms
-                    ) VALUES (?, ?, ?, 'V1_DATASET_REF', ?, ?)
-                    """,
-                    (
-                        run_id,
-                        f"{track_id}-dataset",
-                        str(session_state["data_epoch"]),
-                        canonical_json(
-                            {
-                                "schema": "replay.training.rehydration.v1",
-                                "adapter_session_id": session_id,
-                                "owner": "replay_dataset_ref",
-                            }
-                        ),
-                        now_ms,
-                    ),
+                self._insert_pin(
+                    connection,
+                    run_id=run_id,
+                    track_id=track_id,
+                    adapter_session_id=session_id,
+                    dataset_epoch=str(session_state["data_epoch"]),
+                    now_ms=now_ms,
                 )
                 policy_row = connection.execute(
                     """
@@ -8737,8 +8750,22 @@ class TrainingRunStore:
                 (run_id, f"{track_id}-dataset"),
             )
             connection.execute(
+                "DELETE FROM replay_archive_pin WHERE run_id = ? AND track_id = ?",
+                (run_id, track_id),
+            )
+            connection.execute(
                 "DELETE FROM replay_data_segment_ref WHERE run_id = ? AND track_id = ?",
                 (run_id, track_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM replay_data_segment
+                WHERE storage_kind = 'EMBEDDED_ARCHIVE'
+                  AND NOT EXISTS(
+                      SELECT 1 FROM replay_data_segment_ref AS ref
+                      WHERE ref.segment_id = replay_data_segment.segment_id
+                  )
+                """
             )
             return None if session_id is None else str(session_id)
 
@@ -11837,18 +11864,25 @@ class TrainingRunStore:
         connection: sqlite3.Connection,
         *,
         run_id: str,
+        track_id: str,
         adapter_session_id: str,
         dataset_epoch: str,
         now_ms: int,
     ) -> None:
+        pin_id = (
+            "primary-dataset"
+            if track_id == "track-1"
+            else f"{track_id}-dataset"
+        )
         connection.execute(
             """
             INSERT INTO replay_training_pin(
                 run_id, pin_id, dataset_epoch, pin_kind, manifest_json, created_at_ms
-            ) VALUES (?, 'primary-dataset', ?, 'V1_DATASET_REF', ?, ?)
+            ) VALUES (?, ?, ?, 'V1_DATASET_REF', ?, ?)
             """,
             (
                 run_id,
+                pin_id,
                 dataset_epoch,
                 canonical_json(
                     {
@@ -11857,6 +11891,60 @@ class TrainingRunStore:
                         "owner": "replay_dataset_ref",
                     }
                 ),
+                now_ms,
+            ),
+        )
+        dataset_row = connection.execute(
+            """
+            SELECT snapshot_ref_json, snapshot_blob
+            FROM replay_dataset_ref
+            WHERE session_id = ?
+            """,
+            (adapter_session_id,),
+        ).fetchone()
+        if dataset_row is None:
+            return
+        raw_bar_ref = persisted_bar_archive_reference(
+            dataset_row["snapshot_ref_json"],
+            dataset_row["snapshot_blob"],
+            strict=True,
+        )
+        if raw_bar_ref is None:
+            return
+        source_revision = raw_bar_ref.get("source_revision")
+        identity = raw_bar_ref.get("identity")
+        if (
+            not isinstance(source_revision, str)
+            or len(source_revision) != 71
+            or not source_revision.startswith("sha256:")
+            or not isinstance(identity, Mapping)
+        ):
+            return
+        try:
+            archive_values = (
+                str(identity["exchange"]),
+                str(identity["market_type"]),
+                str(identity["symbol"]),
+                str(raw_bar_ref["interval"]),
+                int(raw_bar_ref["warmup_start_ms"]),
+                int(raw_bar_ref["replay_end_open_ms"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO replay_archive_pin(
+                run_id, track_id, source_revision,
+                exchange, market_type, symbol, base_interval,
+                range_start_ms, range_end_ms, dataset_epoch, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                track_id,
+                source_revision,
+                *archive_values,
+                dataset_epoch,
                 now_ms,
             ),
         )

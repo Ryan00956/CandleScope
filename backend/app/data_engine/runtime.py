@@ -39,8 +39,11 @@ from app.core.config import (
     RAW_AGG_TRADE_ARCHIVE_DIR,
     RAW_AGG_TRADE_ARCHIVE_ENABLED,
     RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS,
+    RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES,
+    RAW_AGG_TRADE_ARCHIVE_MAX_BUFFER_SECONDS,
     RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES,
     RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH,
+    RAW_AGG_TRADE_ARCHIVE_TARGET_FILE_ROWS,
     RAW_AGG_TRADE_ARCHIVE_STREAMS,
     TRADE_FLOW_BATCH_INTERVAL_SECONDS,
     TRADE_FLOW_DB_PATH,
@@ -96,7 +99,6 @@ from app.data_engine.storage import (
     TradeFlowRollupStore,
     TradeFlowRollupWriter,
 )
-from app.replay.runtime import ReplayRuntime, start_replay_runtime
 
 logger = logging.getLogger("data_engine.runtime")
 
@@ -139,16 +141,11 @@ class DataEngineRuntime:
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
     gap_audit_task: asyncio.Task | None = None
-    replay_runtime: ReplayRuntime | None = None
 
     def attach_to_app_state(self, state: Any) -> None:
         """Expose stable app.state handles used by API routes."""
         state.data_engine_runtime = self
         state.data_manager = self.data_manager
-        state.replay_runtime = self.replay_runtime
-        state.replay_service = (
-            None if self.replay_runtime is None else self.replay_runtime.service
-        )
 
     def get_ingestion_config(self) -> IngestionConfig | None:
         """Return the primary ingestion config for settings display."""
@@ -206,13 +203,6 @@ class DataEngineRuntime:
 
     async def shutdown(self, step_timeout: float = 5.0) -> None:
         """Stop runtime-owned components in dependency order."""
-        if self.replay_runtime is not None:
-            await self._shutdown_step(
-                "ReplayRuntime",
-                self.replay_runtime.shutdown(step_timeout=step_timeout),
-                None,
-            )
-
         await self._cancel_background_task(self.gap_audit_task, "Gap audit")
         await self._cancel_background_task(self.gap_scan_task, "Gap scan")
 
@@ -344,6 +334,18 @@ def _build_trade_flow_service(
         flush_interval_seconds=archive_flush_seconds,
         max_pending_batches=archive_pending_batches,
         max_rows_per_batch=archive_batch_rows,
+        target_rows_per_file=_positive_int_config(
+            "RAW_AGG_TRADE_ARCHIVE_TARGET_FILE_ROWS",
+            RAW_AGG_TRADE_ARCHIVE_TARGET_FILE_ROWS,
+        ),
+        max_buffer_seconds=_non_negative_float_config(
+            "RAW_AGG_TRADE_ARCHIVE_MAX_BUFFER_SECONDS",
+            RAW_AGG_TRADE_ARCHIVE_MAX_BUFFER_SECONDS,
+        ),
+        compact_every_batches=_positive_int_config(
+            "RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES",
+            RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES,
+        ),
     )
     event_queue_size = _positive_int_config(
         "TRADE_FLOW_EVENT_QUEUE_SIZE",
@@ -799,7 +801,6 @@ async def start_data_engine() -> DataEngineRuntime:
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
     full_order_book_service: FullOrderBookService | None = None
-    replay_runtime: ReplayRuntime | None = None
 
     try:
         history_service = HistoryAvailabilityService(
@@ -938,9 +939,6 @@ async def start_data_engine() -> DataEngineRuntime:
             ingestion_factory,
         )
 
-        replay_runtime = await start_replay_runtime(
-            raw_trade_archive=trade_flow_service.raw_archive
-        )
         gap_scan_task = _start_startup_gap_scan(dm, backfill_coordinator)
         gap_audit_task = _start_background_gap_audit(dm, backfill_coordinator)
 
@@ -959,7 +957,6 @@ async def start_data_engine() -> DataEngineRuntime:
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
             gap_audit_task=gap_audit_task,
-            replay_runtime=replay_runtime,
         )
         return runtime
     except Exception:
@@ -976,7 +973,6 @@ async def start_data_engine() -> DataEngineRuntime:
                 liquidation_service=liquidation_service,
                 order_book_service=order_book_service,
                 full_order_book_service=full_order_book_service,
-                replay_runtime=replay_runtime,
             )
         raise
 
@@ -1156,11 +1152,7 @@ async def _cleanup_partial_start(
     liquidation_service: LiquidationService | None = None,
     order_book_service: OrderBookService | None = None,
     full_order_book_service: FullOrderBookService | None = None,
-    replay_runtime: ReplayRuntime | None = None,
 ) -> None:
-    if replay_runtime is not None:
-        with suppress(Exception):
-            await replay_runtime.shutdown()
     if price_source is not None:
         with suppress(Exception):
             await price_source.stop()

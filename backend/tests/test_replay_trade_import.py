@@ -128,6 +128,17 @@ def test_verified_import_is_idempotent_and_freezes_checksum_generation(
     assert dataset.source_quality == "binance_public_checksum"
     assert len(dataset.objects) == 2
     assert all(item.source_checksum_sha256 for item in dataset.objects)
+    verified_windows = archive.list_verified_windows(
+        exchange="binance",
+        market_type="futures",
+        symbol=SYMBOL,
+    )
+    assert len(verified_windows) == 1
+    assert verified_windows[0].start_time_ms == START_MS
+    assert verified_windows[0].end_time_ms == START_MS + 86_400_000 - 1
+    assert verified_windows[0].first_agg_trade_id == 100
+    assert verified_windows[0].last_agg_trade_id == 103
+    assert verified_windows[0].partition_count == 1
 
     first = archive.scan_page(
         exchange="binance",
@@ -187,6 +198,11 @@ def test_verified_import_conflicting_checksum_quarantines_partition(
         )
     assert list((tmp_path / "archive").rglob("_verified_import_conflict.json"))
     assert list((tmp_path / "archive" / "_quarantine").glob("conflict-*"))
+    assert archive.list_verified_windows(
+        exchange="binance",
+        market_type="futures",
+        symbol=SYMBOL,
+    ) == ()
     with pytest.raises(RuntimeError, match="quarantined"):
         archive.freeze_dataset(
             exchange="binance",

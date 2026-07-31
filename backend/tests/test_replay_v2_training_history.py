@@ -225,6 +225,42 @@ async def test_all_available_history_pages_repository_to_the_bound_source_start(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_legacy_all_available_run_refuses_a_different_history_backend(
+    tmp_path: Path,
+) -> None:
+    service, repository = await _service(tmp_path / "legacy-source-change.db")
+    try:
+        _created, snapshot = await _create_run(
+            service,
+            history_mode="ALL_AVAILABLE",
+            requested_start_index=12,
+        )
+        replacement_type = type(
+            "ReplacementHistoryRepository",
+            (type(repository),),
+            {},
+        )
+        service._repository = replacement_type()  # noqa: SLF001
+        training = service.training
+        assert training is not None
+        boundary = int(snapshot["cursor"]["virtual_time_ms"])  # type: ignore[index]
+
+        with pytest.raises(TrainingRunError) as captured:
+            await training.history_page(
+                "adapter-1",
+                track_id="track-1",
+                before_ms=boundary + 1,
+                revealed_boundary_ms=boundary,
+                limit=3,
+                data_epoch=str(snapshot["data_epoch"]),
+                history_epoch=None,
+            )
+        assert captured.value.code == "HISTORY_SOURCE_MIGRATION_REQUIRED"
+        assert captured.value.status_code == 409
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_history_rejects_epoch_boundary_and_source_identity_drift(
     tmp_path: Path,
 ) -> None:

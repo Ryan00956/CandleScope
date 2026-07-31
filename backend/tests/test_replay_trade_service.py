@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from app.data_engine.storage.raw_trade_archive import ParquetRawAggTradeArchive
-from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
+from app.data_engine.storage.raw_trade_archive import (
+    ParquetRawAggTradeArchive,
+    VerifiedRawAggTradeBarWindow,
+)
+from app.replay.bars.trade_parity import trade_bar_parity_policy
+from app.replay.constants import (
+    REPLAY_PROTOCOL,
+    CommandType,
+    SessionState,
+    StartPolicy,
+)
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService, SYNTHETIC_TIME_ANCHOR_MS
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.trade_compatibility import build_trade_bar_compatibility
+from tests.fixtures.replay.fakes import FixtureIdentity
 from tests.fixtures.replay.service_fakes import SessionIdFactory, replay_settings
 from tests.fixtures.replay.trade_service_fakes import (
+    DAY_START_MS,
     TRADE_NOW_MS,
     TRADE_REPLAY_START_MS,
     trade_replay_config,
@@ -107,6 +120,187 @@ async def test_trade_capability_stays_closed_without_a_verified_exact_partition(
         "reason": "DATASET_INCOMPLETE",
     }
     await service.shutdown(step_timeout=1.0)
+
+
+async def test_random_trade_selection_uses_only_verified_trade_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "verified-archive")
+    repository = trade_replay_repository()
+    identity = FixtureIdentity("binance", "futures", "BTCUSDT")
+    key = (identity.exchange, identity.market_type, identity.symbol, "1m")
+    verified_rows = repository.rows[key]
+    unverified_rows = [
+        {
+            **row,
+            "open_time": int(row["open_time"]) - 86_400_000,
+            "close_time": int(row["close_time"]) - 86_400_000,
+        }
+        for row in verified_rows
+    ]
+    repository.add_rows(identity, "1m", unverified_rows + verified_rows)
+    service = ReplayService(
+        settings=replay_settings(tmp_path / "random-trade.db"),
+        store=ReplaySQLiteStore(
+            tmp_path / "random-trade.db",
+            now_ms=lambda: TRADE_NOW_MS,
+        ),
+        repository=repository,
+        raw_trade_archive=archive,
+        now_ms=lambda: TRADE_NOW_MS,
+        session_id_factory=SessionIdFactory("random-trade"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        config = replace(
+            trade_replay_config(),
+            start_policy=StartPolicy.RANDOM_ELIGIBLE,
+            requested_start_ms=None,
+        )
+        catalog = await service.catalog(
+            warmup_bars=config.warmup_bars,
+            horizon_ms=config.horizon_ms,
+            quality_mode=config.quality_mode.value,
+            blind_mode=False,
+        )
+        entry = catalog["entries"][0]
+        assert entry["eligible_window_count"] == 6
+        dataset_ref = archive.freeze_dataset(
+            exchange="binance",
+            market_type="futures",
+            symbol="BTCUSDT",
+            start_time_ms=TRADE_REPLAY_START_MS,
+            end_time_ms=(
+                TRADE_REPLAY_START_MS + config.horizon_ms - 1
+            ),
+        )
+        archive.publish_bar_compatibility(
+            dataset_ref=dataset_ref,
+            interval="1m",
+            interval_ms=60_000,
+            bar_source_revision=str(entry["source_fingerprint"]),
+            parity_policy=trade_bar_parity_policy(compare_trade_count=False),
+            checked_bar_count=4,
+            mismatch_bar_count=0,
+            compatible_windows=(
+                VerifiedRawAggTradeBarWindow(
+                    start_time_ms=TRADE_REPLAY_START_MS,
+                    end_time_ms=(
+                        TRADE_REPLAY_START_MS + config.horizon_ms - 1
+                    ),
+                    bar_count=4,
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            service._catalog,
+            "_stable_sample_index",
+            lambda **_kwargs: 0,
+        )
+
+        selected = await service.select_training_window(
+            config,
+            expected_catalog_epoch=str(catalog["catalog_epoch"]),
+        )
+
+        assert selected["selected_start_ms"] >= DAY_START_MS
+        assert (
+            int(selected["selected_start_ms"])
+            + config.horizon_ms
+            - 1
+            <= DAY_START_MS + 86_400_000 - 1
+        )
+        assert selected["selected_start_ms"] == TRADE_REPLAY_START_MS
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_trade_bar_compatibility_builder_publishes_matching_segments(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "compatibility-archive")
+    revision = "sha256:" + "a" * 64
+
+    report = build_trade_bar_compatibility(
+        archive,
+        trade_replay_repository(),
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+        interval="1m",
+        start_time_ms=TRADE_REPLAY_START_MS,
+        end_time_ms=TRADE_REPLAY_START_MS + 4 * 60_000 - 1,
+        bar_source_revision=revision,
+    )
+
+    assert report["checked_bar_count"] == 4
+    assert report["matching_bar_count"] == 4
+    assert report["mismatch_bar_count"] == 0
+    assert archive.list_verified_bar_windows(
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+        interval="1m",
+        interval_ms=60_000,
+        bar_source_revision=revision,
+        parity_policy=trade_bar_parity_policy(compare_trade_count=False),
+    ) == (
+        VerifiedRawAggTradeBarWindow(
+            start_time_ms=TRADE_REPLAY_START_MS,
+            end_time_ms=TRADE_REPLAY_START_MS + 4 * 60_000 - 1,
+            bar_count=4,
+        ),
+    )
+
+
+async def test_trade_bar_compatibility_keeps_disjoint_dataset_proofs(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "multi-compatibility-archive")
+    revision = "sha256:" + "b" * 64
+    policy = trade_bar_parity_policy(compare_trade_count=False)
+    expected_windows: list[VerifiedRawAggTradeBarWindow] = []
+
+    for start_offset_minutes in (0, 2):
+        start_time_ms = (
+            TRADE_REPLAY_START_MS + start_offset_minutes * 60_000
+        )
+        end_time_ms = start_time_ms + 2 * 60_000 - 1
+        dataset_ref = archive.freeze_dataset(
+            exchange="binance",
+            market_type="futures",
+            symbol="BTCUSDT",
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+        )
+        window = VerifiedRawAggTradeBarWindow(
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            bar_count=2,
+        )
+        expected_windows.append(window)
+        archive.publish_bar_compatibility(
+            dataset_ref=dataset_ref,
+            interval="1m",
+            interval_ms=60_000,
+            bar_source_revision=revision,
+            parity_policy=policy,
+            checked_bar_count=2,
+            mismatch_bar_count=0,
+            compatible_windows=(window,),
+        )
+
+    assert archive.list_verified_bar_windows(
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+        interval="1m",
+        interval_ms=60_000,
+        bar_source_revision=revision,
+        parity_policy=policy,
+    ) == tuple(expected_windows)
 
 
 async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(

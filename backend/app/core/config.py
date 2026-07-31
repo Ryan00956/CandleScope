@@ -65,6 +65,8 @@ class ReplaySettings:
     replay_account_history_max_archive_bytes: int = 137_438_953_472
     replay_bar_source: str = "archive"
     replay_history_archive_dir: Path = Path("data/replay-history")
+    replay_agg_trade_enabled: bool = False
+    replay_agg_trade_archive_dir: Path = Path("data/replay-agg-trades")
 
     @property
     def product_v2_available(self) -> bool:
@@ -134,6 +136,48 @@ def load_replay_settings(
         raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify REPLAY_DB_PATH")
     if _paths_refer_to_same_file(replay_history_archive_dir, klines_db_path):
         raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify KLINES_DB_PATH")
+    replay_agg_trade_archive_dir = Path(
+        environment.get(
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR",
+            str(data_dir / "replay-agg-trades"),
+        )
+    )
+    live_agg_trade_archive_dir = Path(
+        environment.get(
+            "RAW_AGG_TRADE_ARCHIVE_DIR",
+            str(data_dir / "raw-agg-live-spool"),
+        )
+    )
+    if _paths_refer_to_same_file(
+        replay_agg_trade_archive_dir,
+        replay_db_path,
+    ):
+        raise ValueError(
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify REPLAY_DB_PATH"
+        )
+    if _paths_refer_to_same_file(
+        replay_agg_trade_archive_dir,
+        klines_db_path,
+    ):
+        raise ValueError(
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify KLINES_DB_PATH"
+        )
+    if _paths_refer_to_same_file(
+        replay_agg_trade_archive_dir,
+        replay_history_archive_dir,
+    ):
+        raise ValueError(
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify "
+            "REPLAY_HISTORY_ARCHIVE_DIR"
+        )
+    if _paths_refer_to_same_file(
+        replay_agg_trade_archive_dir,
+        live_agg_trade_archive_dir,
+    ):
+        raise ValueError(
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify "
+            "RAW_AGG_TRADE_ARCHIVE_DIR"
+        )
     values = {
         name: _bounded_replay_int(environment, name)
         for name in _REPLAY_BUDGETS
@@ -183,6 +227,10 @@ def load_replay_settings(
         ],
         replay_bar_source=replay_bar_source,
         replay_history_archive_dir=replay_history_archive_dir,
+        replay_agg_trade_enabled=_strict_replay_bool(
+            environment, "REPLAY_AGG_TRADE_ENABLED", "0"
+        ),
+        replay_agg_trade_archive_dir=replay_agg_trade_archive_dir,
     )
 
 # Server
@@ -237,6 +285,8 @@ REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES = (
 )
 REPLAY_BAR_SOURCE = REPLAY_SETTINGS.replay_bar_source
 REPLAY_HISTORY_ARCHIVE_DIR = REPLAY_SETTINGS.replay_history_archive_dir
+REPLAY_AGG_TRADE_ENABLED = REPLAY_SETTINGS.replay_agg_trade_enabled
+REPLAY_AGG_TRADE_ARCHIVE_DIR = REPLAY_SETTINGS.replay_agg_trade_archive_dir
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
 REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size
@@ -278,7 +328,7 @@ RAW_AGG_TRADE_ARCHIVE_BACKEND = os.getenv(
     "RAW_AGG_TRADE_ARCHIVE_BACKEND", "parquet"
 ).strip().lower()
 RAW_AGG_TRADE_ARCHIVE_DIR = Path(
-    os.getenv("RAW_AGG_TRADE_ARCHIVE_DIR", DATA_DIR / "raw_agg_trades")
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_DIR", DATA_DIR / "raw-agg-live-spool")
 )
 # Optional comma-separated ``exchange:market_type:symbol`` identities.  When
 # empty, archival follows ordinary TradeFlow leases; configured identities are
@@ -296,6 +346,18 @@ RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES = int(
 )
 RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH = int(
     os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH", "10000")
+)
+RAW_AGG_TRADE_ARCHIVE_TARGET_FILE_ROWS = int(
+    os.getenv(
+        "RAW_AGG_TRADE_ARCHIVE_TARGET_FILE_ROWS",
+        str(RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH),
+    )
+)
+RAW_AGG_TRADE_ARCHIVE_MAX_BUFFER_SECONDS = float(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_BUFFER_SECONDS", "300")
+)
+RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES = int(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES", "64")
 )
 
 # Public liquidation snapshots are lossy at the exchange boundary, but the

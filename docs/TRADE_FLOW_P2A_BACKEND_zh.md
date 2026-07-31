@@ -108,7 +108,7 @@ python -m pip install -r backend/requirements-parquet.txt
 ```text
 RAW_AGG_TRADE_ARCHIVE_ENABLED=1
 RAW_AGG_TRADE_ARCHIVE_BACKEND=parquet
-RAW_AGG_TRADE_ARCHIVE_DIR=<data-dir>/raw_agg_trades
+RAW_AGG_TRADE_ARCHIVE_DIR=<data-dir>/raw-agg-live-spool
 ```
 
 目录按 identity 和 UTC 日期分区：
@@ -219,7 +219,7 @@ ws://localhost:8000/api/v1/stream/trade-flow
 | `TRADE_FLOW_GAP_REPAIR_MAX_TRADES` | `20000` | 单缺口自动修复预算 |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | 是否保存原始 aggTrade |
 | `RAW_AGG_TRADE_ARCHIVE_BACKEND` | `parquet` | 原始归档实现 |
-| `RAW_AGG_TRADE_ARCHIVE_DIR` | `data/raw_agg_trades` | Parquet 根目录 |
+| `RAW_AGG_TRADE_ARCHIVE_DIR` | `data/raw-agg-live-spool` | 仅实时采集使用的 Parquet 根目录；回放读取独立的 `REPLAY_AGG_TRADE_ARCHIVE_DIR` |
 | `RAW_AGG_TRADE_ARCHIVE_STREAMS` | 空 | 逗号分隔的长期归档流，格式 `exchange:market_type:symbol`；空时仅采集已有租约 |
 | `RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS` | `1.0` | archive writer 合批等待 |
 | `RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES` | `16` | archive durable queue 上限 |

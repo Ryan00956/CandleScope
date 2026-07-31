@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -126,6 +128,103 @@ async def test_wal_checkpoint_window_preserves_full_commit_durability(
             "PRAGMA wal_autocheckpoint"
         ).fetchone()[0] == 256
     finally:
+        await store.close()
+
+
+async def test_dataset_snapshots_are_external_deduplicated_and_gc_safe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "external-dataset.db"
+    store = await _created_store(path)
+    object_root = path.parent / f"{path.name}.datasets"
+    try:
+        with sqlite3.connect(path) as connection:
+            row = connection.execute(
+                """
+                SELECT length(snapshot_blob), snapshot_object_id, snapshot_size_bytes
+                FROM replay_dataset_ref
+                WHERE session_id = 'session-1'
+                """
+            ).fetchone()
+        assert row is not None
+        assert row[0] == 0
+        assert str(row[1]).startswith("sha256:")
+        assert row[2] == len(b'{"rows":[]}')
+        assert len(list(object_root.glob("*/*.json.zlib"))) == 1
+        first_dataset = await store.load_dataset("session-1")
+        assert first_dataset is not None
+        assert first_dataset["snapshot_blob"] == b'{"rows":[]}'
+
+        await store.create_session(
+            session_id="session-2",
+            config={"protocol": "replay.v1"},
+            broker_config={"model": "BAR_CONSERVATIVE_V1"},
+            session_state=_state(),
+            dataset_ref={"data_epoch": canonical_sha256({"dataset": 1})},
+            dataset_blob=b'{"rows":[]}',
+            actual_replay_start_ms=1_700_000_000_000,
+            actual_replay_end_ms=1_700_000_060_000,
+            synthetic_origin_ms=946_684_800_000,
+            initial_checkpoint=b"checkpoint-initial",
+        )
+        assert len(list(object_root.glob("*/*.json.zlib"))) == 1
+
+        assert await store.delete_session("session-1") is True
+        assert len(list(object_root.glob("*/*.json.zlib"))) == 1
+        second_dataset = await store.load_dataset("session-2")
+        assert second_dataset is not None
+        assert second_dataset["snapshot_blob"] == b'{"rows":[]}'
+
+        assert await store.delete_session("session-2") is True
+        assert list(object_root.glob("*/*.json.zlib")) == []
+    finally:
+        await store.close()
+
+
+async def test_dataset_gc_serializes_a_new_pending_object(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dataset-gc-race.db"
+    store = ReplaySQLiteStore(path, now_ms=lambda: 1_800_000_000_000)
+    collect_started = threading.Event()
+    collect_release = threading.Event()
+    original_collect = store._dataset_objects.collect  # noqa: SLF001
+
+    def blocked_collect(referenced: set[str]) -> dict[str, int]:
+        collect_started.set()
+        if not collect_release.wait(timeout=5):
+            raise TimeoutError("dataset object GC test did not release")
+        return original_collect(referenced)
+
+    store._dataset_objects.collect = blocked_collect  # type: ignore[method-assign]  # noqa: SLF001
+    try:
+        gc_task = asyncio.create_task(store.collect_dataset_objects())
+        assert await asyncio.to_thread(collect_started.wait, 5)
+        create_task = asyncio.create_task(
+            store.create_session(
+                session_id="session-racing-gc",
+                config={"protocol": "replay.v1"},
+                broker_config={"model": "BAR_CONSERVATIVE_V1"},
+                session_state=_state(),
+                dataset_ref={"data_epoch": canonical_sha256({"dataset": 1})},
+                dataset_blob=b'{"rows":["created-after-gc-snapshot"]}',
+                actual_replay_start_ms=1_700_000_000_000,
+                actual_replay_end_ms=1_700_000_060_000,
+                synthetic_origin_ms=946_684_800_000,
+                initial_checkpoint=b"checkpoint-initial",
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert not create_task.done()
+        collect_release.set()
+        await gc_task
+        await create_task
+
+        dataset = await store.load_dataset("session-racing-gc")
+        assert dataset is not None
+        assert dataset["snapshot_blob"] == b'{"rows":["created-after-gc-snapshot"]}'
+    finally:
+        collect_release.set()
         await store.close()
 
 

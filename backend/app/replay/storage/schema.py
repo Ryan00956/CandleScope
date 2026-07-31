@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 
-REPLAY_SCHEMA_VERSION = 2
+REPLAY_SCHEMA_VERSION = 3
 
 
 SCHEMA_V2 = """
@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS replay_dataset_ref (
     snapshot_ref_json TEXT NOT NULL,
     snapshot_blob BLOB NOT NULL,
     snapshot_sha256 TEXT NOT NULL,
+    snapshot_object_id TEXT,
+    snapshot_size_bytes INTEGER CHECK (
+        snapshot_size_bytes IS NULL OR snapshot_size_bytes >= 0
+    ),
     actual_replay_start_ms INTEGER NOT NULL CHECK (actual_replay_start_ms >= 0),
     actual_replay_end_ms INTEGER NOT NULL CHECK (actual_replay_end_ms >= 0),
     synthetic_origin_ms INTEGER CHECK (synthetic_origin_ms IS NULL OR synthetic_origin_ms >= 0),
@@ -172,6 +176,7 @@ def migrate_replay_schema(connection: sqlite3.Connection, *, now_ms: int) -> Non
             sql = statement.strip()
             if sql:
                 connection.execute(sql)
+        current = REPLAY_SCHEMA_VERSION
     elif current == 1:
         connection.execute(
             "ALTER TABLE replay_checkpoint "
@@ -186,7 +191,27 @@ def migrate_replay_schema(connection: sqlite3.Connection, *, now_ms: int) -> Non
         # only the latest intact legacy checkpoint when it exactly represents
         # the durable session row; older/corrupt fallbacks fail closed instead
         # of silently skipping an ambiguous mutation tail.
-    else:
+        current = 2
+    if current == 2:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(replay_dataset_ref)"
+            ).fetchall()
+        }
+        if "snapshot_object_id" not in columns:
+            connection.execute(
+                "ALTER TABLE replay_dataset_ref "
+                "ADD COLUMN snapshot_object_id TEXT"
+            )
+        if "snapshot_size_bytes" not in columns:
+            connection.execute(
+                "ALTER TABLE replay_dataset_ref "
+                "ADD COLUMN snapshot_size_bytes INTEGER "
+                "CHECK (snapshot_size_bytes IS NULL OR snapshot_size_bytes >= 0)"
+            )
+        current = 3
+    if current != REPLAY_SCHEMA_VERSION:
         raise RuntimeError(f"no replay schema migration path from version {current}")
     connection.execute(
         """

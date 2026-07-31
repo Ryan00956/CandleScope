@@ -16,16 +16,26 @@ import re
 import threading
 import time
 import uuid
+import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
-from app.data_engine.interval_policy import compute_bucket_start_ms, parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_start_ms,
+    is_monthly_interval,
+    parse_interval_ms,
+)
 
 from .canonical import canonical_json_bytes, canonical_sha256
 from .catalog import ReplaySeriesIdentity
-from .models import validate_identifier, validate_timestamp_ms
+from .models import (
+    normalize_decimal_string,
+    validate_identifier,
+    validate_timestamp_ms,
+)
 
 
 REPLAY_HISTORY_CATALOG_SCHEMA_VERSION = "replay-history-catalog.v1"
@@ -53,6 +63,136 @@ _PARQUET_COLUMNS = (
 
 class ReplayHistoryArchiveError(RuntimeError):
     """The replay-history archive is missing, corrupt, or incompatible."""
+
+
+class ReplayHistoryArchiveRuntimeLease:
+    """Prevent destructive archive maintenance while replay is serving Runs."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self._handle: Any | None = None
+
+    def acquire(self) -> None:
+        if self._handle is not None:
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / ".runtime.lock"
+        handle: Any | None = None
+        try:
+            handle = path.open("a+b")
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+        except OSError as exc:
+            if handle is not None:
+                handle.close()
+            raise ReplayHistoryArchiveError(
+                "replay-history archive is already owned by an active runtime"
+            ) from exc
+        assert handle is not None
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "ReplayHistoryArchiveRuntimeLease":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+@contextmanager
+def _archive_mutation_lock(
+    path: Path,
+    *,
+    timeout_seconds: float = 60.0,
+) -> Iterator[None]:
+    """Serialize archive publish and sweep operations across processes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        raise ReplayHistoryArchiveError(
+            "replay-history mutation lock could not be opened"
+        ) from exc
+    acquired = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(
+                        handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                acquired = True
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise ReplayHistoryArchiveError(
+                        "timed out waiting for replay-history mutation lock"
+                    ) from exc
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        handle.close()
 
 
 def _digest(value: object, field_name: str) -> str:
@@ -622,6 +762,15 @@ def _manifest_from_pointer(pointer_path: Path) -> ReplayHistoryCatalogManifest:
         raise ReplayHistoryArchiveError(
             "replay-history current pointer epoch does not match manifest"
         )
+    expected_directory = _catalog_directory(
+        pointer_path.parents[5],
+        manifest.identity,
+        manifest.interval,
+    ).resolve()
+    if pointer_path.parent.resolve() != expected_directory:
+        raise ReplayHistoryArchiveError(
+            "replay-history current pointer identity does not match its path"
+        )
     return manifest
 
 
@@ -906,6 +1055,24 @@ class ReplayHistoryArchiveWriter:
         merge_current: bool = True,
         listing_boundary_source: str = "first_checksum_verified_archive_bar",
     ) -> ReplayHistoryCatalogManifest:
+        with _archive_mutation_lock(self.root / ".mutation.lock"):
+            return self._import_batches_locked(
+                identity,
+                interval,
+                batches,
+                merge_current=merge_current,
+                listing_boundary_source=listing_boundary_source,
+            )
+
+    def _import_batches_locked(
+        self,
+        identity: ReplaySeriesIdentity,
+        interval: str,
+        batches: Sequence[ReplayHistoryImportBatch],
+        *,
+        merge_current: bool,
+        listing_boundary_source: str,
+    ) -> ReplayHistoryCatalogManifest:
         objects = [
             self.write_object(identity, interval, batch) for batch in batches
         ]
@@ -916,6 +1083,118 @@ class ReplayHistoryArchiveWriter:
             merge_current=merge_current,
             listing_boundary_source=listing_boundary_source,
         )
+
+    def collect_garbage(
+        self,
+        *,
+        pinned_revisions: Sequence[str],
+        dry_run: bool = True,
+    ) -> dict[str, object]:
+        """Remove only revisions and objects unreachable from current or Run pins."""
+
+        with _archive_mutation_lock(self.root / ".mutation.lock"):
+            return self._collect_garbage_locked(
+                pinned_revisions=pinned_revisions,
+                dry_run=dry_run,
+            )
+
+    def _collect_garbage_locked(
+        self,
+        *,
+        pinned_revisions: Sequence[str],
+        dry_run: bool,
+    ) -> dict[str, object]:
+        pinned = {_digest(value, "pinned_revision") for value in pinned_revisions}
+        pointers = sorted(self.catalogs_dir.glob("*/*/*/*/current.json"))
+        current: set[str] = set()
+        for pointer in pointers:
+            current.add(_manifest_from_pointer(pointer).catalog_epoch)
+
+        manifests: dict[str, tuple[Path, ReplayHistoryCatalogManifest]] = {}
+        for path in sorted(self.catalogs_dir.glob("*/*/*/*/*.json")):
+            if path.name == "current.json":
+                continue
+            manifest = ReplayHistoryCatalogManifest.from_dict(_read_json(path))
+            expected_directory = _catalog_directory(
+                self.root,
+                manifest.identity,
+                manifest.interval,
+            ).resolve()
+            if path.parent.resolve() != expected_directory:
+                raise ReplayHistoryArchiveError(
+                    "replay-history manifest identity does not match its path"
+                )
+            expected_name = f"{_digest_token(manifest.catalog_epoch)}.json"
+            if path.name != expected_name:
+                raise ReplayHistoryArchiveError(
+                    "replay-history manifest filename does not match its epoch"
+                )
+            manifests[manifest.catalog_epoch] = (path, manifest)
+
+        missing_kept_revisions = sorted((current | pinned) - set(manifests))
+        if missing_kept_revisions:
+            raise ReplayHistoryArchiveError(
+                "kept replay-history revision is missing; garbage collection refused"
+            )
+        kept_revisions = current | pinned
+        for revision in sorted(kept_revisions):
+            _, manifest = manifests[revision]
+            for item in manifest.objects:
+                object_path = (self.root / item.relative_path).resolve()
+                expected_path = (
+                    self.objects_dir
+                    / _digest_token(item.object_sha256)[:2]
+                    / f"{_digest_token(item.object_sha256)}.parquet"
+                ).resolve()
+                if object_path != expected_path or not object_path.is_file():
+                    raise ReplayHistoryArchiveError(
+                        "kept replay-history object is missing; garbage collection refused"
+                    )
+                if (
+                    object_path.stat().st_size != item.size_bytes
+                    or _file_sha256(object_path) != item.object_sha256
+                ):
+                    raise ReplayHistoryArchiveError(
+                        "kept replay-history object changed; garbage collection refused"
+                    )
+        kept_objects = {
+            item.object_sha256
+            for revision, (_, manifest) in manifests.items()
+            if revision in kept_revisions
+            for item in manifest.objects
+        }
+        stale_manifests = [
+            path
+            for revision, (path, _) in sorted(manifests.items())
+            if revision not in kept_revisions
+        ]
+        stale_objects: list[Path] = []
+        stale_bytes = 0
+        for path in sorted(self.objects_dir.glob("*/*.parquet")):
+            object_id = f"sha256:{path.stem}"
+            if _DIGEST_PATTERN.fullmatch(object_id) is None:
+                continue
+            if object_id in kept_objects:
+                continue
+            stale_objects.append(path)
+            stale_bytes += path.stat().st_size
+
+        if not dry_run:
+            for path in stale_manifests:
+                path.unlink()
+            for path in stale_objects:
+                path.unlink()
+
+        return {
+            "schema_version": "replay-history-gc.v1",
+            "dry_run": bool(dry_run),
+            "current_revision_count": len(current),
+            "pinned_revision_count": len(pinned),
+            "kept_object_count": len(kept_objects),
+            "stale_manifest_count": len(stale_manifests),
+            "stale_object_count": len(stale_objects),
+            "stale_object_bytes": stale_bytes,
+        }
 
 
 def _merge_catalog_objects(
@@ -1082,6 +1361,8 @@ def _normalize_import_row(
 class ReplayHistoryRepository:
     """Read-only K-line repository backed only by replay-history manifests."""
 
+    supports_unbounded_indexed_gap_scan = True
+
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
         self.objects_dir = self.root / "objects" / "sha256"
@@ -1094,6 +1375,7 @@ class ReplayHistoryRepository:
         self._revision_cache: dict[
             tuple[str, str, str, str, str], ReplayHistoryCatalogManifest
         ] = {}
+        self._series_errors: dict[str, str] = {}
         self._verified_objects: dict[Path, tuple[int, int, str]] = {}
         self._metrics = {
             "refreshes": 0,
@@ -1101,6 +1383,9 @@ class ReplayHistoryRepository:
             "parquet_queries": 0,
             "parquet_objects_read": 0,
             "checksum_verifications": 0,
+            "aggregate_queries": 0,
+            "aggregate_cache_hits": 0,
+            "aggregate_cache_writes": 0,
         }
         self._refresh()
 
@@ -1263,6 +1548,131 @@ class ReplayHistoryRepository:
             order=order,
         )
 
+    def query_aggregated_bars_at_revision(
+        self,
+        source_revision: str,
+        symbol: str,
+        base_interval: str,
+        display_interval: str,
+        *,
+        actual_start_ms: int,
+        actual_end_ms: int,
+        timeline_delta_ms: int,
+        limit: int,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict[str, object]:
+        """Build one revision-bound chart page through a rebuildable disk cache."""
+
+        manifest = self._manifest(
+            symbol,
+            base_interval,
+            exchange=exchange,
+            market_type=market_type,
+            source_revision=source_revision,
+        )
+        display_ms = parse_interval_ms(display_interval)
+        if (
+            display_ms is None
+            or display_ms <= manifest.interval_ms
+            or display_ms % manifest.interval_ms
+            or is_monthly_interval(display_interval)
+        ):
+            raise ReplayHistoryArchiveError(
+                "display interval is not eligible for fixed aggregation"
+            )
+        if limit < 1 or actual_start_ms < 0 or actual_end_ms <= actual_start_ms:
+            raise ValueError("aggregate history bounds are invalid")
+        public_end_ms = actual_end_ms + timeline_delta_ms
+        public_target_start = compute_bucket_start_ms(
+            max(0, public_end_ms - (limit + 2) * display_ms),
+            display_ms,
+            interval=display_interval,
+        )
+        query_start_ms = max(
+            actual_start_ms,
+            public_target_start - timeline_delta_ms,
+        )
+        query_end_ms = actual_end_ms - 1
+        objects = [
+            item
+            for item in manifest.objects
+            if item.first_open_ms <= query_end_ms
+            and item.last_open_ms >= query_start_ms
+        ]
+        object_state = []
+        object_paths: list[tuple[ReplayHistoryObject, Path]] = []
+        for item in objects:
+            path = self._object_path(item)
+            stat = path.stat()
+            if stat.st_size != item.size_bytes:
+                raise ReplayHistoryArchiveError(
+                    "replay-history aggregate source size changed"
+                )
+            object_paths.append((item, path))
+            object_state.append(
+                {
+                    "object_sha256": item.object_sha256,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "size_bytes": stat.st_size,
+                }
+            )
+        query = {
+            "schema_version": "replay-history-aggregate-query.v1",
+            "source_revision": manifest.catalog_epoch,
+            "identity": manifest.identity.to_dict(),
+            "base_interval": manifest.interval,
+            "display_interval": display_interval,
+            "actual_start_ms": query_start_ms,
+            "actual_end_ms": actual_end_ms,
+            # Public timestamps are part of the returned page.  Two blind Runs
+            # can share the same bucket phase but have different synthetic
+            # origins, so the full offset must participate in the cache key.
+            "timeline_delta_ms": timeline_delta_ms,
+            "limit": limit,
+            "objects": object_state,
+        }
+        cache_key = canonical_sha256(query)
+        cache_path = (
+            self.root
+            / "derived-cache"
+            / "v1"
+            / _digest_token(manifest.catalog_epoch)[:16]
+            / f"{_digest_token(cache_key)}.json.zlib"
+        )
+        cached = self._read_aggregate_cache(cache_path, query)
+        if cached is not None:
+            with self._lock:
+                self._metrics["aggregate_cache_hits"] += 1
+            return cached
+
+        # A valid derived result is already bound to the immutable revision,
+        # expected object digests, sizes and current filesystem tokens.  Only a
+        # cache miss needs to hash and inspect every Parquet input again.  This
+        # keeps disk-cache hits fast across backend restarts without weakening
+        # execution-snapshot verification.
+        for item, path in object_paths:
+            self._verify_object(manifest, item, path)
+        bars = self._aggregate_manifest_range(
+            manifest,
+            objects,
+            display_interval=display_interval,
+            display_ms=display_ms,
+            start_ms=query_start_ms,
+            end_ms=query_end_ms,
+            timeline_delta_ms=timeline_delta_ms,
+        )
+        selected = bars[-(limit + 1) :]
+        result = {
+            "bars": selected,
+            "has_more": query_start_ms > actual_start_ms or len(bars) > limit,
+        }
+        self._write_aggregate_cache(cache_path, query, result)
+        with self._lock:
+            self._metrics["aggregate_queries"] += 1
+            self._metrics["aggregate_cache_writes"] += 1
+        return result
+
     def describe_catalog(
         self,
         symbol: str,
@@ -1353,8 +1763,288 @@ class ReplayHistoryRepository:
                     sorted(item.catalog_epoch for item in self._current.values())
                 ),
                 "verified_objects": len(self._verified_objects),
+                "series_errors": dict(sorted(self._series_errors.items())),
                 **self._metrics,
             }
+
+    @staticmethod
+    def _read_aggregate_cache(
+        path: Path,
+        query: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(zlib.decompress(path.read_bytes()))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version")
+                != "replay-history-aggregate-cache.v1"
+                or payload.get("query") != dict(query)
+                or not isinstance(payload.get("result"), dict)
+                or canonical_sha256(payload["result"])
+                != payload.get("result_sha256")
+            ):
+                return None
+            result = payload["result"]
+            bars = result.get("bars")
+            if not isinstance(bars, list) or not isinstance(
+                result.get("has_more"), bool
+            ):
+                return None
+            return {"bars": bars, "has_more": result["has_more"]}
+        except (OSError, UnicodeError, ValueError, zlib.error, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _write_aggregate_cache(
+        path: Path,
+        query: Mapping[str, object],
+        result: Mapping[str, object],
+    ) -> None:
+        payload = {
+            "schema_version": "replay-history-aggregate-cache.v1",
+            "query": dict(query),
+            "result": dict(result),
+            "result_sha256": canonical_sha256(result),
+        }
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("xb") as handle:
+                handle.write(zlib.compress(canonical_json_bytes(payload), level=6))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError:
+            # The derived cache is optional and rebuildable.
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _aggregate_manifest_range(
+        self,
+        manifest: ReplayHistoryCatalogManifest,
+        objects: Sequence[ReplayHistoryObject],
+        *,
+        display_interval: str,
+        display_ms: int,
+        start_ms: int,
+        end_ms: int,
+        timeline_delta_ms: int,
+    ) -> list[dict[str, object]]:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover - pyarrow installs numpy
+            raise ReplayHistoryArchiveError(
+                "replay-history aggregation requires numpy"
+            ) from exc
+        _, pq = _load_pyarrow()
+        base_ms = manifest.interval_ms
+        expected_components = display_ms // base_ms
+        anchor = compute_bucket_start_ms(
+            0,
+            display_ms,
+            interval=display_interval,
+        )
+        buckets: dict[int, dict[str, object]] = {}
+        columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+        ]
+        for item in objects:
+            path = self._object_path(item)
+            try:
+                table = pq.read_table(
+                    path,
+                    columns=columns,
+                    filters=[
+                        ("open_time", ">=", start_ms),
+                        ("open_time", "<=", end_ms),
+                    ],
+                )
+            except Exception as exc:
+                raise ReplayHistoryArchiveError(
+                    "replay-history aggregate source could not be read"
+                ) from exc
+            if not table.num_rows:
+                continue
+            opens = table["open_time"].combine_chunks().to_numpy(
+                zero_copy_only=False
+            )
+            public_opens = opens + timeline_delta_ms
+            keys = ((public_opens - anchor) // display_ms) * display_ms + anchor
+            group_starts = np.flatnonzero(
+                np.r_[True, keys[1:] != keys[:-1]]
+            )
+            group_ends = np.r_[group_starts[1:], len(keys)]
+            numeric = {
+                name: table[name].combine_chunks().to_numpy(zero_copy_only=False)
+                for name in ("open", "high", "low", "close", "volume")
+            }
+            optional = {
+                name: table[name].combine_chunks().to_pylist()
+                for name in (
+                    "quote_volume",
+                    "trades",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                )
+            }
+            for group_start, group_end in zip(group_starts, group_ends):
+                first = int(group_start)
+                end = int(group_end)
+                bucket = int(keys[first])
+                group_opens = opens[first:end]
+                contiguous = bool(
+                    len(group_opens) < 2
+                    or np.all(np.diff(group_opens) == base_ms)
+                )
+
+                def optional_sum(name: str) -> float | int | None:
+                    values = optional[name][first:end]
+                    if any(value is None for value in values):
+                        return None
+                    if name == "trades":
+                        return sum(int(value) for value in values)
+                    return math.fsum(float(value) for value in values)
+
+                candidate = {
+                    "open": float(numeric["open"][first]),
+                    "high": float(np.max(numeric["high"][first:end])),
+                    "low": float(np.min(numeric["low"][first:end])),
+                    "close": float(numeric["close"][end - 1]),
+                    "volume": math.fsum(
+                        float(value) for value in numeric["volume"][first:end]
+                    ),
+                    "quote_volume": optional_sum("quote_volume"),
+                    "trades": optional_sum("trades"),
+                    "taker_buy_base": optional_sum("taker_buy_base"),
+                    "taker_buy_quote": optional_sum("taker_buy_quote"),
+                    "first_base_open_ms": int(group_opens[0]),
+                    "last_base_open_ms": int(group_opens[-1]),
+                    "component_count": end - first,
+                    "contiguous": contiguous,
+                }
+                existing = buckets.get(bucket)
+                if existing is None:
+                    buckets[bucket] = candidate
+                    continue
+                if (
+                    int(candidate["first_base_open_ms"])
+                    != int(existing["last_base_open_ms"]) + base_ms
+                ):
+                    existing["contiguous"] = False
+                existing["high"] = max(
+                    float(existing["high"]),
+                    float(candidate["high"]),
+                )
+                existing["low"] = min(
+                    float(existing["low"]),
+                    float(candidate["low"]),
+                )
+                existing["close"] = candidate["close"]
+                existing["volume"] = math.fsum(
+                    (float(existing["volume"]), float(candidate["volume"]))
+                )
+                for name in (
+                    "quote_volume",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                ):
+                    left = existing[name]
+                    right = candidate[name]
+                    existing[name] = (
+                        None
+                        if left is None or right is None
+                        else math.fsum((float(left), float(right)))
+                    )
+                existing["trades"] = (
+                    None
+                    if existing["trades"] is None or candidate["trades"] is None
+                    else int(existing["trades"]) + int(candidate["trades"])
+                )
+                existing["last_base_open_ms"] = candidate["last_base_open_ms"]
+                existing["component_count"] = int(
+                    existing["component_count"]
+                ) + int(candidate["component_count"])
+                existing["contiguous"] = bool(
+                    existing["contiguous"] and candidate["contiguous"]
+                )
+
+        def decimal_text(
+            value: object,
+            field_name: str,
+            *,
+            aggregate: bool = False,
+        ) -> str:
+            numeric = float(value)
+            # Imported archive rows are float64. Preserve direct OHLC values;
+            # only suppress sub-picounit summation noise on aggregate totals.
+            normalized = round(numeric, 12) if aggregate else numeric
+            return normalize_decimal_string(
+                str(normalized),
+                field_name=field_name,
+            )
+
+        bars: list[dict[str, object]] = []
+        for bucket, value in sorted(buckets.items()):
+            first_public = int(value["first_base_open_ms"]) + timeline_delta_ms
+            last_public = int(value["last_base_open_ms"]) + timeline_delta_ms
+            if (
+                not value["contiguous"]
+                or int(value["component_count"]) != expected_components
+                or first_public != bucket
+                or last_public != bucket + display_ms - base_ms
+            ):
+                continue
+
+            def optional_text(name: str) -> str | None:
+                raw = value[name]
+                return (
+                    None
+                    if raw is None
+                    else decimal_text(raw, name, aggregate=True)
+                )
+
+            bars.append(
+                {
+                    "open_time_ms": bucket,
+                    "close_time_ms": bucket + display_ms - 1,
+                    "open": decimal_text(value["open"], "open"),
+                    "high": decimal_text(value["high"], "high"),
+                    "low": decimal_text(value["low"], "low"),
+                    "close": decimal_text(value["close"], "close"),
+                    "volume": decimal_text(
+                        value["volume"],
+                        "volume",
+                        aggregate=True,
+                    ),
+                    "quote_volume": optional_text("quote_volume"),
+                    "trades": (
+                        None
+                        if value["trades"] is None
+                        else int(value["trades"])
+                    ),
+                    "taker_buy_base": optional_text("taker_buy_base"),
+                    "taker_buy_quote": optional_text("taker_buy_quote"),
+                    "first_base_open_ms": first_public,
+                    "last_base_open_ms": last_public,
+                    "component_count": expected_components,
+                    "expected_components": expected_components,
+                    "is_closed": True,
+                    "synthetic": False,
+                }
+            )
+        return bars
 
     def _refresh(self) -> None:
         pointers = (
@@ -1376,20 +2066,46 @@ class ReplayHistoryRepository:
             current: dict[
                 tuple[str, str, str, str], ReplayHistoryCatalogManifest
             ] = {}
+            errors: dict[str, str] = {}
             for pointer in pointers:
-                manifest = _manifest_from_pointer(pointer)
+                pointer_name = pointer.relative_to(self.root).as_posix()
+                try:
+                    manifest = _manifest_from_pointer(pointer)
+                    self._validate_manifest_objects_shallow(manifest)
+                except Exception as exc:
+                    errors[pointer_name] = f"{type(exc).__name__}: {exc}"[:500]
+                    continue
                 key = _manifest_key(manifest)
                 if key in current:
-                    raise ReplayHistoryArchiveError(
-                        "replay-history contains duplicate current catalogs"
+                    errors[pointer_name] = (
+                        "ReplayHistoryArchiveError: duplicate current catalog"
                     )
+                    continue
                 current[key] = manifest
                 self._revision_cache[
                     (*key, manifest.catalog_epoch)
                 ] = manifest
             self._current = current
+            self._series_errors = errors
             self._pointer_token = token
             self._metrics["refreshes"] += 1
+
+    def _validate_manifest_objects_shallow(
+        self,
+        manifest: ReplayHistoryCatalogManifest,
+    ) -> None:
+        for item in manifest.objects:
+            path = self._object_path(item)
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                raise ReplayHistoryArchiveError(
+                    "replay-history object is unavailable"
+                ) from exc
+            if not path.is_file() or stat.st_size != item.size_bytes:
+                raise ReplayHistoryArchiveError(
+                    "replay-history object size does not match catalog"
+                )
 
     def _manifest(
         self,
@@ -1712,6 +2428,7 @@ __all__ = [
     "REPLAY_HISTORY_PARQUET_SCHEMA_VERSION",
     "REPLAY_HISTORY_POINTER_SCHEMA_VERSION",
     "ReplayHistoryArchiveError",
+    "ReplayHistoryArchiveRuntimeLease",
     "ReplayHistoryArchiveWriter",
     "ReplayHistoryCatalogManifest",
     "ReplayHistoryImportBatch",

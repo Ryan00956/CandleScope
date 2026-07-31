@@ -189,6 +189,7 @@ def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
     assert default.replay_segment_download_worker_enabled is False
     assert default.replay_segment_auto_gc_enabled is False
     assert default.replay_fast_forward_optimization_enabled is False
+    assert default.replay_agg_trade_enabled is False
     assert default.replay_account_history_enabled is False
     assert default.replay_account_history_max_archive_bytes == 128 * 1024**3
 
@@ -217,6 +218,7 @@ def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED",
         "REPLAY_SEGMENT_AUTO_GC_ENABLED",
         "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED",
+        "REPLAY_AGG_TRADE_ENABLED",
         "REPLAY_ACCOUNT_HISTORY_ENABLED",
     ):
         with pytest.raises(ValueError, match=variable):

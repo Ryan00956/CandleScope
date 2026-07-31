@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
+from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.catalog import ReplayCatalog, ReplaySeriesIdentity
 from app.replay.dataset import BarDatasetBuilder, BarDatasetSnapshot
 from app.replay.history_archive import (
+    ReplayHistoryArchiveError,
+    ReplayHistoryArchiveRuntimeLease,
     ReplayHistoryArchiveWriter,
     ReplayHistoryImportBatch,
     ReplayHistoryRepository,
@@ -15,14 +22,50 @@ from app.replay.history_archive import (
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.models import TrainingRunCreateRequest
+from app.replay.training.schema import migrate_training_schema
+from scripts.import_binance_replay_history import (
+    _daily_fallbacks_by_month,
+    _select_source_objects,
+)
 from tests.fixtures.replay.fakes import make_bar
 from tests.fixtures.replay.service_fakes import SessionIdFactory, replay_settings
+from tests.fixtures.replay.trade_fakes import make_trade_dataset
 
 
 INTERVAL_MS = 60_000
 START_MS = 1_710_000_000_000
 NOW_MS = START_MS + 30 * INTERVAL_MS
 IDENTITY = ReplaySeriesIdentity("binance", "spot", "BTCUSDT")
+
+
+def test_binance_monthly_history_plan_retains_checksum_daily_fallbacks() -> None:
+    provider = BinanceKlineArchiveProvider()
+    refs = provider.plan_objects(
+        market_type="futures",
+        symbol="BTCUSDT",
+        interval="1m",
+        start_ms=int(
+            datetime(2019, 9, 1, tzinfo=timezone.utc).timestamp() * 1_000
+        ),
+        end_ms=(
+            int(
+                datetime(2019, 9, 4, tzinfo=timezone.utc).timestamp()
+                * 1_000
+            )
+            - 1
+        ),
+        now_ms=int(
+            datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp() * 1_000
+        ),
+    )
+
+    assert [item.period for item in _select_source_objects(refs)] == [
+        "2019-09"
+    ]
+    assert [
+        item.period
+        for item in _daily_fallbacks_by_month(refs)["2019-09"]
+    ] == ["2019-09-01", "2019-09-02", "2019-09-03"]
 
 
 def _batch(
@@ -190,6 +233,197 @@ def test_closed_archive_catalog_epoch_does_not_churn_with_wall_clock(
     assert catalog.diagnostics()["cache_hits"] == 1
 
 
+def test_one_corrupt_series_is_quarantined_without_hiding_healthy_series(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    broken = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="broken-series",
+                digest_character="1",
+            )
+        ],
+    )
+    healthy_identity = ReplaySeriesIdentity("binance", "spot", "ETHUSDT")
+    writer.import_batches(
+        healthy_identity,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=1_000,
+                source_key="healthy-series",
+                digest_character="2",
+            )
+        ],
+    )
+    broken_object = root / broken.objects[0].relative_path
+    broken_object.unlink()
+
+    repository = ReplayHistoryRepository(root)
+    series = repository.list_all_series()
+    assert {(item["symbol"], item["interval"]) for item in series} == {
+        ("ETHUSDT", "1m")
+    }
+    diagnostics = repository.diagnostics()
+    assert diagnostics["series_count"] == 1
+    assert len(diagnostics["series_errors"]) == 1
+
+
+def test_archive_gc_keeps_current_and_explicitly_pinned_revisions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    first = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-replaced",
+                digest_character="3",
+            )
+        ],
+    )
+    second = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=900,
+                source_key="fixture-replaced",
+                digest_character="4",
+            )
+        ],
+    )
+
+    pinned = writer.collect_garbage(
+        pinned_revisions=[first.catalog_epoch],
+        dry_run=True,
+    )
+    assert pinned["stale_manifest_count"] == 0
+    assert pinned["stale_object_count"] == 0
+
+    unpinned = writer.collect_garbage(pinned_revisions=(), dry_run=True)
+    assert unpinned["stale_manifest_count"] == 1
+    assert unpinned["stale_object_count"] == 1
+    applied = writer.collect_garbage(pinned_revisions=(), dry_run=False)
+    assert applied["stale_manifest_count"] == 1
+    assert applied["stale_object_count"] == 1
+
+    repository = ReplayHistoryRepository(root)
+    current = repository.query_bars_at_revision(
+        second.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        start_ms=START_MS,
+        end_ms=START_MS,
+        exchange="binance",
+        market_type="spot",
+    )
+    assert current[0]["open"] == 900.0
+    with pytest.raises(ReplayHistoryArchiveError):
+        repository.query_bars_at_revision(
+            first.catalog_epoch,
+            "BTCUSDT",
+            "1m",
+            start_ms=START_MS,
+            end_ms=START_MS,
+            exchange="binance",
+            market_type="spot",
+        )
+
+
+def test_archive_runtime_lease_blocks_destructive_maintenance(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history"
+    runtime = ReplayHistoryArchiveRuntimeLease(root)
+    maintenance = ReplayHistoryArchiveRuntimeLease(root)
+    runtime.acquire()
+    try:
+        with pytest.raises(
+            ReplayHistoryArchiveError,
+            match="active runtime",
+        ):
+            maintenance.acquire()
+    finally:
+        runtime.release()
+
+    maintenance.acquire()
+    maintenance.release()
+
+
+def test_archive_fixed_interval_aggregation_is_revision_bound_and_cached(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(180)),
+                price_base=100,
+                source_key="fixture-three-hours",
+                digest_character="5",
+            )
+        ],
+    )
+    repository = ReplayHistoryRepository(root)
+    kwargs = {
+        "source_revision": manifest.catalog_epoch,
+        "symbol": "BTCUSDT",
+        "base_interval": "1m",
+        "display_interval": "1h",
+        "actual_start_ms": START_MS,
+        "actual_end_ms": START_MS + 180 * INTERVAL_MS,
+        "timeline_delta_ms": 0,
+        "limit": 10,
+        "exchange": "binance",
+        "market_type": "spot",
+    }
+
+    first = repository.query_aggregated_bars_at_revision(**kwargs)
+    second = repository.query_aggregated_bars_at_revision(**kwargs)
+    shifted = repository.query_aggregated_bars_at_revision(
+        **{**kwargs, "timeline_delta_ms": 3_600_000}
+    )
+
+    assert second == first
+    assert shifted["bars"][0]["open_time_ms"] == (
+        first["bars"][0]["open_time_ms"] + 3_600_000
+    )
+    assert first["has_more"] is False
+    assert [item["open_time_ms"] for item in first["bars"]] == [
+        START_MS,
+        START_MS + 60 * INTERVAL_MS,
+        START_MS + 120 * INTERVAL_MS,
+    ]
+    assert first["bars"][0]["open"] == "100"
+    assert first["bars"][0]["close"] == "159.5"
+    assert first["bars"][0]["component_count"] == 60
+    diagnostics = repository.diagnostics()
+    assert diagnostics["aggregate_cache_hits"] == 1
+    assert diagnostics["aggregate_cache_writes"] == 2
+
+    restarted = ReplayHistoryRepository(root)
+    assert restarted.query_aggregated_bars_at_revision(**kwargs) == first
+    restarted_diagnostics = restarted.diagnostics()
+    assert restarted_diagnostics["aggregate_cache_hits"] == 1
+    assert restarted_diagnostics["checksum_verifications"] == 0
+
+
 def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     tmp_path: Path,
 ) -> None:
@@ -239,6 +473,21 @@ def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     )
     assert pinned.provenance.source_revision == first_manifest.catalog_epoch
     assert pinned.replay_rows[0].open == "104"
+    assert "source_revision" not in pinned.snapshot_ref().to_dict()
+    persisted_bar_ref, _ = ReplayService._persisted_dataset(pinned, None)
+    assert persisted_bar_ref["source_revision"] == first_manifest.catalog_epoch
+    persisted_trade_ref, _ = ReplayService._persisted_dataset(
+        pinned,
+        make_trade_dataset(1),
+    )
+    assert persisted_trade_ref["bar_snapshot_ref"] == persisted_bar_ref
+    legacy_reference = persisted_bar_archive_reference(
+        pinned.snapshot_ref().to_dict(),
+        json.dumps(pinned.to_dict()).encode("utf-8"),
+        strict=True,
+    )
+    assert legacy_reference is not None
+    assert legacy_reference["source_revision"] == first_manifest.catalog_epoch
     assert (
         BarDatasetSnapshot.from_dict(pinned.to_dict()).data_epoch
         == pinned.data_epoch
@@ -362,6 +611,47 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
         training = service.training
         assert training is not None
         await training.create_run(request)
+        with sqlite3.connect(database) as connection:
+            pin = connection.execute(
+                """
+                SELECT run_id, track_id, source_revision, symbol, base_interval
+                FROM replay_archive_pin
+                """
+            ).fetchone()
+        assert pin == (
+            "archive-run-1",
+            "track-1",
+            writer.current_manifest(IDENTITY, "1m").catalog_epoch,
+            "BTCUSDT",
+            "1m",
+        )
+        persisted = await service.store.load_dataset("archive-session-1")
+        assert persisted is not None
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            legacy_ref = dict(persisted["snapshot_ref"])
+            legacy_ref.pop("source_revision")
+            connection.execute(
+                """
+                UPDATE replay_dataset_ref
+                SET snapshot_ref_json = ?, snapshot_blob = ?,
+                    snapshot_object_id = NULL, snapshot_size_bytes = NULL
+                WHERE session_id = 'archive-session-1'
+                """,
+                (
+                    json.dumps(legacy_ref),
+                    persisted["snapshot_blob"],
+                ),
+            )
+            connection.execute("DELETE FROM replay_archive_pin")
+            migrate_training_schema(connection, now_ms=NOW_MS)
+            legacy_pin = connection.execute(
+                "SELECT source_revision FROM replay_archive_pin"
+            ).fetchone()
+        assert legacy_pin is not None
+        assert legacy_pin["source_revision"] == (
+            writer.current_manifest(IDENTITY, "1m").catalog_epoch
+        )
         session = await service.get_session("archive-session-1")
         snapshot = session["snapshot"]
 

@@ -38,7 +38,9 @@ from .raw_trade_archive import (
     RawAggTradeGap,
     RawAggTradeObjectManifest,
     RawAggTradePage,
+    VerifiedRawAggTradeBarWindow,
     VerifiedRawAggTradeDay,
+    VerifiedRawAggTradeWindow,
 )
 from .trade_flow_store import (
     SQLiteTradeFlowRollupStore,
@@ -84,7 +86,9 @@ __all__ = [
     "RawAggTradeGap",
     "RawAggTradeObjectManifest",
     "RawAggTradePage",
+    "VerifiedRawAggTradeBarWindow",
     "VerifiedRawAggTradeDay",
+    "VerifiedRawAggTradeWindow",
     "SQLiteTradeFlowRollupStore",
     "TradeFlowRollupStore",
     "TradeFlowRollupWriter",

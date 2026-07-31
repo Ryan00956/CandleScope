@@ -364,6 +364,7 @@ async def test_display_switch_is_persistent_and_does_not_move_domain_state(
 
 async def test_bar_step_display_matches_exact_base_steps_and_stale_view_binding(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = await _service(tmp_path / "replay.db")
     try:
@@ -412,6 +413,11 @@ async def test_bar_step_display_matches_exact_base_steps_and_stale_view_binding(
         )
         assert switched["viewer_state"]["semantic_view_revision"] == 1
 
+        async def unexpected_source_plan(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("display final-state advance must scan only once")
+
+        monkeypatch.setattr(service, "plan_source_chunk", unexpected_source_plan)
+
         # The already-bound 15m command remains 15m even though the current viewer is 1h.
         display = await service.training.command(  # type: ignore[union-attr]
             run_a["run_id"],  # type: ignore[arg-type]
@@ -429,6 +435,12 @@ async def test_bar_step_display_matches_exact_base_steps_and_stale_view_binding(
         )
         display_consumed = display["data"]["consumed"]
         assert display_consumed >= 1
+        assert display["data"]["plan"]["projection_delivery"] == "FINAL_STATE"
+        assert display["data"]["plan"]["path_execution"] == "EMPTY_ACCOUNT"
+        assert display["data"]["plan"]["single_pass_source_chunks"] is True
+        assert display["data"]["coalesced_projection_events"] == display_consumed
+        assert display["data"]["published_projection_events"] == 0
+        assert display["data"]["batch_reducer_events"] == display_consumed
 
         await service.training.command(  # type: ignore[union-attr]
             run_b["run_id"],  # type: ignore[arg-type]

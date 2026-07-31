@@ -1323,7 +1323,7 @@ class ReplaySessionActor:
                 "persisted replay source event does not match immutable dataset",
                 details={"source_sequence": sequence},
             )
-        _, recovered_state_hash = await self._apply_source_event_candidate(
+        _, recovered_state_hash, _ = await self._apply_source_event_candidate(
             publish=False,
             materialize_state=True,
         )
@@ -1930,6 +1930,172 @@ class ReplaySessionActor:
                     "reference_semantics": "ORDERED_SOURCE_EVENT_REDUCER_V1",
                 },
             )
+        if command_type is InternalCommandType.FAST_FORWARD_FINAL_STATE:
+            self._require_state(SessionState.PAUSED, command_type)
+            target = int(parsed.values["target_virtual_time_ms"])
+            if target < self._clock.virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "final-state target cannot move backward",
+                )
+            maximum = self._positive_int(parsed.values["max_events"], "max_events")
+            self._enforce_command_source_event_limit(maximum)
+            require_empty_account = bool(parsed.values["require_empty_account"])
+            snapshot_only = bool(parsed.values["snapshot_only"])
+            if snapshot_only and target != self._clock.virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "snapshot-only final-state command must target the current cursor",
+                )
+            if require_empty_account and self._has_active_trading_path():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "empty-account final-state advance found active trading state",
+                )
+            self._revision += 1
+            if snapshot_only:
+                self._emit_reset_snapshot(
+                    "fast_forward_final_state_cancelled",
+                    mandatory=True,
+                )
+                return self._command_result(
+                    command.command_id,
+                    {
+                        "consumed": 0,
+                        "target_virtual_time_ms": target,
+                        "target_reached": True,
+                        "coalesced_projection_events": 0,
+                        "published_projection_events": 0,
+                        "batch_reducer_events": 0,
+                        "require_empty_account": require_empty_account,
+                        "snapshot_published": True,
+                        "reference_semantics": (
+                            "ORDERED_SOURCE_EVENT_REDUCER_V1"
+                        ),
+                    },
+                )
+            consumed = 0
+            published_projection_events = 0
+            batch_apply = getattr(
+                self._reducer,
+                "apply_source_events_final_state",
+                None,
+            )
+            batch_support = getattr(
+                self._reducer,
+                "supports_final_state_batch",
+                None,
+            )
+            batch_preflight = getattr(
+                self._reducer,
+                "can_apply_source_events_final_state",
+                None,
+            )
+            safe_prefix = getattr(
+                self._reducer,
+                "final_state_safe_prefix_length",
+                None,
+            )
+            use_batch = callable(batch_apply) and (
+                require_empty_account
+                or (callable(batch_support) and bool(batch_support()))
+            )
+            batch_limit = maximum
+            stop_after_interaction = False
+            if (
+                not use_batch
+                and callable(batch_apply)
+                and (callable(safe_prefix) or callable(batch_preflight))
+            ):
+                preview = self._preview_final_state_batch(
+                    target_time_ms=target,
+                    max_events=maximum,
+                )
+                if preview:
+                    if callable(safe_prefix):
+                        prefix_result = safe_prefix(preview)
+                        if inspect.isawaitable(prefix_result):
+                            prefix_result = await prefix_result
+                        if (
+                            isinstance(prefix_result, bool)
+                            or not isinstance(prefix_result, int)
+                            or prefix_result < 0
+                            or prefix_result > len(preview)
+                        ):
+                            raise TypeError(
+                                "replay reducer final-state safe prefix is invalid"
+                            )
+                        if prefix_result > 0:
+                            use_batch = True
+                            batch_limit = prefix_result
+                        else:
+                            # Commit the interaction event by itself. The
+                            # training coordinator can then run account risk
+                            # before scanning the following prefix.
+                            stop_after_interaction = True
+                    else:
+                        preflight_result = batch_preflight(preview)
+                        if inspect.isawaitable(preflight_result):
+                            preflight_result = await preflight_result
+                        use_batch = bool(preflight_result)
+            batch_reducer_events = 0
+            if use_batch:
+                consumed = await self._apply_final_state_batch(
+                    target_time_ms=target,
+                    max_events=batch_limit,
+                    apply_batch=batch_apply,
+                )
+                batch_reducer_events = consumed
+            else:
+                event_limit = 1 if stop_after_interaction else maximum
+                while consumed < event_limit:
+                    event = self._source.peek()
+                    if event is None or self._event_time_ms(event) > target:
+                        break
+                    _, _, published = await self._apply_source_event_candidate(
+                        publish=False,
+                        publish_interactions=True,
+                        materialize_state=False,
+                    )
+                    consumed += 1
+                    if published:
+                        published_projection_events += 1
+                    if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                        await asyncio.sleep(0)
+            next_event = self._source.peek()
+            target_reached = (
+                self._state is SessionState.ENDED
+                or next_event is None
+                or self._event_time_ms(next_event) > target
+            )
+            if target_reached and self._state is not SessionState.ENDED:
+                self._clock.advance_to(target)
+            if require_empty_account and self._has_active_trading_path():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "empty-account final-state advance created trading state",
+                )
+            if target_reached:
+                self._emit_reset_snapshot(
+                    "fast_forward_final_state_complete",
+                    mandatory=True,
+                )
+            return self._command_result(
+                command.command_id,
+                {
+                    "consumed": consumed,
+                    "target_virtual_time_ms": target,
+                    "target_reached": target_reached,
+                    "coalesced_projection_events": (
+                        consumed - published_projection_events
+                    ),
+                    "published_projection_events": published_projection_events,
+                    "batch_reducer_events": batch_reducer_events,
+                    "require_empty_account": require_empty_account,
+                    "snapshot_published": target_reached,
+                    "reference_semantics": "ORDERED_SOURCE_EVENT_REDUCER_V1",
+                },
+            )
         if command_type is CommandType.ADVANCE_BY:
             self._require_state(SessionState.PAUSED, command_type)
             delta_ms = int(parsed.values["ms"])
@@ -2309,23 +2475,27 @@ class ReplaySessionActor:
         self,
         *,
         publish: bool,
+        publish_interactions: bool = False,
         checkpoint: bool = True,
-    ) -> None:
+    ) -> bool:
         owns_candidate = self._pending_events is None
         rollback = self._capture_rollback() if owns_candidate else None
         if owns_candidate:
             self._begin_candidate()
         try:
-            component_state, state_hash = await self._apply_source_event_candidate(
-                publish=publish,
-                materialize_state=owns_candidate or publish or checkpoint,
+            component_state, state_hash, published = (
+                await self._apply_source_event_candidate(
+                    publish=publish,
+                    publish_interactions=publish_interactions,
+                    materialize_state=owns_candidate or publish or checkpoint,
+                )
             )
         except BaseException:
             if rollback is not None:
                 self._restore_rollback(rollback, force_paused=False)
             raise
         if not owns_candidate:
-            return
+            return published
         assert component_state is not None
         assert state_hash is not None
         checkpoint_blob = (
@@ -2366,16 +2536,135 @@ class ReplaySessionActor:
             assert rollback is not None
             self._restore_rollback(rollback, force_paused=True)
             self._enter_persistence_degraded(exc)
-            return
+            return False
         if checkpoint_blob is not None:
             self._record_checkpoint(checkpoint_blob, initial=False)
+        return published
+
+    def _preview_final_state_batch(
+        self,
+        *,
+        target_time_ms: int,
+        max_events: int,
+    ) -> tuple[object, ...]:
+        source = self._fork_current_source()
+        events: list[object] = []
+        while len(events) < max_events:
+            event = source.peek()
+            if event is None:
+                break
+            event_time = self._event_time_ms(event)
+            if event_time > target_time_ms:
+                break
+            if event_time < self._clock.virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source event time moved backward",
+                    details={
+                        "event_time_ms": event_time,
+                        "virtual_time_ms": self._clock.virtual_time_ms,
+                    },
+                )
+            consumed = source.next()
+            if consumed != event:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed during final-state interaction preview",
+                )
+            events.append(event)
+        return tuple(events)
+
+    async def _apply_final_state_batch(
+        self,
+        *,
+        target_time_ms: int,
+        max_events: int,
+        apply_batch: Callable[
+            [Sequence[object]],
+            Mapping[str, object] | Awaitable[Mapping[str, object]],
+        ],
+    ) -> int:
+        events: list[object] = []
+        while len(events) < max_events:
+            event = self._source.peek()
+            if event is None:
+                break
+            event_time = self._event_time_ms(event)
+            if event_time > target_time_ms:
+                break
+            if event_time < self._clock.virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source event time moved backward",
+                    details={
+                        "event_time_ms": event_time,
+                        "virtual_time_ms": self._clock.virtual_time_ms,
+                    },
+                )
+            consumed = self._source.next()
+            if consumed != event:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source changed between peek and atomic commit",
+                )
+            self._clock.advance_to(event_time)
+            source_cursor = self._source.cursor()
+            self._event_chain_hash = self._next_chain_hash(
+                self._event_chain_hash,
+                event,
+                source_cursor.source_sequence,
+            )
+            self._metrics["events_processed"] = (
+                int(self._metrics["events_processed"] or 0) + 1
+            )
+            if self._pending_source_events is not None:
+                self._pending_source_events.append(self._event_payload(event))
+            events.append(event)
+            if len(events) % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+        if not events:
+            return 0
+        try:
+            self._invalidate_component_state()
+            projection = apply_batch(tuple(events))
+            if inspect.isawaitable(projection):
+                projection = await projection
+            if not isinstance(projection, Mapping):
+                raise TypeError("replay reducer batch projection must be an object")
+        except BaseException:
+            self._pause_clock()
+            self._state = SessionState.ERROR
+            raise
+        if self._source.exhausted():
+            event_time = self._event_time_ms(events[-1])
+            terminal_time = getattr(self._source, "terminal_time_ms", event_time)
+            terminal_time = validate_timestamp_ms(
+                terminal_time,
+                field_name="source_terminal_time_ms",
+            )
+            if terminal_time < event_time:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay source terminal time precedes its last event",
+                )
+            self._clock.advance_to(terminal_time)
+            await self._finalize_reducer(
+                open_order_disposition="expire",
+                position_disposition="keep",
+            )
+            self._state = SessionState.ENDED
+            self._pause_clock()
+            self._controller_client_id = None
+            self._controller_deadline_wall = None
+        return len(events)
 
     async def _apply_source_event_candidate(
         self,
         *,
         publish: bool,
+        publish_interactions: bool = False,
         materialize_state: bool,
-    ) -> tuple[dict[str, object] | None, str | None]:
+    ) -> tuple[dict[str, object] | None, str | None, bool]:
         event = self._source.peek()
         if event is None:
             raise ReplayDomainError(
@@ -2442,32 +2731,46 @@ class ReplaySessionActor:
             self._pause_clock()
             self._controller_client_id = None
             self._controller_deadline_wall = None
-        if not materialize_state:
-            return None, None
+        immediate_delivery = self._projection_requires_immediate_delivery(projection)
+        should_publish = publish or (
+            publish_interactions and immediate_delivery
+        )
+        if not materialize_state and not should_publish:
+            return None, None, False
         component_state = self._component_state()
         state_hash = self._compute_state_hash()
-        if publish:
-            self._emit(
-                ReplayEventType.DELTA,
-                {
-                    "source_sequence": source_cursor.source_sequence,
-                    "source_event": self._event_payload(event),
-                    "projection": dict(projection),
-                },
-                mandatory=self._projection_requires_immediate_delivery(projection),
-                state_hash=state_hash,
-            )
-            if self._state is SessionState.ENDED:
-                self._emit(
-                    ReplayEventType.ENDED,
-                    {
-                        "reason": "source_exhausted",
-                        "projection": dict(end_projection),
-                    },
+        if should_publish:
+            if publish_interactions:
+                # Earlier final-state chunks may have consumed source events
+                # without publishing transport frames. A DELTA here would
+                # therefore cross the client's causal source-sequence floor.
+                # Publish the exact post-interaction state atomically instead.
+                self._emit_reset_snapshot(
+                    "fast_forward_final_state_interaction",
                     mandatory=True,
+                )
+            else:
+                self._emit(
+                    ReplayEventType.DELTA,
+                    {
+                        "source_sequence": source_cursor.source_sequence,
+                        "source_event": self._event_payload(event),
+                        "projection": dict(projection),
+                    },
+                    mandatory=immediate_delivery,
                     state_hash=state_hash,
                 )
-        return component_state, state_hash
+                if self._state is SessionState.ENDED:
+                    self._emit(
+                        ReplayEventType.ENDED,
+                        {
+                            "reason": "source_exhausted",
+                            "projection": dict(end_projection),
+                        },
+                        mandatory=True,
+                        state_hash=state_hash,
+                    )
+        return component_state, state_hash, should_publish
 
     @staticmethod
     def _projection_requires_immediate_delivery(

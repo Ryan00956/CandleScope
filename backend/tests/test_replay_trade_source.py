@@ -137,6 +137,29 @@ def test_pristine_blind_trade_source_reconstructs_identity_for_sequence_position
     assert third.last_trade_id == 6
 
 
+def test_positioned_trade_source_reads_only_a_bounded_tail_page() -> None:
+    rows = [make_trade_row(index) for index in range(200)]
+    archive = FakeRawAggTradeArchive(rows)
+    source = TradeReplaySource(
+        PagedReplayTradeReader(
+            archive,  # type: ignore[arg-type]
+            make_trade_dataset(len(rows)),
+            page_rows=200,
+            validate_generation=False,
+        )
+    )
+
+    positioned = source.fork_at_sequence(
+        100,
+        last_event_time_ms=int(rows[99]["trade_time_ms"]),
+    )
+
+    assert positioned.peek() is not None
+    assert archive.scan_limits == [64]
+    assert positioned.buffered_count == 64
+    assert source.cursor().source_sequence == 0
+
+
 def test_blind_trade_source_maps_all_public_ids_but_keeps_actual_archive_cursor() -> (
     None
 ):

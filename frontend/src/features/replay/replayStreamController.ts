@@ -348,30 +348,59 @@ export class ReplayStreamController {
       const isFastForwardComplete = (
         snapshot.status_reason === "fast_forward_complete"
       );
-      const isIntentionalForwardReset = hasAuthorityFloor
-        && (forwardResetRequiresSourceAdvance || isFastForwardComplete)
+      const isFinalStateReset = (
+        snapshot.status_reason === "fast_forward_final_state_complete"
+        || snapshot.status_reason === "fast_forward_final_state_cancelled"
+        || snapshot.status_reason === "fast_forward_final_state_interaction"
+      );
+      const isIntentionalFinalStateReset = hasAuthorityFloor
+        && isFinalStateReset
         && (snapshot.state === "PAUSED" || snapshot.state === "ENDED")
         && snapshot.sequence === lastSequence + 1
         && snapshot.cursor.virtual_time_ms >= lastVirtualTimeMs
         && (
-          forwardResetRequiresSourceAdvance
-            ? (
-              snapshot.revision === lastRevision + 1
-              && snapshot.cursor.source_sequence > lastSourceSequence
+          (
+            snapshot.revision > lastRevision
+            && snapshot.cursor.source_sequence >= lastSourceSequence
+          )
+          || (
+            snapshot.revision === lastRevision
+            && snapshot.cursor.source_sequence === lastSourceSequence
+          )
+        );
+      const isIntentionalForwardReset = hasAuthorityFloor
+        && (
+          isIntentionalFinalStateReset
+          || (
+            (forwardResetRequiresSourceAdvance || isFastForwardComplete)
+            && (snapshot.state === "PAUSED" || snapshot.state === "ENDED")
+            && snapshot.sequence === lastSequence + 1
+            && snapshot.cursor.virtual_time_ms >= lastVirtualTimeMs
+            && (
+              forwardResetRequiresSourceAdvance
+                ? (
+                  snapshot.revision === lastRevision + 1
+                  && snapshot.cursor.source_sequence > lastSourceSequence
+                )
+                : (
+                  (
+                    snapshot.revision === lastRevision + 1
+                    && snapshot.cursor.source_sequence > lastSourceSequence
+                  )
+                  || (
+                    snapshot.revision === lastRevision
+                    && snapshot.cursor.source_sequence === lastSourceSequence
+                  )
+                )
             )
-            : (
-              (
-                snapshot.revision === lastRevision + 1
-                && snapshot.cursor.source_sequence > lastSourceSequence
-              )
-              || (
-                snapshot.revision === lastRevision
-                && snapshot.cursor.source_sequence === lastSourceSequence
-              )
-            )
+          )
         );
       if (hasAuthorityFloor
-        && (forwardResetRequiresSourceAdvance || isFastForwardComplete)
+        && (
+          forwardResetRequiresSourceAdvance
+          || isFastForwardComplete
+          || isFinalStateReset
+        )
         && !isIntentionalForwardReset) {
         this.protocolFault(
           "fast-forward snapshot violated its atomic reset contract",

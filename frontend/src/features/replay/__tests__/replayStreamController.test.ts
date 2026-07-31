@@ -702,6 +702,92 @@ test("an exact terminal fast-forward reset may atomically publish the exhausted 
   controller.stop();
 });
 
+test("a final-state reset may converge across hidden command revisions", () => {
+  for (const statusReason of [
+    "fast_forward_final_state_complete",
+    "fast_forward_final_state_cancelled",
+    "fast_forward_final_state_interaction",
+  ]) {
+    const timers = new FakeTimers();
+    const socket = new FakeSocket();
+    const snapshots: Array<{
+      revision: number;
+      sourceSequence: number;
+      reason: string;
+    }> = [];
+    const controller = new ReplayStreamController({
+      sessionId: "session-0001",
+      initialDataEpoch: replayDigest("c"),
+      baseUrl: "ws://example.test",
+      timers,
+      socketFactory: () => socket,
+      onSnapshot: (snapshot) => snapshots.push({
+        revision: snapshot.revision,
+        sourceSequence: snapshot.cursor.source_sequence,
+        reason: snapshot.status_reason,
+      }),
+    });
+    controller.start();
+    socket.open();
+    socket.message(replaySnapshotEvent({
+      sequence: 10,
+      revision: 4,
+      sourceSequence: 4,
+      virtualTimeMs: BASE_TIME_MS + 239_999,
+    }));
+    socket.message(replaySummaryJumpResetEvent({
+      sequence: 11,
+      revision: 9,
+      sourceSequence: 84,
+      virtualTimeMs: BASE_TIME_MS + 5_039_999,
+      statusReason,
+    }));
+
+    assert.deepEqual(snapshots, [
+      { revision: 4, sourceSequence: 4, reason: "created" },
+      { revision: 9, sourceSequence: 84, reason: statusReason },
+    ]);
+    assert.equal(controller.diagnostics().state, "connected");
+    controller.stop();
+  }
+});
+
+test("a final-state reset cannot cross source within the same revision", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const snapshots: number[] = [];
+  const errors: string[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onSnapshot: (snapshot) => snapshots.push(snapshot.cursor.source_sequence),
+    onError: (error) => errors.push(error.code),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent({
+    sequence: 10,
+    revision: 4,
+    sourceSequence: 4,
+    virtualTimeMs: BASE_TIME_MS + 239_999,
+  }));
+  socket.message(replaySummaryJumpResetEvent({
+    sequence: 11,
+    revision: 4,
+    sourceSequence: 84,
+    virtualTimeMs: BASE_TIME_MS + 5_039_999,
+    statusReason: "fast_forward_final_state_complete",
+  }));
+
+  assert.deepEqual(snapshots, [4]);
+  assert.equal(controller.diagnostics().state, "resyncing");
+  assert.ok(errors.includes("REPLAY_PROTOCOL_ERROR"));
+  controller.stop();
+});
+
 test("coalesced-prefix resets reject non-contiguous or non-forward authority", () => {
   const variants = [
     { name: "sequence", event: replayCoalescedPrefixResetEvent({ sequence: 12 }) },

@@ -103,6 +103,8 @@ if TYPE_CHECKING:
 
 
 ADVANCE_PROGRESS_RETENTION_SECONDS = 2.0
+FINAL_STATE_PROJECTION_DELIVERY = "FINAL_STATE"
+FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS = 10_000
 
 
 def _stored_counter(value: object, *, field_name: str) -> int:
@@ -2253,6 +2255,14 @@ class TrainingRunService:
                         summary=candidate,
                     )
             translated_plan = plan
+            final_state_delivery = (
+                translated_plan.get("basis") == AdvanceBasis.DISPLAY_BAR.value
+                and command.type
+                in {
+                    ReplayV2CommandType.ADVANCE,
+                    ReplayV2CommandType.STEP_DISPLAY,
+                }
+            )
             plan = {
                 **self._fast_forward_plan_payload(
                     decision,
@@ -2281,6 +2291,38 @@ class TrainingRunService:
                     decision.explanation,
                     status_code=409,
                     details={"plan": plan},
+                )
+            if final_state_delivery:
+                empty_account_path = not decision.context.path_dependencies
+                sparse_interaction_path = set(
+                    decision.context.path_dependencies
+                ) == {"OPEN_ORDER"}
+                if empty_account_path or sparse_interaction_path:
+                    plan["chunk_event_limit"] = max(
+                        1,
+                        min(
+                            FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS,
+                            self.replay_service.settings.event_buffer_size,
+                            self.replay_service.settings.trade_page_rows,
+                        ),
+                    )
+                plan.update(
+                    {
+                        "projection_delivery": FINAL_STATE_PROJECTION_DELIVERY,
+                        "path_execution": (
+                            "EMPTY_ACCOUNT"
+                            if empty_account_path
+                            else (
+                                "SPARSE_INTERACTION"
+                                if sparse_interaction_path
+                                else "EXACT_INTERACTION"
+                            )
+                        ),
+                        "final_state_optimized": True,
+                        "single_pass_source_chunks": True,
+                        "interaction_boundary_stop": sparse_interaction_path,
+                        "intermediate_projection_policy": "ORDERS_FILLS_WARNINGS",
+                    }
                 )
             result = await self._execute_target_scan(
                 command=command,
@@ -5797,6 +5839,9 @@ class TrainingRunService:
             "consumed": 0,
             "summary_skipped_events": 0,
             "tail_reducer_events": 0,
+            "coalesced_projection_events": 0,
+            "published_projection_events": 0,
+            "batch_reducer_events": 0,
             "chunks": 0,
             "simulated_account_liquidations": 0,
             "cancelable": bool(plan.get("cancelable", False)),
@@ -5814,9 +5859,8 @@ class TrainingRunService:
                 summary is not None
                 and plan.get("mode") == FastForwardPlan.CHECKPOINT_JUMP.value
             ):
-                current_response = await self.replay_service.get_session(session_id)
                 current = _stored_mapping(
-                    current_response.get("snapshot"),
+                    await self.replay_service.get_session_state(session_id),
                     field_name="adapter snapshot",
                 )
                 current_cursor = _stored_mapping(
@@ -5889,9 +5933,9 @@ class TrainingRunService:
                 if cancel.is_set():
                     job["status"] = "CANCELLED"
                     break
-                current_response = await self.replay_service.get_session(session_id)
                 current = _stored_mapping(
-                    current_response.get("snapshot"), field_name="adapter snapshot"
+                    await self.replay_service.get_session_state(session_id),
+                    field_name="adapter snapshot",
                 )
                 cursor = _stored_mapping(
                     current.get("cursor"), field_name="adapter cursor"
@@ -5906,47 +5950,68 @@ class TrainingRunService:
                 ):
                     job["status"] = "COMPLETED"
                     break
-                chunk = await self.replay_service.plan_source_chunk(
-                    session_id,
-                    target_time_ms=target_virtual_time_ms,
-                    max_events=_stored_counter(
-                        job.get("chunk_event_limit"), field_name="chunk_event_limit"
-                    ),
-                )
-                if cancel.is_set():
-                    job["status"] = "CANCELLED"
-                    break
-                count = _stored_counter(
-                    chunk.get("event_count"), field_name="event_count"
-                )
                 v1_type: CommandType | InternalCommandType
                 payload: dict[str, object]
-                if count > 0:
-                    if plan.get("mode") in {
-                        FastForwardPlan.AGGREGATE_SCAN.value,
-                        FastForwardPlan.CHECKPOINT_JUMP.value,
-                    }:
-                        v1_type = InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT
-                        payload = {
-                            "count": count,
-                            "tail_events": min(
-                                count,
-                                _stored_counter(
-                                    plan.get("tail_event_count", 0),
-                                    field_name="tail_event_count",
-                                ),
-                            ),
-                        }
-                    else:
-                        v1_type = CommandType.STEP
-                        payload = {"count": count}
+                if (
+                    plan.get("projection_delivery")
+                    == FINAL_STATE_PROJECTION_DELIVERY
+                ):
+                    v1_type = InternalCommandType.FAST_FORWARD_FINAL_STATE
+                    payload = {
+                        "target_virtual_time_ms": target_virtual_time_ms,
+                        "max_events": _stored_counter(
+                            job.get("chunk_event_limit"),
+                            field_name="chunk_event_limit",
+                        ),
+                        "require_empty_account": (
+                            plan.get("path_execution") == "EMPTY_ACCOUNT"
+                        ),
+                        "snapshot_only": False,
+                    }
                 else:
-                    # The v1 adapter bounds one duration command to 30 days.
-                    duration = min(
-                        target_virtual_time_ms - current_time, 30 * 86_400_000
+                    chunk = await self.replay_service.plan_source_chunk(
+                        session_id,
+                        target_time_ms=target_virtual_time_ms,
+                        max_events=_stored_counter(
+                            job.get("chunk_event_limit"),
+                            field_name="chunk_event_limit",
+                        ),
                     )
-                    v1_type = CommandType.ADVANCE_BY
-                    payload = {"ms": duration}
+                    if cancel.is_set():
+                        job["status"] = "CANCELLED"
+                        break
+                    count = _stored_counter(
+                        chunk.get("event_count"), field_name="event_count"
+                    )
+                    if count > 0:
+                        if plan.get("mode") in {
+                            FastForwardPlan.AGGREGATE_SCAN.value,
+                            FastForwardPlan.CHECKPOINT_JUMP.value,
+                        }:
+                            v1_type = (
+                                InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT
+                            )
+                            payload = {
+                                "count": count,
+                                "tail_events": min(
+                                    count,
+                                    _stored_counter(
+                                        plan.get("tail_event_count", 0),
+                                        field_name="tail_event_count",
+                                    ),
+                                ),
+                            }
+                        else:
+                            v1_type = CommandType.STEP
+                            payload = {"count": count}
+                    else:
+                        # The v1 adapter bounds one duration command to 30 days.
+                        duration = min(
+                            target_virtual_time_ms - current_time,
+                            30 * 86_400_000,
+                        )
+                        v1_type = CommandType.ADVANCE_BY
+                        payload = {"ms": duration}
                 part = ReplayCommand(
                     protocol=REPLAY_PROTOCOL,
                     command_id=self._advance_part_id(
@@ -5984,6 +6049,24 @@ class TrainingRunService:
                 acknowledged_cursor = _stored_mapping(
                     acknowledged.get("cursor"), field_name="adapter cursor"
                 )
+                acknowledged_consumed = _stored_counter(
+                    acknowledged_data.get("consumed", 0),
+                    field_name="acknowledged consumed",
+                )
+                acknowledged_time = _stored_counter(
+                    acknowledged_cursor.get("virtual_time_ms"),
+                    field_name="virtual_time_ms",
+                )
+                if (
+                    acknowledged_consumed == 0
+                    and acknowledged_time <= current_time
+                    and acknowledged.get("state") != "ENDED"
+                ):
+                    raise TrainingRunError(
+                        ReplayErrorCode.DATASET_MISMATCH.value,
+                        "fast-forward chunk made no cursor progress",
+                        status_code=409,
+                    )
                 job["chunks"] = (
                     _stored_counter(job.get("chunks"), field_name="chunks") + 1
                 )
@@ -5995,21 +6078,33 @@ class TrainingRunService:
                 )
                 job["consumed"] = _stored_counter(
                     job.get("consumed"), field_name="consumed"
-                ) + _stored_counter(
-                    acknowledged_data.get("consumed", 0),
-                    field_name="acknowledged consumed",
-                )
+                ) + acknowledged_consumed
                 job["tail_reducer_events"] = _stored_counter(
                     job.get("tail_reducer_events"),
                     field_name="tail_reducer_events",
+                ) + acknowledged_consumed
+                job["coalesced_projection_events"] = _stored_counter(
+                    job.get("coalesced_projection_events"),
+                    field_name="coalesced_projection_events",
                 ) + _stored_counter(
-                    acknowledged_data.get("consumed", 0),
-                    field_name="acknowledged consumed",
+                    acknowledged_data.get("coalesced_projection_events", 0),
+                    field_name="acknowledged coalesced_projection_events",
                 )
-                job["current_virtual_time_ms"] = _stored_counter(
-                    acknowledged_cursor.get("virtual_time_ms"),
-                    field_name="virtual_time_ms",
+                job["published_projection_events"] = _stored_counter(
+                    job.get("published_projection_events"),
+                    field_name="published_projection_events",
+                ) + _stored_counter(
+                    acknowledged_data.get("published_projection_events", 0),
+                    field_name="acknowledged published_projection_events",
                 )
+                job["batch_reducer_events"] = _stored_counter(
+                    job.get("batch_reducer_events"),
+                    field_name="batch_reducer_events",
+                ) + _stored_counter(
+                    acknowledged_data.get("batch_reducer_events", 0),
+                    field_name="acknowledged batch_reducer_events",
+                )
+                job["current_virtual_time_ms"] = acknowledged_time
                 await self.store.update_advance_intent_cursor(
                     run_id=command.run_id,
                     command_id=command.command_id,
@@ -6024,6 +6119,75 @@ class TrainingRunService:
                     command_id=command.command_id,
                 )
                 await asyncio.sleep(0)
+
+            if (
+                job.get("status") == "CANCELLED"
+                and plan.get("projection_delivery")
+                == FINAL_STATE_PROJECTION_DELIVERY
+                and _stored_counter(
+                    job.get("consumed"), field_name="consumed"
+                )
+                > 0
+            ):
+                cancelled_state = _stored_mapping(
+                    await self.replay_service.get_session_state(session_id),
+                    field_name="adapter snapshot",
+                )
+                cancelled_cursor = _stored_mapping(
+                    cancelled_state.get("cursor"),
+                    field_name="adapter cursor",
+                )
+                cancelled_time = _stored_counter(
+                    cancelled_cursor.get("virtual_time_ms"),
+                    field_name="virtual_time_ms",
+                )
+                sync = ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=self._advance_part_id(
+                        command,
+                        source_sequence=_stored_counter(
+                            cancelled_cursor.get("source_sequence"),
+                            field_name="source_sequence",
+                        ),
+                        virtual_time_ms=cancelled_time,
+                        target_virtual_time_ms=cancelled_time,
+                    ),
+                    client_instance_id=command.client_instance_id,
+                    expected_revision=_stored_counter(
+                        cancelled_state.get("revision"),
+                        field_name="revision",
+                    ),
+                    type=InternalCommandType.FAST_FORWARD_FINAL_STATE,
+                    payload={
+                        "target_virtual_time_ms": cancelled_time,
+                        "max_events": 1,
+                        "require_empty_account": False,
+                        "snapshot_only": True,
+                    },
+                )
+                try:
+                    synchronized = await self.replay_service.command(
+                        session_id,
+                        sync,
+                        _training_internal=True,
+                    )
+                except ReplayDomainError as exc:
+                    raise TrainingRunError(
+                        exc.code.value,
+                        exc.message,
+                        status_code=exc.http_status,
+                        details=exc.details,
+                    ) from exc
+                synchronized_cursor = _stored_mapping(
+                    synchronized.get("cursor"),
+                    field_name="adapter cursor",
+                )
+                await self.store.update_advance_intent_cursor(
+                    run_id=command.run_id,
+                    command_id=command.command_id,
+                    cursor=synchronized_cursor,
+                )
+                job["cancel_snapshot_published"] = True
 
             final_response = await self.replay_service.get_session(session_id)
             final = _stored_mapping(
@@ -6131,6 +6295,18 @@ class TrainingRunService:
                     "tail_reducer_events": _stored_counter(
                         job.get("tail_reducer_events"),
                         field_name="tail_reducer_events",
+                    ),
+                    "coalesced_projection_events": _stored_counter(
+                        job.get("coalesced_projection_events"),
+                        field_name="coalesced_projection_events",
+                    ),
+                    "published_projection_events": _stored_counter(
+                        job.get("published_projection_events"),
+                        field_name="published_projection_events",
+                    ),
+                    "batch_reducer_events": _stored_counter(
+                        job.get("batch_reducer_events"),
+                        field_name="batch_reducer_events",
                     ),
                     "cancelled": job["status"] == "CANCELLED",
                     "target_virtual_time_ms": target_virtual_time_ms,
@@ -6256,6 +6432,18 @@ class TrainingRunService:
             "tail_reducer_events": _stored_counter(
                 job.get("tail_reducer_events", 0),
                 field_name="tail_reducer_events",
+            ),
+            "coalesced_projection_events": _stored_counter(
+                job.get("coalesced_projection_events", 0),
+                field_name="coalesced_projection_events",
+            ),
+            "published_projection_events": _stored_counter(
+                job.get("published_projection_events", 0),
+                field_name="published_projection_events",
+            ),
+            "batch_reducer_events": _stored_counter(
+                job.get("batch_reducer_events", 0),
+                field_name="batch_reducer_events",
             ),
             "chunks": _stored_counter(job.get("chunks"), field_name="chunks"),
             "cancelable": bool(job["cancelable"]),

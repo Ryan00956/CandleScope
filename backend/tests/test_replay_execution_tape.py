@@ -224,6 +224,106 @@ def test_trade_builder_failure_rolls_back_tape_fills_and_ledger() -> None:
     assert len(broker.fills) == 1
 
 
+def test_empty_account_final_state_batch_matches_per_trade_broker_state() -> None:
+    trades = tuple(
+        _trade(
+            index,
+            price=str(100 + (index % 4)),
+            quantity=str(1 + (index % 3)),
+        )
+        for index in range(20)
+    )
+    projected = _broker()
+    final_state = _broker()
+
+    for trade in trades:
+        projected.apply_trade(trade)
+    assert final_state.apply_source_events_final_state(trades) == {}
+
+    assert final_state.snapshot() == projected.snapshot()
+
+
+def test_position_final_state_batch_matches_mark_to_market_path() -> None:
+    seed = _broker()
+    seed.place_order(
+        request(client_order_id="batch-position", quantity="1"),
+        command_id="batch-position-order",
+    )
+    seed.apply_trade(_trade(0, price="100", quantity="1"))
+    checkpoint = seed.snapshot()
+    projected = _broker()
+    projected.restore(checkpoint)
+    final_state = _broker()
+    final_state.restore(checkpoint)
+    trades = tuple(
+        _trade(
+            index,
+            price=str(96 + (index % 9)),
+            quantity="1",
+        )
+        for index in range(1, 20)
+    )
+
+    for trade in trades:
+        projected.apply_trade(trade)
+    assert final_state.supports_final_state_batch()
+    assert final_state.apply_source_events_final_state(trades) == {}
+
+    assert final_state.snapshot() == projected.snapshot()
+
+
+def test_resting_order_final_state_batch_matches_per_trade_path() -> None:
+    seed = _broker()
+    seed.place_order(
+        request(
+            client_order_id="batch-resting-limit",
+            order_type=OrderType.LIMIT,
+            quantity="1",
+            limit_price="90",
+        ),
+        command_id="batch-resting-limit-order",
+    )
+    checkpoint = seed.snapshot()
+    projected = _broker()
+    projected.restore(checkpoint)
+    final_state = _broker()
+    final_state.restore(checkpoint)
+    trades = tuple(
+        _trade(index, price=str(100 + (index % 4)), quantity="1")
+        for index in range(20)
+    )
+
+    for trade in trades:
+        projected.apply_trade(trade)
+    assert not final_state.supports_final_state_batch()
+    assert final_state.can_apply_source_events_final_state(trades)
+    assert final_state.apply_source_events_final_state(trades) == {}
+
+    assert final_state.snapshot() == projected.snapshot()
+
+
+def test_triggering_order_rejects_final_state_batch_without_mutation() -> None:
+    broker = _broker()
+    broker.place_order(
+        request(
+            client_order_id="batch-triggering-limit",
+            order_type=OrderType.LIMIT,
+            quantity="1",
+            limit_price="100",
+        ),
+        command_id="batch-triggering-limit-order",
+    )
+    trades = (_trade(0, price="99.9", quantity="1"),)
+    before = broker.snapshot()
+
+    assert not broker.can_apply_source_events_final_state(trades)
+    with pytest.raises(ReplayDomainError) as raised:
+        broker.apply_source_events_final_state(trades)
+
+    assert raised.value.code is ReplayErrorCode.INVALID_STATE_TRANSITION
+    assert broker.snapshot() == before
+
+
 def test_tape_report_and_checkpoint_preserve_model_version() -> None:
     broker = _broker(minutes=1)
     broker.place_order(

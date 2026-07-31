@@ -1532,6 +1532,16 @@ Phase 8 冻结了四态 planner、进度/取消和 exact reducer reference，但
 9. 最终浏览器 `replay.db` 为 1,179,648 B、SHA-256=`b4e50064db9581d66c68926a0f12b22970a6342c4b998f591f53bc2ed863db89`，training schema=9，包含 1 run/session、1 READY set、2 candidates、1 COMPLETED intent/command；与 `candlescope.db` 均 `quick_check=ok`、foreign-key 零行、无 WAL/SHM，`:18087/:15180` 已释放。Phase 14 v9 旧库从 0 个 Phase 15 表原位新增 3 个表且版本仍为 9；PREPARING build 重启后确定转为 `FAILED/PROCESS_RESTARTED`，两项迁移证据数据库亦 quick/FK/WAL 门禁通过。
 10. detached Phase 14 父提交 `5c38d27` 的 Phase 14 回归 8/8 通过并清理 worktree；完整 staged patch 通过 `git apply --reverse --check --whitespace=error-all`。默认 replay/v2、frontend entry/v2、segment worker/GC、raw archive、historical book 和 fast-forward optimization 开关继续关闭。Decision：实现、真实数据、全量回归、浏览器、SQLite、父基线和反向补丁均 PASS；Phase 15 独立提交成功后才进入 Phase 16，release 继续 HOLD。
 
+### 显示周期终态推进纠偏（2026-07-30）
+
+`DISPLAY_BAR` 的离散“下一根”不再把中间基础 K/aggTrade 当作动画逐条发布。单 FULL 轨在 actor 内按目标虚拟时间做一次有界顺序扫描：空账户每块最多 10,000 个 source event，只在真正到达目标时发布一个 reset snapshot；空仓但有挂单时同样允许大块扫描，broker 先定位第一个可能成交/撤单的事件，只批量折叠它之前的安全前缀，并把交互事件单独精确提交。已有持仓、跨轨、资金费、账户时间线或订单簿依赖时继续使用原 32-event 账户/强平检查边界；边界内无挂单交互的持仓 mark-to-market 可批量折叠，否则逐事件精确撮合。订单、成交或警告发生时发布一次交互后的原子 snapshot，最后发布完整终态；取消发生在隐藏前缀后时额外发布一个不消费 source event 的同步 snapshot。
+
+该路径不依赖 `REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED`，因为它不跳过 reducer 语义；优化开关仍只控制 period-summary/checkpoint skip。实现同时取消了 DISPLAY_BAR 原先的 source chunk 预扫描与 command preflight，块间只读取轻量 cursor/state，不再重复序列化完整 bars/orders/fills 历史。AGG summary jump 定位后的首个读取被限制为 64 行，避免仅验证 32-event tail 却读取默认 50,000 行。前端流控制器只对 `fast_forward_final_state_complete/cancelled/interaction` 放行连续 transport sequence、非回退 cursor 且合法同/后继 revision 的原子 reset；隐藏多个内部块造成的 revision 跳跃不会误触发 resync，同 revision 伪造 source 跳跃仍 fail closed。
+
+正确性边界保持明确：空账户 BAR 1d 通常可在一个 1,440-event 块内直接收敛到最终 1d 状态；挂单与持仓仍使用 exact event reducer，价格触及、reduce-only 失效或其他交互不会被批处理越过。未命中已准备 period summary 的大规模 AGG_TRADE 推进仍为 O(N) 精确扫描，不能宣称 O(1)；真正跳过数十万成交仍要求启用并命中 checksum-bound summary。
+
+开发态对照基准（不是 clean-HEAD 发布门禁）在 2,000 个事件上保持 cursor、source-event-chain state hash 和 component hash 全相等：本机 checksum-verified Binance USD-M 日归档（data epoch `sha256:341c9f222ce17429d97b7805caa921561f281945d35d118713502086b39fc201`）空账户为 0.1010 s 对 2.1584 s（21.37x），远端静态挂单为 0.1139 s 对 2.3698 s（20.81x）；生成的确定性持仓轨在同一 32-event 风控边界下为 0.4094 s 对 4.4915 s（10.97x）。正式发布仍须在 clean HEAD 上重跑完整 benchmark/soak，不能继承这些开发态数字。
+
 ---
 
 ## 27. Phase 16：交易所级账户 fidelity

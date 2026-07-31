@@ -78,6 +78,8 @@ class ReplayTrade:
         value = self.trade_time_ms + offset_ms
         if value < 0:
             raise ValueError("mapped replay trade time cannot be negative")
+        if offset_ms == 0:
+            return self
         return replace(self, trade_time_ms=value)
 
     def with_public_identity(
@@ -195,9 +197,16 @@ class PagedReplayTradeReader:
     def read_page(
         self,
         after: RawAggTradeCursor | None = None,
+        *,
+        limit: int | None = None,
     ) -> ReplayTradePage:
         if after is not None and not isinstance(after, RawAggTradeCursor):
             raise TypeError("after must be RawAggTradeCursor or None")
+        page_limit = self.page_rows if limit is None else limit
+        if isinstance(page_limit, bool) or not isinstance(page_limit, int):
+            raise TypeError("limit must be an integer or None")
+        if page_limit < 1 or page_limit > self.page_rows:
+            raise ValueError(f"limit must be between 1 and {self.page_rows}")
         if after is not None:
             if after.agg_trade_id < self.dataset_ref.expected_first_agg_trade_id - 1:
                 raise ReplayDomainError(
@@ -221,7 +230,7 @@ class PagedReplayTradeReader:
                 start_agg_trade_id=self.dataset_ref.expected_first_agg_trade_id,
                 end_agg_trade_id=self.dataset_ref.expected_last_agg_trade_id,
                 after=after,
-                limit=self.page_rows,
+                limit=page_limit,
                 dataset_ref=self.dataset_ref,
             )
         except ReplayDomainError:
@@ -237,7 +246,7 @@ class PagedReplayTradeReader:
                 "aggregate-trade page data epoch changed",
             )
         trades = tuple(ReplayTrade.from_archive_row(row) for row in page.rows)
-        if len(trades) > self.page_rows:
+        if len(trades) > page_limit:
             raise ReplayDomainError(
                 ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
                 "aggregate-trade archive exceeded the page budget",

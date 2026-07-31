@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.replay.actor import ReplaySessionActor
-from app.replay.constants import REPLAY_PROTOCOL, CommandType
+from app.replay.constants import REPLAY_PROTOCOL, CommandType, ReplayEventType
 from app.replay.internal_commands import InternalCommandType
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService
@@ -18,6 +18,7 @@ from app.replay.training.trade_flow import ReplayTradeFlowAdapter
 from tests.fixtures.replay.service_fakes import INTERVAL_MS
 from tests.fixtures.replay.actor_fakes import (
     CountingReducer,
+    FixtureEvent,
     event_fixture,
     session_config,
     source_factory,
@@ -169,6 +170,271 @@ async def test_projection_coalescing_preserves_source_chain_and_component_hash()
     # The state hash includes the source event-chain hash, so this proves that
     # coalescing only changes delivery and not the ordered reducer path.
     assert optimized[0]["state_hash"] == reference[0]["state_hash"]
+
+
+async def test_final_state_scan_keeps_interactions_and_matches_step_reference() -> None:
+    events = event_fixture(count=128, step_ms=10)
+    target = events[95].event_time_ms
+
+    class InteractionReducer(CountingReducer):
+        def __init__(self) -> None:
+            super().__init__(trading_state=True)
+
+        def apply_source_event(self, event: FixtureEvent) -> dict[str, object]:
+            projection = dict(super().apply_source_event(event))
+            if self.count == 40:
+                projection["orders"] = [{"order_id": "interaction-40"}]
+            return projection
+
+    async def run(
+        *,
+        session_id: str,
+        final_state: bool,
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+        reducer = InteractionReducer()
+        actor = ReplaySessionActor(
+            session_id=session_id,
+            config=session_config(),
+            source_factory=source_factory(events),
+            initial_virtual_time_ms=1_000,
+            command_queue_size=8,
+            event_buffer_size=128,
+            max_emit_fps=30,
+            controller_ttl_seconds=60,
+            checkpoint_event_interval=10_000,
+            checkpoint_virtual_ms=300_000,
+            reducer=reducer,
+        )
+        await actor.start()
+        try:
+            acquired = await actor.submit(
+                ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=f"{session_id}-acquire",
+                    client_instance_id="phase8-final-client",
+                    expected_revision=0,
+                    type=CommandType.ACQUIRE_CONTROLLER,
+                    payload={},
+                )
+            )
+            result = await actor.submit(
+                ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=f"{session_id}-advance",
+                    client_instance_id="phase8-final-client",
+                    expected_revision=acquired.revision,
+                    type=(
+                        InternalCommandType.FAST_FORWARD_FINAL_STATE
+                        if final_state
+                        else CommandType.STEP
+                    ),
+                    payload=(
+                        {
+                            "target_virtual_time_ms": target,
+                            "max_events": 128,
+                            "require_empty_account": False,
+                            "snapshot_only": False,
+                        }
+                        if final_state
+                        else {"count": 96}
+                    ),
+                )
+            )
+            return (
+                (await actor.snapshot()).to_dict(),
+                dict(reducer.snapshot()),
+                dict(result.data),
+                actor.diagnostics(),
+            )
+        finally:
+            await actor.shutdown(step_timeout=1.0)
+
+    final_state, reference = await asyncio.gather(
+        run(session_id="phase8-final-state", final_state=True),
+        run(session_id="phase8-final-reference", final_state=False),
+    )
+
+    assert final_state[2]["consumed"] == 96
+    assert final_state[2]["published_projection_events"] == 1
+    assert final_state[2]["coalesced_projection_events"] == 95
+    assert final_state[2]["snapshot_published"] is True
+    assert final_state[0]["cursor"] == reference[0]["cursor"]
+    assert final_state[1] == reference[1]
+    assert final_state[0]["state_hash"] == reference[0]["state_hash"]
+    assert int(final_state[0]["sequence"]) < int(reference[0]["sequence"])
+    assert int(final_state[3]["component_snapshot_materializations"]) < int(
+        reference[3]["component_snapshot_materializations"]
+    )
+
+
+async def test_final_state_scan_stops_at_first_interaction_boundary() -> None:
+    events = event_fixture(count=5, step_ms=10)
+
+    class SparseInteractionReducer(CountingReducer):
+        def __init__(self) -> None:
+            super().__init__(trading_state=True)
+
+        def apply_source_event(self, event: FixtureEvent) -> dict[str, object]:
+            projection = dict(super().apply_source_event(event))
+            if event.value == 3:
+                projection["orders"] = [{"order_id": "interaction-3"}]
+            return projection
+
+        def supports_final_state_batch(self) -> bool:
+            return False
+
+        @staticmethod
+        def final_state_safe_prefix_length(
+            candidates: tuple[FixtureEvent, ...],
+        ) -> int:
+            return next(
+                (
+                    index
+                    for index, candidate in enumerate(candidates)
+                    if candidate.value == 3
+                ),
+                len(candidates),
+            )
+
+        def apply_source_events_final_state(
+            self,
+            candidates: tuple[FixtureEvent, ...],
+        ) -> dict[str, object]:
+            for candidate in candidates:
+                super().apply_source_event(candidate)
+            return {}
+
+    reducer = SparseInteractionReducer()
+    actor = ReplaySessionActor(
+        session_id="phase8-sparse-interaction",
+        config=session_config(),
+        source_factory=source_factory(events),
+        initial_virtual_time_ms=1_000,
+        command_queue_size=8,
+        event_buffer_size=32,
+        max_emit_fps=30,
+        controller_ttl_seconds=60,
+        checkpoint_event_interval=10_000,
+        checkpoint_virtual_ms=300_000,
+        reducer=reducer,
+    )
+    await actor.start()
+    try:
+        result = await actor.submit(
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="phase8-sparse-acquire",
+                client_instance_id="phase8-sparse-client",
+                expected_revision=0,
+                type=CommandType.ACQUIRE_CONTROLLER,
+                payload={},
+            )
+        )
+        parts: list[dict[str, object]] = []
+        for index in range(3):
+            result = await actor.submit(
+                ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=f"phase8-sparse-part-{index}",
+                    client_instance_id="phase8-sparse-client",
+                    expected_revision=result.revision,
+                    type=InternalCommandType.FAST_FORWARD_FINAL_STATE,
+                    payload={
+                        "target_virtual_time_ms": events[-1].event_time_ms,
+                        "max_events": len(events),
+                        "require_empty_account": False,
+                        "snapshot_only": False,
+                    },
+                )
+            )
+            parts.append(dict(result.data))
+
+        assert [part["consumed"] for part in parts] == [2, 1, 2]
+        assert [part["batch_reducer_events"] for part in parts] == [2, 0, 2]
+        assert [part["published_projection_events"] for part in parts] == [0, 1, 0]
+        assert [part["target_reached"] for part in parts] == [False, False, True]
+        assert reducer.snapshot() == {"count": 5, "total": 15}
+        assert (await actor.snapshot()).cursor.source_sequence == 5
+        interaction_snapshots = [
+            event
+            for event in actor.event_buffer_after(0) or ()
+            if event.type is ReplayEventType.SNAPSHOT
+            and event.data["snapshot"]["status_reason"]
+            == "fast_forward_final_state_interaction"
+        ]
+        assert len(interaction_snapshots) == 1
+        assert interaction_snapshots[0].data["snapshot"]["cursor"][
+            "source_sequence"
+        ] == 3
+    finally:
+        await actor.shutdown(step_timeout=1.0)
+
+
+async def test_final_state_cancel_snapshot_does_not_consume_same_time_event() -> None:
+    events = (
+        FixtureEvent(event_time_ms=1_010, value=1),
+        FixtureEvent(event_time_ms=1_010, value=2),
+        FixtureEvent(event_time_ms=1_020, value=3),
+    )
+    actor = ReplaySessionActor(
+        session_id="phase8-final-cancel",
+        config=session_config(),
+        source_factory=source_factory(events),
+        initial_virtual_time_ms=1_000,
+        command_queue_size=8,
+        event_buffer_size=16,
+        max_emit_fps=30,
+        controller_ttl_seconds=60,
+        checkpoint_event_interval=10_000,
+        checkpoint_virtual_ms=300_000,
+        reducer=CountingReducer(),
+    )
+    await actor.start()
+    try:
+        acquired = await actor.submit(
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="phase8-cancel-acquire",
+                client_instance_id="phase8-final-client",
+                expected_revision=0,
+                type=CommandType.ACQUIRE_CONTROLLER,
+                payload={},
+            )
+        )
+        stepped = await actor.submit(
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="phase8-cancel-step",
+                client_instance_id="phase8-final-client",
+                expected_revision=acquired.revision,
+                type=CommandType.STEP,
+                payload={"count": 1},
+            )
+        )
+        synchronized = await actor.submit(
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="phase8-cancel-snapshot",
+                client_instance_id="phase8-final-client",
+                expected_revision=stepped.revision,
+                type=InternalCommandType.FAST_FORWARD_FINAL_STATE,
+                payload={
+                    "target_virtual_time_ms": stepped.cursor.virtual_time_ms,
+                    "max_events": 1,
+                    "require_empty_account": False,
+                    "snapshot_only": True,
+                },
+            )
+        )
+
+        assert synchronized.data["consumed"] == 0
+        assert synchronized.data["snapshot_published"] is True
+        assert synchronized.cursor == stepped.cursor
+        assert synchronized.sequence == stepped.sequence + 1
+        public = await actor.public_snapshot()
+        assert public["status_reason"] == "fast_forward_final_state_cancelled"
+    finally:
+        await actor.shutdown(step_timeout=1.0)
 
 
 async def _create_trade_run(
@@ -536,6 +802,30 @@ async def test_open_order_forces_full_event_scan(
         )
         assert planned["plan"]["mode"] == "FULL_EVENT_SCAN"  # type: ignore[index]
         assert "OPEN_ORDER" in planned["plan"]["reason_codes"]  # type: ignore[index]
+        viewer = await service.training.get_viewer_state(run_id)
+        advanced = await service.training.command(
+            run_id,
+            _command(
+                run_id,
+                "resting-order-display-step",
+                ReplayV2CommandType.ADVANCE,
+                current,
+                {
+                    "basis": "DISPLAY_BAR",
+                    "count": 1,
+                    "display_interval": viewer["display_interval"],
+                    "viewer_revision": viewer["semantic_view_revision"],
+                },
+            ),
+        )
+        assert advanced["data"]["plan"]["mode"] == "FULL_EVENT_SCAN"  # type: ignore[index]
+        assert advanced["data"]["plan"]["projection_delivery"] == "FINAL_STATE"  # type: ignore[index]
+        assert advanced["data"]["plan"]["path_execution"] == "SPARSE_INTERACTION"  # type: ignore[index]
+        assert advanced["data"]["plan"]["interaction_boundary_stop"] is True  # type: ignore[index]
+        assert advanced["data"]["plan"]["chunk_event_limit"] > 32  # type: ignore[index]
+        assert advanced["data"]["coalesced_projection_events"] > 0  # type: ignore[index]
+        assert advanced["data"]["published_projection_events"] == 0  # type: ignore[index]
+        assert advanced["data"]["batch_reducer_events"] == advanced["data"]["consumed"]  # type: ignore[index]
     finally:
         await service.shutdown(step_timeout=1.0)
 

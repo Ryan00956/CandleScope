@@ -165,6 +165,43 @@ def test_utc_boundary_and_final_forming_display_bar_are_deterministic() -> None:
     assert restored.replace_projection() == projection
 
 
+def test_final_state_trade_updates_match_full_tick_projection_state() -> None:
+    trades = [
+        _trade(
+            index,
+            minute=index // 4,
+            price=str(100 + (index % 5)),
+            quantity=str(1 + (index % 3)),
+            offset_ms=1_000 + index,
+        )
+        for index in range(12)
+    ]
+
+    def build() -> TradeReplayBarBuilder:
+        return TradeReplayBarBuilder(
+            base_interval="1m",
+            display_interval="5m",
+            replay_start_ms=START_MS,
+            replay_end_time_ms=START_MS + 5 * MINUTE_MS - 1,
+        )
+
+    projected = build()
+    final_state = build()
+    batched = build()
+    for trade in trades:
+        projected.apply_trade(trade)
+        final_state.apply_trade_final_state(trade)
+    batched.apply_trades_final_state(trades)
+
+    assert final_state.snapshot() == projected.snapshot()
+    assert batched.snapshot() == projected.snapshot()
+    projected.finalize_bars(virtual_time_ms=START_MS + 5 * MINUTE_MS - 1)
+    final_state.finalize_bars(virtual_time_ms=START_MS + 5 * MINUTE_MS - 1)
+    batched.finalize_bars(virtual_time_ms=START_MS + 5 * MINUTE_MS - 1)
+    assert final_state.snapshot() == projected.snapshot()
+    assert batched.snapshot() == projected.snapshot()
+
+
 def test_parity_tolerance_is_frozen_and_release_fails_closed() -> None:
     builder = TradeReplayBarBuilder(
         base_interval="1m",

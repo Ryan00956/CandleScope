@@ -76,6 +76,7 @@ class FakeRawAggTradeArchive:
         self.rows = rows
         self.epoch_override: str | None = None
         self.inject_overlap = False
+        self.scan_limits: list[int] = []
 
     def validate_dataset(self, _dataset: RawAggTradeDatasetRef) -> None:
         return None
@@ -88,6 +89,7 @@ class FakeRawAggTradeArchive:
         dataset_ref: RawAggTradeDatasetRef,
         **_kwargs: object,
     ) -> RawAggTradePage:
+        self.scan_limits.append(limit)
         start = 0 if after is None else after.agg_trade_id - 99
         if self.inject_overlap and after is not None:
             start -= 1

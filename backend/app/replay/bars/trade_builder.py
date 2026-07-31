@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
@@ -212,6 +212,13 @@ class TradeReplayBarBuilder:
         self._base_interval = base_interval
         self._display_interval = display_interval
         self._base_interval_ms = base_ms
+        display_ms = parse_interval_ms(display_interval)
+        if display_ms is None or display_ms <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "display interval is invalid",
+            )
+        self._display_interval_ms = display_ms
         self._replay_start_ms = validate_timestamp_ms(
             replay_start_ms,
             field_name="replay_start_ms",
@@ -290,6 +297,185 @@ class TradeReplayBarBuilder:
         return str(self.snapshot()["state_hash"])
 
     def apply_trade(self, trade: ReplayTrade) -> Mapping[str, object]:
+        return self._apply_trade(trade, project=True)
+
+    def apply_trade_final_state(self, trade: ReplayTrade) -> Mapping[str, object]:
+        """Update exact aggregate state without building an unused tick projection."""
+
+        return self._apply_trade(trade, project=False)
+
+    def apply_trades_final_state(
+        self,
+        trades: Sequence[ReplayTrade],
+    ) -> Mapping[str, object]:
+        """Fold a trusted ordered trade block while materializing each bar once."""
+
+        if self._finalized:
+            raise ReplayDomainError(
+                ReplayErrorCode.SESSION_ENDED,
+                "aggregate-trade bar builder has been finalized",
+            )
+        if not trades:
+            return {}
+        forming = self._forming
+        current_open = None if forming is None else forming.open_time_ms
+        current_close = None if forming is None else forming.close_time_ms
+        open_price = None if forming is None else forming.open
+        high = None if forming is None else Decimal(forming.high)
+        low = None if forming is None else Decimal(forming.low)
+        close_price = None if forming is None else forming.close
+        volume = None if forming is None else Decimal(forming.volume)
+        quote_volume = (
+            None if forming is None else Decimal(forming.quote_volume)
+        )
+        trade_count = 0 if forming is None else forming.trades
+        taker_buy_base = (
+            None if forming is None else Decimal(forming.taker_buy_base)
+        )
+        taker_buy_quote = (
+            None if forming is None else Decimal(forming.taker_buy_quote)
+        )
+        updates: list[dict[str, object]] = []
+
+        def materialize_forming() -> _FormingBaseBar:
+            if (
+                current_open is None
+                or current_close is None
+                or open_price is None
+                or high is None
+                or low is None
+                or close_price is None
+                or volume is None
+                or quote_volume is None
+                or taker_buy_base is None
+                or taker_buy_quote is None
+            ):
+                raise RuntimeError("aggregate-trade batch forming state is incomplete")
+            return _FormingBaseBar(
+                open_time_ms=current_open,
+                close_time_ms=current_close,
+                open=open_price,
+                high=_decimal_string(high, "high"),
+                low=_decimal_string(low, "low"),
+                close=close_price,
+                volume=_decimal_string(volume, "volume"),
+                quote_volume=_decimal_string(quote_volume, "quote_volume"),
+                trades=trade_count,
+                taker_buy_base=_decimal_string(
+                    taker_buy_base,
+                    "taker_buy_base",
+                ),
+                taker_buy_quote=_decimal_string(
+                    taker_buy_quote,
+                    "taker_buy_quote",
+                ),
+            )
+
+        with localcontext() as context:
+            context.prec = 60
+            for trade in trades:
+                self._validate_trade(trade)
+                base_open_ms = self._base_open(trade.trade_time_ms)
+                next_sequence = self._replay_events_applied + 1
+                if current_open is None:
+                    self._append_empty_until(
+                        base_open_ms,
+                        updates,
+                        source_sequence=next_sequence,
+                        project=False,
+                    )
+                    current_open = base_open_ms
+                    current_close = self._base_end(base_open_ms) - 1
+                    open_price = trade.price
+                    high = Decimal(trade.price)
+                    low = high
+                    close_price = trade.price
+                    volume = Decimal(trade.quantity)
+                    quote_volume = Decimal(trade.quote_quantity)
+                    trade_count = trade.raw_trade_count
+                    taker_buy_base = (
+                        Decimal(0)
+                        if trade.is_buyer_maker
+                        else Decimal(trade.quantity)
+                    )
+                    taker_buy_quote = (
+                        Decimal(0)
+                        if trade.is_buyer_maker
+                        else Decimal(trade.quote_quantity)
+                    )
+                elif base_open_ms == current_open:
+                    price = Decimal(trade.price)
+                    assert high is not None
+                    assert low is not None
+                    assert volume is not None
+                    assert quote_volume is not None
+                    assert taker_buy_base is not None
+                    assert taker_buy_quote is not None
+                    high = max(high, price)
+                    low = min(low, price)
+                    close_price = trade.price
+                    volume += Decimal(trade.quantity)
+                    quote_volume += Decimal(trade.quote_quantity)
+                    trade_count += trade.raw_trade_count
+                    if not trade.is_buyer_maker:
+                        taker_buy_base += Decimal(trade.quantity)
+                        taker_buy_quote += Decimal(trade.quote_quantity)
+                elif base_open_ms > current_open:
+                    self._append_finalized(
+                        materialize_forming().to_replay_bar(),
+                        updates,
+                        source_sequence=next_sequence,
+                        project=False,
+                    )
+                    self._append_empty_until(
+                        base_open_ms,
+                        updates,
+                        source_sequence=next_sequence,
+                        project=False,
+                    )
+                    current_open = base_open_ms
+                    current_close = self._base_end(base_open_ms) - 1
+                    open_price = trade.price
+                    high = Decimal(trade.price)
+                    low = high
+                    close_price = trade.price
+                    volume = Decimal(trade.quantity)
+                    quote_volume = Decimal(trade.quote_quantity)
+                    trade_count = trade.raw_trade_count
+                    taker_buy_base = (
+                        Decimal(0)
+                        if trade.is_buyer_maker
+                        else Decimal(trade.quantity)
+                    )
+                    taker_buy_quote = (
+                        Decimal(0)
+                        if trade.is_buyer_maker
+                        else Decimal(trade.quote_quantity)
+                    )
+                else:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "aggregate-trade bar bucket moved backward",
+                    )
+                self._replay_events_applied = next_sequence
+                self._last_trade_time_ms = trade.trade_time_ms
+                self._last_agg_trade_id = trade.agg_trade_id
+
+        self._forming = materialize_forming()
+        assert current_open is not None
+        self._last_projected_open_ms = compute_bucket_start_ms(
+            current_open,
+            self._display_interval_ms,
+            interval=self._display_interval,
+        )
+        return {}
+
+    def _apply_trade(
+        self,
+        trade: ReplayTrade,
+        *,
+        project: bool,
+    ) -> Mapping[str, object]:
         if self._finalized:
             raise ReplayDomainError(
                 ReplayErrorCode.SESSION_ENDED,
@@ -305,6 +491,7 @@ class TradeReplayBarBuilder:
                 base_open_ms,
                 updates,
                 source_sequence=next_sequence,
+                project=project,
             )
             self._forming = _FormingBaseBar.from_trade(
                 trade,
@@ -318,12 +505,14 @@ class TradeReplayBarBuilder:
                 self._forming.to_replay_bar(),
                 updates,
                 source_sequence=next_sequence,
+                project=project,
             )
             self._forming = None
             self._append_empty_until(
                 base_open_ms,
                 updates,
                 source_sequence=next_sequence,
+                project=project,
             )
             self._forming = _FormingBaseBar.from_trade(
                 trade,
@@ -339,13 +528,20 @@ class TradeReplayBarBuilder:
         self._replay_events_applied = next_sequence
         self._last_trade_time_ms = trade.trade_time_ms
         self._last_agg_trade_id = trade.agg_trade_id
-        updates.append(
-            self._projection_update(
-                self._preview_display_bar(),
-                source_sequence=next_sequence,
-                base_open_time_ms=base_open_ms,
+        if project:
+            updates.append(
+                self._projection_update(
+                    self._preview_display_bar(),
+                    source_sequence=next_sequence,
+                    base_open_time_ms=base_open_ms,
+                )
             )
-        )
+        else:
+            self._last_projected_open_ms = compute_bucket_start_ms(
+                base_open_ms,
+                self._display_interval_ms,
+                interval=self._display_interval,
+            )
         return _pack_updates(updates)
 
     def apply_source_event(self, event: object) -> Mapping[str, object]:
@@ -671,6 +867,7 @@ class TradeReplayBarBuilder:
         updates: list[dict[str, object]],
         *,
         source_sequence: int,
+        project: bool = True,
     ) -> None:
         while self._next_base_open_ms < target_open_ms:
             if self._previous_close is None:
@@ -697,6 +894,7 @@ class TradeReplayBarBuilder:
                 synthetic,
                 updates,
                 source_sequence=source_sequence,
+                project=project,
             )
         if self._next_base_open_ms != target_open_ms:
             raise ReplayDomainError(
@@ -710,6 +908,7 @@ class TradeReplayBarBuilder:
         updates: list[dict[str, object]],
         *,
         source_sequence: int,
+        project: bool = True,
     ) -> None:
         if bar.open_time_ms != self._next_base_open_ms:
             raise ReplayDomainError(
@@ -717,13 +916,14 @@ class TradeReplayBarBuilder:
                 "aggregate-trade finalized bar is not contiguous",
             )
         update = self._bar_builder.apply_bar(bar)
-        updates.append(
-            self._projection_update(
-                update.bar,
-                source_sequence=source_sequence,
-                base_open_time_ms=bar.open_time_ms,
+        if project:
+            updates.append(
+                self._projection_update(
+                    update.bar,
+                    source_sequence=source_sequence,
+                    base_open_time_ms=bar.open_time_ms,
+                )
             )
-        )
         self._previous_close = bar.close
         self._next_base_open_ms = self._base_end(bar.open_time_ms)
 
@@ -731,23 +931,19 @@ class TradeReplayBarBuilder:
         forming = self._forming
         if forming is None:
             raise RuntimeError("aggregate-trade builder has no forming base bar")
-        display_ms = parse_interval_ms(self._display_interval)
-        if display_ms is None or display_ms <= 0:
-            raise ReplayDomainError(
-                ReplayErrorCode.UNSUPPORTED_INTERVAL,
-                "display interval is invalid",
-            )
         bucket_open_ms = compute_bucket_start_ms(
             forming.open_time_ms,
-            display_ms,
+            self._display_interval_ms,
             interval=self._display_interval,
         )
         bucket_end_ms = compute_bucket_end_ms(
             bucket_open_ms,
-            display_ms,
+            self._display_interval_ms,
             interval=self._display_interval,
         )
-        expected_components = (bucket_end_ms - bucket_open_ms) // self._base_interval_ms
+        expected_components = (
+            bucket_end_ms - bucket_open_ms
+        ) // self._base_interval_ms
         active = self._bar_builder.active_bar
         if active is None:
             return ReplayDisplayBar(

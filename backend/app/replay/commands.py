@@ -288,6 +288,52 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             command_type,
             {"count": count, "tail_events": tail_events},
         )
+    if command_type is InternalCommandType.FAST_FORWARD_FINAL_STATE:
+        _exact_keys(
+            payload,
+            {
+                "target_virtual_time_ms",
+                "max_events",
+                "require_empty_account",
+                "snapshot_only",
+            },
+        )
+        try:
+            target_virtual_time_ms = validate_timestamp_ms(
+                payload["target_virtual_time_ms"],
+                field_name="target_virtual_time_ms",
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "target_virtual_time_ms must be a non-negative integer",
+            ) from exc
+        max_events = _positive_bounded_int(
+            payload["max_events"],
+            field_name="max_events",
+            upper_bound=MAX_STEP_COUNT,
+        )
+        require_empty_account = payload["require_empty_account"]
+        if not isinstance(require_empty_account, bool):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "require_empty_account must be a boolean",
+            )
+        snapshot_only = payload["snapshot_only"]
+        if not isinstance(snapshot_only, bool):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "snapshot_only must be a boolean",
+            )
+        return ParsedCommand(
+            command_type,
+            {
+                "target_virtual_time_ms": target_virtual_time_ms,
+                "max_events": max_events,
+                "require_empty_account": require_empty_account,
+                "snapshot_only": snapshot_only,
+            },
+        )
     if command_type is CommandType.END_SESSION:
         if not payload:
             return ParsedCommand(

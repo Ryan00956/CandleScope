@@ -3988,6 +3988,7 @@ class TrainingRunStore:
                        d.actual_replay_start_ms, d.actual_replay_end_ms,
                        d.synthetic_origin_ms,
                        policy.effective_warmup_bars,
+                       policy.actual_visible_history_start_ms,
                        policy.interval_ms AS policy_interval_ms
                 FROM replay_training_run AS r
                 JOIN replay_training_integrity AS i USING(run_id)
@@ -4023,11 +4024,19 @@ class TrainingRunStore:
                     "training time bounds are invalid",
                     status_code=503,
                 )
-            lower = (
+            execution_lower = (
                 public_origin
                 - warmup * interval_ms
                 - (display_interval_ms - interval_ms)
             )
+            history_lower = (
+                public_origin
+                + int(row["actual_visible_history_start_ms"])
+                - actual_origin
+            )
+            # The execution warmup and lazy visible-history prefix have
+            # independent frozen bounds; either may reach farther left.
+            lower = min(execution_lower, history_lower)
             # Dataset refs pin BAR replay bounds by base-bar open time.  Public
             # chart timestamps also include the final bar's close time, so the
             # valid closed interval ends one base interval after the last open

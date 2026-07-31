@@ -9,6 +9,9 @@ from .base import SourceCursor
 from .trade_reader import PagedReplayTradeReader, ReplayTrade
 
 
+POSITIONED_TAIL_PAGE_ROWS = 64
+
+
 class TradeReplaySource:
     def __init__(
         self,
@@ -32,7 +35,9 @@ class TradeReplaySource:
         self.terminal_time_ms = terminal
         self._page: tuple[ReplayTrade, ...] = ()
         self._page_index = 0
+        self._peeked_public: ReplayTrade | None = None
         self._fetch_cursor: RawAggTradeCursor | None = None
+        self._next_page_rows: int | None = None
         self._loaded_exhausted = False
         self._source_sequence = 0
         self._last_actual: RawAggTradeCursor | None = None
@@ -76,7 +81,9 @@ class TradeReplaySource:
         forked.terminal_time_ms = self.terminal_time_ms
         forked._page = self._page
         forked._page_index = self._page_index
+        forked._peeked_public = self._peeked_public
         forked._fetch_cursor = self._fetch_cursor
+        forked._next_page_rows = self._next_page_rows
         forked._loaded_exhausted = self._loaded_exhausted
         forked._source_sequence = self._source_sequence
         forked._last_actual = self._last_actual
@@ -110,7 +117,9 @@ class TradeReplaySource:
             forked = self.fork()
             forked._page = ()
             forked._page_index = 0
+            forked._peeked_public = None
             forked._fetch_cursor = None
+            forked._next_page_rows = None
             forked._loaded_exhausted = False
             forked._source_sequence = 0
             forked._last_actual = None
@@ -152,7 +161,17 @@ class TradeReplaySource:
         forked = self.fork()
         forked._page = ()
         forked._page_index = 0
+        forked._peeked_public = None
         forked._fetch_cursor = actual_cursor
+        forked._next_page_rows = (
+            None
+            if source_sequence == row_count
+            else min(
+                POSITIONED_TAIL_PAGE_ROWS,
+                self._reader.page_rows,
+                row_count - source_sequence,
+            )
+        )
         forked._loaded_exhausted = source_sequence == row_count
         forked._source_sequence = source_sequence
         forked._last_actual = actual_cursor
@@ -166,8 +185,13 @@ class TradeReplaySource:
     def peek(self) -> ReplayTrade | None:
         self._ensure_page()
         if self._page_index >= len(self._page):
+            self._peeked_public = None
             return None
-        return self._public_trade(self._page[self._page_index])
+        if self._peeked_public is None:
+            self._peeked_public = self._public_trade(
+                self._page[self._page_index]
+            )
+        return self._peeked_public
 
     def next(self) -> ReplayTrade | None:
         event = self.peek()
@@ -194,6 +218,7 @@ class TradeReplaySource:
                 "aggregate-trade source did not start at its expected first ID",
             )
         self._page_index += 1
+        self._peeked_public = None
         self._source_sequence += 1
         self._last_actual = actual_cursor
         self._last_public_time_ms = event.trade_time_ms
@@ -287,7 +312,10 @@ class TradeReplaySource:
         if self._page_index < len(self._page) or self._loaded_exhausted:
             return
         try:
-            page = self._reader.read_page(self._fetch_cursor)
+            page = self._reader.read_page(
+                self._fetch_cursor,
+                limit=self._next_page_rows,
+            )
         except ReplayDomainError as exc:
             if not self._blind_mode:
                 raise
@@ -296,6 +324,7 @@ class TradeReplaySource:
                 "blind aggregate-trade source validation failed",
                 details={"blind_redacted": True},
             ) from exc
+        self._next_page_rows = None
         if page.data_epoch != self._reader.data_epoch:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -303,6 +332,7 @@ class TradeReplaySource:
             )
         self._page = page.trades
         self._page_index = 0
+        self._peeked_public = None
         self._fetch_cursor = page.next_cursor
         self._loaded_exhausted = page.exhausted
         if not self._page and not self._loaded_exhausted:

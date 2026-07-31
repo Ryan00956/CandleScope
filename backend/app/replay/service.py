@@ -591,6 +591,12 @@ class ReplayService:
         async with self._lease_handle(session_id) as handle:
             return await self._session_payload(handle)
 
+    async def get_session_state(self, session_id: str) -> dict[str, object]:
+        """Return cursor/state authority without serializing component history."""
+
+        async with self._lease_handle(session_id) as handle:
+            return (await handle.actor.snapshot()).to_dict()
+
     async def plan_source_chunk(
         self,
         session_id: str,
@@ -969,6 +975,7 @@ class ReplayService:
             InternalCommandType.ADJUST_CAPITAL,
             InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
             InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
+            InternalCommandType.FAST_FORWARD_FINAL_STATE,
         } and not _training_internal:
             raise ReplayDomainError(
                 ReplayErrorCode.INVALID_STATE_TRANSITION,

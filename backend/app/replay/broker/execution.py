@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from ..bars.builder import ReplayBarBuilder
 from ..bars.trade_builder import TradeReplayBarBuilder
@@ -720,6 +720,135 @@ class ConservativeBarBroker:
             ReplayErrorCode.DATASET_MISMATCH,
             "broker source event is neither ReplayBar nor ReplayTrade",
         )
+
+    def apply_source_events_final_state(
+        self,
+        events: Sequence[object],
+    ) -> Mapping[str, object]:
+        """Apply an interaction-free block without constructing projections."""
+
+        if self._ended:
+            raise ReplayDomainError(
+                ReplayErrorCode.SESSION_ENDED,
+                "broker session has ended",
+            )
+        if not self.can_apply_source_events_final_state(events):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "final-state broker batch may contain an order interaction",
+            )
+        if not events:
+            return {}
+        final_mark: str | None = None
+        if all(isinstance(event, ReplayTrade) for event in events):
+            if not isinstance(self._bar_builder, TradeReplayBarBuilder):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "aggregate trade cannot be applied to a BAR broker",
+                )
+            trades = tuple(
+                event for event in events if isinstance(event, ReplayTrade)
+            )
+            self._bar_builder.apply_trades_final_state(trades)
+            final_mark = trades[-1].price
+        else:
+            for event in events:
+                if not isinstance(event, ReplayBar):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "broker final-state batch cannot mix source event kinds",
+                    )
+                if not isinstance(self._bar_builder, ReplayBarBuilder):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "BAR event cannot be applied to a trade broker",
+                    )
+                self._bar_builder.apply_bar(event)
+                final_mark = event.close
+        if self._position.quantity == "0":
+            if final_mark is None:
+                return {}
+            self._position = mark_position(self._position, final_mark)
+            self._account = self._account_from(self._ledger, self._position)
+            self._record_equity(self._account)
+        else:
+            for event in events:
+                if isinstance(event, ReplayBar):
+                    mark = event.close
+                elif isinstance(event, ReplayTrade):
+                    mark = event.price
+                else:  # pragma: no cover - validated before reducer mutation
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "broker final-state batch contains an invalid source event",
+                    )
+                self._position = mark_position(self._position, mark)
+                self._account = self._account_from(self._ledger, self._position)
+                self._record_equity(self._account)
+        self._assert_invariants()
+        return {}
+
+    def supports_final_state_batch(self) -> bool:
+        return not any(
+            not order.status.terminal for order in self._orders.values()
+        )
+
+    def can_apply_source_events_final_state(
+        self,
+        events: Sequence[object],
+    ) -> bool:
+        """Return whether a source block cannot mutate any currently open order."""
+
+        return self.final_state_safe_prefix_length(events) == len(events)
+
+    def final_state_safe_prefix_length(
+        self,
+        events: Sequence[object],
+    ) -> int:
+        """Return the exact prefix ending before the first possible interaction."""
+
+        if not events:
+            return 0
+        trade_source = isinstance(self._bar_builder, TradeReplayBarBuilder)
+        if trade_source:
+            if any(not isinstance(event, ReplayTrade) for event in events):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "aggregate-trade broker batch contains a non-trade event",
+                )
+        elif any(not isinstance(event, ReplayBar) for event in events):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR broker batch contains a non-BAR event",
+            )
+
+        open_orders = self.open_orders
+        if not open_orders:
+            return len(events)
+        first_sequence = self._bar_builder.replay_events_applied + 1
+        position_quantity = Decimal(self._position.quantity)
+        for offset, event in enumerate(events):
+            source_sequence = first_sequence + offset
+            for order in open_orders:
+                if order.accepted_source_sequence >= source_sequence:
+                    continue
+                if trade_source:
+                    assert isinstance(event, ReplayTrade)
+                    if order.reduce_only and (
+                        position_quantity == 0
+                        or not self._reduces_position(order, self._position)
+                    ):
+                        # Tape execution cancels an invalid reduce-only order
+                        # as soon as it becomes eligible, even without a price
+                        # trigger.
+                        return offset
+                    if self._trade_trigger(order, event) is not None:
+                        return offset
+                else:
+                    assert isinstance(event, ReplayBar)
+                    if self._trigger(order, event) is not None:
+                        return offset
+        return len(events)
 
     def apply_command(
         self,

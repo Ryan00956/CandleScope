@@ -182,7 +182,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               value="AGG_TRADE"
               disabled={!runtime.capabilities?.sources.agg_trade.enabled}
             >
-              AGG_TRADE · 仅服务端有精确归档时可选
+              AGG_TRADE · 成交归档已校验，K 线近似聚合
             </option>
           </select>
         </label>

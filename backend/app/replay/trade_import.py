@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import urllib.request
@@ -15,8 +16,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import BinaryIO, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
+from xml.etree import ElementTree
 
 from app.data_engine.storage.raw_trade_archive import (
     ParquetRawAggTradeArchive,
@@ -25,6 +27,9 @@ from app.data_engine.storage.raw_trade_archive import (
 
 
 BINANCE_PUBLIC_DATA_ORIGIN = "https://data.binance.vision"
+BINANCE_PUBLIC_DATA_LISTING_ORIGIN = (
+    "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+)
 _FUTURES_HEADER = (
     "agg_trade_id",
     "price",
@@ -35,6 +40,9 @@ _FUTURES_HEADER = (
     "is_buyer_maker",
 )
 _MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
+_MAX_OFFICIAL_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_LISTING_PAGE_BYTES = 16 * 1024 * 1024
+_MAX_LISTING_PAGES = 10_000
 
 
 class ReplayTradeImportError(RuntimeError):
@@ -74,6 +82,110 @@ def parse_official_checksum(payload: str, *, expected_filename: str) -> str:
     if len(digest) != 64 or any(value not in "0123456789abcdef" for value in digest):
         raise ReplayTradeImportError("official CHECKSUM digest is not SHA-256")
     return digest
+
+
+def list_official_agg_trade_days(
+    *,
+    market_type: str,
+    symbol: str,
+    as_of_date: date | None = None,
+    timeout_seconds: float = 60.0,
+    opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+) -> tuple[date, ...]:
+    """List complete Binance daily ZIP/CHECKSUM pairs without downloading bodies."""
+
+    normalized_market = market_type.strip().lower()
+    normalized_symbol = symbol.strip().upper()
+    # Reuse the strict identity checks and canonical official path contract.
+    official_agg_trade_urls(
+        market_type=normalized_market,
+        symbol=normalized_symbol,
+        day=date(2000, 1, 1),
+    )
+    if timeout_seconds <= 0:
+        raise ReplayTradeImportError("official listing timeout must be positive")
+    cutoff = as_of_date or datetime.now(tz=timezone.utc).date()
+    if not isinstance(cutoff, date):
+        raise ReplayTradeImportError("official listing as_of_date must be a date")
+    prefix = (
+        "data/futures/um/daily/aggTrades/"
+        f"{normalized_symbol}/"
+    )
+    filename_pattern = re.compile(
+        rf"^{re.escape(normalized_symbol)}-aggTrades-(\d{{4}}-\d{{2}}-\d{{2}})"
+        r"\.zip(?:\.CHECKSUM)?$"
+    )
+    zip_days: set[date] = set()
+    checksum_days: set[date] = set()
+    marker: str | None = None
+    seen_markers: set[str] = set()
+    for _page in range(_MAX_LISTING_PAGES):
+        query: dict[str, str] = {"delimiter": "/", "prefix": prefix}
+        if marker is not None:
+            query["marker"] = marker
+        url = f"{BINANCE_PUBLIC_DATA_LISTING_ORIGIN}?{urlencode(query)}"
+        try:
+            with opener(url, timeout=timeout_seconds) as response:
+                encoded = _read_bounded(response, max_bytes=_MAX_LISTING_PAGE_BYTES)
+        except ReplayTradeImportError:
+            raise
+        except BaseException as exc:
+            raise ReplayTradeImportError(
+                "failed to list Binance official aggregate-trade objects"
+            ) from exc
+        try:
+            root = ElementTree.fromstring(encoded)
+        except ElementTree.ParseError as exc:
+            raise ReplayTradeImportError(
+                "Binance official aggregate-trade listing is invalid"
+            ) from exc
+        page_keys: list[str] = []
+        for item in root.findall(".//{*}Contents"):
+            key = item.findtext("{*}Key")
+            if not key or not key.startswith(prefix):
+                continue
+            page_keys.append(key)
+            filename = key.removeprefix(prefix)
+            matched = filename_pattern.fullmatch(filename)
+            if matched is None:
+                continue
+            try:
+                current = date.fromisoformat(matched.group(1))
+            except ValueError as exc:
+                raise ReplayTradeImportError(
+                    "Binance official aggregate-trade listing has an invalid date"
+                ) from exc
+            # Daily objects are published on the following UTC day.  Excluding
+            # today prevents a partially published pair from entering the
+            # selection domain even if it appears during a catalog refresh.
+            if current >= cutoff:
+                continue
+            if filename.endswith(".zip.CHECKSUM"):
+                checksum_days.add(current)
+            else:
+                zip_days.add(current)
+        is_truncated = (root.findtext("{*}IsTruncated") or "").strip().lower()
+        if is_truncated != "true":
+            break
+        next_marker = (root.findtext("{*}NextMarker") or "").strip()
+        if not next_marker and page_keys:
+            next_marker = page_keys[-1]
+        if not next_marker or next_marker in seen_markers:
+            raise ReplayTradeImportError(
+                "Binance official aggregate-trade listing pagination did not advance"
+            )
+        seen_markers.add(next_marker)
+        marker = next_marker
+    else:
+        raise ReplayTradeImportError(
+            "Binance official aggregate-trade listing exceeded its page limit"
+        )
+    complete = tuple(sorted(zip_days & checksum_days))
+    if not complete:
+        raise ReplayTradeImportError(
+            "Binance official aggregate-trade listing has no complete daily objects"
+        )
+    return complete
 
 
 def file_sha256(path: Path) -> str:
@@ -294,6 +406,8 @@ def import_official_date_range(
     end: date,
     require_checksum: bool,
     max_rows_per_file: int = 100_000,
+    download_timeout_seconds: float = 60.0,
+    max_download_bytes: int = _MAX_OFFICIAL_DOWNLOAD_BYTES,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
 ) -> dict[str, object]:
     if exchange.strip().lower() != "binance":
@@ -304,6 +418,10 @@ def import_official_date_range(
         )
     if start > end:
         raise ReplayTradeImportError("start date cannot exceed end date")
+    if download_timeout_seconds <= 0:
+        raise ReplayTradeImportError("official download timeout must be positive")
+    if max_download_bytes < 1:
+        raise ReplayTradeImportError("official download byte limit must be positive")
     archive_dir = archive_dir.resolve()
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive = ParquetRawAggTradeArchive(
@@ -323,8 +441,22 @@ def import_official_date_range(
             zip_path = temporary / filename
             checksum_path = temporary / f"{filename}.CHECKSUM"
             try:
-                _download_official(source_url, zip_path, opener=opener)
-                _download_official(checksum_url, checksum_path, opener=opener)
+                # Fetch the tiny signed-by-origin checksum object first so a
+                # missing/unpublished day fails before transferring its body.
+                _download_official(
+                    checksum_url,
+                    checksum_path,
+                    opener=opener,
+                    timeout_seconds=download_timeout_seconds,
+                    max_bytes=min(max_download_bytes, 1024 * 1024),
+                )
+                _download_official(
+                    source_url,
+                    zip_path,
+                    opener=opener,
+                    timeout_seconds=download_timeout_seconds,
+                    max_bytes=max_download_bytes,
+                )
                 accepted, metadata = import_local_verified_day(
                     archive,
                     zip_path=zip_path,
@@ -377,6 +509,8 @@ def _download_official(
     destination: Path,
     *,
     opener: Callable[..., BinaryIO],
+    timeout_seconds: float,
+    max_bytes: int,
 ) -> None:
     parsed = urlparse(url)
     if (
@@ -387,13 +521,33 @@ def _download_official(
         raise ReplayTradeImportError("download URL is not Binance official public data")
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
     try:
-        with opener(url, timeout=60) as response, temporary.open("wb") as output:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+        with opener(url, timeout=timeout_seconds) as response, temporary.open(
+            "wb"
+        ) as output:
+            total = 0
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ReplayTradeImportError(
+                        "official aggregate-trade object exceeds its byte limit"
+                    )
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, destination)
+    except ReplayTradeImportError:
+        raise
     except BaseException as exc:
         raise ReplayTradeImportError(f"failed to download official object: {url}") from exc
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _read_bounded(stream: BinaryIO, *, max_bytes: int) -> bytes:
+    payload = stream.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise ReplayTradeImportError("official listing exceeds its byte limit")
+    return payload
 
 
 def _quarantine_downloads(
@@ -455,12 +609,14 @@ def _boolean(value: str) -> bool:
 
 __all__ = [
     "BINANCE_PUBLIC_DATA_ORIGIN",
+    "BINANCE_PUBLIC_DATA_LISTING_ORIGIN",
     "ReplayTradeImportError",
     "file_sha256",
     "import_local_verified_day",
     "import_official_date_range",
     "inspect_verified_agg_trade_zip",
     "iter_verified_agg_trade_rows",
+    "list_official_agg_trade_days",
     "official_agg_trade_urls",
     "parse_official_checksum",
 ]

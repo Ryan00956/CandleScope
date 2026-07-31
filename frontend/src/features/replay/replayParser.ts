@@ -26,6 +26,7 @@ import type {
   ReplayCommandType,
   ReplayClosedTrade,
   ReplayCursor,
+  ReplayDataFidelity,
   ReplayDecimalString,
   ReplayDigest,
   ReplayDisplayBar,
@@ -813,13 +814,14 @@ export function parseReplaySessionResponse(value: unknown, path = "$"): ReplaySe
   if (snapshot.session_id !== sessionId) fail(path, "outer and snapshot session id disagree");
   const dataFidelity = enumeration(source.data_fidelity, REPLAY_DATA_FIDELITIES, `${path}.data_fidelity`);
   const executionFidelity = enumeration(source.execution_fidelity, REPLAY_EXECUTION_FIDELITIES, `${path}.execution_fidelity`);
-  const expectedDataFidelity = snapshot.config.source_kind === "agg_trade"
-    ? "EXACT_AGG_TRADE_COVERAGE"
-    : "EXACT_BAR_COVERAGE";
+  const expectedDataFidelities: readonly ReplayDataFidelity[] = snapshot.config.source_kind === "agg_trade"
+    ? ["EXACT_AGG_TRADE_COVERAGE", "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"]
+    : ["EXACT_BAR_COVERAGE"];
   const expectedExecutionFidelity = snapshot.config.source_kind === "agg_trade"
     ? "AGG_TRADE_TAPE"
     : "BAR_CONSERVATIVE";
-  if (dataFidelity !== expectedDataFidelity || executionFidelity !== expectedExecutionFidelity) {
+  if (!expectedDataFidelities.includes(dataFidelity)
+    || executionFidelity !== expectedExecutionFidelity) {
     fail(path, "session fidelity disagrees with source kind");
   }
   return {
@@ -849,8 +851,10 @@ function parseSourceCapability(value: unknown, path: string, sourceKind: "bar" |
       fidelity: enumeration(source.fidelity, REPLAY_DATA_FIDELITIES, `${path}.fidelity`),
     };
   }
+  const hasBarParityPolicy = Object.hasOwn(source, "bar_parity_required");
   exact(source, [
     "enabled", "fidelity", "execution_fidelity", "requires_exact_dataset", "reader",
+    ...(hasBarParityPolicy ? ["bar_parity_required"] : []),
   ], path);
   const fidelity = enumeration(source.fidelity, REPLAY_DATA_FIDELITIES, `${path}.fidelity`);
   const executionFidelity = enumeration(
@@ -859,17 +863,24 @@ function parseSourceCapability(value: unknown, path: string, sourceKind: "bar" |
     `${path}.execution_fidelity`,
   );
   const requiresExactDataset = bool(source.requires_exact_dataset, `${path}.requires_exact_dataset`);
-  if (fidelity !== "EXACT_AGG_TRADE_COVERAGE"
+  const supportedFidelity = fidelity === "EXACT_AGG_TRADE_COVERAGE"
+    || fidelity === "VERIFIED_AGG_TRADE_APPROXIMATE_BARS";
+  const barParityRequired = hasBarParityPolicy
+    ? bool(source.bar_parity_required, `${path}.bar_parity_required`)
+    : fidelity === "EXACT_AGG_TRADE_COVERAGE";
+  if (!supportedFidelity
     || executionFidelity !== "AGG_TRADE_TAPE"
     || !requiresExactDataset
+    || (fidelity === "VERIFIED_AGG_TRADE_APPROXIMATE_BARS" && barParityRequired)
     || source.reader !== "paged") {
-    fail(path, "aggregate-trade capability is not the exact paged tape contract");
+    fail(path, "aggregate-trade capability has an inconsistent fidelity contract");
   }
   return {
     enabled,
     fidelity,
     execution_fidelity: executionFidelity,
     requires_exact_dataset: true,
+    bar_parity_required: barParityRequired,
     reader: "paged" as const,
   };
 }
@@ -1278,7 +1289,7 @@ export function parseReplayJournalResponse(value: unknown, path = "$"): ReplayJo
 export interface ReplayReportResponse {
   readonly protocol: typeof REPLAY_PROTOCOL;
   readonly session_id: string;
-  readonly data_fidelity: "EXACT_BAR_COVERAGE" | "EXACT_AGG_TRADE_COVERAGE" | "BEST_EFFORT";
+  readonly data_fidelity: ReplayDataFidelity;
   readonly execution_fidelity: "BAR_CONSERVATIVE" | "AGG_TRADE_TAPE";
   readonly revealed: boolean;
   readonly report: ReplayBrokerReport;

@@ -325,7 +325,7 @@ export function replayTradeSessionResponse() {
   };
   return {
     ...response,
-    data_fidelity: "EXACT_AGG_TRADE_COVERAGE",
+    data_fidelity: "VERIFIED_AGG_TRADE_APPROXIMATE_BARS",
     execution_fidelity: "AGG_TRADE_TAPE",
     snapshot: {
       ...snapshot,
@@ -564,9 +564,10 @@ export function enabledAggTradeCapabilities() {
       ...capabilities.sources,
       agg_trade: {
         enabled: true,
-        fidelity: "EXACT_AGG_TRADE_COVERAGE",
+        fidelity: "VERIFIED_AGG_TRADE_APPROXIMATE_BARS",
         execution_fidelity: "AGG_TRADE_TAPE",
         requires_exact_dataset: true,
+        bar_parity_required: false,
         reader: "paged",
       },
     },

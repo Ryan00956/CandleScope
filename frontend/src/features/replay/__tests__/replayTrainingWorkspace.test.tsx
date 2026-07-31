@@ -149,7 +149,10 @@ test("capability surface never renders unsupported history as numeric zero or st
   assert.doesNotMatch(html, />0(?:\.0+)?</);
 
   const tape = buildReplayCapabilityModel("AGG_TRADE");
+  assert.equal(tape.OHLCV.state, "AVAILABLE_APPROX");
+  assert.equal(tape.INDICATORS.state, "AVAILABLE_APPROX");
   assert.equal(tape.AGG_TRADE_TAPE.state, "AVAILABLE_EXACT");
+  assert.match(tape.OHLCV.detail, /官方 K 线不同/);
   assert.equal(tape.ORDER_FLOW.state, "AVAILABLE_APPROX");
   assert.match(tape.AGG_TRADE_TAPE.detail, /不是交易所 raw fills/);
   assert.match(tape.ORDER_FLOW.detail, /buyer-maker/);

@@ -414,6 +414,34 @@ class VerifiedRawAggTradeWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class RawAggTradeSelectionWindow:
+    """UTC coverage eligible for selection before its body is materialized.
+
+    A local archive derives this from verified receipts.  A remote archive may
+    instead derive it from an immutable official object-availability catalog;
+    unlike :class:`VerifiedRawAggTradeWindow`, it deliberately makes no claim
+    about aggregate-trade ID bounds before the selected daily files are fetched
+    and verified.
+    """
+
+    start_time_ms: int
+    end_time_ms: int
+    partition_count: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("start_time_ms", "end_time_ms", "partition_count"):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_int(getattr(self, field_name), field_name),
+            )
+        if self.start_time_ms > self.end_time_ms:
+            raise ValueError("aggTrade selection coverage bounds are inverted")
+        if self.partition_count < 1:
+            raise ValueError("aggTrade selection coverage must contain a partition")
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedRawAggTradeBarWindow:
     """BAR-close coverage where the verified aggTrade projection passed parity."""
 
@@ -508,6 +536,15 @@ class RawAggTradeArchive(Protocol):
         symbol: str,
     ) -> tuple[VerifiedRawAggTradeWindow, ...]:
         """Return exact UTC ranges backed by valid contiguous daily receipts."""
+
+    def list_selection_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[RawAggTradeSelectionWindow, ...]:
+        """Return UTC ranges eligible for random selection without body scans."""
 
     def list_verified_bar_windows(
         self,
@@ -678,6 +715,16 @@ class DisabledRawAggTradeArchive:
         market_type: str,
         symbol: str,
     ) -> tuple[VerifiedRawAggTradeWindow, ...]:
+        del exchange, market_type, symbol
+        return ()
+
+    def list_selection_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[RawAggTradeSelectionWindow, ...]:
         del exchange, market_type, symbol
         return ()
 
@@ -1211,6 +1258,28 @@ class ParquetRawAggTradeArchive:
             else:
                 merged.append(current)
         return tuple(merged)
+
+    def list_selection_windows(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> tuple[RawAggTradeSelectionWindow, ...]:
+        """Local archives can select only from their verified receipt coverage."""
+
+        return tuple(
+            RawAggTradeSelectionWindow(
+                start_time_ms=item.start_time_ms,
+                end_time_ms=item.end_time_ms,
+                partition_count=item.partition_count,
+            )
+            for item in self.list_verified_windows(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+            )
+        )
 
     def list_verified_bar_windows(
         self,
@@ -3567,6 +3636,7 @@ __all__ = [
     "RawAggTradeGap",
     "RawAggTradeObjectManifest",
     "RawAggTradePage",
+    "RawAggTradeSelectionWindow",
     "RawAggTradeScanLimitError",
     "RawAggTradeArchiveWriter",
     "VERIFIED_IMPORT_SCHEMA_VERSION",

@@ -24,7 +24,7 @@ from app.data_engine.storage.raw_trade_archive import (
     DisabledRawAggTradeArchive,
     RawAggTradeArchive,
     RawAggTradeDatasetRef,
-    VerifiedRawAggTradeBarWindow,
+    RawAggTradeSelectionWindow,
 )
 from app.data_engine.storage.klines_repo import KlinesRepoAdapter
 
@@ -37,7 +37,6 @@ from .actor import (
 )
 from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
 from .bars.trade_builder import TradeReplayBarBuilder
-from .bars.trade_parity import assert_trade_bar_parity, trade_bar_parity_policy
 from .broker.execution import ConservativeBarBroker
 from .broker.models import (
     BrokerConfig,
@@ -357,9 +356,12 @@ class ReplayService:
         else:
             trade_capability = {
                 "enabled": True,
-                "fidelity": DataFidelity.EXACT_AGG_TRADE_COVERAGE.value,
+                "fidelity": (
+                    DataFidelity.VERIFIED_AGG_TRADE_APPROXIMATE_BARS.value
+                ),
                 "execution_fidelity": ExecutionFidelity.AGG_TRADE_TAPE.value,
                 "requires_exact_dataset": True,
+                "bar_parity_required": False,
                 "reader": "paged",
             }
         return {
@@ -476,18 +478,21 @@ class ReplayService:
                 config.symbol,
             )
             entry = catalog.require_entry(identity)
-            window = (
-                await self._select_random_window(
+            trade_catalog_epoch: str | None = None
+            if config.start_policy is StartPolicy.RANDOM_ELIGIBLE:
+                window, trade_catalog_epoch = await self._select_random_window_bound(
                     self._catalog,
                     entry,
                     config,
                 )
-                if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
-                else self._catalog.select_manual(
+            else:
+                window = self._catalog.select_manual(
                     entry,
                     start_ms=self._required_manual_start(config),
                 )
-            )
+                trade_catalog_epoch = await self._trade_selection_catalog_epoch(
+                    config
+                )
         except ReplayDomainError as exc:
             raise self._blind_safe_dataset_error(config, exc) from exc
         if entry.bounds is None:
@@ -515,6 +520,11 @@ class ReplayService:
             "selected_start_ms": window.replay_start_ms,
             "continuous_history_start_ms": continuous_start_ms,
             "interval_ms": window.interval_ms,
+            **(
+                {"agg_trade_catalog_epoch": trade_catalog_epoch}
+                if trade_catalog_epoch is not None
+                else {}
+            ),
         }
 
     @staticmethod
@@ -557,6 +567,12 @@ class ReplayService:
             if source_revision_value is None
             else str(source_revision_value)
         )
+        agg_trade_catalog_epoch_value = selection.get("agg_trade_catalog_epoch")
+        agg_trade_catalog_epoch = (
+            None
+            if agg_trade_catalog_epoch_value is None
+            else str(agg_trade_catalog_epoch_value)
+        )
         if interval_ms < 1:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -575,6 +591,8 @@ class ReplayService:
         digests = (source_fingerprint, catalog_epoch)
         if source_revision is not None:
             digests = (*digests, source_revision)
+        if agg_trade_catalog_epoch is not None:
+            digests = (*digests, agg_trade_catalog_epoch)
         if (
             identity != expected_identity
             or selected_interval != config.base_interval
@@ -761,12 +779,6 @@ class ReplayService:
                 trade_dataset_ref = await self._freeze_trade_dataset(
                     config,
                     actual_dataset,
-                )
-                await asyncio.to_thread(
-                    self._assert_trade_dataset_parity,
-                    config,
-                    actual_dataset,
-                    trade_dataset_ref,
                 )
             return await self._create_from_dataset(
                 config=config,
@@ -2124,12 +2136,6 @@ class ReplayService:
                     ReplayErrorCode.DATASET_MISMATCH,
                     "persisted trade dataset epoch does not match session",
                 )
-            await asyncio.to_thread(
-                self._assert_trade_dataset_parity,
-                config,
-                actual_dataset,
-                trade_dataset_ref,
-            )
         else:
             actual_dataset = BarDatasetSnapshot.from_dict(decoded)
             if actual_dataset.data_epoch != record["data_epoch"]:
@@ -3035,7 +3041,8 @@ class ReplayService:
         if not diagnostics.get("verified_partitions_available"):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_INCOMPLETE,
-                "aggregate-trade replay archive has no verified exact dataset",
+                "aggregate-trade replay archive has no official contiguous "
+                "daily availability",
             )
 
     async def _select_random_window(
@@ -3044,31 +3051,49 @@ class ReplayService:
         entry: ReplayCatalogEntry,
         config: ReplaySessionConfig,
     ) -> EligibleWindow:
+        window, _catalog_epoch = await self._select_random_window_bound(
+            catalog,
+            entry,
+            config,
+        )
+        return window
+
+    async def _select_random_window_bound(
+        self,
+        catalog: ReplayCatalog,
+        entry: ReplayCatalogEntry,
+        config: ReplaySessionConfig,
+    ) -> tuple[EligibleWindow, str | None]:
         if config.source_kind is not SourceKind.AGG_TRADE:
-            return catalog.select_random(entry, seed=config.random_seed)
-        bar_source_revision = entry.source_revision or entry.source_fingerprint
-        interval_ms = parse_interval_ms(config.base_interval)
-        if interval_ms is None:
+            return catalog.select_random(entry, seed=config.random_seed), None
+        if parse_interval_ms(config.base_interval) is None:
             raise ReplayDomainError(
                 ReplayErrorCode.UNSUPPORTED_INTERVAL,
                 "aggregate-trade random selection requires a fixed BAR interval",
             )
         try:
-            verified_windows = await asyncio.to_thread(
-                self._raw_trade_archive.list_verified_bar_windows,
-                exchange=config.exchange,
-                market_type=config.market_type,
-                symbol=config.symbol,
-                interval=config.base_interval,
-                interval_ms=interval_ms,
-                bar_source_revision=bar_source_revision,
-                parity_policy=trade_bar_parity_policy(
-                    compare_trade_count=False,
-                ),
-            )
+            snapshot = getattr(self._raw_trade_archive, "selection_snapshot", None)
+            if callable(snapshot):
+                trade_catalog_epoch, selection_windows = await asyncio.to_thread(
+                    snapshot,
+                    exchange=config.exchange,
+                    market_type=config.market_type,
+                    symbol=config.symbol,
+                )
+                trade_catalog_epoch = self._validated_trade_catalog_epoch(
+                    trade_catalog_epoch
+                )
+            else:
+                selection_windows = await asyncio.to_thread(
+                    self._raw_trade_archive.list_selection_windows,
+                    exchange=config.exchange,
+                    market_type=config.market_type,
+                    symbol=config.symbol,
+                )
+                trade_catalog_epoch = None
             eligible_ranges = self._intersect_trade_eligible_ranges(
                 entry,
-                verified_windows,
+                selection_windows,
             )
         except ReplayDomainError:
             raise
@@ -3081,32 +3106,71 @@ class ReplayService:
             )
             raise ReplayDomainError(
                 code,
-                "verified aggregate-trade coverage index is unavailable",
+                "official aggregate-trade daily availability is unavailable",
             ) from exc
-        return catalog.select_random_from_ranges(
-            entry,
-            eligible_ranges=eligible_ranges,
-            seed=config.random_seed,
-            selection_namespace="agg_trade_verified_receipts.v1",
+        return (
+            catalog.select_random_from_ranges(
+                entry,
+                eligible_ranges=eligible_ranges,
+                seed=config.random_seed,
+                selection_namespace=(
+                    "agg_trade_official_availability.approximate_bars.v1"
+                ),
+            ),
+            trade_catalog_epoch,
         )
+
+    async def _trade_selection_catalog_epoch(
+        self,
+        config: ReplaySessionConfig,
+    ) -> str | None:
+        if config.source_kind is not SourceKind.AGG_TRADE:
+            return None
+        snapshot = getattr(self._raw_trade_archive, "selection_snapshot", None)
+        if not callable(snapshot):
+            return None
+        try:
+            catalog_epoch, _windows = await asyncio.to_thread(
+                snapshot,
+                exchange=config.exchange,
+                market_type=config.market_type,
+                symbol=config.symbol,
+            )
+            return self._validated_trade_catalog_epoch(catalog_epoch)
+        except Exception as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "official aggregate-trade daily availability is unavailable",
+            ) from exc
+
+    @staticmethod
+    def _validated_trade_catalog_epoch(value: object) -> str:
+        epoch = str(value)
+        if (
+            len(epoch) != 71
+            or not epoch.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in epoch[7:])
+        ):
+            raise ValueError("aggregate-trade selection catalog epoch is invalid")
+        return epoch
 
     @staticmethod
     def _intersect_trade_eligible_ranges(
         entry: ReplayCatalogEntry,
-        verified_windows: Sequence[VerifiedRawAggTradeBarWindow],
+        selection_windows: Sequence[RawAggTradeSelectionWindow],
     ) -> tuple[EligibleWindowRange, ...]:
         windows = tuple(
-            sorted(verified_windows, key=lambda item: item.start_time_ms)
+            sorted(selection_windows, key=lambda item: item.start_time_ms)
         )
         previous_end: int | None = None
         for window in windows:
-            if not isinstance(window, VerifiedRawAggTradeBarWindow):
+            if not isinstance(window, RawAggTradeSelectionWindow):
                 raise TypeError(
-                    "verified aggregate-trade coverage contains an invalid window"
+                    "aggregate-trade selection coverage contains an invalid window"
                 )
             if previous_end is not None and window.start_time_ms <= previous_end:
                 raise ValueError(
-                    "verified aggregate-trade coverage windows overlap"
+                    "aggregate-trade selection coverage windows overlap"
                 )
             previous_end = window.end_time_ms
 
@@ -3193,7 +3257,7 @@ class ReplayService:
             )
             raise ReplayDomainError(
                 code,
-                "no checksum-verified exact aggregate-trade dataset covers "
+                "no checksum-verified contiguous aggregate-trade dataset covers "
                 "the selected replay window",
             ) from exc
         expected_identity = (
@@ -3217,63 +3281,6 @@ class ReplayService:
                 "frozen aggregate-trade dataset identity or time range changed",
             )
         return reference
-
-    def _assert_trade_dataset_parity(
-        self,
-        config: ReplaySessionConfig,
-        dataset: BarDatasetSnapshot,
-        trade_dataset_ref: RawAggTradeDatasetRef,
-    ) -> None:
-        try:
-            self._assert_trade_dataset_parity_unredacted(
-                config,
-                dataset,
-                trade_dataset_ref,
-            )
-        except ReplayDomainError as exc:
-            raise self._blind_safe_dataset_error(config, exc) from exc
-
-    def _assert_trade_dataset_parity_unredacted(
-        self,
-        config: ReplaySessionConfig,
-        dataset: BarDatasetSnapshot,
-        trade_dataset_ref: RawAggTradeDatasetRef,
-    ) -> None:
-        reader = PagedReplayTradeReader(
-            self._raw_trade_archive,
-            trade_dataset_ref,
-            page_rows=self.settings.trade_page_rows,
-        )
-        builder = TradeReplayBarBuilder(
-            base_interval=config.base_interval,
-            display_interval=config.base_interval,
-            replay_start_ms=dataset.replay_start_ms,
-            replay_end_time_ms=dataset.replay_rows[-1].close_time_ms,
-            warmup_bars=dataset.warmup_rows,
-            max_closed_bars=max(1, dataset.row_count),
-        )
-        count = 0
-        for trade in reader.iter_trades():
-            builder.apply_trade(trade)
-            count += 1
-        if count != trade_dataset_ref.row_count:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATA_GAP,
-                "aggregate-trade parity scan did not consume the frozen row count",
-            )
-        builder.finalize_bars(virtual_time_ms=dataset.replay_rows[-1].close_time_ms)
-        replay_count = len(dataset.replay_rows)
-        derived = builder.closed_bars[-replay_count:]
-        # Binance aggTrade preserves aggregate-event IDs and the inclusive raw
-        # trade-ID span, but it cannot reproduce the exchange Kline's trade
-        # counter at every minute boundary. Keep timestamps and all OHLCV /
-        # taker-volume fields fail-closed while treating that one field as
-        # explicitly non-comparable.
-        assert_trade_bar_parity(
-            derived,
-            dataset.replay_rows,
-            compare_trade_count=False,
-        )
 
     @staticmethod
     def _blind_safe_dataset_error(
@@ -3339,7 +3346,7 @@ class ReplayService:
     @staticmethod
     def _data_fidelity(config: ReplaySessionConfig) -> str:
         return (
-            DataFidelity.EXACT_AGG_TRADE_COVERAGE.value
+            DataFidelity.VERIFIED_AGG_TRADE_APPROXIMATE_BARS.value
             if config.source_kind is SourceKind.AGG_TRADE
             else DataFidelity.EXACT_BAR_COVERAGE.value
         )

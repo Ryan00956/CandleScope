@@ -202,7 +202,7 @@ export default function ReplayPageShell({ runtime, indicators, chartSurfaceRef }
             <span><span className={`status-dot ${runtime.store.connectionState === "connected" ? "connected" : "loading"}`} />K 线回放 · REPLAY</span>
             <span>{runtime.store.state ?? runtime.phase}</span><span>{marketData.status.barCount} bars</span>
             <span>
-              {config?.source_kind.toUpperCase() ?? "BAR"} · {config?.quality_mode.toUpperCase() ?? "EXACT"} · {config?.source_kind === "agg_trade" ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE"}
+              {config?.source_kind.toUpperCase() ?? "BAR"} · {config?.source_kind === "agg_trade" ? "VERIFIED_TAPE / APPROX_BARS" : config?.quality_mode.toUpperCase() ?? "EXACT"} · {config?.source_kind === "agg_trade" ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE"}
             </span>
           </div>
           <div className="status-right"><span>Controller: {ownsController ? "本页" : runtime.store.controllerClientId ? "其他页面" : "无"}</span><span>{runtime.store.connectionState}</span><span>无 live feeds · replay.v1</span></div>

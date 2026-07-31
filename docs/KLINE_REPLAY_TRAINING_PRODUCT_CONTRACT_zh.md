@@ -53,7 +53,7 @@ Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 | `BaseInterval` | BAR 数据源能够确定性推进的最小历史 K 线周期，例如 1m。 |
 | `DisplayInterval` | 用户当前查看的周期，例如 15m；可随时切换，不改变已经推进到的虚拟时间。 |
 | `VirtualTime` | 服务端权威的训练市场时间；一个 `TrainingRun` 只有一个全局虚拟时钟。 |
-| `DataFidelity` | 数据本身能证明到什么程度，例如完整 BAR、完整 aggTrade、完整历史 L2。 |
+| `DataFidelity` | 数据本身能证明到什么程度，例如精确 BAR、checksum/ID 已验证但 K 线近似聚合的 aggTrade、完整历史 L2。 |
 | `ExecutionFidelity` | 模拟订单能证明到什么程度，例如 BAR 保守触价、聚合成交 tape、历史盘口辅助。 |
 | `IntegrityMode` | 中途是否允许入金或修改规则，以及结果能否进入严格训练统计。 |
 | `TimeDisclosurePolicy` | 真实历史时间向用户显示到何种粒度；必须覆盖全部输出边界。 |
@@ -214,6 +214,7 @@ flowchart LR
 
 - 随机候选只来自 `BaseInterval` 对齐、warmup 完整、前向缓存窗口完整且没有未知缺口的范围。
 - BAR 随机候选必须来自远端 `replay-history` index/manifest 的版本化连续段，不能读取实时 `candlescope.db` 或本地正文缓存的覆盖范围。单个缺口只切分它所在的连续段，不得使缺口后的全部历史失效。
+- AGG_TRADE 随机候选必须来自 Binance 官方目录中 ZIP 与 CHECKSUM 成对存在的版本化连续日期段，再与 BAR 合格范围取交集；远端预转换 receipt 和本地 Parquet 只能加速命中，不能定义、扩大或缩小随机域。选中后才下载官方日包并校验 checksum、日内/跨日成交 ID 连续性和冻结 dataset epoch。
 - 每个连续段按其有效候选时间点数量进入前缀和；随机索引映射到所有连续段的候选全集，不能先等概率选段再选时间。
 - 随机算法使用服务端生成或保存的 seed，并将候选范围版本写入存档；相同 seed 与 dataset identity 必须得到相同起点。
 - catalog 校验、随机选择、冻结快照和 `ALL_AVAILABLE` 历史必须绑定同一个不可变归档 revision；发布新的 `current` revision 不得改变既有 Run。
@@ -365,7 +366,7 @@ flowchart LR
 
 | 能力 | BAR | AGG_TRADE | 历史 L2 |
 |---|---|---|---|
-| K 线与 OHLCV | 精确到已验证 BAR 覆盖 | 由已验证 aggTrade 聚合；声明 aggregate-tape fidelity | 可由更高保真事件派生，但不是首版原因 |
+| K 线与 OHLCV | 精确到已验证 BAR 覆盖 | 由 checksum/ID 已验证的 aggTrade 近似聚合；不要求官方 K 线 parity | 可由更高保真事件派生，但不是首版原因 |
 | 普通 OHLCV 指标 | 只读已揭示前缀，可支持 | 只读已揭示前缀，可支持 | 同左 |
 | 订单流 / tape / CVD | 默认 `UNSUPPORTED_SOURCE_MODE`；若仅用 BAR proxy，必须标 `AVAILABLE_APPROX` | 支持 aggregate-tape 级别，不得改名为 RAW_TRADE | 取决于成交与 book 数据完整性 |
 | 历史 OI | 只在独立 OI 历史覆盖存在时支持 | 同左 | 同左 |
@@ -417,7 +418,7 @@ flowchart LR
 
 ### 10.1 数据真实性
 
-当前已实现的数据源是 `AGG_TRADE`，即交易所聚合成交，不是每一笔原始撮合。产品文案必须使用“成交驱动/聚合成交回放”，不得宣称 raw trade 或逐笔撮合完全还原。
+当前已实现的数据源是 `AGG_TRADE`，即交易所聚合成交，不是每一笔原始撮合。产品文案必须使用“成交驱动/聚合成交回放”，不得宣称 raw trade、逐笔撮合完全还原或官方 K 线 parity。成交归档 checksum 与 aggregate ID 连续性保持严格校验；由 tape 生成的 K 线和指标明确属于近似结果。
 
 ### 10.2 控制项
 
@@ -482,7 +483,7 @@ flowchart LR
 - 穿价限价单：若下单价在当前已揭示参考价上立即可成交，按 taker 处理。
 - 挂单：只在下单之后的市场事件首次触及或穿越价格时成交；绝不追溯到下单前已经发生的高低点。
 - BAR 模式：没有 bar 内路径时采用冻结的保守顺序；同一最小 K 内止盈和止损都触发时选择对账户更不利的可行结果并警告。
-- AGG_TRADE 模式：按聚合成交顺序和可见成交量约束撮合，但不能证明 aggregate 内部原始 fill 顺序或真实 queue position。
+- AGG_TRADE 模式：按聚合成交顺序和可见成交量约束撮合；由 tape 生成的 K 线允许与官方 K 线不同，且不能证明 aggregate 内部原始 fill 顺序或真实 queue position。
 - resting limit 可按 maker fee 计费，但“maker”只表示费用分类，不表示真实排队位置得到还原。
 
 ### 12.3 开启历史盘口时

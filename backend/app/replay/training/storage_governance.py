@@ -7,8 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.data_engine.interval_policy import parse_interval_ms
-from app.replay.bars.trade_parity import trade_bar_parity_policy
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
 
 from .account_history import AccountHistoryArchiveManager
@@ -760,62 +758,6 @@ class ReplayStorageGovernance:
             except Exception:
                 return []
 
-        def bar_compatible_agg_identities(
-            verified: list[dict[str, object]],
-        ) -> tuple[list[dict[str, object]], bool]:
-            list_compatible = getattr(
-                self.raw_trade_archive,
-                "list_verified_bar_windows",
-                None,
-            )
-            list_all = getattr(self.bar_repository, "list_all_series", None)
-            if not callable(list_compatible) or not callable(list_all):
-                return verified, False
-            try:
-                bar_rows = [
-                    row
-                    for row in list_all(custom_only=False)
-                    if isinstance(row, Mapping)
-                ]
-            except Exception:
-                return [], True
-            compatible: list[dict[str, object]] = []
-            for identity in verified:
-                for row in bar_rows:
-                    if (
-                        str(row.get("exchange", "")),
-                        str(row.get("market_type", "")),
-                        str(row.get("symbol", "")),
-                    ) != (
-                        str(identity.get("exchange", "")),
-                        str(identity.get("market_type", "")),
-                        str(identity.get("symbol", "")),
-                    ):
-                        continue
-                    interval = str(row.get("interval", ""))
-                    interval_ms = parse_interval_ms(interval)
-                    revision = row.get("source_revision")
-                    if interval_ms is None or not isinstance(revision, str):
-                        continue
-                    try:
-                        windows = list_compatible(
-                            exchange=identity["exchange"],
-                            market_type=identity["market_type"],
-                            symbol=identity["symbol"],
-                            interval=interval,
-                            interval_ms=interval_ms,
-                            bar_source_revision=revision,
-                            parity_policy=trade_bar_parity_policy(
-                                compare_trade_count=False,
-                            ),
-                        )
-                    except Exception:
-                        continue
-                    if windows:
-                        compatible.append(identity)
-                        break
-            return compatible, True
-
         core_enabled = bool(
             self.settings.enabled and self.settings.product_v2_enabled
         )
@@ -839,10 +781,7 @@ class ReplayStorageGovernance:
             )
             in bar_identity_keys
         ]
-        (
-            agg_identities,
-            compatibility_index_checked,
-        ) = bar_compatible_agg_identities(identity_matched_agg)
+        agg_identities = identity_matched_agg
         bar_ready = core_enabled and bool(bar_identities)
         agg_ready = (
             core_enabled
@@ -866,7 +805,9 @@ class ReplayStorageGovernance:
                 "mode": "AGG_TRADE",
                 "source_contract": "BINANCE_DATA_VISION_USDM_DAILY_AGGTRADES",
                 "declared_scope": "BINANCE_FUTURES_USDM",
-                "fidelity": "EXACT_AGG_TRADE_TAPE_CHECKSUM_BOUND",
+                "fidelity": (
+                    "VERIFIED_AGG_TRADE_TAPE_APPROXIMATE_BAR_PROJECTION"
+                ),
                 "queue_exact": False,
                 "required_flags": [
                     "REPLAY_ENABLED",
@@ -884,17 +825,7 @@ class ReplayStorageGovernance:
                         else (
                             ["VERIFIED_AGG_TRADE_SOURCE_UNAVAILABLE"]
                             if not raw_agg_identities
-                            else (
-                                ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
-                                if not identity_matched_agg
-                                else (
-                                    [
-                                        "BAR_AGG_TRADE_COMPATIBILITY_UNAVAILABLE"
-                                    ]
-                                    if compatibility_index_checked
-                                    else ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
-                                )
-                            )
+                            else ["MATCHING_BAR_SOURCE_UNAVAILABLE"]
                         )
                     )
                 ),

@@ -41,14 +41,15 @@ test("aggregate-trade capability, snapshot, source event and batched bars cross 
   const capabilities = parseReplayCapabilities(enabledAggTradeCapabilities());
   assert.deepEqual(capabilities.sources.agg_trade, {
     enabled: true,
-    fidelity: "EXACT_AGG_TRADE_COVERAGE",
+    fidelity: "VERIFIED_AGG_TRADE_APPROXIMATE_BARS",
     execution_fidelity: "AGG_TRADE_TAPE",
     requires_exact_dataset: true,
+    bar_parity_required: false,
     reader: "paged",
   });
 
   const response = parseReplaySessionResponse(replayTradeSessionResponse());
-  assert.equal(response.data_fidelity, "EXACT_AGG_TRADE_COVERAGE");
+  assert.equal(response.data_fidelity, "VERIFIED_AGG_TRADE_APPROXIMATE_BARS");
   assert.equal(response.execution_fidelity, "AGG_TRADE_TAPE");
   assert.equal(response.snapshot.config.source_kind, "agg_trade");
   assert.ok("public_projection" in response.snapshot.components.bar_builder);

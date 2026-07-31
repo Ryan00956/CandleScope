@@ -236,6 +236,7 @@ conflicts are quarantined and keep the capability closed:
   --start 2026-06-01 --end 2026-06-01 `
   --archive-dir .\data\replay-agg-trades --require-exact
 
+# Optional offline audit only; runtime selection and Run creation do not require it.
 .\.venv\Scripts\python.exe scripts\build_replay_trade_bar_compatibility.py `
   --exchange binance --market-type futures --symbol BTCUSDT --interval 1m `
   --start 2026-06-01 --end 2026-06-01 `
@@ -243,34 +244,40 @@ conflicts are quarantined and keep the capability closed:
   --bar-archive-dir .\data\replay-history
 ```
 
-Random AGG_TRADE starts are sampled only from the intersection of eligible BAR
-windows and a revision-bound compatibility index built by the final command
-above. The index compares every aggregate-trade-derived BAR with one immutable
-BAR archive revision and stores only maximal matching segments. The complete
-forward replay range must fit inside one such segment. Proofs are immutable per
-BAR revision, raw dataset epoch, and parity policy, so publishing a later day
-cannot overwrite earlier verified coverage.
+Random AGG_TRADE starts are sampled from the intersection of eligible BAR
+windows and Binance's lightweight official daily-object availability catalog.
+The catalog is built from complete ZIP/CHECKSUM pairs and is independent of the
+local body cache. After selection, the required official daily ZIPs are fetched,
+checksum-verified, imported, and checked for strict aggregate-trade ID ordering.
+BAR parity is deliberately not a random eligibility condition because Binance
+may aggregate fills across minute boundaries. The selected tape therefore drives
+an explicitly approximate K-line projection.
 
-For remote AGG_TRADE serving, publish checksum-bound compatibility proofs and
-verified receipts after the offline parity job:
+For remote AGG_TRADE serving, sync the lightweight official listing and publish
+the bound index. Legacy verified receipts and BAR compatibility proofs may remain
+in the origin, but neither local nor pre-imported body coverage defines random
+eligibility:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\publish_replay_agg_trade_remote_index.py `
-  --archive-dir .\data\replay-agg-trades-origin
+  --archive-dir .\data\replay-agg-trades-origin `
+  --sync-binance-symbol BTCUSDT
 ```
 
 `EXACT_BAR_COVERAGE` uses the conservative BAR execution model.
-`EXACT_AGG_TRADE_COVERAGE` uses an aggregate-tape, volume-constrained execution
-model. Replay v1 does **not** provide or claim `RAW_TRADE`, `L2_BOOK`, or
+`VERIFIED_AGG_TRADE_APPROXIMATE_BARS` uses a checksum-bound, ID-contiguous
+aggregate-tape and a volume-constrained execution model. Its tape integrity is
+strict, while its derived OHLCV and indicators are approximate. Replay v1 does
+**not** provide or claim `RAW_TRADE`, `L2_BOOK`, official-Kline parity, or
 `EXCHANGE_FUTURES_EXACT` fidelity.
 
-For AGG_TRADE sessions, bar parity remains fail-closed for timestamps, OHLC,
-base/quote volume, and taker-buy volume. Binance may aggregate individual fills
-across a minute boundary into one `aggTrade`; those affected official K-lines
-cannot be reconstructed exactly from the aggregate event and are excluded from
-random candidates. The K-line `trades` counter is never reconstructible from
-aggregate events and remains explicitly non-comparable. Session creation still
-rechecks the selected window after the metadata-only random choice.
+For AGG_TRADE sessions, session creation downloads only the selected official
+daily objects, verifies the official CHECKSUM plus generated object manifests,
+freezes an immutable dataset, and scans the selected range for strict ordering
+and aggregate-ID continuity.
+It does not compare derived bars with official K-lines. The K-line `trades`
+counter and aggregate events spanning a minute boundary are explicitly outside
+the fidelity claim.
 
 ### Failure Recovery and Rollback
 

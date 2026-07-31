@@ -65,11 +65,18 @@ export function buildReplayCapabilityModel(
   return {
     OHLCV: item(
       "OHLCV",
-      "AVAILABLE_EXACT",
-      "仅已揭示前缀；向左按需读取回放专属历史",
-      "EXACT",
+      tape ? "AVAILABLE_APPROX" : "AVAILABLE_EXACT",
+      tape
+        ? "由 checksum 已验证的 aggTrade 聚合；跨分钟 aggregate 可能与官方 K 线不同"
+        : "仅已揭示前缀；向左按需读取回放专属历史",
+      tape ? "APPROX_AGGREGATE" : "EXACT",
     ),
-    INDICATORS: item("Local indicators", "AVAILABLE_EXACT", "仅以已揭示 bars 本地计算", "LOCAL"),
+    INDICATORS: item(
+      "Local indicators",
+      tape ? "AVAILABLE_APPROX" : "AVAILABLE_EXACT",
+      tape ? "以近似聚合的已揭示 bars 本地计算" : "仅以已揭示 bars 本地计算",
+      tape ? "LOCAL_APPROX_BARS" : "LOCAL",
+    ),
     SIMULATED_LIQUIDATION: item("Paper liquidation", "AVAILABLE_APPROX", "训练经纪商合成结果", "APPROX"),
     AGG_TRADE_TAPE: tape
       ? item("Agg trade tape", "AVAILABLE_EXACT", "冻结聚合成交归档；不是交易所 raw fills", "EXACT_AGGREGATE")

@@ -59,17 +59,20 @@ count       = (last_start - first_start) / interval + 1
 服务端的无模偏 SHA-256 随机索引映射到整个候选时间点全集。因此每个有效
 时间点等概率；并非先等概率选段。
 
-`AGG_TRADE` 还会把上述 BAR 候选范围与固定 BAR revision 的逐根兼容性索引
-取交集。仅有 checksum 和连续 aggregate-trade ID 还不够：Binance 可能把跨
-分钟边界的多笔成交聚合成一个 `aggTrade`，因此部分官方 K 线无法从聚合事件
-精确还原。离线兼容性构建器会逐根对账时间、OHLC、base/quote volume 和
-taker-buy volume，只发布最大连续匹配段。候选起点的整个前向区间必须落在
-同一个匹配段内；交集内仍按实际候选点数量等概率抽样。选中后创建 Run 时
-还会再次做对象 checksum 与逐根一致性校验。
+`AGG_TRADE` 会把上述 BAR 候选范围与远程“官方日包可用性 catalog”的 UTC
+连续日取交集。该 catalog 由 Binance 官方 S3 目录中同时存在的 ZIP 与
+`CHECKSUM` 对生成；它记录连续日期段并绑定 catalog epoch，不读取本地缓存，
+也不要求远端预先转换并存放全部 Parquet/receipt。交集内仍按实际候选点数量
+等概率抽样，因此空缓存、部分缓存和完整缓存得到相同的随机域。
 
-兼容性证明按 `BAR revision / raw dataset epoch / parity policy` 不可变保存。
-后续导入并校验新的日期只会追加证明，不会覆盖同一 BAR revision 已发布的
-旧日期覆盖；重叠但内容身份不同的证明会 fail closed。
+选中并持久化 commitment 后，运行时才下载覆盖该窗口的 Binance 官方日包：
+先取小型 `CHECKSUM`，再取 ZIP，校验 SHA-256、ZIP/CSV 身份、日期边界、事件
+顺序和日内 aggregate-trade ID；转换为本地不可变 Parquet 后，再对跨日 ID
+连续性和冻结 dataset epoch 做最终校验。失败保留原 commitment，重试同一
+时间，不会因为本地缺包而缩小候选域或重新抽签。不会要求 aggTrade 聚合出的
+K 线逐根等于官方 K 线：Binance 可能把跨分钟的原始成交合成一个 `aggTrade`，
+这类偏差属于已声明的 `VERIFIED_AGG_TRADE_APPROXIMATE_BARS`。历史兼容性证明
+可作为离线审计证据保留，但不再决定随机范围，也不是创建 Run 的前置条件。
 
 catalog 构建只读取 manifest 的边界和连续段，不扫描 Parquet 正文。选中
 时间后，`BarDatasetBuilder` 从已绑定 revision 读取 `warmup + forward`

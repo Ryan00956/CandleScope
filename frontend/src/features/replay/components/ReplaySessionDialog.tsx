@@ -177,7 +177,7 @@ export default function ReplaySessionDialog({ runtime }: ReplaySessionDialogProp
           <strong>训练保真度</strong>
           <span>{sourceLabel} · {evaluation.dataFidelity} · {evaluation.executionFidelity}</span>
           <span>{draft.sourceKind === "agg_trade"
-            ? "逐笔 tape 按可用成交量部分成交，限价单要求严格穿价；不模拟历史 L2 队列位置。"
+            ? "聚合成交 tape 的 checksum 与 ID 连续性会严格校验；K 线由 tape 近似聚合，可能不同于官方 K 线，且不模拟历史 L2 队列位置。"
             : "无历史 L2；同一 BAR 内多路径触发按最不利、保守路径处理。"}</span>
         </div>
 

@@ -16,6 +16,7 @@ from app.replay.trade_import import (
     ReplayTradeImportError,
     import_local_verified_day,
     import_official_date_range,
+    list_official_agg_trade_days,
     official_agg_trade_urls,
 )
 
@@ -26,6 +27,56 @@ START_MS = int(
     * 1000
 )
 SYMBOL = "BTCUSDT"
+
+
+def test_official_listing_requires_complete_zip_checksum_pairs_across_pages() -> None:
+    prefix = "data/futures/um/daily/aggTrades/BTCUSDT/"
+
+    def xml_page(keys: list[str], *, truncated: bool, marker: str = "") -> bytes:
+        contents = "".join(
+            f"<Contents><Key>{key}</Key><Size>1</Size></Contents>" for key in keys
+        )
+        next_marker = f"<NextMarker>{marker}</NextMarker>" if marker else ""
+        return (
+            "<?xml version='1.0' encoding='UTF-8'?>"
+            "<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>"
+            f"{contents}<IsTruncated>{str(truncated).lower()}</IsTruncated>"
+            f"{next_marker}</ListBucketResult>"
+        ).encode()
+
+    first_marker = f"{prefix}BTCUSDT-aggTrades-2026-06-02.zip"
+    pages = {
+        None: xml_page(
+            [
+                f"{prefix}BTCUSDT-aggTrades-2026-06-01.zip",
+                f"{prefix}BTCUSDT-aggTrades-2026-06-01.zip.CHECKSUM",
+                f"{prefix}BTCUSDT-aggTrades-2026-06-02.zip",
+            ],
+            truncated=True,
+            marker=first_marker,
+        ),
+        first_marker: xml_page(
+            [
+                f"{prefix}BTCUSDT-aggTrades-2026-06-02.zip.CHECKSUM",
+                f"{prefix}BTCUSDT-aggTrades-2026-06-03.zip",
+                f"{prefix}BTCUSDT-aggTrades-2026-06-03.zip.CHECKSUM",
+            ],
+            truncated=False,
+        ),
+    }
+
+    def opener(url: str, **_kwargs: object) -> io.BytesIO:
+        from urllib.parse import parse_qs, urlparse
+
+        marker = parse_qs(urlparse(url).query).get("marker", [None])[0]
+        return io.BytesIO(pages[marker])
+
+    assert list_official_agg_trade_days(
+        market_type="futures",
+        symbol=SYMBOL,
+        as_of_date=date(2026, 6, 3),
+        opener=opener,
+    ) == (date(2026, 6, 1), date(2026, 6, 2))
 
 
 def _rows(*, bad_schema: bool = False, wrong_date: bool = False) -> list[list[str]]:

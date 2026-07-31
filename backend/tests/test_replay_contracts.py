@@ -46,6 +46,7 @@ def test_protocol_literals_and_enums_are_frozen_and_round_trip() -> None:
         DataFidelity: {
             "EXACT_BAR_COVERAGE",
             "EXACT_AGG_TRADE_COVERAGE",
+            "VERIFIED_AGG_TRADE_APPROXIMATE_BARS",
             "BEST_EFFORT",
         },
         ExecutionFidelity: {"BAR_CONSERVATIVE", "AGG_TRADE_TAPE"},

@@ -414,7 +414,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             <div className="replay-fidelity-chips">
               <span>{tradeTape ? "AGG_TRADE" : `BAR_${config?.base_interval.toUpperCase() ?? "--"}`}</span>
               <span>{contractPortfolio?.execution_model ?? "PAPER_LINEAR_V1"}</span>
-              <span>{tradeTape ? "EXACT_AGG_TRADE" : "EXACT_BAR"}</span>
+              <span>{tradeTape ? "VERIFIED_TAPE · APPROX_BARS" : "EXACT_BAR"}</span>
               <span>{contractPortfolio === null
                 ? (tradeTape ? "AGG_TRADE_TAPE" : "BAR_CONSERVATIVE")
                 : "NO_BOOK_QUEUE"}</span>

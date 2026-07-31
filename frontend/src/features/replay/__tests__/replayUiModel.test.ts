@@ -67,7 +67,7 @@ test("session dialog model is capability-driven and emits an immutable exact BAR
   assert.equal(config.requested_start_ms, null);
 });
 
-test("session dialog emits aggregate-trade config only behind the exact archive capability", () => {
+test("session dialog emits aggregate-trade config only behind verified receipt coverage", () => {
   const parsedCatalog = catalog();
   const draft = { ...createReplaySessionDraft(parsedCatalog), sourceKind: "agg_trade" as const };
   const unavailable = evaluateReplaySessionDraft(
@@ -84,7 +84,7 @@ test("session dialog emits aggregate-trade config only behind the exact archive 
     parsedCatalog,
   );
   assert.equal(evaluation.canSubmit, true);
-  assert.equal(evaluation.dataFidelity, "EXACT_AGG_TRADE_COVERAGE");
+  assert.equal(evaluation.dataFidelity, "VERIFIED_AGG_TRADE_APPROXIMATE_BARS");
   assert.equal(evaluation.executionFidelity, "AGG_TRADE_TAPE");
   const config = buildReplaySessionConfig(draft, evaluation);
   assert.equal(config.source_kind, "agg_trade");

@@ -28,7 +28,12 @@ class QualityMode(_StringEnum):
 
 class DataFidelity(_StringEnum):
     EXACT_BAR_COVERAGE = "EXACT_BAR_COVERAGE"
+    # Legacy response literal retained so older persisted/exported payloads parse.
+    # New aggregate-trade sessions must use the explicit approximate-bars value.
     EXACT_AGG_TRADE_COVERAGE = "EXACT_AGG_TRADE_COVERAGE"
+    VERIFIED_AGG_TRADE_APPROXIMATE_BARS = (
+        "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
+    )
     BEST_EFFORT = "BEST_EFFORT"
 
 

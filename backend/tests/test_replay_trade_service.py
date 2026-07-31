@@ -17,7 +17,6 @@ from app.replay.constants import (
     SessionState,
     StartPolicy,
 )
-from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService, SYNTHETIC_TIME_ANCHOR_MS
 from app.replay.storage import ReplaySQLiteStore
@@ -79,11 +78,12 @@ async def test_trade_service_uses_shared_actor_api_and_pin_lifecycle(
     service = await _service(tmp_path / "replay.db", archive, prefix="trade")
     capability = service.capabilities()["sources"]["agg_trade"]
     assert capability["enabled"] is True
-    assert capability["fidelity"] == "EXACT_AGG_TRADE_COVERAGE"
+    assert capability["fidelity"] == "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
+    assert capability["bar_parity_required"] is False
 
     created = await service.create_session(trade_replay_config())
     session_id = str(created["session_id"])
-    assert created["data_fidelity"] == "EXACT_AGG_TRADE_COVERAGE"
+    assert created["data_fidelity"] == "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
     assert created["execution_fidelity"] == "AGG_TRADE_TAPE"
     assert created["snapshot"]["state"] == SessionState.PAUSED.value
     assert archive.diagnostics()["active_pins"] == 1
@@ -127,6 +127,11 @@ async def test_random_trade_selection_uses_only_verified_trade_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive = verified_trade_archive(tmp_path / "verified-archive")
+    trade_catalog_epoch = "sha256:" + "a" * 64
+    archive.selection_snapshot = lambda **kwargs: (  # type: ignore[attr-defined]
+        trade_catalog_epoch,
+        archive.list_selection_windows(**kwargs),
+    )
     repository = trade_replay_repository()
     identity = FixtureIdentity("binance", "futures", "BTCUSDT")
     key = (identity.exchange, identity.market_type, identity.symbol, "1m")
@@ -167,33 +172,15 @@ async def test_random_trade_selection_uses_only_verified_trade_coverage(
         )
         entry = catalog["entries"][0]
         assert entry["eligible_window_count"] == 6
-        dataset_ref = archive.freeze_dataset(
+        assert archive.list_verified_bar_windows(
             exchange="binance",
             market_type="futures",
             symbol="BTCUSDT",
-            start_time_ms=TRADE_REPLAY_START_MS,
-            end_time_ms=(
-                TRADE_REPLAY_START_MS + config.horizon_ms - 1
-            ),
-        )
-        archive.publish_bar_compatibility(
-            dataset_ref=dataset_ref,
             interval="1m",
             interval_ms=60_000,
             bar_source_revision=str(entry["source_fingerprint"]),
             parity_policy=trade_bar_parity_policy(compare_trade_count=False),
-            checked_bar_count=4,
-            mismatch_bar_count=0,
-            compatible_windows=(
-                VerifiedRawAggTradeBarWindow(
-                    start_time_ms=TRADE_REPLAY_START_MS,
-                    end_time_ms=(
-                        TRADE_REPLAY_START_MS + config.horizon_ms - 1
-                    ),
-                    bar_count=4,
-                ),
-            ),
-        )
+        ) == ()
         monkeypatch.setattr(
             service._catalog,
             "_stable_sample_index",
@@ -213,6 +200,7 @@ async def test_random_trade_selection_uses_only_verified_trade_coverage(
             <= DAY_START_MS + 86_400_000 - 1
         )
         assert selected["selected_start_ms"] == TRADE_REPLAY_START_MS
+        assert selected["agg_trade_catalog_epoch"] == trade_catalog_epoch
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -346,7 +334,7 @@ async def test_blind_trade_service_never_exposes_archive_paths_or_actual_time(
     await recovered_service.shutdown(step_timeout=1.0)
 
 
-async def test_blind_trade_parity_failure_redacts_actual_kline_times(
+async def test_blind_trade_accepts_bar_mismatch_without_revealing_actual_times(
     tmp_path: Path,
 ) -> None:
     archive = verified_trade_archive(tmp_path / "private-archive")
@@ -368,20 +356,10 @@ async def test_blind_trade_parity_failure_redacts_actual_kline_times(
     )
     await service.start()
 
-    with pytest.raises(ReplayDomainError) as failure:
-        await service.create_session(trade_replay_config(blind_mode=True))
-    assert failure.value.code is ReplayErrorCode.DATASET_MISMATCH
-    assert failure.value.message == "blind replay dataset validation failed"
-    assert failure.value.details == {"blind_redacted": True}
-    serialized_error = json.dumps(
-        {
-            "message": failure.value.message,
-            "details": dict(failure.value.details),
-        },
-        sort_keys=True,
-    )
-    assert str(TRADE_REPLAY_START_MS) not in serialized_error
-    assert "1000" not in serialized_error
+    created = await service.create_session(trade_replay_config(blind_mode=True))
+    assert created["data_fidelity"] == "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
+    serialized = json.dumps(created, sort_keys=True)
+    assert str(TRADE_REPLAY_START_MS) not in serialized
     await service.shutdown(step_timeout=1.0)
 
 

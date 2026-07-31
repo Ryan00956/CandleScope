@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
 from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.catalog import ReplayCatalog, ReplaySeriesIdentity
 from app.replay.dataset import BarDatasetBuilder, BarDatasetSnapshot
+from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.history_archive import (
     ReplayHistoryArchiveError,
     ReplayHistoryArchiveRuntimeLease,
@@ -19,9 +21,14 @@ from app.replay.history_archive import (
     ReplayHistoryImportBatch,
     ReplayHistoryRepository,
 )
+from app.replay.remote_history import (
+    RemoteReplayHistoryRepository,
+    publish_remote_history_index,
+)
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.models import TrainingRunCreateRequest
+from app.replay.training.errors import TrainingRunError
 from app.replay.training.schema import migrate_training_schema
 from scripts.import_binance_replay_history import (
     _daily_fallbacks_by_month,
@@ -196,6 +203,346 @@ def test_manifest_gap_index_drives_weighted_random_without_reading_parquet(
             "status": "detected",
         }
     ]
+
+
+def test_float64_archive_tiny_volume_is_canonicalized_for_replay(
+    tmp_path: Path,
+) -> None:
+    batch = _batch(
+        list(range(4)),
+        price_base=100,
+        source_key="fixture-tiny-volume",
+        digest_character="9",
+    )
+    rows = [dict(row) for row in batch.rows]
+    rows[0]["volume"] = "0.000013"
+    writer = ReplayHistoryArchiveWriter(
+        tmp_path / "replay-history",
+        now_ms=lambda: NOW_MS,
+    )
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [replace(batch, rows=rows)],
+    )
+    repository = ReplayHistoryRepository(tmp_path / "replay-history")
+    catalog = _catalog(repository)
+    entry = catalog.build(
+        warmup_bars=1,
+        horizon_ms=2 * INTERVAL_MS,
+    ).require_entry(IDENTITY)
+    window = catalog.select_manual(
+        entry,
+        start_ms=START_MS + INTERVAL_MS,
+    )
+
+    snapshot = BarDatasetBuilder(repository, now_ms=lambda: NOW_MS).create(
+        entry,
+        window,
+    )
+
+    assert snapshot.rows[0].volume == "0.000013"
+
+
+def test_remote_catalog_random_selection_is_independent_of_local_object_cache(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(5)),
+                price_base=100,
+                source_key="fixture-remote-a",
+                digest_character="1",
+            ),
+            _batch(
+                list(range(5, 10)),
+                price_base=100,
+                source_key="fixture-remote-b",
+                digest_character="2",
+            ),
+        ],
+    )
+    remote_index = publish_remote_history_index(origin, now_ms=NOW_MS)
+    assert remote_index.catalogs[0].catalog_epoch == manifest.catalog_epoch
+
+    empty_cache = tmp_path / "cache-empty"
+    partial_cache = tmp_path / "cache-partial"
+    full_cache = tmp_path / "cache-full"
+    first = manifest.objects[0]
+    partial_object = partial_cache / first.relative_path
+    partial_object.parent.mkdir(parents=True)
+    shutil.copyfile(origin / first.relative_path, partial_object)
+    shutil.copytree(origin / "objects", full_cache / "objects")
+
+    selections: list[int] = []
+    for cache in (empty_cache, partial_cache, full_cache):
+        repository = RemoteReplayHistoryRepository(
+            cache,
+            origin,
+            refresh_seconds=0,
+        )
+        catalog = _catalog(repository)
+        snapshot = catalog.build(warmup_bars=1, horizon_ms=2 * INTERVAL_MS)
+        entry = snapshot.require_entry(IDENTITY)
+        selections.append(catalog.select_random(entry, seed=734_221).replay_start_ms)
+        diagnostics = repository.diagnostics()
+        assert diagnostics["parquet_objects_read"] == 0
+        assert diagnostics["object_downloads"] == 0
+        assert diagnostics["remote_index_epoch"] == remote_index.index_epoch
+
+    assert selections[0] == selections[1] == selections[2]
+
+
+def test_remote_repository_materializes_only_objects_overlapping_selected_range(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(5)),
+                price_base=100,
+                source_key="fixture-materialize-a",
+                digest_character="3",
+            ),
+            _batch(
+                list(range(5, 10)),
+                price_base=100,
+                source_key="fixture-materialize-b",
+                digest_character="4",
+            ),
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    cache = tmp_path / "cache"
+    repository = RemoteReplayHistoryRepository(cache, origin)
+
+    rows = repository.query_bars_at_revision(
+        manifest.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        start_ms=START_MS + 6 * INTERVAL_MS,
+        end_ms=START_MS + 8 * INTERVAL_MS,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    assert [row["open_time"] for row in rows] == [
+        START_MS + 6 * INTERVAL_MS,
+        START_MS + 7 * INTERVAL_MS,
+        START_MS + 8 * INTERVAL_MS,
+    ]
+    assert not (cache / manifest.objects[0].relative_path).exists()
+    assert (cache / manifest.objects[1].relative_path).is_file()
+    diagnostics = repository.diagnostics()
+    assert diagnostics["object_downloads"] == 1
+    assert diagnostics["object_download_failures"] == 0
+
+
+def test_remote_object_checksum_failure_does_not_change_selection_domain(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-corrupt-object",
+                digest_character="5",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    repository = RemoteReplayHistoryRepository(tmp_path / "cache", origin)
+    entry = _catalog(repository).build(
+        warmup_bars=1,
+        horizon_ms=2 * INTERVAL_MS,
+    ).require_entry(IDENTITY)
+    selected_before = _catalog(repository).select_random(entry, seed=77).replay_start_ms
+
+    object_path = origin / manifest.objects[0].relative_path
+    object_path.write_bytes(object_path.read_bytes() + b"corrupt")
+
+    selected_after = _catalog(repository).select_random(entry, seed=77).replay_start_ms
+    assert selected_after == selected_before
+    with pytest.raises(ReplayHistoryArchiveError, match="size/checksum"):
+        repository.query_bars_at_revision(
+            manifest.catalog_epoch,
+            "BTCUSDT",
+            "1m",
+            start_ms=START_MS,
+            end_ms=START_MS + INTERVAL_MS,
+            exchange="binance",
+            market_type="spot",
+        )
+    assert repository.diagnostics()["object_download_failures"] == 1
+
+
+@pytest.mark.anyio
+async def test_failed_random_preparation_retries_immutable_remote_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    first_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(20)),
+                price_base=100,
+                source_key="fixture-immutable-old",
+                digest_character="7",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    database = tmp_path / "replay.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=tmp_path / "cache",
+            replay_history_origin_uri=str(origin),
+            replay_history_catalog_refresh_seconds=0,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("remote-session"),
+        training_run_id_factory=SessionIdFactory("remote-run"),
+        training_random_seed_factory=lambda: 991_337,
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    training = service.training
+    assert training is not None
+    original_create = service._dataset_builder.create
+    attempts = 0
+
+    def fail_first_materialization(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "injected origin outage",
+            )
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service._dataset_builder,
+        "create",
+        fail_first_materialization,
+    )
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Immutable retry",
+                "source_kind": "BAR",
+                "start_mode": "RANDOM",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "requested_start_ms": None,
+                "indicator_warmup_bars": 2,
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": None,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        with pytest.raises(TrainingRunError):
+            await training.create_run(request)
+
+        second_manifest = writer.import_batches(
+            IDENTITY,
+            "1m",
+            [
+                _batch(
+                    list(range(20)),
+                    price_base=900,
+                    source_key="fixture-immutable-new",
+                    digest_character="8",
+                )
+            ],
+        )
+        assert second_manifest.catalog_epoch != first_manifest.catalog_epoch
+        publish_remote_history_index(origin, now_ms=NOW_MS + 1)
+
+        created = await training.retry_selection_preparation("remote-run-1")
+        session_id = str(created["run"]["adapter_session_id"])
+        persisted = await service.store.load_dataset(session_id)
+        assert persisted is not None
+        payload = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
+        snapshot = BarDatasetSnapshot.from_dict(payload)
+        assert snapshot.provenance.source_revision == first_manifest.catalog_epoch
+        assert max(float(row.open) for row in snapshot.rows) < 200
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+def test_corrupt_live_remote_index_fails_closed_instead_of_using_stale_cache(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-corrupt-index",
+                digest_character="6",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    repository = RemoteReplayHistoryRepository(
+        tmp_path / "cache",
+        origin,
+        refresh_seconds=0,
+    )
+    assert repository.list_all_series()
+    (origin / "index.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ReplayHistoryArchiveError, match="index fields"):
+        repository.list_all_series()
 
 
 def test_closed_archive_catalog_epoch_does_not_churn_with_wall_clock(

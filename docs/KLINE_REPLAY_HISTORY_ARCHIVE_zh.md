@@ -9,10 +9,16 @@
 candlescope.db
   实时行情、近期缓存、在线回填、在线 gap ledger
 
-replay-history/
+replay-history-origin/
+  index.json
   objects/sha256/<prefix>/<content-hash>.parquet
   catalogs/<exchange>/<market>/<symbol>/<interval>/<catalog-epoch>.json
   catalogs/<exchange>/<market>/<symbol>/<interval>/current.json
+
+replay-history-cache/
+  remote-metadata/current.json
+  catalogs/.../<catalog-epoch>.json
+  objects/sha256/<prefix>/<按需下载的 content-hash>.parquet
   derived-cache/v1/<revision>/<query-hash>.json.zlib
 
 replay.db
@@ -22,8 +28,12 @@ replay.db.datasets/
   <prefix>/<snapshot-hash>.json.zlib
 ```
 
-`REPLAY_BAR_SOURCE=archive` 是默认值。运行时只读取 manifest 和 Parquet，
-不会用实时 SQLite 填补归档缺口，也不会触发在线 backfill。
+`REPLAY_BAR_SOURCE=archive` 是默认值。配置 `REPLAY_HISTORY_ORIGIN_URI` 后，
+远端 `index.json` 与不可变 manifest 是随机范围的唯一权威；
+`REPLAY_HISTORY_ARCHIVE_DIR` 退化为可淘汰本地缓存，缓存中有无 Parquet
+都不会改变候选范围。选中起点并持久化 selection commitment 后，运行时才
+下载与 `warmup + forward` 相交的内容寻址对象。不会用实时 SQLite 填补
+归档缺口，也不会触发在线 backfill。
 `REPLAY_BAR_SOURCE=legacy_sqlite` 仅用于显式回滚。
 
 `replay.db` 与 `replay.db.datasets` 是同一个恢复集合。备份或恢复前必须停止
@@ -65,6 +75,13 @@ catalog 构建只读取 manifest 的边界和连续段，不扫描 Parquet 正�
 时间后，`BarDatasetBuilder` 从已绑定 revision 读取 `warmup + forward`
 区间，再次校验缺口、行数、闭合状态与 K 线字段，最后冻结成内存快照。
 逐根推进不查询 Parquet 或 SQLite。
+
+随机选择先以 `PREPARING_DATA` 写入 `replay.db`，记录服务端 seed、选中
+时间、catalog、source revision、请求和 selection 的规范哈希。下载失败会
+保留为 `FAILED`；`POST /api/v1/replay/runs/preparations/{id}/retry` 只能认领
+原 commitment，不能重新调用随机选择。Run 与初始 checkpoint 原子落库后
+才切换为 `READY`。进程重启时遗留的 `PREPARING_DATA` 会转成可审计的
+`FAILED`，随后仍可按同一 commitment 重试。
 
 ## 不可变版本
 
@@ -155,9 +172,28 @@ normalized row 数量。
 ```dotenv
 REPLAY_ENABLED=1
 REPLAY_BAR_SOURCE=archive
-REPLAY_HISTORY_ARCHIVE_DIR=./data/replay-history
+REPLAY_HISTORY_ARCHIVE_DIR=./data/replay-history-cache
+REPLAY_HISTORY_ORIGIN_URI=https://replay.example.com/replay-history/
+REPLAY_HISTORY_CATALOG_REFRESH_SECONDS=300
+REPLAY_HISTORY_DOWNLOAD_TIMEOUT_SECONDS=60
 REPLAY_DB_PATH=./data/replay.db
 ```
+
+对象存储发布端先完成不可变对象与 catalog 发布，再原子生成轻量索引：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_replay_history_remote_index.py `
+  --archive-dir .\data\replay-history-origin
+
+.\.venv\Scripts\python.exe scripts\publish_replay_agg_trade_remote_index.py `
+  --archive-dir .\data\replay-agg-trades-origin
+```
+
+`ORIGIN_URI` 支持只读 `file`、`http` 和 `https` 根地址；本机 `file` origin
+适合 shadow/开发，生产可直接切到同目录布局的 HTTP(S) 对象存储。远端暂时
+不可达时只允许使用最后一次完整校验的元数据快照；远端返回损坏的 live index
+则 fail closed，不会用旧快照掩盖发布错误。正文下载有超时和大小上限，并在
+原子进入缓存前校验 size/checksum。
 
 归档不存在时 catalog 为空，不会回退到实时库。需要临时恢复旧行为时：
 

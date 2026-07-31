@@ -217,9 +217,11 @@ backend/data/cache_gc_audit.jsonl.*
 backend/data/symbol_catalog.v1.json
 backend/data/history_archives/
 backend/data/replay-history/
+backend/data/replay-history-cache/
 backend/data/replay-history-source-cache/
 backend/data/replay-history-import*.json
 backend/data/replay-agg-trades/
+backend/data/replay-agg-trades-cache/
 backend/data/raw-agg-live-spool/
 backend/data/replay.db.datasets/
 

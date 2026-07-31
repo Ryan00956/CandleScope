@@ -14,6 +14,7 @@ from app.data_engine.interval_policy import last_closed_bar_open_ms, parse_inter
 from .canonical import canonical_sha256
 from .catalog import EligibleWindow, ReplayCatalogEntry, ReplaySeriesIdentity
 from .errors import ReplayDomainError, ReplayErrorCode
+from .history_archive import ReplayHistoryArchiveError
 from .models import (
     normalize_decimal_string,
     validate_identifier,
@@ -33,7 +34,14 @@ def _decimal_value(
 ) -> str:
     if isinstance(value, bool) or value is None:
         raise ValueError(f"{field_name} must be a finite Decimal-compatible value")
-    normalized = normalize_decimal_string(str(value), field_name=field_name)
+    if isinstance(value, (float, Decimal)):
+        decimal_input = Decimal(str(value))
+        if not decimal_input.is_finite():
+            raise ValueError(f"{field_name} must be finite")
+        raw = format(decimal_input, "f")
+    else:
+        raw = str(value)
+    normalized = normalize_decimal_string(raw, field_name=field_name)
     decimal_value = Decimal(normalized)
     if positive and decimal_value <= 0:
         raise ValueError(f"{field_name} must be positive")
@@ -526,29 +534,36 @@ class BarDatasetBuilder:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "BAR dataset source revision cannot be revalidated",
             )
-        gap_result = (
-            scan_gaps_at_revision(
-                entry.source_revision,
-                entry.identity.symbol,
-                window.interval,
-                start_ms=window.warmup_start_ms,
-                end_ms=window.replay_end_open_ms,
-                exchange=entry.identity.exchange,
-                market_type=entry.identity.market_type,
-                limit=expected_rows,
+        try:
+            gap_result = (
+                scan_gaps_at_revision(
+                    entry.source_revision,
+                    entry.identity.symbol,
+                    window.interval,
+                    start_ms=window.warmup_start_ms,
+                    end_ms=window.replay_end_open_ms,
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                    limit=expected_rows,
+                )
+                if entry.source_revision is not None
+                and callable(scan_gaps_at_revision)
+                else self._repository.scan_gaps(
+                    entry.identity.symbol,
+                    window.interval,
+                    start_ms=window.warmup_start_ms,
+                    end_ms=window.replay_end_open_ms,
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                    limit=expected_rows,
+                )
             )
-            if entry.source_revision is not None
-            and callable(scan_gaps_at_revision)
-            else self._repository.scan_gaps(
-                entry.identity.symbol,
-                window.interval,
-                start_ms=window.warmup_start_ms,
-                end_ms=window.replay_end_open_ms,
-                exchange=entry.identity.exchange,
-                market_type=entry.identity.market_type,
-                limit=expected_rows,
-            )
-        )
+        except ReplayHistoryArchiveError as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "BAR history metadata could not be revalidated",
+                details={"reason": "REPLAY_HISTORY_METADATA_UNAVAILABLE"},
+            ) from exc
         if gap_result.get("error") or gap_result.get("truncated"):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_INCOMPLETE,
@@ -572,31 +587,38 @@ class BarDatasetBuilder:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "BAR dataset source revision cannot be read",
             )
-        raw_rows = (
-            query_bars_at_revision(
-                entry.source_revision,
-                entry.identity.symbol,
-                window.interval,
-                start_ms=window.warmup_start_ms,
-                end_ms=window.replay_end_open_ms,
-                limit=expected_rows + 1,
-                order="ASC",
-                exchange=entry.identity.exchange,
-                market_type=entry.identity.market_type,
+        try:
+            raw_rows = (
+                query_bars_at_revision(
+                    entry.source_revision,
+                    entry.identity.symbol,
+                    window.interval,
+                    start_ms=window.warmup_start_ms,
+                    end_ms=window.replay_end_open_ms,
+                    limit=expected_rows + 1,
+                    order="ASC",
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                )
+                if entry.source_revision is not None
+                and callable(query_bars_at_revision)
+                else self._repository.query_bars(
+                    entry.identity.symbol,
+                    window.interval,
+                    start_ms=window.warmup_start_ms,
+                    end_ms=window.replay_end_open_ms,
+                    limit=expected_rows + 1,
+                    order="ASC",
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                )
             )
-            if entry.source_revision is not None
-            and callable(query_bars_at_revision)
-            else self._repository.query_bars(
-                entry.identity.symbol,
-                window.interval,
-                start_ms=window.warmup_start_ms,
-                end_ms=window.replay_end_open_ms,
-                limit=expected_rows + 1,
-                order="ASC",
-                exchange=entry.identity.exchange,
-                market_type=entry.identity.market_type,
-            )
-        )
+        except ReplayHistoryArchiveError as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "BAR history object could not be materialized",
+                details={"reason": "REPLAY_HISTORY_MATERIALIZATION_FAILED"},
+            ) from exc
         if len(raw_rows) != expected_rows:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_INCOMPLETE,

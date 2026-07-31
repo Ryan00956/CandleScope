@@ -48,12 +48,14 @@ from .broker.models import (
 from .canonical import canonical_json_bytes, canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError
 from .catalog import (
+    EMPTY_GAP_SUMMARY,
     EligibleWindow,
     EligibleWindowRange,
     KlinesReadRepository,
     ReplayCatalog,
     ReplayCatalogEntry,
     ReplaySeriesIdentity,
+    SeriesBounds,
 )
 from .commands import CommandResult
 from .constants import (
@@ -74,6 +76,7 @@ from .dataset import (
 )
 from .errors import ReplayDomainError, ReplayErrorCode
 from .history_archive import ReplayHistoryRepository
+from .remote_history import RemoteReplayHistoryRepository
 from .internal_commands import InternalCommandType
 from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
 from .period_summary import (
@@ -159,8 +162,19 @@ class ReplayService:
         if repository is not None:
             self._repository = repository
         elif settings.replay_bar_source == "archive":
-            self._repository = ReplayHistoryRepository(
-                settings.replay_history_archive_dir
+            self._repository = (
+                RemoteReplayHistoryRepository(
+                    settings.replay_history_archive_dir,
+                    settings.replay_history_origin_uri,
+                    refresh_seconds=(
+                        settings.replay_history_catalog_refresh_seconds
+                    ),
+                    download_timeout_seconds=(
+                        settings.replay_history_download_timeout_seconds
+                    ),
+                )
+                if settings.replay_history_origin_uri is not None
+                else ReplayHistoryRepository(settings.replay_history_archive_dir)
             )
         elif settings.replay_bar_source == "legacy_sqlite":
             self._repository = KlinesRepoAdapter()
@@ -494,10 +508,121 @@ class ReplayService:
         return {
             "catalog_epoch": catalog.catalog_epoch,
             "source_fingerprint": entry.source_fingerprint,
+            "source_revision": entry.source_revision,
+            "identity": entry.identity.to_dict(),
+            "selected_base_interval": entry.selected_base_interval,
+            "source_bounds": entry.bounds.to_dict(),
             "selected_start_ms": window.replay_start_ms,
             "continuous_history_start_ms": continuous_start_ms,
             "interval_ms": window.interval_ms,
         }
+
+    @staticmethod
+    def _bound_training_entry_and_window(
+        config: ReplaySessionConfig,
+        selection: Mapping[str, object],
+    ) -> tuple[ReplayCatalogEntry, EligibleWindow]:
+        identity_payload = selection.get("identity")
+        bounds_payload = selection.get("source_bounds")
+        if not isinstance(identity_payload, Mapping) or not isinstance(
+            bounds_payload, Mapping
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training selection metadata is incomplete",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
+        try:
+            identity = ReplaySeriesIdentity.from_dict(identity_payload)
+            selected_interval = str(selection["selected_base_interval"])
+            interval_ms = int(selection["interval_ms"])
+            selected_start_ms = int(selection["selected_start_ms"])
+            bounds = SeriesBounds(
+                earliest_open_ms=int(bounds_payload["earliest_open_ms"]),
+                latest_source_open_ms=int(bounds_payload["latest_source_open_ms"]),
+                latest_closed_open_ms=int(bounds_payload["latest_closed_open_ms"]),
+                total_count=int(bounds_payload["total_count"]),
+            )
+            source_fingerprint = str(selection["source_fingerprint"])
+            catalog_epoch = str(selection["catalog_epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training selection metadata is invalid",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            ) from exc
+        source_revision_value = selection.get("source_revision")
+        source_revision = (
+            None
+            if source_revision_value is None
+            else str(source_revision_value)
+        )
+        if interval_ms < 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training selection interval is invalid",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
+        expected_identity = ReplaySeriesIdentity(
+            config.exchange,
+            config.market_type,
+            config.symbol,
+        )
+        parsed_interval_ms = parse_interval_ms(selected_interval)
+        replay_bars, horizon_remainder = divmod(config.horizon_ms, interval_ms)
+        warmup_start_ms = selected_start_ms - config.warmup_bars * interval_ms
+        replay_end_open_ms = selected_start_ms + (replay_bars - 1) * interval_ms
+        digests = (source_fingerprint, catalog_epoch)
+        if source_revision is not None:
+            digests = (*digests, source_revision)
+        if (
+            identity != expected_identity
+            or selected_interval != config.base_interval
+            or parsed_interval_ms != interval_ms
+            or horizon_remainder != 0
+            or replay_bars < 1
+            or any(
+                len(value) != 71
+                or not value.startswith("sha256:")
+                or any(character not in "0123456789abcdef" for character in value[7:])
+                for value in digests
+            )
+            or bounds.total_count < 1
+            or bounds.earliest_open_ms < 0
+            or bounds.latest_closed_open_ms < bounds.earliest_open_ms
+            or bounds.latest_source_open_ms < bounds.latest_closed_open_ms
+            or warmup_start_ms < bounds.earliest_open_ms
+            or replay_end_open_ms > bounds.latest_closed_open_ms
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training selection commitment is inconsistent",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
+        return (
+            ReplayCatalogEntry(
+                identity=identity,
+                base_intervals=(selected_interval,),
+                selected_base_interval=selected_interval,
+                bounds=bounds,
+                gap_summary=EMPTY_GAP_SUMMARY,
+                eligible_ranges=(),
+                quality=DataFidelity.EXACT_BAR_COVERAGE,
+                source_fingerprint=source_fingerprint,
+                catalog_epoch=catalog_epoch,
+                limitations=(),
+                source_revision=source_revision,
+            ),
+            EligibleWindow(
+                interval=selected_interval,
+                interval_ms=interval_ms,
+                warmup_start_ms=warmup_start_ms,
+                replay_start_ms=selected_start_ms,
+                replay_end_open_ms=replay_end_open_ms,
+                warmup_bars=config.warmup_bars,
+                replay_bars=replay_bars,
+            ),
+        )
 
     async def create_session(
         self,
@@ -507,6 +632,7 @@ class ReplayService:
         _internal_forced_start_ms: int | None = None,
         _internal_expected_source_fingerprint: str | None = None,
         _internal_training_history: bool = False,
+        _internal_training_selection: Mapping[str, object] | None = None,
         _extension_factory: Callable[..., object] | None = None,
         _internal_execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> dict[str, object]:
@@ -532,33 +658,49 @@ class ReplayService:
 
         await self._reserve_session_capacity(blind_mode=config.blind_mode)
         try:
-            try:
-                catalog_owner = (
-                    self._training_history_catalog
-                    if _internal_training_history
-                    else self._catalog
-                )
-                catalog = await asyncio.to_thread(
-                    catalog_owner.build,
-                    warmup_bars=config.warmup_bars,
-                    horizon_ms=config.horizon_ms,
-                    quality_mode=config.quality_mode,
+            catalog_owner = (
+                self._training_history_catalog
+                if _internal_training_history
+                else self._catalog
+            )
+            bound_window: EligibleWindow | None = None
+            if _internal_training_selection is not None:
+                entry, bound_window = self._bound_training_entry_and_window(
+                    config,
+                    _internal_training_selection,
                 )
                 if (
                     _expected_catalog_epoch is not None
-                    and catalog.catalog_epoch != _expected_catalog_epoch
+                    and entry.catalog_epoch != _expected_catalog_epoch
                 ):
                     raise ReplayDomainError(
                         ReplayErrorCode.DATASET_MISMATCH,
-                        "replay catalog changed after capability validation",
-                        details={"reason": "CATALOG_EPOCH_MISMATCH"},
+                        "training selection catalog commitment changed",
+                        details={"reason": "SELECTION_COMMITMENT_INVALID"},
                     )
-            except ReplayDomainError as exc:
-                raise self._blind_safe_dataset_error(config, exc) from exc
-            identity = ReplaySeriesIdentity(
-                config.exchange, config.market_type, config.symbol
-            )
-            entry = catalog.require_entry(identity)
+            else:
+                try:
+                    catalog = await asyncio.to_thread(
+                        catalog_owner.build,
+                        warmup_bars=config.warmup_bars,
+                        horizon_ms=config.horizon_ms,
+                        quality_mode=config.quality_mode,
+                    )
+                    if (
+                        _expected_catalog_epoch is not None
+                        and catalog.catalog_epoch != _expected_catalog_epoch
+                    ):
+                        raise ReplayDomainError(
+                            ReplayErrorCode.DATASET_MISMATCH,
+                            "replay catalog changed after capability validation",
+                            details={"reason": "CATALOG_EPOCH_MISMATCH"},
+                        )
+                except ReplayDomainError as exc:
+                    raise self._blind_safe_dataset_error(config, exc) from exc
+                identity = ReplaySeriesIdentity(
+                    config.exchange, config.market_type, config.symbol
+                )
+                entry = catalog.require_entry(identity)
             if (
                 _internal_expected_source_fingerprint is not None
                 and entry.source_fingerprint
@@ -579,7 +721,19 @@ class ReplayService:
                     },
                 )
             try:
-                if _internal_forced_start_ms is not None:
+                if bound_window is not None:
+                    if (
+                        _internal_forced_start_ms is not None
+                        and bound_window.replay_start_ms
+                        != _internal_forced_start_ms
+                    ):
+                        raise ReplayDomainError(
+                            ReplayErrorCode.DATASET_MISMATCH,
+                            "training selected start commitment changed",
+                            details={"reason": "SELECTION_COMMITMENT_INVALID"},
+                        )
+                    window = bound_window
+                elif _internal_forced_start_ms is not None:
                     window = catalog_owner.select_manual(
                         entry,
                         start_ms=_internal_forced_start_ms,
@@ -1568,6 +1722,11 @@ class ReplayService:
                 )
             }
         )
+        trade_history = dict(self._raw_trade_archive.diagnostics())
+        if redact_paths:
+            for field_name in ("root", "origin", "path"):
+                if field_name in trade_history:
+                    trade_history[field_name] = "<redacted>"
         return {
             **self._metrics,
             "enabled": True,
@@ -1591,6 +1750,7 @@ class ReplayService:
             },
             "catalog": self._catalog.diagnostics(),
             "bar_history": repository,
+            "trade_history": trade_history,
             "dataset_pins": dict(self._datasets.diagnostics()),
             "training_product_v2": self.training is not None,
             "persistence": persistence,

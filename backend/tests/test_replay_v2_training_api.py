@@ -159,6 +159,78 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_v2_http_failed_preparation_can_retry_same_commitment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "retry-api.db")
+    app = _app(service)
+    payload = await _payload(service)
+    payload.update(
+        {
+            "start_mode": "RANDOM",
+            "requested_start_ms": None,
+        }
+    )
+    original_create = service._dataset_builder.create
+    attempts = 0
+
+    def fail_first_materialization(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "injected remote download failure",
+            )
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service._dataset_builder,
+        "create",
+        fail_first_materialization,
+    )
+    try:
+        failed = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=payload,
+        )
+        assert failed.status_code == 409
+        preparation_id = failed.json()["error"]["details"]["preparation_id"]
+
+        preparation = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/preparations/{preparation_id}",
+        )
+        assert preparation.status_code == 200
+        before = preparation.json()["preparation"]
+        assert before["status"] == "FAILED"
+
+        retried = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/preparations/{preparation_id}/retry",
+        )
+        assert retried.status_code == 201
+        assert retried.json()["run"]["run_id"] == preparation_id
+
+        ready = await _request(
+            app,
+            "GET",
+            f"/api/v1/replay/runs/preparations/{preparation_id}",
+        )
+        assert ready.status_code == 200
+        after = ready.json()["preparation"]
+        assert after["status"] == "READY"
+        assert after["selection_hash"] == before["selection_hash"]
+        assert after["retry_count"] == 1
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_v2_http_delete_archive_removes_run_and_adapter_session(
     tmp_path: Path,
 ) -> None:

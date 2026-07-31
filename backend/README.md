@@ -150,9 +150,13 @@ cannot reveal data after the durable virtual-time cursor.
 | `REPLAY_PRODUCT_V2_ENABLED` | `1` | Subordinate v2 product selector; explicit `0` restores v1 while the authoritative replay gate remains unchanged |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
 | `REPLAY_BAR_SOURCE` | `archive` | `archive` uses the isolated immutable history plane; `legacy_sqlite` is an explicit rollback mode |
-| `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Content-addressed Parquet objects plus immutable catalog manifests |
+| `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Local archive, or disposable metadata/object cache when `REPLAY_HISTORY_ORIGIN_URI` is set |
+| `REPLAY_HISTORY_ORIGIN_URI` | unset | Authoritative `file`/HTTP(S) history root; its index and manifests define random eligibility independently of cache bodies |
+| `REPLAY_HISTORY_CATALOG_REFRESH_SECONDS` | `300` | Remote metadata refresh TTL; `0` refreshes on every catalog access |
+| `REPLAY_HISTORY_DOWNLOAD_TIMEOUT_SECONDS` | `60` | Bounded timeout for remote metadata and selected-object downloads |
 | `REPLAY_AGG_TRADE_ENABLED` | `0` | Independent exact aggregate-trade replay gate |
 | `REPLAY_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-agg-trades` | Read-only checksum-verified aggregate-trade replay archive |
+| `REPLAY_AGG_TRADE_ORIGIN_URI` | unset | Authoritative remote compatibility/receipt index and on-demand aggregate-trade object origin |
 | `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
 | `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |
 | `REPLAY_EVENT_BUFFER_SIZE` | `10000` | Resumable domain event ring |
@@ -207,6 +211,16 @@ is [`../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](../docs/KLINE_REPLAY_HISTORY_A
 When a closed monthly checksum is absent, the importer automatically attempts
 that month's checksum-verified daily objects before declaring a source gap.
 
+After publishing new current manifests to a remote origin, rebuild its compact
+control-plane index. A runtime configured with an origin samples this index,
+persists the exact selection, and only then downloads overlapping bodies into
+its local cache:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_replay_history_remote_index.py `
+  --archive-dir .\data\replay-history-origin
+```
+
 AGG_TRADE accepts only checksum-verified official Binance USD-M daily files.
 Import is idempotent; identity, date, schema, checksum, monotonicity, or ID
 conflicts are quarantined and keep the capability closed:
@@ -236,6 +250,14 @@ BAR archive revision and stores only maximal matching segments. The complete
 forward replay range must fit inside one such segment. Proofs are immutable per
 BAR revision, raw dataset epoch, and parity policy, so publishing a later day
 cannot overwrite earlier verified coverage.
+
+For remote AGG_TRADE serving, publish checksum-bound compatibility proofs and
+verified receipts after the offline parity job:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\publish_replay_agg_trade_remote_index.py `
+  --archive-dir .\data\replay-agg-trades-origin
+```
 
 `EXACT_BAR_COVERAGE` uses the conservative BAR execution model.
 `EXACT_AGG_TRADE_COVERAGE` uses an aggregate-tape, volume-constrained execution

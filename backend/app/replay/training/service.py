@@ -224,6 +224,55 @@ class TrainingRunService:
         await self.segments.shutdown()
         return frozenset(shutdown_pause_sessions)
 
+    async def get_selection_preparation(
+        self,
+        preparation_id: str,
+    ) -> dict[str, object]:
+        normalized = self._identifier(
+            preparation_id,
+            field_name="preparation_id",
+        )
+        return {
+            "protocol": "replay.v2",
+            "preparation": await self.store.selection_preparation(normalized),
+        }
+
+    async def retry_selection_preparation(
+        self,
+        preparation_id: str,
+    ) -> dict[str, object]:
+        normalized = self._identifier(
+            preparation_id,
+            field_name="preparation_id",
+        )
+        retry = await self.store.claim_selection_preparation_retry(normalized)
+        try:
+            request = TrainingRunCreateRequest.from_dict(retry["request"])
+        except (TypeError, ValueError) as exc:
+            await self.store.fail_selection_preparation(
+                normalized,
+                error_code="TRAINING_RUN_STORAGE_DEGRADED",
+                error_message="training preparation retry request is invalid",
+            )
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training preparation retry request is invalid",
+                status_code=503,
+                details={"preparation_id": normalized},
+            ) from exc
+        try:
+            return await self.create_run(
+                request,
+                _retry_preparation=retry,
+            )
+        except BaseException:
+            await self.store.fail_selection_preparation(
+                normalized,
+                error_code="TRAINING_RUN_CREATE_FAILED",
+                error_message="training preparation retry failed",
+            )
+            raise
+
     async def list_runs(
         self,
         *,
@@ -1436,29 +1485,44 @@ class TrainingRunService:
             "account_audit": account_audit,
         }
 
-    async def create_run(self, request: TrainingRunCreateRequest) -> dict[str, object]:
+    async def create_run(
+        self,
+        request: TrainingRunCreateRequest,
+        *,
+        _retry_preparation: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
-        request = self._authoritative_start_request(request)
-        selection_config = self._adapter_config(request)
-        try:
-            selection = await self.replay_service.select_training_window(
-                selection_config,
-                expected_catalog_epoch=request.catalog_epoch,
-            )
-        except ReplayDomainError as exc:
-            if exc.details.get("reason") == "CATALOG_EPOCH_MISMATCH":
+        if _retry_preparation is None:
+            request = self._authoritative_start_request(request)
+            selection_config = self._adapter_config(request)
+            try:
+                selection = await self.replay_service.select_training_window(
+                    selection_config,
+                    expected_catalog_epoch=request.catalog_epoch,
+                )
+            except ReplayDomainError as exc:
+                if exc.details.get("reason") == "CATALOG_EPOCH_MISMATCH":
+                    raise TrainingRunError(
+                        "CATALOG_EPOCH_MISMATCH",
+                        "data capability changed after validation; refresh and try again",
+                        status_code=409,
+                    ) from exc
                 raise TrainingRunError(
-                    "CATALOG_EPOCH_MISMATCH",
-                    "data capability changed after validation; refresh and try again",
+                    "TRAINING_RUN_CREATE_FAILED",
+                    "training start could not be selected",
                     status_code=409,
+                    details={"reason": exc.code.value},
                 ) from exc
-            raise TrainingRunError(
-                "TRAINING_RUN_CREATE_FAILED",
-                "training start could not be selected",
-                status_code=409,
-                details={"reason": exc.code.value},
-            ) from exc
+        else:
+            raw_selection = _retry_preparation.get("selection")
+            if not isinstance(raw_selection, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training preparation retry selection is invalid",
+                    status_code=503,
+                )
+            selection = dict(raw_selection)
         history_policy = resolve_history_policy(
             request,
             selection,
@@ -1523,11 +1587,48 @@ class TrainingRunService:
                 actual_time_ms=request.requested_start_ms,
                 virtual_time_ms=request.requested_start_ms,
             )
-        run_id = self._identifier(self._run_id_factory(), field_name="run_id")
+        run_id = self._identifier(
+            (
+                self._run_id_factory()
+                if _retry_preparation is None
+                else _retry_preparation.get("preparation_id")
+            ),
+            field_name="run_id",
+        )
         config = self._adapter_config(
             request,
             warmup_bars=history_policy.effective_warmup_bars,
         )
+        required_start_ms = (
+            history_policy.actual_replay_start_ms
+            - history_policy.effective_warmup_bars * history_policy.interval_ms
+        )
+        required_end_ms = (
+            history_policy.actual_replay_start_ms
+            + history_policy.forward_cache_ms
+            - history_policy.interval_ms
+        )
+        if _retry_preparation is None:
+            try:
+                await self.store.create_selection_preparation(
+                    preparation_id=run_id,
+                    start_mode=request.start_mode.value,
+                    random_seed=request.random_seed,
+                    catalog_epoch=request.catalog_epoch,
+                    source_fingerprint=str(selection["source_fingerprint"]),
+                    selected_start_ms=history_policy.actual_replay_start_ms,
+                    required_start_ms=required_start_ms,
+                    required_end_ms=required_end_ms,
+                    interval_ms=history_policy.interval_ms,
+                    request=request,
+                    selection=selection,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_CONFLICT",
+                    "training preparation identity already exists",
+                    status_code=409,
+                ) from exc
 
         def extension_factory(
             *,
@@ -1578,6 +1679,7 @@ class TrainingRunService:
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
                 history_policy=history_policy,
+                source_fingerprint=str(selection["source_fingerprint"]),
                 historical_book_binding=bound_book,
                 account_history_binding=bound_account,
             )
@@ -1585,15 +1687,22 @@ class TrainingRunService:
         try:
             await self.replay_service.create_session(
                 config,
+                _expected_catalog_epoch=request.catalog_epoch,
                 _internal_forced_start_ms=history_policy.actual_replay_start_ms,
                 _internal_expected_source_fingerprint=str(
                     selection["source_fingerprint"]
                 ),
                 _internal_training_history=True,
+                _internal_training_selection=selection,
                 _extension_factory=extension_factory,
                 _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )
         except ReplayDomainError as exc:
+            await self.store.fail_selection_preparation(
+                run_id,
+                error_code=exc.code.value,
+                error_message="selected replay data could not be materialized",
+            )
             catalog_drift = False
             failure: BaseException | None = exc
             while isinstance(failure, ReplayDomainError):
@@ -1606,19 +1715,36 @@ class TrainingRunService:
                     "CATALOG_EPOCH_MISMATCH",
                     "data capability changed after validation; refresh and try again",
                     status_code=409,
+                    details={"preparation_id": run_id},
                 ) from exc
             raise TrainingRunError(
                 "TRAINING_RUN_CREATE_FAILED",
                 "training run could not be created",
                 status_code=409,
-                details={"reason": exc.code.value},
+                details={
+                    "reason": exc.code.value,
+                    "preparation_id": run_id,
+                },
             ) from exc
         except sqlite3.IntegrityError as exc:
+            await self.store.fail_selection_preparation(
+                run_id,
+                error_code="TRAINING_RUN_CONFLICT",
+                error_message="training run persistence conflicted",
+            )
             raise TrainingRunError(
                 "TRAINING_RUN_CONFLICT",
                 "training run identity already exists",
                 status_code=409,
+                details={"preparation_id": run_id},
             ) from exc
+        except BaseException as exc:
+            await self.store.fail_selection_preparation(
+                run_id,
+                error_code=type(exc).__name__,
+                error_message="training data preparation failed",
+            )
+            raise
         run = await self.store.get_run(run_id)
         return {
             "protocol": "replay.v2",

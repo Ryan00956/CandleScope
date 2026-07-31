@@ -65,8 +65,12 @@ class ReplaySettings:
     replay_account_history_max_archive_bytes: int = 137_438_953_472
     replay_bar_source: str = "archive"
     replay_history_archive_dir: Path = Path("data/replay-history")
+    replay_history_origin_uri: str | None = None
+    replay_history_catalog_refresh_seconds: int = 300
+    replay_history_download_timeout_seconds: int = 60
     replay_agg_trade_enabled: bool = False
     replay_agg_trade_archive_dir: Path = Path("data/replay-agg-trades")
+    replay_agg_trade_origin_uri: str | None = None
 
     @property
     def product_v2_available(self) -> bool:
@@ -136,11 +140,36 @@ def load_replay_settings(
         raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify REPLAY_DB_PATH")
     if _paths_refer_to_same_file(replay_history_archive_dir, klines_db_path):
         raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify KLINES_DB_PATH")
+    replay_history_origin_uri = (
+        environment.get("REPLAY_HISTORY_ORIGIN_URI", "").strip() or None
+    )
+    try:
+        replay_history_catalog_refresh_seconds = int(
+            environment.get("REPLAY_HISTORY_CATALOG_REFRESH_SECONDS", "300")
+        )
+        replay_history_download_timeout_seconds = int(
+            environment.get("REPLAY_HISTORY_DOWNLOAD_TIMEOUT_SECONDS", "60")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "replay-history refresh and download timeouts must be integers"
+        ) from exc
+    if not 0 <= replay_history_catalog_refresh_seconds <= 86_400:
+        raise ValueError(
+            "REPLAY_HISTORY_CATALOG_REFRESH_SECONDS must be between 0 and 86400"
+        )
+    if not 1 <= replay_history_download_timeout_seconds <= 3_600:
+        raise ValueError(
+            "REPLAY_HISTORY_DOWNLOAD_TIMEOUT_SECONDS must be between 1 and 3600"
+        )
     replay_agg_trade_archive_dir = Path(
         environment.get(
             "REPLAY_AGG_TRADE_ARCHIVE_DIR",
             str(data_dir / "replay-agg-trades"),
         )
+    )
+    replay_agg_trade_origin_uri = (
+        environment.get("REPLAY_AGG_TRADE_ORIGIN_URI", "").strip() or None
     )
     live_agg_trade_archive_dir = Path(
         environment.get(
@@ -227,10 +256,18 @@ def load_replay_settings(
         ],
         replay_bar_source=replay_bar_source,
         replay_history_archive_dir=replay_history_archive_dir,
+        replay_history_origin_uri=replay_history_origin_uri,
+        replay_history_catalog_refresh_seconds=(
+            replay_history_catalog_refresh_seconds
+        ),
+        replay_history_download_timeout_seconds=(
+            replay_history_download_timeout_seconds
+        ),
         replay_agg_trade_enabled=_strict_replay_bool(
             environment, "REPLAY_AGG_TRADE_ENABLED", "0"
         ),
         replay_agg_trade_archive_dir=replay_agg_trade_archive_dir,
+        replay_agg_trade_origin_uri=replay_agg_trade_origin_uri,
     )
 
 # Server

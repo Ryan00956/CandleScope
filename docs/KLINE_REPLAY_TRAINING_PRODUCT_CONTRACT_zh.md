@@ -213,10 +213,11 @@ flowchart LR
 ### 5.3 随机起点
 
 - 随机候选只来自 `BaseInterval` 对齐、warmup 完整、前向缓存窗口完整且没有未知缺口的范围。
-- BAR 随机候选必须来自独立 `replay-history` 归档的版本化连续段，不能读取实时 `candlescope.db` 的近期覆盖范围。单个缺口只切分它所在的连续段，不得使缺口后的全部历史失效。
+- BAR 随机候选必须来自远端 `replay-history` index/manifest 的版本化连续段，不能读取实时 `candlescope.db` 或本地正文缓存的覆盖范围。单个缺口只切分它所在的连续段，不得使缺口后的全部历史失效。
 - 每个连续段按其有效候选时间点数量进入前缀和；随机索引映射到所有连续段的候选全集，不能先等概率选段再选时间。
 - 随机算法使用服务端生成或保存的 seed，并将候选范围版本写入存档；相同 seed 与 dataset identity 必须得到相同起点。
 - catalog 校验、随机选择、冻结快照和 `ALL_AVAILABLE` 历史必须绑定同一个不可变归档 revision；发布新的 `current` revision 不得改变既有 Run。
+- 服务端必须先持久化 seed、选中时间、catalog 与 source revision 的 selection commitment，再下载正文。下载失败后的重试只能复用该 commitment，不能重新抽签；本地缓存仅用于加速，可缺失且不得扩大或缩小随机域。
 - 不能按未来收益、波动结果或用户未知的事后标签挑选起点。若未来增加“行情场景训练”，标签生成与防泄漏规则必须另立合同。
 - 严格盲测只能使用随机起点。用户手动选择具体日期后，存档必须标记 `START_TIME_KNOWN`，不得进入“未知起点”统计。
 

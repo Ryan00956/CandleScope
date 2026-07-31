@@ -1991,7 +1991,7 @@ class ReplayHistoryRepository:
             # only suppress sub-picounit summation noise on aggregate totals.
             normalized = round(numeric, 12) if aggregate else numeric
             return normalize_decimal_string(
-                str(normalized),
+                format(Decimal(str(normalized)), "f"),
                 field_name=field_name,
             )
 

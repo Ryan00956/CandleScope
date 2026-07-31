@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from app.replay.constants import REPLAY_PROTOCOL, CommandType
+from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService
 from app.replay.storage import REPLAY_SCHEMA_VERSION, ReplaySQLiteStore
 from app.replay.training.errors import TrainingRunError
-from app.replay.training.models import TrainingRunCreateRequest
+from app.replay.training.models import StartMode, TrainingRunCreateRequest
 from app.replay.training.schema import TRAINING_SCHEMA_VERSION
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
@@ -132,6 +133,7 @@ async def test_training_schema_is_additive_and_old_v1_store_ignores_it(
         "replay_training_rule",
         "replay_training_action",
         "replay_training_pin",
+        "replay_training_selection_preparation",
     }.issubset(tables)
 
     old_build_store = ReplaySQLiteStore(path, now_ms=lambda: NOW_MS)
@@ -273,6 +275,7 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
                     "replay_training_rule",
                     "replay_training_action",
                     "replay_training_pin",
+                    "replay_training_selection_preparation",
                 )
             }
         assert counts == {
@@ -285,7 +288,11 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
             "replay_training_rule": 1,
             "replay_training_action": 1,
             "replay_training_pin": 1,
+            "replay_training_selection_preparation": 1,
         }
+        preparation = await service.training.get_selection_preparation("run-1")  # type: ignore[union-attr]
+        assert preparation["preparation"]["status"] == "READY"
+        assert str(preparation["preparation"]["dataset_epoch"]).startswith("sha256:")
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -320,6 +327,111 @@ async def test_create_run_rolls_back_every_row_and_runtime_pin_on_late_failure(
                 "replay_training_pin",
             ):
                 assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+            failed = connection.execute(
+                """
+                SELECT status, error_code
+                FROM replay_training_selection_preparation
+                """
+            ).fetchone()
+            assert failed == ("FAILED", "RuntimeError")
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_failed_materialization_retry_reuses_committed_random_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "prepare-before-materialize.db"
+    service = await _service(path)
+    training = service.training
+    assert training is not None
+    request = replace(
+        await _request(service),
+        start_mode=StartMode.RANDOM,
+        requested_start_ms=None,
+    )
+
+    original_select = service.select_training_window
+    original_create = service._dataset_builder.create
+    selection_attempts = 0
+    materialization_attempts = 0
+
+    async def track_selection(*args, **kwargs):
+        nonlocal selection_attempts
+        selection_attempts += 1
+        return await original_select(*args, **kwargs)
+
+    def fail_first_materialization(*args, **kwargs):
+        nonlocal materialization_attempts
+        materialization_attempts += 1
+        if materialization_attempts == 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "injected remote download failure",
+            )
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service._dataset_builder,
+        "create",
+        fail_first_materialization,
+    )
+    monkeypatch.setattr(service, "select_training_window", track_selection)
+    try:
+        with pytest.raises(TrainingRunError) as failed:
+            await training.create_run(request)
+        assert failed.value.details["preparation_id"] == "run-1"
+        with sqlite3.connect(path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM replay_training_selection_preparation"
+            ).fetchone()
+            assert row is not None
+            assert row["status"] == "FAILED"
+            assert row["error_code"] == "DATASET_INCOMPLETE"
+            assert row["start_mode"] == "RANDOM"
+            assert row["random_seed"] is not None
+            assert row["selected_start_ms"] >= row["required_start_ms"]
+            assert row["selection_hash"].startswith("sha256:")
+            committed = {
+                "random_seed": row["random_seed"],
+                "selected_start_ms": row["selected_start_ms"],
+                "selection_hash": row["selection_hash"],
+                "catalog_epoch": row["catalog_epoch"],
+                "source_fingerprint": row["source_fingerprint"],
+            }
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone()[0] == 0
+
+        retried = await training.retry_selection_preparation("run-1")
+        assert retried["run"]["run_id"] == "run-1"
+        assert selection_attempts == 1
+        assert materialization_attempts == 2
+        with sqlite3.connect(path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM replay_training_selection_preparation"
+            ).fetchone()
+            assert row is not None
+            assert row["status"] == "READY"
+            assert row["retry_count"] == 1
+            assert row["error_code"] is None
+            assert {
+                "random_seed": row["random_seed"],
+                "selected_start_ms": row["selected_start_ms"],
+                "selection_hash": row["selection_hash"],
+                "catalog_epoch": row["catalog_epoch"],
+                "source_fingerprint": row["source_fingerprint"],
+            } == committed
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone()[0] == 1
+
+        with pytest.raises(TrainingRunError) as not_retryable:
+            await training.retry_selection_preparation("run-1")
+        assert not_retryable.value.code == "TRAINING_PREPARATION_NOT_RETRYABLE"
     finally:
         await service.shutdown(step_timeout=1.0)
 

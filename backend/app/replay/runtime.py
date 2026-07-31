@@ -14,6 +14,7 @@ from app.data_engine.storage.raw_trade_archive import (
 )
 
 from .history_archive import ReplayHistoryArchiveRuntimeLease
+from .remote_trade_archive import RemoteRawAggTradeArchive
 from .service import ReplayService
 from .storage import ReplaySQLiteStore
 
@@ -128,9 +129,23 @@ async def start_replay_runtime(
         }
         if raw_trade_archive is None:
             raw_trade_archive = (
-                ParquetRawAggTradeArchive(
-                    settings.replay_agg_trade_archive_dir,
-                    read_only=True,
+                (
+                    RemoteRawAggTradeArchive(
+                        settings.replay_agg_trade_archive_dir,
+                        settings.replay_agg_trade_origin_uri,
+                        refresh_seconds=(
+                            settings.replay_history_catalog_refresh_seconds
+                        ),
+                        download_timeout_seconds=(
+                            settings.replay_history_download_timeout_seconds
+                        ),
+                        page_rows=settings.trade_page_rows,
+                    )
+                    if settings.replay_agg_trade_origin_uri is not None
+                    else ParquetRawAggTradeArchive(
+                        settings.replay_agg_trade_archive_dir,
+                        read_only=True,
+                    )
                 )
                 if settings.replay_agg_trade_enabled
                 else DisabledRawAggTradeArchive()

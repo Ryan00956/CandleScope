@@ -626,6 +626,30 @@ async def list_replay_v2_data_segments(request: Request) -> dict[str, object]:
     return await _training_service(request).list_data_segments()
 
 
+@router.get("/runs/preparations/{preparation_id}")
+async def get_replay_v2_selection_preparation(
+    request: Request,
+    preparation_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).get_selection_preparation(
+        preparation_id
+    )
+
+
+@router.post(
+    "/runs/preparations/{preparation_id}/retry",
+    status_code=201,
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def retry_replay_v2_selection_preparation(
+    request: Request,
+    preparation_id: str,
+) -> dict[str, object]:
+    return await _training_service(request).retry_selection_preparation(
+        preparation_id
+    )
+
+
 @router.get("/runs/historical-books")
 async def list_replay_v2_historical_books(request: Request) -> dict[str, object]:
     return await _training_service(request).list_historical_book_archives()

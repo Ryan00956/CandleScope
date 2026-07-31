@@ -13,6 +13,7 @@ from app.replay.canonical import canonical_json, canonical_sha256
 TRAINING_SCHEMA_VERSION = 9
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
+SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
 DATA_POLICY_SCHEMA_VERSION = "replay.data-policy.v1"
 PERIOD_SUMMARY_SET_SCHEMA_VERSION = "replay.period-summary-set.v1"
 ADVANCE_INTENT_SCHEMA_VERSION = "replay.advance-intent.v1"
@@ -1411,6 +1412,62 @@ ON replay_archive_pin(source_revision, exchange, market_type, symbol, base_inter
 """
 
 
+TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_selection_preparation (
+    preparation_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.selection-preparation.v1'),
+    status TEXT NOT NULL
+        CHECK (status IN ('PREPARING_DATA', 'READY', 'FAILED')),
+    start_mode TEXT NOT NULL CHECK (start_mode IN ('MANUAL', 'RANDOM')),
+    seed_source TEXT NOT NULL CHECK (seed_source IN ('SERVER', 'MANUAL')),
+    random_seed INTEGER
+        CHECK (
+            random_seed IS NULL
+            OR (random_seed >= 0 AND random_seed <= 9007199254740991)
+        ),
+    catalog_epoch TEXT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    selected_start_ms INTEGER NOT NULL CHECK (selected_start_ms >= 0),
+    required_start_ms INTEGER NOT NULL CHECK (required_start_ms >= 0),
+    required_end_ms INTEGER NOT NULL CHECK (required_end_ms >= selected_start_ms),
+    interval_ms INTEGER NOT NULL CHECK (interval_ms >= 1),
+    selection_hash TEXT NOT NULL
+        CHECK (
+            length(selection_hash) = 71
+            AND substr(selection_hash, 1, 7) = 'sha256:'
+        ),
+    request_json TEXT NOT NULL,
+    request_hash TEXT NOT NULL
+        CHECK (
+            length(request_hash) = 71
+            AND substr(request_hash, 1, 7) = 'sha256:'
+        ),
+    selection_json TEXT NOT NULL,
+    selection_json_hash TEXT NOT NULL
+        CHECK (
+            length(selection_json_hash) = 71
+            AND substr(selection_json_hash, 1, 7) = 'sha256:'
+        ),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    dataset_epoch TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (required_start_ms <= selected_start_ms),
+    CHECK (
+        (status = 'READY' AND dataset_epoch IS NOT NULL AND error_code IS NULL)
+        OR (status = 'FAILED' AND dataset_epoch IS NULL AND error_code IS NOT NULL)
+        OR (status = 'PREPARING_DATA' AND dataset_epoch IS NULL AND error_code IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_selection_preparation_status
+ON replay_training_selection_preparation(status, updated_at_ms DESC);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1463,6 +1520,36 @@ def start_selection_hash(
             "actual_end_ms": actual_end_ms,
             "dataset_epoch": dataset_epoch,
             "parent_selection_hash": parent_selection_hash,
+        }
+    )
+
+
+def selection_preparation_hash(
+    *,
+    preparation_id: str,
+    start_mode: str,
+    seed_source: str,
+    random_seed: int | None,
+    catalog_epoch: str,
+    source_fingerprint: str,
+    selected_start_ms: int,
+    required_start_ms: int,
+    required_end_ms: int,
+    interval_ms: int,
+) -> str:
+    return canonical_sha256(
+        {
+            "schema_version": SELECTION_PREPARATION_SCHEMA_VERSION,
+            "preparation_id": preparation_id,
+            "start_mode": start_mode,
+            "seed_source": seed_source,
+            "random_seed": random_seed,
+            "catalog_epoch": catalog_epoch,
+            "source_fingerprint": source_fingerprint,
+            "selected_start_ms": selected_start_ms,
+            "required_start_ms": required_start_ms,
+            "required_end_ms": required_end_ms,
+            "interval_ms": interval_ms,
         }
     )
 
@@ -1981,6 +2068,8 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     _execute_script(connection, TRAINING_SCHEMA_PHASE18_ADDITIVE)
     _execute_script(connection, TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE)
     _backfill_archive_pins(connection, now_ms=now_ms)
+    _execute_script(connection, TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE)
+    _ensure_selection_preparation_storage_columns(connection)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
@@ -1991,6 +2080,30 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         """,
         (TRAINING_SCHEMA_VERSION, now_ms),
     )
+
+
+def _ensure_selection_preparation_storage_columns(
+    connection: sqlite3.Connection,
+) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(replay_training_selection_preparation)"
+        ).fetchall()
+    }
+    additions = {
+        "request_json": "TEXT",
+        "request_hash": "TEXT",
+        "selection_json": "TEXT",
+        "selection_json_hash": "TEXT",
+        "retry_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, declaration in additions.items():
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE replay_training_selection_preparation "
+                f"ADD COLUMN {column} {declaration}"
+            )
 
 
 def _ensure_review_anchor_storage_columns(connection: sqlite3.Connection) -> None:
@@ -2043,10 +2156,12 @@ __all__ = [
     "PERIOD_SUMMARY_SET_SCHEMA_VERSION",
     "REVIEW_TIMELINE_SCHEMA_VERSION",
     "RUN_RULES_SCHEMA_VERSION",
+    "SELECTION_PREPARATION_SCHEMA_VERSION",
     "START_SELECTION_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",
     "data_policy_hash",
     "migrate_training_schema",
+    "selection_preparation_hash",
     "start_selection_hash",
 ]

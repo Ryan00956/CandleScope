@@ -77,10 +77,12 @@ from .schema import (
     PERIOD_SUMMARY_SET_SCHEMA_VERSION,
     REVIEW_TIMELINE_SCHEMA_VERSION,
     RUN_RULES_SCHEMA_VERSION,
+    SELECTION_PREPARATION_SCHEMA_VERSION,
     START_SELECTION_SCHEMA_VERSION,
     TRAINING_SCHEMA_ID,
     data_policy_hash,
     migrate_training_schema,
+    selection_preparation_hash,
     start_selection_hash,
 )
 from .review import (
@@ -325,6 +327,16 @@ class TrainingRunStore:
                 """,
                 (now,),
             )
+            connection.execute(
+                """
+                UPDATE replay_training_selection_preparation
+                SET status = 'FAILED', error_code = 'PROCESS_RESTARTED',
+                    error_message = 'data preparation was interrupted by restart',
+                    updated_at_ms = ?
+                WHERE status = 'PREPARING_DATA'
+                """,
+                (now,),
+            )
             backfill_archive_segments(connection, now_ms=now)
             connection.execute(
                 """
@@ -342,6 +354,216 @@ class TrainingRunStore:
         self.base_store.register_session_summary_writer(self._sync_session_summary)
         self.base_store.register_session_mutation_writer(self._sync_session_mutation)
         self.base_store.register_session_review_writer(self._sync_review_event)
+
+    async def create_selection_preparation(
+        self,
+        *,
+        preparation_id: str,
+        start_mode: str,
+        random_seed: int | None,
+        catalog_epoch: str,
+        source_fingerprint: str,
+        selected_start_ms: int,
+        required_start_ms: int,
+        required_end_ms: int,
+        interval_ms: int,
+        request: TrainingRunCreateRequest,
+        selection: Mapping[str, object],
+    ) -> dict[str, object]:
+        seed_source = "SERVER" if start_mode == "RANDOM" else "MANUAL"
+        digest = selection_preparation_hash(
+            preparation_id=preparation_id,
+            start_mode=start_mode,
+            seed_source=seed_source,
+            random_seed=random_seed,
+            catalog_epoch=catalog_epoch,
+            source_fingerprint=source_fingerprint,
+            selected_start_ms=selected_start_ms,
+            required_start_ms=required_start_ms,
+            required_end_ms=required_end_ms,
+            interval_ms=interval_ms,
+        )
+        request_payload = request.to_dict(redact_hidden_start=False)
+        if request.launch_context is not None:
+            request_payload["launch_context"] = request.launch_context.to_dict()
+        request_json = canonical_json(request_payload)
+        request_hash = canonical_sha256(request_payload)
+        selection_payload = dict(selection)
+        selection_json = canonical_json(selection_payload)
+        selection_json_hash = canonical_sha256(selection_payload)
+        now_ms = self.base_store._validated_now_ms()
+
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """
+                INSERT INTO replay_training_selection_preparation(
+                    preparation_id, schema_version, status, start_mode,
+                    seed_source, random_seed, catalog_epoch, source_fingerprint,
+                    selected_start_ms, required_start_ms, required_end_ms,
+                    interval_ms, selection_hash, request_json, request_hash,
+                    selection_json, selection_json_hash, retry_count, dataset_epoch,
+                    error_code, error_message, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, 'PREPARING_DATA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?)
+                """,
+                (
+                    preparation_id,
+                    SELECTION_PREPARATION_SCHEMA_VERSION,
+                    start_mode,
+                    seed_source,
+                    random_seed,
+                    catalog_epoch,
+                    source_fingerprint,
+                    selected_start_ms,
+                    required_start_ms,
+                    required_end_ms,
+                    interval_ms,
+                    digest,
+                    request_json,
+                    request_hash,
+                    selection_json,
+                    selection_json_hash,
+                    now_ms,
+                    now_ms,
+                ),
+            )
+
+        await self.base_store.run_extension_write(write)
+        return {
+            "preparation_id": preparation_id,
+            "status": "PREPARING_DATA",
+            "selection_hash": digest,
+        }
+
+    async def fail_selection_preparation(
+        self,
+        preparation_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        now_ms = self.base_store._validated_now_ms()
+        bounded_code = str(error_code).strip()[:128] or "PREPARATION_FAILED"
+        bounded_message = str(error_message).strip()[:500] or "data preparation failed"
+
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """
+                UPDATE replay_training_selection_preparation
+                SET status = 'FAILED', error_code = ?, error_message = ?,
+                    updated_at_ms = ?
+                WHERE preparation_id = ? AND status = 'PREPARING_DATA'
+                """,
+                (bounded_code, bounded_message, now_ms, preparation_id),
+            )
+
+        await self.base_store.run_extension_write(write, allow_degraded=True)
+
+    async def claim_selection_preparation_retry(
+        self,
+        preparation_id: str,
+    ) -> dict[str, object]:
+        now_ms = self.base_store._validated_now_ms()
+
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            row = connection.execute(
+                """
+                SELECT * FROM replay_training_selection_preparation
+                WHERE preparation_id = ?
+                """,
+                (preparation_id,),
+            ).fetchone()
+            if row is None:
+                raise TrainingRunError(
+                    "TRAINING_PREPARATION_NOT_FOUND",
+                    "training data preparation does not exist",
+                    status_code=404,
+                )
+            if str(row["status"]) != "FAILED":
+                raise TrainingRunError(
+                    "TRAINING_PREPARATION_NOT_RETRYABLE",
+                    "training data preparation is not in a retryable state",
+                    status_code=409,
+                    details={"status": str(row["status"])},
+                )
+            try:
+                request_payload = json.loads(str(row["request_json"]))
+                selection_payload = json.loads(str(row["selection_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training preparation retry payload is unreadable",
+                    status_code=503,
+                ) from exc
+            if (
+                not isinstance(request_payload, Mapping)
+                or not isinstance(selection_payload, Mapping)
+                or canonical_sha256(request_payload) != str(row["request_hash"])
+                or canonical_sha256(selection_payload)
+                != str(row["selection_json_hash"])
+                or str(selection_payload.get("catalog_epoch"))
+                != str(row["catalog_epoch"])
+                or str(selection_payload.get("source_fingerprint"))
+                != str(row["source_fingerprint"])
+                or int(selection_payload.get("selected_start_ms", -1))
+                != int(row["selected_start_ms"])
+                or int(selection_payload.get("interval_ms", -1))
+                != int(row["interval_ms"])
+            ):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training preparation retry payload failed validation",
+                    status_code=503,
+                )
+            updated = connection.execute(
+                """
+                UPDATE replay_training_selection_preparation
+                SET status = 'PREPARING_DATA', error_code = NULL,
+                    error_message = NULL, retry_count = retry_count + 1,
+                    updated_at_ms = ?
+                WHERE preparation_id = ? AND status = 'FAILED'
+                """,
+                (now_ms, preparation_id),
+            )
+            if updated.rowcount != 1:
+                raise TrainingRunError(
+                    "TRAINING_PREPARATION_NOT_RETRYABLE",
+                    "training data preparation retry was claimed concurrently",
+                    status_code=409,
+                )
+            return {
+                "preparation_id": preparation_id,
+                "request": dict(request_payload),
+                "selection": dict(selection_payload),
+            }
+
+        return await self.base_store.run_extension_write(write)
+
+    async def selection_preparation(
+        self,
+        preparation_id: str,
+    ) -> dict[str, object]:
+        def read(connection: sqlite3.Connection) -> dict[str, object] | None:
+            row = connection.execute(
+                """
+                SELECT preparation_id, status, catalog_epoch, selection_hash,
+                       dataset_epoch, error_code, error_message, retry_count,
+                       created_at_ms, updated_at_ms
+                FROM replay_training_selection_preparation
+                WHERE preparation_id = ?
+                """,
+                (preparation_id,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+        result = await self.base_store.run_extension_read(read)
+        if result is None:
+            raise TrainingRunError(
+                "TRAINING_PREPARATION_NOT_FOUND",
+                "training data preparation does not exist",
+                status_code=404,
+            )
+        return result
 
     def _sync_review_event(
         self,
@@ -398,6 +620,7 @@ class TrainingRunStore:
         actual_replay_start_ms: int,
         actual_replay_end_ms: int,
         history_policy: ResolvedHistoryPolicy,
+        source_fingerprint: str,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
         account_history_binding: PreparedAccountHistoryBinding | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
@@ -413,6 +636,15 @@ class TrainingRunStore:
                 fallback=f"{request.symbol} 训练 {run_id[-8:]}",
             )
             rule = request.to_dict(redact_hidden_start=True)
+            self._validated_selection_preparation(
+                connection,
+                preparation_id=run_id,
+                request=request,
+                history_policy=history_policy,
+                source_fingerprint=source_fingerprint,
+                actual_replay_start_ms=actual_replay_start_ms,
+                actual_replay_end_ms=actual_replay_end_ms,
+            )
             self._insert_run(
                 connection,
                 {
@@ -467,6 +699,21 @@ class TrainingRunStore:
                 parent_selection_hash=None,
                 now_ms=now_ms,
             )
+            preparation_update = connection.execute(
+                """
+                UPDATE replay_training_selection_preparation
+                SET status = 'READY', dataset_epoch = ?, error_code = NULL,
+                    error_message = NULL, updated_at_ms = ?
+                WHERE preparation_id = ? AND status = 'PREPARING_DATA'
+                """,
+                (str(session_state["data_epoch"]), now_ms, run_id),
+            )
+            if preparation_update.rowcount != 1:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training selection preparation could not be finalized",
+                    status_code=503,
+                )
             self._insert_data_policy(
                 connection,
                 run_id=run_id,
@@ -11280,6 +11527,106 @@ class TrainingRunStore:
             context=context,
             now_ms=now_ms,
         )
+
+    @staticmethod
+    def _validated_selection_preparation(
+        connection: sqlite3.Connection,
+        *,
+        preparation_id: str,
+        request: TrainingRunCreateRequest,
+        history_policy: ResolvedHistoryPolicy,
+        source_fingerprint: str,
+        actual_replay_start_ms: int,
+        actual_replay_end_ms: int,
+    ) -> None:
+        row = connection.execute(
+            """
+            SELECT * FROM replay_training_selection_preparation
+            WHERE preparation_id = ?
+            """,
+            (preparation_id,),
+        ).fetchone()
+        if row is None or str(row["status"]) != "PREPARING_DATA":
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training selection preparation is missing or not active",
+                status_code=503,
+            )
+        expected_hash = selection_preparation_hash(
+            preparation_id=str(row["preparation_id"]),
+            start_mode=str(row["start_mode"]),
+            seed_source=str(row["seed_source"]),
+            random_seed=(
+                None if row["random_seed"] is None else int(row["random_seed"])
+            ),
+            catalog_epoch=str(row["catalog_epoch"]),
+            source_fingerprint=str(row["source_fingerprint"]),
+            selected_start_ms=int(row["selected_start_ms"]),
+            required_start_ms=int(row["required_start_ms"]),
+            required_end_ms=int(row["required_end_ms"]),
+            interval_ms=int(row["interval_ms"]),
+        )
+        required_start_ms = (
+            history_policy.actual_replay_start_ms
+            - history_policy.effective_warmup_bars * history_policy.interval_ms
+        )
+        required_end_ms = (
+            history_policy.actual_replay_start_ms
+            + history_policy.forward_cache_ms
+            - history_policy.interval_ms
+        )
+        try:
+            stored_request = json.loads(str(row["request_json"]))
+            stored_selection = json.loads(str(row["selection_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training selection preparation payload is unreadable",
+                status_code=503,
+            ) from exc
+        seed_source = (
+            "SERVER" if request.start_mode.value == "RANDOM" else "MANUAL"
+        )
+        expected_request = request.to_dict(redact_hidden_start=False)
+        if request.launch_context is not None:
+            expected_request["launch_context"] = request.launch_context.to_dict()
+        if (
+            expected_hash != str(row["selection_hash"])
+            or not isinstance(stored_request, Mapping)
+            or not isinstance(stored_selection, Mapping)
+            or canonical_sha256(stored_request) != str(row["request_hash"])
+            or canonical_sha256(stored_selection)
+            != str(row["selection_json_hash"])
+            or dict(stored_request) != expected_request
+            or str(stored_selection.get("catalog_epoch"))
+            != request.catalog_epoch
+            or str(stored_selection.get("source_fingerprint"))
+            != source_fingerprint
+            or int(stored_selection.get("selected_start_ms", -1))
+            != history_policy.actual_replay_start_ms
+            or str(row["schema_version"])
+            != SELECTION_PREPARATION_SCHEMA_VERSION
+            or str(row["start_mode"]) != request.start_mode.value
+            or str(row["seed_source"]) != seed_source
+            or (
+                None if row["random_seed"] is None else int(row["random_seed"])
+            )
+            != request.random_seed
+            or str(row["catalog_epoch"]) != request.catalog_epoch
+            or str(row["source_fingerprint"]) != source_fingerprint
+            or int(row["selected_start_ms"])
+            != history_policy.actual_replay_start_ms
+            or int(row["required_start_ms"]) != required_start_ms
+            or int(row["required_end_ms"]) != required_end_ms
+            or int(row["interval_ms"]) != history_policy.interval_ms
+            or actual_replay_start_ms != history_policy.actual_replay_start_ms
+            or actual_replay_end_ms != required_end_ms
+        ):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training selection preparation failed its commitment check",
+                status_code=503,
+            )
 
     @staticmethod
     def _insert_start_selection(

@@ -247,6 +247,7 @@ test("manual create panel renders an accessible UTC picker, earliest action, and
       refreshCreatePlan: noop,
       createRun: noop,
       migrateLegacy: noop,
+      deleteRun: noop,
       continueRun: noop,
     },
   } satisfies TrainingHubRuntime;

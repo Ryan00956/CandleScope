@@ -935,10 +935,10 @@ class ReplaySQLiteStore:
             raise RuntimeError("replay session review writer is already registered")
         self._session_review_writer = writer
 
-    async def run_extension_write(self, operation):
+    async def run_extension_write(self, operation, *, allow_degraded: bool = False):
         """Run a trusted additive-schema write under the replay transaction lock."""
 
-        return await self._write_async(operation)
+        return await self._write_async(operation, allow_degraded=allow_degraded)
 
     async def run_extension_read(self, operation):
         """Run a trusted additive-schema read under the replay connection lock."""

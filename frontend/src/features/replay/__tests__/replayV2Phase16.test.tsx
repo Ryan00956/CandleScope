@@ -493,6 +493,7 @@ test("Phase 16 Hub visibly discloses the exact archive contract before create", 
       refreshCreatePlan() {},
       createRun() {},
       migrateLegacy() {},
+      deleteRun() {},
       continueRun() {},
     },
   } satisfies TrainingHubRuntime;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearReplayIndicatorPreferences,
   loadReplayIndicatorPreferences,
   saveReplayIndicatorPreferences,
 } from "../replayIndicatorPreferences.js";
@@ -15,6 +16,10 @@ class MemoryStorage {
 
   setItem(key: string, value: string): void {
     this.values.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
   }
 }
 
@@ -87,4 +92,26 @@ test("replay indicator persistence rejects invalid periods and unknown ids", () 
   assert.deepEqual(loadReplayIndicatorPreferences("run-a", storage).indicators, [
     { id: "rsi", visible: true, period: 14 },
   ]);
+});
+
+test("archive cleanup removes only deleted replay indicator scopes", () => {
+  const storage = new MemoryStorage();
+  storage.setItem("candlescope-active-indicators", "[]");
+  storage.setItem("candlescope-replay-local-indicators-v1:adapter-1", "{}");
+  storage.setItem("candlescope-replay-local-indicators-v1:adapter-2", "{}");
+
+  clearReplayIndicatorPreferences(
+    ["adapter-1", "adapter-1", ""],
+    storage,
+  );
+
+  assert.equal(
+    storage.getItem("candlescope-replay-local-indicators-v1:adapter-1"),
+    null,
+  );
+  assert.equal(
+    storage.getItem("candlescope-replay-local-indicators-v1:adapter-2"),
+    "{}",
+  );
+  assert.equal(storage.getItem("candlescope-active-indicators"), "[]");
 });

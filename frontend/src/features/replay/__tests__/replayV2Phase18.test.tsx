@@ -391,6 +391,7 @@ test("storage panel exposes HOLD, protected Review evidence and exact plan confi
       refreshCreatePlan: noop,
       createRun: noop,
       migrateLegacy: noop,
+      deleteRun: noop,
       continueRun: noop,
     },
   } satisfies TrainingHubRuntime;

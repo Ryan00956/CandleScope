@@ -1127,6 +1127,14 @@ async def get_replay_v2_run(request: Request, run_id: str) -> dict[str, object]:
     return await _training_service(request).get_run(run_id)
 
 
+@router.delete(
+    "/runs/{run_id}",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def delete_replay_v2_run(request: Request, run_id: str) -> dict[str, object]:
+    return await _training_service(request).delete_run(run_id)
+
+
 @router.get("/catalog")
 async def replay_catalog(
     request: Request,

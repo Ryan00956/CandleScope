@@ -41,9 +41,15 @@ import type {
 import type {
   ReplayViewerRuntime,
 } from "./useReplayViewerRuntime.js";
-
-const REPLAY_INDICATOR_STORAGE_PREFIX = "candlescope-replay-indicators-v2:";
-const REPLAY_ORDER_FLOW_STORAGE_PREFIX = "candlescope-replay-order-flow-v2:";
+import {
+  replayIndicatorStorageKey,
+  replayOrderFlowStorageKey,
+} from "./replaySharedIndicatorPreferences.js";
+export {
+  clearReplaySharedIndicatorPreferences,
+  replayIndicatorStorageKey,
+  replayOrderFlowStorageKey,
+} from "./replaySharedIndicatorPreferences.js";
 const DISABLED_CAPABILITIES = Object.freeze([
   "hosted-range",
   "indicator-websocket",
@@ -105,14 +111,6 @@ function isPreference(value: unknown): value is {
     && !Array.isArray(value)
     && typeof (value as Record<string, unknown>).added === "boolean"
     && typeof (value as Record<string, unknown>).visible === "boolean";
-}
-
-export function replayIndicatorStorageKey(runScope: string): string {
-  return `${REPLAY_INDICATOR_STORAGE_PREFIX}${runScope}`;
-}
-
-export function replayOrderFlowStorageKey(runScope: string): string {
-  return `${REPLAY_ORDER_FLOW_STORAGE_PREFIX}${runScope}`;
 }
 
 export function loadReplayOrderFlowPreferences(

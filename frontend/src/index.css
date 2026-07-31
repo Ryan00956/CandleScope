@@ -9332,6 +9332,7 @@ body {
 .training-hub-card > footer { display: flex; gap: 7px; }
 .training-hub-card > footer button { padding: 7px 9px; border: 1px solid #475569; border-radius: 5px; color: #e2e8f0; background: #1d4ed8; }
 .training-hub-card > footer button + button { color: #ddd6fe; background: transparent; border-color: #7c3aed; }
+.training-hub-card > footer .training-hub-delete-action { color: #fecaca; background: transparent; border-color: #b91c1c; }
 .training-hub-card button:disabled, .training-hub-heading button:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (prefers-reduced-motion: reduce) {

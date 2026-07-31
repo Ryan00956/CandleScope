@@ -22,6 +22,7 @@ export interface ReplayWorkspacePreferences {
 export interface ReplayPreferenceStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 export interface ReplayWorkspacePreferenceActions {
@@ -133,6 +134,21 @@ export function saveReplayWorkspacePreferences(
     storage.setItem(scopedKey(sessionId), JSON.stringify(normalize(preferences, inherited(storage))));
   } catch {
     // A storage failure keeps the in-memory run layout valid.
+  }
+}
+
+export function clearReplayWorkspacePreferences(
+  sessionIds: readonly string[],
+  storage: ReplayPreferenceStorage | null = browserStorage(),
+): void {
+  if (storage?.removeItem === undefined) return;
+  for (const sessionId of new Set(sessionIds.map((value) => value.trim()))) {
+    if (!sessionId) continue;
+    try {
+      storage.removeItem(scopedKey(sessionId));
+    } catch {
+      // Archive deletion remains authoritative when browser storage is blocked.
+    }
   }
 }
 

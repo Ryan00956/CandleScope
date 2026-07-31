@@ -3480,6 +3480,209 @@ class TrainingRunStore:
             )
         return self._card_from_row(row)
 
+    async def deletion_target(self, run_id: str) -> tuple[str, tuple[str, ...]]:
+        """Return the archive kind and replay sessions that a delete would remove."""
+
+        def read(connection: sqlite3.Connection) -> tuple[str, tuple[str, ...]]:
+            run = connection.execute(
+                "SELECT adapter_session_id FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is not None:
+                child = connection.execute(
+                    """
+                    SELECT child_run_id FROM replay_run_lineage
+                    WHERE parent_run_id = ?
+                    UNION ALL
+                    SELECT child_run_id FROM replay_review_fork_lineage
+                    WHERE parent_run_id = ?
+                    LIMIT 1
+                    """,
+                    (run_id, run_id),
+                ).fetchone()
+                if child is not None:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_HAS_CHILDREN",
+                        "delete child archives before deleting this training run",
+                        status_code=409,
+                        details={"child_run_id": str(child["child_run_id"])},
+                    )
+                sessions = connection.execute(
+                    """
+                    SELECT adapter_session_id
+                    FROM replay_training_market_track
+                    WHERE run_id = ? AND adapter_session_id IS NOT NULL
+                    UNION
+                    SELECT adapter_session_id
+                    FROM replay_training_run
+                    WHERE run_id = ?
+                    """,
+                    (run_id, run_id),
+                ).fetchall()
+                return "V2", tuple(sorted(str(row[0]) for row in sessions))
+
+            legacy = connection.execute(
+                "SELECT session_id FROM replay_session WHERE session_id = ?",
+                (run_id,),
+            ).fetchone()
+            if legacy is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            dependent = connection.execute(
+                """
+                SELECT run_id FROM replay_training_run
+                WHERE parent_legacy_session_id = ?
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if dependent is not None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_HAS_DEPENDENTS",
+                    "legacy replay session is still referenced by a training run",
+                    status_code=409,
+                    details={"run_id": str(dependent["run_id"])},
+                )
+            return "LEGACY_V1", (run_id,)
+
+        return await self.base_store.run_extension_read(read)
+
+    async def delete_run(
+        self,
+        run_id: str,
+        *,
+        expected_session_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Delete one Hub archive and its replay sessions in one SQLite transaction."""
+
+        expected = tuple(sorted(dict.fromkeys(expected_session_ids)))
+
+        def write(connection: sqlite3.Connection) -> tuple[str, ...]:
+            run = connection.execute(
+                "SELECT adapter_session_id FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is not None:
+                child = connection.execute(
+                    """
+                    SELECT child_run_id FROM replay_run_lineage
+                    WHERE parent_run_id = ?
+                    UNION ALL
+                    SELECT child_run_id FROM replay_review_fork_lineage
+                    WHERE parent_run_id = ?
+                    LIMIT 1
+                    """,
+                    (run_id, run_id),
+                ).fetchone()
+                if child is not None:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_HAS_CHILDREN",
+                        "delete child archives before deleting this training run",
+                        status_code=409,
+                        details={"child_run_id": str(child["child_run_id"])},
+                    )
+                sessions = connection.execute(
+                    """
+                    SELECT adapter_session_id
+                    FROM replay_training_market_track
+                    WHERE run_id = ? AND adapter_session_id IS NOT NULL
+                    UNION
+                    SELECT adapter_session_id
+                    FROM replay_training_run
+                    WHERE run_id = ?
+                    """,
+                    (run_id, run_id),
+                ).fetchall()
+                session_ids = tuple(sorted(str(row[0]) for row in sessions))
+                if session_ids != expected:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_CHANGED",
+                        "training run sessions changed while deletion was being prepared",
+                        status_code=409,
+                        details={
+                            "expected_session_ids": expected,
+                            "actual_session_ids": session_ids,
+                        },
+                    )
+                deleted = connection.execute(
+                    "DELETE FROM replay_training_run WHERE run_id = ?",
+                    (run_id,),
+                )
+                if deleted.rowcount != 1:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_NOT_FOUND",
+                        "training run does not exist",
+                        status_code=404,
+                    )
+                for session_id in session_ids:
+                    session_deleted = connection.execute(
+                        "DELETE FROM replay_session WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    if session_deleted.rowcount != 1:
+                        raise TrainingRunError(
+                            "TRAINING_RUN_STORAGE_DEGRADED",
+                            "training adapter session is missing during archive deletion",
+                            status_code=503,
+                            details={"session_id": session_id},
+                        )
+                return session_ids
+
+            legacy = connection.execute(
+                "SELECT session_id FROM replay_session WHERE session_id = ?",
+                (run_id,),
+            ).fetchone()
+            if legacy is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            dependent = connection.execute(
+                """
+                SELECT run_id FROM replay_training_run
+                WHERE parent_legacy_session_id = ?
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if dependent is not None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_HAS_DEPENDENTS",
+                    "legacy replay session is still referenced by a training run",
+                    status_code=409,
+                    details={"run_id": str(dependent["run_id"])},
+                )
+            if expected != (run_id,):
+                raise TrainingRunError(
+                    "TRAINING_RUN_CHANGED",
+                    "legacy replay session changed while deletion was being prepared",
+                    status_code=409,
+                    details={
+                        "expected_session_ids": expected,
+                        "actual_session_ids": (run_id,),
+                    },
+                )
+            deleted = connection.execute(
+                "DELETE FROM replay_session WHERE session_id = ?",
+                (run_id,),
+            )
+            if deleted.rowcount != 1:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            return (run_id,)
+
+        return await self.base_store.run_extension_write(
+            write,
+            allow_degraded=True,
+        )
+
     async def migrate_legacy(
         self,
         *,

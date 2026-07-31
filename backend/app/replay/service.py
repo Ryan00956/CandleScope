@@ -9,7 +9,7 @@ import json
 import secrets
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, localcontext
@@ -202,6 +202,7 @@ class ReplayService:
         self._pending_session_reservations = 0
         self._pending_handle_acquisitions = 0
         self._pending_recoveries: dict[str, ReplayRecoveryClaim] = {}
+        self._pending_session_deletions: dict[str, asyncio.Event] = {}
         self._pending_lifecycle_owners: dict[asyncio.Task[object], int] = {}
         self._lease_owners: dict[asyncio.Task[object], int] = {}
         self._unavailable_sessions: dict[str, ReplayDomainError] = {}
@@ -1265,14 +1266,159 @@ class ReplayService:
         durable = await self.store.get_session(session_id)
         if durable is None:
             return
-        await self.release_session_to_hub(session_id)
-        deleted = await self.store.delete_session(session_id)
+        deleted = await self.delete_sessions_atomically(
+            (session_id,),
+            lambda: self.store.delete_session(session_id),
+        )
         if not deleted:
             raise ReplayDomainError(
                 ReplayErrorCode.PERSISTENCE_DEGRADED,
                 "detached replay session could not be deleted",
                 details={"session_id": session_id},
             )
+
+    async def delete_sessions_atomically(
+        self,
+        session_ids: Sequence[str],
+        delete: Callable[[], Awaitable[_TaskResult]],
+    ) -> _TaskResult:
+        """Fence recovery while actors and their durable archive are deleted.
+
+        The fence spans actor eviction and the caller-owned SQLite transaction.
+        Requests already using a target make deletion fail closed as busy, while
+        requests that arrive after the claim wait and then perform a fresh
+        durable lookup.
+        """
+
+        self._ensure_accepting()
+        normalized = tuple(dict.fromkeys(session_ids))
+        if not normalized or any(not session_id for session_id in normalized):
+            raise ValueError("session_ids must contain non-empty identifiers")
+
+        deletion_complete = asyncio.Event()
+        claimed: dict[str, ReplaySessionHandle] = {}
+        delete_succeeded = False
+        async with self._prune_lock:
+            try:
+                while True:
+                    pending_recoveries: tuple[ReplayRecoveryClaim, ...]
+                    async with self._lifecycle_lock:
+                        self._ensure_accepting()
+                        pending_recoveries = tuple(
+                            claim
+                            for session_id in normalized
+                            if (
+                                claim := self._pending_recoveries.get(session_id)
+                            )
+                            is not None
+                        )
+                    if not pending_recoveries:
+                        break
+                    await asyncio.gather(
+                        *(claim.complete.wait() for claim in pending_recoveries)
+                    )
+
+                async with self._lifecycle_lock:
+                    self._ensure_accepting()
+                    for session_id in normalized:
+                        if session_id in self._pending_session_deletions:
+                            raise ReplayDomainError(
+                                ReplayErrorCode.REVISION_CONFLICT,
+                                "replay session deletion is already in progress",
+                                details={"session_id": session_id},
+                            )
+                        handle = self._sessions.get(session_id)
+                        if handle is not None and (
+                            handle.evicting or handle.in_flight != 0
+                        ):
+                            raise ReplayDomainError(
+                                ReplayErrorCode.REVISION_CONFLICT,
+                                "replay session is busy",
+                                details={"session_id": session_id},
+                            )
+
+                    for session_id in normalized:
+                        self._pending_session_deletions[session_id] = (
+                            deletion_complete
+                        )
+                        handle = self._sessions.get(session_id)
+                        if handle is not None:
+                            handle.evicting = True
+                            handle.eviction_complete.clear()
+                            claimed[session_id] = handle
+                    self._lifecycle_changed.set()
+
+                for session_id, handle in claimed.items():
+                    await self._evict_claimed_handle(
+                        session_id,
+                        handle,
+                        reason="hub",
+                    )
+
+                async def execute_delete() -> _TaskResult:
+                    return await delete()
+
+                delete_task = asyncio.create_task(
+                    execute_delete(),
+                    name="replay-session-archive-delete",
+                )
+                try:
+                    result = await asyncio.shield(delete_task)
+                except asyncio.CancelledError:
+                    try:
+                        await self._await_task_uninterruptibly(delete_task)
+                    except BaseException:
+                        pass
+                    else:
+                        delete_succeeded = True
+                    raise
+                delete_succeeded = True
+                return result
+            finally:
+                cleanup_task = asyncio.create_task(
+                    self._finish_session_deletion(
+                        normalized,
+                        deletion_complete=deletion_complete,
+                        claimed=claimed,
+                        delete_succeeded=delete_succeeded,
+                    ),
+                    name="replay-session-deletion-fence-release",
+                )
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    await self._await_task_uninterruptibly(cleanup_task)
+                    raise
+
+    async def _finish_session_deletion(
+        self,
+        session_ids: Sequence[str],
+        *,
+        deletion_complete: asyncio.Event,
+        claimed: Mapping[str, ReplaySessionHandle],
+        delete_succeeded: bool,
+    ) -> None:
+        """Release a deletion fence without leaving cancellation-visible ghosts."""
+
+        async with self._lifecycle_lock:
+            for session_id, handle in claimed.items():
+                if self._sessions.get(session_id) is handle and handle.evicting:
+                    handle.evicting = False
+                    handle.eviction_complete.set()
+            for session_id in session_ids:
+                if (
+                    self._pending_session_deletions.get(session_id)
+                    is deletion_complete
+                ):
+                    self._pending_session_deletions.pop(session_id, None)
+                if delete_succeeded:
+                    self._unavailable_sessions.pop(session_id, None)
+            # Invalidate durable rows captured by an acquisition before this
+            # fence was claimed. That acquisition must loop and read SQLite
+            # again instead of recovering a deleted record.
+            self._session_generation += 1
+            deletion_complete.set()
+            self._lifecycle_changed.set()
 
     async def shutdown(self, *, step_timeout: float = 5.0) -> None:
         async with self._shutdown_lock:
@@ -1374,6 +1520,9 @@ class ReplayService:
             "pending_session_reservations": self._pending_session_reservations,
             "pending_handle_acquisitions": self._pending_handle_acquisitions,
             "pending_recoveries": tuple(sorted(self._pending_recoveries)),
+            "pending_session_deletions": tuple(
+                sorted(self._pending_session_deletions)
+            ),
             "pending_lifecycle_owners": len(self._pending_lifecycle_owners),
             "active_lease_owners": len(self._lease_owners),
             "unavailable_sessions": {
@@ -2046,22 +2195,36 @@ class ReplayService:
         self._track_pending_lifecycle_owner()
         try:
             while True:
+                wait_for_deletion: asyncio.Event | None = None
                 wait_for_eviction: asyncio.Event | None = None
                 wait_for_recovery: ReplayRecoveryClaim | None = None
+                observed_session_generation = 0
                 async with self._lifecycle_lock:
                     self._ensure_accepting()
-                    handle = self._sessions.get(session_id)
-                    if handle is not None:
-                        if handle.evicting:
-                            wait_for_eviction = handle.eviction_complete
-                        else:
-                            self._activate_handle_lease_locked(handle)
-                            return handle
+                    wait_for_deletion = self._pending_session_deletions.get(
+                        session_id
+                    )
+                    if wait_for_deletion is not None:
+                        handle = None
                     else:
-                        unavailable = self._unavailable_sessions.get(session_id)
-                        if unavailable is not None:
-                            raise unavailable
-                        wait_for_recovery = self._pending_recoveries.get(session_id)
+                        handle = self._sessions.get(session_id)
+                        if handle is not None:
+                            if handle.evicting:
+                                wait_for_eviction = handle.eviction_complete
+                            else:
+                                self._activate_handle_lease_locked(handle)
+                                return handle
+                        else:
+                            unavailable = self._unavailable_sessions.get(session_id)
+                            if unavailable is not None:
+                                raise unavailable
+                            wait_for_recovery = self._pending_recoveries.get(
+                                session_id
+                            )
+                            observed_session_generation = self._session_generation
+                if wait_for_deletion is not None:
+                    await wait_for_deletion.wait()
+                    continue
                 if wait_for_eviction is not None:
                     await wait_for_eviction.wait()
                     continue
@@ -2093,24 +2256,41 @@ class ReplayService:
                 await self._prune_reclaimable_sessions()
                 recovery_claim: ReplayRecoveryClaim | None = None
                 start_recovery = False
+                restart_lookup = False
+                wait_for_deletion = None
                 async with self._lifecycle_lock:
                     self._ensure_available(blind_mode=blind_mode)
-                    handle = self._sessions.get(session_id)
-                    if handle is not None:
-                        if handle.evicting:
-                            wait_for_eviction = handle.eviction_complete
-                        else:
-                            self._activate_handle_lease_locked(handle)
-                            return handle
+                    wait_for_deletion = self._pending_session_deletions.get(
+                        session_id
+                    )
+                    if wait_for_deletion is not None:
+                        handle = None
+                    elif self._session_generation != observed_session_generation:
+                        restart_lookup = True
                     else:
-                        recovery_claim = self._pending_recoveries.get(session_id)
-                        if recovery_claim is None:
-                            self._ensure_session_capacity_locked()
-                            self._pending_session_reservations += 1
-                            self._track_pending_lifecycle_owner()
-                            recovery_claim = ReplayRecoveryClaim()
-                            self._pending_recoveries[session_id] = recovery_claim
-                            start_recovery = True
+                        handle = self._sessions.get(session_id)
+                        if handle is not None:
+                            if handle.evicting:
+                                wait_for_eviction = handle.eviction_complete
+                            else:
+                                self._activate_handle_lease_locked(handle)
+                                return handle
+                        else:
+                            recovery_claim = self._pending_recoveries.get(
+                                session_id
+                            )
+                            if recovery_claim is None:
+                                self._ensure_session_capacity_locked()
+                                self._pending_session_reservations += 1
+                                self._track_pending_lifecycle_owner()
+                                recovery_claim = ReplayRecoveryClaim()
+                                self._pending_recoveries[session_id] = recovery_claim
+                                start_recovery = True
+                if wait_for_deletion is not None:
+                    await wait_for_deletion.wait()
+                    continue
+                if restart_lookup:
+                    continue
                 if wait_for_eviction is not None:
                     await wait_for_eviction.wait()
                     continue
@@ -2407,6 +2587,7 @@ class ReplayService:
                         self._pending_session_reservations == 0
                         and self._pending_handle_acquisitions == 0
                         and not self._pending_recoveries
+                        and not self._pending_session_deletions
                     )
                     if drained:
                         return

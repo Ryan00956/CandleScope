@@ -3,7 +3,9 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import TrainingHubDialog from "../components/TrainingHubDialog.js";
+import TrainingHubDialog, {
+  TrainingRunDeleteConfirmation,
+} from "../components/TrainingHubDialog.js";
 import { resolveReplayProduct } from "../replayProduct.js";
 import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
 import {
@@ -17,6 +19,7 @@ import {
   type TrainingHubRuntime,
 } from "../useTrainingHub.js";
 import {
+  parseTrainingRunDeleteResponse,
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
 } from "../replayV2Types.js";
@@ -246,6 +249,89 @@ test("run-list API is bounded to /runs and never requests sessions or datasets",
   assert.equal(listed.items.length, 1);
   assert.deepEqual(urls, ["/api/v1/replay/runs?limit=50&compatibility=READY"]);
   assert.doesNotMatch(urls.join("\n"), /sessions|dataset|catalog/);
+});
+
+test("run-delete API uses the bounded archive route and strict response parser", async () => {
+  const requests: Array<{ url: string; method: string | undefined }> = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input, init) => {
+      requests.push({ url: String(input), method: init?.method });
+      return new Response(JSON.stringify({
+        protocol: "replay.v2",
+        deleted: true,
+        run_id: "run-1",
+        session_ids: ["adapter-1", "adapter-track-2"],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const deleted = await client.deleteRun("run-1");
+  assert.deepEqual(deleted, parseTrainingRunDeleteResponse({
+    protocol: "replay.v2",
+    deleted: true,
+    run_id: "run-1",
+    session_ids: ["adapter-1", "adapter-track-2"],
+  }));
+  assert.deepEqual(requests, [{ url: "/api/v1/replay/runs/run-1", method: "DELETE" }]);
+  assert.throws(() => parseTrainingRunDeleteResponse({
+    protocol: "replay.v2",
+    deleted: true,
+    run_id: "run-1",
+  }));
+  assert.throws(() => parseTrainingRunDeleteResponse({
+    protocol: "replay.v2",
+    deleted: true,
+    run_id: "run-1",
+    session_ids: ["adapter-1", "adapter-1"],
+  }));
+});
+
+test("Hub clears the run and every server-returned session scope after a matching archive delete", async (context) => {
+  const cleared: Array<{ runId: string; sessionIds: string[] }> = [];
+  const lifecycle = new TrainingHubLifecycle({
+    api: {
+      async listRuns() {
+        return parseTrainingRunListResponse(listResponse());
+      },
+      async capabilities() {
+        throw new Error("not used");
+      },
+      async catalog() {
+        throw new Error("not used");
+      },
+      async createRun() {
+        throw new Error("not used");
+      },
+      async deleteRun() {
+        return parseTrainingRunDeleteResponse({
+          protocol: "replay.v2",
+          deleted: true,
+          run_id: "run-1",
+          session_ids: ["adapter-1", "adapter-track-2"],
+        });
+      },
+      async migrateLegacy() {
+        throw new Error("not used");
+      },
+    },
+    clearDeletedRunState: (runId, sessionIds) => {
+      cleared.push({ runId, sessionIds: [...sessionIds] });
+    },
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+
+  await lifecycle.deleteRun("run-1");
+
+  assert.deepEqual(cleared, [{
+    runId: "run-1",
+    sessionIds: ["adapter-1", "adapter-track-2"],
+  }]);
+  assert.deepEqual(lifecycle.getSnapshot().items, []);
+  assert.equal(lifecycle.getSnapshot().operation, null);
 });
 
 test("Phase 7 prepare-plan parser is exact and preserves fail-closed worker flags", () => {
@@ -621,6 +707,7 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
       refreshCreatePlan() {},
       createRun() {},
       migrateLegacy() {},
+      deleteRun() {},
       continueRun() {},
     },
   } satisfies TrainingHubRuntime;
@@ -629,6 +716,7 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /训练存档大厅/);
   assert.match(html, /BTC 手动训练/);
   assert.match(html, /继续训练/);
+  assert.match(html, /删除存档/);
   assert.match(html, /新建训练/);
   assert.match(html, /资金费.*HISTORICAL_EXACT/);
   assert.match(html, /完整性模式/);
@@ -652,6 +740,25 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /不含盘口排队/);
   assert.doesNotMatch(html, /<strong>多商品<\/strong>/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);
+});
+
+test("archive deletion uses an application-owned explicit confirmation dialog", () => {
+  const card = parseTrainingRunListResponse(listResponse()).items[0];
+  assert.ok(card);
+  const html = renderToStaticMarkup(
+    <TrainingRunDeleteConfirmation
+      card={card}
+      busy={false}
+      onCancel={() => {}}
+      onConfirm={() => {}}
+    />,
+  );
+  assert.match(html, /role="alertdialog"/);
+  assert.match(html, /永久删除训练存档/);
+  assert.match(html, /BTC 手动训练/);
+  assert.match(html, /取消/);
+  assert.match(html, /确认永久删除/);
+  assert.match(html, /本机工作区偏好/);
 });
 
 test("product routing keeps v1 exact when the flag is off and opens Hub only for configure", () => {

@@ -28,6 +28,7 @@ import {
 import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
+  parseTrainingRunDeleteResponse,
   parseTrainingRunReturnResponse,
   parseReplayAccountAuditResponse,
   parseReplayAdvanceProgressResponse,
@@ -69,6 +70,7 @@ import type {
   ReplayV2CommandResult,
   ReplayViewerStateResponse,
   TrainingRunCreatePayload,
+  TrainingRunDeleteResponse,
   TrainingRunListResponse,
   TrainingRunMutationResponse,
   TrainingRunReturnResponse,
@@ -248,6 +250,14 @@ export class ReplayV2ApiClient {
       body: JSON.stringify(payload),
       ...(signal ? { signal } : {}),
     });
+  }
+
+  deleteRun(runId: string, signal?: AbortSignal): Promise<TrainingRunDeleteResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}`,
+      parseTrainingRunDeleteResponse,
+      { method: "DELETE", ...(signal ? { signal } : {}) },
+    );
   }
 
   segmentPlan(

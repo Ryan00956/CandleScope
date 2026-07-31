@@ -1791,6 +1791,13 @@ export interface TrainingRunMutationResponse {
   readonly run: TrainingRunCard;
 }
 
+export interface TrainingRunDeleteResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly deleted: true;
+  readonly run_id: string;
+  readonly session_ids: readonly string[];
+}
+
 export interface TrainingRunReturnResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly run_id: string;
@@ -1988,6 +1995,33 @@ export function parseTrainingRunMutationResponse(value: unknown): TrainingRunMut
     created: boolValue(payload.created, "run mutation.created"),
     migrated: boolValue(payload.migrated, "run mutation.migrated"),
     run: parseTrainingRunCard(payload.run, "run mutation.run"),
+  };
+}
+
+export function parseTrainingRunDeleteResponse(value: unknown): TrainingRunDeleteResponse {
+  const payload = exactObject(value, "run deletion", [
+    "protocol",
+    "deleted",
+    "run_id",
+    "session_ids",
+  ]);
+  if (payload.protocol !== REPLAY_V2_PROTOCOL || payload.deleted !== true) {
+    throw new TypeError("run deletion response is unsupported");
+  }
+  if (!Array.isArray(payload.session_ids) || payload.session_ids.length === 0) {
+    throw new TypeError("run deletion.session_ids must be a non-empty array");
+  }
+  const sessionIds = payload.session_ids.map((sessionId, index) => (
+    identifier(sessionId, `run deletion.session_ids[${index}]`)
+  ));
+  if (new Set(sessionIds).size !== sessionIds.length) {
+    throw new TypeError("run deletion.session_ids must be unique");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    deleted: true,
+    run_id: identifier(payload.run_id, "run deletion.run_id"),
+    session_ids: sessionIds,
   };
 }
 

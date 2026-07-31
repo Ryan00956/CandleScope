@@ -242,6 +242,61 @@ class TrainingRunService:
     async def get_run(self, run_id: str) -> dict[str, object]:
         return await self.store.get_run(self._identifier(run_id, field_name="run_id"))
 
+    async def delete_run(self, run_id: str) -> dict[str, object]:
+        """Pause, detach, and atomically remove one Hub archive."""
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        # Reject missing or protected archives before publishing a run actor.
+        await self.store.deletion_target(normalized)
+        pause_task: asyncio.Task[None] | None = None
+        actor = self._run_actors.setdefault(
+            normalized,
+            TrainingRunActor(normalized),
+        )
+        try:
+            async with actor.serialized():
+                kind, session_ids = await self.store.deletion_target(normalized)
+                if kind == "V2":
+                    pause_task = actor.request_ordered_pause(reason="DELETE_RUN")
+                try:
+                    deleted_session_ids = (
+                        await self.replay_service.delete_sessions_atomically(
+                            session_ids,
+                            lambda: self.store.delete_run(
+                                normalized,
+                                expected_session_ids=session_ids,
+                            ),
+                        )
+                    )
+                except ReplayDomainError as exc:
+                    if exc.http_status == 409:
+                        raise TrainingRunError(
+                            "TRAINING_RUN_BUSY",
+                            "training run cannot be deleted while an adapter session is busy",
+                            status_code=409,
+                            details={
+                                "reason": exc.code.value,
+                                "session_id": exc.details.get("session_id"),
+                            },
+                        ) from exc
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "training adapter sessions could not be detached for deletion",
+                        status_code=503,
+                        details={"reason": exc.code.value},
+                    ) from exc
+                if self._run_actors.get(normalized) is actor:
+                    self._run_actors.pop(normalized, None)
+        finally:
+            if pause_task is not None:
+                await asyncio.gather(pause_task, return_exceptions=True)
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "deleted": True,
+            "run_id": normalized,
+            "session_ids": list(deleted_session_ids),
+        }
+
     async def segment_plan(
         self, request: TrainingRunCreateRequest
     ) -> dict[str, object]:

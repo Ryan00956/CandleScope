@@ -10,6 +10,9 @@ import type {
 } from "./replayStorageModel.js";
 import { defaultReplayV2Api, ReplayV2ApiError } from "./replayV2Api.js";
 import type { TrainingRunListQuery } from "./replayV2Api.js";
+import { clearReplayIndicatorPreferences } from "./replayIndicatorPreferences.js";
+import { clearReplaySharedIndicatorPreferences } from "./replaySharedIndicatorPreferences.js";
+import { clearReplayWorkspacePreferences } from "./replayWorkspacePreferences.js";
 import {
   buildTrainingRunCreateRequest,
   createTrainingRunDraft,
@@ -25,6 +28,7 @@ import type {
   TrainingRunCard,
   TrainingRunCompatibility,
   TrainingRunCreatePayload,
+  TrainingRunDeleteResponse,
   TrainingRunListResponse,
   TrainingRunMutationResponse,
 } from "./replayV2Types.js";
@@ -35,6 +39,7 @@ export type TrainingHubOperation =
   | "create-context"
   | "plan"
   | "create"
+  | "delete"
   | "migrate"
   | "storage-list"
   | "storage-plan"
@@ -86,6 +91,10 @@ export interface TrainingHubApiBoundary {
     signal?: AbortSignal,
   ): Promise<ReplayCatalog>;
   createRun(payload: TrainingRunCreatePayload, signal?: AbortSignal): Promise<TrainingRunMutationResponse>;
+  deleteRun?(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<TrainingRunDeleteResponse>;
   segmentPlan?(
     payload: TrainingRunCreatePayload,
     signal?: AbortSignal,
@@ -119,6 +128,10 @@ export interface TrainingHubLifecycleOptions {
   readonly api?: TrainingHubApiBoundary;
   readonly navigateToSession?: (sessionId: string) => void;
   readonly launchContext?: ReplayLaunchContext;
+  readonly clearDeletedRunState?: (
+    runId: string,
+    sessionIds: readonly string[],
+  ) => void;
 }
 
 type Listener = () => void;
@@ -129,6 +142,18 @@ function hubError(error: unknown): TrainingHubError {
   }
   if (error instanceof Error) return { code: "TRAINING_HUB_ERROR", message: error.message };
   return { code: "TRAINING_HUB_ERROR", message: "Unknown Training Hub failure" };
+}
+
+export function clearDeletedTrainingRunClientState(
+  runId: string,
+  sessionIds: readonly string[],
+): void {
+  clearReplayWorkspacePreferences(sessionIds);
+  clearReplayIndicatorPreferences(sessionIds);
+  clearReplaySharedIndicatorPreferences([
+    runId,
+    ...sessionIds.map((sessionId) => `session:${sessionId}`),
+  ]);
 }
 
 function isAbort(error: unknown): boolean {
@@ -162,6 +187,10 @@ export class TrainingHubLifecycle {
   private readonly api: TrainingHubApiBoundary;
   private readonly navigateToSession: (sessionId: string) => void;
   private readonly launchContext: ReplayLaunchContext | undefined;
+  private readonly clearDeletedRunState: (
+    runId: string,
+    sessionIds: readonly string[],
+  ) => void;
   private readonly listeners = new Set<Listener>();
   private phase: TrainingHubPhase = "IDLE";
   private items: readonly TrainingRunCard[] = [];
@@ -191,10 +220,12 @@ export class TrainingHubLifecycle {
     api = defaultReplayV2Api,
     navigateToSession = defaultNavigateToSession,
     launchContext,
+    clearDeletedRunState = clearDeletedTrainingRunClientState,
   }: TrainingHubLifecycleOptions = {}) {
     this.api = api;
     this.navigateToSession = navigateToSession;
     this.launchContext = launchContext;
+    this.clearDeletedRunState = clearDeletedRunState;
     this.snapshot = this.buildSnapshot();
   }
 
@@ -597,6 +628,38 @@ export class TrainingHubLifecycle {
     }
   }
 
+  async deleteRun(runId: string): Promise<void> {
+    if (this.disposed || this.operation !== null) return;
+    if (this.api.deleteRun === undefined) {
+      this.error = {
+        code: "TRAINING_RUN_DELETE_UNAVAILABLE",
+        message: "当前客户端不支持删除训练存档",
+      };
+      this.publish();
+      return;
+    }
+    this.operation = "delete";
+    this.error = null;
+    this.publish();
+    const token = ++this.requestToken;
+    try {
+      const result = await this.api.deleteRun(
+        runId,
+        this.abortController.signal,
+      );
+      if (!this.accept(token)) return;
+      if (result.run_id !== runId) {
+        throw new TypeError("run deletion response identity changed");
+      }
+      this.clearDeletedRunState(result.run_id, result.session_ids);
+      this.items = this.items.filter((item) => item.run_id !== result.run_id);
+      this.operation = null;
+      this.publish();
+    } catch (error) {
+      this.fail(token, error);
+    }
+  }
+
   continueRun(card: TrainingRunCard): void {
     if (card.resume_action === "UNAVAILABLE") {
       this.error = { code: "TRAINING_RUN_UNAVAILABLE", message: card.status.message };
@@ -812,6 +875,7 @@ export interface TrainingHubRuntime extends TrainingHubSnapshot {
     refreshCreatePlan(): void | Promise<void>;
     createRun(draft: TrainingRunDraft): void | Promise<void>;
     migrateLegacy(sessionId: string, name?: string | null): void | Promise<void>;
+    deleteRun(runId: string): void | Promise<void>;
     continueRun(card: TrainingRunCard): void;
   };
 }
@@ -877,6 +941,7 @@ export function useTrainingHub(
       migrateLegacy: (sessionId: string, name: string | null = null) => (
         lifecycle.migrateLegacy(sessionId, name)
       ),
+      deleteRun: (runId: string) => lifecycle.deleteRun(runId),
       continueRun: (card: TrainingRunCard) => lifecycle.continueRun(card),
     },
   }), [lifecycle, snapshot]);

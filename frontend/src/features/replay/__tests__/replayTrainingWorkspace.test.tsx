@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReplayCapabilitySurface from "../components/ReplayCapabilitySurface.js";
 import { buildReplayCapabilityModel } from "../replayCapabilityModel.js";
 import {
+  clearReplayWorkspacePreferences,
   loadReplayWorkspacePreferences,
   saveReplayWorkspacePreferences,
 } from "../replayWorkspacePreferences.js";
@@ -26,6 +27,7 @@ class MemoryStorage {
   private readonly values = new Map<string, string>();
   getItem(key: string): string | null { return this.values.get(key) ?? null; }
   setItem(key: string, value: string): void { this.values.set(key, value); }
+  removeItem(key: string): void { this.values.delete(key); }
 }
 
 test("v2 workspace owns the same source-neutral market slots without legacy replacements", () => {
@@ -310,6 +312,22 @@ test("workspace preferences inherit live layout once and then persist only insid
   assert.equal(restored.railWidth, 360);
   assert.equal(restored.railCollapsed, false);
   assert.equal(restored.activeDock, "paper");
+});
+
+test("archive cleanup removes only deleted replay workspace scopes", () => {
+  const storage = new MemoryStorage();
+  storage.setItem("candlescope-sidebar-width", "410");
+  storage.setItem("candlescope-replay-workspace:adapter-1", "{}");
+  storage.setItem("candlescope-replay-workspace:adapter-2", "{}");
+
+  clearReplayWorkspacePreferences(
+    ["adapter-1", "adapter-1", "  "],
+    storage,
+  );
+
+  assert.equal(storage.getItem("candlescope-replay-workspace:adapter-1"), null);
+  assert.equal(storage.getItem("candlescope-replay-workspace:adapter-2"), "{}");
+  assert.equal(storage.getItem("candlescope-sidebar-width"), "410");
 });
 
 test("Phase 10 release surface exposes soak telemetry and an accessible danger dialog", () => {

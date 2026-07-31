@@ -24,6 +24,7 @@ export interface ReplayIndicatorPreferenceSnapshot {
 interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
@@ -223,5 +224,20 @@ export function saveReplayIndicatorPreferences(
     }));
   } catch {
     // Indicator view preferences are best-effort and never affect replay evidence.
+  }
+}
+
+export function clearReplayIndicatorPreferences(
+  sessionIds: readonly string[],
+  storage: StorageLike | null = browserStorage(),
+): void {
+  if (storage?.removeItem === undefined) return;
+  for (const sessionId of new Set(sessionIds.map((value) => value.trim()))) {
+    if (!sessionId) continue;
+    try {
+      storage.removeItem(storageKey(sessionId));
+    } catch {
+      // Archive deletion remains authoritative when browser storage is blocked.
+    }
   }
 }

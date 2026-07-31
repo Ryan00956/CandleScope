@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReplayCatalogEntry } from "../replayTypes.js";
 import type { TrainingRunDraft } from "../trainingHubModel.js";
 import {
@@ -12,6 +13,7 @@ import {
 import type {
   ReplayV2RunState,
   ReplayV2SourceKind,
+  TrainingRunCard,
   TrainingRunCompatibility,
 } from "../replayV2Types.js";
 import { replayCatalogIdentity } from "../replayUiModel.js";
@@ -60,6 +62,44 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+export interface TrainingRunDeleteConfirmationProps {
+  readonly card: TrainingRunCard;
+  readonly busy: boolean;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}
+
+export function TrainingRunDeleteConfirmation({
+  card,
+  busy,
+  onCancel,
+  onConfirm,
+}: TrainingRunDeleteConfirmationProps) {
+  return (
+    <div className="replay-modal-backdrop" role="presentation">
+      <section
+        className="replay-end-dialog training-hub-delete-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="training-hub-delete-title"
+        aria-describedby="training-hub-delete-description"
+      >
+        <h2 id="training-hub-delete-title">永久删除训练存档</h2>
+        <p id="training-hub-delete-description">
+          将删除服务端存档、关联训练会话和本机工作区偏好，删除后无法恢复。
+        </p>
+        <strong>{card.name}</strong>
+        <div className="replay-dialog-actions">
+          <button type="button" autoFocus onClick={onCancel}>取消</button>
+          <button type="button" disabled={busy} onClick={onConfirm}>
+            确认永久删除
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
@@ -555,6 +595,9 @@ export default function TrainingHubDialog({
 }: TrainingHubDialogProps) {
   const busy = runtime.operation !== null;
   const modal = presentation === "modal";
+  const [deleteCandidate, setDeleteCandidate] = useState<TrainingRunCard | null>(
+    null,
+  );
   return (
     <main
       className={`training-hub-page ${modal ? "training-hub-modal-surface" : ""}`}
@@ -698,6 +741,14 @@ export default function TrainingHubDialog({
                       建立 v2 包装并继续
                     </button>
                   )}
+                  <button
+                    className="training-hub-delete-action"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setDeleteCandidate(card)}
+                  >
+                    删除存档
+                  </button>
                 </footer>
               </article>
             ))}
@@ -716,6 +767,18 @@ export default function TrainingHubDialog({
         <TrainingRunCreatePanel runtime={runtime} />
         <ReplayStorageGovernancePanel runtime={runtime} />
       </section>
+      {deleteCandidate !== null && (
+        <TrainingRunDeleteConfirmation
+          card={deleteCandidate}
+          busy={busy}
+          onCancel={() => setDeleteCandidate(null)}
+          onConfirm={() => {
+            const runId = deleteCandidate.run_id;
+            setDeleteCandidate(null);
+            void runtime.actions.deleteRun(runId);
+          }}
+        />
+      )}
     </main>
   );
 }

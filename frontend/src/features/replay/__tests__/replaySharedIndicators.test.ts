@@ -33,6 +33,7 @@ import type {
 } from "../../market-data/marketDataTypes.js";
 import { MAX_SERIES_BARS } from "../../market-data/phase1WindowPolicy.js";
 import {
+  clearReplaySharedIndicatorPreferences,
   loadReplayOrderFlowPreferences,
   replayIndicatorStorageKey,
   replayOrderFlowStorageKey,
@@ -67,6 +68,10 @@ class SpyStorage {
       throw new Error("replay attempted to write live indicator state");
     }
     this.values.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
   }
 }
 
@@ -244,6 +249,28 @@ test("replay indicator and order-flow preferences are run-scoped and never touch
     replayOrderFlowStorageKey("run-a"),
     replayOrderFlowStorageKey("run-b"),
   );
+});
+
+test("archive cleanup removes shared indicator scopes without touching live preferences", () => {
+  const storage = new SpyStorage();
+  storage.values.set("candlescope-active-indicators", "live");
+  for (const scope of ["run-a", "session:adapter-a", "run-b"]) {
+    storage.values.set(replayIndicatorStorageKey(scope), "indicators");
+    storage.values.set(replayOrderFlowStorageKey(scope), "order-flow");
+  }
+
+  clearReplaySharedIndicatorPreferences(
+    ["run-a", "session:adapter-a", "run-a"],
+    storage,
+  );
+
+  for (const scope of ["run-a", "session:adapter-a"]) {
+    assert.equal(storage.values.has(replayIndicatorStorageKey(scope)), false);
+    assert.equal(storage.values.has(replayOrderFlowStorageKey(scope)), false);
+  }
+  assert.equal(storage.values.get(replayIndicatorStorageKey("run-b")), "indicators");
+  assert.equal(storage.values.get(replayOrderFlowStorageKey("run-b")), "order-flow");
+  assert.equal(storage.values.get("candlescope-active-indicators"), "live");
 });
 
 test("shared order-flow projection derives replay CVD and Delta from volume plus taker buy", () => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -11,8 +12,10 @@ from fastapi import FastAPI
 import app.api.v1.replay as replay_api
 from app.api.v1.replay import router
 from app.replay.canonical import canonical_sha256
+from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.training.errors import TrainingRunError
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -152,6 +155,295 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         assert returned.status_code == 200
         assert returned.json()["checkpointed"] is True
         assert returned.json()["state"] == "PAUSED"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_v2_http_delete_archive_removes_run_and_adapter_session(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "delete-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        assert created.json()["run"]["run_id"] == "run-1"
+        assert created.json()["run"]["adapter_session_id"] == "adapter-1"
+
+        deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
+        assert deleted.status_code == 200
+        assert deleted.json() == {
+            "protocol": "replay.v2",
+            "deleted": True,
+            "run_id": "run-1",
+            "session_ids": ["adapter-1"],
+        }
+
+        listed = await _request(app, "GET", "/api/v1/replay/runs?limit=10")
+        assert listed.status_code == 200
+        assert listed.json()["items"] == []
+        missing = await _request(app, "GET", "/api/v1/replay/runs/run-1")
+        assert missing.status_code == 404
+        assert missing.json()["error"]["code"] == "TRAINING_RUN_NOT_FOUND"
+        assert await service.store.get_session("adapter-1") is None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_archive_delete_fences_lazy_recovery_until_sqlite_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "delete-recovery-fence.db")
+    app = _app(service)
+    recovery_task: asyncio.Task[dict[str, object]] | None = None
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        assert service.training is not None
+        original_delete = service.training.store.delete_run
+
+        async def delete_with_recovery_probe(
+            run_id: str,
+            *,
+            expected_session_ids: tuple[str, ...],
+        ) -> tuple[str, ...]:
+            nonlocal recovery_task
+            recovery_task = asyncio.create_task(service.get_session("adapter-1"))
+            await asyncio.sleep(0)
+            assert recovery_task.done() is False
+            assert service.diagnostics()["pending_session_deletions"] == (
+                "adapter-1",
+            )
+            return await original_delete(
+                run_id,
+                expected_session_ids=expected_session_ids,
+            )
+
+        monkeypatch.setattr(
+            service.training.store,
+            "delete_run",
+            delete_with_recovery_probe,
+        )
+        deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
+        assert deleted.status_code == 200
+        assert recovery_task is not None
+        with pytest.raises(ReplayDomainError) as missing:
+            await asyncio.wait_for(recovery_task, timeout=1)
+        assert missing.value.code is ReplayErrorCode.SESSION_NOT_FOUND
+        assert "adapter-1" not in service._sessions
+        assert await service.store.get_session("adapter-1") is None
+    finally:
+        if recovery_task is not None and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_archive_delete_invalidates_record_read_before_fence_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "delete-stale-record.db")
+    app = _app(service)
+    recovery_task: asyncio.Task[dict[str, object]] | None = None
+    release_record = asyncio.Event()
+    record_read = asyncio.Event()
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        await service.release_session_to_hub("adapter-1")
+        original_get_session = service.store.get_session
+        delayed = True
+
+        async def get_session_with_stale_read(
+            session_id: str,
+        ) -> dict[str, object] | None:
+            nonlocal delayed
+            record = await original_get_session(session_id)
+            if delayed and session_id == "adapter-1":
+                delayed = False
+                record_read.set()
+                await release_record.wait()
+            return record
+
+        monkeypatch.setattr(
+            service.store,
+            "get_session",
+            get_session_with_stale_read,
+        )
+        recovery_task = asyncio.create_task(service.get_session("adapter-1"))
+        await asyncio.wait_for(record_read.wait(), timeout=1)
+
+        deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
+        assert deleted.status_code == 200
+        release_record.set()
+        with pytest.raises(ReplayDomainError) as missing:
+            await asyncio.wait_for(recovery_task, timeout=1)
+        assert missing.value.code is ReplayErrorCode.SESSION_NOT_FOUND
+        assert "adapter-1" not in service._sessions
+    finally:
+        release_record.set()
+        if recovery_task is not None and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_cancelled_archive_delete_resolves_sqlite_before_releasing_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "delete-cancelled.db")
+    delete_task: asyncio.Task[dict[str, object]] | None = None
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+    try:
+        assert service.training is not None
+        created = await _request(
+            _app(service),
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        original_delete = service.training.store.delete_run
+
+        async def delete_with_barrier(
+            run_id: str,
+            *,
+            expected_session_ids: tuple[str, ...],
+        ) -> tuple[str, ...]:
+            delete_started.set()
+            await release_delete.wait()
+            return await original_delete(
+                run_id,
+                expected_session_ids=expected_session_ids,
+            )
+
+        monkeypatch.setattr(
+            service.training.store,
+            "delete_run",
+            delete_with_barrier,
+        )
+        delete_task = asyncio.create_task(service.training.delete_run("run-1"))
+        await asyncio.wait_for(delete_started.wait(), timeout=1)
+        delete_task.cancel()
+        await asyncio.sleep(0)
+        assert delete_task.done() is False
+
+        release_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(delete_task, timeout=1)
+        assert service.diagnostics()["pending_session_deletions"] == ()
+        assert await service.store.get_session("adapter-1") is None
+        with pytest.raises(ReplayDomainError) as missing:
+            await service.get_session("adapter-1")
+        assert missing.value.code is ReplayErrorCode.SESSION_NOT_FOUND
+    finally:
+        release_delete.set()
+        if delete_task is not None and not delete_task.done():
+            delete_task.cancel()
+            await asyncio.gather(delete_task, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_archive_delete_remains_available_for_evicted_degraded_session(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "delete-degraded.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        await service.release_session_to_hub("adapter-1")
+        service._unavailable_sessions["adapter-1"] = ReplayDomainError(
+            ReplayErrorCode.PERSISTENCE_DEGRADED,
+            "forced unavailable archive",
+        )
+        service.store._degraded_reason = "forced sticky degradation"
+
+        deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
+        assert deleted.status_code == 200
+        assert deleted.json()["session_ids"] == ["adapter-1"]
+        assert "adapter-1" not in service._unavailable_sessions
+        assert await service.store.get_session("adapter-1") is None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_archive_delete_rejects_session_target_drift_atomically(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "delete-target-drift.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+        assert service.training is not None
+
+        with pytest.raises(TrainingRunError) as changed:
+            await service.training.store.delete_run(
+                "run-1",
+                expected_session_ids=("stale-adapter",),
+            )
+        assert changed.value.code == "TRAINING_RUN_CHANGED"
+        assert (await service.training.store.get_run("run-1"))["run_id"] == "run-1"
+        assert await service.store.get_session("adapter-1") is not None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_archive_delete_fails_closed_while_adapter_is_in_use(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "delete-busy.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        assert created.status_code == 201
+
+        async with service._lease_handle("adapter-1"):
+            deleted = await _request(
+                app,
+                "DELETE",
+                "/api/v1/replay/runs/run-1",
+            )
+        assert deleted.status_code == 409
+        assert deleted.json()["error"]["code"] == "TRAINING_RUN_BUSY"
+        assert await service.store.get_session("adapter-1") is not None
+        assert service.training is not None
+        assert (await service.training.store.get_run("run-1"))["run_id"] == "run-1"
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -747,6 +1039,27 @@ async def test_legacy_migration_route_is_additive_and_idempotent(tmp_path: Path)
         assert second.status_code == 200
         assert second.json()["created"] is False
         assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_legacy_v1_archive_can_be_deleted_from_the_hub(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "delete-legacy.db")
+    app = _app(service)
+    try:
+        legacy = await service.create_session(replay_config())
+        session_id = str(legacy["session_id"])
+        deleted = await _request(app, "DELETE", f"/api/v1/replay/runs/{session_id}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {
+            "protocol": "replay.v2",
+            "deleted": True,
+            "run_id": session_id,
+            "session_ids": [session_id],
+        }
+        assert await service.store.get_session(session_id) is None
     finally:
         await service.shutdown(step_timeout=1.0)
 

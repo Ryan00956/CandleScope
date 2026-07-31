@@ -198,6 +198,49 @@ def _safe_bound(value: object) -> int | None:
     return value
 
 
+def _query_bound_repository(
+    repository: KlinesReadRepository,
+    snapshot: BarDatasetSnapshot,
+    symbol: str,
+    interval: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    limit: int,
+    order: str,
+    exchange: str,
+    market_type: str,
+) -> list[dict]:
+    source_revision = snapshot.provenance.source_revision
+    query_at_revision = getattr(repository, "query_bars_at_revision", None)
+    if source_revision is not None:
+        if not callable(query_at_revision):
+            raise RuntimeError(
+                "bound replay-history revision cannot be read by this repository"
+            )
+        return query_at_revision(
+            source_revision,
+            symbol,
+            interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            order=order,
+            exchange=exchange,
+            market_type=market_type,
+        )
+    return repository.query_bars(
+        symbol,
+        interval,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        limit=limit,
+        order=order,
+        exchange=exchange,
+        market_type=market_type,
+    )
+
+
 def _resolve_native_display_context(
     *,
     repository: KlinesReadRepository,
@@ -215,7 +258,13 @@ def _resolve_native_display_context(
     at and after that seam.
     """
 
-    if config.display_interval == config.base_interval:
+    if (
+        config.display_interval == config.base_interval
+        or snapshot.provenance.source_revision is not None
+    ):
+        # An archive revision binds one exact base-interval catalog.  Building
+        # display candles from that pinned base keeps ALL_AVAILABLE deterministic
+        # even if a separately stored native display catalog is republished.
         return None
     display_interval_ms = parse_interval_ms(config.display_interval)
     if display_interval_ms is None or display_interval_ms < 1:
@@ -316,7 +365,9 @@ def _build_native_display_page(
         return [], before_ms, False
     actual_end_ms = public_end_ms - context.timeline_offset_ms
     try:
-        raw_rows = repository.query_bars(
+        raw_rows = _query_bound_repository(
+            repository,
+            snapshot,
             config.symbol,
             config.display_interval,
             start_ms=context.actual_boundary_ms,
@@ -445,7 +496,9 @@ def _build_all_available_page(
     )
     query_start_ms = actual_end_ms - query_rows * interval_ms
     try:
-        raw_rows = repository.query_bars(
+        raw_rows = _query_bound_repository(
+            repository,
+            snapshot,
             config.symbol,
             config.base_interval,
             start_ms=query_start_ms,

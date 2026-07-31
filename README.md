@@ -213,16 +213,27 @@ operations observation window.
 
 ### Prepare Isolated Data
 
-Never point replay at a K-line database or raw archive that another worktree is
-actively writing. Create an SQLite-consistent BAR snapshot first:
+BAR replay uses an independent immutable Parquet history plane by default. It
+does not import old candles into, or query, the live K-line SQLite database:
 
 ```powershell
 Set-Location backend
-.\.venv\Scripts\python.exe scripts\snapshot_replay_klines.py `
-  --source .\data\candlescope.db `
-  --destination .\data\replay-dev\source-candlescope.db `
-  --require-quick-check
+.\.venv\Scripts\python.exe -m pip install -r requirements-parquet.txt
+.\.venv\Scripts\python.exe scripts\import_binance_replay_history.py `
+  --market-type spot `
+  --symbol BTCUSDT `
+  --interval 1m `
+  --start 2017-07-01 `
+  --end 2026-07-30 `
+  --archive-dir .\data\replay-dev\replay-history
 ```
+
+The importer verifies Binance checksums, writes content-addressed Parquet
+objects, records gaps as separate continuous segments, and atomically publishes
+an immutable catalog epoch. Random candidates and `ALL_AVAILABLE` history both
+use that archive; an existing Run remains pinned to its original epoch. See
+[`docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md)
+for the continuity, revision, audit, and rollback contract.
 
 AGG_TRADE is optional. Its importer accepts only the official Binance USD-M
 daily archive, verifies the published SHA-256 before parsing, and quarantines
@@ -261,8 +272,9 @@ pair avoids the normal `18080` / `15173` services:
 # Terminal 1
 Set-Location backend
 $env:CANDLE_DATA_DIR = '.\data\replay-dev'
-$env:KLINES_DB_PATH = '.\data\replay-dev\source-candlescope.db'
 $env:REPLAY_DB_PATH = '.\data\replay-dev\replay.db'
+$env:REPLAY_BAR_SOURCE = 'archive'
+$env:REPLAY_HISTORY_ARCHIVE_DIR = '.\data\replay-dev\replay-history'
 $env:REPLAY_ENABLED = '1'
 # Set to 1 only after an exact AGG_TRADE archive passes the audit above.
 $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'

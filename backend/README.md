@@ -122,18 +122,19 @@ frozen BAR snapshot or exact paged AGG_TRADE archive
   -> replay.v1 HTTP + resumable bounded WebSocket
 ```
 
-The production K-line database remains read-only to replay. Temporary replay
-bars, commands, checkpoints, orders, fills, ledger entries, journals, and
-reports are stored only in `REPLAY_DB_PATH`. Active dataset snapshots/partitions,
-mailboxes, event rings, subscriber queues, checkpoint history, and frontend
-projection windows all have explicit capacity limits.
+BAR replay defaults to an independent immutable Parquet history plane and does
+not open the production K-line database. Commands, checkpoints, orders, fills,
+ledger entries, journals, bounded selected snapshots, and reports are stored in
+`REPLAY_DB_PATH`. Active dataset snapshots/partitions, mailboxes, event rings,
+subscriber queues, checkpoint history, and frontend projection windows all have
+explicit capacity limits.
 
 Training drafts use `ALL_AVAILABLE` chart history by default. The immutable
 execution snapshot remains bounded by indicator warmup plus forward cache;
-older pre-start chart bars are paged through the replay service from the
-read-only local K-line repository up to the run-bound continuous-history
-boundary. This path never triggers exchange backfill and cannot reveal data
-after the durable virtual-time cursor.
+older pre-start chart bars are paged from the same immutable replay-history
+catalog revision that created the Run, up to its continuous-history boundary.
+This path never queries live SQLite, never triggers exchange backfill, and
+cannot reveal data after the durable virtual-time cursor.
 
 ### Replay Configuration
 
@@ -142,6 +143,8 @@ after the durable virtual-time cursor.
 | `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
 | `REPLAY_PRODUCT_V2_ENABLED` | `1` | Subordinate v2 product selector; explicit `0` restores v1 while the authoritative replay gate remains unchanged |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
+| `REPLAY_BAR_SOURCE` | `archive` | `archive` uses the isolated immutable history plane; `legacy_sqlite` is an explicit rollback mode |
+| `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Content-addressed Parquet objects plus immutable catalog manifests |
 | `REPLAY_MAX_ACTIVE_SESSIONS` | `8` | Active pinned session limit |
 | `REPLAY_COMMAND_QUEUE_SIZE` | `256` | Per-actor bounded command mailbox |
 | `REPLAY_EVENT_BUFFER_SIZE` | `10000` | Resumable domain event ring |
@@ -163,15 +166,36 @@ frontend entry flag is separate and is not an authorization boundary.
 
 ### Data Preparation and Capability Rules
 
-BAR sessions require a frozen, aligned, closed, contiguous SQLite snapshot.
-Create it without sharing an actively written source database:
+Install the Parquet dependency and build the BAR history catalog from official
+checksum-verified Binance archives. Missing source objects split continuity;
+they do not invalidate later continuous segments:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\snapshot_replay_klines.py `
-  --source .\data\candlescope.db `
-  --destination .\data\replay-dev\source-candlescope.db `
-  --require-quick-check
+.\.venv\Scripts\python.exe -m pip install -r requirements-parquet.txt
+
+.\.venv\Scripts\python.exe scripts\import_binance_replay_history.py `
+  --market-type spot --symbol BTCUSDT --interval 1m `
+  --start 2017-07-01 --end 2026-07-30 `
+  --archive-dir .\data\replay-history
+
+.\.venv\Scripts\python.exe scripts\audit_replay_history.py `
+  --archive-dir .\data\replay-history `
+  --market-type spot --symbol BTCUSDT --interval 1m `
+  --verify-objects
+
+.\.venv\Scripts\python.exe scripts\audit_replay_history_parity.py `
+  --archive-dir .\data\replay-history `
+  --live-db .\data\candlescope.db `
+  --market-type spot --symbol BTCUSDT --interval 1m
 ```
+
+The importer publishes content-addressed objects before atomically moving
+`current.json`. Runs pin the selected catalog epoch, so a later import cannot
+change their snapshot or `ALL_AVAILABLE` history. For emergency compatibility
+only, set `REPLAY_BAR_SOURCE=legacy_sqlite` and use
+`scripts/snapshot_replay_klines.py`; this opt-in mode restores the previous
+read-only SQLite source. The full BAR archive contract and operations runbook
+is [`../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md).
 
 AGG_TRADE accepts only checksum-verified official Binance USD-M daily files.
 Import is idempotent; identity, date, schema, checksum, monotonicity, or ID
@@ -208,6 +232,9 @@ model. Replay v1 does **not** provide or claim `RAW_TRADE`, `L2_BOOK`, or
 - To roll back only aggregate-trade replay, disable
   `RAW_AGG_TRADE_ARCHIVE_ENABLED`; BAR capability is independent. An older
   application build with no replay routes ignores the retained replay DB.
+- To roll back only the BAR history reader, set
+  `REPLAY_BAR_SOURCE=legacy_sqlite` and restart. Do not delete
+  `REPLAY_HISTORY_ARCHIVE_DIR`; old catalog epochs remain Run dependencies.
 
 Formal local gates are `scripts/audit_replay_determinism.py`,
 `scripts/benchmark_replay.py`, the frontend `smoke:replay` and 4-hour replay

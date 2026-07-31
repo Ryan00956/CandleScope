@@ -1,4 +1,4 @@
 -r requirements.txt
 
-# Optional raw aggTrade archive used by deterministic trade/K-line replay.
+# Immutable BAR replay history and optional raw aggTrade deterministic replay.
 pyarrow==21.0.0

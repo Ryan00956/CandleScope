@@ -145,9 +145,10 @@ class BarDatasetProvenance:
     gap_scan_bars: int
     calendar_id: str
     hash_schema: str
+    source_revision: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "repository_backend": self.repository_backend,
             "identity": self.identity.to_dict(),
             "interval": self.interval,
@@ -164,6 +165,9 @@ class BarDatasetProvenance:
             "calendar_id": self.calendar_id,
             "hash_schema": self.hash_schema,
         }
+        if self.source_revision is not None:
+            payload["source_revision"] = self.source_revision
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "BarDatasetProvenance":
@@ -184,8 +188,24 @@ class BarDatasetProvenance:
             "calendar_id",
             "hash_schema",
         }
-        if set(payload) != expected or not isinstance(payload["identity"], Mapping):
+        payload_fields = frozenset(payload)
+        if (
+            payload_fields
+            not in {
+                frozenset(expected),
+                frozenset({*expected, "source_revision"}),
+            }
+            or not isinstance(payload["identity"], Mapping)
+        ):
             raise ValueError("BAR dataset provenance fields are incompatible")
+        source_revision = payload.get("source_revision")
+        if source_revision is not None and (
+            not isinstance(source_revision, str)
+            or len(source_revision) != 71
+            or not source_revision.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in source_revision[7:])
+        ):
+            raise ValueError("provenance.source_revision must be a SHA-256 digest or null")
         integer_fields = (
             "source_earliest_open_ms",
             "source_latest_open_ms",
@@ -214,6 +234,7 @@ class BarDatasetProvenance:
                 payload["calendar_id"], field_name="calendar_id"
             ),
             hash_schema=_nonempty_string(payload["hash_schema"], "hash_schema"),
+            source_revision=source_revision,
             **values,
         )
 
@@ -495,14 +516,38 @@ class BarDatasetBuilder:
                 },
             )
 
-        gap_result = self._repository.scan_gaps(
-            entry.identity.symbol,
-            window.interval,
-            start_ms=window.warmup_start_ms,
-            end_ms=window.replay_end_open_ms,
-            exchange=entry.identity.exchange,
-            market_type=entry.identity.market_type,
-            limit=expected_rows,
+        scan_gaps_at_revision = getattr(
+            self._repository, "scan_gaps_at_revision", None
+        )
+        if entry.source_revision is not None and not callable(
+            scan_gaps_at_revision
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR dataset source revision cannot be revalidated",
+            )
+        gap_result = (
+            scan_gaps_at_revision(
+                entry.source_revision,
+                entry.identity.symbol,
+                window.interval,
+                start_ms=window.warmup_start_ms,
+                end_ms=window.replay_end_open_ms,
+                exchange=entry.identity.exchange,
+                market_type=entry.identity.market_type,
+                limit=expected_rows,
+            )
+            if entry.source_revision is not None
+            and callable(scan_gaps_at_revision)
+            else self._repository.scan_gaps(
+                entry.identity.symbol,
+                window.interval,
+                start_ms=window.warmup_start_ms,
+                end_ms=window.replay_end_open_ms,
+                exchange=entry.identity.exchange,
+                market_type=entry.identity.market_type,
+                limit=expected_rows,
+            )
         )
         if gap_result.get("error") or gap_result.get("truncated"):
             raise ReplayDomainError(
@@ -517,15 +562,40 @@ class BarDatasetBuilder:
                 details={"gaps": list(gap_result.get("gaps", []))},
             )
 
-        raw_rows = self._repository.query_bars(
-            entry.identity.symbol,
-            window.interval,
-            start_ms=window.warmup_start_ms,
-            end_ms=window.replay_end_open_ms,
-            limit=expected_rows + 1,
-            order="ASC",
-            exchange=entry.identity.exchange,
-            market_type=entry.identity.market_type,
+        query_bars_at_revision = getattr(
+            self._repository, "query_bars_at_revision", None
+        )
+        if entry.source_revision is not None and not callable(
+            query_bars_at_revision
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR dataset source revision cannot be read",
+            )
+        raw_rows = (
+            query_bars_at_revision(
+                entry.source_revision,
+                entry.identity.symbol,
+                window.interval,
+                start_ms=window.warmup_start_ms,
+                end_ms=window.replay_end_open_ms,
+                limit=expected_rows + 1,
+                order="ASC",
+                exchange=entry.identity.exchange,
+                market_type=entry.identity.market_type,
+            )
+            if entry.source_revision is not None
+            and callable(query_bars_at_revision)
+            else self._repository.query_bars(
+                entry.identity.symbol,
+                window.interval,
+                start_ms=window.warmup_start_ms,
+                end_ms=window.replay_end_open_ms,
+                limit=expected_rows + 1,
+                order="ASC",
+                exchange=entry.identity.exchange,
+                market_type=entry.identity.market_type,
+            )
         )
         if len(raw_rows) != expected_rows:
             raise ReplayDomainError(
@@ -574,6 +644,7 @@ class BarDatasetBuilder:
             gap_scan_bars=int(gap_result.get("scanned_bars", 0)),
             calendar_id=str(gap_result.get("calendar_id", "")),
             hash_schema=BAR_DATASET_HASH_SCHEMA_VERSION,
+            source_revision=entry.source_revision,
         )
         payload = {
             "schema_version": BAR_DATASET_HASH_SCHEMA_VERSION,

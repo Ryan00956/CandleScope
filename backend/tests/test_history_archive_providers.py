@@ -90,6 +90,64 @@ def test_binance_futures_archive_accepts_header_and_millisecond_rows(tmp_path) -
     assert bars[0].quote_volume == 157.5
 
 
+def test_binance_archive_normalizes_verified_legacy_close_boundary(tmp_path) -> None:
+    provider, ref = _monthly_binance_ref(market_type="spot", year=2017, month=9)
+    row = (
+        f"{ref.start_ms},100,110,90,105,1.5,{ref.start_ms + 60_000},"
+        "157.5,10,0.7,73.5,0\n"
+    )
+    archive_path = tmp_path / ref.expected_filename
+    archive_path.write_bytes(
+        _zip_bytes(ref.expected_filename[:-4] + ".csv", row)
+    )
+
+    bar = provider.parse_bars(archive_path, ref)[0]
+
+    assert bar.close_time == ref.start_ms + 59_999
+    assert bar.source == "backfill_archive_verified_close_boundary_normalized"
+
+
+def test_binance_replay_parser_audits_partial_and_off_grid_legacy_rows(
+    tmp_path,
+) -> None:
+    provider, ref = _monthly_binance_ref(market_type="spot", year=2017, month=12)
+
+    def row(open_time: int, close_time: int) -> str:
+        return (
+            f"{open_time},100,110,90,105,1.5,{close_time},"
+            "157.5,10,0.7,73.5,0\n"
+        )
+
+    payload = "".join(
+        (
+            row(ref.start_ms, ref.start_ms + 59_999),
+            row(ref.start_ms + 60_000, ref.start_ms + 80_798),
+            row(ref.start_ms + 80_799, ref.start_ms + 140_798),
+            row(ref.start_ms + 180_000, ref.start_ms + 239_999),
+        )
+    )
+    archive_path = tmp_path / ref.expected_filename
+    archive_path.write_bytes(
+        _zip_bytes(ref.expected_filename[:-4] + ".csv", payload)
+    )
+
+    with pytest.raises(ArchiveDataError, match="close timestamp"):
+        provider.parse_bars(archive_path, ref)
+
+    audited = provider.parse_bars_for_replay(archive_path, ref)
+    assert [bar.open_time for bar in audited.bars] == [
+        ref.start_ms,
+        ref.start_ms + 180_000,
+    ]
+    assert audited.source_row_count == 4
+    assert audited.rejected_row_count == 2
+    assert audited.normalized_row_count == 0
+    assert dict(audited.rejection_reasons) == {
+        "close_timestamp_inconsistent": 1,
+        "open_not_interval_aligned": 1,
+    }
+
+
 def test_binance_archive_rejects_bad_checksum_schema_and_unsafe_zip(tmp_path) -> None:
     provider, ref = _monthly_binance_ref(market_type="spot", year=2025, month=1)
     assert provider.parse_checksum(

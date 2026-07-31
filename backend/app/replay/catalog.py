@@ -32,6 +32,15 @@ CATALOG_SCHEMA_VERSION = "replay-catalog.v1"
 CATALOG_SAMPLE_SCHEMA_VERSION = "replay-catalog-sample.v1"
 
 
+def _is_sha256_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
 class KlinesReadRepository(Protocol):
     def list_series(
         self,
@@ -259,13 +268,14 @@ class ReplayCatalogEntry:
     source_fingerprint: str
     catalog_epoch: str
     limitations: tuple[str, ...]
+    source_revision: str | None = None
 
     @property
     def eligible_window_count(self) -> int:
         return sum(item.count for item in self.eligible_ranges)
 
     def to_hash_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "identity": self.identity.to_dict(),
             "base_intervals": list(self.base_intervals),
             "selected_base_interval": self.selected_base_interval,
@@ -277,6 +287,9 @@ class ReplayCatalogEntry:
             "source_fingerprint": self.source_fingerprint,
             "limitations": list(self.limitations),
         }
+        if self.source_revision is not None:
+            payload["source_revision"] = self.source_revision
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,19 +584,25 @@ class ReplayCatalog:
                 total_count = validate_counter(
                     raw["total_count"], field_name="total_count"
                 )
+                source_revision = raw.get("source_revision")
+                if source_revision is not None and not _is_sha256_digest(
+                    source_revision
+                ):
+                    raise ValueError("source_revision is invalid")
             except (KeyError, TypeError, ValueError):
                 continue
             if total_count < 1 or earliest > latest:
                 continue
-            summaries.append(
-                {
-                    **identity.to_dict(),
-                    "interval": interval,
-                    "earliest_open_time": earliest,
-                    "latest_open_time": latest,
-                    "total_count": total_count,
-                }
-            )
+            summary = {
+                **identity.to_dict(),
+                "interval": interval,
+                "earliest_open_time": earliest,
+                "latest_open_time": latest,
+                "total_count": total_count,
+            }
+            if source_revision is not None:
+                summary["source_revision"] = source_revision
+            summaries.append(summary)
         return sorted(
             summaries,
             key=lambda item: (
@@ -650,6 +669,10 @@ class ReplayCatalog:
                 )
                 continue
             fingerprint_series.append(dict(summary))
+            latest_source_open_ms = validate_timestamp_ms(
+                summary["latest_open_time"],
+                field_name="latest_open_time",
+            )
             closed_boundaries.append(
                 {
                     "identity": {
@@ -658,7 +681,13 @@ class ReplayCatalog:
                         "symbol": summary["symbol"],
                     },
                     "interval": interval,
-                    "last_closed_open_ms": last_closed_bar_open_ms(now_ms, interval),
+                    # A frozen archive whose latest row is already closed must
+                    # not acquire a new catalog epoch every wall-clock bucket.
+                    # Only the effective source boundary affects eligibility.
+                    "last_closed_open_ms": min(
+                        latest_source_open_ms,
+                        last_closed_bar_open_ms(now_ms, interval),
+                    ),
                 }
             )
         return canonical_sha256(
@@ -718,11 +747,19 @@ class ReplayCatalog:
             selected_bounds: SeriesBounds | None = None
             selected_gaps = EMPTY_GAP_SUMMARY
             selected_ranges: tuple[EligibleWindowRange, ...] = ()
+            selected_source_revision: str | None = None
             for interval in candidates:
+                raw_source_revision = by_interval[interval].get("source_revision")
+                source_revision = (
+                    str(raw_source_revision)
+                    if raw_source_revision is not None
+                    else None
+                )
                 try:
                     bounds, gaps, ranges = self._plan_interval(
                         identity,
                         interval,
+                        source_revision=source_revision,
                         now_ms=now_ms,
                         warmup_bars=warmup_bars,
                         horizon_ms=horizon_ms,
@@ -739,6 +776,7 @@ class ReplayCatalog:
                     selected_bounds = bounds
                     selected_gaps = gaps
                     selected_ranges = ranges
+                    selected_source_revision = source_revision
                     break
                 limitations.append(f"{interval}:insufficient_contiguous_coverage")
             entries.append(
@@ -757,6 +795,7 @@ class ReplayCatalog:
                     source_fingerprint=source_fingerprint,
                     catalog_epoch="",
                     limitations=tuple(limitations),
+                    source_revision=selected_source_revision,
                 )
             )
         return tuple(entries)
@@ -766,6 +805,7 @@ class ReplayCatalog:
         identity: ReplaySeriesIdentity,
         interval: str,
         *,
+        source_revision: str | None,
         now_ms: int,
         warmup_bars: int,
         horizon_ms: int,
@@ -781,11 +821,26 @@ class ReplayCatalog:
         if warmup_bars + replay_bars > self._max_dataset_rows:
             self._candidate_error("dataset_row_limit_exceeded")
 
-        raw_bounds = self._repository.get_bounds(
-            identity.symbol,
-            interval,
-            exchange=identity.exchange,
-            market_type=identity.market_type,
+        get_bounds_at_revision = getattr(
+            self._repository, "get_bounds_at_revision", None
+        )
+        if source_revision is not None and not callable(get_bounds_at_revision):
+            self._candidate_error("source_revision_bounds_unavailable")
+        raw_bounds = (
+            get_bounds_at_revision(
+                source_revision,
+                identity.symbol,
+                interval,
+                exchange=identity.exchange,
+                market_type=identity.market_type,
+            )
+            if source_revision is not None and callable(get_bounds_at_revision)
+            else self._repository.get_bounds(
+                identity.symbol,
+                interval,
+                exchange=identity.exchange,
+                market_type=identity.market_type,
+            )
         )
         try:
             earliest = validate_timestamp_ms(
@@ -819,6 +874,7 @@ class ReplayCatalog:
         gap_summary = self._scan_gap_chunks(
             identity,
             interval,
+            source_revision=source_revision,
             interval_ms=interval_ms,
             start_ms=earliest,
             end_ms=latest_closed,
@@ -841,6 +897,7 @@ class ReplayCatalog:
         identity: ReplaySeriesIdentity,
         interval: str,
         *,
+        source_revision: str | None,
         interval_ms: int,
         start_ms: int,
         end_ms: int,
@@ -855,14 +912,35 @@ class ReplayCatalog:
                 end_ms,
                 chunk_start + (self._max_scan_rows - 1) * interval_ms,
             )
-            result = self._repository.scan_gaps(
-                identity.symbol,
-                interval,
-                start_ms=chunk_start,
-                end_ms=chunk_end,
-                exchange=identity.exchange,
-                market_type=identity.market_type,
-                limit=self._max_scan_rows,
+            scan_gaps_at_revision = getattr(
+                self._repository, "scan_gaps_at_revision", None
+            )
+            if source_revision is not None and not callable(
+                scan_gaps_at_revision
+            ):
+                self._candidate_error("source_revision_gap_index_unavailable")
+            result = (
+                scan_gaps_at_revision(
+                    source_revision,
+                    identity.symbol,
+                    interval,
+                    start_ms=chunk_start,
+                    end_ms=chunk_end,
+                    exchange=identity.exchange,
+                    market_type=identity.market_type,
+                    limit=self._max_scan_rows,
+                )
+                if source_revision is not None
+                and callable(scan_gaps_at_revision)
+                else self._repository.scan_gaps(
+                    identity.symbol,
+                    interval,
+                    start_ms=chunk_start,
+                    end_ms=chunk_end,
+                    exchange=identity.exchange,
+                    market_type=identity.market_type,
+                    limit=self._max_scan_rows,
+                )
             )
             scan_calls += 1
             self._diagnostics["scan_calls"] = int(

@@ -63,6 +63,8 @@ class ReplaySettings:
     replay_historical_book_max_archive_bytes: int = 1_099_511_627_776
     replay_account_history_enabled: bool = False
     replay_account_history_max_archive_bytes: int = 137_438_953_472
+    replay_bar_source: str = "archive"
+    replay_history_archive_dir: Path = Path("data/replay-history")
 
     @property
     def product_v2_available(self) -> bool:
@@ -119,6 +121,19 @@ def load_replay_settings(
     replay_db_path = Path(environment.get("REPLAY_DB_PATH", str(data_dir / "replay.db")))
     if _paths_refer_to_same_file(replay_db_path, klines_db_path):
         raise ValueError("REPLAY_DB_PATH must not identify KLINES_DB_PATH")
+    replay_bar_source = environment.get("REPLAY_BAR_SOURCE", "archive").strip().lower()
+    if replay_bar_source not in {"archive", "legacy_sqlite"}:
+        raise ValueError("REPLAY_BAR_SOURCE must be archive or legacy_sqlite")
+    replay_history_archive_dir = Path(
+        environment.get(
+            "REPLAY_HISTORY_ARCHIVE_DIR",
+            str(data_dir / "replay-history"),
+        )
+    )
+    if _paths_refer_to_same_file(replay_history_archive_dir, replay_db_path):
+        raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify REPLAY_DB_PATH")
+    if _paths_refer_to_same_file(replay_history_archive_dir, klines_db_path):
+        raise ValueError("REPLAY_HISTORY_ARCHIVE_DIR must not identify KLINES_DB_PATH")
     values = {
         name: _bounded_replay_int(environment, name)
         for name in _REPLAY_BUDGETS
@@ -166,6 +181,8 @@ def load_replay_settings(
         replay_account_history_max_archive_bytes=values[
             "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES"
         ],
+        replay_bar_source=replay_bar_source,
+        replay_history_archive_dir=replay_history_archive_dir,
     )
 
 # Server
@@ -218,6 +235,8 @@ REPLAY_ACCOUNT_HISTORY_ENABLED = REPLAY_SETTINGS.replay_account_history_enabled
 REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES = (
     REPLAY_SETTINGS.replay_account_history_max_archive_bytes
 )
+REPLAY_BAR_SOURCE = REPLAY_SETTINGS.replay_bar_source
+REPLAY_HISTORY_ARCHIVE_DIR = REPLAY_SETTINGS.replay_history_archive_dir
 REPLAY_DB_PATH = REPLAY_SETTINGS.db_path
 REPLAY_MAX_ACTIVE_SESSIONS = REPLAY_SETTINGS.max_active_sessions
 REPLAY_COMMAND_QUEUE_SIZE = REPLAY_SETTINGS.command_queue_size

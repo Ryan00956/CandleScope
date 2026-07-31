@@ -215,6 +215,9 @@ backend/data/custom_indicators.json.tmp
 backend/data/cache_gc_audit.jsonl
 backend/data/symbol_catalog.v1.json
 backend/data/history_archives/
+backend/data/replay-history/
+backend/data/replay-history-source-cache/
+backend/data/replay-history-import*.json
 
 # CandleScope generated perf/test artifacts. Keep ad-hoc/raw runs local, while
 # allowing the curated drawing-engine V2 baselines required by its execution

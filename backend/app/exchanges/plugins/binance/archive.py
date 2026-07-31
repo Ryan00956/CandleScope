@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import math
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -56,6 +57,21 @@ _HEADER = (
 _MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 200
 _MAX_ROWS = 100_000
+
+
+class _BinanceReplayGridError(ArchiveDataError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class BinanceReplayArchiveParseResult:
+    bars: tuple[ArchiveBar, ...]
+    source_row_count: int
+    rejected_row_count: int
+    normalized_row_count: int
+    rejection_reasons: tuple[tuple[str, int], ...]
 
 
 class BinanceKlineArchiveProvider:
@@ -171,6 +187,32 @@ class BinanceKlineArchiveProvider:
         return digest
 
     def parse_bars(self, path: Path, ref: ArchiveObjectRef) -> list[ArchiveBar]:
+        return list(
+            self._parse_archive(path, ref, allow_replay_grid_rejections=False).bars
+        )
+
+    def parse_bars_for_replay(
+        self,
+        path: Path,
+        ref: ArchiveObjectRef,
+    ) -> BinanceReplayArchiveParseResult:
+        """Keep checksum-valid UTC-grid rows and audit legacy off-grid rows.
+
+        Early Binance spot archives contain a few maintenance-period partial or
+        event-anchored candles. They cannot be replay base bars. Excluding them
+        turns the affected range into an explicit manifest gap while preserving
+        all later UTC-aligned history.
+        """
+
+        return self._parse_archive(path, ref, allow_replay_grid_rejections=True)
+
+    def _parse_archive(
+        self,
+        path: Path,
+        ref: ArchiveObjectRef,
+        *,
+        allow_replay_grid_rejections: bool,
+    ) -> BinanceReplayArchiveParseResult:
         spec = parse_interval_spec(ref.interval)
         if spec is None:
             raise ArchiveDataError(f"Unsupported Binance archive interval: {ref.interval}")
@@ -180,8 +222,11 @@ class BinanceKlineArchiveProvider:
             raise ArchiveDataError("Binance K-line ZIP is invalid") from exc
 
         bars: list[ArchiveBar] = []
-        previous_open: int | None = None
+        previous_source_open: int | None = None
         timestamp_unit: str | None = None
+        source_row_count = 0
+        normalized_row_count = 0
+        rejection_reasons: dict[str, int] = {}
         with archive:
             members = [item for item in archive.infolist() if not item.is_dir()]
             if len(members) != 1:
@@ -217,22 +262,51 @@ class BinanceKlineArchiveProvider:
                                     "Binance K-line archive mixes timestamp units"
                                 )
                             timestamp_unit = row_timestamp_unit
-                            bar = _parse_row(fields, ref, spec, line_number)
-                            if previous_open is not None and bar.open_time <= previous_open:
+                            try:
+                                source_open, _ = _timestamps(fields[0], fields[6])
+                            except ValueError as exc:
+                                raise ArchiveDataError(
+                                    f"Binance K-line CSV row {line_number} "
+                                    f"is invalid: {exc}"
+                                ) from exc
+                            if (
+                                previous_source_open is not None
+                                and source_open <= previous_source_open
+                            ):
                                 raise ArchiveDataError(
                                     "Binance K-line timestamps are not strictly increasing"
                                 )
-                            previous_open = bar.open_time
+                            previous_source_open = source_open
+                            source_row_count += 1
+                            if source_row_count > _MAX_ROWS:
+                                raise ArchiveDataError(
+                                    "Binance K-line archive has too many rows"
+                                )
+                            try:
+                                bar = _parse_row(fields, ref, spec, line_number)
+                            except _BinanceReplayGridError as exc:
+                                if not allow_replay_grid_rejections:
+                                    raise
+                                rejection_reasons[exc.code] = (
+                                    rejection_reasons.get(exc.code, 0) + 1
+                                )
+                                continue
                             bars.append(bar)
-                            if len(bars) > _MAX_ROWS:
-                                raise ArchiveDataError("Binance K-line archive has too many rows")
+                            if bar.source.endswith("_normalized"):
+                                normalized_row_count += 1
             except ArchiveDataError:
                 raise
             except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
                 raise ArchiveDataError("Binance K-line ZIP failed CRC/read validation") from exc
         if not bars:
             raise ArchiveDataError("Binance K-line archive is empty")
-        return bars
+        return BinanceReplayArchiveParseResult(
+            bars=tuple(bars),
+            source_row_count=source_row_count,
+            rejected_row_count=source_row_count - len(bars),
+            normalized_row_count=normalized_row_count,
+            rejection_reasons=tuple(sorted(rejection_reasons.items())),
+        )
 
     def _object(
         self,
@@ -304,9 +378,23 @@ def _parse_row(fields: list[str], ref: ArchiveObjectRef, spec, line_number: int)
     if not ref.start_ms <= open_time <= ref.end_ms:
         raise ArchiveDataError("Binance K-line timestamp is outside archive period")
     if spec.floor_ms(open_time) != open_time:
-        raise ArchiveDataError("Binance K-line timestamp is not interval-aligned")
-    if close_time != spec.next_ms(open_time) - 1:
-        raise ArchiveDataError("Binance K-line close timestamp is inconsistent")
+        raise _BinanceReplayGridError(
+            "open_not_interval_aligned",
+            "Binance K-line timestamp is not interval-aligned",
+        )
+    expected_close_time = spec.next_ms(open_time) - 1
+    normalized_legacy_close_boundary = close_time == expected_close_time + 1
+    if normalized_legacy_close_boundary:
+        # A small number of checksum-verified early Binance spot files encode
+        # the final candle before a maintenance gap with the next bucket
+        # boundary itself instead of boundary - 1 ms.  Preserve the bar but
+        # normalize it to CandleScope's half-open interval contract.
+        close_time = expected_close_time
+    elif close_time != expected_close_time:
+        raise _BinanceReplayGridError(
+            "close_timestamp_inconsistent",
+            "Binance K-line close timestamp is inconsistent",
+        )
     if high < max(open_price, low, close) or low > min(open_price, high, close):
         raise ArchiveDataError("Binance K-line OHLC bounds are inconsistent")
     return ArchiveBar(
@@ -327,7 +415,11 @@ def _parse_row(fields: list[str], ref: ArchiveObjectRef, spec, line_number: int)
             "taker_buy_base",
             "taker_buy_quote",
         }),
-        source="backfill_archive_verified",
+        source=(
+            "backfill_archive_verified_close_boundary_normalized"
+            if normalized_legacy_close_boundary
+            else "backfill_archive_verified"
+        ),
     )
 
 
@@ -414,4 +506,7 @@ def _ms(value: datetime) -> int:
     return int(value.timestamp() * 1_000)
 
 
-__all__ = ["BinanceKlineArchiveProvider"]
+__all__ = [
+    "BinanceKlineArchiveProvider",
+    "BinanceReplayArchiveParseResult",
+]

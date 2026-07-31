@@ -70,6 +70,7 @@ from .dataset import (
     remap_bar_snapshot_time,
 )
 from .errors import ReplayDomainError, ReplayErrorCode
+from .history_archive import ReplayHistoryRepository
 from .internal_commands import InternalCommandType
 from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
 from .period_summary import (
@@ -152,7 +153,16 @@ class ReplayService:
             )
         self.settings = settings
         self.store = store
-        self._repository = repository or KlinesRepoAdapter()
+        if repository is not None:
+            self._repository = repository
+        elif settings.replay_bar_source == "archive":
+            self._repository = ReplayHistoryRepository(
+                settings.replay_history_archive_dir
+            )
+        elif settings.replay_bar_source == "legacy_sqlite":
+            self._repository = KlinesRepoAdapter()
+        else:  # ReplaySettings is normally constructed by strict config parsing.
+            raise ValueError(f"unsupported replay BAR source: {settings.replay_bar_source}")
         self._raw_trade_archive = raw_trade_archive or DisabledRawAggTradeArchive()
         self._now_ms = now_ms
         self._session_id_factory = session_id_factory
@@ -283,6 +293,23 @@ class ReplayService:
 
     def capabilities(self) -> dict[str, object]:
         persistence_degraded = self.store.degraded_reason is not None
+        try:
+            list_all_series = getattr(self._repository, "list_all_series", None)
+            bar_series = (
+                list_all_series(custom_only=False)
+                if callable(list_all_series)
+                else self._repository.list_series(custom_only=False)
+            )
+            bar_ready = bool(bar_series)
+            bar_reason = None if bar_ready else "REPLAY_BAR_HISTORY_EMPTY"
+        except Exception:
+            bar_ready = False
+            bar_reason = "REPLAY_BAR_HISTORY_UNAVAILABLE"
+        bar_capability = (
+            {"enabled": True, "fidelity": "EXACT_BAR_COVERAGE"}
+            if bar_ready
+            else {"enabled": False, "reason": bar_reason}
+        )
         archive_diagnostics = self._raw_trade_archive.diagnostics()
         archive_enabled = bool(archive_diagnostics.get("enabled"))
         archive_ready = archive_diagnostics.get("state") == "ready"
@@ -319,7 +346,7 @@ class ReplayService:
                 not persistence_degraded and self._accepting and not self._closed
             ),
             "sources": {
-                "bar": {"enabled": True, "fidelity": "EXACT_BAR_COVERAGE"},
+                "bar": bar_capability,
                 "agg_trade": trade_capability,
             },
             "execution_models": [ExecutionModel.PAPER_LINEAR_V1.value],
@@ -1508,6 +1535,17 @@ class ReplayService:
         persistence = self.store.diagnostics()
         if redact_paths:
             persistence = {**persistence, "path": "<redacted>"}
+        repository_diagnostics = getattr(self._repository, "diagnostics", None)
+        repository = (
+            repository_diagnostics(redact_paths=redact_paths)
+            if callable(repository_diagnostics)
+            else {
+                "backend": (
+                    f"{type(self._repository).__module__}."
+                    f"{type(self._repository).__qualname__}"
+                )
+            }
+        )
         return {
             **self._metrics,
             "enabled": True,
@@ -1530,6 +1568,7 @@ class ReplayService:
                 for session_id, error in self._unavailable_sessions.items()
             },
             "catalog": self._catalog.diagnostics(),
+            "bar_history": repository,
             "dataset_pins": dict(self._datasets.diagnostics()),
             "training_product_v2": self.training is not None,
             "persistence": persistence,
@@ -3022,7 +3061,12 @@ class ReplayService:
         entry: ReplayCatalogEntry, *, blind_mode: bool
     ) -> dict[str, object]:
         if not blind_mode:
-            return {**entry.to_hash_dict(), "catalog_epoch": entry.catalog_epoch}
+            # The archive revision is an internal server-side pin.  The public
+            # replay.v1 catalog contract is strict and clients commit only to
+            # the derived catalog epoch, so do not expand that wire shape.
+            payload = entry.to_hash_dict()
+            payload.pop("source_revision", None)
+            return {**payload, "catalog_epoch": entry.catalog_epoch}
         return {
             "identity": entry.identity.to_dict(),
             "base_intervals": list(entry.base_intervals),

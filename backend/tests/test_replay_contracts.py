@@ -270,6 +270,8 @@ def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -
     assert settings.idle_ttl_seconds == 3_600
     assert settings.replay_account_history_enabled is False
     assert settings.replay_account_history_max_archive_bytes == 128 * 1024**3
+    assert settings.replay_bar_source == "archive"
+    assert settings.replay_history_archive_dir == tmp_path / "replay-history"
 
 
 @pytest.mark.parametrize(
@@ -319,6 +321,24 @@ def test_replay_settings_reject_invalid_bool_and_unsafe_ranges(tmp_path: Path) -
             data_dir=tmp_path,
             klines_db_path=tmp_path / "candlescope.db",
         )
+    with pytest.raises(ValueError, match="REPLAY_BAR_SOURCE"):
+        load_replay_settings(
+            {"REPLAY_BAR_SOURCE": "auto"},
+            data_dir=tmp_path,
+            klines_db_path=tmp_path / "candlescope.db",
+        )
+    with pytest.raises(ValueError, match="REPLAY_HISTORY_ARCHIVE_DIR"):
+        load_replay_settings(
+            {"REPLAY_HISTORY_ARCHIVE_DIR": str(tmp_path / "candlescope.db")},
+            data_dir=tmp_path,
+            klines_db_path=tmp_path / "candlescope.db",
+        )
+    legacy = load_replay_settings(
+        {"REPLAY_BAR_SOURCE": "legacy_sqlite"},
+        data_dir=tmp_path,
+        klines_db_path=tmp_path / "candlescope.db",
+    )
+    assert legacy.replay_bar_source == "legacy_sqlite"
 
 
 @pytest.mark.parametrize(

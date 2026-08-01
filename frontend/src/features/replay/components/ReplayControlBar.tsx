@@ -99,7 +99,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const disabled = pending !== null || phase3Pending !== null || forkPending
     || store.connectionState !== "connected" || !ownsController
     || (viewer !== undefined && (viewer.viewerState === null || viewer.viewerPending));
-  const domainProgress = replayProgress(store);
+  const domainProgress = viewer === undefined
+    ? replayProgress(store)
+    : effectiveState === "ENDED" ? 1 : null;
   const phase3Ratio = viewer?.progress?.ratio_ppm;
   const visiblePlan = fastForwardPlan(viewer?.progress?.plan);
   const progress = typeof phase3Ratio === "number" && Number.isSafeInteger(phase3Ratio)
@@ -203,7 +205,11 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
       )}
       {!ownsController && (
         <div className="replay-controller-banner" role="status">
-          {store.controllerClientId ? "另一个页面正在控制，本页只读。" : "当前为只读；获取控制权后可操作。"}
+          {store.controllerClientId
+            ? "另一个页面正在控制，本页只读。"
+            : effectiveState === "ENDED"
+              ? "训练已结束；获取复盘控制权后可揭示真实区间或添加日志。"
+              : "当前为只读；获取控制权后可操作。"}
           <button
             type="button"
             data-replay-action="takeover-controller"
@@ -220,7 +226,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
               }
             }}
           >
-            {store.controllerClientId ? "接管控制权" : "获取控制权"}
+            {store.controllerClientId
+              ? "接管控制权"
+              : effectiveState === "ENDED" ? "获取复盘控制权" : "获取控制权"}
           </button>
         </div>
       )}
@@ -402,8 +410,12 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
           data-replay-grain={phase3Pending ?? "idle"}
         >
           <span>{publicTime}</span>
-          <progress max={1} value={progress ?? 0} aria-label="回放进度" />
-          <span>{progress === null ? "进度未知" : `${(progress * 100).toFixed(1)}%`}</span>
+          <progress
+            max={1}
+            {...(progress === null ? {} : { value: progress })}
+            aria-label="回放进度"
+          />
+          <span>{progress === null ? "持续训练" : `${(progress * 100).toFixed(1)}%`}</span>
         </div>
       </div>
 

@@ -1067,7 +1067,7 @@ export default function ReplayTrainingPageShell({
             <span>{review === null ? effectiveState ?? runtime.phase : `REVIEW ${review.playback_state}`}</span>
             <span>{viewerBarCount} display bars</span>
             {review === null && history.loading && <span>Loading older replay data…</span>}
-            {review === null && !history.hasMore && !history.loading && <span>已到可用历史起点</span>}
+            {review === null && history.historyEpoch !== null && !history.hasMore && !history.loading && <span>已到可用历史起点</span>}
             {review === null && history.error && <span className="replay-history-error">{history.error}</span>}
             {review !== null && <span>immutable event #{review.selected_timeline_sequence}</span>}
             {review !== null && reviewChartBounded && <span>20,000-bar review prefix bound</span>}

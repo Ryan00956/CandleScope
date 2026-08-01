@@ -1047,7 +1047,7 @@ export class ReplayRuntimeLifecycle {
       clientInstanceId: this.clientInstanceId,
       shouldHeartbeat: () => {
         const snapshot = this.store.getSnapshot();
-        return snapshot.controllerClientId === this.clientInstanceId && snapshot.state !== "ENDED";
+        return snapshot.controllerClientId === this.clientInstanceId;
       },
       onGeneration: ({ generation, reason, resetAuthoritativeState }) => {
         if (!isCurrentStream()) return;

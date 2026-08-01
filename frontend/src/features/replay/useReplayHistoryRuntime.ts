@@ -30,18 +30,34 @@ export interface ReplayHistoryRuntime {
   readonly dismissNotice: () => void;
 }
 
+interface ReplayHistoryState {
+  readonly key: string | null;
+  readonly loading: boolean;
+  readonly hasMore: boolean;
+  readonly error: string | null;
+  readonly historyEpoch: ReplayDigest | null;
+  readonly boundaryMs: number | null;
+  readonly policy: ReplayHistoryPolicy | null;
+  readonly notice: string | null;
+}
+
+function initialReplayHistoryState(key: string | null): ReplayHistoryState {
+  return {
+    key,
+    loading: false,
+    hasMore: true,
+    error: null,
+    historyEpoch: null,
+    boundaryMs: null,
+    policy: null,
+    notice: null,
+  };
+}
+
 export function useReplayHistoryRuntime(
   runtime: ReplayRuntime,
   viewer: ReplayViewerRuntime,
 ): ReplayHistoryRuntime {
-  const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [historyEpoch, setHistoryEpoch] = useState<ReplayDigest | null>(null);
-  const [boundaryMs, setBoundaryMs] = useState<number | null>(null);
-  const [policy, setPolicy] = useState<ReplayHistoryPolicy | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const loadingRef = useRef(false);
   const storeRef = useRef(runtime.store);
   storeRef.current = runtime.store;
   const config = runtime.store.sessionConfig;
@@ -49,38 +65,74 @@ export function useReplayHistoryRuntime(
   const dataEpoch = runtime.store.dataEpoch;
   const runtimeGeneration = runtime.store.generation;
   const displayInterval = viewer.viewerState?.display_interval ?? null;
+  const exchange = config?.exchange ?? null;
+  const marketType = config?.market_type ?? null;
+  const symbol = config?.symbol ?? null;
+  const sourceKind = config?.source_kind ?? null;
+  const baseInterval = config?.base_interval ?? null;
   const identity = useMemo<ReplayHistoryIdentity | null>(() => (
-    config === null || displayInterval === null
+    exchange === null || marketType === null || symbol === null
+      || sourceKind === null || baseInterval === null || displayInterval === null
       ? null
       : ({
-    exchange: config.exchange,
-    market_type: config.market_type,
-    symbol: config.symbol,
-    source_kind: config.source_kind === "agg_trade" ? "AGG_TRADE" : "BAR",
-    base_interval: config.base_interval,
+    exchange,
+    market_type: marketType,
+    symbol,
+    source_kind: sourceKind === "agg_trade" ? "AGG_TRADE" : "BAR",
+    base_interval: baseInterval,
     display_interval: displayInterval,
-  })), [config, displayInterval]);
+  })), [baseInterval, displayInterval, exchange, marketType, sourceKind, symbol]);
   const provider = useMemo(() => (
     sessionId === null || identity === null || dataEpoch === null
       ? null
       : new ReplayHistoryProvider({ sessionId, trackId: "track-1", identity })
   ), [dataEpoch, identity, sessionId]);
+  const historyKey = useMemo(() => (
+    sessionId === null || identity === null || dataEpoch === null
+      ? null
+      : JSON.stringify([
+        runtimeGeneration,
+        sessionId,
+        dataEpoch,
+        identity.exchange,
+        identity.market_type,
+        identity.symbol,
+        identity.source_kind,
+        identity.base_interval,
+        identity.display_interval,
+      ])
+  ), [dataEpoch, identity, runtimeGeneration, sessionId]);
+  const [historyState, setHistoryState] = useState<ReplayHistoryState>(() => (
+    initialReplayHistoryState(historyKey)
+  ));
+  const currentState = historyState.key === historyKey
+    ? historyState
+    : initialReplayHistoryState(historyKey);
+  const loadingRef = useRef<{ key: string | null; loading: boolean }>({
+    key: historyKey,
+    loading: false,
+  });
+  const {
+    loading,
+    hasMore,
+    error,
+    historyEpoch,
+    boundaryMs,
+    policy,
+    notice,
+  } = currentState;
 
   useEffect(() => {
-    setHasMore(true);
-    setError(null);
-    setHistoryEpoch(null);
-    setBoundaryMs(null);
-    setPolicy(null);
-    setNotice(null);
-    loadingRef.current = false;
-    setLoading(false);
+    loadingRef.current = { key: historyKey, loading: false };
+    setHistoryState(initialReplayHistoryState(historyKey));
     return () => provider?.cancel();
-  }, [provider, runtimeGeneration]);
+  }, [historyKey, provider]);
 
   const loadMoreLeft = useCallback<LoadMoreLeft>(async () => {
     const store = storeRef.current;
-    if (provider === null || loadingRef.current || !hasMore
+    if (provider === null
+      || (loadingRef.current.key === historyKey && loadingRef.current.loading)
+      || !hasMore
       || store.dataEpoch === null || store.virtualTimeMs === null
     ) return;
     // Context history belongs only to the display store. The frozen base store
@@ -99,9 +151,12 @@ export function useReplayHistoryRuntime(
       ? initialBeforeMs
       : storeBeforeMs;
     if (beforeMs === null) return;
-    loadingRef.current = true;
-    setLoading(true);
-    setError(null);
+    loadingRef.current = { key: historyKey, loading: true };
+    setHistoryState((current) => ({
+      ...(current.key === historyKey ? current : initialReplayHistoryState(historyKey)),
+      loading: true,
+      error: null,
+    }));
     try {
       const page = await provider.loadBefore({
         beforeMs,
@@ -111,6 +166,7 @@ export function useReplayHistoryRuntime(
       });
       const latest = storeRef.current;
       if (latest.sessionId !== sessionId
+        || latest.generation !== runtimeGeneration
         || latest.dataEpoch !== page.data_epoch
         || latest.virtualTimeMs === null
         || page.revealed_boundary_ms > latest.virtualTimeMs) return;
@@ -118,37 +174,49 @@ export function useReplayHistoryRuntime(
         expectedBeforeMs: beforeMs,
         contextHistory: true,
       });
-      setHistoryEpoch(page.history_epoch);
-      setBoundaryMs(page.history_boundary_ms);
-      setPolicy(page.history_policy);
-      setHasMore(page.has_more && page.bars.length > 0);
-      if (!page.has_more) {
-        setNotice(page.history_policy.visible_history_lookback.mode === "DURATION"
+      const nextHasMore = page.has_more && page.bars.length > 0;
+      const nextNotice = !page.has_more
+        ? (page.history_policy.visible_history_lookback.mode === "DURATION"
           ? `已到旧 Run 的固定历史边界：开始前 ${page.history_policy.visible_history_rows} 根 ${config?.base_interval ?? "基础周期"} K 线。新建 Run 默认可按需翻到数据起点。`
-          : "已到当前观看周期可用连续历史的起点。");
-      } else {
-        setNotice(null);
-      }
+          : "已到当前观看周期可用连续历史的起点。")
+        : null;
+      setHistoryState((current) => current.key === historyKey ? {
+        ...current,
+        hasMore: nextHasMore,
+        historyEpoch: page.history_epoch,
+        boundaryMs: page.history_boundary_ms,
+        policy: page.history_policy,
+        notice: nextNotice,
+      } : current);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
-      setError(cause instanceof Error ? cause.message : "回放历史回补失败");
-      setHasMore(false);
+      setHistoryState((current) => current.key === historyKey ? {
+        ...current,
+        error: cause instanceof Error ? cause.message : "回放历史回补失败",
+        hasMore: false,
+      } : current);
     } finally {
-      loadingRef.current = false;
-      setLoading(false);
+      if (loadingRef.current.key === historyKey) {
+        loadingRef.current = { key: historyKey, loading: false };
+      }
+      setHistoryState((current) => current.key === historyKey
+        ? { ...current, loading: false }
+        : current);
     }
   }, [
     config?.base_interval,
     displayInterval,
     hasMore,
+    historyKey,
     provider,
+    runtimeGeneration,
     sessionId,
     viewer.seriesStore,
   ]);
 
   const restoreLatestWindow = useCallback(async (): Promise<boolean> => {
     if (
-      loadingRef.current
+      (loadingRef.current.key === historyKey && loadingRef.current.loading)
       || config === null
       || displayInterval === null
       || !viewer.seriesStore.rightTruncated
@@ -160,16 +228,13 @@ export function useReplayHistoryRuntime(
       config.base_interval,
       displayInterval,
     );
-    setHasMore(true);
-    setError(null);
-    setHistoryEpoch(null);
-    setBoundaryMs(null);
-    setPolicy(null);
-    setNotice(null);
+    loadingRef.current = { key: historyKey, loading: false };
+    setHistoryState(initialReplayHistoryState(historyKey));
     return true;
   }, [
     config,
     displayInterval,
+    historyKey,
     provider,
     runtime.replayStore.seriesStore,
     viewer.seriesStore,
@@ -189,6 +254,8 @@ export function useReplayHistoryRuntime(
     notice,
     loadMoreLeft,
     restoreLatestWindow,
-    dismissNotice: () => setNotice(null),
+    dismissNotice: () => setHistoryState((current) => current.key === historyKey
+      ? { ...current, notice: null }
+      : current),
   };
 }

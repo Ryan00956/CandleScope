@@ -2988,13 +2988,29 @@ class TrainingRunService:
             account_history_binding=account_history_binding,
         )
         try:
+            track_catalog = await self.replay_service.catalog(
+                warmup_bars=config.warmup_bars,
+                horizon_ms=config.horizon_ms,
+                quality_mode=config.quality_mode,
+                blind_mode=config.blind_mode,
+            )
+            track_catalog_epoch = str(track_catalog["catalog_epoch"])
+            selection = await self.replay_service.select_training_window(
+                config,
+                expected_catalog_epoch=track_catalog_epoch,
+            )
             created = await self.replay_service.create_session(
                 config,
+                _expected_catalog_epoch=track_catalog_epoch,
                 _internal_forced_start_ms=_stored_counter(
                     binding["actual_replay_start_ms"],
                     field_name="actual_replay_start_ms",
                 ),
+                _internal_expected_source_fingerprint=str(
+                    selection["source_fingerprint"]
+                ),
                 _internal_training_history=True,
+                _internal_training_selection=selection,
                 _extension_factory=extension_factory,
                 _internal_execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
             )

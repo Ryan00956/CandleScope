@@ -71,13 +71,20 @@ from .dataset import (
     BarDatasetBuilder,
     BarDatasetPool,
     BarDatasetSnapshot,
+    ReplayBar,
     remap_bar_snapshot_time,
+    validate_replay_repository_bar,
 )
 from .errors import ReplayDomainError, ReplayErrorCode
-from .history_archive import ReplayHistoryRepository
+from .history_archive import ReplayHistoryArchiveError, ReplayHistoryRepository
 from .remote_history import RemoteReplayHistoryRepository
 from .internal_commands import InternalCommandType
-from .models import ReplayCommand, ReplayCursor, ReplaySessionConfig
+from .models import (
+    ReplayCommand,
+    ReplayCursor,
+    ReplaySessionConfig,
+    validate_timestamp_ms,
+)
 from .period_summary import (
     EncodedPeriodSummaryCandidate,
     MAX_PERIOD_SUMMARY_CANDIDATES,
@@ -90,7 +97,7 @@ from .period_summary import (
     encode_component_state,
 )
 from .source_chain import next_source_chain_hash
-from .sources.bar_source import BarReplaySource
+from .sources.bar_source import BarReplaySource, PagedBarReplaySource
 from .sources.trade_reader import PagedReplayTradeReader
 from .sources.trade_source import TradeReplaySource
 from .storage.sqlite_store import ReplaySQLiteStore, StoredCheckpoint, StoredCommand
@@ -103,6 +110,9 @@ _EVICTION_SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 _ENDED_SESSION_HANDOFF_GRACE_MS = 5_000
 TRADE_SESSION_DATASET_SCHEMA_VERSION = "replay-trade-session-dataset.v1"
 TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
+PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION = "replay-paged-bar-session-dataset.v1"
+PAGED_BAR_SESSION_REF_SCHEMA_VERSION = "replay-paged-bar-session-ref.v1"
+PAGED_BAR_MANIFEST_SCHEMA_VERSION = "replay-paged-bar-manifest.v1"
 _TaskResult = TypeVar("_TaskResult")
 
 
@@ -126,6 +136,7 @@ class ReplaySessionHandle:
     )
     trade_dataset_ref: RawAggTradeDatasetRef | None = None
     trade_pin_token: str | None = None
+    bar_paging_manifest: Mapping[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -510,6 +521,20 @@ class ReplayService:
                     continuous_start_ms,
                     gap.end_ms + window.interval_ms,
                 )
+        selected_range = next(
+            (
+                candidate
+                for candidate in entry.eligible_ranges
+                if candidate.contains(window.replay_start_ms)
+            ),
+            None,
+        )
+        continuous_future_end_ms = (
+            window.replay_end_open_ms
+            if selected_range is None
+            else selected_range.last_start_ms
+            + (selected_range.replay_bars - 1) * selected_range.interval_ms
+        )
         return {
             "catalog_epoch": catalog.catalog_epoch,
             "source_fingerprint": entry.source_fingerprint,
@@ -519,6 +544,9 @@ class ReplayService:
             "source_bounds": entry.bounds.to_dict(),
             "selected_start_ms": window.replay_start_ms,
             "continuous_history_start_ms": continuous_start_ms,
+            # Internal selection commitment only.  Blind public projections
+            # never expose this boundary before an authorized reveal.
+            "continuous_future_end_ms": continuous_future_end_ms,
             "interval_ms": window.interval_ms,
             **(
                 {"agg_trade_catalog_epoch": trade_catalog_epoch}
@@ -641,6 +669,151 @@ class ReplayService:
                 replay_bars=replay_bars,
             ),
         )
+
+    @staticmethod
+    def _bar_paging_manifest(
+        config: ReplaySessionConfig,
+        selection: Mapping[str, object] | None,
+        dataset: BarDatasetSnapshot,
+    ) -> dict[str, object] | None:
+        """Bind future BAR pages without treating the eager cache as the end."""
+
+        if config.source_kind is not SourceKind.BAR or selection is None:
+            return None
+        terminal_value = selection.get("continuous_future_end_ms")
+        source_revision = selection.get("source_revision")
+        source_fingerprint = selection.get("source_fingerprint")
+        if terminal_value is None:
+            return None
+        # Legacy/local repositories do not expose an immutable revision that
+        # can safely rebuild future pages.  Keep their existing fixed snapshot
+        # behavior instead of paging from mutable live storage.
+        if source_revision is None:
+            return None
+        try:
+            terminal_open_ms = validate_timestamp_ms(
+                terminal_value,
+                field_name="continuous_future_end_ms",
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training future boundary is invalid",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            ) from exc
+        if terminal_open_ms <= dataset.replay_end_open_ms:
+            return None
+        digests = {
+            "source_revision": source_revision,
+            "source_fingerprint": source_fingerprint,
+        }
+        for field_name, value in digests.items():
+            if (
+                not isinstance(value, str)
+                or len(value) != 71
+                or not value.startswith("sha256:")
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "training future source commitment is incomplete",
+                    details={"reason": "SELECTION_COMMITMENT_INVALID"},
+                )
+            try:
+                int(value[7:], 16)
+            except ValueError as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "training future source commitment is invalid",
+                    details={"reason": "SELECTION_COMMITMENT_INVALID"},
+                ) from exc
+        interval_ms = parse_interval_ms(dataset.interval)
+        if (
+            interval_ms is None
+            or interval_ms <= 0
+            or (terminal_open_ms - dataset.replay_start_ms) % interval_ms != 0
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training future boundary is not aligned",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
+        payload: dict[str, object] = {
+            "schema_version": PAGED_BAR_MANIFEST_SCHEMA_VERSION,
+            "data_epoch": dataset.data_epoch,
+            "source_revision": source_revision,
+            "source_fingerprint": source_fingerprint,
+            "terminal_open_ms": terminal_open_ms,
+            "page_rows": len(dataset.replay_rows),
+        }
+        payload["manifest_hash"] = canonical_sha256(payload)
+        return payload
+
+    @staticmethod
+    def _validated_bar_paging_manifest(
+        payload: Mapping[str, object],
+        dataset: BarDatasetSnapshot,
+    ) -> dict[str, object]:
+        expected = {
+            "schema_version",
+            "data_epoch",
+            "source_revision",
+            "source_fingerprint",
+            "terminal_open_ms",
+            "page_rows",
+            "manifest_hash",
+        }
+        if set(payload) != expected:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR manifest fields are incompatible",
+            )
+        material = dict(payload)
+        manifest_hash = material.pop("manifest_hash")
+        if (
+            material.get("schema_version") != PAGED_BAR_MANIFEST_SCHEMA_VERSION
+            or material.get("data_epoch") != dataset.data_epoch
+            or manifest_hash != canonical_sha256(material)
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR manifest identity is incompatible",
+            )
+        terminal_open_ms = validate_timestamp_ms(
+            material.get("terminal_open_ms"),
+            field_name="terminal_open_ms",
+        )
+        page_rows = material.get("page_rows")
+        if (
+            isinstance(page_rows, bool)
+            or not isinstance(page_rows, int)
+            or page_rows < 1
+            or terminal_open_ms <= dataset.replay_end_open_ms
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR range is invalid",
+            )
+        for field_name in ("source_revision", "source_fingerprint"):
+            value = material.get(field_name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 71
+                or not value.startswith("sha256:")
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted paged BAR source digest is invalid",
+                    details={"field": field_name},
+                )
+            try:
+                int(value[7:], 16)
+            except ValueError as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted paged BAR source digest is invalid",
+                    details={"field": field_name},
+                ) from exc
+        return dict(payload)
 
     async def create_session(
         self,
@@ -780,10 +953,16 @@ class ReplayService:
                     config,
                     actual_dataset,
                 )
+            bar_paging_manifest = self._bar_paging_manifest(
+                config,
+                _internal_training_selection,
+                actual_dataset,
+            )
             return await self._create_from_dataset(
                 config=config,
                 actual_dataset=actual_dataset,
                 trade_dataset_ref=trade_dataset_ref,
+                bar_paging_manifest=bar_paging_manifest,
                 restore_checkpoint=None,
                 forked=False,
                 extension_factory=_extension_factory,
@@ -961,8 +1140,12 @@ class ReplayService:
                 )
 
             if handle.trade_dataset_ref is None:
-                source = BarReplaySource(handle.actor_dataset)
-                total_events = len(handle.actor_dataset.replay_rows)
+                source = self._bar_source(
+                    actor_dataset=handle.actor_dataset,
+                    actual_dataset=handle.actual_dataset,
+                    paging_manifest=handle.bar_paging_manifest,
+                )
+                total_events = source.remaining_count()
                 source_kind = "BAR"
             else:
                 source = TradeReplaySource(
@@ -1257,6 +1440,7 @@ class ReplayService:
                         synthetic_origin_ms=source.synthetic_origin_ms,
                         broker_config=source.broker_config,
                         trade_dataset_ref=source.trade_dataset_ref,
+                        bar_paging_manifest=source.bar_paging_manifest,
                     )
                 finally:
                     self._release_session_capacity_reservation()
@@ -1309,6 +1493,7 @@ class ReplayService:
                         synthetic_origin_ms=source.synthetic_origin_ms,
                         broker_config=source.broker_config,
                         trade_dataset_ref=source.trade_dataset_ref,
+                        bar_paging_manifest=source.bar_paging_manifest,
                         extension_factory=extension_factory,
                     )
                 finally:
@@ -1353,6 +1538,7 @@ class ReplayService:
                         synthetic_origin_ms=source.synthetic_origin_ms,
                         broker_config=source.broker_config,
                         trade_dataset_ref=source.trade_dataset_ref,
+                        bar_paging_manifest=source.bar_paging_manifest,
                         extension_factory=extension_factory,
                     )
                 finally:
@@ -1862,6 +2048,7 @@ class ReplayService:
         config: ReplaySessionConfig,
         actual_dataset: BarDatasetSnapshot,
         trade_dataset_ref: RawAggTradeDatasetRef | None = None,
+        bar_paging_manifest: Mapping[str, object] | None = None,
         restore_checkpoint: bytes | None,
         forked: bool,
         synthetic_origin_ms: int | None = None,
@@ -1890,6 +2077,11 @@ class ReplayService:
             )
             if config.start_policy is StartPolicy.MANUAL:
                 actor_config = replace(config, requested_start_ms=origin)
+        if bar_paging_manifest is not None:
+            bar_paging_manifest = self._validated_bar_paging_manifest(
+                bar_paging_manifest,
+                actual_dataset,
+            )
         broker = broker_config or self._broker_config(actor_config, actor_dataset)
         if config.source_kind is SourceKind.AGG_TRADE and trade_dataset_ref is None:
             raise ReplayDomainError(
@@ -1919,6 +2111,8 @@ class ReplayService:
                 config=actor_config,
                 dataset=actor_dataset,
                 trade_dataset_ref=trade_dataset_ref,
+                bar_paging_manifest=bar_paging_manifest,
+                actual_dataset=actual_dataset,
                 reducer=reducer,
                 restore_checkpoint=restore_checkpoint,
                 recovery_target=None,
@@ -1934,16 +2128,21 @@ class ReplayService:
             persisted_ref, persisted_blob = self._persisted_dataset(
                 actual_dataset,
                 trade_dataset_ref,
+                bar_paging_manifest=bar_paging_manifest,
             )
             extension_write = None
             if extension_factory is not None:
+                extension_ref, extension_blob = self._persisted_dataset(
+                    actual_dataset,
+                    trade_dataset_ref,
+                )
                 extension_write = extension_factory(
                     session_id=session_id,
                     session_state=durable_state,
                     component_state=snapshot["components"],
                     broker_config=broker.to_dict(),
-                    dataset_ref=persisted_ref,
-                    dataset_blob=persisted_blob,
+                    dataset_ref=extension_ref,
+                    dataset_blob=extension_blob,
                     actual_replay_start_ms=actual_dataset.replay_start_ms,
                     actual_replay_end_ms=actual_dataset.replay_end_open_ms,
                 )
@@ -1997,6 +2196,7 @@ class ReplayService:
                 last_activity_ms=created_at_ms,
                 trade_dataset_ref=trade_dataset_ref,
                 trade_pin_token=trade_pin_token,
+                bar_paging_manifest=bar_paging_manifest,
             )
             payload = {
                 "protocol": REPLAY_PROTOCOL,
@@ -2111,6 +2311,7 @@ class ReplayService:
                 "persisted replay dataset must be an object",
             )
         trade_dataset_ref: RawAggTradeDatasetRef | None = None
+        bar_paging_manifest: Mapping[str, object] | None = None
         if config.source_kind is SourceKind.AGG_TRADE:
             expected = {
                 "schema_version",
@@ -2137,7 +2338,28 @@ class ReplayService:
                     "persisted trade dataset epoch does not match session",
                 )
         else:
-            actual_dataset = BarDatasetSnapshot.from_dict(decoded)
+            if decoded.get("schema_version") == PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION:
+                expected = {
+                    "schema_version",
+                    "bar_dataset",
+                    "paging_manifest",
+                }
+                if (
+                    set(decoded) != expected
+                    or not isinstance(decoded.get("bar_dataset"), Mapping)
+                    or not isinstance(decoded.get("paging_manifest"), Mapping)
+                ):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "persisted paged BAR dataset bundle is incompatible",
+                    )
+                actual_dataset = BarDatasetSnapshot.from_dict(decoded["bar_dataset"])
+                bar_paging_manifest = self._validated_bar_paging_manifest(
+                    decoded["paging_manifest"],
+                    actual_dataset,
+                )
+            else:
+                actual_dataset = BarDatasetSnapshot.from_dict(decoded)
             if actual_dataset.data_epoch != record["data_epoch"]:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
@@ -2206,6 +2428,8 @@ class ReplayService:
                     config=config,
                     dataset=actor_dataset,
                     trade_dataset_ref=trade_dataset_ref,
+                    bar_paging_manifest=bar_paging_manifest,
+                    actual_dataset=actual_dataset,
                     reducer=reducer,
                     restore_checkpoint=checkpoint.payload,
                     retained_checkpoints=tuple(
@@ -2253,6 +2477,7 @@ class ReplayService:
                 last_activity_ms=int(record["updated_at_ms"]),
                 trade_dataset_ref=trade_dataset_ref,
                 trade_pin_token=trade_pin_token,
+                bar_paging_manifest=bar_paging_manifest,
             )
             async with self._lifecycle_lock:
                 self._ensure_available(blind_mode=config.blind_mode)
@@ -2311,6 +2536,8 @@ class ReplayService:
         config: ReplaySessionConfig,
         dataset: BarDatasetSnapshot,
         trade_dataset_ref: RawAggTradeDatasetRef | None,
+        bar_paging_manifest: Mapping[str, object] | None,
+        actual_dataset: BarDatasetSnapshot,
         reducer: ConservativeBarBroker,
         restore_checkpoint: bytes | None,
         retained_checkpoints: Sequence[tuple[bytes, bool]] = (),
@@ -2318,8 +2545,12 @@ class ReplayService:
     ) -> ReplaySessionActor:
         if trade_dataset_ref is None:
 
-            def source_factory() -> BarReplaySource:
-                return BarReplaySource(dataset)
+            def source_factory() -> BarReplaySource | PagedBarReplaySource:
+                return self._bar_source(
+                    actor_dataset=dataset,
+                    actual_dataset=actual_dataset,
+                    paging_manifest=bar_paging_manifest,
+                )
         else:
             time_offset_ms = dataset.replay_start_ms - trade_dataset_ref.start_time_ms
 
@@ -2351,6 +2582,142 @@ class ReplayService:
             mutation_hook=self._persist_mutation,
             recovery_target=recovery_target,
         )
+
+    def _bar_source(
+        self,
+        *,
+        actor_dataset: BarDatasetSnapshot,
+        actual_dataset: BarDatasetSnapshot,
+        paging_manifest: Mapping[str, object] | None,
+    ) -> BarReplaySource | PagedBarReplaySource:
+        if paging_manifest is None:
+            return BarReplaySource(actor_dataset)
+        manifest = self._validated_bar_paging_manifest(
+            paging_manifest,
+            actual_dataset,
+        )
+        timeline_delta_ms = (
+            actor_dataset.replay_start_ms - actual_dataset.replay_start_ms
+        )
+        terminal_open_ms = (
+            int(manifest["terminal_open_ms"]) + timeline_delta_ms
+        )
+        source_revision = str(manifest["source_revision"])
+        source_fingerprint = str(manifest["source_fingerprint"])
+        page_rows = int(manifest["page_rows"])
+
+        def load_page(
+            public_start_ms: int,
+            public_end_ms: int,
+            expected_count: int,
+        ) -> tuple[ReplayBar, ...]:
+            return self._load_bar_source_page(
+                actual_dataset=actual_dataset,
+                source_revision=source_revision,
+                timeline_delta_ms=timeline_delta_ms,
+                public_start_ms=public_start_ms,
+                public_end_ms=public_end_ms,
+                expected_count=expected_count,
+            )
+
+        return PagedBarReplaySource(
+            actor_dataset,
+            terminal_open_ms=terminal_open_ms,
+            source_revision=source_revision,
+            source_fingerprint=source_fingerprint,
+            page_rows=page_rows,
+            page_loader=load_page,
+        )
+
+    def _load_bar_source_page(
+        self,
+        *,
+        actual_dataset: BarDatasetSnapshot,
+        source_revision: str,
+        timeline_delta_ms: int,
+        public_start_ms: int,
+        public_end_ms: int,
+        expected_count: int,
+    ) -> tuple[ReplayBar, ...]:
+        actual_start_ms = public_start_ms - timeline_delta_ms
+        actual_end_ms = public_end_ms - timeline_delta_ms
+        query_at_revision = getattr(self._repository, "query_bars_at_revision", None)
+        if not callable(query_at_revision):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "paged BAR source revision is unavailable",
+            )
+        try:
+            raw_rows = query_at_revision(
+                source_revision,
+                actual_dataset.identity.symbol,
+                actual_dataset.interval,
+                start_ms=actual_start_ms,
+                end_ms=actual_end_ms,
+                limit=expected_count,
+                order="ASC",
+                exchange=actual_dataset.identity.exchange,
+                market_type=actual_dataset.identity.market_type,
+            )
+        except ReplayHistoryArchiveError as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "paged BAR archive could not provide the committed source range",
+            ) from exc
+        if not isinstance(raw_rows, list) or len(raw_rows) != expected_count:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_INCOMPLETE,
+                "paged BAR archive range is incomplete",
+                details={
+                    "expected_count": expected_count,
+                    "actual_count": len(raw_rows) if isinstance(raw_rows, list) else None,
+                },
+            )
+        entry = ReplayCatalogEntry(
+            identity=actual_dataset.identity,
+            base_intervals=(actual_dataset.interval,),
+            selected_base_interval=actual_dataset.interval,
+            bounds=SeriesBounds(
+                earliest_open_ms=actual_dataset.provenance.source_earliest_open_ms,
+                latest_source_open_ms=actual_dataset.provenance.source_latest_open_ms,
+                latest_closed_open_ms=(
+                    actual_dataset.provenance.source_latest_closed_open_ms
+                ),
+                total_count=actual_dataset.provenance.row_count,
+            ),
+            gap_summary=EMPTY_GAP_SUMMARY,
+            eligible_ranges=(),
+            quality=DataFidelity.EXACT_BAR_COVERAGE,
+            source_fingerprint=actual_dataset.provenance.source_fingerprint,
+            catalog_epoch=actual_dataset.provenance.catalog_epoch,
+            limitations=(),
+            source_revision=source_revision,
+        )
+        interval_ms = parse_interval_ms(actual_dataset.interval)
+        if interval_ms is None or interval_ms <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "paged BAR interval is unsupported",
+            )
+        rows = []
+        for index, raw in enumerate(raw_rows):
+            expected_open_ms = actual_start_ms + index * interval_ms
+            row = validate_replay_repository_bar(
+                raw,
+                identity=entry.identity,
+                interval=entry.selected_base_interval or actual_dataset.interval,
+                interval_ms=interval_ms,
+                expected_open_ms=expected_open_ms,
+                now_ms=self._now_ms(),
+            )
+            rows.append(
+                replace(
+                    row,
+                    open_time_ms=row.open_time_ms + timeline_delta_ms,
+                    close_time_ms=row.close_time_ms + timeline_delta_ms,
+                )
+            )
+        return tuple(rows)
 
     async def _persist_mutation(self, mutation: ActorMutation) -> None:
         if mutation.command is not None:
@@ -3316,6 +3683,8 @@ class ReplayService:
     def _persisted_dataset(
         dataset: BarDatasetSnapshot,
         trade_dataset_ref: RawAggTradeDatasetRef | None,
+        *,
+        bar_paging_manifest: Mapping[str, object] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         bar_reference = dataset.snapshot_ref().to_dict()
         if dataset.provenance.source_revision is not None:
@@ -3323,8 +3692,22 @@ class ReplayService:
             # replay.v1 checkpoints.  The archive revision is persistence-only:
             # it protects the immutable history objects used by this Run.
             bar_reference["source_revision"] = dataset.provenance.source_revision
-        if trade_dataset_ref is None:
+        if trade_dataset_ref is None and bar_paging_manifest is None:
             return bar_reference, dataset.to_dict()
+        if trade_dataset_ref is None:
+            reference = {
+                "schema_version": PAGED_BAR_SESSION_REF_SCHEMA_VERSION,
+                "data_epoch": dataset.data_epoch,
+                "source_kind": SourceKind.BAR.value,
+                "bar_snapshot_ref": bar_reference,
+                "paging_manifest": dict(bar_paging_manifest or {}),
+            }
+            bundle = {
+                "schema_version": PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION,
+                "bar_dataset": dataset.to_dict(),
+                "paging_manifest": dict(bar_paging_manifest or {}),
+            }
+            return reference, bundle
         reference = {
             "schema_version": TRADE_SESSION_REF_SCHEMA_VERSION,
             "data_epoch": trade_dataset_ref.data_epoch,
@@ -3388,9 +3771,14 @@ class ReplayService:
 
     @staticmethod
     def _actual_history(handle: ReplaySessionHandle) -> dict[str, int]:
+        replay_end_open_ms = handle.actual_dataset.replay_end_open_ms
+        if handle.bar_paging_manifest is not None:
+            replay_end_open_ms = int(
+                handle.bar_paging_manifest["terminal_open_ms"]
+            )
         return {
             "replay_start_ms": handle.actual_dataset.replay_start_ms,
-            "replay_end_open_ms": handle.actual_dataset.replay_end_open_ms,
+            "replay_end_open_ms": replay_end_open_ms,
         }
 
     @staticmethod

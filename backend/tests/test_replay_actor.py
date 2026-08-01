@@ -928,6 +928,50 @@ async def test_heartbeat_queued_across_terminal_controller_release_is_idempotent
 
 
 @_async_test
+async def test_explicit_terminal_controller_heartbeat_renews_lease() -> None:
+    actor = _actor(controller_ttl_seconds=0.15, events=event_fixture(count=5))
+    await actor.start()
+    await actor.submit(
+        _command("terminal-renew-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+    ended = await actor.submit(
+        _command("terminal-renew-end", CommandType.END_SESSION, revision=1)
+    )
+    assert ended.state is SessionState.ENDED
+    assert (await actor.snapshot()).controller_client_id is None
+
+    reacquired = await actor.submit(
+        _command(
+            "terminal-renew-reacquire",
+            CommandType.ACQUIRE_CONTROLLER,
+            revision=2,
+        )
+    )
+    assert reacquired.state is SessionState.ENDED
+    assert (await actor.snapshot()).controller_client_id == "tab-a"
+
+    await asyncio.sleep(0.09)
+    await actor.heartbeat("tab-a")
+    await asyncio.sleep(0.09)
+    renewed = await actor.snapshot()
+    assert renewed.controller_client_id == "tab-a"
+    assert renewed.revision == 3
+    assert actor.diagnostics()["controller_expirations"] == 0
+
+    async def _wait_for_expiration() -> None:
+        while (await actor.snapshot()).controller_client_id is not None:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(_wait_for_expiration(), timeout=0.3)
+    expired = await actor.snapshot()
+    assert expired.state is SessionState.ENDED
+    assert expired.controller_client_id is None
+    assert expired.revision == 4
+    assert actor.diagnostics()["controller_expirations"] == 1
+    await actor.shutdown()
+
+
+@_async_test
 async def test_pause_ack_waits_for_atomic_event_and_queue_overflow_is_diagnostic() -> (
     None
 ):

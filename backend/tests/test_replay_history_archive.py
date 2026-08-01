@@ -12,6 +12,7 @@ import pytest
 from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
 from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.catalog import ReplayCatalog, ReplaySeriesIdentity
+from app.replay.constants import REPLAY_PROTOCOL, CommandType
 from app.replay.dataset import BarDatasetBuilder, BarDatasetSnapshot
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.history_archive import (
@@ -26,6 +27,7 @@ from app.replay.remote_history import (
     publish_remote_history_index,
 )
 from app.replay.service import ReplayService
+from app.replay.models import ReplayCommand
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.models import TrainingRunCreateRequest
 from app.replay.training.errors import TrainingRunError
@@ -508,11 +510,152 @@ async def test_failed_random_preparation_retries_immutable_remote_revision(
         persisted = await service.store.load_dataset(session_id)
         assert persisted is not None
         payload = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
-        snapshot = BarDatasetSnapshot.from_dict(payload)
+        snapshot_payload = payload.get("bar_dataset", payload)
+        assert isinstance(snapshot_payload, dict)
+        snapshot = BarDatasetSnapshot.from_dict(snapshot_payload)
         assert snapshot.provenance.source_revision == first_manifest.catalog_epoch
         assert max(float(row.open) for row in snapshot.rows) < 200
     finally:
         await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(12)),
+                price_base=100,
+                source_key="fixture-paged-forward-cache",
+                digest_character="9",
+            )
+        ],
+    )
+    database = tmp_path / "paged-forward-cache.db"
+
+    async def start_service() -> ReplayService:
+        instance = ReplayService(
+            settings=replace(
+                replay_settings(database),
+                product_v2_enabled=True,
+            ),
+            store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+            repository=ReplayHistoryRepository(root),
+            now_ms=lambda: NOW_MS,
+            session_id_factory=SessionIdFactory("paged-session"),
+            training_run_id_factory=SessionIdFactory("paged-run"),
+            native_intervals=lambda _identity: ("1m",),
+        )
+        await instance.start()
+        return instance
+
+    service = await start_service()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=1,
+            horizon_ms=3 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=True,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Paged forward cache",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "requested_start_ms": START_MS + INTERVAL_MS,
+                "indicator_warmup_bars": 1,
+                "forward_cache_ms": 3 * INTERVAL_MS,
+                "random_seed": None,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "HIDE_ALL",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        session_id = str(created["run"]["adapter_session_id"])
+
+        def command(
+            command_id: str,
+            command_type: CommandType,
+            revision: int,
+            payload: dict[str, object] | None = None,
+        ) -> ReplayCommand:
+            return ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id=command_id,
+                client_instance_id="paged-browser",
+                expected_revision=revision,
+                type=command_type,
+                payload=payload or {},
+            )
+
+        await service.command(
+            session_id,
+            command("acquire-paged", CommandType.ACQUIRE_CONTROLLER, 0),
+        )
+        cache_boundary = await service.command(
+            session_id,
+            command(
+                "step-cache-boundary",
+                CommandType.STEP,
+                1,
+                {"count": 3},
+            ),
+        )
+        assert cache_boundary["state"] == "PAUSED"
+        assert cache_boundary["cursor"]["source_sequence"] == 3
+        assert cache_boundary["cursor"]["at_end"] is False
+        assert cache_boundary["cursor"]["virtual_time_ms"] < START_MS
+        assert str(START_MS + 11 * INTERVAL_MS) not in json.dumps(
+            cache_boundary,
+            sort_keys=True,
+        )
+
+        paged = await service.command(
+            session_id,
+            command("step-paged", CommandType.STEP, 2, {"count": 1}),
+        )
+        assert paged["state"] == "PAUSED"
+        assert paged["cursor"]["source_sequence"] == 4
+        persisted = await service.store.load_dataset(session_id)
+        assert persisted is not None
+        bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
+        assert bundle["schema_version"] == "replay-paged-bar-session-dataset.v1"
+        assert bundle["paging_manifest"]["source_revision"] == manifest.catalog_epoch
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+    recovered = await start_service()
+    try:
+        snapshot = (await recovered.get_session(session_id))["snapshot"]
+        assert snapshot["state"] == "PAUSED"
+        assert snapshot["cursor"]["source_sequence"] == 4
+        assert snapshot["cursor"]["at_end"] is False
+    finally:
+        await recovered.shutdown(step_timeout=1.0)
 
 
 def test_corrupt_live_remote_index_fails_closed_instead_of_using_stale_cache(
@@ -977,7 +1120,13 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
         with sqlite3.connect(database) as connection:
             connection.row_factory = sqlite3.Row
             legacy_ref = dict(persisted["snapshot_ref"])
-            legacy_ref.pop("source_revision")
+            nested_bar_ref = legacy_ref.get("bar_snapshot_ref")
+            if isinstance(nested_bar_ref, dict):
+                nested_bar_ref = dict(nested_bar_ref)
+                nested_bar_ref.pop("source_revision")
+                legacy_ref["bar_snapshot_ref"] = nested_bar_ref
+            else:
+                legacy_ref.pop("source_revision")
             connection.execute(
                 """
                 UPDATE replay_dataset_ref

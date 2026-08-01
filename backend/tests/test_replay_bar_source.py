@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.sources.bar_source import BarReplaySource
+from app.replay.sources.bar_source import BarReplaySource, PagedBarReplaySource
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
     REPLAY_START_MS,
@@ -62,6 +62,75 @@ def test_bar_source_positions_checkpoint_cursor_without_scanning_prefix() -> Non
 
     assert positioned.cursor().source_sequence == 2
     assert positioned.peek() == snapshot.replay_rows[2]
+    assert source.cursor().source_sequence == 0
+
+
+def test_paged_bar_source_treats_initial_snapshot_as_cache_not_terminal() -> None:
+    initial = make_bar_snapshot(warmup_count=1, replay_count=2)
+    complete = make_bar_snapshot(warmup_count=1, replay_count=6)
+    loaded: list[tuple[int, int, int]] = []
+
+    def load_page(start_ms: int, end_ms: int, count: int):
+        loaded.append((start_ms, end_ms, count))
+        offset = (start_ms - REPLAY_START_MS) // INTERVAL_MS
+        return complete.replay_rows[offset : offset + count]
+
+    source = PagedBarReplaySource(
+        initial,
+        terminal_open_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        source_revision="sha256:" + "1" * 64,
+        source_fingerprint="sha256:" + "2" * 64,
+        page_rows=2,
+        page_loader=load_page,
+    )
+
+    assert source.next() == initial.replay_rows[0]
+    assert source.next() == initial.replay_rows[1]
+    assert source.exhausted() is False
+    assert source.cursor().at_end is False
+    assert source.next() == complete.replay_rows[2]
+    assert loaded == [
+        (
+            REPLAY_START_MS + 2 * INTERVAL_MS,
+            REPLAY_START_MS + 3 * INTERVAL_MS,
+            2,
+        )
+    ]
+    assert source.advance_until(REPLAY_START_MS + 6 * INTERVAL_MS - 1) == (
+        complete.replay_rows[3],
+        complete.replay_rows[4],
+        complete.replay_rows[5],
+    )
+    assert source.exhausted() is True
+    assert source.cursor().source_sequence == 6
+
+
+def test_paged_bar_source_restores_late_cursor_without_scanning_prefix() -> None:
+    initial = make_bar_snapshot(replay_count=2)
+    complete = make_bar_snapshot(replay_count=6)
+    loaded: list[int] = []
+
+    def load_page(start_ms: int, _end_ms: int, count: int):
+        loaded.append(start_ms)
+        offset = (start_ms - REPLAY_START_MS) // INTERVAL_MS
+        return complete.replay_rows[offset : offset + count]
+
+    source = PagedBarReplaySource(
+        initial,
+        terminal_open_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        source_revision="sha256:" + "3" * 64,
+        source_fingerprint="sha256:" + "4" * 64,
+        page_rows=2,
+        page_loader=load_page,
+    )
+    positioned = source.fork_at_sequence(
+        4,
+        last_event_time_ms=REPLAY_START_MS + 4 * INTERVAL_MS - 1,
+    )
+
+    assert loaded == []
+    assert positioned.peek() == complete.replay_rows[4]
+    assert loaded == [REPLAY_START_MS + 4 * INTERVAL_MS]
     assert source.cursor().source_sequence == 0
 
 

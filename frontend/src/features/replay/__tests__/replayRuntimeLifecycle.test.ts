@@ -158,6 +158,33 @@ test("HTTP session snapshot validates only; first published chart truth is the W
   assert.equal(lifecycle.store.seriesStore.barCount, 1);
 });
 
+test("an explicitly reacquired terminal controller remains heartbeat-eligible", async (context) => {
+  const harness = streamHarness();
+  const lifecycle = new ReplayRuntimeLifecycle({
+    entry: { kind: "session", sessionId: "session-0001" },
+    clientInstanceId: "browser-0001",
+    api: {
+      async capabilities() { return parseReplayCapabilities(enabledCapabilities()); },
+      async getSession() { return parseReplaySessionResponse(replaySessionResponse()); },
+    },
+    streamFactory: (options) => harness.factory(options),
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+
+  lifecycle.store.beginGeneration(1, {
+    resetAuthoritativeState: true,
+    connectionState: "connected",
+  });
+  lifecycle.store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse({
+    controllerClientId: "browser-0001",
+    state: "ENDED",
+  })).snapshot);
+
+  assert.equal(harness.options[0]?.shouldHeartbeat?.(), true);
+});
+
 test("a right-edge gesture restores the latest replay window after deep left history", async (context) => {
   const harness = streamHarness();
   const store = new ReplayStore({

@@ -231,6 +231,7 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
   const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
   const historyRuntime = source("src/features/replay/useReplayHistoryRuntime.ts");
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
   assert.doesNotMatch(
     workspace,
     /loading=\{review === null\s*&&\s*\([^)]*history\.loading/s,
@@ -240,6 +241,8 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   assert.match(runtime, /pendingSourceDeltas\.push\(delta\)/);
   assert.match(historyRuntime, /replayHistoryInitialBeforeMs/);
   assert.match(historyRuntime, /provider\.historyEpoch === null/);
+  assert.match(historyRuntime, /historyState\.key === historyKey/);
+  assert.match(historyRuntime, /latest\.generation !== runtimeGeneration/);
   assert.match(
     historyRuntime,
     /replayHistoryStoreBeforeMs\(\s*viewer\.seriesStore,\s*\)/s,
@@ -252,6 +255,11 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   );
   assert.match(historyRuntime, /expectedBeforeMs:\s*beforeMs/);
   assert.doesNotMatch(historyRuntime, /oldestLoadedTime/);
+  assert.match(
+    workspace,
+    /history\.historyEpoch !== null && !history\.hasMore && !history\.loading/,
+  );
+  assert.match(controls, /训练已结束；获取复盘控制权后可揭示真实区间或添加日志/);
 });
 
 test("viewer projection coalesces source bursts to one rebuild per browser frame", () => {
@@ -351,4 +359,12 @@ test("Phase 10 release surface exposes soak telemetry and an accessible danger d
   assert.match(integrity, /downloadReplayTrainingReport\(report, "csv"\)/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(styles, /\.replay-loading-spinner \{ animation: none !important; \}/);
+});
+
+test("forward cache is not rendered as the total training progress", () => {
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+
+  assert.match(controls, /effectiveState === "ENDED" \? 1 : null/);
+  assert.match(controls, /progress === null \? "持续训练"/);
+  assert.match(controls, /progress === null \? \{\} : \{ value: progress \}/);
 });

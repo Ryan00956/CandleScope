@@ -79,13 +79,27 @@ function closeValue(row: KlineBar): number | null {
 function revealedRows(
   rows: readonly KlineBar[],
   cursorMs: number | null,
+  intervalSeconds: number | null = null,
 ): KlineBar[] {
-  return cursorMs === null
+  const revealed = cursorMs === null
     ? []
     : rows.filter((row) => (
         Number(row.time) * 1_000 <= cursorMs
         && closeValue(row) !== null
       ));
+  if (
+    intervalSeconds === null
+    || !Number.isSafeInteger(intervalSeconds)
+    || intervalSeconds < 1
+  ) return revealed;
+  let segmentStart = 0;
+  for (let index = 1; index < revealed.length; index += 1) {
+    if (
+      Number(revealed[index]?.time)
+      !== Number(revealed[index - 1]?.time) + intervalSeconds
+    ) segmentStart = index;
+  }
+  return revealed.slice(segmentStart);
 }
 
 function line(
@@ -129,11 +143,15 @@ export function buildReplaySmaLine(
   rows: readonly KlineBar[],
   cursorMs: number | null,
   period = 20,
+  intervalSeconds: number | null = null,
 ): IndicatorLine {
   return line(
     `replay-local-sma-${period}`,
     `SMA ${period} · revealed only`,
-    movingAveragePoints(revealedRows(rows, cursorMs), period),
+    movingAveragePoints(
+      revealedRows(rows, cursorMs, intervalSeconds),
+      period,
+    ),
     { color: MAIN_COLORS.sma!, overlay: true, pane: "main" },
   );
 }
@@ -426,13 +444,24 @@ export function useReplayIndicatorRuntime(
   const projection = useMemo(() => {
     void seriesRevision;
     const cursorMs = storeSnapshot.virtualTimeMs;
-    const rows = revealedRows(seriesStore.snapshot(), cursorMs);
+    const rows = revealedRows(
+      seriesStore.snapshot(),
+      cursorMs,
+      seriesStore.intervalSeconds,
+    );
     const visible = preferences.indicators.filter((item) => item.visible);
     const visibleById = new Map(visible.map((item) => [item.id, item]));
     const mainOverlayLines: IndicatorLine[] = [];
     const subPanes: IndicatorSubPane[] = [];
     const sma = visibleById.get("sma");
-    if (sma) mainOverlayLines.push(buildReplaySmaLine(rows, cursorMs, sma.period));
+    if (sma) {
+      mainOverlayLines.push(buildReplaySmaLine(
+        rows,
+        cursorMs,
+        sma.period,
+        seriesStore.intervalSeconds,
+      ));
+    }
     const ema = visibleById.get("ema");
     if (ema) {
       mainOverlayLines.push(line(

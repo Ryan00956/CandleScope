@@ -31,9 +31,16 @@ export interface ReplayHistoryPolicy {
   readonly policy_hash: ReplayDigest;
 }
 
+export interface ReplayHistoryExcludedRange {
+  readonly start_ms: number;
+  readonly end_ms: number;
+  readonly reason: "source_gap" | "source_gap_affected_display_bucket";
+  readonly source_reason: string;
+}
+
 export interface ReplayHistoryPage {
   readonly protocol: "replay.v2";
-  readonly schema_version: "replay.history.v2";
+  readonly schema_version: "replay.history.v3";
   readonly run_id: string;
   readonly session_id: string;
   readonly track_id: string;
@@ -44,6 +51,7 @@ export interface ReplayHistoryPage {
   readonly history_policy: ReplayHistoryPolicy;
   readonly revealed_boundary_ms: number;
   readonly bars: readonly ReplayDisplayBar[];
+  readonly excluded_ranges: readonly ReplayHistoryExcludedRange[];
   readonly next_before_ms: number;
   readonly has_more: boolean;
 }
@@ -259,6 +267,43 @@ function parseBar(value: unknown, path: string): ReplayDisplayBar {
   };
 }
 
+function parseExcludedRange(
+  value: unknown,
+  path: string,
+): ReplayHistoryExcludedRange {
+  const source = record(value, path);
+  exact(source, ["start_ms", "end_ms", "reason", "source_reason"], path);
+  const startMs = integer(source.start_ms, `${path}.start_ms`);
+  const endMs = integer(source.end_ms, `${path}.end_ms`);
+  if (endMs < startMs) fail(path, "must contain an ordered inclusive range");
+  const reason = string(source.reason, `${path}.reason`);
+  if (reason !== "source_gap" && reason !== "source_gap_affected_display_bucket") {
+    fail(`${path}.reason`, "is unsupported");
+  }
+  return {
+    start_ms: startMs,
+    end_ms: endMs,
+    reason,
+    source_reason: string(source.source_reason, `${path}.source_reason`),
+  };
+}
+
+function exclusionsCover(
+  ranges: readonly ReplayHistoryExcludedRange[],
+  startMs: number,
+  endMs: number,
+): boolean {
+  if (startMs > endMs) return true;
+  let cursorMs = startMs;
+  for (const range of ranges) {
+    if (range.end_ms < cursorMs) continue;
+    if (range.start_ms > cursorMs) return false;
+    cursorMs = Math.max(cursorMs, range.end_ms + 1);
+    if (cursorMs > endMs) return true;
+  }
+  return false;
+}
+
 function sameIdentity(left: ReplayHistoryIdentity, right: ReplayHistoryIdentity): boolean {
   return left.exchange === right.exchange
     && left.market_type === right.market_type
@@ -288,10 +333,10 @@ function parsePage(
   exact(source, [
     "protocol", "schema_version", "run_id", "session_id", "track_id", "identity", "data_epoch",
     "history_epoch", "history_boundary_ms", "history_policy", "revealed_boundary_ms",
-    "bars", "next_before_ms", "has_more",
+    "bars", "excluded_ranges", "next_before_ms", "has_more",
   ], "history");
   if (source.protocol !== "replay.v2") fail("history.protocol", "must be replay.v2");
-  if (source.schema_version !== "replay.history.v2") fail("history.schema_version", "is unsupported");
+  if (source.schema_version !== "replay.history.v3") fail("history.schema_version", "is unsupported");
   const parsedSession = string(source.session_id, "history.session_id");
   const parsedTrack = string(source.track_id, "history.track_id");
   if (parsedSession !== sessionId || parsedTrack !== trackId) fail("history", "session or track identity drifted");
@@ -308,14 +353,28 @@ function parsePage(
   const historyBoundary = integer(source.history_boundary_ms, "history.history_boundary_ms");
   if (historyBoundary > boundary) fail("history.history_boundary_ms", "exceeds the revealed boundary");
   const historyPolicy = parseHistoryPolicy(source.history_policy, "history.history_policy");
+  if (!Array.isArray(source.excluded_ranges)) fail("history.excluded_ranges", "must be an array");
+  const excludedRanges = source.excluded_ranges.map(
+    (item, index) => parseExcludedRange(item, `history.excluded_ranges[${index}]`),
+  );
+  for (const [index, range] of excludedRanges.entries()) {
+    if (range.start_ms < historyBoundary || range.end_ms >= request.beforeMs) {
+      fail(`history.excluded_ranges[${index}]`, "is outside the requested history page");
+    }
+    const previous = excludedRanges[index - 1];
+    if (previous !== undefined && range.start_ms <= previous.end_ms) {
+      fail(`history.excluded_ranges[${index}]`, "overlaps a previous excluded range");
+    }
+  }
   if (!Array.isArray(source.bars)) fail("history.bars", "must be an array");
   const bars = source.bars.map((item, index) => parseBar(item, `history.bars[${index}]`));
   let previousOpen = -1;
   let previousClose = -1;
   for (const [index, item] of bars.entries()) {
     if (item.open_time_ms <= previousOpen) fail(`history.bars[${index}]`, "must be strictly increasing");
-    if (previousClose >= 0 && item.open_time_ms !== previousClose + 1) {
-      fail(`history.bars[${index}]`, "must be contiguous with the previous history bar");
+    if (previousClose >= 0 && item.open_time_ms !== previousClose + 1
+      && !exclusionsCover(excludedRanges, previousClose + 1, item.open_time_ms - 1)) {
+      fail(`history.bars[${index}]`, "contains an undeclared gap after the previous history bar");
     }
     if (item.open_time_ms >= request.beforeMs) fail(`history.bars[${index}]`, "is outside the before-page");
     if (item.open_time_ms < historyBoundary) {
@@ -323,6 +382,11 @@ function parsePage(
     }
     if (item.close_time_ms > boundary || item.last_base_open_ms > boundary) {
       fail(`history.bars[${index}]`, "exceeds the revealed boundary");
+    }
+    if (excludedRanges.some((range) => (
+      range.start_ms <= item.close_time_ms && range.end_ms >= item.open_time_ms
+    ))) {
+      fail(`history.bars[${index}]`, "overlaps an excluded source range");
     }
     previousOpen = item.open_time_ms;
     previousClose = item.close_time_ms;
@@ -333,7 +397,7 @@ function parsePage(
   }
   return {
     protocol: "replay.v2",
-    schema_version: "replay.history.v2",
+    schema_version: "replay.history.v3",
     run_id: string(source.run_id, "history.run_id"),
     session_id: parsedSession,
     track_id: parsedTrack,
@@ -344,6 +408,7 @@ function parsePage(
     history_policy: historyPolicy,
     revealed_boundary_ms: boundary,
     bars,
+    excluded_ranges: excludedRanges,
     next_before_ms: nextBefore,
     has_more: boolean(source.has_more, "history.has_more"),
   };
@@ -453,8 +518,16 @@ export function applyReplayHistoryPage(
       throw new ReplayHistoryProtocolError("history cursor must be a non-negative safe integer");
     }
     const newestHistoryBar = page.bars.at(-1);
+    const connectionStartMs = newestHistoryBar === undefined
+      ? expectedBeforeMs
+      : newestHistoryBar.close_time_ms + 1;
     if (newestHistoryBar !== undefined
-      && newestHistoryBar.close_time_ms + 1 !== expectedBeforeMs) {
+      && connectionStartMs !== expectedBeforeMs
+      && (connectionStartMs > expectedBeforeMs || !exclusionsCover(
+        page.excluded_ranges,
+        connectionStartMs,
+        expectedBeforeMs - 1,
+      ))) {
       throw new ReplayHistoryProtocolError(
         "history page does not connect to the authoritative replay source window",
       );
@@ -470,5 +543,6 @@ export function applyReplayHistoryPage(
     dataEpoch: page.data_epoch,
     historyEpoch: page.history_epoch,
     revealedBoundaryMs: page.revealed_boundary_ms,
+    excludedRangeCount: page.excluded_ranges.length,
   });
 }

@@ -832,7 +832,8 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
         )
         assert page.status_code == 200
         payload = page.json()
-        assert payload["schema_version"] == "replay.history.v2"
+        assert payload["schema_version"] == "replay.history.v3"
+        assert payload["excluded_ranges"] == []
         assert payload["history_boundary_ms"] <= payload["revealed_boundary_ms"]
         assert (
             payload["history_policy"]["schema_version"]

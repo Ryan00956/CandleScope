@@ -247,6 +247,21 @@ async def test_phase14_history_policy_resolves_roles_gaps_and_budget(
         assert all_available.visible_history_rows == 4
         assert all_available.effective_warmup_bars == 2
         assert all_available.actual_visible_history_start_ms == START_MS
+        gapped_all_available = resolve_history_policy(
+            await _request(
+                service,
+                visible_mode="ALL_AVAILABLE",
+                visible_duration_ms=None,
+            ),
+            {
+                **selection,
+                "continuous_history_start_ms": START_MS + 2 * INTERVAL_MS,
+                "source_bounds": {"earliest_open_ms": START_MS},
+            },
+            max_dataset_rows=10,
+        )
+        assert gapped_all_available.actual_visible_history_start_ms == START_MS
+        assert gapped_all_available.visible_history_rows == 4
         lazy_all_available = resolve_history_policy(
             await _request(
                 service,
@@ -519,7 +534,7 @@ async def test_phase14_display_context_uses_native_interval_without_expanding_ex
         await service.shutdown()
 
 
-async def test_phase14_native_display_context_stops_at_first_real_gap(
+async def test_phase14_native_display_context_crosses_declared_real_gap(
     tmp_path: Path,
 ) -> None:
     service = await _service(tmp_path / "native-display-gap.db")
@@ -565,13 +580,15 @@ async def test_phase14_native_display_context_stops_at_first_real_gap(
 
         assert [bar["open_time_ms"] for bar in page["bars"]] == [
             public_start_ms - offset * 3_600_000
-            for offset in range(5, 0, -1)
+            for offset in (*range(11, 6, -1), *range(5, 0, -1))
         ]
-        assert page["has_more"] is False
-        assert all(
-            right["open_time_ms"] == left["close_time_ms"] + 1
-            for left, right in zip(page["bars"], page["bars"][1:])
-        )
+        assert page["has_more"] is True
+        assert page["excluded_ranges"] == [{
+            "start_ms": public_start_ms - 6 * 3_600_000,
+            "end_ms": public_start_ms - 5 * 3_600_000 - 1,
+            "reason": "source_gap",
+            "source_reason": "fixture_gap",
+        }]
     finally:
         await service.shutdown()
 

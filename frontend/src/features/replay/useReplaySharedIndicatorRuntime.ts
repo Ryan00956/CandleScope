@@ -183,6 +183,7 @@ export function selectRevealedIndicatorBars(
   if (cursorMs === null || !Number.isFinite(cursorMs)) return [];
   const prefix: KlineBar[] = [];
   let previousTime = -Infinity;
+  let previousCloseTimeMs: number | null = null;
   for (const [index, bar] of rows.entries()) {
     const time = Number(bar.time);
     const openTimeMs = time * 1_000;
@@ -213,8 +214,18 @@ export function selectRevealedIndicatorBars(
     } else if (index !== rows.length - 1 || closeTimeMs <= cursorMs) {
       break;
     }
+    if (
+      previousCloseTimeMs !== null
+      && openTimeMs !== previousCloseTimeMs + 1
+    ) {
+      // Indicators are stateful. A declared exchange/source gap starts a new
+      // calculation segment; carrying EMA/RSI/Pine state across it would be a
+      // fabricated observation even though the chart correctly leaves a hole.
+      prefix.length = 0;
+    }
     prefix.push(bar);
     previousTime = time;
+    previousCloseTimeMs = closeTimeMs;
   }
   return prefix;
 }

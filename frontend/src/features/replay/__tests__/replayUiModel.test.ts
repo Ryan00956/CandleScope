@@ -129,6 +129,23 @@ test("replay local indicator drops every source row after the public cursor", ()
   assert.equal(line.data?.at(-1)?.time, (BASE_TIME_MS / 1_000) + 21 * 60);
 });
 
+test("replay local indicator restarts its window after a history gap", () => {
+  const baseSeconds = BASE_TIME_MS / 1_000;
+  const rows: KlineBar[] = [0, 60, 180, 240].map((offset, index) => ({
+    time: (baseSeconds + offset) as EpochSeconds,
+    close: 100 + index,
+  }));
+  const line = buildReplaySmaLine(
+    rows,
+    BASE_TIME_MS + 240_000,
+    2,
+    60,
+  );
+
+  assert.deepEqual(line.data?.map((point) => point.time), [baseSeconds + 240]);
+  assert.equal(line.data?.[0]?.value, 102.5);
+});
+
 test("report exports bind fidelity, warnings and hashes without actual history before reveal", () => {
   const response = {
     protocol: "replay.v1" as const,

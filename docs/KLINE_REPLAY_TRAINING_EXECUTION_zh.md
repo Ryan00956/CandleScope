@@ -1473,7 +1473,7 @@ data-policy 表与 history v2 都是 additive replay.v2 所有物；training sch
 
 ### 产品纠偏（2026-07-30）
 
-用户确认训练图表应与实时图表具有相同的左侧浏览体验：限制未来的是 `VirtualTime`，不是 indicator warmup。此前“`ALL_AVAILABLE` 把全部左侧历史扩大进 immutable execution snapshot”的 Phase 14 解释被废止。新建 Run 默认 `ALL_AVAILABLE`，创建时只把连续历史起点写入 data policy；执行 snapshot/segment 仍只包含 indicator warmup 与 forward cache。图表向左时由 `replay.history.v2` 经 replay service 从本地只读 K 线仓库分段读取，逐行校验 identity、闭合状态、基础周期对齐和连续性，盲化 Run 保持 synthetic timeline；任何页面读取都不推进 cursor、账户或领域 state，也不允许越过 `VirtualTime`。旧 `DURATION` Run 保持原固定边界，避免静默改写既有训练证据。
+用户确认训练图表应与实时图表具有相同的左侧浏览体验：限制未来的是 `VirtualTime`，不是 indicator warmup。此前“`ALL_AVAILABLE` 把全部左侧历史扩大进 immutable execution snapshot”的 Phase 14 解释被废止。新建 Run 默认 `ALL_AVAILABLE`；执行 snapshot/segment 仍只包含 indicator warmup 与 forward cache。图表向左时由 `replay.history.v3` 经 replay service 从本地只读 K 线仓库分段读取，边界绑定 checksum revision 的 listing boundary。归档 gap index 明确声明的停牌、维护或无 K 线区间通过 `excluded_ranges` 保持为空，并允许继续读取缺口之前的真实 K 线；不补零、不伪造 K 线，未声明缺口仍失败关闭，指标状态在缺口处重置。盲化 Run 只返回 synthetic timeline；任何页面读取都不推进 cursor、账户或领域 state，也不允许越过 `VirtualTime`。旧 `DURATION` Run 保持原固定边界，避免静默改写既有训练证据。
 
 ---
 

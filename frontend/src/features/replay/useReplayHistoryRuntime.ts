@@ -175,11 +175,14 @@ export function useReplayHistoryRuntime(
         contextHistory: true,
       });
       const nextHasMore = page.has_more && page.bars.length > 0;
+      const gapNotice = page.excluded_ranges.length > 0
+        ? `已跨过 ${page.excluded_ranges.length} 段交易所无 K 线区间；图表保留空白，没有补造 K 线。`
+        : null;
       const nextNotice = !page.has_more
         ? (page.history_policy.visible_history_lookback.mode === "DURATION"
           ? `已到旧 Run 的固定历史边界：开始前 ${page.history_policy.visible_history_rows} 根 ${config?.base_interval ?? "基础周期"} K 线。新建 Run 默认可按需翻到数据起点。`
-          : "已到当前观看周期可用连续历史的起点。")
-        : null;
+          : "已到该归档校验过的数据起点；中间的停牌或维护缺口均保持为空白。")
+        : gapNotice;
       setHistoryState((current) => current.key === historyKey ? {
         ...current,
         hasMore: nextHasMore,

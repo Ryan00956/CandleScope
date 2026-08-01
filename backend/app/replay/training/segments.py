@@ -692,6 +692,22 @@ def resolve_history_policy(
         selection.get("continuous_history_start_ms"),
         "selection continuous_history_start_ms",
     )
+    source_bounds = selection.get("source_bounds")
+    source_start_ms = (
+        _integer(
+            source_bounds.get("earliest_open_ms"),
+            "selection source_bounds.earliest_open_ms",
+        )
+        if isinstance(source_bounds, Mapping)
+        and source_bounds.get("earliest_open_ms") is not None
+        else continuous_start_ms
+    )
+    if source_start_ms > continuous_start_ms or source_start_ms > selected_start_ms:
+        raise TrainingRunError(
+            "VISIBLE_HISTORY_COVERAGE_UNAVAILABLE",
+            "all-available source boundary is inconsistent with the selected start",
+            status_code=409,
+        )
     visible = request.visible_history_lookback
     assert visible is not None
     if visible.mode is VisibleHistoryMode.DURATION:
@@ -720,7 +736,10 @@ def resolve_history_policy(
             )
         effective = max(request.indicator_warmup_bars, visible_rows)
     else:
-        visible_start_ms = continuous_start_ms
+        # ALL_AVAILABLE is a chart-navigation contract.  Source gaps before the
+        # selected execution segment remain explicit empty ranges; they must not
+        # silently turn the latest continuous segment into the listing boundary.
+        visible_start_ms = source_start_ms
         distance = selected_start_ms - visible_start_ms
         if distance < 0 or distance % interval_ms:
             raise TrainingRunError(

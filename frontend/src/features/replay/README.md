@@ -33,10 +33,14 @@ embedded/non-rebuildable archives are never candidates.
 
 New training drafts default to `ALL_AVAILABLE`. Indicator warmup remains an
 execution/indicator concern only; dragging the chart left requests bounded
-`replay.history.v2` pages through the replay service until the run-bound
-continuous source boundary. Existing `DURATION` runs retain their fixed left
-edge. Neither mode may read a live browser feed or expose bars to the right of
-the durable replay cursor. The chart keeps a bounded in-memory window: if deep
+`replay.history.v3` pages through the replay service until the revision-bound
+listing boundary. Checksum-indexed source gaps are returned as explicit
+`excluded_ranges`; the chart may continue before them but never fills them with
+synthetic candles. Indicator state restarts at each gap, while the execution
+snapshot remains confined to its original continuous segment. Existing
+`DURATION` runs retain their fixed left edge. Neither mode may read a live
+browser feed or expose bars to the right of the durable replay cursor. The chart
+keeps a bounded in-memory window: if deep
 left paging evicts newer rows, a right-edge gesture atomically restores the
 latest replay-authoritative window and resets paging so the same history can
 be traversed again without touching live market data.

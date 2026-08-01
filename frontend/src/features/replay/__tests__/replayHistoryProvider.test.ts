@@ -52,7 +52,7 @@ function bar(openTimeMs: number, intervalMs = 60_000) {
 function response(overrides: Record<string, unknown> = {}) {
   return {
     protocol: "replay.v2",
-    schema_version: "replay.history.v2",
+    schema_version: "replay.history.v3",
     run_id: "run-1",
     session_id: "adapter-1",
     track_id: "track-1",
@@ -75,6 +75,7 @@ function response(overrides: Record<string, unknown> = {}) {
     },
     revealed_boundary_ms: BOUNDARY_MS,
     bars: [bar(1_800_000_120_000), bar(1_800_000_180_000)],
+    excluded_ranges: [],
     next_before_ms: 1_800_000_120_000,
     has_more: true,
     ...overrides,
@@ -139,6 +140,43 @@ test("history parser rejects source, epoch, unknown-field, and lookahead drift",
       ReplayHistoryProtocolError,
     );
   }
+});
+
+test("declared exchange gaps remain empty while history continues before them", async () => {
+  const payload = response({
+    bars: [bar(1_800_000_120_000), bar(1_800_000_240_000)],
+    excluded_ranges: [{
+      start_ms: 1_800_000_180_000,
+      end_ms: 1_800_000_239_999,
+      reason: "source_gap",
+      source_reason: "replay_archive_gap",
+    }],
+    next_before_ms: 1_800_000_120_000,
+  });
+  const runtime = provider(async () => new Response(JSON.stringify(payload), { status: 200 }));
+  const page = await runtime.loadBefore({
+    beforeMs: BOUNDARY_MS,
+    revealedBoundaryMs: BOUNDARY_MS,
+    dataEpoch: DATA_EPOCH,
+    limit: 250,
+  });
+  const store = new SeriesWindowStore({ maxBars: 100 });
+  store.replace([
+    { time: 1_800_000_300, open: 103, high: 104, low: 102, close: 103.5, volume: 8 },
+  ]);
+
+  applyReplayHistoryPage(store, page, {
+    expectedBeforeMs: BOUNDARY_MS,
+    contextHistory: true,
+  });
+
+  assert.deepEqual(store.snapshot().map((row) => Number(row.time)), [
+    1_800_000_120,
+    1_800_000_240,
+    1_800_000_300,
+  ]);
+  assert.equal(store.snapshot().some((row) => Number(row.time) === 1_800_000_180), false);
+  assert.deepEqual(page.excluded_ranges, payload.excluded_ranges);
 });
 
 test("all-available policy may expose more rows than the execution warmup", async () => {

@@ -1179,3 +1179,113 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
         assert max(float(item["open"]) for item in bars) < 200
     finally:
         await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_all_available_history_crosses_a_revision_declared_archive_gap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history-gap"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [offset for offset in range(30) if offset not in range(5, 10)],
+                price_base=100,
+                source_key="fixture-maintenance-gap",
+                digest_character="9",
+            )
+        ],
+    )
+    database = tmp_path / "replay-gap.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=root,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("gap-session"),
+        training_run_id_factory=SessionIdFactory("gap-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Archive maintenance gap history",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "5m",
+                "requested_start_ms": START_MS + 20 * INTERVAL_MS,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": 42,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        training = service.training
+        assert training is not None
+        await training.create_run(request)
+        session = await service.get_session("gap-session-1")
+        snapshot = session["snapshot"]
+        page = await training.history_page(
+            "gap-session-1",
+            track_id="track-1",
+            before_ms=START_MS + 10 * INTERVAL_MS,
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=2,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="5m",
+        )
+
+        assert page["schema_version"] == "replay.history.v3"
+        assert page["history_boundary_ms"] == START_MS
+        assert [bar["open_time_ms"] for bar in page["bars"]] == [START_MS]
+        assert page["excluded_ranges"] == [
+            {
+                "start_ms": START_MS + 5 * INTERVAL_MS,
+                "end_ms": START_MS + 10 * INTERVAL_MS - 1,
+                "reason": "source_gap_affected_display_bucket",
+                "source_reason": "replay_archive_gap",
+            }
+        ]
+        assert page["has_more"] is False
+
+        snapshot_after = (await service.get_session("gap-session-1"))["snapshot"]
+        assert snapshot_after["cursor"] == snapshot["cursor"]
+        assert snapshot_after["data_epoch"] == snapshot["data_epoch"]
+    finally:
+        await service.shutdown(step_timeout=1.0)

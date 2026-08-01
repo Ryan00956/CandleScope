@@ -144,6 +144,17 @@ test("replay indicator input includes one authoritative forming bar at the revea
   ], 1_120_000), []);
 });
 
+test("replay indicator input resets at a chart history gap", () => {
+  const selected = selectRevealedIndicatorBars([
+    bar(1_000, true),
+    bar(1_060, true),
+    bar(1_180, true),
+    bar(1_240, true),
+  ], 1_300_000);
+
+  assert.deepEqual(selected.map((item) => item.time), [1_180, 1_240]);
+});
+
 test("provided-bars policy forces local safe execution and rejects unknown runtimes", () => {
   const builtin = prepareProvidedBarsIndicator({
     id: "ma",

@@ -179,7 +179,15 @@ export class ReplayStore {
 
   applyAtomicSnapshot(generation: number, snapshot: ReplaySessionSnapshot): boolean {
     if (generation !== this.generation) return false;
-    replaceReplaySeriesFromSnapshot(this.seriesStore, snapshot);
+    const preserveRevealedPrefix = this.hasAuthoritativeSnapshot
+      && this.sessionId === snapshot.session_id
+      && this.dataEpoch === snapshot.data_epoch
+      && snapshot.cursor.source_sequence >= this.sourceSequence
+      && (this.virtualTimeMs === null
+        || snapshot.cursor.virtual_time_ms >= this.virtualTimeMs);
+    replaceReplaySeriesFromSnapshot(this.seriesStore, snapshot, {
+      preserveRevealedPrefix,
+    });
     this.hasAuthoritativeSnapshot = true;
     this.connectionState = "connected";
     this.sessionId = snapshot.session_id;

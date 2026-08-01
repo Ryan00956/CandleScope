@@ -7,6 +7,7 @@ import {
   ReplayHistoryProtocolError,
   applyReplayHistoryPage,
   replayHistoryInitialBeforeMs,
+  replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
 } from "../replayHistoryProvider.js";
 import type {
@@ -251,6 +252,116 @@ test("initial display history starts at the replay seam instead of an incomplete
   );
   assert.equal(replayHistoryInitialBeforeMs(null, "1h"), null);
   assert.equal(replayHistoryInitialBeforeMs(946_684_800_000, "invalid"), null);
+});
+
+test("revealed history repair replaces an elapsed partial left bucket without reading the future", () => {
+  const dayMs = 86_400_000;
+  const replayStartMs = 946_684_800_000;
+  const store = new SeriesWindowStore({ intervalSeconds: dayMs / 1_000 });
+  store.replace([
+    {
+      ...bar(replayStartMs - dayMs, dayMs),
+      time: (replayStartMs - dayMs) / 1_000,
+      replayCloseTimeMs: replayStartMs - 1,
+      replayClosed: true,
+      replayContextHistory: true,
+    },
+    {
+      ...bar(replayStartMs + 3 * dayMs, dayMs),
+      time: (replayStartMs + 3 * dayMs) / 1_000,
+      replayCloseTimeMs: replayStartMs + 4 * dayMs - 1,
+      replayClosed: false,
+    },
+    {
+      ...bar(replayStartMs + 4 * dayMs, dayMs),
+      time: (replayStartMs + 4 * dayMs) / 1_000,
+      replayCloseTimeMs: replayStartMs + 5 * dayMs - 1,
+      replayClosed: true,
+    },
+  ]);
+
+  assert.equal(
+    replayHistoryRevealRepairBeforeMs(
+      store,
+      replayStartMs,
+      replayStartMs + 5 * dayMs - 1,
+      "1d",
+    ),
+    replayStartMs + 4 * dayMs,
+  );
+
+  const forming = new SeriesWindowStore({ intervalSeconds: dayMs / 1_000 });
+  forming.replace([{
+    ...bar(replayStartMs, dayMs),
+    time: replayStartMs / 1_000,
+    replayCloseTimeMs: replayStartMs + dayMs - 1,
+    replayClosed: false,
+  }]);
+  assert.equal(
+    replayHistoryRevealRepairBeforeMs(
+      forming,
+      replayStartMs,
+      replayStartMs + 60_000,
+      "1d",
+    ),
+    null,
+  );
+});
+
+test("revealed history repair detects a missing replay prefix and stops after continuity is restored", () => {
+  const hourMs = 3_600_000;
+  const replayStartMs = 946_684_800_000;
+  const store = new SeriesWindowStore({ intervalSeconds: hourMs / 1_000 });
+  store.replace([
+    {
+      ...bar(replayStartMs - hourMs, hourMs),
+      time: (replayStartMs - hourMs) / 1_000,
+      replayCloseTimeMs: replayStartMs - 1,
+      replayClosed: true,
+      replayContextHistory: true,
+    },
+    {
+      ...bar(replayStartMs + 2 * hourMs, hourMs),
+      time: (replayStartMs + 2 * hourMs) / 1_000,
+      replayCloseTimeMs: replayStartMs + 3 * hourMs - 1,
+      replayClosed: true,
+    },
+  ]);
+  assert.equal(
+    replayHistoryRevealRepairBeforeMs(
+      store,
+      replayStartMs,
+      replayStartMs + 3 * hourMs - 1,
+      "1h",
+    ),
+    replayStartMs + 2 * hourMs,
+  );
+
+  store.applyRange([
+    {
+      ...bar(replayStartMs, hourMs),
+      time: replayStartMs / 1_000,
+      replayCloseTimeMs: replayStartMs + hourMs - 1,
+      replayClosed: true,
+      replayContextHistory: true,
+    },
+    {
+      ...bar(replayStartMs + hourMs, hourMs),
+      time: (replayStartMs + hourMs) / 1_000,
+      replayCloseTimeMs: replayStartMs + 2 * hourMs - 1,
+      replayClosed: true,
+      replayContextHistory: true,
+    },
+  ]);
+  assert.equal(
+    replayHistoryRevealRepairBeforeMs(
+      store,
+      replayStartMs,
+      replayStartMs + 3 * hourMs - 1,
+      "1h",
+    ),
+    null,
+  );
 });
 
 test("initial display page replaces an overlapping partial warmup bucket", async () => {

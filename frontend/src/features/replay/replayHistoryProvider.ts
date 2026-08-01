@@ -105,6 +105,63 @@ export function replayHistoryInitialBeforeMs(
   return Number.isSafeInteger(seamMs) && seamMs >= 0 ? seamMs : null;
 }
 
+/**
+ * Finds the exclusive display boundary that can repair a bounded replay
+ * projection.  A forming right-edge bucket is never requested early; only an
+ * elapsed partial left bucket or a real discontinuity after the replay seam is
+ * eligible.
+ */
+export function replayHistoryRevealRepairBeforeMs(
+  store: SeriesWindowStore,
+  replayStartMs: number | null,
+  revealedBoundaryMs: number | null,
+  displayInterval: string | null,
+): number | null {
+  if (
+    replayStartMs === null
+    || revealedBoundaryMs === null
+    || !Number.isSafeInteger(replayStartMs)
+    || !Number.isSafeInteger(revealedBoundaryMs)
+    || replayStartMs < 0
+    || revealedBoundaryMs < 0
+    || displayInterval === null
+  ) return null;
+  const timeline = createIntervalTimeline(displayInterval);
+  const seamSeconds = timeline?.floor(Math.floor(replayStartMs / 1_000));
+  if (seamSeconds === null || seamSeconds === undefined) return null;
+  const seamMs = seamSeconds * 1_000;
+  if (!Number.isSafeInteger(seamMs) || seamMs < 0) return null;
+
+  const rows = store.snapshot();
+  const projectionIndex = rows.findIndex((row) => row.replayContextHistory !== true);
+  if (projectionIndex < 0) return null;
+  const firstProjection = rows[projectionIndex];
+  if (!firstProjection) return null;
+  const projectionOpenMs = Number(firstProjection.time) * 1_000;
+  const projectionCloseMs = Number(firstProjection.replayCloseTimeMs);
+  if (!Number.isSafeInteger(projectionOpenMs) || projectionOpenMs < 0) return null;
+
+  if (
+    firstProjection.replayClosed !== true
+    && Number.isSafeInteger(projectionCloseMs)
+    && projectionCloseMs >= projectionOpenMs
+    && projectionCloseMs <= revealedBoundaryMs
+    && Number.isSafeInteger(projectionCloseMs + 1)
+  ) {
+    return projectionCloseMs + 1;
+  }
+  if (projectionOpenMs <= seamMs) return null;
+
+  const previous = rows[projectionIndex - 1];
+  const previousCloseMs = Number(previous?.replayCloseTimeMs);
+  if (
+    previous?.replayContextHistory === true
+    && Number.isSafeInteger(previousCloseMs)
+    && previousCloseMs + 1 === projectionOpenMs
+  ) return null;
+  return projectionOpenMs <= revealedBoundaryMs ? projectionOpenMs : null;
+}
+
 function fail(path: string, message: string): never {
   throw new ReplayHistoryProtocolError(`${path}: ${message}`);
 }

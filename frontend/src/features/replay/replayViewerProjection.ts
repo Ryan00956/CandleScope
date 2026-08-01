@@ -283,9 +283,10 @@ function mergeDisplayContextWithProjection(
     const contextTime = Number(context.time);
     const projectedTime = Number(projected.time);
     if (contextTime <= projectedTime) {
-      // History pages are server-clamped strictly before the replay seam.
-      // Let their complete native display candle replace an incomplete
-      // aggregate built from the bounded execution warmup at the same time.
+      // Server history is cursor-clamped and may repair an already revealed
+      // replay bucket after the bounded execution window evicts its prefix.
+      // Let that complete display candle replace an incomplete local aggregate
+      // at the same time.
       rows.push(context);
       contextIndex += 1;
       if (contextTime === projectedTime) projectedIndex += 1;
@@ -295,6 +296,50 @@ function mergeDisplayContextWithProjection(
     }
   }
   return rows;
+}
+
+function revealedContextRows(
+  rows: readonly KlineBar[],
+  publicTimeMs: number | null,
+): KlineBar[] {
+  return rows.filter((row) => {
+    if (!isReplayContextHistoryBar(row)) return false;
+    if (publicTimeMs === null) return true;
+    const closeTimeMs = Number(row.replayCloseTimeMs);
+    const lastBaseOpenMs = Number(row.replayLastBaseOpenMs);
+    return Number.isSafeInteger(closeTimeMs)
+      && Number.isSafeInteger(lastBaseOpenMs)
+      && closeTimeMs <= publicTimeMs
+      && lastBaseOpenMs <= publicTimeMs;
+  });
+}
+
+function carriedRevealedProjectionRows(
+  previousRows: readonly KlineBar[],
+  projectedRows: readonly KlineBar[],
+  publicTimeMs: number | null,
+): KlineBar[] {
+  const firstProjectedTime = projectedRows[0]?.time;
+  if (firstProjectedTime === undefined) return [];
+  const projectedByTime = new Map(projectedRows.map((row) => [row.time, row]));
+  return previousRows.flatMap((row) => {
+    if (isReplayContextHistoryBar(row) || row.replayClosed !== true) return [];
+    const closeTimeMs = Number(row.replayCloseTimeMs);
+    const lastBaseOpenMs = Number(row.replayLastBaseOpenMs);
+    if (publicTimeMs !== null && (
+      !Number.isSafeInteger(closeTimeMs)
+      || !Number.isSafeInteger(lastBaseOpenMs)
+      || closeTimeMs > publicTimeMs
+      || lastBaseOpenMs > publicTimeMs
+    )) return [];
+    const current = projectedByTime.get(row.time);
+    const wasEvicted = row.time < firstProjectedTime;
+    const replacesPartialBoundary = current !== undefined
+      && current.replayClosed !== true;
+    return wasEvicted || replacesPartialBoundary
+      ? [{ ...row, replayContextHistory: true }]
+      : [];
+  });
 }
 
 function firstDifferentRow(
@@ -348,11 +393,32 @@ export function applyReplayViewerSeriesDelta(
   if (projectedRows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
     return target.clear(meta);
   }
-  // A bounded before-window intentionally stops following the execution tail.
-  // Keep it stable until the user explicitly restores the latest window.
-  if (target.rightTruncated) return target.applyRange([], meta);
+  // A bounded before-window intentionally stops following a monotonic
+  // execution tail. A backward/reset snapshot is different: retaining that
+  // historical window could expose bars beyond the new public cursor, so it
+  // must rebuild immediately from cursor-safe rows.
+  const authoritativeReset = sourceDeltaType === WINDOW_DELTA_TYPES.REPLACE
+    && sourceDelta.preserveRevealedPrefix !== true;
+  if (target.rightTruncated && !authoritativeReset) {
+    return target.applyRange([], meta);
+  }
 
-  const contextRows = target.snapshot().filter(isReplayContextHistoryBar);
+  const previousRows = target.snapshot().slice();
+  const rawPublicTimeMs = Number(sourceDelta.publicTimeMs);
+  const publicTimeMs = Number.isSafeInteger(rawPublicTimeMs) && rawPublicTimeMs >= 0
+    ? rawPublicTimeMs
+    : null;
+  const preserveRevealedPrefix = sourceDeltaType !== WINDOW_DELTA_TYPES.REPLACE
+    || sourceDelta.preserveRevealedPrefix === true;
+  const contextRows = revealedContextRows(previousRows, publicTimeMs);
+  if (preserveRevealedPrefix) {
+    contextRows.push(...carriedRevealedProjectionRows(
+      previousRows,
+      projectedRows,
+      publicTimeMs,
+    ));
+    contextRows.sort((left, right) => Number(left.time) - Number(right.time));
+  }
   const rows = mergeDisplayContextWithProjection(contextRows, projectedRows);
   if (target.isEmpty() || sourceDeltaType === WINDOW_DELTA_TYPES.REPLACE) {
     return target.replace(rows, meta);

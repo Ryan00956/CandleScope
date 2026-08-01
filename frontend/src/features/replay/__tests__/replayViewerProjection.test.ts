@@ -263,6 +263,90 @@ test("display-only context survives execution ticks and explicit restore drops i
   assert.deepEqual(viewer.snapshot(), source.snapshot());
 });
 
+test("forward final-state replacements retain complete revealed display buckets across source eviction", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    maxBars: 6,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 5 }, (_, index) => baseBar(index)));
+  const viewer = new SeriesWindowStore({ maxBars: 20 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "5m");
+  assert.equal(viewer.first()?.replayClosed, true);
+
+  const firstForward = source.replace(
+    Array.from({ length: 6 }, (_, index) => baseBar(index + 4)),
+    {
+      preserveRevealedPrefix: true,
+      publicTimeMs: (HOUR_START + 10 * 60) * 1_000 - 1,
+    },
+  );
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "5m", firstForward);
+  let rows = viewer.snapshot();
+  assert.deepEqual(rows.map((row) => Number(row.time)), [
+    HOUR_START,
+    HOUR_START + 5 * 60,
+  ]);
+  assert.equal(rows[0]?.replayClosed, true);
+  assert.equal(rows[0]?.replayContextHistory, true);
+  assert.equal(rows[1]?.replayClosed, true);
+
+  const secondForward = source.replace(
+    Array.from({ length: 6 }, (_, index) => baseBar(index + 9)),
+    {
+      preserveRevealedPrefix: true,
+      publicTimeMs: (HOUR_START + 15 * 60) * 1_000 - 1,
+    },
+  );
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "5m", secondForward);
+  rows = viewer.snapshot();
+  assert.deepEqual(rows.map((row) => Number(row.time)), [
+    HOUR_START,
+    HOUR_START + 5 * 60,
+    HOUR_START + 10 * 60,
+  ]);
+  assert.ok(rows.every((row) => row.replayClosed === true));
+  assert.deepEqual(
+    rows.map((row) => row.replayContextHistory === true),
+    [true, true, false],
+  );
+});
+
+test("backward final-state replacement drops display history beyond the new public cursor", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 10 }, (_, index) => baseBar(index + 25)));
+  const viewer = new SeriesWindowStore({ maxBars: 2 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "5m");
+  viewer.applyRange([
+    {
+      ...barAt(HOUR_START, 0, 5 * 60),
+      replayContextHistory: true,
+    },
+    {
+      ...barAt(HOUR_START + 5 * 60, 5, 5 * 60),
+      replayContextHistory: true,
+    },
+  ]);
+  assert.equal(viewer.rightTruncated, true);
+
+  const backward = source.replace(
+    Array.from({ length: 3 }, (_, index) => baseBar(index)),
+    {
+      preserveRevealedPrefix: false,
+      publicTimeMs: (HOUR_START + 3 * 60) * 1_000 - 1,
+    },
+  );
+  applyReplayViewerSeriesDelta(viewer, source, "1m", "5m", backward);
+  assert.deepEqual(
+    viewer.snapshot().map((row) => Number(row.time)),
+    [HOUR_START],
+  );
+  assert.equal(viewer.first()?.replayContextHistory, undefined);
+});
+
 test("native pre-replay context replaces a partial warmup bucket and keeps latest indicators continuous", () => {
   const source = new SeriesWindowStore({
     intervalSeconds: 60,

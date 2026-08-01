@@ -578,6 +578,10 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
                 "display_interval": "1m",
                 "requested_start_ms": START_MS + INTERVAL_MS,
                 "indicator_warmup_bars": 1,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
                 "forward_cache_ms": 3 * INTERVAL_MS,
                 "random_seed": None,
                 "initial_equity": "10000",
@@ -636,10 +640,33 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
 
         paged = await service.command(
             session_id,
-            command("step-paged", CommandType.STEP, 2, {"count": 1}),
+            command("step-paged", CommandType.STEP, 2, {"count": 3}),
         )
         assert paged["state"] == "PAUSED"
-        assert paged["cursor"]["source_sequence"] == 4
+        assert paged["cursor"]["source_sequence"] == 6
+        paged_snapshot = (await service.get_session(session_id))["snapshot"]
+        builder = paged_snapshot["components"]["bar_builder"]
+        replay_start_ms = int(builder["replay_start_ms"])
+        revealed_boundary_ms = int(paged_snapshot["cursor"]["virtual_time_ms"])
+        revealed_page = await service.training.history_page(
+            session_id,
+            track_id="track-1",
+            before_ms=replay_start_ms + 5 * INTERVAL_MS,
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=20,
+            data_epoch=str(paged_snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="5m",
+        )
+        assert [bar["open_time_ms"] for bar in revealed_page["bars"]] == [
+            replay_start_ms
+        ]
+        revealed_bar = revealed_page["bars"][0]
+        assert revealed_bar["open"] == "101"
+        assert revealed_bar["close"] == "105.5"
+        assert revealed_bar["component_count"] == 5
+        assert revealed_bar["is_closed"] is True
+        assert revealed_bar["close_time_ms"] <= revealed_boundary_ms
         persisted = await service.store.load_dataset(session_id)
         assert persisted is not None
         bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
@@ -652,7 +679,7 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
     try:
         snapshot = (await recovered.get_session(session_id))["snapshot"]
         assert snapshot["state"] == "PAUSED"
-        assert snapshot["cursor"]["source_sequence"] == 4
+        assert snapshot["cursor"]["source_sequence"] == 6
         assert snapshot["cursor"]["at_end"] is False
     finally:
         await recovered.shutdown(step_timeout=1.0)

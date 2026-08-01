@@ -5,6 +5,7 @@ import {
   ReplayHistoryProvider,
   applyReplayHistoryPage,
   replayHistoryInitialBeforeMs,
+  replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
 } from "./replayHistoryProvider.js";
 import type {
@@ -105,6 +106,7 @@ export function useReplayHistoryRuntime(
   const [historyState, setHistoryState] = useState<ReplayHistoryState>(() => (
     initialReplayHistoryState(historyKey)
   ));
+  const [, setViewerSeriesRevision] = useState(0);
   const currentState = historyState.key === historyKey
     ? historyState
     : initialReplayHistoryState(historyKey);
@@ -112,6 +114,7 @@ export function useReplayHistoryRuntime(
     key: historyKey,
     loading: false,
   });
+  const repairAttemptsRef = useRef(new Set<number>());
   const {
     loading,
     hasMore,
@@ -124,15 +127,44 @@ export function useReplayHistoryRuntime(
 
   useEffect(() => {
     loadingRef.current = { key: historyKey, loading: false };
+    repairAttemptsRef.current.clear();
     setHistoryState(initialReplayHistoryState(historyKey));
     return () => provider?.cancel();
   }, [historyKey, provider]);
 
+  useEffect(() => {
+    const unsubscribe = viewer.seriesStore.subscribe((delta) => {
+      if (delta.type === "replace" || delta.type === "clear") {
+        setViewerSeriesRevision((current) => current + 1);
+      }
+    });
+    return () => { unsubscribe(); };
+  }, [viewer.seriesStore]);
+
+  const revealRepairBeforeMs = replayHistoryRevealRepairBeforeMs(
+    viewer.seriesStore,
+    runtime.store.replayStartMs,
+    runtime.store.virtualTimeMs,
+    displayInterval,
+  );
+  const revealRepairPending = revealRepairBeforeMs !== null
+    && !repairAttemptsRef.current.has(revealRepairBeforeMs);
+
   const loadMoreLeft = useCallback<LoadMoreLeft>(async () => {
     const store = storeRef.current;
+    const repairBeforeMs = replayHistoryRevealRepairBeforeMs(
+      viewer.seriesStore,
+      store.replayStartMs,
+      store.virtualTimeMs,
+      displayInterval,
+    );
+    const pendingRepairBeforeMs = repairBeforeMs !== null
+      && !repairAttemptsRef.current.has(repairBeforeMs)
+      ? repairBeforeMs
+      : null;
     if (provider === null
       || (loadingRef.current.key === historyKey && loadingRef.current.loading)
-      || !hasMore
+      || (!hasMore && pendingRepairBeforeMs === null)
       || store.dataEpoch === null || store.virtualTimeMs === null
     ) return;
     // Context history belongs only to the display store. The frozen base store
@@ -147,9 +179,10 @@ export function useReplayHistoryRuntime(
     // The first native-display page owns every complete display bucket before
     // the replay seam, including buckets that overlap the frozen base warmup.
     // Later pages continue from the oldest display-owned row.
-    const beforeMs = provider.historyEpoch === null && initialBeforeMs !== null
-      ? initialBeforeMs
-      : storeBeforeMs;
+    const beforeMs = pendingRepairBeforeMs
+      ?? (provider.historyEpoch === null && initialBeforeMs !== null
+        ? initialBeforeMs
+        : storeBeforeMs);
     if (beforeMs === null) return;
     loadingRef.current = { key: historyKey, loading: true };
     setHistoryState((current) => ({
@@ -174,6 +207,9 @@ export function useReplayHistoryRuntime(
         expectedBeforeMs: beforeMs,
         contextHistory: true,
       });
+      if (pendingRepairBeforeMs !== null) {
+        repairAttemptsRef.current.add(pendingRepairBeforeMs);
+      }
       const nextHasMore = page.has_more && page.bars.length > 0;
       const gapNotice = page.excluded_ranges.length > 0
         ? `已跨过 ${page.excluded_ranges.length} 段交易所无 K 线区间；图表保留空白，没有补造 K 线。`
@@ -215,6 +251,24 @@ export function useReplayHistoryRuntime(
     runtimeGeneration,
     sessionId,
     viewer.seriesStore,
+  ]);
+
+  useEffect(() => {
+    if (
+      provider === null
+      || revealRepairBeforeMs === null
+      || !revealRepairPending
+      || runtime.store.dataEpoch === null
+      || runtime.store.virtualTimeMs === null
+    ) return;
+    void loadMoreLeft();
+  }, [
+    loadMoreLeft,
+    provider,
+    revealRepairBeforeMs,
+    revealRepairPending,
+    runtime.store.dataEpoch,
+    runtime.store.virtualTimeMs,
   ]);
 
   const restoreLatestWindow = useCallback(async (): Promise<boolean> => {

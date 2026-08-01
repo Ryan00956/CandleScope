@@ -92,6 +92,11 @@ function isTradeBuilder(
 export function replaceReplaySeriesFromSnapshot(
   store: SeriesWindowStore,
   snapshot: ReplaySessionSnapshot,
+  {
+    preserveRevealedPrefix = false,
+  }: {
+    readonly preserveRevealedPrefix?: boolean;
+  } = {},
 ): WindowDelta {
   const builder = snapshot.components.bar_builder;
   const bars = isTradeBuilder(builder)
@@ -121,6 +126,8 @@ export function replaceReplaySeriesFromSnapshot(
     dataEpoch: snapshot.data_epoch,
     publicTimelineEpoch: builder.replay_start_ms,
     sourceSequence: snapshot.cursor.source_sequence,
+    publicTimeMs: snapshot.cursor.virtual_time_ms,
+    preserveRevealedPrefix,
   });
 }
 

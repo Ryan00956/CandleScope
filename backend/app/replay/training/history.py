@@ -898,7 +898,7 @@ def _query_validated_descending_base_rows(
     actual_end_ms: int,
     interval_ms: int,
     query_limit: int,
-    actual_replay_start_ms: int,
+    validation_now_ms: int,
 ) -> list[ReplayBar]:
     try:
         raw_rows = _query_bound_repository(
@@ -944,7 +944,7 @@ def _query_validated_descending_base_rows(
                     interval=config.base_interval,
                     interval_ms=interval_ms,
                     expected_open_ms=raw_open_ms,
-                    now_ms=actual_replay_start_ms,
+                    now_ms=validation_now_ms,
                 )
             )
             previous_open_ms = raw_open_ms
@@ -1009,7 +1009,6 @@ def _build_base_interval_page(
     before_ms: int,
     actual_start_ms: int,
     actual_end_ms: int,
-    actual_replay_start_ms: int,
     interval_ms: int,
     timeline_delta_ms: int,
     limit: int,
@@ -1022,7 +1021,7 @@ def _build_base_interval_page(
         actual_end_ms=actual_end_ms,
         interval_ms=interval_ms,
         query_limit=limit + 1,
-        actual_replay_start_ms=actual_replay_start_ms,
+        validation_now_ms=actual_end_ms,
     )
     selected = validated[:limit]
     page = [
@@ -1121,7 +1120,6 @@ def _build_gapped_aggregate_page(
     history_boundary_ms: int,
     actual_start_ms: int,
     actual_end_ms: int,
-    actual_replay_start_ms: int,
     interval_ms: int,
     timeline_delta_ms: int,
     limit: int,
@@ -1152,7 +1150,7 @@ def _build_gapped_aggregate_page(
         actual_end_ms=actual_end_ms,
         interval_ms=interval_ms,
         query_limit=query_limit,
-        actual_replay_start_ms=actual_replay_start_ms,
+        validation_now_ms=actual_end_ms,
     )
     actual_rows = list(reversed(descending))
     public_rows = (
@@ -1227,7 +1225,11 @@ def _build_all_available_page(
     """Read one bounded chart page without expanding the execution snapshot."""
 
     timeline_delta_ms = snapshot.replay_start_ms - actual_replay_start_ms
-    public_end_ms = min(before_ms, snapshot.replay_start_ms)
+    # The immutable ALL_AVAILABLE source remains chart-readable after the
+    # execution snapshot's bounded bar builder evicts older replay rows.  Page
+    # through every fully revealed source row, while keeping the request
+    # exclusive and clamped to the durable public cursor.
+    public_end_ms = min(before_ms, revealed_boundary_ms + 1)
     actual_end_ms = public_end_ms - timeline_delta_ms
     actual_end_ms = compute_bucket_start_ms(
         actual_end_ms,
@@ -1260,7 +1262,6 @@ def _build_all_available_page(
             before_ms=before_ms,
             actual_start_ms=actual_history_start_ms,
             actual_end_ms=actual_end_ms,
-            actual_replay_start_ms=actual_replay_start_ms,
             interval_ms=interval_ms,
             timeline_delta_ms=timeline_delta_ms,
             limit=limit,
@@ -1344,7 +1345,6 @@ def _build_all_available_page(
                 history_boundary_ms=history_boundary_ms,
                 actual_start_ms=actual_history_start_ms,
                 actual_end_ms=aggregate_actual_end_ms,
-                actual_replay_start_ms=actual_replay_start_ms,
                 interval_ms=interval_ms,
                 timeline_delta_ms=timeline_delta_ms,
                 limit=limit,
@@ -1376,7 +1376,6 @@ def _build_all_available_page(
         history_boundary_ms=history_boundary_ms,
         actual_start_ms=actual_history_start_ms,
         actual_end_ms=actual_end_ms,
-        actual_replay_start_ms=actual_replay_start_ms,
         interval_ms=interval_ms,
         timeline_delta_ms=timeline_delta_ms,
         limit=limit,

@@ -47,6 +47,31 @@ test("ReplayStore owns read models while SeriesWindowStore remains bar truth", (
   assert.equal(store.getSnapshot().account?.equity, "10000");
 });
 
+test("atomic snapshots label only same-dataset monotonic resets for revealed-prefix retention", () => {
+  const store = new ReplayStore();
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse({
+    sourceSequence: 1,
+    virtualTimeMs: BASE_TIME_MS + 60_000,
+  })).snapshot);
+  const flags: unknown[] = [];
+  const unsubscribe = store.seriesStore.subscribe((delta) => {
+    flags.push(delta.preserveRevealedPrefix);
+  });
+
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse({
+    sourceSequence: 2,
+    virtualTimeMs: BASE_TIME_MS + 120_000,
+  })).snapshot);
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse({
+    sourceSequence: 1,
+    virtualTimeMs: BASE_TIME_MS + 60_000,
+  })).snapshot);
+  unsubscribe();
+
+  assert.deepEqual(flags, [true, false]);
+});
+
 test("100x-style deltas update chart immediately but ordinary UI at most once per frame", () => {
   const scheduler = new FakeScheduler();
   const store = new ReplayStore({ scheduler });

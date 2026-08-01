@@ -282,6 +282,7 @@ export class ReplayRuntimeLifecycle {
   private started = false;
   private disposed = false;
   private acquireAfterSnapshot = false;
+  private controllerOwnershipIntent = false;
   private commandRevisionFloor = 0;
   private latestWindowRestore: {
     readonly promise: Promise<boolean>;
@@ -1098,14 +1099,12 @@ export class ReplayRuntimeLifecycle {
         this.phase = "ACTIVE";
         this.commandRevisionFloor = Math.max(this.commandRevisionFloor, snapshot.revision);
         this.error = null;
-        this.publish();
-        const acquireController = this.acquireAfterSnapshot
-          && snapshot.controller_client_id === null
-          && snapshot.state !== "ENDED";
+        this.observeControllerAuthority({
+          acquireWhenUnowned: this.acquireAfterSnapshot && snapshot.state !== "ENDED",
+        });
         this.acquireAfterSnapshot = false;
-        if (acquireController) {
-          void this.submitCommand("acquire_controller", {}).catch(() => undefined);
-        }
+        this.publish();
+        this.recoverControllerOwnership();
         if (snapshot.state === "ENDED") {
           if (this.reportRequest !== null) this.reportRefreshQueued = true;
           else void this.loadReport().catch(() => undefined);
@@ -1118,6 +1117,7 @@ export class ReplayRuntimeLifecycle {
         if (!this.store.applyEvent(globalGeneration, event)) {
           throw new Error("replay store rejected the authoritative event generation");
         }
+        this.observeControllerAuthority({ endedByEvent: event.type === "replay.ended" });
         if (this.completePendingCommandFromStream()) this.publish();
         this.store.clearError(globalGeneration);
         this.commandRevisionFloor = Math.max(this.commandRevisionFloor, event.revision);
@@ -1134,6 +1134,7 @@ export class ReplayRuntimeLifecycle {
             this.queueReportRefresh();
           }
         }
+        this.recoverControllerOwnership();
       },
       onError: (error, generation) => {
         if (!isCurrentStream()) return;
@@ -1150,6 +1151,42 @@ export class ReplayRuntimeLifecycle {
     this.error = error;
     this.phase = "ERROR";
     this.publish();
+  }
+
+  private observeControllerAuthority({
+    acquireWhenUnowned = false,
+    endedByEvent = false,
+  }: {
+    readonly acquireWhenUnowned?: boolean;
+    readonly endedByEvent?: boolean;
+  } = {}): void {
+    const snapshot = this.store.getSnapshot();
+    if (snapshot.controllerClientId === this.clientInstanceId) {
+      this.controllerOwnershipIntent = true;
+      return;
+    }
+    if (snapshot.controllerClientId !== null
+      || snapshot.statusReason === "controller_released"
+      || endedByEvent) {
+      this.controllerOwnershipIntent = false;
+      return;
+    }
+    if (acquireWhenUnowned) this.controllerOwnershipIntent = true;
+  }
+
+  private recoverControllerOwnership(): void {
+    const snapshot = this.store.getSnapshot();
+    if (!this.controllerOwnershipIntent
+      || this.disposed
+      || this.phase !== "ACTIVE"
+      || this.pendingCommand !== null
+      || this.forkRequest !== null
+      || snapshot.connectionState !== "connected"
+      || snapshot.sessionId !== this.sessionId
+      || snapshot.controllerClientId !== null) return;
+    // This is an ordinary acquire, never a takeover. It heals a lease that
+    // expired while this same browser was throttled, frozen, or reconnecting.
+    void this.submitCommand("acquire_controller", {}).catch(() => undefined);
   }
 
   private stopCurrentRun(preservePendingCommand = false): void {
@@ -1201,6 +1238,7 @@ export class ReplayRuntimeLifecycle {
     this.forkRequest = null;
     this.forkPending = false;
     this.acquireAfterSnapshot = false;
+    this.controllerOwnershipIntent = false;
     this.operation = preservePendingCommand && this.pendingCommand !== null ? "command" : null;
   }
 

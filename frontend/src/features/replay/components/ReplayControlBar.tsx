@@ -84,6 +84,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const pending = runtime.pendingCommand?.type ?? null;
   const phase3Pending = viewer?.controlPending?.type ?? null;
+  const controllerActionPending = pending === "acquire_controller"
+    || phase3Pending === "acquire_controller"
+    || phase3Pending === "takeover_controller";
   const contractPortfolio = viewer?.marketTracks?.portfolio.schema_version === "replay.training.portfolio.v2"
     ? viewer.marketTracks.portfolio
     : null;
@@ -209,11 +212,13 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             ? "另一个页面正在控制，本页只读。"
             : effectiveState === "ENDED"
               ? "训练已结束；获取复盘控制权后可揭示真实区间或添加日志。"
-              : "当前为只读；获取控制权后可操作。"}
+              : controllerActionPending
+                ? "控制权短暂中断，正在自动恢复。"
+                : "当前为只读；获取控制权后可操作。"}
           <button
             type="button"
             data-replay-action="takeover-controller"
-            disabled={pending !== null || forkPending || store.connectionState !== "connected"}
+            disabled={pending !== null || phase3Pending !== null || forkPending || store.connectionState !== "connected"}
             onClick={() => {
               if (viewer === undefined) {
                 void runtime.actions.acquireController(store.controllerClientId !== null).catch(() => undefined);
@@ -226,7 +231,9 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
               }
             }}
           >
-            {store.controllerClientId
+            {controllerActionPending
+              ? store.controllerClientId ? "正在接管…" : "正在恢复…"
+              : store.controllerClientId
               ? "接管控制权"
               : effectiveState === "ENDED" ? "获取复盘控制权" : "获取控制权"}
           </button>

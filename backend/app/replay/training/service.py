@@ -43,6 +43,7 @@ from .commands import ReplayV2Command
 from .control import (
     ADVANCE_CONTRACT_VERSION,
     MAX_CONTROL_COUNT,
+    MAX_PLAYBACK_BATCH_UNITS,
     PLAYBACK_CONTRACT_VERSION,
     advance_basis,
     aligned_step_target_ms,
@@ -105,6 +106,8 @@ if TYPE_CHECKING:
 ADVANCE_PROGRESS_RETENTION_SECONDS = 2.0
 FINAL_STATE_PROJECTION_DELIVERY = "FINAL_STATE"
 FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS = 10_000
+ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
+ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
 
 
 def _stored_counter(value: object, *, field_name: str) -> int:
@@ -1901,18 +1904,28 @@ class TrainingRunService:
         }:
             return await self._command_serialized(normalized, command)
         actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        ordered_pause_barrier = (
+            command.type is ReplayV2CommandType.PAUSE
+            and actor.playback_is_active()
+        )
         if command.type is ReplayV2CommandType.PAUSE:
             # A pause is a barrier, not ordinary queued work. Signal the
             # server-owned loop before waiting for its serialization lock so a
             # high playback rate cannot consume the remaining dataset first.
             actor.signal_ordered_stop()
         async with actor.serialized():
-            return await self._command_serialized(normalized, command)
+            return await self._command_serialized(
+                normalized,
+                command,
+                ordered_pause_barrier=ordered_pause_barrier,
+            )
 
     async def _command_serialized(
         self,
         run_id: str,
         command: ReplayV2Command,
+        *,
+        ordered_pause_barrier: bool = False,
     ) -> dict[str, object]:
         normalized_run = self._identifier(run_id, field_name="run_id")
         if not isinstance(command, ReplayV2Command):
@@ -2298,7 +2311,7 @@ class TrainingRunService:
             )
         snapshot = (
             self._snapshot(session)
-            if run_actor.playback_is_active()
+            if (run_actor.playback_is_active() or ordered_pause_barrier)
             and command.type
             in {
                 ReplayV2CommandType.PAUSE,
@@ -4226,7 +4239,8 @@ class TrainingRunService:
                     if profile_revision != last_profile_revision:
                         last_advance_wall = now_wall
                         last_profile_revision = profile_revision
-                    elapsed_seconds = max(0.0, now_wall - last_advance_wall)
+                    raw_elapsed_seconds = now_wall - last_advance_wall
+                    elapsed_seconds = max(0.0, raw_elapsed_seconds)
                     basis = advance_basis(clock.get("basis"))
                     rate = control_rate(clock.get("rate"))
                     source_kind = str(binding["source_kind"])
@@ -4280,19 +4294,65 @@ class TrainingRunService:
                             consumed_wall_seconds = elapsed_seconds
                             timeout = 0.0
                     else:
+                        final_state_batch_units = 0
+                        if (
+                            source_kind == "BAR"
+                            and rate >= ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE
+                        ):
+                            base_interval_ms = fixed_interval_ms(
+                                str(binding["base_interval"]),
+                                field_name="base_interval",
+                            )
+                            if current_time <= MAX_TIMESTAMP_MS - base_interval_ms:
+                                final_state_profile = (
+                                    self._ordered_final_state_batch_profile(
+                                        binding=binding,
+                                        tracks=tracks,
+                                        snapshot=selected_snapshot,
+                                        target_virtual_time_ms=(
+                                            current_time + base_interval_ms
+                                        ),
+                                        enabled=True,
+                                    )
+                                )
+                                if final_state_profile is not None:
+                                    final_state_batch_units = min(
+                                        final_state_profile[0],
+                                        (
+                                            rate
+                                            + ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ
+                                            - 1
+                                        )
+                                        // ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ,
+                                    )
                         units = discrete_playback_units(
                             elapsed_seconds,
                             rate=rate,
                         )
+                        if units < final_state_batch_units:
+                            if raw_elapsed_seconds >= 0:
+                                # Keep one bounded projection batch computed
+                                # ahead of wall time. Without this lead, a fast
+                                # actor catches up and falls back to one durable
+                                # command per BAR at high public rates.
+                                units = final_state_batch_units
+                            else:
+                                units = 0
+                                target = None
+                                timeout = min(
+                                    0.25,
+                                    max(0.001, -raw_elapsed_seconds),
+                                )
                         if units == 0:
-                            target = None
-                            timeout = min(
-                                0.25,
-                                max(
-                                    0.001,
-                                    (1 / rate) - elapsed_seconds,
-                                ),
-                            )
+                            if final_state_batch_units == 0:
+                                target = None
+                                timeout = min(
+                                    0.25,
+                                    max(
+                                        0.001,
+                                        (1 / rate) - elapsed_seconds,
+                                    ),
+                                )
                         elif basis is AdvanceBasis.SOURCE_EVENT:
                             if len(tracks) != 1:
                                 raise TrainingRunError(
@@ -4405,6 +4465,7 @@ class TrainingRunService:
                             tracks=tracks,
                             target_virtual_time_ms=target,
                             stop_event=stop,
+                            allow_final_state_batch=True,
                         )
                         if consumed_wall_seconds > 0:
                             last_advance_wall += consumed_wall_seconds
@@ -4609,6 +4670,7 @@ class TrainingRunService:
         target_virtual_time_ms: int,
         job: dict[str, object] | None = None,
         stop_event: asyncio.Event | None = None,
+        allow_final_state_batch: bool = False,
     ) -> tuple[StableMarketEvent, ...]:
         await self.account_history.guard_run(
             run_id=command.run_id,
@@ -4663,11 +4725,25 @@ class TrainingRunService:
                 snapshot = self._snapshot(session)
                 snapshots.append((track, snapshot))
                 times.add(self._cursor_time(snapshot))
+
+            final_state_profile = self._ordered_final_state_batch_profile(
+                binding=binding,
+                tracks=tracks,
+                snapshot=snapshots[0][1],
+                target_virtual_time_ms=target_virtual_time_ms,
+                enabled=allow_final_state_batch,
+            )
+            source_plan_limit = (
+                1 if final_state_profile is None else final_state_profile[0]
+            )
+            planned_event_times: dict[str, tuple[int, ...]] = {}
+            for track, _snapshot in snapshots:
+                session_id = self._track_session_id(track)
                 try:
                     plan = await self.replay_service.plan_source_chunk(
                         session_id,
                         target_time_ms=target_virtual_time_ms,
-                        max_events=1,
+                        max_events=source_plan_limit,
                     )
                 except (ReplayDomainError, TrainingRunError) as exc:
                     await self._fail_closed_multi_track(
@@ -4687,9 +4763,29 @@ class TrainingRunService:
                         status_code=409,
                         details={"track_id": track["track_id"]},
                     ) from exc
-                if _stored_counter(
+                event_count = _stored_counter(
                     plan["event_count"], field_name="event_count"
-                ) == 1:
+                )
+                if final_state_profile is not None:
+                    raw_event_times = plan.get("event_times_ms")
+                    if not isinstance(raw_event_times, (list, tuple)):
+                        raise TrainingRunError(
+                            "TRAINING_RUN_STORAGE_DEGRADED",
+                            "batched market event plan is missing timestamps",
+                            status_code=503,
+                        )
+                    event_times = tuple(
+                        _stored_counter(value, field_name="source_event_time_ms")
+                        for value in raw_event_times
+                    )
+                    if len(event_times) != event_count:
+                        raise TrainingRunError(
+                            "TRAINING_RUN_STORAGE_DEGRADED",
+                            "batched market event plan has an invalid timestamp count",
+                            status_code=503,
+                        )
+                    planned_event_times[str(track["track_id"])] = event_times
+                if event_count > 0:
                     next_time = plan["last_event_time_ms"]
                     if not isinstance(next_time, int):
                         raise TrainingRunError(
@@ -4807,6 +4903,16 @@ class TrainingRunService:
                         command_id=command.command_id,
                         track_id=str(barrier_track["track_id"]),
                         initial_snapshot=before,
+                        final_state_max_events=(
+                            None
+                            if final_state_profile is None
+                            else final_state_profile[0]
+                        ),
+                        require_empty_account=(
+                            False
+                            if final_state_profile is None
+                            else final_state_profile[1]
+                        ),
                     )
                     after_cursor = after.get("cursor")
                     if not isinstance(after_cursor, Mapping):
@@ -4815,27 +4921,57 @@ class TrainingRunService:
                             "market track cursor is invalid",
                             status_code=503,
                         )
-                    for sequence in range(
-                        before_sequence + 1,
-                        _stored_counter(
-                            after_cursor["source_sequence"],
-                            field_name="source_sequence",
+                    after_sequence = _stored_counter(
+                        after_cursor["source_sequence"],
+                        field_name="source_sequence",
+                    )
+                    if final_state_profile is not None:
+                        event_times = planned_event_times.get(
+                            str(barrier_track["track_id"]),
+                            (),
                         )
-                        + 1,
-                    ):
-                        wave_events.append(
+                        if after_sequence - before_sequence != len(event_times):
+                            raise TrainingRunError(
+                                "GLOBAL_CHECKPOINT_INCOMPLETE",
+                                "batched market advance did not match its source plan",
+                                status_code=503,
+                                details={
+                                    "planned_count": len(event_times),
+                                    "consumed_count": after_sequence - before_sequence,
+                                },
+                            )
+                        wave_events.extend(
                             StableMarketEvent(
                                 actual_event_time_ms=self._actual_event_time_ms(
                                     binding,
-                                    wave_time,
+                                    event_time_ms,
                                 ),
                                 event_phase=MARKET_EVENT_PHASE,
                                 market_track_stable_id=str(
                                     barrier_track["track_id"]
                                 ),
-                                source_sequence=sequence,
+                                source_sequence=before_sequence + offset,
+                            )
+                            for offset, event_time_ms in enumerate(
+                                event_times,
+                                start=1,
                             )
                         )
+                    else:
+                        for sequence in range(before_sequence + 1, after_sequence + 1):
+                            wave_events.append(
+                                StableMarketEvent(
+                                    actual_event_time_ms=self._actual_event_time_ms(
+                                        binding,
+                                        wave_time,
+                                    ),
+                                    event_phase=MARKET_EVENT_PHASE,
+                                    market_track_stable_id=str(
+                                        barrier_track["track_id"]
+                                    ),
+                                    source_sequence=sequence,
+                                )
+                            )
 
             try:
                 wave_events.extend(
@@ -4930,6 +5066,50 @@ class TrainingRunService:
             "global advance exceeded the bounded wave budget",
             status_code=409,
         )
+
+    def _ordered_final_state_batch_profile(
+        self,
+        *,
+        binding: Mapping[str, object],
+        tracks: tuple[Mapping[str, object], ...],
+        snapshot: Mapping[str, object],
+        target_virtual_time_ms: int,
+        enabled: bool,
+    ) -> tuple[int, bool] | None:
+        """Choose bounded terminal delivery only for proven ordered BAR paths."""
+
+        if (
+            not enabled
+            or str(binding.get("source_kind")) != "BAR"
+            or len(tracks) != 1
+            or self._cursor_time(snapshot) >= target_virtual_time_ms
+        ):
+            return None
+        decision = self._plan_fast_forward(
+            binding=binding,
+            snapshot=snapshot,
+            tracks=tracks,
+            target_virtual_time_ms=target_virtual_time_ms,
+        )
+        dependencies = set(decision.context.path_dependencies)
+        if decision.context.blocking_reasons or not dependencies.issubset(
+            {"OPEN_ORDER", "OPEN_POSITION"}
+        ):
+            return None
+        if (
+            str(binding.get("account_model")) == "TOUCH_OR_TAPE_V2"
+            and dependencies
+        ):
+            # Contract-account marks and liquidation checks still require the
+            # global event barrier while any trading path is active.
+            return None
+        require_empty_account = not dependencies
+        limit = min(
+            MAX_PLAYBACK_BATCH_UNITS if require_empty_account else 32,
+            self.replay_service.settings.event_buffer_size,
+            FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS,
+        )
+        return max(1, limit), require_empty_account
 
     @staticmethod
     def _actual_event_time_ms(
@@ -5057,6 +5237,8 @@ class TrainingRunService:
         command_id: str,
         track_id: str,
         initial_snapshot: Mapping[str, object] | None = None,
+        final_state_max_events: int | None = None,
+        require_empty_account: bool = False,
     ) -> Mapping[str, object]:
         known_snapshot = initial_snapshot
         for _chunk_index in range(100_000):
@@ -5086,12 +5268,25 @@ class TrainingRunService:
             plan = await self.replay_service.plan_source_chunk(
                 session_id,
                 target_time_ms=target_virtual_time_ms,
-                max_events=32,
+                max_events=(
+                    32
+                    if final_state_max_events is None
+                    else final_state_max_events
+                ),
             )
             count = _stored_counter(plan["event_count"], field_name="event_count")
             if count > 0:
-                v1_type = CommandType.STEP
-                payload: dict[str, object] = {"count": count}
+                if final_state_max_events is None:
+                    v1_type: CommandType | InternalCommandType = CommandType.STEP
+                    payload: dict[str, object] = {"count": count}
+                else:
+                    v1_type = InternalCommandType.FAST_FORWARD_FINAL_STATE
+                    payload = {
+                        "target_virtual_time_ms": target_virtual_time_ms,
+                        "max_events": count,
+                        "require_empty_account": require_empty_account,
+                        "snapshot_only": False,
+                    }
             else:
                 if snapshot["state"] == "ENDED":
                     raise TrainingRunError(
@@ -5117,7 +5312,11 @@ class TrainingRunService:
                 payload=payload,
             )
             try:
-                acknowledged = await self.replay_service.command(session_id, part)
+                acknowledged = await self.replay_service.command(
+                    session_id,
+                    part,
+                    _training_internal=isinstance(v1_type, InternalCommandType),
+                )
             except ReplayDomainError as exc:
                 raise TrainingRunError(
                     exc.code.value,

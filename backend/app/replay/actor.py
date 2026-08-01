@@ -3040,6 +3040,7 @@ class ReplaySessionActor:
         source = self._fork_current_source()
         count = 0
         last_event_time_ms: int | None = None
+        event_times_ms: list[int] = []
         while count < max_events and (event := source.peek()) is not None:
             event_time = self._event_time_ms(event)
             if event_time > target_time_ms:
@@ -3051,12 +3052,14 @@ class ReplaySessionActor:
                 )
             count += 1
             last_event_time_ms = event_time
+            event_times_ms.append(event_time)
         next_event = source.peek()
         return {
             "revision": self._revision,
             "cursor": self._cursor_dict(),
             "event_count": count,
             "last_event_time_ms": last_event_time_ms,
+            "event_times_ms": tuple(event_times_ms),
             "has_more_before_target": (
                 next_event is not None
                 and self._event_time_ms(next_event) <= target_time_ms

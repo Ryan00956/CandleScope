@@ -12,6 +12,7 @@ from app.replay.training.control import (
     supported_playback_bases,
     virtual_duration_ms,
 )
+from app.replay.internal_commands import InternalCommandType
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import AdvanceBasis, ReplayV2CommandType
 from tests.fixtures.replay.service_fakes import INTERVAL_MS
@@ -423,6 +424,59 @@ async def test_phase13_canonical_play_rate_pause_barrier_and_restart_defaults(
         await restored.shutdown(step_timeout=1.0)
 
 
+async def test_phase13_contract_position_disables_ordered_final_state_batch(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "playback-position-boundary.db")
+    try:
+        run = await _create_and_acquire(service, command_suffix="position-boundary")
+        selected = await service.get_session(run["adapter_session_id"])
+        await service.training.command(
+            run["run_id"],
+            _command(
+                run["run_id"],
+                "open-position-boundary",
+                ReplayV2CommandType.PLACE_ORDER,
+                selected,
+                {
+                    "client_order_id": "open-position-boundary",
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": "1",
+                    "reduce_only": False,
+                    "limit_price": None,
+                    "stop_price": None,
+                },
+            ),
+        )
+        binding = await service.training.store.run_binding(run["run_id"])
+        projection = await service.training.get_market_tracks(run["run_id"])
+        tracks = tuple(
+            track
+            for track in projection["tracks"]
+            if track["subscription_tier"] == "FULL"
+        )
+        snapshot = (await service.get_session(run["adapter_session_id"]))[
+            "snapshot"
+        ]
+        assert tracks[0]["position"]["quantity"] == "1"
+        assert binding["account_model"] == "TOUCH_OR_TAPE_V2"
+        assert (
+            service.training._ordered_final_state_batch_profile(
+                binding=binding,
+                tracks=tracks,
+                snapshot=snapshot,
+                target_virtual_time_ms=(
+                    int(snapshot["cursor"]["virtual_time_ms"]) + INTERVAL_MS
+                ),
+                enabled=True,
+            )
+            is None
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_phase13_pause_interrupts_high_rate_batch_at_committed_wave(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -447,13 +501,21 @@ async def test_phase13_pause_interrupts_high_rate_batch_at_committed_wave(
         after_profile = await service.get_session(run["adapter_session_id"])
 
         original_advance = service.training._advance_adapter_to
+        original_adapter_command = service.command
         first_wave_advanced = asyncio.Event()
         second_wave_started = asyncio.Event()
         advance_calls = 0
+        advance_kwargs: list[dict[str, object]] = []
+        adapter_command_types: list[object] = []
+
+        async def recorded_adapter_command(session_id, command, **kwargs):
+            adapter_command_types.append(command.type)
+            return await original_adapter_command(session_id, command, **kwargs)
 
         async def controlled_advance(**kwargs):
             nonlocal advance_calls
             advance_calls += 1
+            advance_kwargs.append(dict(kwargs))
             if advance_calls > 1:
                 second_wave_started.set()
                 await never_release_second_wave.wait()
@@ -467,9 +529,10 @@ async def test_phase13_pause_interrupts_high_rate_batch_at_committed_wave(
             "_advance_adapter_to",
             controlled_advance,
         )
+        monkeypatch.setattr(service, "command", recorded_adapter_command)
         monkeypatch.setattr(
             "app.replay.training.service.discrete_playback_units",
-            lambda _elapsed_seconds, *, rate: 100,
+            lambda _elapsed_seconds, *, rate: 0,
         )
 
         playing = await service.training.command(
@@ -510,10 +573,19 @@ async def test_phase13_pause_interrupts_high_rate_batch_at_committed_wave(
         assert paused["state"] == "PAUSED"
         assert advance_calls == 1
         assert second_wave_started.is_set() is False
+        assert advance_kwargs[0]["final_state_max_events"] == 64
+        assert advance_kwargs[0]["require_empty_account"] is True
+        assert adapter_command_types == [
+            InternalCommandType.FAST_FORWARD_FINAL_STATE
+        ]
 
         at_barrier = await service.get_session(run["adapter_session_id"])
         barrier_cursor = dict(at_barrier["snapshot"]["cursor"])
-        assert barrier_cursor["source_sequence"] == 1
+        assert barrier_cursor["source_sequence"] > 1
+        events = await service.training.store.global_events(run["run_id"])
+        assert [event["source_sequence"] for event in events] == list(
+            range(1, int(barrier_cursor["source_sequence"]) + 1)
+        )
         await asyncio.sleep(0.02)
         stable = await service.get_session(run["adapter_session_id"])
         assert stable["snapshot"]["cursor"] == barrier_cursor

@@ -67,6 +67,8 @@ export interface LineBreakProjectionValues {
 
 export interface SourceBar extends Record<string, unknown> {
   time: number;
+  sourceFromTime?: unknown;
+  sourceToTime?: unknown;
   open?: number;
   high?: number;
   low?: number;

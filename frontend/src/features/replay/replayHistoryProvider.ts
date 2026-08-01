@@ -1,5 +1,7 @@
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { surfaceViewportHasAnchorCoverage } from "../chart-representation/surfaceViewportState.js";
+import type { SurfaceViewportSnapshot } from "../chart-representation/chartRepresentationTypes.js";
 import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import { replayDisplayBarToKline } from "./replaySeriesProjection.js";
 import type { ReplayDigest, ReplayDisplayBar } from "./replayTypes.js";
@@ -78,6 +80,41 @@ export class ReplayHistoryProtocolError extends Error {
   }
 }
 
+export function replayHistoryViewportTransferUnavailable(
+  store: SeriesWindowStore,
+  transfer: SurfaceViewportSnapshot | null,
+  attemptedBeforeMs: number | null,
+): boolean {
+  return attemptedBeforeMs !== null
+    && transfer !== null
+    && !surfaceViewportHasAnchorCoverage(store.snapshot(), transfer);
+}
+
+export function replayHistoryViewportTransferNeedsLatestWindow(
+  store: SeriesWindowStore,
+  transfer: SurfaceViewportSnapshot | null,
+  {
+    displayInterval,
+    revealedBoundaryMs,
+  }: {
+    readonly displayInterval: string | null;
+    readonly revealedBoundaryMs: number | null;
+  },
+): boolean {
+  if (!store.rightTruncated
+    || transfer === null
+    || transfer.datasetKey === store.seriesKey
+    || displayInterval === null
+    || revealedBoundaryMs === null
+    || transfer.anchorSourceTime * 1_000 > revealedBoundaryMs
+    || surfaceViewportHasAnchorCoverage(store.snapshot(), transfer)) return false;
+  return replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: transfer.anchorSourceTime,
+    displayInterval,
+    revealedBoundaryMs,
+  }) === null;
+}
+
 export function replayHistoryStoreBeforeMs(
   store: SeriesWindowStore,
 ): number | null {
@@ -103,6 +140,65 @@ export function replayHistoryInitialBeforeMs(
     ? Number.NaN
     : seamSeconds * 1_000;
   return Number.isSafeInteger(seamMs) && seamMs >= 0 ? seamMs : null;
+}
+
+/**
+ * Resolve one aligned history page boundary that contains a transferred chart
+ * anchor. Returning null means the active display store already spans it (or
+ * the anchor cannot be requested without crossing the revealed replay edge).
+ */
+export function replayHistoryViewportBeforeMs(
+  store: SeriesWindowStore,
+  {
+    anchorSourceTime,
+    displayInterval,
+    revealedBoundaryMs,
+  }: {
+    readonly anchorSourceTime?: unknown;
+    readonly displayInterval?: unknown;
+    readonly revealedBoundaryMs?: unknown;
+  } = {},
+): number | null {
+  const anchorSeconds = Number(anchorSourceTime);
+  const revealedMs = Number(revealedBoundaryMs);
+  if (!Number.isFinite(anchorSeconds)
+    || !Number.isSafeInteger(revealedMs)
+    || revealedMs < 0) return null;
+  const anchorMs = anchorSeconds * 1_000;
+  if (!Number.isSafeInteger(anchorMs) || anchorMs < 0 || anchorMs > revealedMs) return null;
+
+  // Coverage is row-local rather than a first/last envelope: a replay store
+  // may contain declared gaps.  Use the last revealed base open instead of a
+  // forming bucket's nominal close, which can still be in the hidden future.
+  for (const row of store.snapshot()) {
+    const rowFromSeconds = Number(row.sourceFromTime ?? row.time);
+    const rowToSeconds = Number(
+      row.sourceToTime
+        ?? (Number.isSafeInteger(row.replayLastBaseOpenMs)
+          ? Number(row.replayLastBaseOpenMs) / 1_000
+          : row.time),
+    );
+    const rowFromMs = rowFromSeconds * 1_000;
+    const rowToMs = rowToSeconds * 1_000;
+    if (Number.isSafeInteger(rowFromMs)
+      && Number.isSafeInteger(rowToMs)
+      && rowFromMs <= anchorMs
+      && anchorMs <= rowToMs) return null;
+  }
+
+  const timeline = createIntervalTimeline(displayInterval);
+  const bucketStart = timeline?.floor(anchorSeconds);
+  const bucketEnd = bucketStart === null || bucketStart === undefined
+    ? null
+    : timeline?.next(bucketStart);
+  const beforeMs = bucketEnd === null || bucketEnd === undefined
+    ? Number.NaN
+    : bucketEnd * 1_000;
+  return Number.isSafeInteger(beforeMs)
+    && beforeMs > anchorMs
+    && beforeMs <= revealedMs + 1
+    ? beforeMs
+    : null;
 }
 
 /**

@@ -7,6 +7,7 @@ import type {
   Projector,
   SourceBar,
 } from "../chartRepresentationTypes.js";
+import { projectionSourceTimeRange } from "./projectorData.js";
 
 const LINE_BREAK_STATE_VERSION = 1;
 type LineBreakDirection = "up" | "down";
@@ -405,7 +406,7 @@ export class LineBreakProjector implements Projector<
       closeTicks,
       order: state.nextOrder,
       sourceFromTime,
-      sourceToTime: row.time,
+      sourceToTime: projectionSourceTimeRange(row).to,
       referenceHighTicks,
       referenceLowTicks,
       customValues: cloneCustomValues(row.customValues),

@@ -5,6 +5,7 @@ import MarketStatusBar from "../../app/MarketStatusBar.js";
 import MarketTopBarFrame from "../../app/MarketTopBarFrame.js";
 import type { ChartSurfaceActions, ChartSurfaceHandle, ChartSurfaceVisibleRange } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { RefObject } from "react";
+import type { SurfaceViewportSnapshot } from "../chart-representation/chartRepresentationTypes.js";
 import DrawingToolbar from "../../components/DrawingToolbar.js";
 import IntervalSelector from "../../components/IntervalSelector.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
@@ -72,6 +73,11 @@ export interface ReplayTrainingPageShellProps {
   readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
   readonly chartSurfaceActions: ChartSurfaceActions;
   readonly viewer: ReplayViewerRuntime;
+}
+
+interface ReplayIntervalViewportTransfer {
+  readonly snapshot: SurfaceViewportSnapshot;
+  readonly targetInterval: IntervalString;
 }
 
 function ReplayReviewRightRail({ review }: { readonly review: ReplayReviewResponse }) {
@@ -157,6 +163,8 @@ export default function ReplayTrainingPageShell({
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
   const [integrityOpen, setIntegrityOpen] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
+  const [intervalViewportTransfer, setIntervalViewportTransfer] = useState<ReplayIntervalViewportTransfer | null>(null);
+  const intervalCommandOwnerRef = useRef<object | null>(null);
   const {
     customIntervalRecords,
     savedCustomIntervals,
@@ -180,7 +188,23 @@ export default function ReplayTrainingPageShell({
   });
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
   const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
-  const history = useReplayHistoryRuntime(runtime, viewer);
+  const activeIntervalViewportTransfer = intervalViewportTransfer !== null
+    && intervalsSemanticallyEquivalent(
+      viewer.viewerState?.display_interval
+        ?? runtime.store.sessionConfig?.base_interval
+        ?? "1m",
+      intervalViewportTransfer.targetInterval,
+    )
+    ? intervalViewportTransfer.snapshot
+    : null;
+  const history = useReplayHistoryRuntime(runtime, viewer, activeIntervalViewportTransfer);
+  useEffect(() => {
+    if (!history.viewportTransferUnavailable
+      || activeIntervalViewportTransfer === null) return;
+    setIntervalViewportTransfer((current) => (
+      current?.snapshot === activeIntervalViewportTransfer ? null : current
+    ));
+  }, [activeIntervalViewportTransfer, history.viewportTransferUnavailable]);
   const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
   const review = integrityRuntime.review;
   useEffect(() => {
@@ -595,11 +619,36 @@ export default function ReplayTrainingPageShell({
   const unavailableIntervalMessage = useCallback((next: IntervalString): string => (
     replayIntervalUnavailableMessage(baseInterval, next)
   ), [baseInterval]);
+  const setReplayDisplayInterval = useCallback((next: IntervalString): void => {
+    if (intervalCommandOwnerRef.current !== null
+      || intervalsSemanticallyEquivalent(interval, next)) return;
+    const owner = {};
+    intervalCommandOwnerRef.current = owner;
+    const snapshot = chartSurfaceActions.captureViewportTransfer();
+    const transfer = snapshot === null
+      ? null
+      : { snapshot, targetInterval: next } satisfies ReplayIntervalViewportTransfer;
+    setIntervalViewportTransfer(transfer);
+    void viewer.actions.setDisplayInterval(next)
+      .catch(() => {
+        setIntervalViewportTransfer((current) => current === transfer ? null : current);
+      })
+      .finally(() => {
+        if (intervalCommandOwnerRef.current === owner) {
+          intervalCommandOwnerRef.current = null;
+        }
+      });
+  }, [chartSurfaceActions, interval, viewer.actions]);
+  const settleReplayIntervalViewportTransfer = useCallback((
+    transfer: SurfaceViewportSnapshot,
+  ): void => {
+    setIntervalViewportTransfer((current) => current?.snapshot === transfer ? null : current);
+  }, []);
   const selectReplayInterval = useCallback((next: IntervalString): void => {
     if (review !== null || !intervalAvailability(next)) return;
     markIntervalUsed(next);
-    void viewer.actions.setDisplayInterval(next).catch(() => undefined);
-  }, [intervalAvailability, markIntervalUsed, review, viewer.actions]);
+    setReplayDisplayInterval(next);
+  }, [intervalAvailability, markIntervalUsed, review, setReplayDisplayInterval]);
   const createReplayCustomInterval = useCallback((next: IntervalString) => {
     if (review !== null) return { ok: false as const, message: "ReviewMode 中周期只读" };
     if (!intervalAvailability(next)) {
@@ -607,7 +656,7 @@ export default function ReplayTrainingPageShell({
     }
     const result = addCustomInterval(next, { markUsed: true });
     if (!result.ok) return { ok: false as const, message: "周期格式无效" };
-    void viewer.actions.setDisplayInterval(result.value).catch(() => undefined);
+    setReplayDisplayInterval(result.value);
     showIntervalNotice({
       type: "success",
       text: `${result.value} 已保存并切换；实时主图与回放共用这份自定义周期`,
@@ -619,7 +668,7 @@ export default function ReplayTrainingPageShell({
     review,
     showIntervalNotice,
     unavailableIntervalMessage,
-    viewer.actions,
+    setReplayDisplayInterval,
   ]);
   const removeReplayCustomInterval = useCallback((removedInterval: IntervalString): void => {
     if (review !== null) return;
@@ -627,7 +676,7 @@ export default function ReplayTrainingPageShell({
     if (removed === null) return;
     lastRemovedIntervalRef.current = removed;
     if (intervalsSemanticallyEquivalent(interval, removed.value)) {
-      void viewer.actions.setDisplayInterval(baseInterval).catch(() => undefined);
+      setReplayDisplayInterval(baseInterval);
     }
     showIntervalNotice({
       type: "warning",
@@ -641,7 +690,7 @@ export default function ReplayTrainingPageShell({
     removeCustomInterval,
     review,
     showIntervalNotice,
-    viewer.actions,
+    setReplayDisplayInterval,
   ]);
   const restoreReplayCustomInterval = useCallback((): void => {
     const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
@@ -657,7 +706,7 @@ export default function ReplayTrainingPageShell({
     if (removed.some((record) => (
       intervalsSemanticallyEquivalent(interval, record.value)
     ))) {
-      void viewer.actions.setDisplayInterval(baseInterval).catch(() => undefined);
+      setReplayDisplayInterval(baseInterval);
     }
     showIntervalNotice({
       type: "warning",
@@ -671,7 +720,7 @@ export default function ReplayTrainingPageShell({
     interval,
     review,
     showIntervalNotice,
-    viewer.actions,
+    setReplayDisplayInterval,
   ]);
   const viewerLast = displayedSeriesStore.last();
   const viewerFirst = displayedSeriesStore.first();
@@ -743,6 +792,10 @@ export default function ReplayTrainingPageShell({
       datasetKey={review === null
         ? String(displayedSeriesStore.seriesKey ?? "replay-viewer-uninitialized")
         : `review:${review.review_id}:${review.selected_timeline_sequence}`}
+      datasetViewportTransfer={review === null ? activeIntervalViewportTransfer : null}
+      onDatasetViewportTransferSettled={settleReplayIntervalViewportTransfer}
+      followLatest={review === null}
+      latestBarPosition={0.5}
       upColor={settings.upColor}
       downColor={settings.downColor}
       chartType={settings.chartType}
@@ -776,13 +829,13 @@ export default function ReplayTrainingPageShell({
       positionSize={drawings.view.positionSize}
       drawingSnapEnabled={drawings.view.drawingSnapEnabled}
       onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
-      mainOverlayLines={review === null ? [...indicators.view.mainOverlayLines] : []}
-      subPanes={review === null ? [...indicators.view.subPanes] : []}
-      indicatorMarkers={review === null ? [...indicators.view.markers] : []}
-      indicatorFills={review === null ? [...indicators.view.fills] : []}
-      indicatorHlines={review === null ? [...indicators.view.hlines] : []}
-      indicatorBgcolors={review === null ? [...indicators.view.bgcolors] : []}
-      indicatorBarcolors={review === null ? [...indicators.view.barcolors] : []}
+      mainOverlayLines={review === null ? indicators.view.mainOverlayLines : []}
+      subPanes={review === null ? indicators.view.subPanes : []}
+      indicatorMarkers={review === null ? indicators.view.markers : []}
+      indicatorFills={review === null ? indicators.view.fills : []}
+      indicatorHlines={review === null ? indicators.view.hlines : []}
+      indicatorBgcolors={review === null ? indicators.view.bgcolors : []}
+      indicatorBarcolors={review === null ? indicators.view.barcolors : []}
       onRemoveSubPane={review === null
         ? (pane) => {
             const owner = pane.owner;
@@ -917,10 +970,12 @@ export default function ReplayTrainingPageShell({
             && config !== null
             && viewer.viewerState !== null
             && !viewer.viewerPending
+            && intervalViewportTransfer === null
             && replayIntervalCatalog.nativeIntervals.length > 0}
           capabilityLoading={config === null
             || viewer.loading
-            || viewer.viewerPending}
+            || viewer.viewerPending
+            || intervalViewportTransfer !== null}
           nativeIntervals={replayIntervalCatalog.nativeIntervals}
           intervalGroups={replayIntervalCatalog.intervalGroups}
           customIntervalRecords={customIntervalRecords}

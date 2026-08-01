@@ -173,6 +173,7 @@ import { clearDrawingScopeAuthoritatively } from "../features/drawings/drawingSc
 import { useDrawingFontMetricRevision } from "../features/drawings/text/drawingFontMetricRevision";
 import {
   axisTimeKey,
+  bindSurfaceViewportSourceAnchor,
   buildDisplaySourceTimeIndex,
   buildSurfaceViewportSnapshot,
   createProjector,
@@ -180,6 +181,7 @@ import {
   isOrdinalAxisTime,
   isLastDisplayTargetForSourceTime,
   planSurfaceViewportRestore,
+  preserveBoundSurfaceViewportSourceAnchor,
   ProjectionStore,
   projectPaneDescriptorsToDisplay,
   rememberSurfaceViewport,
@@ -190,6 +192,8 @@ import {
   shouldPreserveProjectionViewport,
   selectSurfaceViewportSnapshot,
   sourceTimeFromAxisTime,
+  surfaceViewportHasAnchorCoverage,
+  transferSurfaceViewportSnapshot,
 } from "../features/chart-representation/index.js";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 import type {
@@ -274,6 +278,13 @@ export interface SingleChartPanesProps {
   timeFormatter?: ((timeSeconds: number) => string) | undefined;
   tickMarkFormatter?: ((timeSeconds: number, tickMarkType: number) => string) | undefined;
   savedVisibleRange?: SavedVisibleRangeSnapshot | null;
+  datasetViewportTransfer?: SurfaceViewportSnapshot | null;
+  onDatasetViewportTransferSettled?: ((
+    transfer: SurfaceViewportSnapshot,
+    outcome: "applied" | "interrupted" | "superseded",
+  ) => void) | null;
+  followLatest?: boolean;
+  latestBarPosition?: number;
   dataMeta?: ChartDataCommitMeta | null;
   onViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
   onVisibleRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
@@ -451,6 +462,7 @@ const PRICE_SCALE_CONTEXT_MENU_WIDTH = 220;
 const PRICE_SCALE_CONTEXT_MENU_HEIGHT = 236;
 const PRICE_SCALE_CONTEXT_MENU_MARGIN = 8;
 const EMPTY_DERIVED_AUXILIARY_INDEX = buildDisplaySourceTimeIndex([]);
+const EMPTY_INDICATOR_BAR_COLOR_MAP = buildIndicatorBarColorMap([]);
 const PRICE_SCALE_MODES = [
   { value: 0, label: "常规", labelEn: "Regular" },
   { value: 1, label: "对数", labelEn: "Logarithmic" },
@@ -1012,6 +1024,10 @@ function restoreSurfaceViewport(
   if (!plan) return false;
   return viewportController.restoreProjectionRange(plan.logicalRange, {
     barSpacing: plan.barSpacing,
+    // A dataset transfer is an explicit ownership hand-off. Applying it
+    // immediately avoids leaving the transfer pending behind the controller's
+    // short post-drag interaction lock.
+    immediate: true,
   });
 }
 
@@ -1227,6 +1243,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   timeFormatter,
   tickMarkFormatter,
   savedVisibleRange = null,
+  datasetViewportTransfer = null,
+  onDatasetViewportTransferSettled = null,
+  followLatest = false,
+  latestBarPosition = 0.5,
   dataMeta = null,
   onViewportRangeChange = null,
   onVisibleRangeChange = null,
@@ -1331,6 +1351,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const requestedChartTypeRef = useRef(normalizeMainChartType(chartType));
   const requestedProjectionSettingsRef = useRef<ProjectionSettings | null>(null);
   const pendingSurfaceViewportRef = useRef<SurfaceViewportSnapshot | null>(null);
+  const datasetViewportTransferRef = useRef<SurfaceViewportSnapshot | null>(datasetViewportTransfer);
+  const pendingDatasetViewportTransferRequestRef = useRef<SurfaceViewportSnapshot | null>(null);
+  const boundSurfaceViewportAnchorRef = useRef<SurfaceViewportSnapshot | null>(null);
+  const onDatasetViewportTransferSettledRef = useRef(onDatasetViewportTransferSettled);
+  const followLatestRef = useRef(followLatest);
+  const latestBarPositionRef = useRef(latestBarPosition);
   const surfaceViewportCacheRef = useRef<Map<string, SurfaceViewportSnapshot>>(new Map());
   const activeSurfaceOwnerRef = useRef<ActiveSurfaceOwner>({
     chart: null,
@@ -1349,6 +1375,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const isSyncingRef = useRef(false);
   const isRestoringViewportRef = useRef(false);
   const userInteractedRef = useRef(false);
+  const followLatestDisabledRef = useRef(false);
   const hasRestoredRangeRef = useRef(false);
   const lastViewportRestoreSourceRef = useRef<string | null>(null);
   const visibleRangeSaveTimerRef = useRef<TimerHandle | null>(null);
@@ -1696,9 +1723,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   requestedProjectionSettingsRef.current = projectionSettings;
   seriesStoreRef.current = seriesStore;
   datasetKeyRef.current = datasetKey;
+  datasetViewportTransferRef.current = datasetViewportTransfer;
+  onDatasetViewportTransferSettledRef.current = onDatasetViewportTransferSettled;
+  followLatestRef.current = followLatest;
+  latestBarPositionRef.current = latestBarPosition;
   surfaceConfigKeyRef.current = surfaceConfigKey;
   const indicatorBarColorMap = useMemo(
-    () => buildIndicatorBarColorMap(indicatorBarcolors),
+    () => indicatorBarcolors.length === 0
+      ? EMPTY_INDICATOR_BAR_COLOR_MAP
+      : buildIndicatorBarColorMap(indicatorBarcolors),
     [indicatorBarcolors],
   );
   const indicatorDatasetOwned = hasCurrentDatasetOwnership({
@@ -2051,6 +2084,35 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     let trackingFrame: number | null = null;
     let settleFrame: number | null = null;
+    let followLatestResizeFrame: number | null = null;
+    let observedWidth = wrapper.getBoundingClientRect().width;
+    const syncSize = () => {
+      syncOverlays();
+      const nextWidth = wrapper.getBoundingClientRect().width;
+      if (!Number.isFinite(nextWidth)
+        || nextWidth <= 0
+        || Math.abs(nextWidth - observedWidth) < 0.5) return;
+      observedWidth = nextWidth;
+      if (followLatestResizeFrame !== null) cancelAnimationFrame(followLatestResizeFrame);
+      followLatestResizeFrame = requestAnimationFrame(() => {
+        followLatestResizeFrame = null;
+        const displayRows = displayRowsRef.current;
+        if (!followLatestRef.current
+          || followLatestDisabledRef.current
+          || pendingSurfaceViewportRef.current !== null
+          || displayRows.length === 0) return;
+        const rawPosition = Number(latestBarPositionRef.current);
+        const position = Number.isFinite(rawPosition)
+          ? Math.min(1, Math.max(0, rawPosition))
+          : 0.5;
+        if (viewportControllerRef.current?.followLatest(
+          displayRows.length - 1,
+          { position },
+        )) {
+          boundSurfaceViewportAnchorRef.current = null;
+        }
+      });
+    };
     const trackPaneResize = () => {
       syncOverlays();
       trackingFrame = requestAnimationFrame(trackPaneResize);
@@ -2077,7 +2139,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     syncOverlays();
     const initialFrame = requestAnimationFrame(syncOverlays);
     const resizeObserver = typeof ResizeObserver === "function"
-      ? new ResizeObserver(syncOverlays)
+      ? new ResizeObserver(syncSize)
       : null;
     resizeObserver?.observe(wrapper);
     for (const pane of chart.panes?.() || []) {
@@ -2088,18 +2150,19 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     window.addEventListener("pointerup", stopPaneResizeTracking);
     window.addEventListener("pointercancel", stopPaneResizeTracking);
     window.addEventListener("blur", stopPaneResizeTracking);
-    window.addEventListener("resize", syncOverlays);
+    window.addEventListener("resize", syncSize);
     return () => {
       panePointerLayoutRef.current = null;
       cancelAnimationFrame(initialFrame);
       if (trackingFrame !== null) cancelAnimationFrame(trackingFrame);
       if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+      if (followLatestResizeFrame !== null) cancelAnimationFrame(followLatestResizeFrame);
       resizeObserver?.disconnect();
       wrapper.removeEventListener("pointerdown", startPaneResizeTracking, true);
       window.removeEventListener("pointerup", stopPaneResizeTracking);
       window.removeEventListener("pointercancel", stopPaneResizeTracking);
       window.removeEventListener("blur", stopPaneResizeTracking);
-      window.removeEventListener("resize", syncOverlays);
+      window.removeEventListener("resize", syncSize);
     };
   }, [activePaneIds, activePaneIdsKey, seriesReady, subPaneIdsKey]);
 
@@ -2147,10 +2210,40 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
 
-  const issueHistoryInteractionTicket = useCallback(() => {
-    userInteractedRef.current = true;
-    leftHistoryInteractionGenerationRef.current += 1;
+  const settleDatasetViewportTransfer = useCallback((
+    outcome: "applied" | "interrupted" | "superseded",
+  ) => {
+    const transfer = pendingDatasetViewportTransferRequestRef.current
+      ?? datasetViewportTransferRef.current;
+    if (transfer === null) return;
+    pendingDatasetViewportTransferRequestRef.current = null;
+    if (datasetViewportTransferRef.current === transfer) {
+      datasetViewportTransferRef.current = null;
+    }
+    onDatasetViewportTransferSettledRef.current?.(transfer, outcome);
   }, []);
+
+  const markViewportRangeInteracted = useCallback(() => {
+    pendingSurfaceViewportRef.current = null;
+    boundSurfaceViewportAnchorRef.current = null;
+    settleDatasetViewportTransfer("interrupted");
+    userInteractedRef.current = true;
+    followLatestDisabledRef.current = true;
+    viewportControllerRef.current?.markUserInteracting();
+  }, [settleDatasetViewportTransfer]);
+
+  useEffect(() => {
+    if (datasetViewportTransfer !== null
+      || pendingDatasetViewportTransferRequestRef.current === null) return;
+    pendingSurfaceViewportRef.current = null;
+    boundSurfaceViewportAnchorRef.current = null;
+    settleDatasetViewportTransfer("superseded");
+  }, [datasetViewportTransfer, settleDatasetViewportTransfer]);
+
+  const issueHistoryInteractionTicket = useCallback(() => {
+    markViewportRangeInteracted();
+    leftHistoryInteractionGenerationRef.current += 1;
+  }, [markViewportRangeInteracted]);
 
   const evaluateLeftHistoryDemand = useCallback((range: VisibleLogicalRange) => {
     const currentData = sourceRowsRef.current;
@@ -2252,7 +2345,19 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         rightWindowRestoreScrollFrameRef.current = requestAnimationFrame(() => {
           rightWindowRestoreScrollFrameRef.current = null;
           if (datasetKeyRef.current !== requestedDatasetKey) return;
-          chartRef.current?.timeScale().scrollToRealTime?.();
+          if (followLatestRef.current && displayRowsRef.current.length > 0) {
+            followLatestDisabledRef.current = false;
+            const rawPosition = Number(latestBarPositionRef.current);
+            const position = Number.isFinite(rawPosition)
+              ? Math.min(1, Math.max(0, rawPosition))
+              : 0.5;
+            viewportControllerRef.current?.followLatest(
+              displayRowsRef.current.length - 1,
+              { position },
+            );
+          } else {
+            chartRef.current?.timeScale().scrollToRealTime?.();
+          }
         });
         return true;
       })
@@ -2308,6 +2413,48 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       timeRange: sourceTimeRange,
     });
   }, [chartAdapter]);
+
+  const captureViewportTransfer = useCallback(() => {
+    const pendingViewport = pendingSurfaceViewportRef.current;
+    if (pendingViewport !== null) return pendingViewport;
+    const chart = chartRef.current;
+    const committedOwner = activeSurfaceOwnerRef.current?.chart === chart
+      ? activeSurfaceOwnerRef.current
+      : null;
+    const captured = captureSurfaceViewport(chart, {
+      axisMode: surfaceAxisModeRef.current,
+      datasetKey: committedOwner?.datasetKey ?? datasetKeyRef.current,
+      displayRows: displayRowsRef.current,
+      surfaceConfigKey: committedOwner?.surfaceConfigKey ?? surfaceConfigKeyRef.current,
+    });
+    const snapshot = preserveBoundSurfaceViewportSourceAnchor(
+      captured,
+      boundSurfaceViewportAnchorRef.current,
+    );
+    if (snapshot !== null) {
+      rememberSurfaceViewport(surfaceViewportCacheRef.current, snapshot);
+    }
+    return snapshot;
+  }, []);
+
+  const followLatestViewport = useCallback((
+    displayRows: readonly DisplayRow[] = displayRowsRef.current,
+  ): boolean => {
+    if (!followLatestRef.current
+      || followLatestDisabledRef.current
+      || pendingSurfaceViewportRef.current !== null
+      || displayRows.length === 0) return false;
+    const rawPosition = Number(latestBarPositionRef.current);
+    const position = Number.isFinite(rawPosition)
+      ? Math.min(1, Math.max(0, rawPosition))
+      : 0.5;
+    const followed = viewportControllerRef.current?.followLatest(
+      displayRows.length - 1,
+      { position },
+    ) ?? false;
+    if (followed) boundSurfaceViewportAnchorRef.current = null;
+    return followed;
+  }, []);
 
   const publishViewportRangeChange = useCallback((visibleRange: ChartSurfaceVisibleRange | null = null) => {
     const range = visibleRange || captureVisibleRange();
@@ -2544,6 +2691,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       scheduleFutureTimeAxisCoverage();
       if (isChartPointerActiveRef.current && range) {
         chartPointerLogicalRangeChangedRef.current = true;
+        markViewportRangeInteracted();
       }
       if (!shouldPublishUserViewportRange({
         isProgrammatic: isRestoringViewportRef.current,
@@ -2677,15 +2825,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) return undefined;
-    const markViewportInteracted = () => {
-      userInteractedRef.current = true;
-      viewportControllerRef.current?.markUserInteracting();
-    };
     const resetPointerGesture = () => {
       const gesture = chartPointerGestureRef.current;
       gesture.kind = null;
@@ -2722,7 +2866,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       gesture.touchIdentifier = touchIdentifier;
       chartPointerLogicalRangeChangedRef.current = false;
       isChartPointerActiveRef.current = true;
-      markViewportInteracted();
     };
     const markMousePointerActive = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
@@ -2810,7 +2953,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     };
     const handleWheel = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
-      markViewportInteracted();
+      if (event.deltaX !== 0 || event.deltaY !== 0) {
+        markViewportRangeInteracted();
+      }
       const containerRect = containerRef.current?.getBoundingClientRect?.() ?? null;
       const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
       const validWheel = shouldIssueHistoryTicketForWheel({
@@ -2873,9 +3018,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     drawingEngineToolActive,
     evaluateHistoryEdgeGesture,
     issueHistoryInteractionTicket,
+    markViewportRangeInteracted,
     notifyDrawingFrameInvalidation,
     saveCurrentPaneHeights,
     scheduleFutureTimeAxisCoverage,
+    settleDatasetViewportTransfer,
   ]);
 
   useEffect(() => {
@@ -3166,6 +3313,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      if (activeSurfaceOwnerRef.current?.chart === chart) {
+        activeSurfaceOwnerRef.current = {
+          ...activeSurfaceOwnerRef.current,
+          datasetKey: datasetKeyRef.current,
+          surfaceConfigKey: surfaceConfigKeyRef.current,
+        };
+      }
       ensurePanePlaceholderSeries(
         chart,
         panePlaceholderSeriesRef,
@@ -3317,14 +3471,40 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }, [contextMenu]);
 
   useEffect(() => {
-    if (pendingSurfaceViewportRef.current?.datasetKey !== datasetKey) {
-      pendingSurfaceViewportRef.current = null;
-    }
-    if (activeSurfaceOwnerRef.current?.chart === chartRef.current) {
-      activeSurfaceOwnerRef.current = {
-        ...activeSurfaceOwnerRef.current,
+    const chart = chartRef.current;
+    const activeOwner = activeSurfaceOwnerRef.current;
+    const outgoingDatasetKey = activeOwner?.chart === chart
+      ? activeOwner.datasetKey
+      : null;
+    const rememberedViewport = selectSurfaceViewportSnapshot(
+      surfaceViewportCacheRef.current,
+      {
         datasetKey,
-      };
+        surfaceConfigKey: surfaceConfigKeyRef.current,
+      },
+    ).snapshot;
+    const transferredViewport = transferSurfaceViewportSnapshot(
+      datasetViewportTransferRef.current,
+      {
+        fromDatasetKey: outgoingDatasetKey,
+        toDatasetKey: datasetKey,
+      },
+    );
+    const pendingViewport = transferredViewport ?? rememberedViewport;
+    boundSurfaceViewportAnchorRef.current = null;
+    pendingDatasetViewportTransferRequestRef.current = transferredViewport !== null
+      ? datasetViewportTransferRef.current
+      : null;
+    if (rememberedViewport === null
+      && transferredViewport === null
+      && datasetViewportTransferRef.current !== null
+      && datasetViewportTransferRef.current.datasetKey !== datasetKey) {
+      settleDatasetViewportTransfer("superseded");
+    }
+    if (pendingViewport !== null) {
+      pendingSurfaceViewportRef.current = pendingViewport;
+    } else if (pendingSurfaceViewportRef.current?.datasetKey !== datasetKey) {
+      pendingSurfaceViewportRef.current = null;
     }
     if (futureTimeAxisCoverageFrameRef.current != null) {
       cancelAnimationFrame(futureTimeAxisCoverageFrameRef.current);
@@ -3332,7 +3512,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }
     futureTimeAxisCoveragePendingRef.current = false;
     clearFutureTimeAxis({ force: true, resetPointCount: true });
-    const chart = chartRef.current;
     const subPaneCount = activeSubPaneCountRef.current;
     trimPanePlaceholderSeries(chart, panePlaceholderSeriesRef, subPaneCount + 1);
     clearAuxiliaryChartState({
@@ -3367,7 +3546,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     if (subPaneCount > 0) {
       materializeRuntimePaneLayout(chart, containerRef.current);
     }
-    userInteractedRef.current = false;
     leftHistoryDemandDatasetRef.current = null;
     leftHistoryInteractionGenerationRef.current = 0;
     leftHistoryConsumedGenerationRef.current = 0;
@@ -3385,6 +3563,30 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       cancelAnimationFrame(rightWindowRestoreScrollFrameRef.current);
       rightWindowRestoreScrollFrameRef.current = null;
     }
+    if (pendingViewport !== null) {
+      // displayRowsRef still belongs to the outgoing dataset in this effect.
+      // Keep the transfer pending until the target store has committed; an
+      // early restore here consumed the snapshot against the wrong interval.
+      hasRestoredRangeRef.current = false;
+      lastViewportRestoreSourceRef.current = null;
+      // The main LWC series stays mounted, but drawing/auxiliary consumers must
+      // not observe the outgoing projection under the incoming dataset key.
+      setDrawingSurfaceDataKey(null);
+      setDrawingPaneDataAnchors(new Map());
+      setAuxiliaryDisplayState({ datasetKey: null, rows: [], surfaceConfigKey: null });
+      publishDrawingProjectionStore(null);
+      recordPerfEvent("chart.viewport.datasetTransfer", {
+        applied: false,
+        bars: 0,
+        datasetKey,
+        outgoingDatasetKey,
+        pending: true,
+        source: rememberedViewport !== null ? "remembered" : "transfer",
+      });
+      return;
+    }
+    userInteractedRef.current = false;
+    followLatestDisabledRef.current = false;
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
     renderedMainSeriesDataRef.current = [];
@@ -3399,7 +3601,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
-  }, [clearFutureTimeAxis, datasetKey, materializeRuntimePaneLayout, publishDrawingProjectionStore]);
+  }, [
+    clearFutureTimeAxis,
+    datasetKey,
+    materializeRuntimePaneLayout,
+    publishDrawingProjectionStore,
+    settleDatasetViewportTransfer,
+  ]);
 
   useEffect(() => {
     const series = mainSeriesRef.current;
@@ -3522,6 +3730,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      if (projectionRendered && activeSurfaceOwnerRef.current?.chart === chartRef.current) {
+        activeSurfaceOwnerRef.current = {
+          ...activeSurfaceOwnerRef.current,
+          datasetKey: datasetKeyRef.current,
+          surfaceConfigKey: surfaceConfigKeyRef.current,
+        };
+      }
       ensurePanePlaceholderSeries(
         chartRef.current,
         panePlaceholderSeriesRef,
@@ -3544,7 +3759,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         publishDrawingProjectionStore(projectionStore);
         chartAdapter.requestSeriesUpdate();
       }
-      if (projectionRendered && pendingSurfaceViewportRef.current && displayRows.length > 0) {
+      if (projectionRendered
+        && pendingSurfaceViewportRef.current
+        && surfaceViewportHasAnchorCoverage(
+          sourceRowsRef.current,
+          pendingSurfaceViewportRef.current,
+        )) {
         isRestoringViewportRef.current = true;
         try {
           const restored = restoreSurfaceViewport(
@@ -3558,23 +3778,48 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
             },
           );
           if (restored) {
+            hasRestoredRangeRef.current = true;
+            lastViewportRestoreSourceRef.current = "surface-viewport-transfer";
             materializeRuntimePaneLayout(
               chartRef.current,
               containerRef.current,
               { nudgeAxis: "height" },
             );
           }
-          pendingSurfaceViewportRef.current = null;
+          if (restored) {
+            const restoredTransfer = pendingSurfaceViewportRef.current;
+            pendingSurfaceViewportRef.current = null;
+            const targetSnapshot = bindSurfaceViewportSourceAnchor(
+              captureSurfaceViewport(chartRef.current, {
+                axisMode: surfaceAxisModeRef.current,
+                datasetKey: datasetKeyRef.current,
+                displayRows,
+                surfaceConfigKey: surfaceConfigKeyRef.current,
+              }),
+              restoredTransfer,
+            );
+            if (targetSnapshot !== null) {
+              boundSurfaceViewportAnchorRef.current = targetSnapshot;
+              rememberSurfaceViewport(surfaceViewportCacheRef.current, targetSnapshot);
+            }
+            settleDatasetViewportTransfer("applied");
+          }
         } finally {
           isRestoringViewportRef.current = false;
         }
+      }
+      if (projectionRendered && followLatestViewport(displayRows)) {
+        hasRestoredRangeRef.current = true;
+        lastViewportRestoreSourceRef.current = "follow-latest";
       }
     } finally {
       isSyncingRef.current = false;
     }
 
     const unsubscribe = store.subscribe((delta, currentStore) => {
-      if (projectionGenerationRef.current !== generation || delta?.type === "noop") return;
+      if (projectionGenerationRef.current !== generation
+        || seriesStoreRef.current !== currentStore
+        || delta?.type === "noop") return;
       const currentSeries = mainSeriesRef.current;
       if (!currentSeries) return;
       try {
@@ -3683,15 +3928,83 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           && getChartTypeDescriptor(currentChartType).axisMode === "derived-ordinal") {
           chartAdapter.requestSeriesUpdate();
         }
+        const nextDatasetKey = currentStore.seriesKey ?? datasetKeyRef.current;
+        const directViewportTransfer = transferSurfaceViewportSnapshot(
+          datasetViewportTransferRef.current,
+          {
+            fromDatasetKey: datasetKeyRef.current,
+            toDatasetKey: nextDatasetKey,
+          },
+        );
+        if (directViewportTransfer !== null) {
+          pendingSurfaceViewportRef.current = directViewportTransfer;
+        }
+        const pendingViewportTransfer = directViewportTransfer
+          ?? (pendingSurfaceViewportRef.current?.datasetKey === nextDatasetKey
+            ? pendingSurfaceViewportRef.current
+            : null);
+        if (projectionRendered
+          && pendingViewportTransfer
+          && surfaceViewportHasAnchorCoverage(sourceRowsRef.current, pendingViewportTransfer)) {
+          isRestoringViewportRef.current = true;
+          try {
+            const restored = restoreSurfaceViewport(
+              viewportControllerRef.current,
+              displayRows,
+              pendingViewportTransfer,
+              {
+                axisMode: surfaceAxisModeRef.current,
+                datasetKey: nextDatasetKey,
+                surfaceConfigKey: surfaceConfigKeyRef.current,
+              },
+            );
+            if (restored) {
+              hasRestoredRangeRef.current = true;
+              lastViewportRestoreSourceRef.current = "dataset-viewport-transfer";
+              materializeRuntimePaneLayout(
+                chartRef.current,
+                containerRef.current,
+                { nudgeAxis: "height" },
+              );
+            }
+            if (restored) {
+              const restoredTransfer = pendingViewportTransfer;
+              pendingSurfaceViewportRef.current = null;
+              const targetSnapshot = bindSurfaceViewportSourceAnchor(
+                captureSurfaceViewport(chartRef.current, {
+                  axisMode: surfaceAxisModeRef.current,
+                  datasetKey: nextDatasetKey,
+                  displayRows,
+                  surfaceConfigKey: surfaceConfigKeyRef.current,
+                }),
+                restoredTransfer,
+              );
+              if (targetSnapshot !== null) {
+                boundSurfaceViewportAnchorRef.current = targetSnapshot;
+                rememberSurfaceViewport(surfaceViewportCacheRef.current, targetSnapshot);
+              }
+              settleDatasetViewportTransfer("applied");
+            }
+          } finally {
+            isRestoringViewportRef.current = false;
+          }
+        }
+        if (projectionRendered
+          && displayRows.length !== previousDisplayRows.length
+          && followLatestViewport(displayRows)) {
+          hasRestoredRangeRef.current = true;
+          lastViewportRestoreSourceRef.current = "follow-latest";
+        }
       } finally {
         isSyncingRef.current = false;
       }
     });
     return () => { unsubscribe(); };
-  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, followLatestViewport, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, settleDatasetViewportTransfer, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
+    if (pendingSurfaceViewportRef.current !== null) return;
     if (!shouldRestoreChartViewport({
       dataMeta,
       datasetKey,
@@ -3700,6 +4013,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       lastRestoreSource: lastViewportRestoreSourceRef.current,
       userInteracted: userInteractedRef.current,
     })) return;
+
+    if (followLatestViewport(displayRowsRef.current)) {
+      hasRestoredRangeRef.current = true;
+      lastViewportRestoreSourceRef.current = "follow-latest";
+      publishViewportRangeChange();
+      return;
+    }
 
     const restorePlan = planVisibleRangeRestore(savedVisibleRange, rows, dataMeta);
     let restored = false;
@@ -3722,7 +4042,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = dataMeta?.source || null;
     if (restored) publishViewportRangeChange();
-  }, [captureVisibleRange, dataMeta, datasetKey, publishViewportRangeChange, savedVisibleRange, seriesStore]);
+  }, [captureVisibleRange, dataMeta, datasetKey, followLatestViewport, publishViewportRangeChange, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -4518,6 +4838,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useImperativeHandle(ref, () => ({
     getVisibleRange: captureVisibleRange,
+    captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
@@ -4575,6 +4896,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     seriesReady,
   }), [
     captureVisibleRange,
+    captureViewportTransfer,
     chartAdapter,
     clearAllDrawings,
     loading,

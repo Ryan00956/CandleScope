@@ -6,6 +6,7 @@ import type {
   DrawingExportPrepareOptions,
   DrawingStylePatch,
 } from "../features/drawings/drawingInteractionController.js";
+import type { SurfaceViewportSnapshot } from "../features/chart-representation/chartRepresentationTypes.js";
 
 export interface ChartSurfaceVisibleRange {
   barSpacing?: number;
@@ -17,6 +18,7 @@ export interface ChartSurfaceVisibleRange {
 
 export interface ChartSurfaceHandle {
   getVisibleRange(): ChartSurfaceVisibleRange | null;
+  captureViewportTransfer(): SurfaceViewportSnapshot | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
   prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease | null>;
@@ -29,6 +31,10 @@ export function useChartSurfaceRuntime() {
 
   const getVisibleRange = useCallback(() => (
     callChartSurface(ref, "getVisibleRange", null)
+  ), []);
+
+  const captureViewportTransfer = useCallback(() => (
+    callChartSurface(ref, "captureViewportTransfer", null)
   ), []);
 
   const clearAllDrawings = useCallback(() => {
@@ -58,12 +64,14 @@ export function useChartSurfaceRuntime() {
 
   const actions = useMemo(() => ({
     getVisibleRange,
+    captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
     prepareExport,
     updateSelectedDrawingStyle,
     getExportSnapshot,
   }), [
+    captureViewportTransfer,
     clearAllDrawings,
     getExportSnapshot,
     getVisibleRange,

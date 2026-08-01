@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { HeikinAshiProjector } from "../projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "../projectors/identityProjector.js";
+import { KagiProjector } from "../projectors/kagiProjector.js";
+import { LineBreakProjector } from "../projectors/lineBreakProjector.js";
+import { PointFigureProjector } from "../projectors/pointFigureProjector.js";
+import { RenkoProjector } from "../projectors/renkoProjector.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
 
 const rows = [
@@ -54,4 +58,42 @@ test("IdentityProjector preserves source fields and adds LWC customValues lineag
   assert.equal(customValues.venue, "demo");
   assert.equal(projection.projectorId, "identity");
   assert.equal(projection.sourceFromTime, 60);
+});
+
+test("derived projectors retain the full revealed source range of coarse rows", () => {
+  const coarseRows = [
+    {
+      time: 100,
+      sourceFromTime: 100,
+      sourceToTime: 107,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+    },
+    {
+      time: 115,
+      sourceFromTime: 115,
+      sourceToTime: 122,
+      open: 100,
+      high: 130,
+      low: 99,
+      close: 130,
+    },
+  ];
+  const projectors = [
+    new RenkoProjector({ boxSize: 1 }),
+    new LineBreakProjector({ numberOfLines: 1 }),
+    new KagiProjector({ reversalTicks: 1 }),
+    new PointFigureProjector({ boxSize: 1, reversalAmount: 1 }),
+  ];
+
+  for (const projector of projectors) {
+    const projected = projector.project(coarseRows);
+    assert.ok(projected.length > 0, `${projector.id} should emit a row`);
+    const latestSourceTo = Math.max(...projected.map((row) => (
+      Number(row.customValues?.chartProjection?.sourceToTime)
+    )));
+    assert.equal(latestSourceTo, 122, projector.id);
+  }
 });

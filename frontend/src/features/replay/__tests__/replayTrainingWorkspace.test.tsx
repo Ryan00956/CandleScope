@@ -94,6 +94,12 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(workspace, /seriesStore=\{displayedSeriesStore\}/);
   assert.match(workspace, /review === null \? viewer\.seriesStore : reviewSeriesStore/);
   assert.match(workspace, /setDisplayInterval/);
+  assert.match(workspace, /captureViewportTransfer/);
+  assert.match(workspace, /datasetViewportTransfer=\{review === null \? activeIntervalViewportTransfer : null\}/);
+  assert.match(workspace, /useReplayHistoryRuntime\(runtime, viewer, activeIntervalViewportTransfer\)/);
+  assert.match(workspace, /intervalViewportTransfer\.targetInterval/);
+  assert.match(workspace, /current\?\.snapshot === transfer/);
+  assert.doesNotMatch(workspace, /\[\.\.\.indicators\.view\./);
   assert.match(workspace, /buildReplayIntervalCatalog/);
   assert.match(workspace, /useCustomIntervals/);
   assert.match(workspace, /customIntervalRecords=\{customIntervalRecords\}/);
@@ -222,7 +228,7 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
   assert.match(runtime, /const displayInterval = viewerState\?\.display_interval \?\? null/);
   assert.match(
     runtime,
-    /\[baseInterval, displayInterval, seriesStore, sourceStore\]/,
+    /\[baseInterval, displayInterval, seriesStore, sourceStore, viewerSeriesCache\]/,
   );
   assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
 });

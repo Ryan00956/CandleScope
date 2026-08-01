@@ -9,6 +9,9 @@ import {
   replayHistoryInitialBeforeMs,
   replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
+  replayHistoryViewportTransferNeedsLatestWindow,
+  replayHistoryViewportTransferUnavailable,
+  replayHistoryViewportBeforeMs,
 } from "../replayHistoryProvider.js";
 import type {
   ReplayHistoryIdentity,
@@ -252,6 +255,150 @@ test("initial display history starts at the replay seam instead of an incomplete
   );
   assert.equal(replayHistoryInitialBeforeMs(null, "1h"), null);
   assert.equal(replayHistoryInitialBeforeMs(946_684_800_000, "invalid"), null);
+});
+
+test("viewport history targets the aligned bucket around an uncovered interval anchor", () => {
+  const store = new SeriesWindowStore({ intervalSeconds: 3_600 });
+  store.replace([{
+    time: 946_771_200,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100,
+    volume: 1,
+    replayCloseTimeMs: 946_774_799_999,
+    replayLastBaseOpenMs: 946_772_000_000,
+    sourceFromTime: 946_771_200,
+    sourceToTime: 946_772_000,
+  }]);
+
+  assert.equal(replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: 946_684_800,
+    displayInterval: "1h",
+    revealedBoundaryMs: 946_800_000_000,
+  }), 946_688_400_000);
+  assert.equal(replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: 946_772_000,
+    displayInterval: "1h",
+    revealedBoundaryMs: 946_800_000_000,
+  }), null);
+  assert.equal(replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: 946_774_000,
+    displayInterval: "1h",
+    revealedBoundaryMs: 946_800_000_000,
+  }), 946_774_800_000, "a forming bucket's nominal close is not revealed coverage");
+  assert.equal(replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: 946_900_000,
+    displayInterval: "1h",
+    revealedBoundaryMs: 946_800_000_000,
+  }), null);
+});
+
+test("a targeted history page settles when a display-bucket gap still leaves no anchor coverage", () => {
+  const start = 946_684_800;
+  const store = new SeriesWindowStore({ intervalSeconds: 900 });
+  store.replace([
+    {
+      time: start,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      sourceFromTime: start,
+      sourceToTime: start + 5 * 60,
+    },
+    {
+      time: start + 15 * 60,
+      open: 101,
+      high: 102,
+      low: 100,
+      close: 101,
+      sourceFromTime: start + 15 * 60,
+      sourceToTime: start + 20 * 60,
+    },
+  ]);
+  const transfer = {
+    anchorSourceTime: start + 7 * 60,
+    anchorTime: start + 7 * 60,
+    axisMode: "time",
+    barSpacing: 6,
+    datasetKey: "viewer:1m",
+    logicalSpan: 100,
+    screenOffset: 50,
+    sourceRange: null,
+    surfaceConfigKey: "time",
+  } as const;
+
+  assert.equal(
+    replayHistoryViewportTransferUnavailable(store, transfer, (start + 15 * 60) * 1_000),
+    true,
+  );
+  assert.equal(replayHistoryViewportTransferUnavailable(store, transfer, null), false);
+});
+
+test("a forming anchor restores latest from a reactivated right-truncated interval cache", () => {
+  const start = 946_684_800;
+  const store = new SeriesWindowStore({
+    intervalSeconds: 900,
+    maxBars: 2,
+    seriesKey: "replay-base|viewer:15m",
+  });
+  store.replace([{
+    time: start + 15 * 60,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100,
+    sourceFromTime: start + 15 * 60,
+    sourceToTime: start + 17 * 60,
+  }]);
+  store.applyRange([
+    {
+      time: start - 15 * 60,
+      open: 98,
+      high: 99,
+      low: 97,
+      close: 98,
+      sourceFromTime: start - 15 * 60,
+      sourceToTime: start - 60,
+    },
+    {
+      time: start,
+      open: 99,
+      high: 100,
+      low: 98,
+      close: 99,
+      sourceFromTime: start,
+      sourceToTime: start + 14 * 60,
+    },
+  ]);
+  const transfer = {
+    anchorSourceTime: start + 17 * 60,
+    anchorTime: start + 17 * 60,
+    axisMode: "time",
+    barSpacing: 6,
+    datasetKey: "replay-base|viewer:1m",
+    logicalSpan: 100,
+    screenOffset: 50,
+    sourceRange: null,
+    surfaceConfigKey: "time",
+  } as const;
+
+  assert.equal(store.rightTruncated, true);
+  assert.equal(replayHistoryViewportTransferNeedsLatestWindow(store, transfer, {
+    displayInterval: "15m",
+    revealedBoundaryMs: (start + 17 * 60) * 1_000,
+  }), true);
+});
+
+test("viewport history uses calendar boundaries for monthly display intervals", () => {
+  const store = new SeriesWindowStore();
+  const january = Date.UTC(2000, 0, 15) / 1_000;
+  assert.equal(replayHistoryViewportBeforeMs(store, {
+    anchorSourceTime: january,
+    displayInterval: "1M",
+    revealedBoundaryMs: Date.UTC(2000, 5, 1),
+  }), Date.UTC(2000, 1, 1));
 });
 
 test("revealed history repair replaces an elapsed partial left bucket without reading the future", () => {

@@ -3,7 +3,9 @@ import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { WindowDelta } from "../market-data/klineContracts.js";
 import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { SeriesWindowRegistry } from "../market-data/window/windowRegistry.js";
 import {
+  canonicalizeIntervalValue,
   intervalTiles,
   parseIntervalSeconds,
 } from "../../utils/intervals.js";
@@ -27,6 +29,108 @@ function replayIntervalTimeline(
     throw new ReplayViewerProjectionError(`${fieldName} is invalid`);
   }
   return timeline;
+}
+
+export function buildReplayViewerSeriesKey(
+  source: SeriesWindowStore,
+  displayInterval: string,
+) {
+  const canonicalDisplayInterval = canonicalizeIntervalValue(displayInterval);
+  if (canonicalDisplayInterval === "") {
+    throw new ReplayViewerProjectionError("display interval is invalid");
+  }
+  return asSeriesKey(
+    `${String(source.seriesKey ?? "replay-base")}|viewer:${canonicalDisplayInterval}`,
+  );
+}
+
+/**
+ * Per-run display cache mirroring the live chart's per-series registry.
+ * A display interval owns one immutable store identity and is synchronized
+ * only when the authoritative source version actually changes.
+ */
+export class ReplayViewerSeriesCache {
+  private readonly registry = new SeriesWindowRegistry();
+  private readonly projectedAuthorities = new WeakMap<SeriesWindowStore, {
+    readonly publicTimeMs: number | null;
+    readonly sourceVersion: number;
+  }>();
+
+  storeFor(source: SeriesWindowStore, displayInterval: string): SeriesWindowStore {
+    return this.registry.getOrCreate(
+      buildReplayViewerSeriesKey(source, displayInterval),
+    );
+  }
+
+  prepare(
+    source: SeriesWindowStore,
+    baseInterval: string,
+    displayInterval: string,
+    publicTimeMs: number | null,
+  ): SeriesWindowStore {
+    const expectedBaseSeconds = nominalSeconds(baseInterval, "base interval");
+    if (!source.isEmpty()
+      && source.intervalSeconds !== null
+      && source.intervalSeconds !== expectedBaseSeconds) {
+      throw new ReplayViewerProjectionError(
+        "authoritative replay source interval does not match the base interval",
+      );
+    }
+    const target = this.storeFor(source, displayInterval);
+    this.synchronize(target, source, baseInterval, displayInterval, publicTimeMs);
+    return target;
+  }
+
+  synchronize(
+    target: SeriesWindowStore,
+    source: SeriesWindowStore,
+    baseInterval: string,
+    displayInterval: string,
+    publicTimeMs: number | null = null,
+  ): boolean {
+    const sourceVersion = Number(source.version);
+    const authority = this.projectedAuthorities.get(target);
+    const normalizedPublicTimeMs = Number.isSafeInteger(publicTimeMs)
+      && Number(publicTimeMs) >= 0
+      ? Number(publicTimeMs)
+      : null;
+    if (authority?.sourceVersion === sourceVersion
+      && authority.publicTimeMs === normalizedPublicTimeMs) return false;
+    const rewound = authority?.publicTimeMs !== null
+      && authority?.publicTimeMs !== undefined
+      && normalizedPublicTimeMs !== null
+      && normalizedPublicTimeMs < authority.publicTimeMs;
+    if (rewound || !target.rightTruncated || target.isEmpty()) {
+      rebuildReplayViewerSeries(
+        target,
+        source,
+        baseInterval,
+        displayInterval,
+        {
+          preserveContextHistory: !rewound && !target.isEmpty(),
+          publicTimeMs: normalizedPublicTimeMs,
+        },
+      );
+    }
+    this.projectedAuthorities.set(target, {
+      publicTimeMs: normalizedPublicTimeMs,
+      sourceVersion,
+    });
+    return true;
+  }
+
+  markSynchronized(
+    target: SeriesWindowStore,
+    source: SeriesWindowStore,
+    publicTimeMs: number | null = null,
+  ): void {
+    this.projectedAuthorities.set(target, {
+      publicTimeMs: Number.isSafeInteger(publicTimeMs) && Number(publicTimeMs) >= 0
+        ? Number(publicTimeMs)
+        : null,
+      sourceVersion: Number(source.version),
+    });
+  }
 }
 
 export function isReplayContextHistoryBar(
@@ -111,6 +215,8 @@ function aggregateBucket(
     bucketEndSeconds,
   );
   const lastBaseOpenMs = Number(last.time) * 1_000;
+  const sourceFromTime = Number(first.sourceFromTime ?? first.time);
+  const sourceToTime = Number(last.sourceToTime ?? last.time);
   // The adapter always publishes one row per BaseInterval. In AGG_TRADE mode
   // a row's replayComponentCount counts trades, not base bars, so display
   // completeness must be based on the number of revealed base rows.
@@ -132,6 +238,8 @@ function aggregateBucket(
   const takerBuyQuote = nullableSum(rows, "takerBuyQuote");
   return {
     time,
+    sourceFromTime: Number.isFinite(sourceFromTime) ? sourceFromTime : Number(first.time),
+    sourceToTime: Number.isFinite(sourceToTime) ? sourceToTime : Number(last.time),
     open: finiteNumber(first, "open"),
     high: rows.reduce((maximum, row) => Math.max(maximum, finiteNumber(row, "high")), -Infinity),
     low: rows.reduce((minimum, row) => Math.min(minimum, finiteNumber(row, "low")), Infinity),
@@ -216,15 +324,34 @@ export function rebuildReplayViewerSeries(
   source: SeriesWindowStore,
   baseInterval: string,
   displayInterval: string,
+  {
+    preserveContextHistory = false,
+    publicTimeMs = null,
+  }: {
+    readonly preserveContextHistory?: boolean;
+    readonly publicTimeMs?: number | null;
+  } = {},
 ): void {
-  const rows = aggregateReplayBaseBars(
+  const projectedRows = aggregateReplayBaseBars(
     source.snapshot({ force: true }),
     baseInterval,
     displayInterval,
   );
+  const previousRows = target.snapshot();
+  const rows = preserveContextHistory
+    ? mergeDisplayContextWithProjection(
+        revealedContextRows(previousRows, publicTimeMs),
+        projectedRows,
+      )
+    : projectedRows;
   const displaySeconds = nominalSeconds(displayInterval, "display interval");
+  const seriesKey = buildReplayViewerSeriesKey(source, displayInterval);
   target.intervalSeconds = displaySeconds;
-  target.seriesKey = asSeriesKey(`${String(source.seriesKey ?? "replay-base")}|viewer:${displayInterval}`);
+  target.seriesKey = seriesKey;
+  // A historical window can converge back to the authoritative row set while
+  // retaining SeriesWindowStore's right-truncated flag. Rebuilding the latest
+  // window must still replace once so that flag reaches its terminal state.
+  if (sameProjectedRows(previousRows, rows) && !target.rightTruncated) return;
   target.replace(rows, {
     source: "replay-viewer-rebuild",
     baseInterval,
@@ -386,9 +513,7 @@ export function applyReplayViewerSeriesDelta(
     displayInterval,
   };
   target.intervalSeconds = displaySeconds;
-  target.seriesKey = asSeriesKey(
-    `${String(source.seriesKey ?? "replay-base")}|viewer:${displayInterval}`,
-  );
+  target.seriesKey = buildReplayViewerSeriesKey(source, displayInterval);
 
   if (projectedRows.length === 0 || sourceDeltaType === WINDOW_DELTA_TYPES.CLEAR) {
     return target.clear(meta);

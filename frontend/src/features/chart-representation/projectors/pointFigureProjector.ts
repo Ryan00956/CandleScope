@@ -8,6 +8,7 @@ import type {
   Projector,
   SourceBar,
 } from "../chartRepresentationTypes.js";
+import { projectionSourceTimeRange } from "./projectorData.js";
 
 const POINT_FIGURE_STATE_VERSION = 1;
 type PointFigureDirection = "x" | "o" | null;
@@ -214,7 +215,7 @@ function projectionCustomValues(row: SourceBar, {
     chartProjection: Object.freeze({
       projectorId: "point-and-figure",
       sourceFromTime,
-      sourceToTime: row.time,
+      sourceToTime: projectionSourceTimeRange(row).to,
       sourceOrdinal: 0,
       synthetic: true,
       provisional: Boolean(provisional),
@@ -378,7 +379,7 @@ export class PointFigureProjector implements Projector<
     if (closeTicks >= columnHighTicks + this.boxTicks) {
       const boxes = Math.floor((closeTicks - columnHighTicks) / this.boxTicks);
       state.columnHighTicks = columnHighTicks + boxes * this.boxTicks;
-      state.columnSourceToTime = row.time;
+      state.columnSourceToTime = projectionSourceTimeRange(row).to;
       state.columnCustomValues = cloneCustomValues(row.customValues);
       this._upsertCurrentColumn(data, state, row, provisional);
       return;
@@ -407,7 +408,7 @@ export class PointFigureProjector implements Projector<
     if (closeTicks <= columnLowTicks - this.boxTicks) {
       const boxes = Math.floor((columnLowTicks - closeTicks) / this.boxTicks);
       state.columnLowTicks = columnLowTicks - boxes * this.boxTicks;
-      state.columnSourceToTime = row.time;
+      state.columnSourceToTime = projectionSourceTimeRange(row).to;
       state.columnCustomValues = cloneCustomValues(row.customValues);
       this._upsertCurrentColumn(data, state, row, provisional);
       return;
@@ -442,7 +443,7 @@ export class PointFigureProjector implements Projector<
     state.columnHighTicks = highTicks;
     state.columnOrder = state.nextOrder;
     state.columnSourceFromTime = sourceFromTime;
-    state.columnSourceToTime = row.time;
+    state.columnSourceToTime = projectionSourceTimeRange(row).to;
     state.columnCustomValues = cloneCustomValues(row.customValues);
     state.nextOrder += 1;
     state.pendingFromTime = row.time;

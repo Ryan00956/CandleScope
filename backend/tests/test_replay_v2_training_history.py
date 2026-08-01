@@ -4,12 +4,14 @@ import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.errors import TrainingRunError
+from app.replay.training.history import _resolve_native_display_context
 from app.replay.training.models import TrainingRunCreateRequest
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
@@ -29,6 +31,17 @@ from tests.fixtures.replay.trade_service_fakes import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_calendar_month_history_uses_base_reconstruction_in_blind_time() -> None:
+    for interval in ("1M", "2M"):
+        config = SimpleNamespace(base_interval="1m", display_interval=interval)
+        assert _resolve_native_display_context(
+            repository=object(),  # type: ignore[arg-type]
+            config=config,  # type: ignore[arg-type]
+            snapshot=object(),  # type: ignore[arg-type]
+            actual_replay_start_ms=1_709_251_200_000,
+        ) is None
 
 
 async def _service(path: Path) -> tuple[ReplayService, object]:

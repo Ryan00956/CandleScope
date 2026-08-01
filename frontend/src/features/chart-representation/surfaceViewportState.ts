@@ -1,7 +1,9 @@
 import {
+  axisTimeKey,
   mapSourceViewportAnchorToDisplayLogicalRange,
   sourceTimeFromAxisTime,
   sourceTimeFromDisplayRow,
+  sourceTimeRangeFromDisplayRow,
 } from "./axisTime.js";
 import type {
   AxisTime,
@@ -11,6 +13,8 @@ import type {
 } from "./chartRepresentationTypes.js";
 
 export const SURFACE_VIEWPORT_CACHE_LIMIT = 32;
+
+const VIEWPORT_GEOMETRY_EPSILON = 1e-6;
 
 function finiteRange(range: unknown): LogicalRange | null {
   const record = range && typeof range === "object"
@@ -33,6 +37,36 @@ export function buildSurfaceViewportCacheKey(
 ): string | null {
   if (!datasetKey || !surfaceConfigKey) return null;
   return JSON.stringify([datasetKey, surfaceConfigKey]);
+}
+
+export function bindSurfaceViewportSourceAnchor(
+  captured: SurfaceViewportSnapshot | null | undefined,
+  source: SurfaceViewportSnapshot | null | undefined,
+): SurfaceViewportSnapshot | null {
+  if (!captured || !source || captured.datasetKey !== source.datasetKey) return captured ?? null;
+  return {
+    ...captured,
+    anchorSourceTime: source.anchorSourceTime,
+  };
+}
+
+export function preserveBoundSurfaceViewportSourceAnchor(
+  captured: SurfaceViewportSnapshot | null | undefined,
+  bound: SurfaceViewportSnapshot | null | undefined,
+): SurfaceViewportSnapshot | null {
+  if (!captured || !bound
+    || captured.datasetKey !== bound.datasetKey
+    || captured.surfaceConfigKey !== bound.surfaceConfigKey
+    || captured.axisMode !== bound.axisMode
+    || axisTimeKey(captured.anchorTime) !== axisTimeKey(bound.anchorTime)
+    || Math.abs(captured.logicalSpan - bound.logicalSpan) > VIEWPORT_GEOMETRY_EPSILON
+    || Math.abs(captured.screenOffset - bound.screenOffset) > VIEWPORT_GEOMETRY_EPSILON) {
+    return captured ?? null;
+  }
+  return {
+    ...captured,
+    anchorSourceTime: bound.anchorSourceTime,
+  };
 }
 
 /**
@@ -66,8 +100,11 @@ export function buildSurfaceViewportSnapshot({
   const anchorRow = displayRows[anchorIndex];
   if (!anchorRow) return null;
   const anchorTime = anchorRow.time;
-  const anchorSourceTime = sourceTimeFromAxisTime(anchorTime)
-    ?? sourceTimeFromDisplayRow(anchorRow);
+  // A display bucket can represent several revealed source bars. Prefer its
+  // lineage tail over the bucket-open axis coordinate so a 1m -> 15m -> 1m
+  // round trip does not degrade 12:07 into 12:00.
+  const anchorSourceTime = sourceTimeFromDisplayRow(anchorRow)
+    ?? sourceTimeFromAxisTime(anchorTime);
   if (anchorTime == null || anchorSourceTime === null || !Number.isFinite(anchorSourceTime)) {
     return null;
   }
@@ -169,4 +206,54 @@ export function selectSurfaceViewportSnapshot(
     return { snapshot: outgoingSnapshot, source: "transfer" };
   }
   return { snapshot: null, source: "none" };
+}
+
+/**
+ * Explicitly carry a captured viewport across a dataset identity change.
+ *
+ * Dataset isolation remains the default: a transfer is accepted only when it
+ * was captured from the currently-owned outgoing dataset. Callers must opt in
+ * at the transition boundary and provide the exact incoming dataset key.
+ */
+export function transferSurfaceViewportSnapshot(
+  snapshot: SurfaceViewportSnapshot | null | undefined,
+  {
+    fromDatasetKey,
+    toDatasetKey,
+  }: {
+    fromDatasetKey?: unknown;
+    toDatasetKey?: unknown;
+  } = {},
+): SurfaceViewportSnapshot | null {
+  if (!snapshot
+    || !fromDatasetKey
+    || !toDatasetKey
+    || fromDatasetKey === toDatasetKey
+    || snapshot.datasetKey !== fromDatasetKey) return null;
+  return {
+    ...snapshot,
+    // Axis coordinates are dataset-local (a coarse bucket open or an ordinal
+    // order). Cross-dataset restoration must resolve from stable source time.
+    anchorTime: snapshot.anchorSourceTime,
+    datasetKey: toDatasetKey,
+  };
+}
+
+/**
+ * A cross-dataset transfer must not snap to the nearest edge while the target
+ * interval is still publishing or paging the rows around the captured anchor.
+ */
+export function surfaceViewportHasAnchorCoverage(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  snapshot: SurfaceViewportSnapshot | null | undefined,
+): boolean {
+  const anchor = Number(snapshot?.anchorSourceTime);
+  if (!displayRows?.length || !Number.isFinite(anchor)) return false;
+
+  for (const row of displayRows) {
+    const range = sourceTimeRangeFromDisplayRow(row);
+    if (!range) continue;
+    if (range.from <= anchor && anchor <= range.to) return true;
+  }
+  return false;
 }

@@ -59,6 +59,32 @@ function toLogicalRange(range: ViewportLogicalRange): LogicalRange {
   };
 }
 
+export function logicalRangeForLatestBarPosition({
+  barSpacing,
+  contentLastLogical,
+  position = 0.5,
+  width,
+}: {
+  barSpacing?: unknown;
+  contentLastLogical?: unknown;
+  position?: unknown;
+  width?: unknown;
+} = {}): ViewportLogicalRange | null {
+  const spacing = Number(barSpacing);
+  const last = Number(contentLastLogical);
+  const scaleWidth = Number(width);
+  const normalizedPosition = Number(position);
+  if (!Number.isFinite(spacing) || spacing <= 0
+    || !Number.isFinite(last)
+    || !Number.isFinite(scaleWidth) || scaleWidth <= 0
+    || !Number.isFinite(normalizedPosition)
+    || normalizedPosition < 0 || normalizedPosition > 1) return null;
+  const span = scaleWidth / spacing;
+  if (!Number.isFinite(span) || span <= 0) return null;
+  const from = last - span * normalizedPosition;
+  return { from, to: from + span };
+}
+
 export class ViewportController {
   private readonly chartProvider: () => AdapterChart | null;
   private readonly contentLogicalRangeProvider: (() => ViewportLogicalRange | null) | null;
@@ -133,6 +159,16 @@ export class ViewportController {
       }
       return false;
     }
+    const timeScale = this.getTimeScale();
+    if (!timeScale) return false;
+    return Boolean(apply(timeScale, this.getChart()));
+  }
+
+  private applyImmediateIntent(apply: ViewportIntent["apply"]): boolean {
+    // An explicit surface/dataset transition owns the viewport now. Any
+    // queued compensation belongs to the outgoing surface and must not run
+    // after the target range has been restored.
+    this.pendingIntent = null;
     const timeScale = this.getTimeScale();
     if (!timeScale) return false;
     return Boolean(apply(timeScale, this.getChart()));
@@ -233,9 +269,15 @@ export class ViewportController {
 
   restoreProjectionRange(
     logicalRange: ViewportLogicalRange | null | undefined,
-    { barSpacing = null }: { barSpacing?: number | null } = {},
+    {
+      barSpacing = null,
+      immediate = false,
+    }: {
+      barSpacing?: number | null;
+      immediate?: boolean;
+    } = {},
   ): boolean {
-    return this.applyIntent("projectionRestore", PRIORITY.restore, (timeScale) => {
+    const apply = (timeScale: AdapterTimeScale) => {
       if (finiteNumber(barSpacing)) {
         timeScale.applyOptions?.({ barSpacing });
       }
@@ -244,6 +286,30 @@ export class ViewportController {
         return true;
       }
       return this.fitSemanticContent(timeScale);
+    };
+    return immediate
+      ? this.applyImmediateIntent(apply)
+      : this.applyIntent("projectionRestore", PRIORITY.restore, apply);
+  }
+
+  followLatest(
+    contentLastLogical: number,
+    {
+      position = 0.5,
+    }: {
+      position?: number;
+    } = {},
+  ): boolean {
+    return this.applyIntent("followLatest", PRIORITY.restore, (timeScale) => {
+      const range = logicalRangeForLatestBarPosition({
+        barSpacing: safeCall(() => Number(timeScale.options?.().barSpacing), Number.NaN),
+        contentLastLogical,
+        position,
+        width: safeCall(() => Number(timeScale.width?.()), Number.NaN),
+      });
+      if (!range) return false;
+      timeScale.setVisibleLogicalRange?.(toLogicalRange(range));
+      return true;
     });
   }
 

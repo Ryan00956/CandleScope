@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WindowDelta, WindowDeltaType } from "../market-data/klineContracts.js";
 import { WINDOW_DELTA_TYPES } from "../market-data/window/windowDeltas.js";
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 import type {
   ReplayAccountAuditResponse,
   ReplayV2Command,
@@ -17,7 +18,7 @@ import { defaultReplayV2Api } from "./replayV2Api.js";
 import type { ReplayPeriodSummaryStatusResponse } from "./replayPeriodSummary.js";
 import {
   applyReplayViewerSeriesDelta,
-  rebuildReplayViewerSeries,
+  ReplayViewerSeriesCache,
 } from "./replayViewerProjection.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
@@ -107,7 +108,10 @@ export function coalesceReplayViewerSourceDeltas(
   } else {
     type = WINDOW_DELTA_TYPES.MID_MERGE;
   }
+  const latest = changed[changed.length - 1] as WindowDelta;
+  const replacements = changed.filter((delta) => delta.type === WINDOW_DELTA_TYPES.REPLACE);
   return {
+    ...latest,
     type,
     changed: true,
     addedLeft: changed.reduce((total, delta) => (
@@ -122,8 +126,26 @@ export function coalesceReplayViewerSourceDeltas(
     trimmedRight: changed.reduce((total, delta) => (
       total + (Number(delta.trimmedRight) || 0)
     ), 0),
+    ...(replacements.length > 0
+      ? {
+          preserveRevealedPrefix: replacements.every((delta) => (
+            delta.preserveRevealedPrefix === true
+          )),
+        }
+      : {}),
     source: "replay-viewer-source-burst",
   };
+}
+
+function publicTimeMsFromDelta(
+  delta: WindowDelta | null,
+  fallback: number | null,
+): number | null {
+  const value = Number(delta?.publicTimeMs);
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  return Number.isSafeInteger(fallback) && Number(fallback) >= 0
+    ? Number(fallback)
+    : null;
 }
 
 export interface ReplayViewerRuntime {
@@ -139,7 +161,7 @@ export interface ReplayViewerRuntime {
   readonly summaryPreparing: boolean;
   readonly summaryError: string | null;
   readonly actions: {
-    setDisplayInterval(interval: string): Promise<ReplayV2CommandResult>;
+    setDisplayInterval(interval: string): Promise<ReplayV2CommandResult | null>;
     submitControl(
       type: ReplayPhase3ControlType,
       payload: Readonly<Record<string, ReplayV2Json>>,
@@ -197,12 +219,71 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   viewerRef.current = viewerState;
   const controlRef = useRef(controlPending);
   controlRef.current = controlPending;
+  const viewerCommandRef = useRef<string | null>(null);
   const sourceStore = runtime.replayStore.seriesStore;
-  const seriesStore = useMemo(() => new SeriesWindowStore(), []);
   const sessionId = runtime.store.sessionId;
   const config = runtime.store.sessionConfig;
   const baseInterval = config?.base_interval ?? null;
+  const adapterDisplayInterval = config?.display_interval ?? null;
   const displayInterval = viewerState?.display_interval ?? null;
+  const sourceSeriesKey = sourceStore.seriesKey;
+  const sourcePublicTimeMsRef = useRef(runtime.store.virtualTimeMs);
+  sourcePublicTimeMsRef.current = runtime.store.virtualTimeMs;
+  const viewerStores = useMemo(() => ({
+    ownerSessionId: sessionId,
+    viewerSeriesCache: new ReplayViewerSeriesCache(),
+    unavailableSeriesStore: new SeriesWindowStore(),
+  }), [sessionId]);
+  const { viewerSeriesCache, unavailableSeriesStore } = viewerStores;
+  const prepareViewerSeries = useCallback((next: ReplayViewerState): void => {
+    if (baseInterval === null) throw new Error("replay base interval is unavailable");
+    if (adapterDisplayInterval !== null && !intervalsSemanticallyEquivalent(
+      baseInterval,
+      adapterDisplayInterval,
+    )) {
+      throw new Error("authoritative replay adapter is not projected at the base interval");
+    }
+    viewerSeriesCache.prepare(
+      sourceStore,
+      baseInterval,
+      next.display_interval,
+      sourcePublicTimeMsRef.current,
+    );
+  }, [adapterDisplayInterval, baseInterval, sourceStore, viewerSeriesCache]);
+  const publishViewerState = useCallback((next: ReplayViewerState): boolean => {
+    const current = viewerRef.current;
+    if (current !== null
+      && next.semantic_view_revision < current.semantic_view_revision) return true;
+    const targetChanged = current === null
+      || current.run_id !== next.run_id
+      || !intervalsSemanticallyEquivalent(
+        current.display_interval,
+        next.display_interval,
+      );
+    try {
+      if (targetChanged) prepareViewerSeries(next);
+    } catch (cause) {
+      setViewerState(null);
+      setError(cause instanceof Error ? cause.message : "展示周期重建失败");
+      return false;
+    }
+    viewerRef.current = next;
+    setViewerState(next);
+    return true;
+  }, [prepareViewerSeries]);
+  const viewerSeriesBinding = useMemo(() => ({
+    sourceSeriesKey,
+    store: displayInterval === null
+      ? unavailableSeriesStore
+      : viewerSeriesCache.storeFor(sourceStore, displayInterval),
+  }), [
+    displayInterval,
+    sourceSeriesKey,
+    sourceStore,
+    unavailableSeriesStore,
+    viewerSeriesCache,
+  ]);
+  const seriesStore = viewerSeriesBinding.store;
 
   useEffect(() => {
     if (sessionId === null) {
@@ -223,7 +304,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         >= viewerResponse.viewer_state.semantic_view_revision
         ? tracksResponse.viewer_state
         : viewerResponse.viewer_state;
-      setViewerState(authoritative);
+      publishViewerState(authoritative);
       setMarketTracks(tracksResponse);
     }).catch((cause: unknown) => {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
@@ -232,7 +313,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       if (!abort.signal.aborted) setLoading(false);
     });
     return () => abort.abort();
-  }, [reloadRevision, sessionId]);
+  }, [publishViewerState, reloadRevision, sessionId]);
 
   useEffect(() => {
     const runId = viewerState?.run_id;
@@ -258,27 +339,27 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     runId: string,
   ): Promise<ReplayMarketTracksResponse> => {
     const response = await defaultReplayV2Api.tracksRun(runId);
+    if (!publishViewerState(response.viewer_state)) {
+      throw new Error("authoritative replay viewer projection could not be prepared");
+    }
     setMarketTracks(response);
-    setViewerState((current) => current === null
-      || response.viewer_state.semantic_view_revision >= current.semantic_view_revision
-      ? response.viewer_state
-      : current);
     return response;
-  }, []);
+  }, [publishViewerState]);
 
   const failClosedAndRefreshMarketTracks = useCallback(async (
     runId: string,
-  ): Promise<void> => {
+  ): Promise<ReplayMarketTracksResponse | null> => {
     // A rejected command may already have paused the Run and cleared a
     // continuity-gated projection server-side. Remove every local track
     // projection before attempting the authoritative refresh so a second
     // network failure cannot leave stale L2 or fills visible.
     setMarketTracks(null);
     try {
-      await refreshMarketTracks(runId);
+      return await refreshMarketTracks(runId);
     } catch {
       // The original command error remains the user-facing failure. Keeping
       // marketTracks null is the deliberate fail-closed state.
+      return null;
     }
   }, [refreshMarketTracks]);
 
@@ -306,11 +387,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         const sourceDelta = coalesceReplayViewerSourceDeltas(pendingSourceDeltas);
         pendingSourceDeltas = [];
         if (!initialized || sourceDelta === null) {
-          rebuildReplayViewerSeries(
+          viewerSeriesCache.synchronize(
             seriesStore,
             sourceStore,
             baseInterval,
             displayInterval,
+            sourcePublicTimeMsRef.current,
           );
           initialized = true;
         } else {
@@ -320,6 +402,11 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
             baseInterval,
             displayInterval,
             sourceDelta,
+          );
+          viewerSeriesCache.markSynchronized(
+            seriesStore,
+            sourceStore,
+            publicTimeMsFromDelta(sourceDelta, sourcePublicTimeMsRef.current),
           );
         }
         setError(null);
@@ -339,7 +426,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       projectionScheduler.cancel();
       pendingSourceDeltas = [];
     };
-  }, [baseInterval, displayInterval, seriesStore, sourceStore]);
+  }, [baseInterval, displayInterval, seriesStore, sourceStore, viewerSeriesCache]);
 
   useEffect(() => {
     const active = controlPending;
@@ -420,10 +507,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     setError(null);
     try {
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
-      setViewerState((current) => current === null
-        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
-        ? result.viewer_state
-        : current);
+      publishViewerState(result.viewer_state);
       setProgress(progressFromResult(result));
       await refreshMarketTracks(command.run_id);
       return result;
@@ -434,9 +518,14 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     } finally {
       setControlPending((current) => current?.command_id === command.command_id ? null : current);
     }
-  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState, refreshMarketTracks]);
 
-  const setDisplayInterval = useCallback(async (interval: string): Promise<ReplayV2CommandResult> => {
+  const setDisplayInterval = useCallback(async (
+    interval: string,
+  ): Promise<ReplayV2CommandResult | null> => {
+    if (viewerCommandRef.current !== null) {
+      throw new Error("another replay.v2 viewer command is pending");
+    }
     const viewer = viewerRef.current;
     if (viewer === null) throw new Error("ViewerState is unavailable");
     const command = buildCommand(
@@ -447,23 +536,34 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       },
       "viewer",
     );
+    viewerCommandRef.current = command.command_id;
     setViewerPending(true);
     setError(null);
     try {
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
-      setViewerState((current) => current === null
-        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
-        ? result.viewer_state
-        : current);
+      publishViewerState(result.viewer_state);
       return result;
     } catch (cause) {
-      await failClosedAndRefreshMarketTracks(command.run_id);
+      const authoritative = await failClosedAndRefreshMarketTracks(command.run_id);
+      if (authoritative !== null && intervalsSemanticallyEquivalent(
+        authoritative.viewer_state.display_interval,
+        interval,
+      )) {
+        // The command committed but its response was lost. The authoritative
+        // refresh already published the requested target, so preserve the
+        // pending viewport hand-off and report a recovered success.
+        setError(null);
+        return null;
+      }
       setError(cause instanceof Error ? cause.message : "展示周期切换失败");
       throw cause;
     } finally {
-      setViewerPending(false);
+      if (viewerCommandRef.current === command.command_id) {
+        viewerCommandRef.current = null;
+        setViewerPending(false);
+      }
     }
-  }, [buildCommand, failClosedAndRefreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState]);
 
   const cancelAdvance = useCallback(async (): Promise<ReplayV2CommandResult> => {
     const active = controlRef.current;
@@ -489,15 +589,16 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     prefix: string,
   ): Promise<ReplayV2CommandResult> => {
     if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (viewerCommandRef.current !== null) {
+      throw new Error("another replay.v2 viewer command is pending");
+    }
     const command = buildCommand(type, payload, prefix);
+    viewerCommandRef.current = command.command_id;
     setViewerPending(true);
     setError(null);
     try {
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
-      setViewerState((current) => current === null
-        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
-        ? result.viewer_state
-        : current);
+      publishViewerState(result.viewer_state);
       await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
@@ -505,9 +606,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setError(cause instanceof Error ? cause.message : "MarketTrack 操作失败");
       throw cause;
     } finally {
-      setViewerPending(false);
+      if (viewerCommandRef.current === command.command_id) {
+        viewerCommandRef.current = null;
+        setViewerPending(false);
+      }
     }
-  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState, refreshMarketTracks]);
 
   const selectTrack = useCallback(async (trackId: string): Promise<ReplayV2CommandResult> => {
     const viewer = viewerRef.current;
@@ -569,15 +673,16 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     payload: Readonly<Record<string, ReplayV2Json>>,
   ): Promise<ReplayV2CommandResult> => {
     if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (viewerCommandRef.current !== null) {
+      throw new Error("another replay.v2 viewer command is pending");
+    }
     const command = buildCommand(type, payload, "trade");
+    viewerCommandRef.current = command.command_id;
     setViewerPending(true);
     setError(null);
     try {
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
-      setViewerState((current) => current === null
-        || result.viewer_state.semantic_view_revision >= current.semantic_view_revision
-        ? result.viewer_state
-        : current);
+      publishViewerState(result.viewer_state);
       await refreshMarketTracks(command.run_id);
       return result;
     } catch (cause) {
@@ -585,9 +690,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setError(cause instanceof Error ? cause.message : "组合纸面交易失败");
       throw cause;
     } finally {
-      setViewerPending(false);
+      if (viewerCommandRef.current === command.command_id) {
+        viewerCommandRef.current = null;
+        setViewerPending(false);
+      }
     }
-  }, [buildCommand, failClosedAndRefreshMarketTracks, refreshMarketTracks]);
+  }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState, refreshMarketTracks]);
 
   const resyncHistoricalBook = useCallback(async (): Promise<void> => {
     const runId = viewerRef.current?.run_id;

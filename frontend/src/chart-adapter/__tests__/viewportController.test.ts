@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ViewportController } from "../viewportController.js";
+import {
+  logicalRangeForLatestBarPosition,
+  ViewportController,
+} from "../viewportController.js";
 import {
   malformedFixture,
   mustBeDefined,
@@ -29,6 +32,7 @@ function createChart() {
       timeScale.range = range;
     },
     getVisibleLogicalRange: () => timeScale.range,
+    width: () => 600,
     scrollToPosition: (position: number, animated: boolean) => {
       calls.push(["scrollToPosition", position, animated]);
     },
@@ -205,6 +209,54 @@ test("restoreProjectionRange owns logical writes and falls back to fit", () => {
     ["applyOptions", { barSpacing: 9 }],
     ["setVisibleLogicalRange", { from: 2, to: 12 }],
     ["fitContent"],
+  ]);
+});
+
+test("immediate projection restore supersedes a queued outgoing-dataset intent", () => {
+  const { chart, calls } = createChart();
+  let unlock: (() => void) | undefined;
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    setTimer: (fn) => {
+      unlock = fn;
+      return timerFixture(8);
+    },
+    clearTimer: () => {},
+  });
+
+  controller.markUserInteracting();
+  controller.queueShift(3);
+  assert.equal(controller.restoreProjectionRange(
+    { from: 30, to: 40 },
+    { barSpacing: 9, immediate: true },
+  ), true);
+  assert.deepEqual(calls, [
+    ["applyOptions", { barSpacing: 9 }],
+    ["setVisibleLogicalRange", { from: 30, to: 40 }],
+  ]);
+
+  mustBeDefined(unlock)();
+  assert.deepEqual(calls, [
+    ["applyOptions", { barSpacing: 9 }],
+    ["setVisibleLogicalRange", { from: 30, to: 40 }],
+  ]);
+});
+
+test("followLatest keeps an underfilled latest bar centered without fitting", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.deepEqual(logicalRangeForLatestBarPosition({
+    barSpacing: 6,
+    contentLastLogical: 9,
+    position: 0.5,
+    width: 600,
+  }), { from: -41, to: 59 });
+  assert.equal(controller.followLatest(9), true);
+  assert.equal(controller.followLatest(10), true);
+  assert.deepEqual(calls, [
+    ["setVisibleLogicalRange", { from: -41, to: 59 }],
+    ["setVisibleLogicalRange", { from: -40, to: 60 }],
   ]);
 });
 

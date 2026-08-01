@@ -78,8 +78,12 @@ export function sourceTimeRangeFromDisplayRow(
   const rowSourceTime = finiteNumber(row.sourceTime);
   const axisSourceTime = sourceTimeFromAxisTime(row.time);
   const fallback = rowSourceTime ?? axisSourceTime;
-  const from = finiteNumber(lineage?.sourceFromTime) ?? fallback;
-  const to = finiteNumber(lineage?.sourceToTime) ?? fallback;
+  const from = finiteNumber(lineage?.sourceFromTime)
+    ?? finiteNumber(row.sourceFromTime)
+    ?? fallback;
+  const to = finiteNumber(lineage?.sourceToTime)
+    ?? finiteNumber(row.sourceToTime)
+    ?? fallback;
   if (from === null || to === null) return null;
   return from <= to ? { from, to } : { from: to, to: from };
 }

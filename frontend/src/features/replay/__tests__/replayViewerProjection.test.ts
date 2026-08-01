@@ -6,6 +6,7 @@ import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import {
   applyReplayViewerSeriesDelta,
   ReplayViewerProjectionError,
+  ReplayViewerSeriesCache,
   aggregateReplayBaseBars,
   rebuildReplayViewerSeries,
 } from "../replayViewerProjection.js";
@@ -415,4 +416,129 @@ test("a right-truncated context window stops following execution until restore",
   rebuildReplayViewerSeries(viewer, source, "1m", "1m");
   assert.equal(viewer.rightTruncated, false);
   assert.deepEqual(viewer.snapshot(), source.snapshot());
+});
+
+test("latest rebuild clears stale right truncation after rows already converge", () => {
+  const source = new SeriesWindowStore({
+    intervalSeconds: 60,
+    seriesKey: "replay-base",
+  });
+  source.replace(Array.from({ length: 5 }, (_, index) => baseBar(index + 10)));
+  const viewer = new SeriesWindowStore({ maxBars: 5 });
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  viewer.applyRange(Array.from({ length: 5 }, (_, index) => ({
+    ...baseBar(index + 5),
+    replayContextHistory: true,
+  })));
+  viewer.applyRange(source.snapshot());
+
+  assert.deepEqual(viewer.snapshot(), source.snapshot());
+  assert.equal(viewer.rightTruncated, true);
+  rebuildReplayViewerSeries(viewer, source, "1m", "1m");
+  assert.equal(viewer.rightTruncated, false);
+});
+
+test("per-interval viewer cache reactivates a warm store without rebuilding it", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "replay-base" });
+  source.replace(Array.from({ length: 10 }, (_, index) => baseBar(index)));
+  const cache = new ReplayViewerSeriesCache();
+
+  const oneMinute = cache.storeFor(source, "1m");
+  assert.equal(cache.synchronize(oneMinute, source, "1m", "1m"), true);
+  oneMinute.applyRange([{
+    ...baseBar(-1),
+    replayContextHistory: true,
+  }]);
+  const warmSnapshot = structuredClone(oneMinute.snapshot());
+  let repeatedWrites = 0;
+  oneMinute.subscribe(() => { repeatedWrites += 1; });
+
+  const fiveMinute = cache.storeFor(source, "5m");
+  assert.notStrictEqual(fiveMinute, oneMinute);
+  assert.equal(cache.synchronize(fiveMinute, source, "1m", "5m"), true);
+  assert.strictEqual(cache.storeFor(source, "1m"), oneMinute);
+  assert.equal(cache.synchronize(oneMinute, source, "1m", "1m"), false);
+  assert.equal(repeatedWrites, 0);
+  assert.deepEqual(oneMinute.snapshot(), warmSnapshot);
+
+  source.applyRange([baseBar(10)]);
+  assert.equal(cache.synchronize(oneMinute, source, "1m", "1m"), true);
+  assert.equal(oneMinute.first()?.replayContextHistory, true);
+  assert.equal(oneMinute.last()?.time, baseBar(10).time);
+});
+
+test("semantically equivalent interval aliases share one prepared cache store", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "replay-base" });
+  source.replace(Array.from({ length: 60 }, (_, index) => baseBar(index)));
+  const cache = new ReplayViewerSeriesCache();
+
+  const prepared = cache.prepare(source, "1m", "60m", null);
+  const alias = cache.storeFor(source, "1h");
+
+  assert.strictEqual(alias, prepared);
+  assert.equal(alias.isEmpty(), false);
+});
+
+test("cold viewer cache preparation publishes a populated target before activation", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "replay-base" });
+  source.replace(Array.from({ length: 15 }, (_, index) => baseBar(index)));
+  const cache = new ReplayViewerSeriesCache();
+
+  const prepared = cache.prepare(
+    source,
+    "1m",
+    "15m",
+    (HOUR_START + 15 * 60) * 1_000 - 1,
+  );
+
+  assert.equal(prepared.barCount, 1);
+  assert.equal(prepared.first()?.replayClosed, true);
+  assert.strictEqual(cache.storeFor(source, "15m"), prepared);
+});
+
+test("inactive interval cache drops future context after an authoritative rewind", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "replay-base" });
+  source.replace(Array.from({ length: 10 }, (_, index) => baseBar(index + 10)));
+  const cache = new ReplayViewerSeriesCache();
+  const viewer = cache.storeFor(source, "5m");
+  viewer.maxBars = 2;
+  cache.synchronize(
+    viewer,
+    source,
+    "1m",
+    "5m",
+    (HOUR_START + 20 * 60) * 1_000 - 1,
+  );
+  viewer.applyRange([
+    { ...barAt(HOUR_START, 0, 5 * 60), replayContextHistory: true },
+    { ...barAt(HOUR_START + 5 * 60, 5, 5 * 60), replayContextHistory: true },
+  ]);
+  assert.equal(viewer.rightTruncated, true);
+
+  source.replace(Array.from({ length: 5 }, (_, index) => baseBar(index)), {
+    preserveRevealedPrefix: false,
+    publicTimeMs: (HOUR_START + 5 * 60) * 1_000 - 1,
+  });
+  cache.synchronize(
+    viewer,
+    source,
+    "1m",
+    "5m",
+    (HOUR_START + 5 * 60) * 1_000 - 1,
+  );
+
+  assert.equal(viewer.rightTruncated, false);
+  assert.deepEqual(viewer.snapshot().map((row) => Number(row.time)), [HOUR_START]);
+  assert.equal(viewer.first()?.replayContextHistory, undefined);
+});
+
+test("viewer cache rejects a source store whose interval is not the base interval", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 300, seriesKey: "replay-base" });
+  source.replace([barAt(HOUR_START, 0, 300)]);
+  const cache = new ReplayViewerSeriesCache();
+
+  assert.throws(
+    () => cache.prepare(source, "1m", "15m", (HOUR_START + 300) * 1_000 - 1),
+    /does not match the base interval/,
+  );
 });

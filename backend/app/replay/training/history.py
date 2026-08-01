@@ -33,6 +33,21 @@ MAX_HISTORY_PAGE_BARS = 1_000
 MAX_HISTORY_QUERY_BASE_ROWS = 100_000
 
 
+def _previous_bucket_start_ms(
+    bucket_start_ms: int,
+    interval_ms: int,
+    *,
+    interval: str,
+) -> int:
+    if bucket_start_ms <= 0:
+        return -1
+    return compute_bucket_start_ms(
+        bucket_start_ms - 1,
+        interval_ms,
+        interval=interval,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _NativeDisplayHistoryContext:
     interval_ms: int
@@ -669,11 +684,15 @@ def _resolve_native_display_context(
 
     if (
         config.display_interval == config.base_interval
+        or is_monthly_interval(config.display_interval)
         or snapshot.provenance.source_revision is not None
     ):
         # An archive revision binds one exact base-interval catalog.  Building
         # display candles from that pinned base keeps ALL_AVAILABLE deterministic
         # even if a separately stored native display catalog is republished.
+        # Calendar-month buckets cannot be shifted between real and blind
+        # synthetic timelines with one millisecond offset; reconstructing them
+        # from the bound base rows preserves public calendar boundaries.
         return None
     display_interval_ms = parse_interval_ms(config.display_interval)
     if display_interval_ms is None or display_interval_ms < 1:
@@ -688,7 +707,11 @@ def _resolve_native_display_context(
         display_interval_ms,
         interval=config.display_interval,
     )
-    last_complete_open_ms = actual_anchor_ms - display_interval_ms
+    last_complete_open_ms = _previous_bucket_start_ms(
+        actual_anchor_ms,
+        display_interval_ms,
+        interval=config.display_interval,
+    )
     if last_complete_open_ms < 0:
         return None
     try:
@@ -773,6 +796,13 @@ def _build_native_display_page(
     if public_end_ms <= context.public_boundary_ms:
         return _HistoryPageResult((), before_ms, False)
     actual_end_ms = public_end_ms - context.timeline_offset_ms
+    last_requested_open_ms = _previous_bucket_start_ms(
+        actual_end_ms,
+        context.interval_ms,
+        interval=config.display_interval,
+    )
+    if last_requested_open_ms < context.actual_boundary_ms:
+        return _HistoryPageResult((), before_ms, False)
     try:
         raw_rows = _query_bound_repository(
             repository,
@@ -780,7 +810,7 @@ def _build_native_display_page(
             config.symbol,
             config.display_interval,
             start_ms=context.actual_boundary_ms,
-            end_ms=actual_end_ms - context.interval_ms,
+            end_ms=last_requested_open_ms,
             limit=limit + 1,
             order="DESC",
             exchange=config.exchange,
@@ -847,6 +877,13 @@ def _build_native_display_page(
         )
 
     selected = validated_rows[:limit]
+    base_interval_ms = parse_interval_ms(config.base_interval)
+    if base_interval_ms is None or base_interval_ms < 1:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training base interval is invalid",
+            status_code=503,
+        )
     page = [
         ReplayDisplayBar(
             open_time_ms=row.open_time_ms + context.timeline_offset_ms,
@@ -861,9 +898,20 @@ def _build_native_display_page(
             taker_buy_base=row.taker_buy_base,
             taker_buy_quote=row.taker_buy_quote,
             first_base_open_ms=row.open_time_ms + context.timeline_offset_ms,
-            last_base_open_ms=row.open_time_ms + context.timeline_offset_ms,
-            component_count=1,
-            expected_components=1,
+            last_base_open_ms=(
+                row.close_time_ms
+                + context.timeline_offset_ms
+                - base_interval_ms
+                + 1
+            ),
+            component_count=max(
+                1,
+                (row.close_time_ms - row.open_time_ms + 1) // base_interval_ms,
+            ),
+            expected_components=max(
+                1,
+                (row.close_time_ms - row.open_time_ms + 1) // base_interval_ms,
+            ),
             is_closed=True,
             synthetic=False,
         )

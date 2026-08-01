@@ -7,6 +7,7 @@ import type {
   RenkoDisplayRow,
   SourceBar,
 } from "../chartRepresentationTypes.js";
+import { projectionSourceTimeRange } from "./projectorData.js";
 
 const RENKO_STATE_VERSION = 1;
 type RenkoDirection = "up" | "down" | null;
@@ -135,7 +136,7 @@ function projectionCustomValues(row: SourceBar, {
     chartProjection: Object.freeze({
       projectorId: "renko",
       sourceFromTime,
-      sourceToTime: row.time,
+      sourceToTime: projectionSourceTimeRange(row).to,
       sourceOrdinal,
       synthetic: true,
       provisional: Boolean(provisional),

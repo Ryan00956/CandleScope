@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LoadMoreLeft } from "../market-data/useChartLoadMoreLeft.js";
+import type { SurfaceViewportSnapshot } from "../chart-representation/chartRepresentationTypes.js";
 import type { ReplayDigest } from "./replayTypes.js";
 import {
   ReplayHistoryProvider,
@@ -7,6 +8,9 @@ import {
   replayHistoryInitialBeforeMs,
   replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
+  replayHistoryViewportTransferNeedsLatestWindow,
+  replayHistoryViewportTransferUnavailable,
+  replayHistoryViewportBeforeMs,
 } from "./replayHistoryProvider.js";
 import type {
   ReplayHistoryIdentity,
@@ -26,6 +30,7 @@ export interface ReplayHistoryRuntime {
   readonly boundaryMs: number | null;
   readonly policy: ReplayHistoryPolicy | null;
   readonly notice: string | null;
+  readonly viewportTransferUnavailable: boolean;
   readonly loadMoreLeft: LoadMoreLeft;
   readonly restoreLatestWindow: () => Promise<boolean>;
   readonly dismissNotice: () => void;
@@ -40,6 +45,7 @@ interface ReplayHistoryState {
   readonly boundaryMs: number | null;
   readonly policy: ReplayHistoryPolicy | null;
   readonly notice: string | null;
+  readonly viewportTransferUnavailable: boolean;
 }
 
 function initialReplayHistoryState(key: string | null): ReplayHistoryState {
@@ -52,12 +58,14 @@ function initialReplayHistoryState(key: string | null): ReplayHistoryState {
     boundaryMs: null,
     policy: null,
     notice: null,
+    viewportTransferUnavailable: false,
   };
 }
 
 export function useReplayHistoryRuntime(
   runtime: ReplayRuntime,
   viewer: ReplayViewerRuntime,
+  viewportTransfer: SurfaceViewportSnapshot | null = null,
 ): ReplayHistoryRuntime {
   const storeRef = useRef(runtime.store);
   storeRef.current = runtime.store;
@@ -115,6 +123,7 @@ export function useReplayHistoryRuntime(
     loading: false,
   });
   const repairAttemptsRef = useRef(new Set<number>());
+  const viewportAttemptsRef = useRef(new Set<number>());
   const {
     loading,
     hasMore,
@@ -128,6 +137,7 @@ export function useReplayHistoryRuntime(
   useEffect(() => {
     loadingRef.current = { key: historyKey, loading: false };
     repairAttemptsRef.current.clear();
+    viewportAttemptsRef.current.clear();
     setHistoryState(initialReplayHistoryState(historyKey));
     return () => provider?.cancel();
   }, [historyKey, provider]);
@@ -149,9 +159,39 @@ export function useReplayHistoryRuntime(
   );
   const revealRepairPending = revealRepairBeforeMs !== null
     && !repairAttemptsRef.current.has(revealRepairBeforeMs);
+  const viewportBeforeMs = viewportTransfer !== null
+    && viewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
+    ? replayHistoryViewportBeforeMs(viewer.seriesStore, {
+        anchorSourceTime: viewportTransfer.anchorSourceTime,
+        displayInterval,
+        revealedBoundaryMs: runtime.store.virtualTimeMs,
+      })
+    : null;
+  const viewportPagePending = viewportBeforeMs !== null
+    && !viewportAttemptsRef.current.has(viewportBeforeMs);
+  const viewportNeedsLatestRestore = replayHistoryViewportTransferNeedsLatestWindow(
+    viewer.seriesStore,
+    viewportTransfer,
+    {
+      displayInterval,
+      revealedBoundaryMs: runtime.store.virtualTimeMs,
+    },
+  );
 
   const loadMoreLeft = useCallback<LoadMoreLeft>(async () => {
     const store = storeRef.current;
+    const targetViewportBeforeMs = viewportTransfer !== null
+      && viewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
+      ? replayHistoryViewportBeforeMs(viewer.seriesStore, {
+          anchorSourceTime: viewportTransfer.anchorSourceTime,
+          displayInterval,
+          revealedBoundaryMs: store.virtualTimeMs,
+        })
+      : null;
+    const pendingViewportBeforeMs = targetViewportBeforeMs !== null
+      && !viewportAttemptsRef.current.has(targetViewportBeforeMs)
+      ? targetViewportBeforeMs
+      : null;
     const repairBeforeMs = replayHistoryRevealRepairBeforeMs(
       viewer.seriesStore,
       store.replayStartMs,
@@ -164,7 +204,9 @@ export function useReplayHistoryRuntime(
       : null;
     if (provider === null
       || (loadingRef.current.key === historyKey && loadingRef.current.loading)
-      || (!hasMore && pendingRepairBeforeMs === null)
+      || (!hasMore
+        && pendingViewportBeforeMs === null
+        && pendingRepairBeforeMs === null)
       || store.dataEpoch === null || store.virtualTimeMs === null
     ) return;
     // Context history belongs only to the display store. The frozen base store
@@ -179,11 +221,15 @@ export function useReplayHistoryRuntime(
     // The first native-display page owns every complete display bucket before
     // the replay seam, including buckets that overlap the frozen base warmup.
     // Later pages continue from the oldest display-owned row.
-    const beforeMs = pendingRepairBeforeMs
+    const beforeMs = pendingViewportBeforeMs
+      ?? pendingRepairBeforeMs
       ?? (provider.historyEpoch === null && initialBeforeMs !== null
         ? initialBeforeMs
         : storeBeforeMs);
     if (beforeMs === null) return;
+    if (pendingViewportBeforeMs !== null) {
+      viewportAttemptsRef.current.add(pendingViewportBeforeMs);
+    }
     loadingRef.current = { key: historyKey, loading: true };
     setHistoryState((current) => ({
       ...(current.key === historyKey ? current : initialReplayHistoryState(historyKey)),
@@ -211,6 +257,15 @@ export function useReplayHistoryRuntime(
         repairAttemptsRef.current.add(pendingRepairBeforeMs);
       }
       const nextHasMore = page.has_more && page.bars.length > 0;
+      // A gap can invalidate the whole target display bucket even when the
+      // original fine-grained anchor itself is outside the excluded range.
+      // The targeted page gets one attempt; actual post-apply coverage is the
+      // authoritative terminal check, including empty/exhausted pages.
+      const viewportTransferUnavailable = replayHistoryViewportTransferUnavailable(
+        viewer.seriesStore,
+        viewportTransfer,
+        pendingViewportBeforeMs,
+      );
       const gapNotice = page.excluded_ranges.length > 0
         ? `已跨过 ${page.excluded_ranges.length} 段交易所无 K 线区间；图表保留空白，没有补造 K 线。`
         : null;
@@ -226,6 +281,7 @@ export function useReplayHistoryRuntime(
         boundaryMs: page.history_boundary_ms,
         policy: page.history_policy,
         notice: nextNotice,
+        viewportTransferUnavailable,
       } : current);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
@@ -233,6 +289,7 @@ export function useReplayHistoryRuntime(
         ...current,
         error: cause instanceof Error ? cause.message : "回放历史回补失败",
         hasMore: false,
+        viewportTransferUnavailable: pendingViewportBeforeMs !== null,
       } : current);
     } finally {
       if (loadingRef.current.key === historyKey) {
@@ -251,13 +308,14 @@ export function useReplayHistoryRuntime(
     runtimeGeneration,
     sessionId,
     viewer.seriesStore,
+    viewportTransfer,
   ]);
 
   useEffect(() => {
     if (
       provider === null
-      || revealRepairBeforeMs === null
-      || !revealRepairPending
+      || viewportNeedsLatestRestore
+      || (!viewportPagePending && !revealRepairPending)
       || runtime.store.dataEpoch === null
       || runtime.store.virtualTimeMs === null
     ) return;
@@ -269,6 +327,9 @@ export function useReplayHistoryRuntime(
     revealRepairPending,
     runtime.store.dataEpoch,
     runtime.store.virtualTimeMs,
+    viewportBeforeMs,
+    viewportNeedsLatestRestore,
+    viewportPagePending,
   ]);
 
   const restoreLatestWindow = useCallback(async (): Promise<boolean> => {
@@ -297,6 +358,11 @@ export function useReplayHistoryRuntime(
     viewer.seriesStore,
   ]);
 
+  useEffect(() => {
+    if (!viewportNeedsLatestRestore) return;
+    void restoreLatestWindow();
+  }, [restoreLatestWindow, viewportNeedsLatestRestore]);
+
   return {
     loading,
     hasMore,
@@ -309,6 +375,7 @@ export function useReplayHistoryRuntime(
     boundaryMs,
     policy,
     notice,
+    viewportTransferUnavailable: currentState.viewportTransferUnavailable,
     loadMoreLeft,
     restoreLatestWindow,
     dismissNotice: () => setHistoryState((current) => current.key === historyKey

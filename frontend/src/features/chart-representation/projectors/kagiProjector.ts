@@ -8,6 +8,7 @@ import type {
   Projector,
   SourceBar,
 } from "../chartRepresentationTypes.js";
+import { projectionSourceTimeRange } from "./projectorData.js";
 
 const KAGI_STATE_VERSION = 1;
 type KagiDirection = "up" | "down" | null;
@@ -270,7 +271,7 @@ function projectionCustomValues(row: SourceBar, {
     chartProjection: Object.freeze({
       projectorId: "kagi",
       sourceFromTime,
-      sourceToTime: row.time,
+      sourceToTime: projectionSourceTimeRange(row).to,
       sourceOrdinal: 0,
       synthetic: true,
       provisional: Boolean(provisional),
@@ -442,7 +443,7 @@ export class KagiProjector implements Projector<KagiState, Record<string, unknow
 
   _extendActiveLeg(data: KagiDisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
     state.legEndTicks = closeTicks;
-    state.legSourceToTime = row.time;
+    state.legSourceToTime = projectionSourceTimeRange(row).to;
     state.legCustomValues = cloneCustomValues(row.customValues);
     state.currentStyle = this._sectionsForState(state).tailStyle;
     this._upsertActiveLeg(data, state, row, provisional);
@@ -471,7 +472,7 @@ export class KagiProjector implements Projector<KagiState, Record<string, unknow
     state.legReversalKind = reversalKind;
     state.legTurnTicks = turnTicks;
     state.legSourceFromTime = sourceFromTime;
-    state.legSourceToTime = row.time;
+    state.legSourceToTime = projectionSourceTimeRange(row).to;
     state.legCustomValues = cloneCustomValues(row.customValues);
     state.nextOrder += 1;
     state.pendingFromTime = row.time;

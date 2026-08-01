@@ -37,6 +37,12 @@ export function replayDisplayBarToKline(bar: ReplayDisplayBar): KlineBar {
   const takerBuyQuote = bar.taker_buy_quote === null ? null : finiteDecimal(bar.taker_buy_quote, "taker_buy_quote");
   return {
     time,
+    // The chart axis is the display bucket open, while viewport transfers
+    // must keep the most recently revealed base-bar identity.  Keeping this
+    // lineage on the row prevents a forming coarse bucket from collapsing an
+    // anchor such as 12:07 back to its 12:00 display time.
+    sourceFromTime: time,
+    sourceToTime: Math.floor(bar.last_base_open_ms / 1_000),
     open: finiteDecimal(bar.open, "open"),
     high: finiteDecimal(bar.high, "high"),
     low: finiteDecimal(bar.low, "low"),

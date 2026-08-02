@@ -480,6 +480,24 @@ async def test_none_track_performs_zero_history_reads_then_selects_atomically(
             by_id["track-2"]["cursor"]["virtual_time_ms"]
             == by_id["track-1"]["cursor"]["virtual_time_ms"]
         )
+        selected_session = await service.get_session("adapter-2")
+        with pytest.raises(TrainingRunError) as stale_view:
+            await service.training.command(  # type: ignore[union-attr]
+                run_id,
+                _command(
+                    run_id,
+                    "stale-track-display-grid",
+                    ReplayV2CommandType.ADVANCE,
+                    selected_session,
+                    {
+                        "basis": "DISPLAY_BAR",
+                        "count": 1,
+                        "display_interval": "1m",
+                        "viewer_revision": 0,
+                    },
+                ),
+            )
+        assert stale_view.value.code == "VIEWER_REVISION_CONFLICT"
     finally:
         await service.shutdown(step_timeout=1.0)
 

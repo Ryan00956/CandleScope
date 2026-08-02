@@ -75,8 +75,8 @@
     },
     {
       "id": 11,
-      "title": "STEP_DISPLAY 先补当前桶再走完整桶",
-      "automated": { "path": "backend/tests/test_replay_v2_training_phase3.py", "needle": "test_aligned_step_finishes_forming_bucket_then_advances_full_buckets" },
+      "title": "DISPLAY_BAR 按冻结 source 网格先补当前桶再走完整桶",
+      "automated": { "path": "backend/tests/test_replay_v2_training_phase3.py", "needle": "test_blind_display_advance_finishes_source_bucket_before_next_bucket" },
       "release_gate": "full_suite"
     },
     {

@@ -12,6 +12,7 @@ from app.data_engine.interval_policy import (
     parse_interval_ms,
     parse_interval_spec,
 )
+from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.models import MAX_TIMESTAMP_MS, validate_timestamp_ms
 
 from .errors import TrainingRunError
@@ -293,6 +294,100 @@ def aligned_step_target_ms(
     return target
 
 
+def source_aligned_step_target_ms(
+    *,
+    current_virtual_time_ms: int,
+    actual_replay_start_ms: int,
+    public_replay_start_ms: int,
+    source_bucket_anchor_ms: int | None,
+    base_interval: str,
+    step_interval: str,
+    count: int,
+) -> int:
+    """Return a public cursor target on the frozen source bucket grid.
+
+    Blind replay preserves elapsed time while replacing the real calendar with
+    a synthetic one.  A display bucket therefore has to be completed on its
+    exchange/source boundary, not on an unrelated wall-clock boundary in the
+    synthetic public timeline.
+    """
+
+    current = validate_timestamp_ms(
+        current_virtual_time_ms,
+        field_name="current_virtual_time_ms",
+    )
+    actual_start = validate_timestamp_ms(
+        actual_replay_start_ms,
+        field_name="actual_replay_start_ms",
+    )
+    public_start = validate_timestamp_ms(
+        public_replay_start_ms,
+        field_name="public_replay_start_ms",
+    )
+    compatible_step_interval_ms(
+        base_interval=base_interval,
+        step_interval=step_interval,
+    )
+    steps = control_count(count)
+    if current < public_start:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step cursor precedes the public replay origin",
+            status_code=422,
+        )
+    elapsed_ms = current - public_start
+    if actual_start > MAX_TIMESTAMP_MS - elapsed_ms:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step cursor exceeds the timestamp range",
+            status_code=422,
+        )
+    actual_current = actual_start + elapsed_ms
+    try:
+        mapper = SourceBucketTimeMapper.create(
+            interval=step_interval,
+            actual_replay_start_ms=actual_start,
+            public_replay_start_ms=public_start,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+        )
+        bucket_open = mapper.actual_containing_bucket_open(actual_current)
+        bucket_close = mapper.actual_bucket_end(bucket_open) - 1
+        remaining = steps if actual_current >= bucket_close else steps - 1
+        if mapper.monthly_count is None:
+            actual_target = bucket_close + remaining * mapper.interval_ms
+        else:
+            for _ in range(remaining):
+                bucket_open = mapper.actual_bucket_end(bucket_open)
+            actual_target = mapper.actual_bucket_end(bucket_open) - 1
+    except (OverflowError, ValueError) as exc:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step target exceeds the source bucket grid",
+            status_code=422,
+        ) from exc
+    if actual_target > MAX_TIMESTAMP_MS:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step target exceeds the timestamp range",
+            status_code=422,
+        )
+    target_delta_ms = actual_target - actual_start
+    if target_delta_ms < 0 or public_start > MAX_TIMESTAMP_MS - target_delta_ms:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step target exceeds the timestamp range",
+            status_code=422,
+        )
+    target = public_start + target_delta_ms
+    if target <= current:
+        raise TrainingRunError(
+            "REPLAY_CONTROL_INVALID",
+            "display step target must advance the replay cursor",
+            status_code=422,
+        )
+    return target
+
+
 def validate_bar_duration_ms(*, duration_ms: object, base_interval: str) -> int:
     if isinstance(duration_ms, bool) or not isinstance(duration_ms, int):
         raise TrainingRunError(
@@ -325,6 +420,7 @@ __all__ = [
     "default_playback_basis",
     "discrete_playback_units",
     "fixed_interval_ms",
+    "source_aligned_step_target_ms",
     "supported_advance_bases",
     "supported_playback_bases",
     "validate_bar_duration_ms",

@@ -60,6 +60,7 @@ from .control import (
     default_playback_basis,
     discrete_playback_units,
     fixed_interval_ms,
+    source_aligned_step_target_ms,
     supported_advance_bases,
     supported_playback_bases,
     validate_bar_duration_ms,
@@ -190,6 +191,9 @@ class TrainingRunService:
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
         self._period_summary_builds: set[str] = set()
         self._run_actors: dict[str, TrainingRunActor] = {}
+        self._display_source_grid_anchors: dict[
+            tuple[str, str, str, str], int
+        ] = {}
 
     async def start(self) -> None:
         await self.store.start()
@@ -346,6 +350,9 @@ class TrainingRunService:
                     ) from exc
                 if self._run_actors.get(normalized) is actor:
                     self._run_actors.pop(normalized, None)
+                for cache_key in tuple(self._display_source_grid_anchors):
+                    if cache_key[0] == normalized:
+                        self._display_source_grid_anchors.pop(cache_key, None)
         finally:
             if pause_task is not None:
                 await asyncio.gather(pause_task, return_exceptions=True)
@@ -2279,6 +2286,14 @@ class TrainingRunService:
                 "alignment_policy": display_alignment_policy,
             }
         )
+        self._display_source_grid_anchors[
+            (
+                run_id,
+                track_id,
+                requested_interval,
+                str(binding["track_dataset_epoch"]),
+            )
+        ] = display_source_bucket_anchor_ms
         return {
             **binding,
             "display_source_revision": pinned_source_revision,
@@ -4857,12 +4872,21 @@ class TrainingRunService:
                                     "display playback profile has no interval",
                                     status_code=503,
                                 )
-                            target = aligned_step_target_ms(
-                                current_virtual_time_ms=current_time,
-                                base_interval=str(binding["base_interval"]),
-                                step_interval=step_interval,
-                                count=units,
-                            )
+                            if basis is AdvanceBasis.DISPLAY_BAR:
+                                target = await self._source_aligned_display_target(
+                                    binding=binding,
+                                    current_virtual_time_ms=current_time,
+                                    base_interval=str(binding["base_interval"]),
+                                    display_interval=step_interval,
+                                    count=units,
+                                )
+                            else:
+                                target = aligned_step_target_ms(
+                                    current_virtual_time_ms=current_time,
+                                    base_interval=str(binding["base_interval"]),
+                                    step_interval=step_interval,
+                                    count=units,
+                                )
                             base_interval_ms = compatible_step_interval_ms(
                                 base_interval=str(binding["base_interval"]),
                                 step_interval=str(binding["base_interval"]),
@@ -7385,6 +7409,7 @@ class TrainingRunService:
         self,
         *,
         command: ReplayV2Command,
+        binding: Mapping[str, object],
         base_interval: str,
         display_interval: object,
         viewer_revision: object,
@@ -7408,10 +7433,13 @@ class TrainingRunService:
             command.run_id,
             viewer_revision,
         )
-        if submitted_view.display_interval != display_interval:
+        if (
+            submitted_view.display_interval != display_interval
+            or submitted_view.selected_track_id != str(binding["selected_track_id"])
+        ):
             raise TrainingRunError(
                 "VIEWER_REVISION_CONFLICT",
-                "display interval does not match the bound viewer revision",
+                "display control does not match the bound viewer revision",
                 status_code=409,
             )
         return display_interval, viewer_revision
@@ -7420,6 +7448,7 @@ class TrainingRunService:
         self,
         *,
         command: ReplayV2Command,
+        binding: Mapping[str, object],
         base_interval: str,
         current_time: int,
         count: int,
@@ -7428,19 +7457,95 @@ class TrainingRunService:
     ) -> tuple[int, str, int]:
         interval, revision = await self._validate_display_binding(
             command=command,
+            binding=binding,
             base_interval=base_interval,
             display_interval=display_interval,
             viewer_revision=viewer_revision,
         )
         return (
-            aligned_step_target_ms(
+            await self._source_aligned_display_target(
+                binding=binding,
                 current_virtual_time_ms=current_time,
                 base_interval=base_interval,
-                step_interval=interval,
+                display_interval=interval,
                 count=count,
             ),
             interval,
             revision,
+        )
+
+    async def _display_source_bucket_anchor_ms(
+        self,
+        *,
+        binding: Mapping[str, object],
+        display_interval: str,
+    ) -> int | None:
+        if display_interval == str(binding["base_interval"]):
+            return None
+        history_binding = await self.store.history_binding(
+            session_id=str(binding["adapter_session_id"]),
+            track_id=str(binding["selected_track_id"]),
+        )
+        cache_key = (
+            str(history_binding["run_id"]),
+            str(history_binding["track_id"]),
+            display_interval,
+            str(history_binding["track_dataset_epoch"]),
+        )
+        cached = self._display_source_grid_anchors.get(cache_key)
+        if cached is not None:
+            return cached
+        grid_binding = await self._attach_native_display_archive_pin(
+            history_binding,
+            display_interval=display_interval,
+            require_projection_grid=True,
+        )
+        raw_anchor = grid_binding.get("display_source_bucket_anchor_ms")
+        if raw_anchor is None:
+            return None
+        if isinstance(raw_anchor, bool) or not isinstance(raw_anchor, int):
+            raise TrainingRunError(
+                "HISTORY_SOURCE_INCOMPLETE",
+                "pinned native display grid anchor is invalid",
+                status_code=503,
+            )
+        self._display_source_grid_anchors[cache_key] = raw_anchor
+        return raw_anchor
+
+    async def _source_aligned_display_target(
+        self,
+        *,
+        binding: Mapping[str, object],
+        current_virtual_time_ms: int,
+        base_interval: str,
+        display_interval: str,
+        count: int,
+    ) -> int:
+        actual_start_ms = _stored_counter(
+            binding["actual_replay_start_ms"],
+            field_name="actual_replay_start_ms",
+        )
+        synthetic_origin_ms = binding.get("synthetic_origin_ms")
+        public_start_ms = (
+            actual_start_ms
+            if synthetic_origin_ms is None
+            else _stored_counter(
+                synthetic_origin_ms,
+                field_name="synthetic_origin_ms",
+            )
+        )
+        source_bucket_anchor_ms = await self._display_source_bucket_anchor_ms(
+            binding=binding,
+            display_interval=display_interval,
+        )
+        return source_aligned_step_target_ms(
+            current_virtual_time_ms=current_virtual_time_ms,
+            actual_replay_start_ms=actual_start_ms,
+            public_replay_start_ms=public_start_ms,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+            base_interval=base_interval,
+            step_interval=display_interval,
+            count=count,
         )
 
     @staticmethod
@@ -7518,6 +7623,7 @@ class TrainingRunService:
                     viewer_revision,
                 ) = await self._validate_display_binding(
                     command=command,
+                    binding=binding,
                     base_interval=base_interval,
                     display_interval=display_interval,
                     viewer_revision=viewer_revision,
@@ -7544,6 +7650,7 @@ class TrainingRunService:
         if basis is AdvanceBasis.DISPLAY_BAR:
             display_interval, viewer_revision = await self._validate_display_binding(
                 command=command,
+                binding=binding,
                 base_interval=base_interval,
                 display_interval=normalized["display_interval"],
                 viewer_revision=normalized["viewer_revision"],
@@ -7632,6 +7739,7 @@ class TrainingRunService:
                 count = control_count(normalized["count"])
                 target, interval, viewer_revision = await self._display_advance_target(
                     command=command,
+                    binding=binding,
                     base_interval=base_interval,
                     current_time=current_time,
                     count=count,
@@ -7769,6 +7877,7 @@ class TrainingRunService:
             count = control_count(payload["count"])
             target, interval, viewer_revision = await self._display_advance_target(
                 command=command,
+                binding=binding,
                 base_interval=base_interval,
                 current_time=current_time,
                 count=count,

@@ -10,9 +10,13 @@ import pytest
 from app.replay.service import ReplayService
 from app.replay.storage import REPLAY_SCHEMA_VERSION, ReplaySQLiteStore
 from app.replay.training.commands import ReplayV2Command
-from app.replay.training.control import aligned_step_target_ms
+from app.replay.training.control import (
+    aligned_step_target_ms,
+    source_aligned_step_target_ms,
+)
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import (
+    AdvanceBasis,
     ReplayV2CommandType,
     TrainingCursor,
     TrainingRunCreateRequest,
@@ -58,12 +62,13 @@ async def _request(
     service: ReplayService,
     *,
     display_interval: str = "15m",
+    blind_mode: bool = False,
 ) -> TrainingRunCreateRequest:
     catalog = await service.catalog(
         warmup_bars=2,
         horizon_ms=18 * INTERVAL_MS,
         quality_mode="exact",
-        blind_mode=False,
+        blind_mode=blind_mode,
     )
     return TrainingRunCreateRequest.from_dict(
         {
@@ -88,7 +93,7 @@ async def _request(
             "taker_fee_bps": "5",
             "market_slippage_bps": "1",
             "integrity_mode": "CHALLENGE",
-            "time_disclosure_policy": "NONE",
+            "time_disclosure_policy": "HIDE_ALL" if blind_mode else "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
             "funding_mode": "OFF",
@@ -158,6 +163,61 @@ def test_aligned_step_finishes_forming_bucket_then_advances_full_buckets() -> No
         step_interval="15m",
         count=2,
     ) == bucket_start + 2_699_999
+
+
+def test_source_aligned_step_finishes_native_bucket_before_opening_next() -> None:
+    hour_ms = 3_600_000
+    actual_bucket_start = START_MS - (START_MS % hour_ms)
+    actual_start = actual_bucket_start + 50 * INTERVAL_MS
+    public_start = 946_684_800_000
+    public_hour_close = public_start + hour_ms - 1
+
+    first_target = source_aligned_step_target_ms(
+        current_virtual_time_ms=public_hour_close,
+        actual_replay_start_ms=actual_start,
+        public_replay_start_ms=public_start,
+        source_bucket_anchor_ms=0,
+        base_interval="1m",
+        step_interval="1h",
+        count=1,
+    )
+    assert first_target - public_hour_close == 10 * INTERVAL_MS
+
+    second_target = source_aligned_step_target_ms(
+        current_virtual_time_ms=first_target,
+        actual_replay_start_ms=actual_start,
+        public_replay_start_ms=public_start,
+        source_bucket_anchor_ms=0,
+        base_interval="1m",
+        step_interval="1h",
+        count=1,
+    )
+    assert second_target - first_target == hour_ms
+
+
+def test_source_aligned_step_respects_custom_anchor_and_count() -> None:
+    custom_anchor = START_MS + 2 * INTERVAL_MS
+    actual_start = custom_anchor + 10 * INTERVAL_MS
+    public_start = 946_684_800_000
+    first_target = source_aligned_step_target_ms(
+        current_virtual_time_ms=public_start,
+        actual_replay_start_ms=actual_start,
+        public_replay_start_ms=public_start,
+        source_bucket_anchor_ms=custom_anchor,
+        base_interval="1m",
+        step_interval="15m",
+        count=1,
+    )
+    assert first_target - public_start == 5 * INTERVAL_MS - 1
+    assert source_aligned_step_target_ms(
+        current_virtual_time_ms=first_target,
+        actual_replay_start_ms=actual_start,
+        public_replay_start_ms=public_start,
+        source_bucket_anchor_ms=custom_anchor,
+        base_interval="1m",
+        step_interval="15m",
+        count=2,
+    ) - first_target == 30 * INTERVAL_MS
 
 
 def test_aligned_step_supports_calendar_intervals_and_rejects_inexact_intervals() -> None:
@@ -360,6 +420,131 @@ async def test_display_switch_is_persistent_and_does_not_move_domain_state(
         assert viewer["semantic_view_revision"] == 1
     finally:
         await restored.shutdown(step_timeout=1.0)
+
+
+async def test_blind_display_advance_finishes_source_bucket_before_next_bucket(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "blind-display-grid.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(service, display_interval="5m", blind_mode=True)
+        )
+        run = created["run"]
+        initial = await service.get_session(run["adapter_session_id"])
+        await service.training.command(  # type: ignore[union-attr]
+            run["run_id"],
+            _v2_command(
+                run_id=run["run_id"],
+                command_id="blind-grid-acquire",
+                command_type=ReplayV2CommandType.ACQUIRE_CONTROLLER,
+                snapshot=initial,
+                payload={"takeover": False},
+            ),
+        )
+        before = await service.get_session(run["adapter_session_id"])
+        before_time = before["snapshot"]["cursor"]["virtual_time_ms"]
+
+        first = await service.training.command(  # type: ignore[union-attr]
+            run["run_id"],
+            _v2_command(
+                run_id=run["run_id"],
+                command_id="blind-grid-first",
+                command_type=ReplayV2CommandType.ADVANCE,
+                snapshot=before,
+                payload={
+                    "basis": "DISPLAY_BAR",
+                    "count": 1,
+                    "display_interval": "5m",
+                    "viewer_revision": 0,
+                },
+            ),
+        )
+        assert first["cursor"]["virtual_time_ms"] - before_time == INTERVAL_MS - 1
+
+        after_first = await service.get_session(run["adapter_session_id"])
+        second = await service.training.command(  # type: ignore[union-attr]
+            run["run_id"],
+            _v2_command(
+                run_id=run["run_id"],
+                command_id="blind-grid-second",
+                command_type=ReplayV2CommandType.ADVANCE,
+                snapshot=after_first,
+                payload={
+                    "basis": "DISPLAY_BAR",
+                    "count": 1,
+                    "display_interval": "5m",
+                    "viewer_revision": 0,
+                },
+            ),
+        )
+        assert (
+            second["cursor"]["virtual_time_ms"]
+            - first["cursor"]["virtual_time_ms"]
+            == 5 * INTERVAL_MS
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_blind_display_playback_targets_the_same_source_grid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "blind-display-playback-grid.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            await _request(service, display_interval="5m", blind_mode=True)
+        )
+        run = created["run"]
+        initial = await service.get_session(run["adapter_session_id"])
+        await service.training.command(  # type: ignore[union-attr]
+            run["run_id"],
+            _v2_command(
+                run_id=run["run_id"],
+                command_id="blind-play-acquire",
+                command_type=ReplayV2CommandType.ACQUIRE_CONTROLLER,
+                snapshot=initial,
+                payload={"takeover": False},
+            ),
+        )
+        before = await service.get_session(run["adapter_session_id"])
+        captured_target: dict[str, int] = {}
+        actor = service.training._run_actors[str(run["run_id"])]  # noqa: SLF001
+        generation, stop = actor.begin_ordered_playback(
+            client_instance_id="phase3-browser",
+            basis=AdvanceBasis.DISPLAY_BAR,
+            rate=1,
+            display_interval="5m",
+            viewer_revision=0,
+        )
+
+        async def capture_advance(**kwargs: object) -> None:
+            captured_target["value"] = int(kwargs["target_virtual_time_ms"])
+            stop.set()
+
+        monkeypatch.setattr(
+            service.training,
+            "_advance_full_tracks_to",
+            capture_advance,
+        )
+        monkeypatch.setattr(
+            "app.replay.training.service.discrete_playback_units",
+            lambda _elapsed_seconds, *, rate: 1,
+        )
+        await asyncio.wait_for(
+            service.training._run_ordered_playback(  # noqa: SLF001
+                run_id=str(run["run_id"]),
+                generation=generation,
+                stop=stop,
+            ),
+            timeout=1.0,
+        )
+        before_time = before["snapshot"]["cursor"]["virtual_time_ms"]
+        assert captured_target["value"] - before_time == INTERVAL_MS - 1
+        assert actor.playback_is_active() is False
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_bar_step_display_matches_exact_base_steps_and_stale_view_binding(

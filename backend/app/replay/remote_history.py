@@ -32,6 +32,7 @@ from .history_archive import (
     _catalog_directory,
     _digest_token,
     _file_sha256,
+    _interval_path_component,
     _manifest_from_pointer,
     _manifest_key,
 )
@@ -110,7 +111,8 @@ class ReplayRemoteCatalogEntry:
             raise ReplayHistoryArchiveError("remote catalog_epoch is invalid") from exc
         expected_path = (
             f"catalogs/{value.exchange}/{value.market_type}/{value.symbol}/"
-            f"{value.interval}/{_digest_token(value.catalog_epoch)}.json"
+            f"{_interval_path_component(value.interval)}/"
+            f"{_digest_token(value.catalog_epoch)}.json"
         )
         if value.manifest_path != expected_path:
             raise ReplayHistoryArchiveError(

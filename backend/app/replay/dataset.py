@@ -9,7 +9,11 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 
-from app.data_engine.interval_policy import last_closed_bar_open_ms, parse_interval_ms, row_is_closed
+from app.data_engine.interval_policy import (
+    last_closed_bar_open_ms,
+    parse_interval_ms,
+    row_is_closed,
+)
 
 from .canonical import canonical_sha256
 from .catalog import EligibleWindow, ReplayCatalogEntry, ReplaySeriesIdentity
@@ -197,23 +201,23 @@ class BarDatasetProvenance:
             "hash_schema",
         }
         payload_fields = frozenset(payload)
-        if (
-            payload_fields
-            not in {
-                frozenset(expected),
-                frozenset({*expected, "source_revision"}),
-            }
-            or not isinstance(payload["identity"], Mapping)
-        ):
+        if payload_fields not in {
+            frozenset(expected),
+            frozenset({*expected, "source_revision"}),
+        } or not isinstance(payload["identity"], Mapping):
             raise ValueError("BAR dataset provenance fields are incompatible")
         source_revision = payload.get("source_revision")
         if source_revision is not None and (
             not isinstance(source_revision, str)
             or len(source_revision) != 71
             or not source_revision.startswith("sha256:")
-            or any(character not in "0123456789abcdef" for character in source_revision[7:])
+            or any(
+                character not in "0123456789abcdef" for character in source_revision[7:]
+            )
         ):
-            raise ValueError("provenance.source_revision must be a SHA-256 digest or null")
+            raise ValueError(
+                "provenance.source_revision must be a SHA-256 digest or null"
+            )
         integer_fields = (
             "source_earliest_open_ms",
             "source_latest_open_ms",
@@ -524,12 +528,8 @@ class BarDatasetBuilder:
                 },
             )
 
-        scan_gaps_at_revision = getattr(
-            self._repository, "scan_gaps_at_revision", None
-        )
-        if entry.source_revision is not None and not callable(
-            scan_gaps_at_revision
-        ):
+        scan_gaps_at_revision = getattr(self._repository, "scan_gaps_at_revision", None)
+        if entry.source_revision is not None and not callable(scan_gaps_at_revision):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "BAR dataset source revision cannot be revalidated",
@@ -546,8 +546,7 @@ class BarDatasetBuilder:
                     market_type=entry.identity.market_type,
                     limit=expected_rows,
                 )
-                if entry.source_revision is not None
-                and callable(scan_gaps_at_revision)
+                if entry.source_revision is not None and callable(scan_gaps_at_revision)
                 else self._repository.scan_gaps(
                     entry.identity.symbol,
                     window.interval,
@@ -580,9 +579,7 @@ class BarDatasetBuilder:
         query_bars_at_revision = getattr(
             self._repository, "query_bars_at_revision", None
         )
-        if entry.source_revision is not None and not callable(
-            query_bars_at_revision
-        ):
+        if entry.source_revision is not None and not callable(query_bars_at_revision):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "BAR dataset source revision cannot be read",
@@ -730,6 +727,7 @@ def validate_replay_repository_bar(
     interval_ms: int,
     expected_open_ms: int,
     now_ms: int,
+    expected_close_ms: int | None = None,
 ) -> ReplayBar:
     """Validate one repository row before it enters any replay projection."""
 
@@ -746,7 +744,11 @@ def validate_replay_repository_bar(
             ReplayErrorCode.DATA_GAP,
             f"BAR open_time sequence gap: expected {expected_open_ms}, got {open_time_ms}",
         )
-    expected_close = open_time_ms + interval_ms - 1
+    expected_close = (
+        open_time_ms + interval_ms - 1
+        if expected_close_ms is None
+        else expected_close_ms
+    )
     if close_time_ms != expected_close or close_time_ms >= now_ms:
         raise ReplayDomainError(
             ReplayErrorCode.DATASET_INCOMPLETE,
@@ -773,7 +775,9 @@ def validate_replay_repository_bar(
         open_value = _decimal_value(raw.get("open"), field_name="open", positive=True)
         high_value = _decimal_value(raw.get("high"), field_name="high", positive=True)
         low_value = _decimal_value(raw.get("low"), field_name="low", positive=True)
-        close_value = _decimal_value(raw.get("close"), field_name="close", positive=True)
+        close_value = _decimal_value(
+            raw.get("close"), field_name="close", positive=True
+        )
         volume = _decimal_value(raw.get("volume"), field_name="volume")
         quote_volume = _optional_decimal(
             raw.get("quote_volume"), field_name="quote_volume"

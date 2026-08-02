@@ -202,6 +202,7 @@ class ReplayService:
             if settings.product_v2_available
             else None
         )
+        self._native_intervals_explicit = native_intervals is not None
         self._native_intervals = native_intervals or self._all_local_intervals
         self._catalog = ReplayCatalog(
             self._repository,  # type: ignore[arg-type]

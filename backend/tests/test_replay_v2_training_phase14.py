@@ -9,6 +9,7 @@ import pytest
 
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.training.commands import ReplayV2Command
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import (
@@ -125,9 +126,7 @@ async def _request(
             "base_interval": "1m",
             "display_interval": "1m",
             "requested_start_ms": (
-                START_MS + 4 * INTERVAL_MS
-                if start_mode == "MANUAL"
-                else None
+                START_MS + 4 * INTERVAL_MS if start_mode == "MANUAL" else None
             ),
             "indicator_warmup_bars": indicator_warmup_bars,
             "visible_history_lookback": {
@@ -480,6 +479,11 @@ async def test_phase14_display_context_uses_native_interval_without_expanding_ex
         snapshot_before = session_before["snapshot"]
         cursor_before = snapshot_before["cursor"]
         public_start_ms = int(cursor_before["virtual_time_ms"])
+        mapper = SourceBucketTimeMapper.create(
+            interval="1h",
+            actual_replay_start_ms=START_MS + 4 * INTERVAL_MS,
+            public_replay_start_ms=public_start_ms,
+        )
         call_count = len(repository.calls)  # type: ignore[attr-defined]
 
         page = await service.training.history_page(  # type: ignore[union-attr]
@@ -495,22 +499,22 @@ async def test_phase14_display_context_uses_native_interval_without_expanding_ex
 
         assert page["identity"]["base_interval"] == "1m"
         assert page["identity"]["display_interval"] == "1h"
-        assert page["history_boundary_ms"] == public_start_ms - 48 * 3_600_000
+        assert page["history_boundary_ms"] == mapper.public_from_actual(
+            START_MS - 48 * 3_600_000
+        )
         assert [bar["open_time_ms"] for bar in page["bars"]] == [
-            public_start_ms - offset * 3_600_000
+            mapper.public_from_actual(START_MS - offset * 3_600_000)
             for offset in range(10, 0, -1)
         ]
-        assert page["bars"][-1]["close_time_ms"] + 1 == public_start_ms
+        assert page["bars"][-1]["close_time_ms"] + 1 == mapper.public_anchor_ms
         assert page["has_more"] is True
         history_calls = repository.calls[call_count:]  # type: ignore[attr-defined]
         assert any(
-            name == "query_bars"
-            and details["key"][-1] == "1h"
+            name == "query_bars" and details["key"][-1] == "1h"
             for name, details in history_calls
         )
         assert not any(
-            name == "query_bars"
-            and details["key"][-1] == "1m"
+            name == "query_bars" and details["key"][-1] == "1m"
             for name, details in history_calls
         )
         session_after = await service.get_session(session_id)
@@ -563,10 +567,7 @@ async def test_phase14_native_display_context_crosses_declared_real_gap(
         )
         snapshot = (await service.get_session(session_id))["snapshot"]
         revealed_boundary_ms = int(snapshot["cursor"]["virtual_time_ms"])
-        public_start_ms = (
-            revealed_boundary_ms
-            - revealed_boundary_ms % 3_600_000
-        )
+        public_start_ms = revealed_boundary_ms - revealed_boundary_ms % 3_600_000
         page = await service.training.history_page(  # type: ignore[union-attr]
             session_id,
             track_id="track-1",
@@ -583,12 +584,14 @@ async def test_phase14_native_display_context_crosses_declared_real_gap(
             for offset in (*range(11, 6, -1), *range(5, 0, -1))
         ]
         assert page["has_more"] is True
-        assert page["excluded_ranges"] == [{
-            "start_ms": public_start_ms - 6 * 3_600_000,
-            "end_ms": public_start_ms - 5 * 3_600_000 - 1,
-            "reason": "source_gap",
-            "source_reason": "fixture_gap",
-        }]
+        assert page["excluded_ranges"] == [
+            {
+                "start_ms": public_start_ms - 6 * 3_600_000,
+                "end_ms": public_start_ms - 5 * 3_600_000 - 1,
+                "reason": "source_gap_affected_display_bucket",
+                "source_reason": "fixture_gap",
+            }
+        ]
     finally:
         await service.shutdown()
 
@@ -722,8 +725,9 @@ async def test_phase14_segment_covers_full_frozen_history_and_policy_roles(
         assert manifest["range"]["start_ms"] == row["range_start_ms"]
         assert manifest["history_policy"]["visible_history_rows"] == 4
         assert manifest["history_policy"]["effective_warmup_bars"] == 4
-        assert manifest["history_policy"]["dataset_history_start_ms"] == (
-            row["range_start_ms"]
+        assert (
+            manifest["history_policy"]["dataset_history_start_ms"]
+            == (row["range_start_ms"])
         )
     finally:
         await service.shutdown()
@@ -783,9 +787,7 @@ async def test_phase14_v9_additive_policy_table_backfills_and_keeps_rollback_ver
             visible_history_mode=policy["visible_history_mode"],
             visible_history_lookback_ms=policy["visible_history_lookback_ms"],
             visible_history_rows=policy["visible_history_rows"],
-            actual_visible_history_start_ms=policy[
-                "actual_visible_history_start_ms"
-            ],
+            actual_visible_history_start_ms=policy["actual_visible_history_start_ms"],
             actual_replay_start_ms=policy["actual_replay_start_ms"],
             effective_warmup_bars=policy["effective_warmup_bars"],
             forward_cache_ms=policy["forward_cache_ms"],

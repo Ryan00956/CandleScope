@@ -17,8 +17,13 @@ import type {
   ReplayHistoryPolicy,
 } from "./replayHistoryProvider.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
-import { rebuildReplayViewerSeries } from "./replayViewerProjection.js";
+import { defaultReplayV2Api } from "./replayV2Api.js";
+import {
+  rebuildReplayViewerSeries,
+  replaceReplayViewerSeriesFromServer,
+} from "./replayViewerProjection.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
+import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 
 
 export interface ReplayHistoryRuntime {
@@ -79,6 +84,19 @@ export function useReplayHistoryRuntime(
   const symbol = config?.symbol ?? null;
   const sourceKind = config?.source_kind ?? null;
   const baseInterval = config?.base_interval ?? null;
+  const usesSourceBucketProjection = sourceKind === "bar"
+    && config?.blind_mode === true
+    && baseInterval !== null
+    && displayInterval !== null
+    && !intervalsSemanticallyEquivalent(baseInterval, displayInterval);
+  // Each blinded coarse interval owns a different public ordinal mapping.
+  // A source-lineage anchor from 1D therefore cannot be compared with the
+  // synthetic lineage of 1W without revealing the private source phase.  Let
+  // the authoritative projection restore the latest window, and reserve
+  // targeted viewport paging for timelines with a shared public identity.
+  const historyViewportTransfer = usesSourceBucketProjection
+    ? null
+    : viewportTransfer;
   const identity = useMemo<ReplayHistoryIdentity | null>(() => (
     exchange === null || marketType === null || symbol === null
       || sourceKind === null || baseInterval === null || displayInterval === null
@@ -159,10 +177,10 @@ export function useReplayHistoryRuntime(
   );
   const revealRepairPending = revealRepairBeforeMs !== null
     && !repairAttemptsRef.current.has(revealRepairBeforeMs);
-  const viewportBeforeMs = viewportTransfer !== null
-    && viewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
+  const viewportBeforeMs = historyViewportTransfer !== null
+    && historyViewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
     ? replayHistoryViewportBeforeMs(viewer.seriesStore, {
-        anchorSourceTime: viewportTransfer.anchorSourceTime,
+        anchorSourceTime: historyViewportTransfer.anchorSourceTime,
         displayInterval,
         revealedBoundaryMs: runtime.store.virtualTimeMs,
       })
@@ -171,7 +189,7 @@ export function useReplayHistoryRuntime(
     && !viewportAttemptsRef.current.has(viewportBeforeMs);
   const viewportNeedsLatestRestore = replayHistoryViewportTransferNeedsLatestWindow(
     viewer.seriesStore,
-    viewportTransfer,
+    historyViewportTransfer,
     {
       displayInterval,
       revealedBoundaryMs: runtime.store.virtualTimeMs,
@@ -180,10 +198,10 @@ export function useReplayHistoryRuntime(
 
   const loadMoreLeft = useCallback<LoadMoreLeft>(async () => {
     const store = storeRef.current;
-    const targetViewportBeforeMs = viewportTransfer !== null
-      && viewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
+    const targetViewportBeforeMs = historyViewportTransfer !== null
+      && historyViewportTransfer.datasetKey !== viewer.seriesStore.seriesKey
       ? replayHistoryViewportBeforeMs(viewer.seriesStore, {
-          anchorSourceTime: viewportTransfer.anchorSourceTime,
+          anchorSourceTime: historyViewportTransfer.anchorSourceTime,
           displayInterval,
           revealedBoundaryMs: store.virtualTimeMs,
         })
@@ -249,6 +267,31 @@ export function useReplayHistoryRuntime(
         || latest.dataEpoch !== page.data_epoch
         || latest.virtualTimeMs === null
         || page.revealed_boundary_ms > latest.virtualTimeMs) return;
+      // A display-interval switch can start a viewport/repair page while the
+      // source-bucket projection is still in flight.  Once that authoritative
+      // projection arrives it may already cover the requested anchor.  Do not
+      // let the older page reconnect against a cursor that is no longer the
+      // active gap; a fresh render will request a different target if one is
+      // still needed.
+      if (pendingViewportBeforeMs !== null) {
+        const latestViewportBeforeMs = historyViewportTransfer !== null
+          ? replayHistoryViewportBeforeMs(viewer.seriesStore, {
+              anchorSourceTime: historyViewportTransfer.anchorSourceTime,
+              displayInterval,
+              revealedBoundaryMs: latest.virtualTimeMs,
+            })
+          : null;
+        if (latestViewportBeforeMs !== pendingViewportBeforeMs) return;
+      }
+      if (pendingRepairBeforeMs !== null) {
+        const latestRepairBeforeMs = replayHistoryRevealRepairBeforeMs(
+          viewer.seriesStore,
+          latest.replayStartMs,
+          latest.virtualTimeMs,
+          displayInterval,
+        );
+        if (latestRepairBeforeMs !== pendingRepairBeforeMs) return;
+      }
       applyReplayHistoryPage(viewer.seriesStore, page, {
         expectedBeforeMs: beforeMs,
         contextHistory: true,
@@ -263,7 +306,7 @@ export function useReplayHistoryRuntime(
       // authoritative terminal check, including empty/exhausted pages.
       const viewportTransferUnavailable = replayHistoryViewportTransferUnavailable(
         viewer.seriesStore,
-        viewportTransfer,
+        historyViewportTransfer,
         pendingViewportBeforeMs,
       );
       const gapNotice = page.excluded_ranges.length > 0
@@ -308,7 +351,7 @@ export function useReplayHistoryRuntime(
     runtimeGeneration,
     sessionId,
     viewer.seriesStore,
-    viewportTransfer,
+    historyViewportTransfer,
   ]);
 
   useEffect(() => {
@@ -340,12 +383,35 @@ export function useReplayHistoryRuntime(
       || !viewer.seriesStore.rightTruncated
     ) return false;
     provider?.cancel();
-    rebuildReplayViewerSeries(
-      viewer.seriesStore,
-      runtime.replayStore.seriesStore,
-      config.base_interval,
-      displayInterval,
-    );
+    if (usesSourceBucketProjection
+      && runtime.store.sessionId !== null
+      && runtime.store.dataEpoch !== null
+      && runtime.store.virtualTimeMs !== null
+      && viewer.viewerState !== null) {
+      const response = await defaultReplayV2Api.displayProjectionBySession(
+        runtime.store.sessionId,
+        {
+          trackId: viewer.viewerState.selected_track_id,
+          displayInterval,
+          revealedBoundaryMs: runtime.store.virtualTimeMs,
+          dataEpoch: runtime.store.dataEpoch,
+        },
+      );
+      replaceReplayViewerSeriesFromServer(
+        viewer.seriesStore,
+        runtime.replayStore.seriesStore,
+        displayInterval,
+        response.bars,
+        response.revealed_boundary_ms,
+      );
+    } else {
+      rebuildReplayViewerSeries(
+        viewer.seriesStore,
+        runtime.replayStore.seriesStore,
+        config.base_interval,
+        displayInterval,
+      );
+    }
     loadingRef.current = { key: historyKey, loading: false };
     setHistoryState(initialReplayHistoryState(historyKey));
     return true;
@@ -355,7 +421,12 @@ export function useReplayHistoryRuntime(
     historyKey,
     provider,
     runtime.replayStore.seriesStore,
+    runtime.store.dataEpoch,
+    runtime.store.sessionId,
+    runtime.store.virtualTimeMs,
+    usesSourceBucketProjection,
     viewer.seriesStore,
+    viewer.viewerState,
   ]);
 
   useEffect(() => {

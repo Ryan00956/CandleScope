@@ -26,6 +26,10 @@ import {
   type ReplayPeriodSummaryStatusResponse,
 } from "./replayPeriodSummary.js";
 import {
+  parseReplayDisplayProjection,
+  type ReplayDisplayProjectionResponse,
+} from "./replayDisplayProjection.js";
+import {
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunDeleteResponse,
@@ -394,6 +398,45 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/session/${safeSegment(sessionId, "session id")}/viewer`,
       parseReplayViewerStateResponse,
+      signal ? { signal } : {},
+    );
+  }
+
+  displayProjectionBySession(
+    sessionId: string,
+    {
+      trackId,
+      displayInterval,
+      revealedBoundaryMs,
+      dataEpoch,
+      limit = 1_000,
+    }: {
+      readonly trackId: string;
+      readonly displayInterval: string;
+      readonly revealedBoundaryMs: number;
+      readonly dataEpoch: string;
+      readonly limit?: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayDisplayProjectionResponse> {
+    if (!Number.isSafeInteger(revealedBoundaryMs) || revealedBoundaryMs < 0
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 1_000
+      || !/^sha256:[0-9a-f]{64}$/.test(dataEpoch)) {
+      return Promise.reject(new ReplayV2ApiError(
+        "REPLAY_V2_PROTOCOL_ERROR",
+        "display projection request is invalid",
+      ));
+    }
+    const params = new URLSearchParams({
+      track_id: safeIdentifier(trackId, "track id"),
+      display_interval: safeIdentifier(displayInterval, "display interval"),
+      revealed_boundary_ms: String(revealedBoundaryMs),
+      data_epoch: dataEpoch,
+      limit: String(limit),
+    });
+    return this.request(
+      `/runs/session/${safeSegment(sessionId, "session id")}/display-projection?${params}`,
+      parseReplayDisplayProjection,
       signal ? { signal } : {},
     );
   }

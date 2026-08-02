@@ -223,6 +223,7 @@ class BinanceKlineArchiveProvider:
 
         bars: list[ArchiveBar] = []
         previous_source_open: int | None = None
+        source_bucket_phase_ms: int | None = None
         timestamp_unit: str | None = None
         source_row_count = 0
         normalized_row_count = 0
@@ -291,6 +292,14 @@ class BinanceKlineArchiveProvider:
                                     rejection_reasons.get(exc.code, 0) + 1
                                 )
                                 continue
+                            if ref.interval == "3d":
+                                row_phase_ms = bar.open_time % spec.nominal_ms
+                                if source_bucket_phase_ms is None:
+                                    source_bucket_phase_ms = row_phase_ms
+                                elif row_phase_ms != source_bucket_phase_ms:
+                                    raise ArchiveDataError(
+                                        "Binance 3d K-line archive mixes source bucket phases"
+                                    )
                             bars.append(bar)
                             if bar.source.endswith("_normalized"):
                                 normalized_row_count += 1
@@ -377,7 +386,11 @@ def _parse_row(fields: list[str], ref: ArchiveObjectRef, spec, line_number: int)
         ) from exc
     if not ref.start_ms <= open_time <= ref.end_ms:
         raise ArchiveDataError("Binance K-line timestamp is outside archive period")
-    if spec.floor_ms(open_time) != open_time:
+    # Binance's native 3d series is anchored to the symbol's first source
+    # bucket rather than the Unix 3-day phase.  The replay-history catalog
+    # binds that per-series phase immutably; all other intervals retain the
+    # canonical exchange/grid check here.
+    if ref.interval != "3d" and spec.floor_ms(open_time) != open_time:
         raise _BinanceReplayGridError(
             "open_not_interval_aligned",
             "Binance K-line timestamp is not interval-aligned",

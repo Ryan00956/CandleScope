@@ -19,6 +19,7 @@ import type { ReplayPeriodSummaryStatusResponse } from "./replayPeriodSummary.js
 import {
   applyReplayViewerSeriesDelta,
   ReplayViewerSeriesCache,
+  replaceReplayViewerSeriesFromServer,
 } from "./replayViewerProjection.js";
 import type { ReplayRuntime } from "./useReplayRuntime.js";
 
@@ -226,6 +227,15 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const baseInterval = config?.base_interval ?? null;
   const adapterDisplayInterval = config?.display_interval ?? null;
   const displayInterval = viewerState?.display_interval ?? null;
+  const sourceExchange = config?.exchange ?? null;
+  const sourceMarketType = config?.market_type ?? null;
+  const sourceSymbol = config?.symbol ?? null;
+  const dataEpoch = runtime.store.dataEpoch;
+  const requiresSourceBucketProjection = config?.source_kind === "bar"
+    && config.blind_mode === true
+    && baseInterval !== null
+    && displayInterval !== null
+    && !intervalsSemanticallyEquivalent(baseInterval, displayInterval);
   const sourceSeriesKey = sourceStore.seriesKey;
   const sourcePublicTimeMsRef = useRef(runtime.store.virtualTimeMs);
   sourcePublicTimeMsRef.current = runtime.store.virtualTimeMs;
@@ -243,13 +253,31 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     )) {
       throw new Error("authoritative replay adapter is not projected at the base interval");
     }
+    if (config?.source_kind === "bar"
+      && config.blind_mode === true
+      && !intervalsSemanticallyEquivalent(
+        baseInterval,
+        next.display_interval,
+      )) {
+      viewerSeriesCache.storeFor(sourceStore, next.display_interval).clear({
+        source: "replay-viewer-awaiting-source-bucket-projection",
+      });
+      return;
+    }
     viewerSeriesCache.prepare(
       sourceStore,
       baseInterval,
       next.display_interval,
       sourcePublicTimeMsRef.current,
     );
-  }, [adapterDisplayInterval, baseInterval, sourceStore, viewerSeriesCache]);
+  }, [
+    adapterDisplayInterval,
+    baseInterval,
+    config?.blind_mode,
+    config?.source_kind,
+    sourceStore,
+    viewerSeriesCache,
+  ]);
   const publishViewerState = useCallback((next: ReplayViewerState): boolean => {
     const current = viewerRef.current;
     if (current !== null
@@ -374,6 +402,99 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   }, [marketTracks?.global_clock.state, marketTracks?.run_id, refreshMarketTracks]);
 
   useEffect(() => {
+    if (requiresSourceBucketProjection) {
+      let disposed = false;
+      let activeRequest: AbortController | null = null;
+      let refreshPending = false;
+      const refresh = () => {
+        if (activeRequest !== null) {
+          refreshPending = true;
+          return;
+        }
+        const boundaryMs = runtime.store.virtualTimeMs;
+        const activeDataEpoch = runtime.store.dataEpoch;
+        const trackId = viewerRef.current?.selected_track_id ?? null;
+        if (sessionId === null
+          || displayInterval === null
+          || boundaryMs === null
+          || activeDataEpoch === null
+          || trackId === null) {
+          seriesStore.clear({ source: "replay-viewer-source-bucket-unavailable" });
+          return;
+        }
+        const request = new AbortController();
+        activeRequest = request;
+        refreshPending = false;
+        void defaultReplayV2Api.displayProjectionBySession(
+          sessionId,
+          {
+            trackId,
+            displayInterval,
+            revealedBoundaryMs: boundaryMs,
+            dataEpoch: activeDataEpoch,
+          },
+          request.signal,
+        ).then((response) => {
+          if (disposed || request.signal.aborted) return;
+          const latestBoundaryMs = runtime.store.virtualTimeMs;
+          const latestDataEpoch = runtime.store.dataEpoch;
+          if (response.session_id !== sessionId
+            || response.track_id !== trackId
+            || response.display_interval !== displayInterval
+            || response.data_epoch !== activeDataEpoch
+            || response.revealed_boundary_ms !== boundaryMs
+            || response.identity.exchange !== sourceExchange
+            || response.identity.market_type !== sourceMarketType
+            || response.identity.symbol !== sourceSymbol
+            || response.identity.source_kind !== "BAR"
+            || baseInterval === null
+            || !intervalsSemanticallyEquivalent(
+              response.identity.base_interval,
+              baseInterval,
+            )) {
+            throw new Error("source-bucket projection identity changed");
+          }
+          if (latestBoundaryMs !== boundaryMs
+            || latestDataEpoch !== activeDataEpoch) {
+            refreshPending = true;
+            return;
+          }
+          replaceReplayViewerSeriesFromServer(
+            seriesStore,
+            sourceStore,
+            displayInterval,
+            response.bars,
+            response.revealed_boundary_ms,
+          );
+          viewerSeriesCache.markSynchronized(
+            seriesStore,
+            sourceStore,
+            response.revealed_boundary_ms,
+          );
+          setError(null);
+        }).catch((cause: unknown) => {
+          if (disposed
+            || request.signal.aborted
+            || (cause instanceof DOMException && cause.name === "AbortError")) return;
+          seriesStore.clear({ source: "replay-viewer-source-bucket-error" });
+          setError(cause instanceof Error ? cause.message : "交易所周期 K 线重建失败");
+        }).finally(() => {
+          if (activeRequest === request) activeRequest = null;
+          if (!disposed && refreshPending) projectionScheduler.schedule();
+        });
+      };
+      const projectionScheduler = createReplayViewerProjectionScheduler(refresh);
+      refresh();
+      const unsubscribe = sourceStore.subscribe(() => {
+        projectionScheduler.schedule();
+      });
+      return () => {
+        disposed = true;
+        unsubscribe();
+        projectionScheduler.cancel();
+        activeRequest?.abort();
+      };
+    }
     let initialized = false;
     let pendingSourceDeltas: WindowDelta[] = [];
     const rebuild = () => {
@@ -426,7 +547,20 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       projectionScheduler.cancel();
       pendingSourceDeltas = [];
     };
-  }, [baseInterval, displayInterval, seriesStore, sourceStore, viewerSeriesCache]);
+  }, [
+    baseInterval,
+    dataEpoch,
+    displayInterval,
+    requiresSourceBucketProjection,
+    runtime.store,
+    seriesStore,
+    sessionId,
+    sourceExchange,
+    sourceMarketType,
+    sourceSymbol,
+    sourceStore,
+    viewerSeriesCache,
+  ]);
 
   useEffect(() => {
     const active = controlPending;

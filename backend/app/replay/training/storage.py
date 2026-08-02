@@ -3457,6 +3457,26 @@ class TrainingRunStore:
                 dataset_epoch=str(parent["dataset_epoch"]),
                 now_ms=now_ms,
             )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO replay_archive_pin(
+                    run_id, track_id, source_revision,
+                    exchange, market_type, symbol, base_interval,
+                    range_start_ms, range_end_ms, dataset_epoch, created_at_ms
+                )
+                SELECT ?, 'track-1', source_revision,
+                       exchange, market_type, symbol, base_interval,
+                       range_start_ms, range_end_ms, ?, ?
+                FROM replay_archive_pin
+                WHERE run_id = ? AND track_id = 'track-1'
+                """,
+                (
+                    child_run_id,
+                    str(parent["dataset_epoch"]),
+                    now_ms,
+                    parent_run_id,
+                ),
+            )
             register_archive_segment(
                 connection,
                 run_id=child_run_id,
@@ -9015,6 +9035,157 @@ class TrainingRunStore:
                 """
             )
             return None if session_id is None else str(session_id)
+
+        return await self.base_store.run_extension_write(write)
+
+    async def history_archive_pin(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        interval: str,
+    ) -> dict[str, object] | None:
+        """Return the immutable archive revision bound to one chart interval."""
+
+        def read(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+            return list(
+                connection.execute(
+                    """
+                    SELECT source_revision, exchange, market_type, symbol,
+                           base_interval, range_start_ms, range_end_ms,
+                           dataset_epoch, created_at_ms
+                    FROM replay_archive_pin
+                    WHERE run_id = ? AND track_id = ? AND base_interval = ?
+                    ORDER BY created_at_ms, source_revision
+                    """,
+                    (run_id, track_id, interval),
+                ).fetchall()
+            )
+
+        rows = await self.base_store.run_extension_read(read)
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise TrainingRunError(
+                "HISTORY_SOURCE_INCOMPLETE",
+                "training history interval has conflicting archive pins",
+                status_code=503,
+            )
+        return dict(rows[0])
+
+    async def pin_history_archive_interval(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        source_revision: str,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        range_start_ms: int,
+        range_end_ms: int,
+    ) -> dict[str, object]:
+        """Pin a native display catalog once, preserving later page stability."""
+
+        if (
+            len(source_revision) != 71
+            or not source_revision.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in source_revision[7:])
+            or not exchange
+            or not market_type
+            or not symbol
+            or not interval
+            or isinstance(range_start_ms, bool)
+            or not isinstance(range_start_ms, int)
+            or isinstance(range_end_ms, bool)
+            or not isinstance(range_end_ms, int)
+            or range_start_ms < 0
+            or range_end_ms < range_start_ms
+        ):
+            raise TrainingRunError(
+                "HISTORY_SOURCE_INCOMPLETE",
+                "native display archive pin is invalid",
+                status_code=503,
+            )
+        now_ms = self.base_store._validated_now_ms()
+
+        def write(connection: sqlite3.Connection) -> dict[str, object]:
+            track = connection.execute(
+                """
+                SELECT t.exchange, t.market_type, t.symbol, t.dataset_epoch
+                FROM replay_training_market_track AS t
+                WHERE t.run_id = ? AND t.track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if track is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training history track does not exist",
+                    status_code=404,
+                )
+            if (
+                str(track["exchange"]) != exchange
+                or str(track["market_type"]) != market_type
+                or str(track["symbol"]) != symbol
+            ):
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_IDENTITY_DRIFT",
+                    "native display archive identity changed",
+                )
+            existing = connection.execute(
+                """
+                SELECT source_revision, exchange, market_type, symbol,
+                       base_interval, range_start_ms, range_end_ms,
+                       dataset_epoch, created_at_ms
+                FROM replay_archive_pin
+                WHERE run_id = ? AND track_id = ? AND base_interval = ?
+                ORDER BY created_at_ms, source_revision
+                """,
+                (run_id, track_id, interval),
+            ).fetchall()
+            if len(existing) > 1:
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_INCOMPLETE",
+                    "training history interval has conflicting archive pins",
+                    status_code=503,
+                )
+            if existing:
+                return dict(existing[0])
+            connection.execute(
+                """
+                INSERT INTO replay_archive_pin(
+                    run_id, track_id, source_revision,
+                    exchange, market_type, symbol, base_interval,
+                    range_start_ms, range_end_ms, dataset_epoch, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    track_id,
+                    source_revision,
+                    exchange,
+                    market_type,
+                    symbol,
+                    interval,
+                    range_start_ms,
+                    range_end_ms,
+                    str(track["dataset_epoch"]),
+                    now_ms,
+                ),
+            )
+            return {
+                "source_revision": source_revision,
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "base_interval": interval,
+                "range_start_ms": range_start_ms,
+                "range_end_ms": range_end_ms,
+                "dataset_epoch": str(track["dataset_epoch"]),
+                "created_at_ms": now_ms,
+            }
 
         return await self.base_store.run_extension_write(write)
 

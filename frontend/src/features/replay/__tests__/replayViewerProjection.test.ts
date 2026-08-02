@@ -5,17 +5,29 @@ import { SeriesWindowStore } from "../../market-data/window/seriesWindowStore.js
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import {
   applyReplayViewerSeriesDelta,
+  buildReplayViewerSeriesKey,
   ReplayViewerProjectionError,
   ReplayViewerSeriesCache,
   aggregateReplayBaseBars,
   rebuildReplayViewerSeries,
+  replaceReplayViewerSeriesFromServer,
 } from "../replayViewerProjection.js";
+import type { ReplayDisplayBar } from "../replayTypes.js";
 import {
   selectRevealedIndicatorBars,
 } from "../useReplaySharedIndicatorRuntime.js";
 
 
 const HOUR_START = 1_800_000_000 - (1_800_000_000 % 3_600);
+
+test("viewer store identity commits the source-bucket mapping contract", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "replay-base" });
+
+  assert.match(
+    String(buildReplayViewerSeriesKey(source, "1d")),
+    /\|viewer:1d\|mapping:source-bucket-v3$/,
+  );
+});
 
 function baseBar(index: number, closed = true): KlineBar {
   const price = 100 + index;
@@ -134,6 +146,48 @@ test("weekly and calendar-month viewer intervals preserve real UTC boundaries", 
   assert.deepEqual(monthly.map((row) => row.replayExpectedComponents), [31, 29]);
   assert.ok(monthly.every((row) => row.replayClosed === true));
   assert.equal(monthly[1]?.replayCloseTimeMs, Date.UTC(2024, 2, 1) - 1);
+});
+
+test("server source-bucket projection replaces blind client calendar aggregation", () => {
+  const source = new SeriesWindowStore({ intervalSeconds: 60, seriesKey: "blind-base" });
+  source.replace(Array.from({ length: 10 }, (_, index) => baseBar(index)));
+  const viewer = new SeriesWindowStore();
+  const publicWeekMs = Date.UTC(2000, 0, 3);
+  const publicCursorMs = publicWeekMs + 7 * 86_400_000 - 1;
+  const authoritative: ReplayDisplayBar = {
+    open_time_ms: publicWeekMs as ReplayDisplayBar["open_time_ms"],
+    close_time_ms: publicCursorMs as ReplayDisplayBar["close_time_ms"],
+    open: "5309.81" as ReplayDisplayBar["open"],
+    high: "5900" as ReplayDisplayBar["high"],
+    low: "5178.8" as ReplayDisplayBar["low"],
+    close: "5775.62" as ReplayDisplayBar["close"],
+    volume: "191971.589975" as ReplayDisplayBar["volume"],
+    quote_volume: null,
+    trades: null,
+    taker_buy_base: null,
+    taker_buy_quote: null,
+    first_base_open_ms: publicWeekMs as ReplayDisplayBar["first_base_open_ms"],
+    last_base_open_ms: (publicCursorMs - 59_999) as ReplayDisplayBar["last_base_open_ms"],
+    component_count: 10_080,
+    expected_components: 10_080,
+    is_closed: true,
+    synthetic: false,
+  };
+
+  replaceReplayViewerSeriesFromServer(
+    viewer,
+    source,
+    "1w",
+    [authoritative],
+    publicCursorMs,
+  );
+
+  assert.equal(viewer.barCount, 1);
+  assert.equal(viewer.first()?.open, 5309.81);
+  assert.equal(viewer.first()?.high, 5900);
+  assert.equal(viewer.first()?.low, 5178.8);
+  assert.equal(viewer.first()?.close, 5775.62);
+  assert.equal(viewer.first()?.replayClosed, true);
 });
 
 test("custom fixed intervals project while inexact intervals fail closed", () => {

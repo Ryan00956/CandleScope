@@ -11,6 +11,14 @@ import {
 } from "../../utils/intervals.js";
 import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
 import type { IntervalTimeline } from "../../utils/intervalTimeline.js";
+import { replayDisplayBarToKline } from "./replaySeriesProjection.js";
+import type { ReplayDisplayBar } from "./replayTypes.js";
+
+
+// Bump this whenever the server-owned source-bucket/public-time mapping
+// changes. The version is part of the store identity so a hot-reloaded viewer
+// cannot retain history produced by an older mapping contract.
+const REPLAY_VIEWER_MAPPING_SCHEMA_VERSION = "source-bucket-v3";
 
 
 export class ReplayViewerProjectionError extends Error {
@@ -40,7 +48,8 @@ export function buildReplayViewerSeriesKey(
     throw new ReplayViewerProjectionError("display interval is invalid");
   }
   return asSeriesKey(
-    `${String(source.seriesKey ?? "replay-base")}|viewer:${canonicalDisplayInterval}`,
+    `${String(source.seriesKey ?? "replay-base")}|viewer:${canonicalDisplayInterval}`
+      + `|mapping:${REPLAY_VIEWER_MAPPING_SCHEMA_VERSION}`,
   );
 }
 
@@ -381,6 +390,49 @@ function sameProjectedRows(
       row as Readonly<Record<string, unknown>>,
       right[index] as Readonly<Record<string, unknown>> | undefined,
   ));
+}
+
+export function replaceReplayViewerSeriesFromServer(
+  target: SeriesWindowStore,
+  source: SeriesWindowStore,
+  displayInterval: string,
+  bars: readonly ReplayDisplayBar[],
+  publicTimeMs: number,
+): WindowDelta {
+  if (!Number.isSafeInteger(publicTimeMs) || publicTimeMs < 0) {
+    throw new ReplayViewerProjectionError("server projection public cursor is invalid");
+  }
+  const projectedRows = bars.map(replayDisplayBarToKline);
+  for (let index = 0; index < projectedRows.length; index += 1) {
+    const row = projectedRows[index];
+    const previous = projectedRows[index - 1];
+    if (row === undefined
+      || (previous !== undefined && row.time <= previous.time)
+      || Number(row.time) * 1_000 > publicTimeMs
+      || Number(row.replayLastBaseOpenMs) > publicTimeMs
+      || (row.replayClosed === true && Number(row.replayCloseTimeMs) > publicTimeMs)) {
+      throw new ReplayViewerProjectionError(
+        "server projection contains a non-causal or unordered bar",
+      );
+    }
+  }
+  const previousRows = target.snapshot();
+  const contextRows = revealedContextRows(previousRows, publicTimeMs);
+  contextRows.push(...carriedRevealedProjectionRows(
+    previousRows,
+    projectedRows,
+    publicTimeMs,
+  ));
+  contextRows.sort((left, right) => Number(left.time) - Number(right.time));
+  const rows = mergeDisplayContextWithProjection(contextRows, projectedRows);
+  target.intervalSeconds = nominalSeconds(displayInterval, "display interval");
+  target.seriesKey = buildReplayViewerSeriesKey(source, displayInterval);
+  return target.replace(rows, {
+    source: "replay-viewer-source-bucket-projection",
+    displayInterval,
+    publicTimeMs,
+    serverAuthoritative: true,
+  });
 }
 
 function mergeDisplayContextWithProjection(

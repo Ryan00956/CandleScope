@@ -854,6 +854,26 @@ async def replay_v2_training_history(
     )
 
 
+@router.get("/runs/session/{session_id}/display-projection")
+async def replay_v2_training_display_projection(
+    request: Request,
+    session_id: str,
+    track_id: str = Query(min_length=1, max_length=128),
+    revealed_boundary_ms: int = Query(ge=0, le=MAX_TIMESTAMP_MS),
+    limit: int = Query(default=1_000, ge=1, le=1_000),
+    data_epoch: str = Query(min_length=71, max_length=71),
+    display_interval: str = Query(min_length=1, max_length=32),
+) -> dict[str, object]:
+    return await _training_service(request).display_projection(
+        session_id,
+        track_id=track_id,
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=limit,
+        data_epoch=data_epoch,
+        display_interval=display_interval,
+    )
+
+
 @router.get("/runs/session/{session_id}/viewer")
 async def replay_v2_training_viewer_by_session(
     request: Request,

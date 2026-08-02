@@ -10,6 +10,7 @@ import pytest
 
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.history_archive import SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.history import _resolve_native_display_context
 from app.replay.training.models import TrainingRunCreateRequest
@@ -33,15 +34,61 @@ from tests.fixtures.replay.trade_service_fakes import (
 pytestmark = pytest.mark.anyio
 
 
-async def test_calendar_month_history_uses_base_reconstruction_in_blind_time() -> None:
+async def test_calendar_month_history_requires_a_pinned_native_revision() -> None:
+    snapshot = SimpleNamespace(
+        provenance=SimpleNamespace(source_revision="sha256:" + "1" * 64)
+    )
     for interval in ("1M", "2M"):
         config = SimpleNamespace(base_interval="1m", display_interval=interval)
-        assert _resolve_native_display_context(
-            repository=object(),  # type: ignore[arg-type]
-            config=config,  # type: ignore[arg-type]
-            snapshot=object(),  # type: ignore[arg-type]
-            actual_replay_start_ms=1_709_251_200_000,
-        ) is None
+        assert (
+            _resolve_native_display_context(
+                repository=object(),  # type: ignore[arg-type]
+                config=config,  # type: ignore[arg-type]
+                snapshot=snapshot,  # type: ignore[arg-type]
+                actual_replay_start_ms=1_709_251_200_000,
+            )
+            is None
+        )
+
+
+async def test_pinned_calendar_month_history_uses_calendar_bucket_ordinals() -> None:
+    source_revision = "sha256:" + "2" * 64
+    actual_replay_start_ms = 1_709_251_200_000  # 2024-03-01T00:00:00Z
+    public_replay_start_ms = 946_684_800_000  # 2000-01-01T00:00:00Z
+    repository = SimpleNamespace(
+        get_bounds_at_revision=lambda *_args, **_kwargs: {
+            "source_revision": source_revision,
+            "earliest_open_time": 1_577_836_800_000,
+            "latest_open_time": actual_replay_start_ms,
+            "source_bucket_anchor_ms": 0,
+            "alignment_policy": SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH,
+        }
+    )
+    context = _resolve_native_display_context(
+        repository=repository,  # type: ignore[arg-type]
+        config=SimpleNamespace(  # type: ignore[arg-type]
+            base_interval="1m",
+            display_interval="1M",
+            symbol="BTCUSDT",
+            exchange="binance",
+            market_type="spot",
+        ),
+        snapshot=SimpleNamespace(  # type: ignore[arg-type]
+            provenance=SimpleNamespace(source_revision="sha256:" + "1" * 64),
+            replay_start_ms=public_replay_start_ms,
+        ),
+        actual_replay_start_ms=actual_replay_start_ms,
+        display_source_revision=source_revision,
+        display_source_bucket_anchor_ms=0,
+        display_alignment_policy=SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH,
+    )
+
+    assert context is not None
+    assert context.mapper.actual_anchor_ms == actual_replay_start_ms
+    assert context.mapper.actual_bucket_open(-1) == 1_706_745_600_000
+    assert context.mapper.public_bucket_end(
+        context.mapper.public_bucket_open(-1)
+    ) == context.mapper.public_bucket_open(0)
 
 
 async def _service(path: Path) -> tuple[ReplayService, object]:
@@ -146,10 +193,7 @@ async def test_history_pages_are_snapshot_bound_revealed_only_and_repository_fre
         assert first["schema_version"] == "replay.history.v3"
         assert first["excluded_ranges"] == []
         assert first["history_boundary_ms"] <= first["revealed_boundary_ms"]
-        assert (
-            first["history_policy"]["schema_version"]
-            == "replay.data-policy.v1"
-        )
+        assert first["history_policy"]["schema_version"] == "replay.data-policy.v1"
         assert first["track_id"] == "track-1"
         assert first["data_epoch"] == data_epoch
         assert first["revealed_boundary_ms"] == boundary
@@ -216,10 +260,7 @@ async def test_all_available_history_pages_repository_to_the_bound_source_start(
                 break
             before_ms = int(page["next_before_ms"])
 
-        assert sorted(opens) == [
-            START_MS + index * INTERVAL_MS
-            for index in range(12)
-        ]
+        assert sorted(opens) == [START_MS + index * INTERVAL_MS for index in range(12)]
         assert len(opens) == len(set(opens))
         assert pages[0]["history_boundary_ms"] == START_MS
         policy = pages[0]["history_policy"]
@@ -227,8 +268,7 @@ async def test_all_available_history_pages_repository_to_the_bound_source_start(
         assert policy["visible_history_rows"] == 12
         assert policy["effective_warmup_bars"] == 2
         assert any(
-            name == "query_bars"
-            and call["end_ms"] < START_MS + 12 * INTERVAL_MS
+            name == "query_bars" and call["end_ms"] < START_MS + 12 * INTERVAL_MS
             for name, call in repository.calls  # type: ignore[attr-defined]
         )
 

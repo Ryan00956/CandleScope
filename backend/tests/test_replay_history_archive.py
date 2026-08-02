@@ -9,13 +9,16 @@ from pathlib import Path
 
 import pytest
 
+from app.data_engine.interval_policy import compute_bucket_start_ms
 from app.exchanges.plugins.binance.archive import BinanceKlineArchiveProvider
 from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.catalog import ReplayCatalog, ReplaySeriesIdentity
 from app.replay.constants import REPLAY_PROTOCOL, CommandType
 from app.replay.dataset import BarDatasetBuilder, BarDatasetSnapshot
+from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.history_archive import (
+    SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
     ReplayHistoryArchiveError,
     ReplayHistoryArchiveRuntimeLease,
     ReplayHistoryArchiveWriter,
@@ -29,7 +32,12 @@ from app.replay.remote_history import (
 from app.replay.service import ReplayService
 from app.replay.models import ReplayCommand
 from app.replay.storage import ReplaySQLiteStore
-from app.replay.training.models import TrainingRunCreateRequest
+from app.replay.training.commands import ReplayV2Command
+from app.replay.training.models import (
+    ReplayV2CommandType,
+    TrainingCursor,
+    TrainingRunCreateRequest,
+)
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.schema import migrate_training_schema
 from scripts.import_binance_replay_history import (
@@ -53,28 +61,17 @@ def test_binance_monthly_history_plan_retains_checksum_daily_fallbacks() -> None
         market_type="futures",
         symbol="BTCUSDT",
         interval="1m",
-        start_ms=int(
-            datetime(2019, 9, 1, tzinfo=timezone.utc).timestamp() * 1_000
-        ),
-        end_ms=(
-            int(
-                datetime(2019, 9, 4, tzinfo=timezone.utc).timestamp()
-                * 1_000
-            )
-            - 1
-        ),
-        now_ms=int(
-            datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp() * 1_000
-        ),
+        start_ms=int(datetime(2019, 9, 1, tzinfo=timezone.utc).timestamp() * 1_000),
+        end_ms=(int(datetime(2019, 9, 4, tzinfo=timezone.utc).timestamp() * 1_000) - 1),
+        now_ms=int(datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp() * 1_000),
     )
 
-    assert [item.period for item in _select_source_objects(refs)] == [
-        "2019-09"
+    assert [item.period for item in _select_source_objects(refs)] == ["2019-09"]
+    assert [item.period for item in _daily_fallbacks_by_month(refs)["2019-09"]] == [
+        "2019-09-01",
+        "2019-09-02",
+        "2019-09-03",
     ]
-    assert [
-        item.period
-        for item in _daily_fallbacks_by_month(refs)["2019-09"]
-    ] == ["2019-09-01", "2019-09-02", "2019-09-03"]
 
 
 def _batch(
@@ -91,6 +88,37 @@ def _batch(
                 price=str(price_base + offset),
                 source="binance_archive_verified",
             )
+            for offset in offsets
+        ],
+        source_provider="binance-public-kline-v1",
+        source_object_key=source_key,
+        source_period=source_key,
+        source_url=f"https://data.binance.vision/{source_key}.zip",
+        source_content_sha256=f"sha256:{digest_character * 64}",
+        source_provider_checksum=f"sha256:{digest_character * 64}",
+    )
+
+
+def _native_interval_batch(
+    offsets: list[int],
+    *,
+    interval: str,
+    interval_ms: int,
+    price_base: int,
+    source_key: str,
+    digest_character: str,
+) -> ReplayHistoryImportBatch:
+    return ReplayHistoryImportBatch(
+        rows=[
+            {
+                **make_bar(
+                    START_MS + offset * INTERVAL_MS,
+                    interval_ms=interval_ms,
+                    price=str(price_base + offset),
+                    source="binance_archive_verified",
+                ),
+                "interval": interval,
+            }
             for offset in offsets
         ],
         source_provider="binance-public-kline-v1",
@@ -167,16 +195,18 @@ def test_manifest_gap_index_drives_weighted_random_without_reading_parquet(
     assert description["continuous_segment_count"] == 2
     assert description["missing_grid_rows"] == 2
     assert description["source_rejected_rows"] == 0
-    assert repository.verify_catalog_objects(
-        "BTCUSDT",
-        "1m",
-        exchange="binance",
-        market_type="spot",
-    )["verified"] is True
+    assert (
+        repository.verify_catalog_objects(
+            "BTCUSDT",
+            "1m",
+            exchange="binance",
+            market_type="spot",
+        )["verified"]
+        is True
+    )
 
     selected = {
-        catalog.select_random(entry, seed=seed).replay_start_ms
-        for seed in range(64)
+        catalog.select_random(entry, seed=seed).replay_start_ms for seed in range(64)
     }
     assert selected == {
         START_MS + INTERVAL_MS,
@@ -368,10 +398,14 @@ def test_remote_object_checksum_failure_does_not_change_selection_domain(
     )
     publish_remote_history_index(origin, now_ms=NOW_MS)
     repository = RemoteReplayHistoryRepository(tmp_path / "cache", origin)
-    entry = _catalog(repository).build(
-        warmup_bars=1,
-        horizon_ms=2 * INTERVAL_MS,
-    ).require_entry(IDENTITY)
+    entry = (
+        _catalog(repository)
+        .build(
+            warmup_bars=1,
+            horizon_ms=2 * INTERVAL_MS,
+        )
+        .require_entry(IDENTITY)
+    )
     selected_before = _catalog(repository).select_random(entry, seed=77).replay_start_ms
 
     object_path = origin / manifest.objects[0].relative_path
@@ -658,12 +692,15 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
             history_epoch=None,
             display_interval="5m",
         )
+        # The requested source start sits inside its native 5m candle.  Blind
+        # projection maps that whole exchange bucket to the preceding public
+        # slot instead of re-flooring the shifted 1m timestamps at replay start.
         assert [bar["open_time_ms"] for bar in revealed_page["bars"]] == [
-            replay_start_ms
+            replay_start_ms - 5 * INTERVAL_MS
         ]
         revealed_bar = revealed_page["bars"][0]
-        assert revealed_bar["open"] == "101"
-        assert revealed_bar["close"] == "105.5"
+        assert revealed_bar["open"] == "100"
+        assert revealed_bar["close"] == "104.5"
         assert revealed_bar["component_count"] == 5
         assert revealed_bar["is_closed"] is True
         assert revealed_bar["close_time_ms"] <= revealed_boundary_ms
@@ -941,6 +978,66 @@ def test_archive_fixed_interval_aggregation_is_revision_bound_and_cached(
     assert restarted_diagnostics["checksum_verifications"] == 0
 
 
+def test_archive_blind_weekly_projection_keeps_native_monday_buckets(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-history-native-week"
+    monday_ms = int(datetime(2024, 3, 4, tzinfo=timezone.utc).timestamp() * 1_000)
+    rows = [
+        make_bar(
+            monday_ms + offset * INTERVAL_MS,
+            price=str(100 + offset),
+            source="binance_archive_verified",
+        )
+        for offset in range(2 * 7 * 24 * 60)
+    ]
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            ReplayHistoryImportBatch(
+                rows=rows,
+                source_provider="binance-public-kline-v1",
+                source_object_key="fixture-two-native-weeks",
+                source_period="2024-03",
+                source_url="https://data.binance.vision/native-week.zip",
+                source_content_sha256=f"sha256:{'6' * 64}",
+                source_provider_checksum=f"sha256:{'6' * 64}",
+            )
+        ],
+    )
+    repository = ReplayHistoryRepository(root)
+    actual_replay_start_ms = monday_ms + (2 * 24 * 60 + 11 * 60 + 50) * INTERVAL_MS
+    public_replay_start_ms = int(
+        datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() * 1_000
+    )
+
+    projected = repository.query_source_bucket_bars_at_revision(
+        manifest.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        "1w",
+        actual_start_ms=monday_ms,
+        actual_end_ms=monday_ms + 2 * 7 * 24 * 60 * INTERVAL_MS,
+        actual_replay_start_ms=actual_replay_start_ms,
+        public_replay_start_ms=public_replay_start_ms,
+        limit=10,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    bars = projected["bars"]
+    assert len(bars) == 2
+    assert bars[0]["open"] == "100"
+    assert bars[0]["close"] == "10179.5"
+    assert bars[0]["component_count"] == 10_080
+    assert bars[1]["open"] == "10180"
+    assert bars[1]["close"] == "20259.5"
+    assert bars[1]["open_time_ms"] - bars[0]["open_time_ms"] == 7 * 86_400_000
+    assert str(monday_ms) not in json.dumps(projected, sort_keys=True)
+
+
 def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     tmp_path: Path,
 ) -> None:
@@ -1006,8 +1103,7 @@ def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     assert legacy_reference is not None
     assert legacy_reference["source_revision"] == first_manifest.catalog_epoch
     assert (
-        BarDatasetSnapshot.from_dict(pinned.to_dict()).data_epoch
-        == pinned.data_epoch
+        BarDatasetSnapshot.from_dict(pinned.to_dict()).data_epoch == pinned.data_epoch
     )
 
     second_catalog = _catalog(repository)
@@ -1314,5 +1410,804 @@ async def test_all_available_history_crosses_a_revision_declared_archive_gap(
         snapshot_after = (await service.get_session("gap-session-1"))["snapshot"]
         assert snapshot_after["cursor"] == snapshot["cursor"]
         assert snapshot_after["data_epoch"] == snapshot["data_epoch"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_all_available_history_pins_native_display_revision_before_seam(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-native-display"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [offset for offset in range(30) if offset not in range(5, 10)],
+                price_base=100,
+                source_key="fixture-base-gap",
+                digest_character="a",
+            )
+        ],
+    )
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        "5m",
+        [
+            _native_interval_batch(
+                [0, 5, 10, 15],
+                interval="5m",
+                interval_ms=5 * INTERVAL_MS,
+                price_base=1_000,
+                source_key="fixture-native-5m-v1",
+                digest_character="b",
+            )
+        ],
+    )
+    database = tmp_path / "replay-native-display.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=root,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("native-session"),
+        training_run_id_factory=SessionIdFactory("native-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=True,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Pinned native display history",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "5m",
+                "requested_start_ms": START_MS + 20 * INTERVAL_MS,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": 42,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "HIDE_ALL",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        training = service.training
+        assert training is not None
+        await training.create_run(request)
+        session = await service.get_session("native-session-1")
+        snapshot = session["snapshot"]
+        public_replay_start_ms = int(
+            snapshot["components"]["bar_builder"]["replay_start_ms"]
+        )
+        page = await training.history_page(
+            "native-session-1",
+            track_id="track-1",
+            before_ms=public_replay_start_ms,
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="5m",
+        )
+
+        assert [bar["open_time_ms"] for bar in page["bars"]] == [
+            public_replay_start_ms - offset * INTERVAL_MS for offset in (20, 15, 10, 5)
+        ]
+        assert [bar["open"] for bar in page["bars"]] == [
+            "1000",
+            "1005",
+            "1010",
+            "1015",
+        ]
+        assert page["excluded_ranges"] == []
+
+        replacement_manifest = writer.import_batches(
+            IDENTITY,
+            "5m",
+            [
+                _native_interval_batch(
+                    [0, 5, 10, 15],
+                    interval="5m",
+                    interval_ms=5 * INTERVAL_MS,
+                    price_base=2_000,
+                    source_key="fixture-native-5m-v2",
+                    digest_character="c",
+                )
+            ],
+            merge_current=False,
+        )
+        assert replacement_manifest.catalog_epoch != native_manifest.catalog_epoch
+
+        repeated = await training.history_page(
+            "native-session-1",
+            track_id="track-1",
+            before_ms=public_replay_start_ms,
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=str(page["history_epoch"]),
+            display_interval="5m",
+        )
+        assert repeated["history_epoch"] == page["history_epoch"]
+        assert repeated["bars"] == page["bars"]
+
+        connection = sqlite3.connect(database)
+        try:
+            pins = connection.execute(
+                """
+                SELECT base_interval, source_revision
+                FROM replay_archive_pin
+                ORDER BY base_interval
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        assert pins == [
+            ("1m", base_manifest.catalog_epoch),
+            ("5m", native_manifest.catalog_epoch),
+        ]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_weekly_native_gap_fails_before_pin_then_accepts_continuous_revision(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-native-weekly-gap"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(30)),
+                price_base=100,
+                source_key="fixture-base-1m",
+                digest_character="d",
+            )
+        ],
+    )
+    week_ms = 7 * 24 * 60 * INTERVAL_MS
+    replay_start_ms = START_MS + 20 * INTERVAL_MS
+    current_week_open_ms = compute_bucket_start_ms(
+        replay_start_ms,
+        week_ms,
+        interval="1w",
+    )
+    last_complete_week_open_ms = current_week_open_ms - week_ms
+    weekly_open_times = [
+        last_complete_week_open_ms - offset * week_ms for offset in range(4, -1, -1)
+    ]
+    weekly_offsets = [
+        (open_time_ms - START_MS) // INTERVAL_MS for open_time_ms in weekly_open_times
+    ]
+    gappy_manifest = writer.import_batches(
+        IDENTITY,
+        "1w",
+        [
+            _native_interval_batch(
+                [offset for index, offset in enumerate(weekly_offsets) if index != 2],
+                interval="1w",
+                interval_ms=week_ms,
+                price_base=100_000,
+                source_key="fixture-native-1w-gappy",
+                digest_character="e",
+            )
+        ],
+    )
+    database = tmp_path / "replay-native-weekly-gap.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=root,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("weekly-gap-session"),
+        training_run_id_factory=SessionIdFactory("weekly-gap-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Fail closed gappy weekly history",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1w",
+                "requested_start_ms": replay_start_ms,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": 42,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        training = service.training
+        assert training is not None
+        await training.create_run(request)
+        session = await service.get_session("weekly-gap-session-1")
+        snapshot = session["snapshot"]
+        revealed_boundary_ms = int(snapshot["cursor"]["virtual_time_ms"])
+
+        with pytest.raises(TrainingRunError) as failed:
+            await training.history_page(
+                "weekly-gap-session-1",
+                track_id="track-1",
+                before_ms=replay_start_ms,
+                revealed_boundary_ms=revealed_boundary_ms,
+                limit=10,
+                data_epoch=str(snapshot["data_epoch"]),
+                history_epoch=None,
+                display_interval="1w",
+            )
+        assert failed.value.code == "HISTORY_SOURCE_INCOMPLETE"
+        assert failed.value.status_code == 503
+
+        with sqlite3.connect(database) as connection:
+            pins_after_failure = connection.execute(
+                """
+                SELECT base_interval, source_revision
+                FROM replay_archive_pin
+                ORDER BY base_interval
+                """
+            ).fetchall()
+        assert pins_after_failure == [("1m", base_manifest.catalog_epoch)]
+
+        continuous_manifest = writer.import_batches(
+            IDENTITY,
+            "1w",
+            [
+                _native_interval_batch(
+                    weekly_offsets,
+                    interval="1w",
+                    interval_ms=week_ms,
+                    price_base=200_000,
+                    source_key="fixture-native-1w-continuous",
+                    digest_character="f",
+                )
+            ],
+            merge_current=False,
+        )
+        assert continuous_manifest.catalog_epoch != gappy_manifest.catalog_epoch
+
+        page = await training.history_page(
+            "weekly-gap-session-1",
+            track_id="track-1",
+            before_ms=replay_start_ms,
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="1w",
+        )
+        assert [bar["open_time_ms"] for bar in page["bars"]] == weekly_open_times
+        assert page["excluded_ranges"] == []
+
+        with sqlite3.connect(database) as connection:
+            pins_after_recovery = connection.execute(
+                """
+                SELECT base_interval, source_revision
+                FROM replay_archive_pin
+                ORDER BY base_interval
+                """
+            ).fetchall()
+        assert pins_after_recovery == [
+            ("1m", base_manifest.catalog_epoch),
+            ("1w", continuous_manifest.catalog_epoch),
+        ]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_blind_native_daily_history_uses_source_bucket_ordinal_mapping(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-native-daily-phase"
+    day_ms = 24 * 60 * INTERVAL_MS
+    replay_start_ms = START_MS + 2 * day_ms + 20 * INTERVAL_MS
+    fixture_now_ms = replay_start_ms + 30 * INTERVAL_MS
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: fixture_now_ms)
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(2 * 24 * 60 + 31)),
+                price_base=100,
+                source_key="fixture-daily-phase-base-1m",
+                digest_character="1",
+            )
+        ],
+    )
+    actual_daily_anchor_ms = compute_bucket_start_ms(
+        replay_start_ms,
+        day_ms,
+        interval="1d",
+    )
+    native_daily_open_times = [
+        actual_daily_anchor_ms - 2 * day_ms,
+        actual_daily_anchor_ms - day_ms,
+    ]
+    native_daily_offsets = [
+        (open_time_ms - START_MS) // INTERVAL_MS
+        for open_time_ms in native_daily_open_times
+    ]
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        "1d",
+        [
+            _native_interval_batch(
+                native_daily_offsets,
+                interval="1d",
+                interval_ms=day_ms,
+                price_base=100_000,
+                source_key="fixture-native-1d-phase",
+                digest_character="2",
+            )
+        ],
+    )
+    database = tmp_path / "replay-native-daily-phase.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=root,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: fixture_now_ms),
+        now_ms=lambda: fixture_now_ms,
+        session_id_factory=SessionIdFactory("daily-phase-session"),
+        training_run_id_factory=SessionIdFactory("daily-phase-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=True,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Blind native daily phase mapping",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1d",
+                "requested_start_ms": replay_start_ms,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": 42,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "HIDE_ALL",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        training = service.training
+        assert training is not None
+        await training.create_run(request)
+        session = await service.get_session("daily-phase-session-1")
+        snapshot = session["snapshot"]
+        public_replay_start_ms = int(
+            snapshot["components"]["bar_builder"]["replay_start_ms"]
+        )
+        mapper = SourceBucketTimeMapper.create(
+            interval="1d",
+            actual_replay_start_ms=replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+        )
+        public_calendar_anchor_ms = compute_bucket_start_ms(
+            public_replay_start_ms,
+            day_ms,
+            interval="1d",
+        )
+        assert (
+            replay_start_ms - mapper.actual_anchor_ms
+            != public_replay_start_ms - public_calendar_anchor_ms
+        )
+        assert mapper.public_anchor_ms != public_calendar_anchor_ms
+        expected_public_open_times = [
+            mapper.public_from_actual(open_time_ms)
+            for open_time_ms in native_daily_open_times
+        ]
+
+        page = await training.history_page(
+            "daily-phase-session-1",
+            track_id="track-1",
+            before_ms=public_replay_start_ms,
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="1d",
+        )
+
+        assert [bar["open_time_ms"] for bar in page["bars"]] == (
+            expected_public_open_times
+        )
+        assert [bar["open"] for bar in page["bars"]] == [
+            str(100_000 + offset) for offset in native_daily_offsets
+        ]
+        assert page["excluded_ranges"] == []
+        with sqlite3.connect(database) as connection:
+            pins = connection.execute(
+                """
+                SELECT base_interval, source_revision
+                FROM replay_archive_pin
+                ORDER BY base_interval
+                """
+            ).fetchall()
+        assert pins == [
+            ("1d", native_manifest.catalog_epoch),
+            ("1m", base_manifest.catalog_epoch),
+        ]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_duration_projection_uses_pinned_three_day_source_phase(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "replay-native-three-day-phase"
+    day_ms = 24 * 60 * INTERVAL_MS
+    three_day_ms = 3 * day_ms
+    replay_start_ms = START_MS + 20 * INTERVAL_MS
+    fixture_now_ms = replay_start_ms + 30 * INTERVAL_MS
+    source_anchor_ms = day_ms
+    mapper_for_source = SourceBucketTimeMapper.create(
+        interval="3d",
+        actual_replay_start_ms=replay_start_ms,
+        public_replay_start_ms=946_684_800_000,
+        source_bucket_anchor_ms=source_anchor_ms,
+    )
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: fixture_now_ms)
+    base_start_offset = (mapper_for_source.actual_anchor_ms - START_MS) // INTERVAL_MS
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(base_start_offset, 31)),
+                price_base=100_000,
+                source_key="fixture-three-day-phase-base-1m",
+                digest_character="3",
+            )
+        ],
+    )
+    last_complete_open_ms = mapper_for_source.actual_bucket_open(-1)
+    native_offset = (last_complete_open_ms - START_MS) // INTERVAL_MS
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        "3d",
+        [
+            replace(
+                _native_interval_batch(
+                    [native_offset],
+                    interval="3d",
+                    interval_ms=three_day_ms,
+                    price_base=300_000,
+                    source_key="fixture-native-3d-phase",
+                    digest_character="4",
+                ),
+                alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+                source_bucket_anchor_ms=source_anchor_ms,
+            )
+        ],
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        source_bucket_anchor_ms=source_anchor_ms,
+    )
+    database = tmp_path / "replay-native-three-day-phase.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+            product_v2_enabled=True,
+            replay_bar_source="archive",
+            replay_history_archive_dir=root,
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: fixture_now_ms),
+        now_ms=lambda: fixture_now_ms,
+        session_id_factory=SessionIdFactory("three-day-phase-session"),
+        training_run_id_factory=SessionIdFactory("three-day-phase-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=True,
+        )
+        request_payload = {
+            "protocol": "replay.v2",
+            "catalog_epoch": catalog["catalog_epoch"],
+            "name": "Duration three-day phase projection",
+            "source_kind": "BAR",
+            "start_mode": "MANUAL",
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "settlement_asset": "USDT",
+            "base_interval": "1m",
+            "display_interval": "3d",
+            "requested_start_ms": replay_start_ms,
+            "warmup_bars": 2,
+            "forward_cache_ms": 5 * INTERVAL_MS,
+            "random_seed": 42,
+            "initial_equity": "10000",
+            "max_leverage": "3",
+            "maker_fee_bps": "2",
+            "taker_fee_bps": "5",
+            "market_slippage_bps": "1",
+            "integrity_mode": "CHALLENGE",
+            "time_disclosure_policy": "HIDE_ALL",
+            "book_mode": "OFF",
+            "margin_mode": "CROSS",
+            "funding_mode": "OFF",
+            "allow_rule_changes": False,
+        }
+        request = TrainingRunCreateRequest.from_dict(request_payload)
+        training = service.training
+        assert training is not None
+        created = await training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+
+        def command(
+            command_id: str,
+            command_type: ReplayV2CommandType,
+            session: dict[str, object],
+            payload: dict[str, object],
+        ) -> ReplayV2Command:
+            snapshot = session["snapshot"]
+            assert isinstance(snapshot, dict)
+            cursor = snapshot["cursor"]
+            assert isinstance(cursor, dict)
+            revision = int(snapshot["revision"])
+            return ReplayV2Command(
+                protocol="replay.v2",
+                run_id=run_id,
+                command_id=command_id,
+                client_instance_id="three-day-phase-browser",
+                expected_revision=revision,
+                expected_cursor=TrainingCursor(
+                    virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    source_sequence=int(cursor["source_sequence"]),
+                    revision=revision,
+                ),
+                type=command_type,
+                payload=payload,
+            )
+
+        session = await service.get_session(session_id)
+        await training.command(
+            run_id,
+            command(
+                "acquire-three-day-phase",
+                ReplayV2CommandType.ACQUIRE_CONTROLLER,
+                session,
+                {"takeover": False},
+            ),
+        )
+        session = await service.get_session(session_id)
+        await training.command(
+            run_id,
+            command(
+                "step-three-day-phase",
+                ReplayV2CommandType.STEP_BASE,
+                session,
+                {"count": 2},
+            ),
+        )
+        session = await service.get_session(session_id)
+        snapshot = session["snapshot"]
+        assert isinstance(snapshot, dict)
+        public_replay_start_ms = int(
+            snapshot["components"]["bar_builder"]["replay_start_ms"]
+        )
+        expected_mapper = SourceBucketTimeMapper.create(
+            interval="3d",
+            actual_replay_start_ms=replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+            source_bucket_anchor_ms=source_anchor_ms,
+        )
+        canonical_mapper = SourceBucketTimeMapper.create(
+            interval="3d",
+            actual_replay_start_ms=replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+        )
+        assert expected_mapper.public_anchor_ms != canonical_mapper.public_anchor_ms
+
+        projection = await training.display_projection(
+            session_id,
+            track_id="track-1",
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            display_interval="3d",
+        )
+
+        assert projection["bars"], {
+            "cursor": snapshot["cursor"],
+            "public_replay_start_ms": public_replay_start_ms,
+            "projection": projection,
+        }
+        assert [bar["open_time_ms"] for bar in projection["bars"]] == [
+            expected_mapper.public_anchor_ms
+        ]
+        assert projection["bars"][0]["is_closed"] is False
+        assert "source_bucket_anchor_ms" not in json.dumps(projection)
+        with sqlite3.connect(database) as connection:
+            pins = connection.execute(
+                """
+                SELECT base_interval, source_revision
+                FROM replay_archive_pin
+                ORDER BY base_interval
+                """
+            ).fetchall()
+        assert pins == [
+            ("1m", base_manifest.catalog_epoch),
+            ("3d", native_manifest.catalog_epoch),
+        ]
+
+        all_available_payload = {
+            **request_payload,
+            "name": "All-available three-day seam",
+            "indicator_warmup_bars": 2,
+            "visible_history_lookback": {
+                "mode": "ALL_AVAILABLE",
+                "duration_ms": None,
+            },
+        }
+        all_available_payload.pop("warmup_bars")
+        created = await training.create_run(
+            TrainingRunCreateRequest.from_dict(all_available_payload)
+        )
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        session = await service.get_session(session_id)
+        await training.command(
+            run_id,
+            command(
+                "acquire-three-day-seam",
+                ReplayV2CommandType.ACQUIRE_CONTROLLER,
+                session,
+                {"takeover": False},
+            ),
+        )
+        session = await service.get_session(session_id)
+        await training.command(
+            run_id,
+            command(
+                "step-three-day-seam",
+                ReplayV2CommandType.STEP_BASE,
+                session,
+                {"count": 2},
+            ),
+        )
+        session = await service.get_session(session_id)
+        snapshot = session["snapshot"]
+        assert isinstance(snapshot, dict)
+        public_replay_start_ms = int(
+            snapshot["components"]["bar_builder"]["replay_start_ms"]
+        )
+        seam_mapper = SourceBucketTimeMapper.create(
+            interval="3d",
+            actual_replay_start_ms=replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+            source_bucket_anchor_ms=source_anchor_ms,
+        )
+        projection = await training.display_projection(
+            session_id,
+            track_id="track-1",
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            display_interval="3d",
+        )
+        history = await training.history_page(
+            session_id,
+            track_id="track-1",
+            before_ms=seam_mapper.public_anchor_ms,
+            revealed_boundary_ms=int(snapshot["cursor"]["virtual_time_ms"]),
+            limit=10,
+            data_epoch=str(snapshot["data_epoch"]),
+            history_epoch=None,
+            display_interval="3d",
+        )
+
+        assert history["excluded_ranges"] == []
+        assert [bar["open_time_ms"] for bar in history["bars"]] == [
+            seam_mapper.public_bucket_open(-1)
+        ]
+        assert [bar["open_time_ms"] for bar in projection["bars"]] == [
+            seam_mapper.public_anchor_ms
+        ]
+        assert (
+            history["bars"][-1]["close_time_ms"] + 1
+            == projection["bars"][0]["open_time_ms"]
+        )
     finally:
         await service.shutdown(step_timeout=1.0)

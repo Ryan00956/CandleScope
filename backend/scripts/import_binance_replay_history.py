@@ -20,6 +20,7 @@ from app.data_engine.backfill.archive_cache import (  # noqa: E402
     AiohttpArchiveHttpClient,
     HistoricalArchiveCache,
 )
+from app.data_engine.interval_policy import parse_interval_ms  # noqa: E402
 from app.exchanges.archive import (  # noqa: E402
     ArchiveDataError,
     ArchiveGranularity,
@@ -33,6 +34,8 @@ from app.replay.history_archive import (  # noqa: E402
     ReplayHistoryArchiveError,
     ReplayHistoryArchiveWriter,
     ReplayHistoryImportBatch,
+    SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH,
+    SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
 )
 
 
@@ -212,6 +215,22 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
         str(args.symbol).strip().upper(),
     )
     current = writer.current_manifest(identity, args.interval)
+    alignment_policy = (
+        SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
+        if args.interval == "3d"
+        else (
+            SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH
+            if args.interval == "1M"
+            else None
+        )
+    )
+    source_bucket_anchor_ms = (
+        current.source_bucket_anchor_ms
+        if current is not None
+        and alignment_policy is not None
+        and current.alignment_policy == alignment_policy
+        else None
+    )
     current_by_source = (
         {item.source_object_key: item for item in current.objects}
         if current is not None
@@ -271,6 +290,18 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                     cached.path,
                     ref,
                 )
+                if (
+                    alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
+                    and source_bucket_anchor_ms is None
+                ):
+                    interval_ms = parse_interval_ms(args.interval)
+                    if interval_ms is None:
+                        raise ReplayHistoryArchiveError(
+                            "Binance source interval is invalid"
+                        )
+                    source_bucket_anchor_ms = (
+                        int(parsed.bars[0].open_time) % interval_ms
+                    )
                 item = await asyncio.to_thread(
                     writer.write_object,
                     identity,
@@ -286,8 +317,20 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                         source_row_count=parsed.source_row_count,
                         source_rejected_rows=parsed.rejected_row_count,
                         source_normalized_rows=parsed.normalized_row_count,
-                        source_filter_policy="binance_checksum_utc_grid_v1",
+                        source_filter_policy=(
+                            "binance_checksum_catalog_fixed_grid_v1"
+                            if alignment_policy
+                            == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
+                            else (
+                                "binance_checksum_calendar_month_grid_v1"
+                                if alignment_policy
+                                == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH
+                                else "binance_checksum_utc_grid_v1"
+                            )
+                        ),
                         source_rejection_reasons=parsed.rejection_reasons,
+                        source_bucket_anchor_ms=source_bucket_anchor_ms,
+                        alignment_policy=alignment_policy,
                     ),
                 )
                 objects.append(item)
@@ -359,6 +402,8 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
         objects,
         merge_current=not args.replace_current,
         listing_boundary_source="first_checksum_verified_binance_archive_bar",
+        source_bucket_anchor_ms=source_bucket_anchor_ms,
+        alignment_policy=alignment_policy,
     )
     return {
         "schema_version": "replay-history-import-report.v1",

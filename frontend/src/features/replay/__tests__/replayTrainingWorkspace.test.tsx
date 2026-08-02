@@ -226,10 +226,10 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
   const runtime = source("src/features/replay/useReplayViewerRuntime.ts");
   assert.match(runtime, /const baseInterval = config\?\.base_interval \?\? null/);
   assert.match(runtime, /const displayInterval = viewerState\?\.display_interval \?\? null/);
-  assert.match(
-    runtime,
-    /\[baseInterval, displayInterval, seriesStore, sourceStore, viewerSeriesCache\]/,
-  );
+  assert.match(runtime, /requiresSourceBucketProjection/);
+  assert.match(runtime, /displayProjectionBySession/);
+  assert.match(runtime, /replaceReplayViewerSeriesFromServer/);
+  assert.match(runtime, /sourceStore\.subscribe/);
   assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
 });
 
@@ -255,6 +255,10 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   );
   assert.match(historyRuntime, /applyReplayHistoryPage\(viewer\.seriesStore/);
   assert.match(historyRuntime, /contextHistory:\s*true/);
+  assert.match(historyRuntime, /latestViewportBeforeMs !== pendingViewportBeforeMs/);
+  assert.match(historyRuntime, /latestRepairBeforeMs !== pendingRepairBeforeMs/);
+  assert.match(historyRuntime, /historyViewportTransfer = usesSourceBucketProjection/);
+  assert.match(historyRuntime, /replayHistoryViewportBeforeMs\(viewer\.seriesStore/);
   assert.doesNotMatch(
     historyRuntime,
     /applyReplayHistoryPage\(runtime\.replayStore\.seriesStore/,

@@ -24,13 +24,16 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from app.data_engine.interval_policy import (
+    IntervalAlignment,
     compute_bucket_start_ms,
     is_monthly_interval,
     parse_interval_ms,
+    parse_interval_spec,
 )
 
 from .canonical import canonical_json_bytes, canonical_sha256
 from .catalog import ReplaySeriesIdentity
+from .display_time import SourceBucketTimeMapper
 from .models import (
     normalize_decimal_string,
     validate_identifier,
@@ -39,9 +42,14 @@ from .models import (
 
 
 REPLAY_HISTORY_CATALOG_SCHEMA_VERSION = "replay-history-catalog.v1"
+REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2 = "replay-history-catalog.v2"
 REPLAY_HISTORY_POINTER_SCHEMA_VERSION = "replay-history-pointer.v1"
 REPLAY_HISTORY_PARQUET_SCHEMA_VERSION = "replay-history-bars.v1"
 REPLAY_HISTORY_CALENDAR_ID = "crypto.24x7.utc"
+
+SOURCE_BUCKET_ALIGNMENT_CANONICAL = "CANONICAL_INTERVAL_V1"
+SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED = "CATALOG_ANCHORED_FIXED_V1"
+SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH = "CANONICAL_CALENDAR_MONTH_V1"
 
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -63,6 +71,162 @@ _PARQUET_COLUMNS = (
 
 class ReplayHistoryArchiveError(RuntimeError):
     """The replay-history archive is missing, corrupt, or incompatible."""
+
+
+def _canonical_source_bucket_anchor_ms(interval: str) -> int:
+    spec = parse_interval_spec(interval)
+    if spec is None:
+        raise ReplayHistoryArchiveError(
+            f"unsupported replay-history interval: {interval}"
+        )
+    return spec.floor_ms(0)
+
+
+def _default_source_bucket_alignment(interval: str) -> str:
+    spec = parse_interval_spec(interval)
+    if spec is None:
+        raise ReplayHistoryArchiveError(
+            f"unsupported replay-history interval: {interval}"
+        )
+    return (
+        SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH
+        if spec.alignment is IntervalAlignment.CALENDAR_MONTH
+        else SOURCE_BUCKET_ALIGNMENT_CANONICAL
+    )
+
+
+def _validate_source_bucket_alignment(
+    *,
+    interval: str,
+    interval_ms: int,
+    alignment_policy: str,
+    source_bucket_anchor_ms: int,
+) -> None:
+    spec = parse_interval_spec(interval)
+    if spec is None or spec.nominal_ms != interval_ms:
+        raise ReplayHistoryArchiveError(
+            "replay-history source bucket interval is incompatible"
+        )
+    if isinstance(source_bucket_anchor_ms, bool) or not isinstance(
+        source_bucket_anchor_ms, int
+    ):
+        raise ReplayHistoryArchiveError(
+            "replay-history source bucket anchor is invalid"
+        )
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CANONICAL:
+        if (
+            spec.alignment is IntervalAlignment.CALENDAR_MONTH
+            or source_bucket_anchor_ms != spec.floor_ms(0)
+        ):
+            raise ReplayHistoryArchiveError(
+                "replay-history canonical source bucket anchor is invalid"
+            )
+        return
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED:
+        if (
+            spec.alignment is not IntervalAlignment.FIXED_EPOCH
+            or source_bucket_anchor_ms < 0
+            or source_bucket_anchor_ms >= interval_ms
+        ):
+            raise ReplayHistoryArchiveError(
+                "replay-history catalog source bucket anchor is invalid"
+            )
+        return
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH:
+        if (
+            spec.alignment is not IntervalAlignment.CALENDAR_MONTH
+            or source_bucket_anchor_ms != spec.floor_ms(0)
+        ):
+            raise ReplayHistoryArchiveError(
+                "replay-history calendar source bucket anchor is invalid"
+            )
+        return
+    raise ReplayHistoryArchiveError(
+        "replay-history source bucket alignment policy is unsupported"
+    )
+
+
+def _source_bucket_is_aligned(
+    open_ms: int,
+    *,
+    interval: str,
+    interval_ms: int,
+    alignment_policy: str,
+    source_bucket_anchor_ms: int,
+) -> bool:
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED:
+        return (open_ms - source_bucket_anchor_ms) % interval_ms == 0
+    spec = parse_interval_spec(interval)
+    return spec is not None and spec.floor_ms(open_ms) == open_ms
+
+
+def _source_bucket_next_ms(
+    open_ms: int,
+    *,
+    interval: str,
+    interval_ms: int,
+    alignment_policy: str,
+) -> int:
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH:
+        spec = parse_interval_spec(interval)
+        if spec is None:
+            raise ReplayHistoryArchiveError(
+                "replay-history calendar interval is invalid"
+            )
+        return spec.next_ms(open_ms)
+    return open_ms + interval_ms
+
+
+def _source_bucket_previous_ms(
+    open_ms: int,
+    *,
+    interval: str,
+    interval_ms: int,
+    alignment_policy: str,
+) -> int:
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH:
+        spec = parse_interval_spec(interval)
+        if spec is None:
+            raise ReplayHistoryArchiveError(
+                "replay-history calendar interval is invalid"
+            )
+        return spec.previous_ms(open_ms)
+    return open_ms - interval_ms
+
+
+def _source_bucket_count(
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval: str,
+    interval_ms: int,
+    alignment_policy: str,
+) -> int:
+    if start_ms > end_ms:
+        return 0
+    if alignment_policy != SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH:
+        distance_ms = end_ms - start_ms
+        if distance_ms % interval_ms:
+            raise ReplayHistoryArchiveError(
+                "replay-history source bucket range is misaligned"
+            )
+        return distance_ms // interval_ms + 1
+    count = 1
+    cursor = start_ms
+    while cursor < end_ms:
+        next_ms = _source_bucket_next_ms(
+            cursor,
+            interval=interval,
+            interval_ms=interval_ms,
+            alignment_policy=alignment_policy,
+        )
+        if next_ms <= cursor or next_ms > end_ms:
+            raise ReplayHistoryArchiveError(
+                "replay-history calendar source bucket range is misaligned"
+            )
+        cursor = next_ms
+        count += 1
+    return count
 
 
 class ReplayHistoryArchiveRuntimeLease:
@@ -443,9 +607,12 @@ class ReplayHistoryObject:
 class ReplayHistoryCatalogManifest:
     catalog_epoch: str
     generated_at_ms: int
+    schema_version: str
     identity: ReplaySeriesIdentity
     interval: str
     interval_ms: int
+    source_bucket_anchor_ms: int
+    alignment_policy: str
     calendar_id: str
     listing_boundary_ms: int
     listing_boundary_source: str
@@ -456,8 +623,8 @@ class ReplayHistoryCatalogManifest:
     segments: tuple[ReplayHistorySegment, ...]
 
     def hash_payload(self) -> dict[str, object]:
-        return {
-            "schema_version": REPLAY_HISTORY_CATALOG_SCHEMA_VERSION,
+        payload: dict[str, object] = {
+            "schema_version": self.schema_version,
             "identity": self.identity.to_dict(),
             "interval": self.interval,
             "interval_ms": self.interval_ms,
@@ -470,6 +637,14 @@ class ReplayHistoryCatalogManifest:
             "objects": [item.to_dict() for item in self.objects],
             "segments": [item.to_dict() for item in self.segments],
         }
+        if self.schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2:
+            payload.update(
+                {
+                    "source_bucket_anchor_ms": self.source_bucket_anchor_ms,
+                    "alignment_policy": self.alignment_policy,
+                }
+            )
+        return payload
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -482,6 +657,7 @@ class ReplayHistoryCatalogManifest:
     def from_dict(
         cls, payload: Mapping[str, object]
     ) -> "ReplayHistoryCatalogManifest":
+        schema_version = payload.get("schema_version")
         expected = {
             "schema_version",
             "catalog_epoch",
@@ -498,11 +674,16 @@ class ReplayHistoryCatalogManifest:
             "objects",
             "segments",
         }
+        if schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2:
+            expected.update({"source_bucket_anchor_ms", "alignment_policy"})
         if set(payload) != expected:
             raise ReplayHistoryArchiveError(
                 "replay-history catalog fields are incompatible"
             )
-        if payload["schema_version"] != REPLAY_HISTORY_CATALOG_SCHEMA_VERSION:
+        if schema_version not in {
+            REPLAY_HISTORY_CATALOG_SCHEMA_VERSION,
+            REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2,
+        }:
             raise ReplayHistoryArchiveError(
                 "replay-history catalog schema is incompatible"
             )
@@ -543,9 +724,23 @@ class ReplayHistoryCatalogManifest:
             generated_at_ms=validate_timestamp_ms(
                 payload["generated_at_ms"], field_name="generated_at_ms"
             ),
+            schema_version=str(schema_version),
             identity=ReplaySeriesIdentity.from_dict(payload["identity"]),
             interval=interval,
             interval_ms=interval_ms,
+            source_bucket_anchor_ms=(
+                validate_timestamp_ms(
+                    payload["source_bucket_anchor_ms"],
+                    field_name="source_bucket_anchor_ms",
+                )
+                if schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+                else _canonical_source_bucket_anchor_ms(interval)
+            ),
+            alignment_policy=(
+                _nonempty(payload["alignment_policy"], "alignment_policy")
+                if schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+                else SOURCE_BUCKET_ALIGNMENT_CANONICAL
+            ),
             calendar_id=_nonempty(payload["calendar_id"], "calendar_id"),
             listing_boundary_ms=validate_timestamp_ms(
                 payload["listing_boundary_ms"], field_name="listing_boundary_ms"
@@ -587,21 +782,51 @@ class ReplayHistoryCatalogManifest:
             raise ReplayHistoryArchiveError(
                 "replay-history catalog bounds/counts are inconsistent"
             )
+        is_v2 = self.schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+        if is_v2:
+            _validate_source_bucket_alignment(
+                interval=self.interval,
+                interval_ms=self.interval_ms,
+                alignment_policy=self.alignment_policy,
+                source_bucket_anchor_ms=self.source_bucket_anchor_ms,
+            )
         previous_object_end: int | None = None
         for item in self.objects:
-            if (
-                compute_bucket_start_ms(
+            first_aligned = (
+                _source_bucket_is_aligned(
+                    item.first_open_ms,
+                    interval=self.interval,
+                    interval_ms=self.interval_ms,
+                    alignment_policy=self.alignment_policy,
+                    source_bucket_anchor_ms=self.source_bucket_anchor_ms,
+                )
+                if is_v2
+                else compute_bucket_start_ms(
                     item.first_open_ms,
                     self.interval_ms,
                     interval=self.interval,
                 )
-                != item.first_open_ms
-                or compute_bucket_start_ms(
+                == item.first_open_ms
+            )
+            last_aligned = (
+                _source_bucket_is_aligned(
+                    item.last_open_ms,
+                    interval=self.interval,
+                    interval_ms=self.interval_ms,
+                    alignment_policy=self.alignment_policy,
+                    source_bucket_anchor_ms=self.source_bucket_anchor_ms,
+                )
+                if is_v2
+                else compute_bucket_start_ms(
                     item.last_open_ms,
                     self.interval_ms,
                     interval=self.interval,
                 )
-                != item.last_open_ms
+                == item.last_open_ms
+            )
+            if (
+                not first_aligned
+                or not last_aligned
                 or (
                     previous_object_end is not None
                     and item.first_open_ms <= previous_object_end
@@ -610,9 +835,33 @@ class ReplayHistoryCatalogManifest:
                 raise ReplayHistoryArchiveError(
                     "replay-history catalog objects overlap or are misaligned"
                 )
-            _validate_segments(item.segments, interval_ms=self.interval_ms)
+            _validate_segments(
+                item.segments,
+                interval_ms=self.interval_ms,
+                **(
+                    {
+                        "interval": self.interval,
+                        "alignment_policy": self.alignment_policy,
+                        "source_bucket_anchor_ms": self.source_bucket_anchor_ms,
+                    }
+                    if is_v2
+                    else {}
+                ),
+            )
             previous_object_end = item.last_open_ms
-        _validate_segments(self.segments, interval_ms=self.interval_ms)
+        _validate_segments(
+            self.segments,
+            interval_ms=self.interval_ms,
+            **(
+                {
+                    "interval": self.interval,
+                    "alignment_policy": self.alignment_policy,
+                    "source_bucket_anchor_ms": self.source_bucket_anchor_ms,
+                }
+                if is_v2
+                else {}
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,6 +878,8 @@ class ReplayHistoryImportBatch:
     source_normalized_rows: int = 0
     source_filter_policy: str = "strict_utc_grid_v1"
     source_rejection_reasons: tuple[tuple[str, int], ...] = ()
+    source_bucket_anchor_ms: int | None = None
+    alignment_policy: str | None = None
 
 
 def _raise_archive(message: str):
@@ -636,17 +887,64 @@ def _raise_archive(message: str):
 
 
 def _validate_segments(
-    segments: Sequence[ReplayHistorySegment], *, interval_ms: int
+    segments: Sequence[ReplayHistorySegment],
+    *,
+    interval_ms: int,
+    interval: str | None = None,
+    alignment_policy: str | None = None,
+    source_bucket_anchor_ms: int | None = None,
 ) -> None:
+    if interval is None or alignment_policy is None or source_bucket_anchor_ms is None:
+        previous_end: int | None = None
+        for segment in segments:
+            expected_count = ((segment.end_ms - segment.start_ms) // interval_ms) + 1
+            if (
+                (segment.end_ms - segment.start_ms) % interval_ms
+                or segment.row_count != expected_count
+                or (
+                    previous_end is not None
+                    and segment.start_ms <= previous_end + interval_ms
+                )
+            ):
+                raise ReplayHistoryArchiveError(
+                    "replay-history continuity segments are invalid"
+                )
+            previous_end = segment.end_ms
+        return
     previous_end: int | None = None
     for segment in segments:
-        expected_count = ((segment.end_ms - segment.start_ms) // interval_ms) + 1
+        expected_count = _source_bucket_count(
+            segment.start_ms,
+            segment.end_ms,
+            interval=interval,
+            interval_ms=interval_ms,
+            alignment_policy=alignment_policy,
+        )
         if (
-            (segment.end_ms - segment.start_ms) % interval_ms
+            not _source_bucket_is_aligned(
+                segment.start_ms,
+                interval=interval,
+                interval_ms=interval_ms,
+                alignment_policy=alignment_policy,
+                source_bucket_anchor_ms=source_bucket_anchor_ms,
+            )
+            or not _source_bucket_is_aligned(
+                segment.end_ms,
+                interval=interval,
+                interval_ms=interval_ms,
+                alignment_policy=alignment_policy,
+                source_bucket_anchor_ms=source_bucket_anchor_ms,
+            )
             or segment.row_count != expected_count
             or (
                 previous_end is not None
-                and segment.start_ms <= previous_end + interval_ms
+                and segment.start_ms
+                <= _source_bucket_next_ms(
+                    previous_end,
+                    interval=interval,
+                    interval_ms=interval_ms,
+                    alignment_policy=alignment_policy,
+                )
             )
         ):
             raise ReplayHistoryArchiveError(
@@ -656,7 +954,11 @@ def _validate_segments(
 
 
 def _segments_from_opens(
-    opens: Sequence[int], *, interval_ms: int
+    opens: Sequence[int],
+    *,
+    interval_ms: int,
+    interval: str | None = None,
+    alignment_policy: str | None = None,
 ) -> tuple[ReplayHistorySegment, ...]:
     if not opens:
         raise ReplayHistoryArchiveError("cannot build segments from empty rows")
@@ -665,7 +967,17 @@ def _segments_from_opens(
     previous = opens[0]
     count = 1
     for current in opens[1:]:
-        if current == previous + interval_ms:
+        expected_next = (
+            previous + interval_ms
+            if interval is None or alignment_policy is None
+            else _source_bucket_next_ms(
+                previous,
+                interval=interval,
+                interval_ms=interval_ms,
+                alignment_policy=alignment_policy,
+            )
+        )
+        if current == expected_next:
             count += 1
         else:
             segments.append(
@@ -679,12 +991,30 @@ def _segments_from_opens(
 
 
 def _merge_segments(
-    objects: Sequence[ReplayHistoryObject], *, interval_ms: int
+    objects: Sequence[ReplayHistoryObject],
+    *,
+    interval_ms: int,
+    interval: str | None = None,
+    alignment_policy: str | None = None,
 ) -> tuple[ReplayHistorySegment, ...]:
     merged: list[ReplayHistorySegment] = []
     for item in objects:
         for segment in item.segments:
-            if merged and segment.start_ms == merged[-1].end_ms + interval_ms:
+            expected_next = (
+                merged[-1].end_ms + interval_ms
+                if merged and (interval is None or alignment_policy is None)
+                else (
+                    _source_bucket_next_ms(
+                        merged[-1].end_ms,
+                        interval=interval,
+                        interval_ms=interval_ms,
+                        alignment_policy=alignment_policy,
+                    )
+                    if merged
+                    else None
+                )
+            )
+            if merged and segment.start_ms == expected_next:
                 previous = merged[-1]
                 merged[-1] = ReplayHistorySegment(
                     start_ms=previous.start_ms,
@@ -732,8 +1062,26 @@ def _catalog_directory(
         / _safe_component(identity.exchange, "exchange")
         / _safe_component(identity.market_type, "market_type")
         / _safe_component(identity.symbol, "symbol")
-        / _safe_component(interval, "interval")
+        / _interval_path_component(interval)
     )
+
+
+def _interval_path_component(interval: str) -> str:
+    """Return a stable catalog path token without case-fold collisions.
+
+    Catalog identity remains the exchange interval spelling (``1m`` versus
+    ``1M``).  The filesystem token is deliberately different for calendar
+    months because Windows treats those two spellings as the same directory.
+    Existing interval paths remain unchanged; only ``1M`` uses the reserved
+    ``1mo`` token.
+    """
+
+    value = _safe_component(interval, "interval")
+    if parse_interval_spec(value) is None:
+        raise ReplayHistoryArchiveError(
+            f"unsupported replay-history interval: {value}"
+        )
+    return "1mo" if value == "1M" else value
 
 
 def _manifest_from_pointer(pointer_path: Path) -> ReplayHistoryCatalogManifest:
@@ -811,12 +1159,38 @@ class ReplayHistoryArchiveWriter:
             raise ReplayHistoryArchiveError(
                 f"unsupported replay-history interval: {interval}"
             )
+        alignment_policy = (
+            _default_source_bucket_alignment(interval)
+            if batch.alignment_policy is None
+            else _nonempty(batch.alignment_policy, "alignment_policy")
+        )
+        source_bucket_anchor_ms = batch.source_bucket_anchor_ms
+        if source_bucket_anchor_ms is None:
+            source_bucket_anchor_ms = (
+                validate_timestamp_ms(
+                    _raw_value(batch.rows[0], "open_time"),
+                    field_name="source_bucket_anchor_ms",
+                )
+                if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
+                and batch.rows
+                else _canonical_source_bucket_anchor_ms(interval)
+            )
+            if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED:
+                source_bucket_anchor_ms %= interval_ms
+        _validate_source_bucket_alignment(
+            interval=interval,
+            interval_ms=interval_ms,
+            alignment_policy=alignment_policy,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+        )
         rows = [
             _normalize_import_row(
                 raw,
                 identity=identity,
                 interval=interval,
                 interval_ms=interval_ms,
+                alignment_policy=alignment_policy,
+                source_bucket_anchor_ms=source_bucket_anchor_ms,
             )
             for raw in batch.rows
         ]
@@ -829,7 +1203,12 @@ class ReplayHistoryArchiveWriter:
             raise ReplayHistoryArchiveError(
                 "replay-history import rows must be strictly increasing"
             )
-        segments = _segments_from_opens(opens, interval_ms=interval_ms)
+        segments = _segments_from_opens(
+            opens,
+            interval_ms=interval_ms,
+            interval=interval,
+            alignment_policy=alignment_policy,
+        )
         source_content_sha256 = _optional_digest(
             batch.source_content_sha256, "source_content_sha256"
         )
@@ -964,6 +1343,8 @@ class ReplayHistoryArchiveWriter:
         *,
         merge_current: bool = True,
         listing_boundary_source: str = "first_checksum_verified_archive_bar",
+        source_bucket_anchor_ms: int | None = None,
+        alignment_policy: str | None = None,
     ) -> ReplayHistoryCatalogManifest:
         interval_ms = parse_interval_ms(interval)
         if interval_ms is None or interval_ms <= 0:
@@ -979,16 +1360,65 @@ class ReplayHistoryArchiveWriter:
             raise ReplayHistoryArchiveError(
                 "cannot publish an empty replay-history catalog"
             )
-        segments = _merge_segments(objects, interval_ms=interval_ms)
+        resolved_alignment_policy = (
+            existing.alignment_policy
+            if alignment_policy is None and merge_current and existing is not None
+            else (
+                _default_source_bucket_alignment(interval)
+                if alignment_policy is None
+                else _nonempty(alignment_policy, "alignment_policy")
+            )
+        )
+        resolved_source_bucket_anchor_ms = source_bucket_anchor_ms
+        if resolved_source_bucket_anchor_ms is None:
+            resolved_source_bucket_anchor_ms = (
+                existing.source_bucket_anchor_ms
+                if merge_current
+                and existing is not None
+                and existing.alignment_policy == resolved_alignment_policy
+                else (
+                    objects[0].first_open_ms
+                    % interval_ms
+                    if resolved_alignment_policy
+                    == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
+                    else _canonical_source_bucket_anchor_ms(interval)
+                )
+            )
+        _validate_source_bucket_alignment(
+            interval=interval,
+            interval_ms=interval_ms,
+            alignment_policy=resolved_alignment_policy,
+            source_bucket_anchor_ms=resolved_source_bucket_anchor_ms,
+        )
+        schema_version = (
+            REPLAY_HISTORY_CATALOG_SCHEMA_VERSION
+            if resolved_alignment_policy == SOURCE_BUCKET_ALIGNMENT_CANONICAL
+            else REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+        )
+        segments = _merge_segments(
+            objects,
+            interval_ms=interval_ms,
+            **(
+                {
+                    "interval": interval,
+                    "alignment_policy": resolved_alignment_policy,
+                }
+                if schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+                else {}
+            ),
+        )
         generated_at_ms = validate_timestamp_ms(
             self._now_ms(), field_name="generated_at_ms"
         )
         draft = ReplayHistoryCatalogManifest(
             catalog_epoch="sha256:" + "0" * 64,
             generated_at_ms=generated_at_ms,
+            schema_version=schema_version,
             identity=identity,
             interval=validate_identifier(interval, field_name="interval"),
             interval_ms=interval_ms,
+            source_bucket_anchor_ms=resolved_source_bucket_anchor_ms,
+            alignment_policy=resolved_alignment_policy,
             calendar_id=REPLAY_HISTORY_CALENDAR_ID,
             listing_boundary_ms=objects[0].first_open_ms,
             listing_boundary_source=_nonempty(
@@ -1006,9 +1436,12 @@ class ReplayHistoryArchiveWriter:
                     field: getattr(draft, field)
                     for field in (
                         "generated_at_ms",
+                        "schema_version",
                         "identity",
                         "interval",
                         "interval_ms",
+                        "source_bucket_anchor_ms",
+                        "alignment_policy",
                         "calendar_id",
                         "listing_boundary_ms",
                         "listing_boundary_source",
@@ -1054,6 +1487,8 @@ class ReplayHistoryArchiveWriter:
         *,
         merge_current: bool = True,
         listing_boundary_source: str = "first_checksum_verified_archive_bar",
+        source_bucket_anchor_ms: int | None = None,
+        alignment_policy: str | None = None,
     ) -> ReplayHistoryCatalogManifest:
         with _archive_mutation_lock(self.root / ".mutation.lock"):
             return self._import_batches_locked(
@@ -1062,6 +1497,8 @@ class ReplayHistoryArchiveWriter:
                 batches,
                 merge_current=merge_current,
                 listing_boundary_source=listing_boundary_source,
+                source_bucket_anchor_ms=source_bucket_anchor_ms,
+                alignment_policy=alignment_policy,
             )
 
     def _import_batches_locked(
@@ -1072,7 +1509,27 @@ class ReplayHistoryArchiveWriter:
         *,
         merge_current: bool,
         listing_boundary_source: str,
+        source_bucket_anchor_ms: int | None,
+        alignment_policy: str | None,
     ) -> ReplayHistoryCatalogManifest:
+        batch_alignment_policies = {
+            batch.alignment_policy
+            for batch in batches
+            if batch.alignment_policy is not None
+        }
+        if alignment_policy is None and batch_alignment_policies:
+            if len(batch_alignment_policies) != 1:
+                raise ReplayHistoryArchiveError(
+                    "replay-history import batches disagree on source alignment"
+                )
+            alignment_policy = next(iter(batch_alignment_policies))
+        batch_anchors = [
+            batch.source_bucket_anchor_ms
+            for batch in batches
+            if batch.source_bucket_anchor_ms is not None
+        ]
+        if source_bucket_anchor_ms is None and batch_anchors:
+            source_bucket_anchor_ms = batch_anchors[0]
         objects = [
             self.write_object(identity, interval, batch) for batch in batches
         ]
@@ -1082,6 +1539,8 @@ class ReplayHistoryArchiveWriter:
             objects,
             merge_current=merge_current,
             listing_boundary_source=listing_boundary_source,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+            alignment_policy=alignment_policy,
         )
 
     def collect_garbage(
@@ -1291,6 +1750,8 @@ def _normalize_import_row(
     identity: ReplaySeriesIdentity,
     interval: str,
     interval_ms: int,
+    alignment_policy: str,
+    source_bucket_anchor_ms: int,
 ) -> dict[str, object]:
     del identity
     open_time = validate_timestamp_ms(
@@ -1299,11 +1760,22 @@ def _normalize_import_row(
     close_time = validate_timestamp_ms(
         _raw_value(raw, "close_time"), field_name="close_time"
     )
-    if (
-        compute_bucket_start_ms(open_time, interval_ms, interval=interval)
-        != open_time
-        or close_time != open_time + interval_ms - 1
-    ):
+    expected_close_time = (
+        _source_bucket_next_ms(
+            open_time,
+            interval=interval,
+            interval_ms=interval_ms,
+            alignment_policy=alignment_policy,
+        )
+        - 1
+    )
+    if not _source_bucket_is_aligned(
+        open_time,
+        interval=interval,
+        interval_ms=interval_ms,
+        alignment_policy=alignment_policy,
+        source_bucket_anchor_ms=source_bucket_anchor_ms,
+    ) or close_time != expected_close_time:
         raise ReplayHistoryArchiveError(
             "replay-history row is not aligned to the interval"
         )
@@ -1401,6 +1873,9 @@ class ReplayHistoryRepository:
                     "latest_open_time": manifest.latest_open_ms,
                     "total_count": manifest.total_count,
                     "source_revision": manifest.catalog_epoch,
+                    "source_bucket_anchor_ms": manifest.source_bucket_anchor_ms,
+                    "alignment_policy": manifest.alignment_policy,
+                    "catalog_schema_version": manifest.schema_version,
                 }
                 for _, manifest in sorted(self._current.items())
             ]
@@ -1673,6 +2148,156 @@ class ReplayHistoryRepository:
             self._metrics["aggregate_cache_writes"] += 1
         return result
 
+    def query_source_bucket_bars_at_revision(
+        self,
+        source_revision: str,
+        symbol: str,
+        base_interval: str,
+        display_interval: str,
+        *,
+        actual_start_ms: int,
+        actual_end_ms: int,
+        actual_replay_start_ms: int,
+        public_replay_start_ms: int,
+        limit: int,
+        include_partial: bool = False,
+        source_bucket_anchor_ms: int | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict[str, object]:
+        """Aggregate native source buckets and map only the result to public time.
+
+        Unlike ``query_aggregated_bars_at_revision``, this path never floors a
+        shifted base timestamp.  It is the server-authoritative path used by a
+        blind training viewer, where exchange bucket membership must survive
+        the synthetic-timeline projection.
+        """
+
+        manifest = self._manifest(
+            symbol,
+            base_interval,
+            exchange=exchange,
+            market_type=market_type,
+            source_revision=source_revision,
+        )
+        display_ms = parse_interval_ms(display_interval)
+        if (
+            display_ms is None
+            or display_ms <= manifest.interval_ms
+            or (
+                not is_monthly_interval(display_interval)
+                and display_ms % manifest.interval_ms
+            )
+        ):
+            raise ReplayHistoryArchiveError(
+                "display interval is not eligible for source-bucket aggregation"
+            )
+        if (
+            limit < 1
+            or actual_start_ms < 0
+            or actual_end_ms <= actual_start_ms
+            or not isinstance(include_partial, bool)
+        ):
+            raise ValueError("source-bucket aggregate bounds are invalid")
+        mapper = SourceBucketTimeMapper.create(
+            interval=display_interval,
+            actual_replay_start_ms=actual_replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+        )
+        last_bucket_open_ms = mapper.actual_containing_bucket_open(
+            actual_end_ms - 1
+        )
+        last_ordinal = mapper.actual_bucket_ordinal(last_bucket_open_ms)
+        target_start_ms = mapper.actual_bucket_open(last_ordinal - limit - 2)
+        query_start_ms = max(actual_start_ms, target_start_ms)
+        query_end_ms = actual_end_ms - 1
+        objects = [
+            item
+            for item in manifest.objects
+            if item.first_open_ms <= query_end_ms
+            and item.last_open_ms >= query_start_ms
+        ]
+        object_state = []
+        object_paths: list[tuple[ReplayHistoryObject, Path]] = []
+        for item in objects:
+            path = self._object_path(item)
+            stat = path.stat()
+            if stat.st_size != item.size_bytes:
+                raise ReplayHistoryArchiveError(
+                    "replay-history aggregate source size changed"
+                )
+            object_paths.append((item, path))
+            object_state.append(
+                {
+                    "object_sha256": item.object_sha256,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "size_bytes": stat.st_size,
+                }
+            )
+        query = {
+            "schema_version": "replay-history-source-bucket-query.v2",
+            "source_revision": manifest.catalog_epoch,
+            "identity": manifest.identity.to_dict(),
+            "base_interval": manifest.interval,
+            "display_interval": display_interval,
+            "actual_start_ms": query_start_ms,
+            "actual_end_ms": actual_end_ms,
+            "actual_replay_start_ms": actual_replay_start_ms,
+            "public_replay_start_ms": public_replay_start_ms,
+            "source_bucket_anchor_ms": mapper.source_bucket_anchor_ms,
+            "limit": limit,
+            "include_partial": include_partial,
+            "objects": object_state,
+        }
+        cache_key = canonical_sha256(query)
+        cache_path = (
+            self.root
+            / "derived-cache"
+            / "source-bucket-v2"
+            / _digest_token(manifest.catalog_epoch)[:16]
+            / f"{_digest_token(cache_key)}.json.zlib"
+        )
+        # A forming bucket changes on every revealed base bar.  Persisting that
+        # cursor-specific result would create an unbounded cache-file stream
+        # during playback; only closed history pages are disk-cached.
+        cached = None if include_partial else self._read_aggregate_cache(
+            cache_path,
+            query,
+        )
+        if cached is not None:
+            with self._lock:
+                self._metrics["aggregate_cache_hits"] += 1
+            return cached
+
+        for item, path in object_paths:
+            self._verify_object(manifest, item, path)
+        bars = self._aggregate_manifest_source_buckets(
+            manifest,
+            objects,
+            mapper=mapper,
+            display_interval=display_interval,
+            display_ms=display_ms,
+            start_ms=query_start_ms,
+            end_ms=query_end_ms,
+            actual_end_ms=actual_end_ms,
+            actual_replay_start_ms=actual_replay_start_ms,
+            public_replay_start_ms=public_replay_start_ms,
+            include_partial=include_partial,
+        )
+        selected = bars[-(limit + 1) :]
+        result = {
+            "bars": selected,
+            "has_more": query_start_ms > actual_start_ms or len(bars) > limit,
+        }
+        if not include_partial:
+            self._write_aggregate_cache(cache_path, query, result)
+        with self._lock:
+            self._metrics["aggregate_queries"] += 1
+            if not include_partial:
+                self._metrics["aggregate_cache_writes"] += 1
+        return result
+
     def describe_catalog(
         self,
         symbol: str,
@@ -1689,16 +2314,27 @@ class ReplayHistoryRepository:
             market_type=market_type,
             source_revision=source_revision,
         )
-        expected_rows = (
-            (manifest.latest_open_ms - manifest.earliest_open_ms)
-            // manifest.interval_ms
-        ) + 1
+        if manifest.schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2:
+            expected_rows = _source_bucket_count(
+                manifest.earliest_open_ms,
+                manifest.latest_open_ms,
+                interval=manifest.interval,
+                interval_ms=manifest.interval_ms,
+                alignment_policy=manifest.alignment_policy,
+            )
+        else:
+            expected_rows = (
+                (manifest.latest_open_ms - manifest.earliest_open_ms)
+                // manifest.interval_ms
+            ) + 1
         return {
-            "schema_version": REPLAY_HISTORY_CATALOG_SCHEMA_VERSION,
+            "schema_version": manifest.schema_version,
             "catalog_epoch": manifest.catalog_epoch,
             "identity": manifest.identity.to_dict(),
             "interval": manifest.interval,
             "interval_ms": manifest.interval_ms,
+            "source_bucket_anchor_ms": manifest.source_bucket_anchor_ms,
+            "alignment_policy": manifest.alignment_policy,
             "calendar_id": manifest.calendar_id,
             "listing_boundary_ms": manifest.listing_boundary_ms,
             "listing_boundary_source": manifest.listing_boundary_source,
@@ -2046,6 +2682,282 @@ class ReplayHistoryRepository:
             )
         return bars
 
+    def _aggregate_manifest_source_buckets(
+        self,
+        manifest: ReplayHistoryCatalogManifest,
+        objects: Sequence[ReplayHistoryObject],
+        *,
+        mapper: SourceBucketTimeMapper,
+        display_interval: str,
+        display_ms: int,
+        start_ms: int,
+        end_ms: int,
+        actual_end_ms: int,
+        actual_replay_start_ms: int,
+        public_replay_start_ms: int,
+        include_partial: bool,
+    ) -> list[dict[str, object]]:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover - pyarrow installs numpy
+            raise ReplayHistoryArchiveError(
+                "replay-history aggregation requires numpy"
+            ) from exc
+        _, pq = _load_pyarrow()
+        base_ms = manifest.interval_ms
+        fixed_anchor = mapper.actual_anchor_ms
+        buckets: dict[int, dict[str, object]] = {}
+        columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+        ]
+        for item in objects:
+            path = self._object_path(item)
+            try:
+                table = pq.read_table(
+                    path,
+                    columns=columns,
+                    filters=[
+                        ("open_time", ">=", start_ms),
+                        ("open_time", "<=", end_ms),
+                    ],
+                )
+            except Exception as exc:
+                raise ReplayHistoryArchiveError(
+                    "replay-history aggregate source could not be read"
+                ) from exc
+            if not table.num_rows:
+                continue
+            opens = table["open_time"].combine_chunks().to_numpy(
+                zero_copy_only=False
+            )
+            if mapper.monthly_count is None:
+                keys = (
+                    ((opens - fixed_anchor) // display_ms) * display_ms
+                    + fixed_anchor
+                )
+            else:
+                month_ordinals = (
+                    opens.astype("datetime64[ms]")
+                    .astype("datetime64[M]")
+                    .astype(np.int64)
+                )
+                anchor_month_ordinal = int(
+                    np.datetime64(mapper.actual_anchor_ms, "ms")
+                    .astype("datetime64[M]")
+                    .astype(np.int64)
+                )
+                bucket_months = (
+                    (
+                        (month_ordinals - anchor_month_ordinal)
+                        // mapper.monthly_count
+                    )
+                    * mapper.monthly_count
+                    + anchor_month_ordinal
+                )
+                keys = (
+                    bucket_months.astype("datetime64[M]")
+                    .astype("datetime64[ms]")
+                    .astype(np.int64)
+                )
+            group_starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+            group_ends = np.r_[group_starts[1:], len(keys)]
+            numeric = {
+                name: table[name].combine_chunks().to_numpy(zero_copy_only=False)
+                for name in ("open", "high", "low", "close", "volume")
+            }
+            optional = {
+                name: table[name].combine_chunks().to_pylist()
+                for name in (
+                    "quote_volume",
+                    "trades",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                )
+            }
+            for group_start, group_end in zip(group_starts, group_ends):
+                first = int(group_start)
+                end = int(group_end)
+                bucket = int(keys[first])
+                group_opens = opens[first:end]
+                contiguous = bool(
+                    len(group_opens) < 2
+                    or np.all(np.diff(group_opens) == base_ms)
+                )
+
+                def optional_sum(name: str) -> float | int | None:
+                    values = optional[name][first:end]
+                    if any(value is None for value in values):
+                        return None
+                    if name == "trades":
+                        return sum(int(value) for value in values)
+                    return math.fsum(float(value) for value in values)
+
+                candidate = {
+                    "open": float(numeric["open"][first]),
+                    "high": float(np.max(numeric["high"][first:end])),
+                    "low": float(np.min(numeric["low"][first:end])),
+                    "close": float(numeric["close"][end - 1]),
+                    "volume": math.fsum(
+                        float(value) for value in numeric["volume"][first:end]
+                    ),
+                    "quote_volume": optional_sum("quote_volume"),
+                    "trades": optional_sum("trades"),
+                    "taker_buy_base": optional_sum("taker_buy_base"),
+                    "taker_buy_quote": optional_sum("taker_buy_quote"),
+                    "first_base_open_ms": int(group_opens[0]),
+                    "last_base_open_ms": int(group_opens[-1]),
+                    "component_count": end - first,
+                    "contiguous": contiguous,
+                }
+                existing = buckets.get(bucket)
+                if existing is None:
+                    buckets[bucket] = candidate
+                    continue
+                if (
+                    int(candidate["first_base_open_ms"])
+                    != int(existing["last_base_open_ms"]) + base_ms
+                ):
+                    existing["contiguous"] = False
+                existing["high"] = max(
+                    float(existing["high"]),
+                    float(candidate["high"]),
+                )
+                existing["low"] = min(
+                    float(existing["low"]),
+                    float(candidate["low"]),
+                )
+                existing["close"] = candidate["close"]
+                existing["volume"] = math.fsum(
+                    (float(existing["volume"]), float(candidate["volume"]))
+                )
+                for name in (
+                    "quote_volume",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                ):
+                    left = existing[name]
+                    right = candidate[name]
+                    existing[name] = (
+                        None
+                        if left is None or right is None
+                        else math.fsum((float(left), float(right)))
+                    )
+                existing["trades"] = (
+                    None
+                    if existing["trades"] is None or candidate["trades"] is None
+                    else int(existing["trades"]) + int(candidate["trades"])
+                )
+                existing["last_base_open_ms"] = candidate["last_base_open_ms"]
+                existing["component_count"] = int(
+                    existing["component_count"]
+                ) + int(candidate["component_count"])
+                existing["contiguous"] = bool(
+                    existing["contiguous"] and candidate["contiguous"]
+                )
+
+        def decimal_text(
+            value: object,
+            field_name: str,
+            *,
+            aggregate: bool = False,
+        ) -> str:
+            numeric = float(value)
+            normalized = round(numeric, 12) if aggregate else numeric
+            return normalize_decimal_string(
+                format(Decimal(str(normalized)), "f"),
+                field_name=field_name,
+            )
+
+        public_revealed_ms = (
+            public_replay_start_ms
+            + actual_end_ms
+            - actual_replay_start_ms
+            - 1
+        )
+        bars: list[dict[str, object]] = []
+        for actual_bucket, value in sorted(buckets.items()):
+            actual_bucket_end = mapper.actual_bucket_end(actual_bucket)
+            duration_ms = actual_bucket_end - actual_bucket
+            if duration_ms % base_ms:
+                continue
+            expected_components = duration_ms // base_ms
+            component_count = int(value["component_count"])
+            first_actual = int(value["first_base_open_ms"])
+            last_actual = int(value["last_base_open_ms"])
+            complete = (
+                component_count == expected_components
+                and last_actual == actual_bucket_end - base_ms
+            )
+            partial = (
+                include_partial
+                and not complete
+                and component_count < expected_components
+                and last_actual + base_ms == actual_end_ms
+            )
+            if (
+                not value["contiguous"]
+                or first_actual != actual_bucket
+                or not (complete or partial)
+            ):
+                continue
+            public_bucket = mapper.public_from_actual(actual_bucket)
+            public_bucket_end = mapper.public_bucket_end(public_bucket)
+            public_last_base = min(
+                public_bucket_end - base_ms,
+                public_bucket + (component_count - 1) * base_ms,
+                public_revealed_ms,
+            )
+            if public_bucket < 0 or public_last_base < public_bucket:
+                continue
+
+            def optional_text(name: str) -> str | None:
+                raw = value[name]
+                return (
+                    None
+                    if raw is None
+                    else decimal_text(raw, name, aggregate=True)
+                )
+
+            bars.append(
+                {
+                    "open_time_ms": public_bucket,
+                    "close_time_ms": public_bucket_end - 1,
+                    "open": decimal_text(value["open"], "open"),
+                    "high": decimal_text(value["high"], "high"),
+                    "low": decimal_text(value["low"], "low"),
+                    "close": decimal_text(value["close"], "close"),
+                    "volume": decimal_text(
+                        value["volume"],
+                        "volume",
+                        aggregate=True,
+                    ),
+                    "quote_volume": optional_text("quote_volume"),
+                    "trades": (
+                        None
+                        if value["trades"] is None
+                        else int(value["trades"])
+                    ),
+                    "taker_buy_base": optional_text("taker_buy_base"),
+                    "taker_buy_quote": optional_text("taker_buy_quote"),
+                    "first_base_open_ms": public_bucket,
+                    "last_base_open_ms": public_last_base,
+                    "component_count": component_count,
+                    "expected_components": expected_components,
+                    "is_closed": complete,
+                    "synthetic": False,
+                }
+            )
+        return bars
+
     def _refresh(self) -> None:
         pointers = (
             sorted(self.catalogs_dir.glob("*/*/*/*/current.json"))
@@ -2185,6 +3097,50 @@ class ReplayHistoryRepository:
                 "coverage_indexed": True,
                 "source_revision": manifest.catalog_epoch,
             }
+        is_v2 = (
+            manifest.schema_version == REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2
+        )
+        if is_v2 and (
+            not _source_bucket_is_aligned(
+                start,
+                interval=manifest.interval,
+                interval_ms=manifest.interval_ms,
+                alignment_policy=manifest.alignment_policy,
+                source_bucket_anchor_ms=manifest.source_bucket_anchor_ms,
+            )
+            or not _source_bucket_is_aligned(
+                end,
+                interval=manifest.interval,
+                interval_ms=manifest.interval_ms,
+                alignment_policy=manifest.alignment_policy,
+                source_bucket_anchor_ms=manifest.source_bucket_anchor_ms,
+            )
+        ):
+            raise ReplayHistoryArchiveError(
+                "replay-history gap scan bounds are not source-grid aligned"
+            )
+
+        def gap_payload(gap_start_ms: int, gap_end_ms: int) -> dict[str, object]:
+            if not is_v2:
+                return _gap_payload(
+                    gap_start_ms,
+                    gap_end_ms,
+                    manifest.interval_ms,
+                )
+            return {
+                "start_ms": gap_start_ms,
+                "end_ms": gap_end_ms,
+                "missing_bars": _source_bucket_count(
+                    gap_start_ms,
+                    gap_end_ms,
+                    interval=manifest.interval,
+                    interval_ms=manifest.interval_ms,
+                    alignment_policy=manifest.alignment_policy,
+                ),
+                "reason": "replay_archive_gap",
+                "status": "detected",
+            }
+
         gaps: list[dict[str, object]] = []
         cursor = start
         present_rows = 0
@@ -2195,16 +3151,44 @@ class ReplayHistoryRepository:
                 continue
             if cursor < overlap_start:
                 gaps.append(
-                    _gap_payload(
+                    gap_payload(
                         cursor,
-                        overlap_start - manifest.interval_ms,
-                        manifest.interval_ms,
+                        (
+                            _source_bucket_previous_ms(
+                                overlap_start,
+                                interval=manifest.interval,
+                                interval_ms=manifest.interval_ms,
+                                alignment_policy=manifest.alignment_policy,
+                            )
+                            if is_v2
+                            else overlap_start - manifest.interval_ms
+                        ),
                     )
                 )
-            present_rows += ((overlap_end - overlap_start) // manifest.interval_ms) + 1
-            cursor = max(cursor, overlap_end + manifest.interval_ms)
+            present_rows += (
+                _source_bucket_count(
+                    overlap_start,
+                    overlap_end,
+                    interval=manifest.interval,
+                    interval_ms=manifest.interval_ms,
+                    alignment_policy=manifest.alignment_policy,
+                )
+                if is_v2
+                else ((overlap_end - overlap_start) // manifest.interval_ms) + 1
+            )
+            next_cursor = (
+                _source_bucket_next_ms(
+                    overlap_end,
+                    interval=manifest.interval,
+                    interval_ms=manifest.interval_ms,
+                    alignment_policy=manifest.alignment_policy,
+                )
+                if is_v2
+                else overlap_end + manifest.interval_ms
+            )
+            cursor = max(cursor, next_cursor)
         if cursor <= end:
-            gaps.append(_gap_payload(cursor, end, manifest.interval_ms))
+            gaps.append(gap_payload(cursor, end))
         return {
             **manifest.identity.to_dict(),
             "interval": manifest.interval,
@@ -2218,6 +3202,8 @@ class ReplayHistoryRepository:
             "calendar_id": manifest.calendar_id,
             "coverage_indexed": True,
             "source_revision": manifest.catalog_epoch,
+            "source_bucket_anchor_ms": manifest.source_bucket_anchor_ms,
+            "alignment_policy": manifest.alignment_policy,
         }
 
     def _query_manifest(
@@ -2395,6 +3381,8 @@ def _manifest_bounds(
         "latest_open_time": manifest.latest_open_ms,
         "total_count": manifest.total_count,
         "source_revision": manifest.catalog_epoch,
+        "source_bucket_anchor_ms": manifest.source_bucket_anchor_ms,
+        "alignment_policy": manifest.alignment_policy,
         "listing_boundary_ms": manifest.listing_boundary_ms,
         "listing_boundary_source": manifest.listing_boundary_source,
     }
@@ -2425,8 +3413,12 @@ def _sum_rejection_reasons(
 __all__ = [
     "REPLAY_HISTORY_CALENDAR_ID",
     "REPLAY_HISTORY_CATALOG_SCHEMA_VERSION",
+    "REPLAY_HISTORY_CATALOG_SCHEMA_VERSION_V2",
     "REPLAY_HISTORY_PARQUET_SCHEMA_VERSION",
     "REPLAY_HISTORY_POINTER_SCHEMA_VERSION",
+    "SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH",
+    "SOURCE_BUCKET_ALIGNMENT_CANONICAL",
+    "SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED",
     "ReplayHistoryArchiveError",
     "ReplayHistoryArchiveRuntimeLease",
     "ReplayHistoryArchiveWriter",

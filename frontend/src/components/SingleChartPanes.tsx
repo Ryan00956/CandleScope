@@ -1357,6 +1357,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const onDatasetViewportTransferSettledRef = useRef(onDatasetViewportTransferSettled);
   const followLatestRef = useRef(followLatest);
   const latestBarPositionRef = useRef(latestBarPosition);
+  // Replay public labels settle asynchronously. Formatter identity belongs to
+  // the in-place appearance update below, not to the chart surface lifetime.
+  const timeFormatterRef = useRef(timeFormatter);
+  const tickMarkFormatterRef = useRef(tickMarkFormatter);
   const surfaceViewportCacheRef = useRef<Map<string, SurfaceViewportSnapshot>>(new Map());
   const activeSurfaceOwnerRef = useRef<ActiveSurfaceOwner>({
     chart: null,
@@ -1727,6 +1731,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   onDatasetViewportTransferSettledRef.current = onDatasetViewportTransferSettled;
   followLatestRef.current = followLatest;
   latestBarPositionRef.current = latestBarPosition;
+  timeFormatterRef.current = timeFormatter;
+  tickMarkFormatterRef.current = tickMarkFormatter;
   surfaceConfigKeyRef.current = surfaceConfigKey;
   const indicatorBarColorMap = useMemo(
     () => indicatorBarcolors.length === 0
@@ -2494,6 +2500,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const surfaceViewportCache = surfaceViewportCacheRef.current;
     const initialSubPaneCount = activeSubPaneCountRef.current;
     const initialPaneHeightStorageKey = paneHeightStorageKeyRef.current;
+    const initialTimeFormatter = timeFormatterRef.current;
+    const initialTickMarkFormatter = tickMarkFormatterRef.current;
 
     const options = buildChartPaneOptions({
       container,
@@ -2502,8 +2510,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       timezone,
       interval: intervalRef.current,
       showTimeScale: true,
-      ...(timeFormatter ? { timeFormatter } : {}),
-      ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
+      ...(initialTimeFormatter ? { timeFormatter: initialTimeFormatter } : {}),
+      ...(initialTickMarkFormatter ? { tickMarkFormatter: initialTickMarkFormatter } : {}),
     });
     options.layout = {
       ...options.layout,
@@ -2825,7 +2833,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, tickMarkFormatter, timeFormatter, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;

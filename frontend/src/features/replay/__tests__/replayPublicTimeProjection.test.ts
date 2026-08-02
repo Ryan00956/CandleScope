@@ -116,6 +116,48 @@ test("public-time projection coalesces bursts and fetches only cache misses", as
   assert.equal(controller.getSnapshot().labels.get(ORIGIN_MS), `public:${ORIGIN_MS}`);
 });
 
+test("incremental public-time loading retains the settled label map", async (context) => {
+  const incremental = {
+    resolve: null as ((value: ReplayPublicTimeBatchResponse) => void) | null,
+  };
+  let calls = 0;
+  const api: ReplayPublicTimeProjectionApi = {
+    publicTimesRun(runId, timelineMs) {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(response(runId, "HIDE_ALL", timelineMs));
+      return new Promise((resolve) => {
+        incremental.resolve = resolve;
+      });
+    },
+  };
+  const controller = new ReplayPublicTimeProjectionController(api);
+  context.after(() => controller.cancel());
+
+  update(controller, [ORIGIN_MS]);
+  await waitFor(
+    () => controller.getSnapshot().labels.size === 1
+      && !controller.getSnapshot().loading,
+    "initial projection did not settle",
+  );
+  const settledLabels = controller.getSnapshot().labels;
+
+  update(controller, [ORIGIN_MS, ORIGIN_MS + 60_000]);
+  await waitFor(
+    () => controller.getSnapshot().loading && incremental.resolve !== null,
+    "incremental projection did not start",
+  );
+  assert.equal(controller.getSnapshot().labels, settledLabels);
+
+  assert.ok(incremental.resolve);
+  incremental.resolve(response("run-1", "HIDE_ALL", [ORIGIN_MS + 60_000]));
+  await waitFor(
+    () => controller.getSnapshot().labels.size === 2
+      && !controller.getSnapshot().loading,
+    "incremental projection did not settle",
+  );
+  assert.notEqual(controller.getSnapshot().labels, settledLabels);
+});
+
 test("public-time projection ignores an aborted stale scope", async (context) => {
   const stale = {
     resolve: null as ((value: ReplayPublicTimeBatchResponse) => void) | null,

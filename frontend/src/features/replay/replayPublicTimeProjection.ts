@@ -191,16 +191,14 @@ export class ReplayPublicTimeProjectionController {
   ): ReadonlyMap<number, string> {
     if (labels.size === 0) return labels;
     const desired = new Set(this.desiredTimeline);
-    if (labels.size === desired.size) {
-      let exact = true;
-      for (const key of labels.keys()) {
-        if (!desired.has(key)) {
-          exact = false;
-          break;
-        }
+    let requiresTrim = false;
+    for (const key of labels.keys()) {
+      if (!desired.has(key)) {
+        requiresTrim = true;
+        break;
       }
-      if (exact) return labels;
     }
+    if (!requiresTrim) return labels;
     const trimmed = new Map<number, string>();
     for (const value of this.desiredTimeline) {
       const label = labels.get(value);

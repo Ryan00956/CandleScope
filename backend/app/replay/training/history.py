@@ -13,6 +13,7 @@ from app.data_engine.interval_policy import (
     parse_interval_ms,
 )
 from app.replay.bars.builder import ReplayBarBuilder, ReplayDisplayBar
+from app.replay.bars.schedule import ReplayBarSchedule
 from app.replay.canonical import canonical_sha256
 from app.replay.catalog import KlinesReadRepository
 from app.replay.dataset import (
@@ -23,6 +24,7 @@ from app.replay.dataset import (
 )
 from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.errors import ReplayDomainError
+from app.replay.market_halts import ReplayBarHalt, validate_registered_bar_halts
 from app.replay.models import ReplaySessionConfig
 
 from .errors import TrainingRunError
@@ -136,6 +138,58 @@ def _decode_bar_snapshot(
             ),
         )
     return snapshot
+
+
+def _decode_verified_market_halts(
+    persisted: Mapping[str, object],
+    *,
+    snapshot: BarDatasetSnapshot,
+    config: ReplaySessionConfig,
+) -> tuple[ReplayBarHalt, ...]:
+    """Read exact reviewed halt decisions from a paged BAR session manifest."""
+
+    manifest: Mapping[str, object] | None = None
+    snapshot_ref = persisted.get("snapshot_ref")
+    if isinstance(snapshot_ref, Mapping):
+        raw_manifest = snapshot_ref.get("paging_manifest")
+        if isinstance(raw_manifest, Mapping):
+            manifest = raw_manifest
+    if manifest is None:
+        blob = persisted.get("snapshot_blob")
+        if isinstance(blob, (bytes, bytearray)):
+            try:
+                decoded = json.loads(bytes(blob).decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, Mapping):
+                raw_manifest = decoded.get("paging_manifest")
+                if isinstance(raw_manifest, Mapping):
+                    manifest = raw_manifest
+    if (
+        manifest is None
+        or manifest.get("schema_version") != "replay-paged-bar-manifest.v2"
+    ):
+        return ()
+
+    interval_ms = parse_interval_ms(config.base_interval)
+    if interval_ms is None or interval_ms < 1:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training base interval is invalid",
+            status_code=503,
+        )
+    try:
+        return validate_registered_bar_halts(
+            manifest.get("verified_market_halts"),
+            identity=snapshot.identity,
+            interval_ms=interval_ms,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _fail(
+            "HISTORY_SNAPSHOT_INVALID",
+            "training verified halt manifest is invalid",
+            status_code=503,
+        ) from exc
 
 
 def _identity(
@@ -1166,6 +1220,150 @@ def _native_row_to_display_bar(
     )
 
 
+def _bucket_overlaps_verified_halt(
+    bucket_start_ms: int,
+    bucket_end_ms: int,
+    verified_halts: tuple[ReplayBarHalt, ...],
+) -> bool:
+    return any(
+        halt.start_open_ms < bucket_end_ms and halt.resume_ms > bucket_start_ms
+        for halt in verified_halts
+    )
+
+
+def _build_verified_halt_projection_bucket(
+    *,
+    repository: KlinesReadRepository,
+    snapshot: BarDatasetSnapshot,
+    config: ReplaySessionConfig,
+    mapper: SourceBucketTimeMapper,
+    verified_halts: tuple[ReplayBarHalt, ...],
+    actual_bucket_open_ms: int,
+    actual_end_ms: int,
+    actual_replay_start_ms: int,
+) -> ReplayDisplayBar | None:
+    """Rebuild one halt-overlapping bucket from its exact traded components."""
+
+    base_interval_ms = parse_interval_ms(config.base_interval)
+    if base_interval_ms is None or base_interval_ms < 1:
+        raise _fail(
+            "HISTORY_POLICY_INVALID",
+            "training base interval is invalid",
+            status_code=503,
+        )
+    actual_bucket_end_ms = mapper.actual_bucket_end(actual_bucket_open_ms)
+    schedule = ReplayBarSchedule(config.base_interval, verified_halts)
+    try:
+        expected_count, first_open_ms, last_open_ms = schedule.expected_bounds(
+            actual_bucket_open_ms,
+            actual_bucket_end_ms,
+        )
+    except ReplayDomainError as exc:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection schedule is invalid",
+            status_code=503,
+        ) from exc
+    if expected_count == 0:
+        return None
+    if (
+        first_open_ms is None
+        or last_open_ms is None
+        or expected_count > MAX_HISTORY_QUERY_BASE_ROWS
+    ):
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection bucket exceeds the bounded source policy",
+            status_code=503,
+        )
+
+    try:
+        raw_rows = _query_bound_repository(
+            repository,
+            snapshot,
+            config.symbol,
+            config.base_interval,
+            start_ms=first_open_ms,
+            end_ms=last_open_ms,
+            limit=expected_count,
+            order="ASC",
+            exchange=config.exchange,
+            market_type=config.market_type,
+        )
+    except TrainingRunError:
+        raise
+    except Exception as exc:
+        raise _fail(
+            "HISTORY_SOURCE_UNAVAILABLE",
+            "verified halt projection source could not be read",
+            status_code=503,
+        ) from exc
+    if len(raw_rows) != expected_count:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection omitted a traded base interval",
+            status_code=503,
+        )
+
+    replay_rows: list[ReplayBar] = []
+    try:
+        for index, raw in enumerate(raw_rows):
+            expected_open_ms = schedule.nth_expected_open(first_open_ms, index)
+            raw_open_ms = int(raw["open_time"])
+            replay_rows.append(
+                validate_replay_repository_bar(
+                    raw,
+                    identity=snapshot.identity,
+                    interval=config.base_interval,
+                    interval_ms=base_interval_ms,
+                    expected_open_ms=expected_open_ms,
+                    now_ms=actual_end_ms,
+                    expected_close_ms=expected_open_ms + base_interval_ms - 1,
+                )
+            )
+            if raw_open_ms != expected_open_ms:
+                raise ValueError("verified halt projection ordering changed")
+
+        builder = ReplayBarBuilder(
+            base_interval=config.base_interval,
+            display_interval=config.display_interval,
+            replay_start_ms=first_open_ms,
+            max_closed_bars=1,
+            verified_halts=verified_halts,
+        )
+        for replay_bar in replay_rows:
+            builder.apply_bar(replay_bar)
+    except (KeyError, TypeError, ValueError, ReplayDomainError) as exc:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection base series changed",
+            status_code=503,
+        ) from exc
+    if builder.active_bar is not None or len(builder.closed_bars) != 1:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection bucket did not close exactly",
+            status_code=503,
+        )
+
+    rebuilt = builder.closed_bars[0]
+    if rebuilt.open_time_ms != actual_bucket_open_ms:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "verified halt projection escaped its source bucket",
+            status_code=503,
+        )
+    public_open_ms = mapper.public_from_actual(actual_bucket_open_ms)
+    timeline_delta_ms = snapshot.replay_start_ms - actual_replay_start_ms
+    return replace(
+        rebuilt,
+        open_time_ms=public_open_ms,
+        close_time_ms=mapper.public_bucket_end(public_open_ms) - 1,
+        first_base_open_ms=rebuilt.first_base_open_ms + timeline_delta_ms,
+        last_base_open_ms=rebuilt.last_base_open_ms + timeline_delta_ms,
+    )
+
+
 def _replace_closed_projection_buckets_from_native(
     *,
     repository: KlinesReadRepository,
@@ -1174,8 +1372,10 @@ def _replace_closed_projection_buckets_from_native(
     mapper: SourceBucketTimeMapper,
     display_source_revision: str | None,
     actual_end_ms: int,
+    actual_replay_start_ms: int,
     limit: int,
     bars: list[ReplayDisplayBar],
+    verified_halts: tuple[ReplayBarHalt, ...] = (),
 ) -> list[ReplayDisplayBar]:
     """Use the immutable native display series for every closed bucket.
 
@@ -1223,9 +1423,7 @@ def _replace_closed_projection_buckets_from_native(
             status_code=503,
         ) from exc
 
-    candidate_ordinals = list(
-        range(first_candidate_ordinal, last_closed_ordinal + 1)
-    )
+    candidate_ordinals = list(range(first_candidate_ordinal, last_closed_ordinal + 1))
     first_candidate_open_ms = mapper.actual_bucket_open(candidate_ordinals[0])
     last_candidate_open_ms = mapper.actual_bucket_open(candidate_ordinals[-1])
     query_limit = len(candidate_ordinals)
@@ -1253,6 +1451,15 @@ def _replace_closed_projection_buckets_from_native(
         ) from exc
 
     candidate_set = set(candidate_ordinals)
+    halt_ordinals = {
+        ordinal
+        for ordinal in candidate_ordinals
+        if _bucket_overlaps_verified_halt(
+            mapper.actual_bucket_open(ordinal),
+            mapper.actual_bucket_end(mapper.actual_bucket_open(ordinal)),
+            verified_halts,
+        )
+    }
     replaced_ordinals: set[int] = set()
     previous_open_ms: int | None = None
     try:
@@ -1274,7 +1481,7 @@ def _replace_closed_projection_buckets_from_native(
                 now_ms=actual_end_ms,
                 expected_close_ms=mapper.actual_bucket_end(raw_open_ms) - 1,
             )
-            if ordinal in candidate_set:
+            if ordinal in candidate_set and ordinal not in halt_ordinals:
                 existing_by_ordinal[ordinal] = _native_row_to_display_bar(
                     row,
                     mapper=mapper,
@@ -1288,6 +1495,24 @@ def _replace_closed_projection_buckets_from_native(
             "pinned native display projection changed inside the bound source range",
             status_code=503,
         ) from exc
+
+    for ordinal in sorted(halt_ordinals):
+        actual_bucket_open_ms = mapper.actual_bucket_open(ordinal)
+        rebuilt = _build_verified_halt_projection_bucket(
+            repository=repository,
+            snapshot=snapshot,
+            config=config,
+            mapper=mapper,
+            verified_halts=verified_halts,
+            actual_bucket_open_ms=actual_bucket_open_ms,
+            actual_end_ms=actual_end_ms,
+            actual_replay_start_ms=actual_replay_start_ms,
+        )
+        if rebuilt is None:
+            existing_by_ordinal.pop(ordinal, None)
+        else:
+            existing_by_ordinal[ordinal] = rebuilt
+        replaced_ordinals.add(ordinal)
 
     omitted_ordinals = candidate_set - replaced_ordinals
     if omitted_ordinals:
@@ -2304,6 +2529,11 @@ def build_display_projection(
             status_code=422,
         ) from exc
     snapshot = _decode_bar_snapshot(persisted, config=config)
+    verified_halts = _decode_verified_market_halts(
+        persisted,
+        snapshot=snapshot,
+        config=config,
+    )
     identity = _assert_source_binding(
         binding,
         config,
@@ -2478,13 +2708,15 @@ def build_display_projection(
             mapper=mapper,
             display_source_revision=display_source_revision,
             actual_end_ms=actual_end_ms,
+            actual_replay_start_ms=actual_replay_start_ms,
             limit=limit,
             bars=bars,
+            verified_halts=verified_halts,
         )
         if display_source_revision is not None and bars:
-            has_more = has_more or mapper.public_bucket_ordinal(
-                bars[0].open_time_ms
-            ) > 0
+            has_more = (
+                has_more or mapper.public_bucket_ordinal(bars[0].open_time_ms) > 0
+            )
     for bar in bars:
         if (
             bar.open_time_ms > revealed_boundary_ms
@@ -2498,7 +2730,7 @@ def build_display_projection(
             )
     projection_epoch = canonical_sha256(
         {
-            "schema_version": "replay.display-projection-epoch.v3",
+            "schema_version": "replay.display-projection-epoch.v4",
             "run_id": binding["run_id"],
             "session_id": binding["session_id"],
             "track_id": binding["track_id"],
@@ -2510,6 +2742,7 @@ def build_display_projection(
             "display_source_revision": display_source_revision,
             "display_grid_commitment": display_grid_commitment,
             "closed_native_authority": "pinned-closed-only.v1",
+            "verified_market_halts": [halt.to_dict() for halt in verified_halts],
         }
     )
     return {

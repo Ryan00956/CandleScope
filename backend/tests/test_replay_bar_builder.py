@@ -10,6 +10,7 @@ from app.replay.bars.builder import (
     ReplayBarBuilder,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
+from app.replay.market_halts import ReplayBarHalt
 from app.replay.sources.bar_source import BarReplaySource
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
@@ -25,6 +26,7 @@ def _builder(
     replay_start_ms: int = REPLAY_START_MS,
     warmup=(),
     max_closed_bars: int = 32,
+    verified_halts=(),
 ) -> ReplayBarBuilder:
     return ReplayBarBuilder(
         base_interval="1m",
@@ -32,6 +34,7 @@ def _builder(
         replay_start_ms=replay_start_ms,
         warmup_bars=warmup,
         max_closed_bars=max_closed_bars,
+        verified_halts=verified_halts,
     )
 
 
@@ -210,6 +213,93 @@ def test_duplicate_out_of_order_gap_and_malformed_bar_fail_without_partial_state
         )
     assert forming.value.code is ReplayErrorCode.DATASET_INCOMPLETE
     assert builder.state_hash == before
+
+
+def test_verified_halt_skips_missing_opens_without_fabricating_display_components() -> (
+    None
+):
+    halt = ReplayBarHalt(
+        start_open_ms=REPLAY_START_MS + 2 * INTERVAL_MS,
+        end_open_ms=REPLAY_START_MS + 3 * INTERVAL_MS,
+        halt_id="fixture-reviewed-halt",
+        resume_ms=REPLAY_START_MS + 4 * INTERVAL_MS,
+        reason="exchange_scheduled_system_upgrade",
+        evidence_url="https://example.com/reviewed-halt",
+    )
+    builder = _builder(verified_halts=(halt,))
+
+    updates = [
+        builder.apply_bar(
+            make_replay_bar(REPLAY_START_MS + offset * INTERVAL_MS, 100 + offset)
+        )
+        for offset in (0, 1, 4)
+    ]
+
+    closed = updates[-1].bar
+    assert closed.is_closed is True
+    assert closed.first_base_open_ms == REPLAY_START_MS
+    assert closed.last_base_open_ms == REPLAY_START_MS + 4 * INTERVAL_MS
+    assert closed.component_count == 3
+    assert closed.expected_components == 3
+    assert updates[-1].gap_policy == "verified_market_halts_v1"
+    assert builder.replay_events_applied == 3
+
+    snapshot = builder.snapshot()
+    restored = _builder(verified_halts=(halt,))
+    restored.restore(snapshot)
+    assert restored.snapshot() == snapshot
+
+    with pytest.raises(ReplayDomainError) as wrong_schedule:
+        _builder().restore(snapshot)
+    assert wrong_schedule.value.code is ReplayErrorCode.DATASET_MISMATCH
+
+
+def test_verified_halt_can_skip_whole_display_buckets_and_restore_closed_tail() -> None:
+    halt = ReplayBarHalt(
+        start_open_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        end_open_ms=REPLAY_START_MS + 9 * INTERVAL_MS,
+        halt_id="fixture-full-bucket-halt",
+        resume_ms=REPLAY_START_MS + 10 * INTERVAL_MS,
+        reason="exchange_scheduled_system_upgrade",
+        evidence_url="https://example.com/full-bucket-halt",
+    )
+    builder = _builder(verified_halts=(halt,))
+    for offset in (*range(5), *range(10, 15)):
+        builder.apply_bar(
+            make_replay_bar(REPLAY_START_MS + offset * INTERVAL_MS, 100 + offset)
+        )
+
+    assert [bar.open_time_ms for bar in builder.closed_bars] == [
+        REPLAY_START_MS,
+        REPLAY_START_MS + 10 * INTERVAL_MS,
+    ]
+    assert builder.replay_events_applied == 10
+    restored = _builder(verified_halts=(halt,))
+    restored.restore(builder.snapshot())
+    assert restored.snapshot() == builder.snapshot()
+
+
+def test_replay_can_start_at_resume_after_a_fully_halted_display_prefix() -> None:
+    halt = ReplayBarHalt(
+        start_open_ms=REPLAY_START_MS,
+        end_open_ms=REPLAY_START_MS + 2 * INTERVAL_MS,
+        halt_id="fixture-halted-display-prefix",
+        resume_ms=REPLAY_START_MS + 3 * INTERVAL_MS,
+        reason="exchange_scheduled_system_upgrade",
+        evidence_url="https://example.com/halted-display-prefix",
+    )
+    builder = _builder(
+        replay_start_ms=halt.resume_ms,
+        verified_halts=(halt,),
+    )
+
+    builder.apply_bar(make_replay_bar(halt.resume_ms, 103))
+    closed = builder.apply_bar(make_replay_bar(halt.resume_ms + INTERVAL_MS, 104)).bar
+
+    assert closed.is_closed is True
+    assert closed.open_time_ms == REPLAY_START_MS
+    assert closed.component_count == 2
+    assert closed.expected_components == 2
 
 
 @pytest.mark.parametrize("component_position", [1, 2, 3, 4])

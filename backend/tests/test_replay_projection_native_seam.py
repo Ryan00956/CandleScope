@@ -23,6 +23,7 @@ from app.replay.history_archive import (
     ReplayHistoryImportBatch,
     ReplayHistoryRepository,
 )
+from app.replay.market_halts import DEFAULT_VERIFIED_MARKET_HALTS
 from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.training.history import build_display_projection, build_history_page
 from tests.fixtures.replay.fakes import make_bar
@@ -40,10 +41,7 @@ IDENTITY = ReplaySeriesIdentity("binance", "spot", "BTCUSDT")
 
 def _ms(value: str) -> int:
     return int(
-        datetime.fromisoformat(value)
-        .replace(tzinfo=timezone.utc)
-        .timestamp()
-        * 1_000
+        datetime.fromisoformat(value).replace(tzinfo=timezone.utc).timestamp() * 1_000
     )
 
 
@@ -240,6 +238,7 @@ def _persisted(
     *,
     actual_replay_start_ms: int,
     synthetic_origin_ms: int | None = None,
+    verified_market_halts: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "data_epoch": snapshot.data_epoch,
@@ -248,6 +247,13 @@ def _persisted(
     }
     if synthetic_origin_ms is not None:
         payload["synthetic_origin_ms"] = synthetic_origin_ms
+    if verified_market_halts is not None:
+        payload["snapshot_ref"] = {
+            "paging_manifest": {
+                "schema_version": "replay-paged-bar-manifest.v2",
+                "verified_market_halts": verified_market_halts,
+            }
+        }
     return payload
 
 
@@ -475,16 +481,18 @@ def test_fixed_native_grids_fill_seam_and_keep_limit_has_more(
     display_ms = display_ms_by_interval[display_interval]
     components = display_ms // base_interval_ms
     actual_anchor_ms = (
-        source_anchor_ms
-        + ((ANCHOR_MS - source_anchor_ms) // display_ms) * display_ms
+        source_anchor_ms + ((ANCHOR_MS - source_anchor_ms) // display_ms) * display_ms
     )
     if display_interval == "3d":
         assert actual_anchor_ms % display_ms == DAY_MS
     if display_interval == "1w":
-        assert datetime.fromtimestamp(
-            actual_anchor_ms / 1_000,
-            tz=timezone.utc,
-        ).weekday() == 0
+        assert (
+            datetime.fromtimestamp(
+                actual_anchor_ms / 1_000,
+                tz=timezone.utc,
+            ).weekday()
+            == 0
+        )
 
     root = tmp_path / "archive"
     actual_end_ms = actual_anchor_ms + 2 * display_ms
@@ -663,9 +671,7 @@ def test_calendar_month_seam_is_causal_native_exact_and_history_contiguous(
         root,
         now_ms=lambda: _ms("2024-04-01T00:00:00"),
     )
-    all_daily_opens = list(
-        range(actual_history_start_ms, actual_end_ms, DAY_MS)
-    )
+    all_daily_opens = list(range(actual_history_start_ms, actual_end_ms, DAY_MS))
     missing_daily_open_ms = _ms("2024-02-02T00:00:00")
     base_opens = [
         open_time_ms
@@ -735,9 +741,7 @@ def test_calendar_month_seam_is_causal_native_exact_and_history_contiguous(
         source_bucket_anchor_ms=0,
     )
 
-    snapshot_opens = list(
-        range(_ms("2024-02-18T00:00:00"), actual_end_ms, DAY_MS)
-    )
+    snapshot_opens = list(range(_ms("2024-02-18T00:00:00"), actual_end_ms, DAY_MS))
     snapshot = _snapshot_for_rows(
         source_revision=base_manifest.catalog_epoch,
         base_interval="1d",
@@ -832,8 +836,7 @@ def test_calendar_month_seam_is_causal_native_exact_and_history_contiguous(
         "taker_buy_base": "600",
         "taker_buy_quote": "450555",
         "first_base_open_ms": mapper.public_anchor_ms,
-        "last_base_open_ms": mapper.public_bucket_end(mapper.public_anchor_ms)
-        - DAY_MS,
+        "last_base_open_ms": mapper.public_bucket_end(mapper.public_anchor_ms) - DAY_MS,
         "component_count": 28,
         "expected_components": 28,
         "is_closed": True,
@@ -920,10 +923,7 @@ def test_closed_projection_prefers_native_rounding_over_complete_base_aggregate(
         alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
         source_bucket_anchor_ms=0,
     )
-    row_opens = [
-        anchor_ms + offset * MINUTE_MS
-        for offset in range(8, 15)
-    ]
+    row_opens = [anchor_ms + offset * MINUTE_MS for offset in range(8, 15)]
     snapshot = _snapshot_for_rows(
         source_revision=base_manifest.catalog_epoch,
         base_interval="1m",
@@ -1019,3 +1019,146 @@ def test_closed_projection_prefers_native_rounding_over_complete_base_aggregate(
             "synthetic": False,
         }
     ]
+
+
+def test_closed_projection_rebuilds_reviewed_halt_buckets_from_traded_minutes(
+    tmp_path: Path,
+) -> None:
+    bucket_open_ms = _ms("2019-05-15T00:00:00")
+    halt_start_ms = _ms("2019-05-15T03:00:00")
+    resume_ms = _ms("2019-05-15T13:00:00")
+    actual_end_ms = _ms("2019-05-15T16:00:00")
+    display_interval = "8h"
+    display_ms = 8 * HOUR_MS
+    root = tmp_path / "archive"
+    writer = ReplayHistoryArchiveWriter(
+        root,
+        now_ms=lambda: actual_end_ms + MINUTE_MS,
+    )
+    base_opens = [
+        *range(bucket_open_ms - 2 * MINUTE_MS, halt_start_ms, MINUTE_MS),
+        *range(resume_ms, actual_end_ms, MINUTE_MS),
+    ]
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [
+                    make_bar(
+                        open_time_ms,
+                        price=str(100 + index),
+                        source="binance_archive_verified",
+                    )
+                    for index, open_time_ms in enumerate(base_opens)
+                ],
+                source_key="verified-halt-base-1m",
+                digest_character="3",
+            )
+        ],
+    )
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        display_interval,
+        [
+            _batch(
+                [
+                    {
+                        "exchange": "binance",
+                        "market_type": "spot",
+                        "symbol": "BTCUSDT",
+                        "interval": display_interval,
+                        "open_time": bucket_open_ms,
+                        "close_time": bucket_open_ms + display_ms - 1,
+                        "open": "900",
+                        "high": "999",
+                        "low": "899",
+                        "close": "950",
+                        "volume": "9999",
+                        "quote_volume": "9999",
+                        "trades": 9999,
+                        "taker_buy_base": "9999",
+                        "taker_buy_quote": "9999",
+                        "source": "binance_archive_verified",
+                    }
+                ],
+                source_key="verified-halt-native-8h",
+                digest_character="4",
+                alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+                source_bucket_anchor_ms=0,
+            )
+        ],
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        source_bucket_anchor_ms=0,
+    )
+    eager_opens = list(
+        range(
+            bucket_open_ms - 2 * MINUTE_MS, bucket_open_ms + 11 * MINUTE_MS, MINUTE_MS
+        )
+    )
+    snapshot = _snapshot_for_rows(
+        source_revision=base_manifest.catalog_epoch,
+        base_interval="1m",
+        base_interval_ms=MINUTE_MS,
+        replay_start_ms=bucket_open_ms,
+        row_opens=eager_opens,
+        source_earliest_open_ms=base_opens[0],
+        source_latest_open_ms=base_opens[-1],
+        gap_count=1,
+    )
+    config = replace(
+        replay_config(),
+        display_interval=display_interval,
+        requested_start_ms=bucket_open_ms,
+        warmup_bars=2,
+        horizon_ms=actual_end_ms - bucket_open_ms,
+    )
+    binding = _grid_binding(
+        snapshot=snapshot,
+        config=config,
+        display_interval=display_interval,
+        display_source_revision=native_manifest.catalog_epoch,
+        source_bucket_anchor_ms=0,
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        durable_boundary_ms=actual_end_ms - 1,
+    )
+    halt = DEFAULT_VERIFIED_MARKET_HALTS[0].for_interval(MINUTE_MS)
+    assert halt is not None
+    assert halt.start_open_ms == halt_start_ms
+    assert halt.resume_ms == resume_ms
+    persisted = _persisted(
+        snapshot,
+        actual_replay_start_ms=bucket_open_ms,
+        verified_market_halts=[halt.to_dict()],
+    )
+
+    projection = build_display_projection(
+        binding=binding,
+        persisted=persisted,
+        revealed_boundary_ms=actual_end_ms - 1,
+        limit=2,
+        data_epoch=snapshot.data_epoch,
+        display_interval=display_interval,
+        repository=ReplayHistoryRepository(root),
+    )
+
+    assert [bar["open_time_ms"] for bar in projection["bars"]] == [
+        bucket_open_ms,
+        bucket_open_ms + display_ms,
+    ]
+    assert [bar["component_count"] for bar in projection["bars"]] == [180, 180]
+    assert [bar["expected_components"] for bar in projection["bars"]] == [
+        180,
+        180,
+    ]
+    assert [bar["first_base_open_ms"] for bar in projection["bars"]] == [
+        bucket_open_ms,
+        resume_ms,
+    ]
+    assert [bar["last_base_open_ms"] for bar in projection["bars"]] == [
+        halt_start_ms - MINUTE_MS,
+        actual_end_ms - MINUTE_MS,
+    ]
+    assert all(bar["is_closed"] is True for bar in projection["bars"])
+    assert all(bar["synthetic"] is False for bar in projection["bars"])
+    assert projection["bars"][0]["high"] != "999"

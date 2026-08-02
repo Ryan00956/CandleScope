@@ -722,6 +722,203 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         await recovered.shutdown(step_timeout=1.0)
 
 
+@pytest.mark.anyio
+async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_bar(
+    tmp_path: Path,
+) -> None:
+    halt_start_ms = 1_557_889_200_000
+    resume_ms = 1_557_925_200_000
+    source_start_ms = halt_start_ms - 10 * INTERVAL_MS
+    rows = [
+        make_bar(
+            source_start_ms + offset * INTERVAL_MS,
+            price=str(100 + offset),
+            source="binance_archive_verified",
+        )
+        for offset in range(10)
+    ] + [
+        make_bar(
+            resume_ms + offset * INTERVAL_MS,
+            price=str(200 + offset),
+            source="binance_archive_verified",
+        )
+        for offset in range(11)
+    ]
+    root = tmp_path / "verified-halt-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            ReplayHistoryImportBatch(
+                rows=rows,
+                source_provider="binance-public-kline-v1",
+                source_object_key="BTCUSDT-1m-2019-05-reviewed",
+                source_period="2019-05-15",
+                source_url="https://data.binance.vision/reviewed.zip",
+                source_content_sha256="sha256:" + "7" * 64,
+                source_provider_checksum="sha256:" + "7" * 64,
+            )
+        ],
+    )
+    database = tmp_path / "verified-halt.db"
+
+    async def start_service() -> ReplayService:
+        instance = ReplayService(
+            settings=replace(
+                replay_settings(database),
+                product_v2_enabled=True,
+            ),
+            store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+            repository=ReplayHistoryRepository(root),
+            now_ms=lambda: NOW_MS,
+            session_id_factory=SessionIdFactory("halt-session"),
+            training_run_id_factory=SessionIdFactory("halt-run"),
+            native_intervals=lambda _identity: ("1m",),
+        )
+        await instance.start()
+        return instance
+
+    service = await start_service()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=3 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Verified Binance halt",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "5m",
+                "requested_start_ms": halt_start_ms - 5 * INTERVAL_MS,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 3 * INTERVAL_MS,
+                "random_seed": None,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        session_id = str(created["run"]["adapter_session_id"])
+
+        persisted = await service.store.load_dataset(session_id)
+        assert persisted is not None
+        bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
+        manifest = bundle["paging_manifest"]
+        assert manifest["schema_version"] == "replay-paged-bar-manifest.v2"
+        assert manifest["verified_market_halts"] == [
+            {
+                "schema_version": "replay-bar-halt.v1",
+                "halt_id": "binance-system-upgrade-2019-05-15",
+                "start_open_ms": halt_start_ms,
+                "end_open_ms": resume_ms - INTERVAL_MS,
+                "resume_ms": resume_ms,
+                "reason": "exchange_scheduled_system_upgrade",
+                "evidence_url": (
+                    "https://binance.zendesk.com/hc/en-us/articles/"
+                    "360028054052-System-Upgrade-Notice"
+                ),
+            }
+        ]
+
+        def command(
+            command_id: str,
+            command_type: CommandType,
+            revision: int,
+            payload: dict[str, object] | None = None,
+        ) -> ReplayCommand:
+            return ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id=command_id,
+                client_instance_id="halt-browser",
+                expected_revision=revision,
+                type=command_type,
+                payload=payload or {},
+            )
+
+        await service.command(
+            session_id,
+            command("acquire-halt", CommandType.ACQUIRE_CONTROLLER, 0),
+        )
+        before_halt = await service.command(
+            session_id,
+            command("step-to-halt", CommandType.STEP, 1, {"count": 5}),
+        )
+        assert before_halt["state"] == "PAUSED"
+        assert before_halt["cursor"]["source_sequence"] == 5
+        assert before_halt["cursor"]["at_end"] is False
+        assert before_halt["cursor"]["last_base_bar_open_ms"] == (
+            halt_start_ms - INTERVAL_MS
+        )
+
+        inside_halt = await service.command(
+            session_id,
+            command(
+                "advance-inside-halt",
+                CommandType.ADVANCE_BY,
+                2,
+                {"ms": 4 * 60 * INTERVAL_MS},
+            ),
+        )
+        assert inside_halt["state"] == "PAUSED"
+        assert inside_halt["data"]["consumed"] == 0
+        assert inside_halt["cursor"]["source_sequence"] == 5
+        assert inside_halt["cursor"]["virtual_time_ms"] == (
+            halt_start_ms - 1 + 4 * 60 * INTERVAL_MS
+        )
+
+        resumed = await service.command(
+            session_id,
+            command("step-first-resume", CommandType.STEP, 3, {"count": 1}),
+        )
+        assert resumed["state"] == "PAUSED"
+        assert resumed["cursor"]["source_sequence"] == 6
+        assert resumed["cursor"]["last_base_bar_open_ms"] == resume_ms
+        snapshot = (await service.get_session(session_id))["snapshot"]
+        builder = snapshot["components"]["bar_builder"]
+        assert builder["gap_policy"] == "verified_market_halts_v1"
+        assert builder["replay_events_applied"] == 6
+        assert [bar["open_time_ms"] for bar in builder["closed_bars"][-2:]] == [
+            halt_start_ms - INTERVAL_MS,
+            resume_ms,
+        ]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+    recovered = await start_service()
+    try:
+        snapshot = (await recovered.get_session(session_id))["snapshot"]
+        assert snapshot["state"] == "PAUSED"
+        assert snapshot["cursor"]["source_sequence"] == 6
+        assert snapshot["cursor"]["last_base_bar_open_ms"] == resume_ms
+    finally:
+        await recovered.shutdown(step_timeout=1.0)
+
+
 def test_corrupt_live_remote_index_fails_closed_instead_of_using_stale_cache(
     tmp_path: Path,
 ) -> None:

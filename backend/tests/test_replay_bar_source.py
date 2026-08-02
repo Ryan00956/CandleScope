@@ -5,11 +5,13 @@ from dataclasses import replace
 import pytest
 
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
+from app.replay.market_halts import ReplayBarHalt
 from app.replay.sources.bar_source import BarReplaySource, PagedBarReplaySource
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
     REPLAY_START_MS,
     make_bar_snapshot,
+    make_replay_bar,
 )
 
 
@@ -132,6 +134,60 @@ def test_paged_bar_source_restores_late_cursor_without_scanning_prefix() -> None
     assert positioned.peek() == complete.replay_rows[4]
     assert loaded == [REPLAY_START_MS + 4 * INTERVAL_MS]
     assert source.cursor().source_sequence == 0
+
+
+def test_paged_bar_source_pages_across_only_an_explicit_verified_halt() -> None:
+    initial = make_bar_snapshot(replay_count=2)
+    halt = ReplayBarHalt(
+        start_open_ms=REPLAY_START_MS + 2 * INTERVAL_MS,
+        end_open_ms=REPLAY_START_MS + 4 * INTERVAL_MS,
+        halt_id="fixture-reviewed-halt",
+        resume_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        reason="exchange_scheduled_system_upgrade",
+        evidence_url="https://example.com/reviewed-halt",
+    )
+    loaded: list[tuple[int, int, int]] = []
+
+    def load_page(start_ms: int, end_ms: int, count: int):
+        loaded.append((start_ms, end_ms, count))
+        return tuple(
+            make_replay_bar(start_ms + index * INTERVAL_MS, 200 + index)
+            for index in range(count)
+        )
+
+    source = PagedBarReplaySource(
+        initial,
+        terminal_open_ms=REPLAY_START_MS + 7 * INTERVAL_MS,
+        source_revision="sha256:" + "5" * 64,
+        source_fingerprint="sha256:" + "6" * 64,
+        page_rows=4,
+        page_loader=load_page,
+        verified_halts=(halt,),
+    )
+
+    assert source.remaining_count() == 5
+    assert source.next() == initial.replay_rows[0]
+    assert source.next() == initial.replay_rows[1]
+    resumed = source.next()
+    assert resumed is not None
+    assert resumed.open_time_ms == REPLAY_START_MS + 5 * INTERVAL_MS
+    assert loaded == [
+        (
+            REPLAY_START_MS + 5 * INTERVAL_MS,
+            REPLAY_START_MS + 7 * INTERVAL_MS,
+            3,
+        )
+    ]
+    assert source.cursor().source_sequence == 3
+    assert source.cursor().last_base_bar_open_ms == resumed.open_time_ms
+    assert source.snapshot_ref()["schema_version"] == "replay-paged-bar-source.v2"
+    assert (
+        source.fork_at_sequence(
+            3,
+            last_event_time_ms=resumed.close_time_ms,
+        ).peek()
+        == source.peek()
+    )
 
 
 @pytest.mark.parametrize("fault", ["duplicate", "gap", "forming", "boundary"])

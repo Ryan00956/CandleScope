@@ -79,6 +79,11 @@ from .errors import ReplayDomainError, ReplayErrorCode
 from .history_archive import ReplayHistoryArchiveError, ReplayHistoryRepository
 from .remote_history import RemoteReplayHistoryRepository
 from .internal_commands import InternalCommandType
+from .market_halts import (
+    ReplayBarHalt,
+    match_verified_market_halt,
+    validate_registered_bar_halts,
+)
 from .models import (
     ReplayCommand,
     ReplayCursor,
@@ -113,6 +118,7 @@ TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
 PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION = "replay-paged-bar-session-dataset.v1"
 PAGED_BAR_SESSION_REF_SCHEMA_VERSION = "replay-paged-bar-session-ref.v1"
 PAGED_BAR_MANIFEST_SCHEMA_VERSION = "replay-paged-bar-manifest.v1"
+PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2 = "replay-paged-bar-manifest.v2"
 _TaskResult = TypeVar("_TaskResult")
 
 
@@ -176,9 +182,7 @@ class ReplayService:
                 RemoteReplayHistoryRepository(
                     settings.replay_history_archive_dir,
                     settings.replay_history_origin_uri,
-                    refresh_seconds=(
-                        settings.replay_history_catalog_refresh_seconds
-                    ),
+                    refresh_seconds=(settings.replay_history_catalog_refresh_seconds),
                     download_timeout_seconds=(
                         settings.replay_history_download_timeout_seconds
                     ),
@@ -189,7 +193,9 @@ class ReplayService:
         elif settings.replay_bar_source == "legacy_sqlite":
             self._repository = KlinesRepoAdapter()
         else:  # ReplaySettings is normally constructed by strict config parsing.
-            raise ValueError(f"unsupported replay BAR source: {settings.replay_bar_source}")
+            raise ValueError(
+                f"unsupported replay BAR source: {settings.replay_bar_source}"
+            )
         self._raw_trade_archive = raw_trade_archive or DisabledRawAggTradeArchive()
         self._now_ms = now_ms
         self._session_id_factory = session_id_factory
@@ -307,9 +313,7 @@ class ReplayService:
                 if error.code is ReplayErrorCode.SCAN_LIMIT_EXCEEDED:
                     # Capacity pressure is not durable corruption. Leave this
                     # and later records healthy for on-demand lazy recovery.
-                    self._metrics["startup_recoveries_deferred"] = (
-                        len(records) - index
-                    )
+                    self._metrics["startup_recoveries_deferred"] = len(records) - index
                     break
                 self._unavailable_sessions[session_id] = error
                 self._metrics["recovery_failures"] = (
@@ -368,9 +372,7 @@ class ReplayService:
         else:
             trade_capability = {
                 "enabled": True,
-                "fidelity": (
-                    DataFidelity.VERIFIED_AGG_TRADE_APPROXIMATE_BARS.value
-                ),
+                "fidelity": (DataFidelity.VERIFIED_AGG_TRADE_APPROXIMATE_BARS.value),
                 "execution_fidelity": ExecutionFidelity.AGG_TRADE_TAPE.value,
                 "requires_exact_dataset": True,
                 "bar_parity_required": False,
@@ -502,9 +504,7 @@ class ReplayService:
                     entry,
                     start_ms=self._required_manual_start(config),
                 )
-                trade_catalog_epoch = await self._trade_selection_catalog_epoch(
-                    config
-                )
+                trade_catalog_epoch = await self._trade_selection_catalog_epoch(config)
         except ReplayDomainError as exc:
             raise self._blind_safe_dataset_error(config, exc) from exc
         if entry.bounds is None:
@@ -536,6 +536,33 @@ class ReplayService:
             else selected_range.last_start_ms
             + (selected_range.replay_bars - 1) * selected_range.interval_ms
         )
+        verified_market_halts: list[ReplayBarHalt] = []
+        if config.source_kind is SourceKind.BAR:
+            continuous_future_end_ms = entry.bounds.latest_closed_open_ms
+            for gap in entry.gap_summary.gaps:
+                if gap.end_ms < window.replay_start_ms:
+                    continue
+                if gap.start_ms <= window.replay_end_open_ms:
+                    raise self._blind_safe_dataset_error(
+                        config,
+                        ReplayDomainError(
+                            ReplayErrorCode.DATASET_MISMATCH,
+                            "selected BAR window intersects its frozen gap index",
+                        ),
+                    )
+                halt = match_verified_market_halt(
+                    entry.identity,
+                    gap,
+                    interval_ms=window.interval_ms,
+                )
+                if (
+                    halt is not None
+                    and halt.resume_ms <= entry.bounds.latest_closed_open_ms
+                ):
+                    verified_market_halts.append(halt)
+                    continue
+                continuous_future_end_ms = gap.start_ms - window.interval_ms
+                break
         return {
             "catalog_epoch": catalog.catalog_epoch,
             "source_fingerprint": entry.source_fingerprint,
@@ -549,6 +576,15 @@ class ReplayService:
             # never expose this boundary before an authorized reveal.
             "continuous_future_end_ms": continuous_future_end_ms,
             "interval_ms": window.interval_ms,
+            **(
+                {
+                    "verified_market_halts": [
+                        halt.to_dict() for halt in verified_market_halts
+                    ]
+                }
+                if verified_market_halts
+                else {}
+            ),
             **(
                 {"agg_trade_catalog_epoch": trade_catalog_epoch}
                 if trade_catalog_epoch is not None
@@ -592,9 +628,7 @@ class ReplayService:
             ) from exc
         source_revision_value = selection.get("source_revision")
         source_revision = (
-            None
-            if source_revision_value is None
-            else str(source_revision_value)
+            None if source_revision_value is None else str(source_revision_value)
         )
         agg_trade_catalog_epoch_value = selection.get("agg_trade_catalog_epoch")
         agg_trade_catalog_epoch = (
@@ -738,14 +772,44 @@ class ReplayService:
                 "training future boundary is not aligned",
                 details={"reason": "SELECTION_COMMITMENT_INVALID"},
             )
+        try:
+            verified_halts = validate_registered_bar_halts(
+                selection.get("verified_market_halts", []),
+                identity=dataset.identity,
+                interval_ms=interval_ms,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training verified-halt commitment is invalid",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            ) from exc
+        if any(
+            halt.start_open_ms <= dataset.replay_end_open_ms
+            or halt.resume_ms > terminal_open_ms
+            for halt in verified_halts
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training verified-halt range is outside the paged future",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
         payload: dict[str, object] = {
-            "schema_version": PAGED_BAR_MANIFEST_SCHEMA_VERSION,
+            "schema_version": (
+                PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2
+                if verified_halts
+                else PAGED_BAR_MANIFEST_SCHEMA_VERSION
+            ),
             "data_epoch": dataset.data_epoch,
             "source_revision": source_revision,
             "source_fingerprint": source_fingerprint,
             "terminal_open_ms": terminal_open_ms,
             "page_rows": len(dataset.replay_rows),
         }
+        if verified_halts:
+            payload["verified_market_halts"] = [
+                halt.to_dict() for halt in verified_halts
+            ]
         payload["manifest_hash"] = canonical_sha256(payload)
         return payload
 
@@ -754,6 +818,7 @@ class ReplayService:
         payload: Mapping[str, object],
         dataset: BarDatasetSnapshot,
     ) -> dict[str, object]:
+        schema_version = payload.get("schema_version")
         expected = {
             "schema_version",
             "data_epoch",
@@ -763,6 +828,8 @@ class ReplayService:
             "page_rows",
             "manifest_hash",
         }
+        if schema_version == PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2:
+            expected.add("verified_market_halts")
         if set(payload) != expected:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -771,7 +838,11 @@ class ReplayService:
         material = dict(payload)
         manifest_hash = material.pop("manifest_hash")
         if (
-            material.get("schema_version") != PAGED_BAR_MANIFEST_SCHEMA_VERSION
+            material.get("schema_version")
+            not in {
+                PAGED_BAR_MANIFEST_SCHEMA_VERSION,
+                PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2,
+            }
             or material.get("data_epoch") != dataset.data_epoch
             or manifest_hash != canonical_sha256(material)
         ):
@@ -814,6 +885,38 @@ class ReplayService:
                     "persisted paged BAR source digest is invalid",
                     details={"field": field_name},
                 ) from exc
+        interval_ms = parse_interval_ms(dataset.interval)
+        if interval_ms is None or interval_ms <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "persisted paged BAR interval is unsupported",
+            )
+        raw_halts = material.get("verified_market_halts", [])
+        try:
+            verified_halts = validate_registered_bar_halts(
+                raw_halts,
+                identity=dataset.identity,
+                interval_ms=interval_ms,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR halt commitment is invalid",
+            ) from exc
+        if schema_version == PAGED_BAR_MANIFEST_SCHEMA_VERSION and verified_halts:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "legacy paged BAR manifest cannot contain verified halts",
+            )
+        if any(
+            halt.start_open_ms <= dataset.replay_end_open_ms
+            or halt.resume_ms > terminal_open_ms
+            for halt in verified_halts
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR halt range is outside the committed future",
+            )
         return dict(payload)
 
     async def create_session(
@@ -895,8 +998,7 @@ class ReplayService:
                 entry = catalog.require_entry(identity)
             if (
                 _internal_expected_source_fingerprint is not None
-                and entry.source_fingerprint
-                != _internal_expected_source_fingerprint
+                and entry.source_fingerprint != _internal_expected_source_fingerprint
             ):
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
@@ -916,8 +1018,7 @@ class ReplayService:
                 if bound_window is not None:
                     if (
                         _internal_forced_start_ms is not None
-                        and bound_window.replay_start_ms
-                        != _internal_forced_start_ms
+                        and bound_window.replay_start_ms != _internal_forced_start_ms
                     ):
                         raise ReplayDomainError(
                             ReplayErrorCode.DATASET_MISMATCH,
@@ -1210,6 +1311,8 @@ class ReplayService:
                 handle.actor_dataset,
                 handle.broker_config,
                 trade_dataset_ref=handle.trade_dataset_ref,
+                bar_paging_manifest=handle.bar_paging_manifest,
+                actual_dataset=handle.actual_dataset,
             )
             try:
                 reducer.restore(component_state)
@@ -1242,14 +1345,11 @@ class ReplayService:
                 )
                 if cursor.source_sequence == candidate_sequences[endpoint_index]:
                     state = dict(reducer.snapshot())
-                    blob, raw_bytes, blob_hash, state_hash = (
-                        encode_component_state(state)
+                    blob, raw_bytes, blob_hash, state_hash = encode_component_state(
+                        state
                     )
                     total_compressed += len(blob)
-                    if (
-                        total_compressed
-                        > MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES
-                    ):
+                    if total_compressed > MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES:
                         raise ReplayDomainError(
                             ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
                             "period-summary compressed cache budget was exceeded",
@@ -1281,9 +1381,7 @@ class ReplayService:
                         end_source_cursor={
                             "source_sequence": cursor.source_sequence,
                             "last_event_time_ms": cursor.last_event_time_ms,
-                            "last_base_bar_open_ms": (
-                                cursor.last_base_bar_open_ms
-                            ),
+                            "last_base_bar_open_ms": (cursor.last_base_bar_open_ms),
                             "at_end": cursor.at_end,
                         },
                         end_event_chain_hash=chain,
@@ -1326,9 +1424,7 @@ class ReplayService:
                 "rule_revision": rule_revision,
                 "rule_hash": rule_hash,
                 "base_source_sequence": base_sequence,
-                "base_domain_command_position": int(
-                    payload["domain_command_position"]
-                ),
+                "base_domain_command_position": int(payload["domain_command_position"]),
                 "base_event_chain_hash": str(payload["event_chain_hash"]),
                 "base_component_state_hash": base_component_hash,
                 "candidate_summary_hashes": [
@@ -1371,21 +1467,23 @@ class ReplayService:
         *,
         _training_internal: bool = False,
     ) -> dict[str, object]:
-        if command.type in {
-            InternalCommandType.ADJUST_CAPITAL,
-            InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
-            InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
-            InternalCommandType.FAST_FORWARD_FINAL_STATE,
-        } and not _training_internal:
+        if (
+            command.type
+            in {
+                InternalCommandType.ADJUST_CAPITAL,
+                InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
+                InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
+                InternalCommandType.FAST_FORWARD_FINAL_STATE,
+            }
+            and not _training_internal
+        ):
             raise ReplayDomainError(
                 ReplayErrorCode.INVALID_STATE_TRANSITION,
                 "internal training command is unavailable on replay.v1",
             )
         async with self._lease_handle(session_id) as handle:
             try:
-                existing = await self.store.get_command(
-                    session_id, command.command_id
-                )
+                existing = await self.store.get_command(session_id, command.command_id)
                 if existing is not None:
                     result = self._replay_stored_command(existing, command)
                 else:
@@ -1709,9 +1807,7 @@ class ReplayService:
                         pending_recoveries = tuple(
                             claim
                             for session_id in normalized
-                            if (
-                                claim := self._pending_recoveries.get(session_id)
-                            )
+                            if (claim := self._pending_recoveries.get(session_id))
                             is not None
                         )
                     if not pending_recoveries:
@@ -1740,9 +1836,7 @@ class ReplayService:
                             )
 
                     for session_id in normalized:
-                        self._pending_session_deletions[session_id] = (
-                            deletion_complete
-                        )
+                        self._pending_session_deletions[session_id] = deletion_complete
                         handle = self._sessions.get(session_id)
                         if handle is not None:
                             handle.evicting = True
@@ -1808,10 +1902,7 @@ class ReplayService:
                     handle.evicting = False
                     handle.eviction_complete.set()
             for session_id in session_ids:
-                if (
-                    self._pending_session_deletions.get(session_id)
-                    is deletion_complete
-                ):
+                if self._pending_session_deletions.get(session_id) is deletion_complete:
                     self._pending_session_deletions.pop(session_id, None)
                 if delete_succeeded:
                     self._unavailable_sessions.pop(session_id, None)
@@ -1851,9 +1942,7 @@ class ReplayService:
             # when it enters this serialized section and cannot touch an actor.
             async with self._prune_lock:
                 pass
-            if not await self._wait_for_pending_lifecycle_drain(
-                timeout=step_timeout
-            ):
+            if not await self._wait_for_pending_lifecycle_drain(timeout=step_timeout):
                 owners = tuple(self._pending_lifecycle_owners)
                 for owner in owners:
                     owner.cancel()
@@ -1878,9 +1967,7 @@ class ReplayService:
                 finally:
                     self._datasets.release(session_id)
                     if handle.trade_pin_token is not None:
-                        self._raw_trade_archive.release_dataset(
-                            handle.trade_pin_token
-                        )
+                        self._raw_trade_archive.release_dataset(handle.trade_pin_token)
             if not await self._wait_for_lease_drain(timeout=step_timeout):
                 owners = tuple(self._lease_owners)
                 for owner in owners:
@@ -1938,9 +2025,7 @@ class ReplayService:
             "pending_session_reservations": self._pending_session_reservations,
             "pending_handle_acquisitions": self._pending_handle_acquisitions,
             "pending_recoveries": tuple(sorted(self._pending_recoveries)),
-            "pending_session_deletions": tuple(
-                sorted(self._pending_session_deletions)
-            ),
+            "pending_session_deletions": tuple(sorted(self._pending_session_deletions)),
             "pending_lifecycle_owners": len(self._pending_lifecycle_owners),
             "active_lease_owners": len(self._lease_owners),
             "unavailable_sessions": {
@@ -2094,6 +2179,8 @@ class ReplayService:
             actor_dataset,
             broker,
             trade_dataset_ref=trade_dataset_ref,
+            bar_paging_manifest=bar_paging_manifest,
+            actual_dataset=actual_dataset,
             execution_mode=execution_mode,
         )
         self._datasets.pin(session_id, actor_dataset)
@@ -2270,8 +2357,7 @@ class ReplayService:
                     "failed to compensate an incomplete replay session creation",
                     details={
                         "reason": (
-                            f"{type(compensation_error).__name__}: "
-                            f"{compensation_error}"
+                            f"{type(compensation_error).__name__}: {compensation_error}"
                         )
                     },
                 ) from compensation_error
@@ -2339,7 +2425,10 @@ class ReplayService:
                     "persisted trade dataset epoch does not match session",
                 )
         else:
-            if decoded.get("schema_version") == PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION:
+            if (
+                decoded.get("schema_version")
+                == PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION
+            ):
                 expected = {
                     "schema_version",
                     "bar_dataset",
@@ -2423,6 +2512,8 @@ class ReplayService:
                     actor_dataset,
                     broker_config,
                     trade_dataset_ref=trade_dataset_ref,
+                    bar_paging_manifest=bar_paging_manifest,
+                    actual_dataset=actual_dataset,
                 )
                 candidate = self._actor(
                     session_id=session_id,
@@ -2524,8 +2615,7 @@ class ReplayService:
         return (
             checkpoint.is_latest
             and checkpoint.source_sequence == int(record["source_sequence"])
-            and checkpoint.command_log_offset
-            == int(record["command_log_offset"])
+            and checkpoint.command_log_offset == int(record["command_log_offset"])
             and checkpoint.event_sequence == int(record["event_sequence"])
             and checkpoint.state_hash == str(record["state_hash"])
         )
@@ -2600,12 +2690,15 @@ class ReplayService:
         timeline_delta_ms = (
             actor_dataset.replay_start_ms - actual_dataset.replay_start_ms
         )
-        terminal_open_ms = (
-            int(manifest["terminal_open_ms"]) + timeline_delta_ms
-        )
+        terminal_open_ms = int(manifest["terminal_open_ms"]) + timeline_delta_ms
         source_revision = str(manifest["source_revision"])
         source_fingerprint = str(manifest["source_fingerprint"])
         page_rows = int(manifest["page_rows"])
+        verified_halts = self._actor_bar_halts(
+            manifest,
+            actual_dataset=actual_dataset,
+            actor_dataset=actor_dataset,
+        )
 
         def load_page(
             public_start_ms: int,
@@ -2628,7 +2721,42 @@ class ReplayService:
             source_fingerprint=source_fingerprint,
             page_rows=page_rows,
             page_loader=load_page,
+            verified_halts=verified_halts,
         )
+
+    @staticmethod
+    def _actor_bar_halts(
+        paging_manifest: Mapping[str, object] | None,
+        *,
+        actual_dataset: BarDatasetSnapshot,
+        actor_dataset: BarDatasetSnapshot,
+    ) -> tuple[ReplayBarHalt, ...]:
+        if paging_manifest is None:
+            return ()
+        raw_halts = paging_manifest.get("verified_market_halts")
+        if raw_halts is None:
+            return ()
+        interval_ms = parse_interval_ms(actual_dataset.interval)
+        if interval_ms is None or interval_ms <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "paged BAR halt interval is unsupported",
+            )
+        try:
+            halts = validate_registered_bar_halts(
+                raw_halts,
+                identity=actual_dataset.identity,
+                interval_ms=interval_ms,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "paged BAR halt commitment is invalid",
+            ) from exc
+        timeline_delta_ms = (
+            actor_dataset.replay_start_ms - actual_dataset.replay_start_ms
+        )
+        return tuple(halt.shifted(timeline_delta_ms) for halt in halts)
 
     def _load_bar_source_page(
         self,
@@ -2671,7 +2799,9 @@ class ReplayService:
                 "paged BAR archive range is incomplete",
                 details={
                     "expected_count": expected_count,
-                    "actual_count": len(raw_rows) if isinstance(raw_rows, list) else None,
+                    "actual_count": len(raw_rows)
+                    if isinstance(raw_rows, list)
+                    else None,
                 },
             )
         entry = ReplayCatalogEntry(
@@ -2796,9 +2926,7 @@ class ReplayService:
                 observed_session_generation = 0
                 async with self._lifecycle_lock:
                     self._ensure_accepting()
-                    wait_for_deletion = self._pending_session_deletions.get(
-                        session_id
-                    )
+                    wait_for_deletion = self._pending_session_deletions.get(session_id)
                     if wait_for_deletion is not None:
                         handle = None
                     else:
@@ -2813,9 +2941,7 @@ class ReplayService:
                             unavailable = self._unavailable_sessions.get(session_id)
                             if unavailable is not None:
                                 raise unavailable
-                            wait_for_recovery = self._pending_recoveries.get(
-                                session_id
-                            )
+                            wait_for_recovery = self._pending_recoveries.get(session_id)
                             observed_session_generation = self._session_generation
                 if wait_for_deletion is not None:
                     await wait_for_deletion.wait()
@@ -2855,9 +2981,7 @@ class ReplayService:
                 wait_for_deletion = None
                 async with self._lifecycle_lock:
                     self._ensure_available(blind_mode=blind_mode)
-                    wait_for_deletion = self._pending_session_deletions.get(
-                        session_id
-                    )
+                    wait_for_deletion = self._pending_session_deletions.get(session_id)
                     if wait_for_deletion is not None:
                         handle = None
                     elif self._session_generation != observed_session_generation:
@@ -2871,9 +2995,7 @@ class ReplayService:
                                 self._activate_handle_lease_locked(handle)
                                 return handle
                         else:
-                            recovery_claim = self._pending_recoveries.get(
-                                session_id
-                            )
+                            recovery_claim = self._pending_recoveries.get(session_id)
                             if recovery_claim is None:
                                 self._ensure_session_capacity_locked()
                                 self._pending_session_reservations += 1
@@ -3055,15 +3177,10 @@ class ReplayService:
             if snapshot is None:
                 return
             ended = snapshot.state is SessionState.ENDED
-            activity_age_ms = (
-                self._validated_now_ms() - handle.last_activity_ms
-            )
-            ended_handoff_complete = (
-                activity_age_ms >= _ENDED_SESSION_HANDOFF_GRACE_MS
-            )
+            activity_age_ms = self._validated_now_ms() - handle.last_activity_ms
+            ended_handoff_complete = activity_age_ms >= _ENDED_SESSION_HANDOFF_GRACE_MS
             idle = (
-                snapshot.controller_client_id is None
-                and activity_age_ms >= idle_ttl_ms
+                snapshot.controller_client_id is None and activity_age_ms >= idle_ttl_ms
             )
             if not idle and not (
                 ended and (capacity_pressure or ended_handoff_complete)
@@ -3080,9 +3197,7 @@ class ReplayService:
                     or handle.activity_generation != observed_generation
                 ):
                     continue
-                activity_age_ms = (
-                    self._validated_now_ms() - handle.last_activity_ms
-                )
+                activity_age_ms = self._validated_now_ms() - handle.last_activity_ms
                 if (
                     reason == "ended"
                     and not capacity_pressure
@@ -3311,6 +3426,8 @@ class ReplayService:
         broker_config: BrokerConfig,
         *,
         trade_dataset_ref: RawAggTradeDatasetRef | None = None,
+        bar_paging_manifest: Mapping[str, object] | None = None,
+        actual_dataset: BarDatasetSnapshot | None = None,
         execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
     ) -> ConservativeBarBroker:
         max_closed_bars = min(10_000, max(1, dataset.row_count))
@@ -3329,12 +3446,18 @@ class ReplayService:
                 max_closed_bars=max_closed_bars,
             )
         else:
+            verified_halts = ReplayService._actor_bar_halts(
+                bar_paging_manifest,
+                actual_dataset=actual_dataset or dataset,
+                actor_dataset=dataset,
+            )
             builder = ReplayBarBuilder(
                 base_interval=config.base_interval,
                 display_interval=config.display_interval,
                 replay_start_ms=dataset.replay_start_ms,
                 warmup_bars=dataset.warmup_rows,
                 max_closed_bars=max_closed_bars,
+                verified_halts=verified_halts,
             )
         return ConservativeBarBroker(
             config=broker_config,
@@ -3527,9 +3650,7 @@ class ReplayService:
         entry: ReplayCatalogEntry,
         selection_windows: Sequence[RawAggTradeSelectionWindow],
     ) -> tuple[EligibleWindowRange, ...]:
-        windows = tuple(
-            sorted(selection_windows, key=lambda item: item.start_time_ms)
-        )
+        windows = tuple(sorted(selection_windows, key=lambda item: item.start_time_ms))
         previous_end: int | None = None
         for window in windows:
             if not isinstance(window, RawAggTradeSelectionWindow):
@@ -3537,18 +3658,14 @@ class ReplayService:
                     "aggregate-trade selection coverage contains an invalid window"
                 )
             if previous_end is not None and window.start_time_ms <= previous_end:
-                raise ValueError(
-                    "aggregate-trade selection coverage windows overlap"
-                )
+                raise ValueError("aggregate-trade selection coverage windows overlap")
             previous_end = window.end_time_ms
 
         intersections: list[EligibleWindowRange] = []
         for candidate in entry.eligible_ranges:
             forward_span_ms = candidate.replay_bars * candidate.interval_ms
             for coverage in windows:
-                last_start_for_coverage = (
-                    coverage.end_time_ms - forward_span_ms + 1
-                )
+                last_start_for_coverage = coverage.end_time_ms - forward_span_ms + 1
                 unaligned_first = max(
                     candidate.first_start_ms,
                     coverage.start_time_ms,
@@ -3570,15 +3687,13 @@ class ReplayService:
                     // candidate.interval_ms,
                 )
                 first_start_ms = (
-                    candidate.first_start_ms
-                    + first_offset * candidate.interval_ms
+                    candidate.first_start_ms + first_offset * candidate.interval_ms
                 )
                 last_offset = (
                     unaligned_last - candidate.first_start_ms
                 ) // candidate.interval_ms
                 last_start_ms = (
-                    candidate.first_start_ms
-                    + last_offset * candidate.interval_ms
+                    candidate.first_start_ms + last_offset * candidate.interval_ms
                 )
                 if first_start_ms > last_start_ms:
                     continue
@@ -3589,8 +3704,7 @@ class ReplayService:
                         first_start_ms=first_start_ms,
                         last_start_ms=last_start_ms,
                         count=(
-                            (last_start_ms - first_start_ms)
-                            // candidate.interval_ms
+                            (last_start_ms - first_start_ms) // candidate.interval_ms
                         )
                         + 1,
                         warmup_bars=candidate.warmup_bars,
@@ -3774,9 +3888,7 @@ class ReplayService:
     def _actual_history(handle: ReplaySessionHandle) -> dict[str, int]:
         replay_end_open_ms = handle.actual_dataset.replay_end_open_ms
         if handle.bar_paging_manifest is not None:
-            replay_end_open_ms = int(
-                handle.bar_paging_manifest["terminal_open_ms"]
-            )
+            replay_end_open_ms = int(handle.bar_paging_manifest["terminal_open_ms"])
         return {
             "replay_start_ms": handle.actual_dataset.replay_start_ms,
             "replay_end_open_ms": replay_end_open_ms,

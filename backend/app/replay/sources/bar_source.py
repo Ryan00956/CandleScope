@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 
 from app.data_engine.interval_policy import (
@@ -18,10 +20,21 @@ from ..dataset import (
     ReplayBar,
 )
 from ..errors import ReplayDomainError, ReplayErrorCode
+from ..bars.schedule import ReplayBarSchedule
+from ..market_halts import ReplayBarHalt
 from .base import SourceCursor
 
 
 PAGED_BAR_SOURCE_SCHEMA_VERSION = "replay-paged-bar-source.v1"
+PAGED_BAR_SOURCE_SCHEMA_VERSION_V2 = "replay-paged-bar-source.v2"
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexedBarSegment:
+    start_open_ms: int
+    end_open_ms: int
+    start_index: int
+    end_index: int
 
 
 class _PagedBarArchive:
@@ -34,6 +47,7 @@ class _PagedBarArchive:
         terminal_open_ms: int,
         page_rows: int,
         page_loader: Callable[[int, int, int], tuple[ReplayBar, ...]],
+        verified_halts: tuple[ReplayBarHalt, ...] = (),
     ) -> None:
         interval_ms = parse_interval_ms(snapshot.interval)
         if interval_ms is None or interval_ms <= 0:
@@ -55,7 +69,6 @@ class _PagedBarArchive:
                 interval=snapshot.interval,
             )
             != terminal_open_ms
-            or (terminal_open_ms - snapshot.replay_start_ms) % interval_ms != 0
         ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -69,30 +82,89 @@ class _PagedBarArchive:
             raise TypeError("page_loader must be callable")
         self.snapshot = snapshot
         self.interval_ms = interval_ms
+        self.schedule = ReplayBarSchedule(snapshot.interval, verified_halts)
         self.terminal_open_ms = terminal_open_ms
         self.page_rows = page_rows
         self.page_loader = page_loader
         self.initial_rows = snapshot.replay_rows
-        self.total_rows = (
-            (terminal_open_ms - snapshot.replay_start_ms) // interval_ms + 1
+        if any(
+            halt.start_open_ms <= snapshot.replay_end_open_ms
+            for halt in self.schedule.verified_halts
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "verified BAR halt overlaps the initial forward cache",
+            )
+        raw_segments = self.schedule.segments(
+            snapshot.replay_start_ms,
+            terminal_open_ms,
         )
+        indexed_segments: list[_IndexedBarSegment] = []
+        total_rows = 0
+        for segment in raw_segments:
+            indexed_segments.append(
+                _IndexedBarSegment(
+                    start_open_ms=segment.start_open_ms,
+                    end_open_ms=segment.end_open_ms,
+                    start_index=total_rows,
+                    end_index=total_rows + segment.count,
+                )
+            )
+            total_rows += segment.count
+        self._segments = tuple(indexed_segments)
+        self._segment_start_indexes = tuple(
+            segment.start_index for segment in self._segments
+        )
+        self.total_rows = total_rows
+        if len(self.initial_rows) > self.total_rows:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "initial BAR cache exceeds the committed scheduled range",
+            )
+        for index, row in enumerate(self.initial_rows):
+            if row.open_time_ms != self.open_at_index(index):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "initial BAR cache does not follow the committed schedule",
+                )
         self._pages: dict[int, tuple[ReplayBar, ...]] = {}
+
+    def open_at_index(self, index: int) -> int:
+        if index < 0 or index >= self.total_rows:
+            raise IndexError("BAR source index is outside the committed range")
+        segment_index = bisect_right(self._segment_start_indexes, index) - 1
+        segment = self._segments[segment_index]
+        if index >= segment.end_index:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR source index escaped its committed schedule segment",
+            )
+        return segment.start_open_ms + (index - segment.start_index) * self.interval_ms
+
+    def _page_span(self, index: int) -> tuple[int, int]:
+        segment_index = bisect_right(self._segment_start_indexes, index) - 1
+        segment = self._segments[segment_index]
+        page_base = max(len(self.initial_rows), segment.start_index)
+        if index < page_base or index >= segment.end_index:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "paged BAR cursor is outside its loadable schedule segment",
+            )
+        page_start = (
+            page_base + ((index - page_base) // self.page_rows) * self.page_rows
+        )
+        expected_count = min(self.page_rows, segment.end_index - page_start)
+        return page_start, expected_count
 
     def row_at(self, index: int) -> ReplayBar | None:
         if index < 0 or index >= self.total_rows:
             return None
         if index < len(self.initial_rows):
             return self.initial_rows[index]
-        page_start = len(self.initial_rows) + (
-            (index - len(self.initial_rows)) // self.page_rows
-        ) * self.page_rows
+        page_start, expected_count = self._page_span(index)
         page = self._pages.get(page_start)
         if page is None:
-            remaining = self.total_rows - page_start
-            expected_count = min(self.page_rows, remaining)
-            start_open_ms = (
-                self.snapshot.replay_start_ms + page_start * self.interval_ms
-            )
+            start_open_ms = self.open_at_index(page_start)
             end_open_ms = start_open_ms + (expected_count - 1) * self.interval_ms
             page = self.page_loader(start_open_ms, end_open_ms, expected_count)
             if not isinstance(page, tuple) or len(page) != expected_count:
@@ -106,16 +178,22 @@ class _PagedBarArchive:
                 )
             expected_open_ms = start_open_ms
             for row in page:
-                if not isinstance(row, ReplayBar) or row.open_time_ms != expected_open_ms:
+                if (
+                    not isinstance(row, ReplayBar)
+                    or row.open_time_ms != expected_open_ms
+                ):
                     raise ReplayDomainError(
                         ReplayErrorCode.DATASET_MISMATCH,
                         "paged BAR loader changed the committed source order",
                     )
-                expected_close_ms = compute_bucket_end_ms(
-                    expected_open_ms,
-                    self.interval_ms,
-                    interval=self.snapshot.interval,
-                ) - 1
+                expected_close_ms = (
+                    compute_bucket_end_ms(
+                        expected_open_ms,
+                        self.interval_ms,
+                        interval=self.snapshot.interval,
+                    )
+                    - 1
+                )
                 if row.close_time_ms != expected_close_ms:
                     raise ReplayDomainError(
                         ReplayErrorCode.DATASET_INCOMPLETE,
@@ -144,6 +222,7 @@ class PagedBarReplaySource:
         source_fingerprint: str,
         page_rows: int,
         page_loader: Callable[[int, int, int], tuple[ReplayBar, ...]],
+        verified_halts: tuple[ReplayBarHalt, ...] = (),
     ) -> None:
         if not isinstance(snapshot, BarDatasetSnapshot):
             raise TypeError("snapshot must be BarDatasetSnapshot")
@@ -169,19 +248,27 @@ class PagedBarReplaySource:
             terminal_open_ms=terminal_open_ms,
             page_rows=page_rows,
             page_loader=page_loader,
+            verified_halts=verified_halts,
         )
         initial_ref = snapshot.snapshot_ref().to_dict()
-        self._snapshot_ref: Mapping[str, object] = MappingProxyType(
-            {
-                "schema_version": PAGED_BAR_SOURCE_SCHEMA_VERSION,
-                "data_epoch": snapshot.data_epoch,
-                "initial_snapshot_ref": initial_ref,
-                "source_revision": source_revision,
-                "source_fingerprint": source_fingerprint,
-                "terminal_open_ms": terminal_open_ms,
-                "page_rows": page_rows,
-            }
-        )
+        snapshot_ref: dict[str, object] = {
+            "schema_version": (
+                PAGED_BAR_SOURCE_SCHEMA_VERSION_V2
+                if verified_halts
+                else PAGED_BAR_SOURCE_SCHEMA_VERSION
+            ),
+            "data_epoch": snapshot.data_epoch,
+            "initial_snapshot_ref": initial_ref,
+            "source_revision": source_revision,
+            "source_fingerprint": source_fingerprint,
+            "terminal_open_ms": terminal_open_ms,
+            "page_rows": page_rows,
+        }
+        if verified_halts:
+            snapshot_ref["verified_market_halts"] = [
+                halt.to_dict() for halt in verified_halts
+            ]
+        self._snapshot_ref: Mapping[str, object] = MappingProxyType(snapshot_ref)
         self._index = 0
 
     @classmethod
@@ -219,8 +306,8 @@ class PagedBarReplaySource:
         expected_last_time = (
             None
             if source_sequence == 0
-            else self._archive.snapshot.replay_start_ms
-            + source_sequence * self._archive.interval_ms
+            else self._archive.open_at_index(source_sequence - 1)
+            + self._archive.interval_ms
             - 1
         )
         if last_event_time_ms != expected_last_time:
@@ -259,10 +346,7 @@ class PagedBarReplaySource:
 
     def cursor(self) -> SourceCursor:
         previous_open_ms = (
-            None
-            if self._index == 0
-            else self._archive.snapshot.replay_start_ms
-            + (self._index - 1) * self._archive.interval_ms
+            None if self._index == 0 else self._archive.open_at_index(self._index - 1)
         )
         return SourceCursor(
             source_sequence=self._index,
@@ -280,6 +364,10 @@ class PagedBarReplaySource:
 
     def remaining_count(self) -> int:
         return self._archive.total_rows - self._index
+
+    @property
+    def terminal_time_ms(self) -> int:
+        return self._archive.terminal_open_ms + self._archive.interval_ms - 1
 
 
 class BarReplaySource:

@@ -24,7 +24,9 @@ from app.data_engine.interval_policy import (
 from ..canonical import canonical_sha256
 from ..dataset import ReplayBar
 from ..errors import ReplayDomainError, ReplayErrorCode
+from ..market_halts import ReplayBarHalt
 from ..models import normalize_decimal_string, validate_timestamp_ms
+from .schedule import ReplayBarSchedule
 
 
 BAR_BUILDER_STATE_SCHEMA_VERSION = "replay-bar-builder-state.v1"
@@ -365,6 +367,7 @@ class ReplayBarBuilder:
         warmup_bars: Iterable[ReplayBar] = (),
         max_closed_bars: int = 2_048,
         synthetic_policy: str = BAR_SYNTHETIC_POLICY,
+        verified_halts: Iterable[ReplayBarHalt] = (),
     ) -> None:
         self._capability = assess_bar_builder_capability(
             base_interval,
@@ -381,7 +384,9 @@ class ReplayBarBuilder:
             TRADE_SYNTHETIC_POLICY,
         }:
             raise ValueError("synthetic_policy is unsupported")
-        self._gap_policy = BAR_GAP_POLICY
+        self._verified_halts = tuple(verified_halts)
+        self._schedule = ReplayBarSchedule(base_interval, self._verified_halts)
+        self._gap_policy = self._schedule.gap_policy
         self._synthetic_policy = synthetic_policy
         self._capability = replace(
             self._capability,
@@ -414,6 +419,11 @@ class ReplayBarBuilder:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "replay start is not aligned to the base interval",
             )
+        if not self._schedule.is_expected_open(self._replay_start_ms):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "replay start falls inside a verified market halt",
+            )
         if isinstance(max_closed_bars, bool) or not isinstance(max_closed_bars, int):
             raise TypeError("max_closed_bars must be an integer")
         if max_closed_bars < 1:
@@ -425,14 +435,15 @@ class ReplayBarBuilder:
                 ReplayErrorCode.DATASET_INCOMPLETE,
                 "warmup contains a non-ReplayBar value",
             )
-        self._warmup_fingerprint = canonical_sha256(
-            {
-                "schema_version": BAR_BUILDER_WARMUP_SCHEMA_VERSION,
-                "base_interval": self._base_interval,
-                "replay_start_ms": self._replay_start_ms,
-                "bars": [bar.to_dict() for bar in self._warmup_bars],
-            }
-        )
+        warmup_fingerprint_payload: dict[str, object] = {
+            "schema_version": BAR_BUILDER_WARMUP_SCHEMA_VERSION,
+            "base_interval": self._base_interval,
+            "replay_start_ms": self._replay_start_ms,
+            "bars": [bar.to_dict() for bar in self._warmup_bars],
+        }
+        if self._verified_halts:
+            warmup_fingerprint_payload["bar_schedule_hash"] = self._schedule.fingerprint
+        self._warmup_fingerprint = canonical_sha256(warmup_fingerprint_payload)
         self.reset()
 
     @property
@@ -505,6 +516,7 @@ class ReplayBarBuilder:
             warmup_bars=self._warmup_bars,
             max_closed_bars=self._max_closed_bars,
             synthetic_policy=self._synthetic_policy,
+            verified_halts=self._verified_halts,
         )
         for bar in revealed:
             rebuilt.apply_bar(bar)
@@ -574,10 +586,17 @@ class ReplayBarBuilder:
             self._display_interval_ms,
             interval=self._display_interval,
         )
-        expected_components = self._expected_components(
-            bucket_open_ms,
-            bucket_end_ms,
+        expected_components, expected_first_open_ms, expected_last_open_ms = (
+            self._expected_component_bounds(
+                bucket_open_ms,
+                bucket_end_ms,
+            )
         )
+        if expected_first_open_ms is None or expected_last_open_ms is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "BAR source event falls inside a fully halted display bucket",
+            )
 
         if self._active_bar is None:
             candidate = ReplayDisplayBar(
@@ -609,9 +628,9 @@ class ReplayBarBuilder:
             candidate = self._accumulate(self._active_bar, bar, normalized)
             action = BarProjectionAction.TICK
 
-        reaches_bucket_end = bar.close_time_ms == bucket_end_ms - 1
+        reaches_bucket_end = bar.open_time_ms == expected_last_open_ms
         complete = (
-            candidate.first_base_open_ms == bucket_open_ms
+            candidate.first_base_open_ms == expected_first_open_ms
             and candidate.component_count == expected_components
         )
         if candidate.component_count > expected_components:
@@ -917,6 +936,17 @@ class ReplayBarBuilder:
                 )
             return
 
+        scheduled_prefix_count = self._schedule.expected_count(
+            display_open_ms,
+            self._replay_start_ms,
+        )
+        if scheduled_prefix_count == 0:
+            if self._active_bar is not None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_INCOMPLETE,
+                    "warmup revealed a component inside a fully halted prefix",
+                )
+            return
         required_prefix_count = self._count_base_components(
             display_open_ms,
             self._replay_start_ms,
@@ -941,6 +971,13 @@ class ReplayBarBuilder:
     ) -> int:
         return self._count_base_components(bucket_open_ms, bucket_end_ms)
 
+    def _expected_component_bounds(
+        self,
+        bucket_open_ms: int,
+        bucket_end_ms: int,
+    ) -> tuple[int, int | None, int | None]:
+        return self._schedule.expected_bounds(bucket_open_ms, bucket_end_ms)
+
     def _count_base_components(self, start_ms: int, end_ms: int) -> int:
         if start_ms >= end_ms:
             raise ReplayDomainError(
@@ -948,17 +985,11 @@ class ReplayBarBuilder:
                 "display bucket has an invalid time range",
             )
         if not is_monthly_interval(self._base_interval):
-            duration_ms = end_ms - start_ms
-            if duration_ms % self._base_interval_ms:
-                raise ReplayDomainError(
-                    ReplayErrorCode.UNSUPPORTED_INTERVAL,
-                    "display bucket cannot be tiled by the base interval",
-                )
-            count = duration_ms // self._base_interval_ms
+            count = self._schedule.expected_count(start_ms, end_ms)
             if count < 1:
                 raise ReplayDomainError(
-                    ReplayErrorCode.UNSUPPORTED_INTERVAL,
-                    "display bucket has no base components",
+                    ReplayErrorCode.DATASET_INCOMPLETE,
+                    "display bucket contains no scheduled base components",
                 )
             return count
 
@@ -986,22 +1017,19 @@ class ReplayBarBuilder:
         return count
 
     def _next_base_open(self, open_time_ms: int) -> int:
-        return compute_bucket_end_ms(
-            open_time_ms,
-            self._base_interval_ms,
-            interval=self._base_interval,
-        )
+        return self._schedule.next_expected_open(open_time_ms)
 
     def _initial_closed_chain_hash(self) -> str:
-        return canonical_sha256(
-            {
-                "schema_version": BAR_BUILDER_CLOSED_CHAIN_SCHEMA_VERSION,
-                "base_interval": self._base_interval,
-                "display_interval": self._display_interval,
-                "replay_start_ms": self._replay_start_ms,
-                "warmup_fingerprint": self._warmup_fingerprint,
-            }
-        )
+        payload: dict[str, object] = {
+            "schema_version": BAR_BUILDER_CLOSED_CHAIN_SCHEMA_VERSION,
+            "base_interval": self._base_interval,
+            "display_interval": self._display_interval,
+            "replay_start_ms": self._replay_start_ms,
+            "warmup_fingerprint": self._warmup_fingerprint,
+        }
+        if self._verified_halts:
+            payload["bar_schedule_hash"] = self._schedule.fingerprint
+        return canonical_sha256(payload)
 
     @staticmethod
     def _next_closed_chain_hash(
@@ -1208,14 +1236,16 @@ class ReplayBarBuilder:
             )
 
         for previous, current in zip(closed_bars, closed_bars[1:]):
-            if current.open_time_ms != self._next_display_open(previous.open_time_ms):
+            if current.open_time_ms != self._next_scheduled_display_open(
+                previous.open_time_ms
+            ):
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
-                    "retained closed display bars are not contiguous",
+                    "retained closed display bars do not follow the BAR schedule",
                 )
         if active_bar is not None:
-            if closed_bars and active_bar.open_time_ms != self._next_display_open(
-                closed_bars[-1].open_time_ms
+            if closed_bars and active_bar.open_time_ms != (
+                self._next_scheduled_display_open(closed_bars[-1].open_time_ms)
             ):
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
@@ -1273,17 +1303,24 @@ class ReplayBarBuilder:
             self._display_interval_ms,
             interval=self._display_interval,
         )
-        expected_components = self._expected_components(
-            bucket_open_ms,
-            bucket_end_ms,
+        expected_components, expected_first_open_ms, expected_last_open_ms = (
+            self._expected_component_bounds(
+                bucket_open_ms,
+                bucket_end_ms,
+            )
         )
+        if expected_first_open_ms is None or expected_last_open_ms is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "display bar cannot occupy a fully halted bucket",
+            )
         if (
             bar.open_time_ms != bucket_open_ms
             or bar.close_time_ms != bucket_end_ms - 1
             or bar.expected_components != expected_components
             or bar.component_count < 1
             or bar.component_count > expected_components
-            or bar.first_base_open_ms != bucket_open_ms
+            or bar.first_base_open_ms != expected_first_open_ms
             or compute_bucket_start_ms(
                 bar.last_base_open_ms,
                 self._base_interval_ms,
@@ -1302,7 +1339,7 @@ class ReplayBarBuilder:
             )
         complete = (
             bar.component_count == expected_components
-            and self._next_base_open(bar.last_base_open_ms) == bucket_end_ms
+            and bar.last_base_open_ms == expected_last_open_ms
         )
         if complete is not expected_closed:
             raise ReplayDomainError(
@@ -1373,19 +1410,25 @@ class ReplayBarBuilder:
             if not self._warmup_bars:
                 return None
             return self._warmup_bars[-1].open_time_ms
-        if not is_monthly_interval(self._base_interval):
-            return (
-                self._replay_start_ms
-                + (replay_events_applied - 1) * self._base_interval_ms
-            )
-        cursor_ms = self._replay_start_ms
-        for _ in range(replay_events_applied - 1):
-            cursor_ms = self._next_base_open(cursor_ms)
-        return cursor_ms
+        return self._schedule.nth_expected_open(
+            self._replay_start_ms,
+            replay_events_applied - 1,
+        )
 
     def _next_display_open(self, open_time_ms: int) -> int:
         return compute_bucket_end_ms(
             open_time_ms,
+            self._display_interval_ms,
+            interval=self._display_interval,
+        )
+
+    def _next_scheduled_display_open(self, open_time_ms: int) -> int:
+        next_bucket_open_ms = self._next_display_open(open_time_ms)
+        next_expected_base_open_ms = self._schedule.next_expected_at_or_after(
+            next_bucket_open_ms
+        )
+        return compute_bucket_start_ms(
+            next_expected_base_open_ms,
             self._display_interval_ms,
             interval=self._display_interval,
         )

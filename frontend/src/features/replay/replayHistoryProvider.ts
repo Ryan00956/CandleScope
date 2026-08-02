@@ -143,6 +143,26 @@ export function replayHistoryInitialBeforeMs(
 }
 
 /**
+ * Resolve the first history cursor against the projection that currently owns
+ * the chart's left edge. Blinded source-bucket projections preserve the
+ * exchange candle phase, so their first bar can differ from the canonical
+ * calendar bucket containing replayStartMs. In that mode the authoritative
+ * store must exist before history paging starts and its first open is the only
+ * valid connection cursor. Locally-derived projections retain the older seam
+ * behavior so a complete history bucket can replace a partial warmup bucket.
+ */
+export function replayHistoryFirstPageBeforeMs(
+  store: SeriesWindowStore,
+  replayStartMs: number | null,
+  displayInterval: string | null,
+  usesSourceBucketProjection: boolean,
+): number | null {
+  const storeBeforeMs = replayHistoryStoreBeforeMs(store);
+  if (usesSourceBucketProjection) return storeBeforeMs;
+  return replayHistoryInitialBeforeMs(replayStartMs, displayInterval) ?? storeBeforeMs;
+}
+
+/**
  * Resolve one aligned history page boundary that contains a transferred chart
  * anchor. Returning null means the active display store already spans it (or
  * the anchor cannot be requested without crossing the revealed replay edge).

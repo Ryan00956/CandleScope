@@ -245,8 +245,9 @@ test("history paging stays non-blocking and uses viewer delta projection", () =>
   assert.match(workspace, /history\.loading && <span>Loading older replay data/);
   assert.match(runtime, /applyReplayViewerSeriesDelta/);
   assert.match(runtime, /pendingSourceDeltas\.push\(delta\)/);
-  assert.match(historyRuntime, /replayHistoryInitialBeforeMs/);
+  assert.match(historyRuntime, /replayHistoryFirstPageBeforeMs/);
   assert.match(historyRuntime, /provider\.historyEpoch === null/);
+  assert.match(historyRuntime, /usesSourceBucketProjection/);
   assert.match(historyRuntime, /historyState\.key === historyKey/);
   assert.match(historyRuntime, /latest\.generation !== runtimeGeneration/);
   assert.match(

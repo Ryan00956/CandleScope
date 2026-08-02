@@ -5,7 +5,7 @@ import type { ReplayDigest } from "./replayTypes.js";
 import {
   ReplayHistoryProvider,
   applyReplayHistoryPage,
-  replayHistoryInitialBeforeMs,
+  replayHistoryFirstPageBeforeMs,
   replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
   replayHistoryViewportTransferNeedsLatestWindow,
@@ -232,17 +232,20 @@ export function useReplayHistoryRuntime(
     const storeBeforeMs = replayHistoryStoreBeforeMs(
       viewer.seriesStore,
     );
-    const initialBeforeMs = replayHistoryInitialBeforeMs(
+    const firstPageBeforeMs = replayHistoryFirstPageBeforeMs(
+      viewer.seriesStore,
       store.replayStartMs,
       displayInterval,
+      usesSourceBucketProjection,
     );
-    // The first native-display page owns every complete display bucket before
-    // the replay seam, including buckets that overlap the frozen base warmup.
-    // Later pages continue from the oldest display-owned row.
+    // Source-bucket pages connect to the authoritative projection's exact
+    // source phase. Other first pages retain the replay seam so history can
+    // replace an overlapping partial warmup bucket. Later pages always
+    // continue from the oldest display-owned row.
     const beforeMs = pendingViewportBeforeMs
       ?? pendingRepairBeforeMs
-      ?? (provider.historyEpoch === null && initialBeforeMs !== null
-        ? initialBeforeMs
+      ?? (provider.historyEpoch === null && firstPageBeforeMs !== null
+        ? firstPageBeforeMs
         : storeBeforeMs);
     if (beforeMs === null) return;
     if (pendingViewportBeforeMs !== null) {
@@ -350,6 +353,7 @@ export function useReplayHistoryRuntime(
     provider,
     runtimeGeneration,
     sessionId,
+    usesSourceBucketProjection,
     viewer.seriesStore,
     historyViewportTransfer,
   ]);

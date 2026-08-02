@@ -6,6 +6,7 @@ import {
   ReplayHistoryProvider,
   ReplayHistoryProtocolError,
   applyReplayHistoryPage,
+  replayHistoryFirstPageBeforeMs,
   replayHistoryInitialBeforeMs,
   replayHistoryRevealRepairBeforeMs,
   replayHistoryStoreBeforeMs,
@@ -255,6 +256,60 @@ test("initial display history starts at the replay seam instead of an incomplete
   );
   assert.equal(replayHistoryInitialBeforeMs(null, "1h"), null);
   assert.equal(replayHistoryInitialBeforeMs(946_684_800_000, "invalid"), null);
+});
+
+test("source-bucket first page connects to the authoritative phase across coarse intervals", () => {
+  const cases = [
+    { interval: "1d", firstOpenMs: 946_598_400_000, calendarSeamMs: 946_684_800_000 },
+    { interval: "3d", firstOpenMs: 946_598_400_000, calendarSeamMs: 946_598_400_000 },
+    { interval: "1w", firstOpenMs: 945_648_000_000, calendarSeamMs: 946_252_800_000 },
+    { interval: "1M", firstOpenMs: 941_414_400_000, calendarSeamMs: 946_684_800_000 },
+  ] as const;
+
+  for (const { interval, firstOpenMs, calendarSeamMs } of cases) {
+    const store = new SeriesWindowStore({ maxBars: 100 });
+    store.replace([{
+      time: firstOpenMs / 1_000,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100.5,
+      volume: 1,
+      replayClosed: true,
+    }]);
+
+    assert.equal(
+      replayHistoryFirstPageBeforeMs(store, 946_684_800_000, interval, true),
+      firstOpenMs,
+    );
+    assert.equal(
+      replayHistoryFirstPageBeforeMs(store, 946_684_800_000, interval, false),
+      calendarSeamMs,
+    );
+  }
+});
+
+test("source-bucket history waits for its authoritative projection", () => {
+  const store = new SeriesWindowStore({ maxBars: 100, intervalSeconds: 604_800 });
+
+  assert.equal(
+    replayHistoryFirstPageBeforeMs(store, 946_684_800_000, "1w", true),
+    null,
+  );
+  assert.equal(
+    replayHistoryFirstPageBeforeMs(store, 946_684_800_000, "1w", false),
+    946_252_800_000,
+  );
+});
+
+test("local first-page cursor falls back to the store when the replay seam is unavailable", () => {
+  const store = new SeriesWindowStore({ maxBars: 100 });
+  store.replace([{ time: 946_598_400, open: 100, high: 101, low: 99, close: 100.5, volume: 1 }]);
+
+  assert.equal(
+    replayHistoryFirstPageBeforeMs(store, null, "1d", false),
+    946_598_400_000,
+  );
 });
 
 test("viewport history targets the aligned bucket around an uncovered interval anchor", () => {

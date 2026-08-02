@@ -4480,7 +4480,8 @@ class TrainingRunStore:
             row = connection.execute(
                 """
                 SELECT r.adapter_session_id, r.time_disclosure_policy,
-                       r.base_interval, r.display_interval, i.revealed,
+                       r.base_interval, r.display_interval, r.virtual_time_ms,
+                       i.revealed,
                        d.actual_replay_start_ms, d.actual_replay_end_ms,
                        d.synthetic_origin_ms,
                        policy.effective_warmup_bars,
@@ -4537,13 +4538,30 @@ class TrainingRunStore:
             # chart timestamps also include the final bar's close time, so the
             # valid closed interval ends one base interval after the last open
             # (exclusive) rather than at the last open itself.
-            upper = (
+            initial_forward_upper = (
                 public_origin
                 + int(row["actual_replay_end_ms"])
                 - actual_origin
                 + interval_ms
                 - 1
             )
+            current_public_cursor = int(row["virtual_time_ms"])
+            if (
+                current_public_cursor < 0
+                or current_public_cursor > 253_402_300_799_999
+            ):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training public cursor is invalid",
+                    status_code=503,
+                )
+            # Paged BAR runs may continue beyond the eagerly persisted forward
+            # cache.  The Run cursor is the server-authoritative, already-public
+            # frontier, so extending to it admits revealed pages without exposing
+            # the private terminal committed by the paging manifest.  Preserve
+            # the initial cache allowance for fixed datasets and display-bucket
+            # alignment established by the Phase 12 public-time contract.
+            upper = max(initial_forward_upper, current_public_cursor)
             if lower < 0 or any(value < lower or value > upper for value in normalized):
                 raise TrainingRunError(
                     "TRAINING_RUN_INVALID",

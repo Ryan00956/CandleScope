@@ -633,6 +633,7 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         )
         assert service.training is not None
         created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])
 
         def command(
@@ -682,6 +683,30 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         builder = paged_snapshot["components"]["bar_builder"]
         replay_start_ms = int(builder["replay_start_ms"])
         revealed_boundary_ms = int(paged_snapshot["cursor"]["virtual_time_ms"])
+        persisted = await service.store.load_dataset(session_id)
+        assert persisted is not None
+        initial_forward_upper = (
+            int(persisted["synthetic_origin_ms"])
+            + int(persisted["actual_replay_end_ms"])
+            - int(persisted["actual_replay_start_ms"])
+            + INTERVAL_MS
+            - 1
+        )
+        assert revealed_boundary_ms > initial_forward_upper
+        public_times = await service.training.public_times(
+            run_id,
+            timeline_ms=(revealed_boundary_ms,),
+        )
+        assert [item["input_timeline_ms"] for item in public_times["items"]] == [
+            revealed_boundary_ms
+        ]
+        with pytest.raises(TrainingRunError, match="outside the pinned"):
+            await service.training.public_times(
+                run_id,
+                timeline_ms=(revealed_boundary_ms + 1,),
+            )
+        report = await service.training.report(run_id)
+        assert report["run_id"] == run_id
         revealed_page = await service.training.history_page(
             session_id,
             track_id="track-1",
@@ -704,8 +729,6 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         assert revealed_bar["component_count"] == 5
         assert revealed_bar["is_closed"] is True
         assert revealed_bar["close_time_ms"] <= revealed_boundary_ms
-        persisted = await service.store.load_dataset(session_id)
-        assert persisted is not None
         bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
         assert bundle["schema_version"] == "replay-paged-bar-session-dataset.v1"
         assert bundle["paging_manifest"]["source_revision"] == manifest.catalog_epoch
@@ -718,6 +741,14 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         assert snapshot["state"] == "PAUSED"
         assert snapshot["cursor"]["source_sequence"] == 6
         assert snapshot["cursor"]["at_end"] is False
+        assert recovered.training is not None
+        public_times = await recovered.training.public_times(
+            run_id,
+            timeline_ms=(int(snapshot["cursor"]["virtual_time_ms"]),),
+        )
+        assert [item["input_timeline_ms"] for item in public_times["items"]] == [
+            int(snapshot["cursor"]["virtual_time_ms"])
+        ]
     finally:
         await recovered.shutdown(step_timeout=1.0)
 

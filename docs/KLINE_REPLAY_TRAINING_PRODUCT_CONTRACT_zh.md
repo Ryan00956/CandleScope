@@ -12,7 +12,7 @@ Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 
 ## 1. 合同地位与解释规则
 
-本文是回放训练 v2 的产品真值，回答“用户最终得到什么、每个操作究竟是什么意思、缺数据时必须怎样表现”。配套执行文档回答“怎样分阶段把现有 Replay v1 迁移到这个产品”。
+本文是回放训练 v2 的产品真值，回答“用户最终得到什么、每个操作究竟是什么意思、缺数据时必须怎样表现”。配套执行文档记录从 Replay v1 内核演进到这个产品的实现过程；v1 不再作为用户可选择的产品或存档格式。
 
 本文使用以下约束词：
 
@@ -108,7 +108,7 @@ Track 生命周期只允许：
 
 `CapabilityKind`、v2 command type 和 event type 的完整集合以同一 canonical golden 为机器可读真值；新增、删除或改名必须先修订本合同、同步两端定义并更新 golden，未知值一律拒绝。时间披露只能保持或变得更严格；变得更宽松必须通过后续 Phase 实现的显式、不可撤销审计事件，普通 parser/projection 不得静默降级。
 
-Schema 迁移策略固定为 `ADDITIVE_ONLY`：v2 只能新增表、索引和读取路径；不得重命名、删除、就地改写 `replay.v1` 表或旧 JSON/hash。v1 到 v2 的任何转换都创建新 `TrainingRun` 并保留 parent ref。
+开发阶段只支持新建的 v2 `TrainingRun`。裸 `replay_session` 是 v2 执行器的内部 adapter 状态，不得出现在训练大厅，不提供迁移、兼容打开或通过 Hub 删除的公共入口；不符合当前 v2 合同的记录一律 fail closed，并通过清空开发数据后重建解决。
 
 首个多商品闭环限定在同一交易所、同一市场类型、同一结算资产的线性合约组合，例如同一 USDT 结算账户下的多个商品。跨交易所、跨现货与合约、跨结算币种不属于首个闭环。
 
@@ -319,7 +319,7 @@ flowchart LR
 - 新建训练默认使用 `ALL_AVAILABLE`；主图初次打开包含指标 warmup 历史，用户继续向左滚动时应像实时页一样分段加载，直到创建时绑定的连续历史起点。
 - 用户向左滚动时复用实时 backfill 的范围规划、去重、取消、缓存和 `SeriesWindowStore` 增量语义，但数据请求必须走 replay-aware history provider。
 - 已挂载图表的分页状态不得映射为整图 loading/空白遮罩；ViewerState 投影必须把历史页继续发布为 `prepend`（聚合边界修正可追加 `mid-merge`），把推进发布为 `tick/append`。只有初次装载、身份/周期切换或权威重同步才允许 `replace`。图表实例、pane、缩放和可见时间锚点在左侧分页期间必须保持，体感与实时行情一致。
-- `indicator_warmup_bars` 只决定执行/指标初始化快照，不得作为图表可浏览历史上限。`DURATION` 仅作为旧 Run 与显式固定窗口的兼容策略。
+- `indicator_warmup_bars` 只决定执行/指标初始化快照，不得作为图表可浏览历史上限。`DURATION` 仅表示显式固定窗口策略。
 - 更早历史必须绑定该 MarketTrack 的 history epoch、创建时确定的 source identity 与连续历史边界。`ALL_AVAILABLE` 可由 replay service 从本地只读 K 线仓库按固定范围分页，但不得触发 live backfill、交易所网络请求、live HTTP/WS 或读取浏览器实时缓存；行数、时间序列、身份或连续性不符时必须 fail closed。
 - 前端可以使用有界滑动窗口控制内存；若向左分页淘汰了窗口右端，用户重新向右触边时必须通过 replay 权威快照恢复当前已揭示窗口，并重置 history provider，使其随后仍可再次向左分页。不得把内存上限伪装成历史终点，也不得用 live 数据修补右端。
 - backfill 只能返回该 `MarketTrack` 的历史数据，且任何向右数据不得超过当前全局 `VirtualTime`。
@@ -591,7 +591,7 @@ flowchart LR
 - 单个 `FULL` MarketTrack 故障：整个组合训练暂停，避免跨商品时钟分叉。
 - 存储写失败：命令不得先对用户显示成功；commit-before-publish。
 - checkpoint 损坏：只允许回退到经过校验的旧 checkpoint 并重放；没有可信恢复点则 fail closed。
-- 版本不兼容：存档大厅显示只读说明和可执行迁移/导出路径，不得静默改写 golden hash。
+- 版本不兼容：拒绝载入并给出重新创建指引；不得合成兼容卡片、静默迁移或改写 golden hash。
 - 数据需要重下：显示来源、范围、预计大小和进度；取消后存档仍保持可恢复状态。
 
 所有错误都必须区分“产品不支持”“当前没有历史”“正在加载”“数据已降级”“内部故障”，并给出下一步。
@@ -640,7 +640,7 @@ flowchart LR
 25. ReviewMode 可定位开平仓和最大回撤，原存档 hash 不变；从中继续会创建 fork。
 26. GC 不删除不可重建的存档数据；可重建冷数据回收后能按 manifest 恢复到同一 dataset hash。
 27. 历史 OI、市场爆仓、订单簿或订单流不支持时，原面板位置明确显示原因而非空白或零。
-28. v1 legacy 存档在大厅中有明确版本标识；迁移或只读恢复不会静默改写原 hash。
+28. 裸 v1 adapter session 不进入大厅，迁移路由不存在，Hub 删除接口也不得接受其 session id。
 
 ---
 

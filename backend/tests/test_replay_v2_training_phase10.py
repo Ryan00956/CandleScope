@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None:
     matrix, validated = release_verifier._validate_matrix()
-    assert matrix["production_enablement"] == "HOLD_CORE_DEFAULT_OFF_V2_DEFAULT_ON"
+    assert matrix["production_enablement"] == "HOLD_CORE_DEFAULT_OFF"
     assert matrix["expected_scenarios"] == 40
     assert [scenario["id"] for scenario in validated] == list(range(1, 41))
     assert all(scenario["validated"] is True for scenario in validated)
@@ -33,20 +33,17 @@ def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None
     }
 
 
-def test_phase10_keeps_core_off_while_v2_is_the_default_product(
+def test_phase10_keeps_the_single_core_gate_default_off(
     tmp_path: Path,
 ) -> None:
     settings = load_replay_settings(
         {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
     )
     assert settings.enabled is False
-    assert settings.product_v2_enabled is True
     assert settings.replay_historical_book_enabled is False
     assert release_verifier._validate_default_flags() == {
         "REPLAY_ENABLED": "0",
-        "REPLAY_PRODUCT_V2_ENABLED": "1",
         "VITE_REPLAY_ENTRY_ENABLED": "0",
-        "VITE_REPLAY_PRODUCT_V2_ENABLED": "1",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
         "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
@@ -148,8 +145,10 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         encoding="utf-8"
     )
     package = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
+    verifier = (ROOT / "backend/scripts/verify_replay_v2_release.py").read_text(
+        encoding="utf-8"
+    )
     for needle in (
-        "--product-v2",
         "v2ArchiveLifecycleCycle",
         "v2AccessibilityAudit",
         "v2_keyboard_accessible",
@@ -160,9 +159,6 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
     ):
         assert needle in soak
     for needle in (
-        "--product-v2",
-        "REPLAY_PRODUCT_V2_ENABLED",
-        "VITE_REPLAY_PRODUCT_V2_ENABLED",
         "--live-window",
         "--disable-gap-maintenance",
         '#replay-status-bar, #status-bar[data-runtime-source="replay"]',
@@ -180,7 +176,13 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
     assert "--duration-ms 14400000 --cycles 100" in package["scripts"][
         "soak:replay:v2:4h"
     ]
-    assert "--product-v2" in package["scripts"]["drill:replay:v2:rollback"]
+    assert "--product-v2" not in soak
+    assert "--product-v2" not in rollback
+    assert "--product-v2" not in package["scripts"]["drill:replay:v2:rollback"]
+    assert "REPLAY_PRODUCT_V2_ENABLED" not in soak
+    assert "REPLAY_PRODUCT_V2_ENABLED" not in rollback
+    assert "REPLAY_PRODUCT_V2_ENABLED" not in verifier
+    assert "replay-v1-smoke" not in verifier
 
 
 def test_formal_fast_forward_refreshes_controller_lease_between_chunks() -> None:

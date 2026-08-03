@@ -162,6 +162,16 @@ class CountingReducer:
     def has_trading_state(self) -> bool:
         return self._trading_state
 
+    def final_state_transport_anchor(self) -> int | None:
+        return None
+
+    def final_state_transport_projection(
+        self,
+        replace_from_open_ms: int | None,
+    ) -> Mapping[str, object]:
+        del replace_from_open_ms
+        return {"fixture_count": self.count, "fixture_total": self.total}
+
 
 class GateReducer(CountingReducer):
     def __init__(self) -> None:

@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 
 
-REPLAY_SCHEMA_VERSION = 3
+REPLAY_SCHEMA_VERSION = 4
 
 
-SCHEMA_V2 = """
+SCHEMA_CURRENT = """
 CREATE TABLE IF NOT EXISTS replay_session (
     session_id TEXT PRIMARY KEY,
     config_json TEXT NOT NULL,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS replay_source_event (
 CREATE TABLE IF NOT EXISTS replay_checkpoint (
     checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES replay_session(session_id) ON DELETE CASCADE,
-    mutation_id INTEGER CHECK (mutation_id IS NULL OR mutation_id >= 0),
+    mutation_id INTEGER NOT NULL CHECK (mutation_id >= 0),
     source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
     command_log_offset INTEGER NOT NULL CHECK (command_log_offset >= 0),
     event_sequence INTEGER NOT NULL CHECK (event_sequence >= 0),
@@ -150,76 +150,65 @@ CREATE TABLE IF NOT EXISTS replay_report (
 
 
 def migrate_replay_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
-    """Migrate only the already-open replay connection, fail-closed on drift."""
+    """Create the current schema on a fresh DB and reject every legacy shape."""
 
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS replay_schema_version (
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-            version INTEGER NOT NULL CHECK (version >= 0),
-            applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms >= 0)
+    replay_tables = {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name LIKE 'replay_%'
+            """
+        ).fetchall()
+    }
+    if "replay_schema_version" in replay_tables:
+        row = connection.execute(
+            "SELECT version FROM replay_schema_version WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "unversioned replay schema is unsupported; clear REPLAY_DB_PATH "
+                "and start with a fresh database"
+            )
+        current = int(row[0])
+    else:
+        if replay_tables:
+            raise RuntimeError(
+                "unversioned replay tables are unsupported; clear REPLAY_DB_PATH "
+                "and start with a fresh database"
+            )
+        current = None
+
+    if current is None:
+        connection.execute(
+            """
+            CREATE TABLE replay_schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0),
+                applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms >= 0)
+            )
+            """
         )
-        """
-    )
-    row = connection.execute(
-        "SELECT version FROM replay_schema_version WHERE singleton = 1"
-    ).fetchone()
-    current = 0 if row is None else int(row[0])
+        for statement in SCHEMA_CURRENT.split(";"):
+            sql = statement.strip()
+            if sql:
+                connection.execute(sql)
+        connection.execute(
+            """
+            INSERT INTO replay_schema_version(singleton, version, applied_at_ms)
+            VALUES (1, ?, ?)
+            """,
+            (REPLAY_SCHEMA_VERSION, now_ms),
+        )
+        return
+
     if current > REPLAY_SCHEMA_VERSION:
         raise RuntimeError(
             f"replay schema {current} is newer than supported {REPLAY_SCHEMA_VERSION}"
         )
     if current == REPLAY_SCHEMA_VERSION:
         return
-    if current == 0:
-        for statement in SCHEMA_V2.split(";"):
-            sql = statement.strip()
-            if sql:
-                connection.execute(sql)
-        current = REPLAY_SCHEMA_VERSION
-    elif current == 1:
-        connection.execute(
-            "ALTER TABLE replay_checkpoint "
-            "ADD COLUMN mutation_id INTEGER "
-            "CHECK (mutation_id IS NULL OR mutation_id >= 0)"
-        )
-        # V1 did not persist a cross-table mutation watermark.  It cannot be
-        # reconstructed from state_hash/timestamps: controller, speed, and
-        # status-only mutations can share both values (and the configured
-        # clock may return the same millisecond for every transaction).  NULL
-        # therefore explicitly marks a legacy checkpoint.  Recovery may use
-        # only the latest intact legacy checkpoint when it exactly represents
-        # the durable session row; older/corrupt fallbacks fail closed instead
-        # of silently skipping an ambiguous mutation tail.
-        current = 2
-    if current == 2:
-        columns = {
-            str(row[1])
-            for row in connection.execute(
-                "PRAGMA table_info(replay_dataset_ref)"
-            ).fetchall()
-        }
-        if "snapshot_object_id" not in columns:
-            connection.execute(
-                "ALTER TABLE replay_dataset_ref "
-                "ADD COLUMN snapshot_object_id TEXT"
-            )
-        if "snapshot_size_bytes" not in columns:
-            connection.execute(
-                "ALTER TABLE replay_dataset_ref "
-                "ADD COLUMN snapshot_size_bytes INTEGER "
-                "CHECK (snapshot_size_bytes IS NULL OR snapshot_size_bytes >= 0)"
-            )
-        current = 3
-    if current != REPLAY_SCHEMA_VERSION:
-        raise RuntimeError(f"no replay schema migration path from version {current}")
-    connection.execute(
-        """
-        INSERT INTO replay_schema_version(singleton, version, applied_at_ms)
-        VALUES (1, ?, ?)
-        ON CONFLICT(singleton) DO UPDATE SET
-            version = excluded.version,
-            applied_at_ms = excluded.applied_at_ms
-        """,
-        (REPLAY_SCHEMA_VERSION, now_ms),
+    raise RuntimeError(
+        f"obsolete replay schema {current} is unsupported; clear REPLAY_DB_PATH "
+        "and start with a fresh database"
     )

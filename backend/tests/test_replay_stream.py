@@ -18,6 +18,7 @@ from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand, ReplayCursor, ReplayEvent
 from app.replay.service import ReplayService
 from app.replay.storage.sqlite_store import ReplaySQLiteStore
+from app.replay.training.errors import TrainingRunError
 from tests.fixtures.replay.actor_fakes import (
     CountingReducer,
     FixtureEvent,
@@ -388,8 +389,20 @@ class FakeActor:
         return completion
 
 
+class FakeTrainingStore:
+    async def run_id_for_session(self, session_id: str) -> str:
+        if session_id != "session-1":
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training adapter session does not exist",
+                status_code=404,
+            )
+        return "run-1"
+
+
 class FakeReplayService:
     def __init__(self, *, mode: str = "wait", wrong_epoch: bool = False) -> None:
+        self.training = SimpleNamespace(store=FakeTrainingStore())
         self.actor = FakeActor()
         self.subscription = FakeSubscription(mode=mode)
         self.wrong_epoch = wrong_epoch
@@ -582,6 +595,39 @@ def test_websocket_handoff_heartbeat_and_disconnect_cleanup() -> None:
     assert service.subscribe_args == (3, DIGEST)
     assert service.heartbeats == [("session-1", "browser-tab-1")]
     assert service.actor.unsubscribed == [1]
+
+
+def test_websocket_internal_adapter_is_closed_when_training_is_unavailable() -> None:
+    service = FakeReplayService()
+    service.training = None
+    with TestClient(_app(service)) as client:
+        with client.websocket_connect("/api/v1/stream/replay/session-1") as websocket:
+            error = websocket.receive_json()
+            assert error["protocol"] == "replay.v2"
+            assert error["error"]["code"] == "REPLAY_TRAINING_UNAVAILABLE"
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1013
+    assert service.subscribe_args is None
+
+
+def test_websocket_rejects_unowned_adapter_before_actor_handoff() -> None:
+    service = FakeReplayService()
+    with TestClient(_app(service)) as client:
+        with client.websocket_connect(
+            "/api/v1/stream/replay/bare-session"
+        ) as websocket:
+            error = websocket.receive_json()
+            assert error["protocol"] == "replay.v2"
+            assert error["error"] == {
+                "code": "TRAINING_RUN_NOT_FOUND",
+                "message": "training adapter session does not exist",
+                "details": {},
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1008
+    assert service.subscribe_args is None
 
 
 def test_websocket_slow_client_requires_resync_and_closes_1013() -> None:

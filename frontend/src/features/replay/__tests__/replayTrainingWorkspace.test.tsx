@@ -14,7 +14,10 @@ import {
   saveReplayWorkspacePreferences,
 } from "../replayWorkspacePreferences.js";
 import {
+  createReplayViewerProjectionRequestGate,
+  createReplayViewerProjectionRequestScheduler,
   createReplayViewerProjectionScheduler,
+  REPLAY_STORE_REVISION_ACK_TIMEOUT_MS,
   waitForReplayStoreRevision,
 } from "../useReplayViewerRuntime.js";
 
@@ -68,12 +71,12 @@ test("v2 workspace owns the same source-neutral market slots without legacy repl
   assert.doesNotMatch(workspace, /<header\s+className="top-bar replay-top-bar"/);
 });
 
-test("v2 session route is flag-gated and leaves the v1 shell as the rollback path", () => {
+test("every replay route stays on the v2 Hub or workspace", () => {
   const composition = source("src/features/replay/ReplayApp.tsx");
-  assert.match(composition, /REPLAY_PRODUCT_V2_ENABLED/);
   assert.match(composition, /ReplayTrainingPageShell/);
-  assert.match(composition, /ReplayPageShell/);
+  assert.match(composition, /entry\.kind === "configure"/);
   assert.match(composition, /entry\.kind === "session"/);
+  assert.doesNotMatch(composition, /ReplayV1App|ReplayPageShell|resolveReplayProduct/);
 });
 
 test("Phase 13 workspace projects ViewerState and exposes capability-driven advance bases", () => {
@@ -124,6 +127,11 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(viewerRuntime, /if \(!replayAdvanceIsCancelable\(active\)\) return/);
   assert.match(controls, /const cancelableAdvancePending = replayAdvanceIsCancelable/);
   assert.match(viewerRuntime, /payload\.basis === "DISPLAY_BAR"/);
+  assert.match(
+    viewerRuntime,
+    /createReplayViewerProjectionRequestScheduler\(refresh\)/,
+    "coarse projection I/O must not wait for a paint frame",
+  );
   assert.match(viewerRuntime, /defaultReplayV2Api\.advanceProgress/);
   assert.match(viewerRuntime, /"cancel_advance"/);
   assert.match(workspace, /const effectiveState = replayEffectiveTrainingState\(/);
@@ -313,7 +321,61 @@ test("viewer projection coalesces source bursts to one rebuild per browser frame
   assert.deepEqual(canceled, [2]);
 });
 
+test("viewer projection requests are latest-boundary-wins and dedupe committed keys", () => {
+  const created: AbortController[] = [];
+  const gate = createReplayViewerProjectionRequestGate(() => {
+    const request = new AbortController();
+    created.push(request);
+    return request;
+  });
+
+  const first = gate.begin("boundary-a");
+  assert.ok(first);
+  assert.equal(gate.begin("boundary-a"), null);
+  const second = gate.begin("boundary-b");
+  assert.ok(second);
+  assert.equal(first.signal.aborted, true);
+  assert.equal(gate.isCurrent("boundary-a", first), false);
+  assert.equal(gate.isCurrent("boundary-b", second), true);
+  assert.equal(gate.commit("boundary-a", first), false);
+  assert.equal(gate.commit("boundary-b", second), true);
+  assert.equal(gate.begin("boundary-b"), null);
+
+  const third = gate.begin("boundary-c");
+  assert.ok(third);
+  gate.cancel();
+  assert.equal(third.signal.aborted, true);
+  assert.equal(created.length, 3);
+});
+
+test("source-bucket projection requests cross authority on a microtask without waiting for paint", () => {
+  const callbacks: Array<() => void> = [];
+  let refreshes = 0;
+  const scheduler = createReplayViewerProjectionRequestScheduler(
+    () => { refreshes += 1; },
+    (callback) => { callbacks.push(callback); },
+  );
+
+  scheduler.schedule();
+  scheduler.schedule();
+  assert.equal(callbacks.length, 1);
+  assert.equal(refreshes, 0);
+  callbacks.shift()?.();
+  assert.equal(refreshes, 1);
+
+  scheduler.schedule();
+  assert.equal(callbacks.length, 1);
+  scheduler.cancel();
+  callbacks.shift()?.();
+  assert.equal(refreshes, 1);
+
+  scheduler.schedule();
+  callbacks.shift()?.();
+  assert.equal(refreshes, 2);
+});
+
 test("display advance acknowledgement waits for the authoritative stream revision", async () => {
+  assert.equal(REPLAY_STORE_REVISION_ACK_TIMEOUT_MS, 1_000);
   let revision = 3;
   const listeners = new Set<() => void>();
   const store = {

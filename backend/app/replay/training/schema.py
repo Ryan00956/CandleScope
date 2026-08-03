@@ -1,16 +1,13 @@
-"""Additive replay training schema that old replay.v1 builds safely ignore."""
+"""Replay training schema used by the v2 product and its internal adapter."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 
-from app.data_engine.interval_policy import parse_interval_ms
-from app.replay.archive_pins import persisted_bar_archive_reference
-from app.replay.canonical import canonical_json, canonical_sha256
+from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 9
+TRAINING_SCHEMA_VERSION = 10
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
@@ -26,8 +23,6 @@ CREATE TABLE IF NOT EXISTS replay_training_run (
     run_id TEXT PRIMARY KEY,
     adapter_session_id TEXT NOT NULL UNIQUE
         REFERENCES replay_session(session_id) ON DELETE CASCADE,
-    parent_legacy_session_id TEXT
-        REFERENCES replay_session(session_id) ON DELETE RESTRICT,
     protocol TEXT NOT NULL CHECK (protocol = 'replay.v2'),
     schema_version TEXT NOT NULL CHECK (schema_version = 'replay.training.v1'),
     name TEXT NOT NULL,
@@ -67,31 +62,6 @@ ON replay_training_run(updated_at_ms DESC, run_id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_replay_training_run_state_source
 ON replay_training_run(state, source_kind, updated_at_ms DESC, run_id DESC);
-
-CREATE TABLE IF NOT EXISTS replay_training_track (
-    run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
-    track_id TEXT NOT NULL,
-    adapter_session_id TEXT NOT NULL
-        REFERENCES replay_session(session_id) ON DELETE CASCADE,
-    exchange TEXT NOT NULL,
-    market_type TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    source_kind TEXT NOT NULL,
-    state TEXT NOT NULL,
-    subscription_tier TEXT NOT NULL,
-    dataset_epoch TEXT NOT NULL,
-    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
-    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    revision INTEGER NOT NULL CHECK (revision >= 0),
-    forced_full_reasons_json TEXT NOT NULL,
-    capabilities_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
-    PRIMARY KEY (run_id, track_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_replay_training_track_session
-ON replay_training_track(adapter_session_id);
 
 CREATE TABLE IF NOT EXISTS replay_training_rule (
     run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
@@ -756,7 +726,7 @@ CREATE TABLE IF NOT EXISTS replay_training_start_selection (
         CHECK (schema_version = 'replay.start-selection.v1'),
     start_mode TEXT NOT NULL CHECK (start_mode IN ('MANUAL', 'RANDOM')),
     seed_source TEXT NOT NULL
-        CHECK (seed_source IN ('SERVER', 'MANUAL', 'LEGACY_CLIENT', 'FORK')),
+        CHECK (seed_source IN ('SERVER', 'MANUAL', 'FORK')),
     random_seed INTEGER
         CHECK (
             random_seed IS NULL
@@ -1554,356 +1524,8 @@ def selection_preparation_hash(
     )
 
 
-def _backfill_start_selections(
-    connection: sqlite3.Connection,
-    *,
-    now_ms: int,
-) -> None:
-    rows = connection.execute(
-        """
-        SELECT r.run_id, r.start_mode, r.dataset_epoch, s.config_json,
-               d.actual_replay_start_ms, d.actual_replay_end_ms
-        FROM replay_training_run AS r
-        JOIN replay_session AS s ON s.session_id = r.adapter_session_id
-        JOIN replay_dataset_ref AS d ON d.session_id = r.adapter_session_id
-        ORDER BY r.run_id
-        """
-    ).fetchall()
-    for (
-        run_id,
-        start_mode,
-        dataset_epoch,
-        config_json,
-        actual_start_ms,
-        actual_end_ms,
-    ) in rows:
-        mode = str(start_mode)
-        config = json.loads(str(config_json))
-        random_seed = (
-            int(config["random_seed"])
-            if mode == "RANDOM" and config.get("random_seed") is not None
-            else None
-        )
-        seed_source = "LEGACY_CLIENT" if mode == "RANDOM" else "MANUAL"
-        digest = start_selection_hash(
-            run_id=str(run_id),
-            start_mode=mode,
-            seed_source=seed_source,
-            random_seed=random_seed,
-            actual_start_ms=int(actual_start_ms),
-            actual_end_ms=int(actual_end_ms),
-            dataset_epoch=str(dataset_epoch),
-            parent_selection_hash=None,
-        )
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_start_selection(
-                run_id, schema_version, start_mode, seed_source, random_seed,
-                actual_start_ms, actual_end_ms, dataset_epoch,
-                parent_selection_hash, selection_hash, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-            """,
-            (
-                str(run_id),
-                START_SELECTION_SCHEMA_VERSION,
-                mode,
-                seed_source,
-                random_seed,
-                int(actual_start_ms),
-                int(actual_end_ms),
-                str(dataset_epoch),
-                digest,
-                now_ms,
-            ),
-        )
-
-
-def _backfill_launch_contexts(
-    connection: sqlite3.Connection,
-    *,
-    now_ms: int,
-) -> None:
-    rows = connection.execute(
-        """
-        SELECT run_id, exchange, market_type, last_symbol, display_interval
-        FROM replay_training_run
-        ORDER BY run_id
-        """
-    ).fetchall()
-    for run_id, exchange, market_type, symbol, display_interval in rows:
-        context = {
-            "schema_version": "replay.launch-context.v1",
-            "source": "DIRECT_HUB",
-            "exchange": str(exchange),
-            "market_type": str(market_type),
-            "symbol": str(symbol),
-            "display_interval": str(display_interval),
-            "watchlist_snapshot": {
-                "schema_version": "replay.watchlist-snapshot.v1",
-                "groups": [],
-            },
-        }
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_launch_context(
-                run_id, schema_version, source, context_json,
-                context_hash, created_at_ms
-            ) VALUES (?, 'replay.launch-context.v1', 'DIRECT_HUB', ?, ?, ?)
-            """,
-            (
-                str(run_id),
-                canonical_json(context),
-                canonical_sha256(context),
-                now_ms,
-            ),
-        )
-
-
-def _backfill_data_policies(
-    connection: sqlite3.Connection,
-    *,
-    now_ms: int,
-) -> None:
-    """Give pre-Phase-14 runs the exact legacy history semantics.
-
-    Legacy ``warmup_bars`` simultaneously powered indicators and the visible
-    pre-start chart.  Preserve that contract without opening or rewriting the
-    immutable dataset blob.
-    """
-
-    rows = connection.execute(
-        """
-        SELECT r.run_id, s.config_json, d.actual_replay_start_ms
-        FROM replay_training_run AS r
-        JOIN replay_session AS s ON s.session_id = r.adapter_session_id
-        JOIN replay_dataset_ref AS d ON d.session_id = r.adapter_session_id
-        WHERE NOT EXISTS(
-            SELECT 1 FROM replay_training_data_policy AS policy
-            WHERE policy.run_id = r.run_id
-        )
-        ORDER BY r.run_id
-        """
-    ).fetchall()
-    for run_id, config_json, actual_replay_start_ms in rows:
-        config = json.loads(str(config_json))
-        if not isinstance(config, dict):
-            raise TypeError("legacy replay config must be an object")
-        interval = str(config.get("base_interval", ""))
-        interval_ms = parse_interval_ms(interval)
-        if interval_ms is None:
-            raise ValueError("legacy replay base_interval must be fixed")
-        warmup_bars = int(config["warmup_bars"])
-        forward_cache_ms = int(config["horizon_ms"])
-        actual_start = int(actual_replay_start_ms)
-        visible_lookback_ms = warmup_bars * interval_ms
-        visible_start = actual_start - visible_lookback_ms
-        if (
-            warmup_bars < 1
-            or forward_cache_ms < 1
-            or visible_start < 0
-        ):
-            raise ValueError("legacy replay history policy is invalid")
-        digest = data_policy_hash(
-            indicator_warmup_bars=warmup_bars,
-            visible_history_mode="DURATION",
-            visible_history_lookback_ms=visible_lookback_ms,
-            visible_history_rows=warmup_bars,
-            actual_visible_history_start_ms=visible_start,
-            actual_replay_start_ms=actual_start,
-            effective_warmup_bars=warmup_bars,
-            forward_cache_ms=forward_cache_ms,
-            interval_ms=interval_ms,
-        )
-        connection.execute(
-            """
-            INSERT INTO replay_training_data_policy(
-                run_id, schema_version, indicator_warmup_bars,
-                visible_history_mode, visible_history_lookback_ms,
-                visible_history_rows, actual_visible_history_start_ms,
-                actual_replay_start_ms, effective_warmup_bars,
-                forward_cache_ms, interval_ms, policy_hash, created_at_ms
-            ) VALUES (?, ?, ?, 'DURATION', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(run_id),
-                DATA_POLICY_SCHEMA_VERSION,
-                warmup_bars,
-                visible_lookback_ms,
-                warmup_bars,
-                visible_start,
-                actual_start,
-                warmup_bars,
-                forward_cache_ms,
-                interval_ms,
-                digest,
-                now_ms,
-            ),
-        )
-
-
-def _backfill_phase17_policies(
-    connection: sqlite3.Connection,
-    *,
-    now_ms: int,
-) -> None:
-    """Seed independent user-cap and funding histories for existing v9 runs."""
-
-    rows = connection.execute(
-        """
-        SELECT r.run_id, r.virtual_time_ms, r.source_sequence,
-               rule.rule_json, account.funding_mode,
-               account.fixed_funding_rate, account.funding_interval_ms,
-               history.account_data_mode, dataset.actual_replay_start_ms
-        FROM replay_training_run AS r
-        JOIN replay_training_rule AS rule
-          ON rule.run_id = r.run_id AND rule.revision = 1
-        JOIN replay_training_contract_account AS account USING(run_id)
-        LEFT JOIN replay_training_account_history AS history USING(run_id)
-        JOIN replay_dataset_ref AS dataset
-          ON dataset.session_id = r.adapter_session_id
-        ORDER BY r.run_id
-        """
-    ).fetchall()
-    for row in rows:
-        run_id = str(row["run_id"])
-        rule = json.loads(str(row["rule_json"]))
-        if not isinstance(rule, dict) or not isinstance(rule.get("max_leverage"), str):
-            raise RuntimeError(
-                f"replay training run {run_id} has no canonical max_leverage"
-            )
-        leverage = {
-            "schema_version": RUN_RULES_SCHEMA_VERSION,
-            "kind": "LEVERAGE_CAP",
-            "run_id": run_id,
-            "revision": 1,
-            "effective_virtual_time_ms": int(row["actual_replay_start_ms"]),
-            "source_sequence": 0,
-            "max_leverage": str(rule["max_leverage"]),
-            "fidelity": "CONFIGURED_USER_CAP_EXACT",
-        }
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_leverage_policy(
-                run_id, revision, effective_virtual_time_ms, source_sequence,
-                max_leverage, policy_hash, fidelity, reason, command_id,
-                created_at_ms
-            ) VALUES (?, 1, ?, ?, ?, ?, ?, 'creation policy', NULL, ?)
-            """,
-            (
-                run_id,
-                row["actual_replay_start_ms"],
-                0,
-                rule["max_leverage"],
-                canonical_sha256(leverage),
-                "CONFIGURED_USER_CAP_EXACT",
-                now_ms,
-            ),
-        )
-        mode = str(row["funding_mode"])
-        exact = str(row["account_data_mode"] or "APPROX_PROXY") == "HISTORICAL_EXACT"
-        fidelity = (
-            "HISTORICAL_EXACT_ARCHIVE_POLICY"
-            if exact and mode == "HISTORICAL_EXACT"
-            else "CONFIGURED_FUNDING_POLICY_EXACT"
-        )
-        funding = {
-            "schema_version": RUN_RULES_SCHEMA_VERSION,
-            "kind": "FUNDING_POLICY",
-            "run_id": run_id,
-            "revision": 1,
-            "effective_virtual_time_ms": int(row["actual_replay_start_ms"]),
-            "source_sequence": 0,
-            "funding_mode": mode,
-            "fixed_funding_rate": row["fixed_funding_rate"],
-            "funding_interval_ms": row["funding_interval_ms"],
-            "fidelity": fidelity,
-        }
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_funding_policy(
-                run_id, revision, effective_virtual_time_ms, source_sequence,
-                funding_mode, fixed_funding_rate, funding_interval_ms,
-                policy_hash, fidelity, reason, command_id, created_at_ms
-            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'creation policy', NULL, ?)
-            """,
-            (
-                run_id,
-                row["actual_replay_start_ms"],
-                0,
-                mode,
-                row["fixed_funding_rate"],
-                row["funding_interval_ms"],
-                canonical_sha256(funding),
-                fidelity,
-                now_ms,
-            ),
-        )
-
-
-def _backfill_archive_pins(
-    connection: sqlite3.Connection,
-    *,
-    now_ms: int,
-) -> None:
-    rows = connection.execute(
-        """
-        SELECT track.run_id, track.track_id, track.dataset_epoch,
-               dataset.snapshot_ref_json, dataset.snapshot_blob
-        FROM replay_training_market_track AS track
-        JOIN replay_dataset_ref AS dataset
-          ON dataset.session_id = track.adapter_session_id
-        WHERE track.adapter_session_id IS NOT NULL
-        ORDER BY track.run_id, track.track_id
-        """
-    ).fetchall()
-    for run_id, track_id, dataset_epoch, snapshot_ref_json, snapshot_blob in rows:
-        raw_bar_snapshot = persisted_bar_archive_reference(
-            snapshot_ref_json,
-            snapshot_blob,
-        )
-        if raw_bar_snapshot is None:
-            continue
-        revision = raw_bar_snapshot.get("source_revision")
-        identity = raw_bar_snapshot.get("identity")
-        if (
-            not isinstance(revision, str)
-            or len(revision) != 71
-            or not revision.startswith("sha256:")
-            or not isinstance(identity, dict)
-        ):
-            continue
-        try:
-            values = (
-                str(identity["exchange"]),
-                str(identity["market_type"]),
-                str(identity["symbol"]),
-                str(raw_bar_snapshot["interval"]),
-                int(raw_bar_snapshot["warmup_start_ms"]),
-                int(raw_bar_snapshot["replay_end_open_ms"]),
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_archive_pin(
-                run_id, track_id, source_revision,
-                exchange, market_type, symbol, base_interval,
-                range_start_ms, range_end_ms, dataset_epoch, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(run_id),
-                str(track_id),
-                revision,
-                *values,
-                str(dataset_epoch),
-                now_ms,
-            ),
-        )
-
-
 def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> None:
-    """Create only v2-owned tables; never advance the replay.v1 schema row."""
+    """Create v2-owned tables without changing the adapter schema row."""
 
     connection.execute(
         """
@@ -1918,228 +1540,38 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         "SELECT version FROM replay_training_schema_version WHERE singleton = 1"
     ).fetchone()
     current = 0 if row is None else int(row[0])
-    if current > TRAINING_SCHEMA_VERSION:
+    if current == TRAINING_SCHEMA_VERSION:
+        return
+    if current != 0:
         raise RuntimeError(
-            f"replay training schema {current} is newer than supported "
-            f"{TRAINING_SCHEMA_VERSION}"
+            f"replay training schema {current} is obsolete; "
+            "clear replay training data and create a fresh database"
         )
-    if current == 0:
-        _execute_script(connection, TRAINING_SCHEMA_V1)
-        current = 1
-    if current == 1:
-        _execute_script(connection, TRAINING_SCHEMA_V2)
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_viewer_state(
-                run_id, selected_track_id, display_interval, chart_type,
-                visible_range_json, pane_layout_json, rail_layout_json,
-                semantic_view_revision, updated_at_ms
-            )
-            SELECT run_id, 'track-1', display_interval, 'candles',
-                   NULL, '{}', '{}', 0, ?
-            FROM replay_training_run
-            """,
-            (now_ms,),
-        )
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_viewer_event(
-                run_id, semantic_view_revision, command_id, event_type,
-                request_json, viewer_state_json, created_at_ms
-            )
-            SELECT run_id, 0, NULL, 'INITIAL_VIEWER_STATE', '{}',
-                   json_object(
-                       'run_id', run_id,
-                       'selected_track_id', 'track-1',
-                       'display_interval', display_interval,
-                       'chart_type', 'candles',
-                       'visible_range', NULL,
-                       'pane_layout', json('{}'),
-                       'rail_layout', json('{}'),
-                       'semantic_view_revision', 0
-                   ), ?
-            FROM replay_training_run
-            """,
-            (now_ms,),
-        )
-        current = 2
-    if current == 2:
-        _execute_script(connection, TRAINING_SCHEMA_V3)
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_integrity(
-                run_id, strict_eligible, start_time_known, revealed,
-                allowed_mutations_json, result_label, updated_at_ms
-            )
-            SELECT run_id,
-                   CASE WHEN integrity_mode = 'CHALLENGE' AND start_mode = 'RANDOM'
-                        THEN 1 ELSE 0 END,
-                   CASE WHEN start_mode = 'MANUAL' THEN 1 ELSE 0 END,
-                   0,
-                   '[]',
-                   CASE WHEN start_mode = 'MANUAL' THEN 'START_TIME_KNOWN'
-                        ELSE integrity_mode END,
-                   ?
-            FROM replay_training_run
-            """,
-            (now_ms,),
-        )
-        current = 3
-    if current == 3:
-        _execute_script(connection, TRAINING_SCHEMA_V4)
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_market_track(
-                run_id, track_id, stable_ordinal, adapter_session_id,
-                exchange, market_type, symbol, settlement_asset, source_kind,
-                state, subscription_tier, dataset_epoch, virtual_time_ms,
-                source_sequence, revision, forced_full_reasons_json,
-                capabilities_json, public_price, position_json, account_json,
-                open_orders_json, degraded_reason, created_at_ms, updated_at_ms
-            )
-            SELECT t.run_id, t.track_id, 1, t.adapter_session_id,
-                   t.exchange, t.market_type, t.symbol, r.settlement_asset,
-                   t.source_kind, t.state, t.subscription_tier, t.dataset_epoch,
-                   t.virtual_time_ms, t.source_sequence, t.revision,
-                   '["VIEWED"]', t.capabilities_json, NULL, '{}', '{}', '[]',
-                   NULL, t.created_at_ms, t.updated_at_ms
-            FROM replay_training_track AS t
-            JOIN replay_training_run AS r USING(run_id)
-            """
-        )
-        current = 4
-    if current == 4:
-        _execute_script(connection, TRAINING_SCHEMA_V5)
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO replay_training_contract_account(
-                run_id, account_model, margin_mode, funding_mode,
-                fixed_funding_rate, funding_interval_ms, next_funding_time_ms,
-                overlay_cash, isolated_margin_json, status, fidelity,
-                ledger_tail_hash, created_at_ms, updated_at_ms
-            )
-            SELECT run_id, 'PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER', margin_mode,
-                   funding_mode, NULL, NULL, NULL, '0', '{}', 'ACTIVE',
-                   'LEGACY_MIGRATION_NO_REINTERPRETATION',
-                   'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-                   ?, ?
-            FROM replay_training_run
-            """,
-            (now_ms, now_ms),
-        )
-        current = 5
-    if current == 5:
-        _execute_script(connection, TRAINING_SCHEMA_V6)
-        current = 6
-    if current == 6:
-        _execute_script(connection, TRAINING_SCHEMA_V7)
-        current = 7
-    if current == 7:
-        _execute_script(connection, TRAINING_SCHEMA_V8)
-        _backfill_launch_contexts(connection, now_ms=now_ms)
-        current = 8
-    if current == 8:
-        _execute_script(connection, TRAINING_SCHEMA_V9)
-        _backfill_start_selections(connection, now_ms=now_ms)
-        current = 9
-    if current != TRAINING_SCHEMA_VERSION:
-        raise RuntimeError(f"no replay training schema migration path from {current}")
-    # Phase 14 deliberately remains schema v9.  This additive table is ignored
-    # safely by the Phase 13 binary, which keeps the documented rollback path
-    # open while new binaries fail closed when a policy row is missing.
-    _execute_script(connection, TRAINING_SCHEMA_PHASE14_ADDITIVE)
-    _backfill_data_policies(connection, now_ms=now_ms)
-    # Phase 15 remains additive at schema v9 so a Phase 14 binary can ignore
-    # derived summaries and durable advance intents without rewriting them.
-    _execute_script(connection, TRAINING_SCHEMA_PHASE15_ADDITIVE)
-    # Phase 16 keeps schema v9 for a whole-commit rollback to Phase 15. Exact
-    # account archives and their projections are additive and old binaries
-    # cannot accidentally interpret them as proxy account data.
-    _execute_script(connection, TRAINING_SCHEMA_PHASE16_ADDITIVE)
-    # Phase 17 remains an additive v9 extension.  Old binaries ignore the
-    # independent rule/review tables; new binaries fail closed if their
-    # content-addressed evidence cannot be captured.
-    _execute_script(connection, TRAINING_SCHEMA_PHASE17_ADDITIVE)
-    _ensure_review_anchor_storage_columns(connection)
-    _backfill_phase17_policies(connection, now_ms=now_ms)
-    # Phase 18 remains additive at schema v9.  Phase 17 binaries safely ignore
-    # account-history GC audit evidence and never interpret EVICTED objects as
-    # READY archives.
-    _execute_script(connection, TRAINING_SCHEMA_PHASE18_ADDITIVE)
-    _execute_script(connection, TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE)
-    _backfill_archive_pins(connection, now_ms=now_ms)
-    _execute_script(connection, TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE)
-    _ensure_selection_preparation_storage_columns(connection)
+    for script in (
+        TRAINING_SCHEMA_V1,
+        TRAINING_SCHEMA_V2,
+        TRAINING_SCHEMA_V3,
+        TRAINING_SCHEMA_V4,
+        TRAINING_SCHEMA_V5,
+        TRAINING_SCHEMA_V6,
+        TRAINING_SCHEMA_V7,
+        TRAINING_SCHEMA_V8,
+        TRAINING_SCHEMA_V9,
+        TRAINING_SCHEMA_PHASE14_ADDITIVE,
+        TRAINING_SCHEMA_PHASE15_ADDITIVE,
+        TRAINING_SCHEMA_PHASE16_ADDITIVE,
+        TRAINING_SCHEMA_PHASE17_ADDITIVE,
+        TRAINING_SCHEMA_PHASE18_ADDITIVE,
+        TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE,
+        TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE,
+    ):
+        _execute_script(connection, script)
     connection.execute(
         """
         INSERT INTO replay_training_schema_version(singleton, version, applied_at_ms)
         VALUES (1, ?, ?)
-        ON CONFLICT(singleton) DO UPDATE SET
-            version = excluded.version,
-            applied_at_ms = excluded.applied_at_ms
         """,
         (TRAINING_SCHEMA_VERSION, now_ms),
-    )
-
-
-def _ensure_selection_preparation_storage_columns(
-    connection: sqlite3.Connection,
-) -> None:
-    columns = {
-        str(row[1])
-        for row in connection.execute(
-            "PRAGMA table_info(replay_training_selection_preparation)"
-        ).fetchall()
-    }
-    additions = {
-        "request_json": "TEXT",
-        "request_hash": "TEXT",
-        "selection_json": "TEXT",
-        "selection_json_hash": "TEXT",
-        "retry_count": "INTEGER NOT NULL DEFAULT 0",
-    }
-    for column, declaration in additions.items():
-        if column not in columns:
-            connection.execute(
-                f"ALTER TABLE replay_training_selection_preparation "
-                f"ADD COLUMN {column} {declaration}"
-            )
-
-
-def _ensure_review_anchor_storage_columns(connection: sqlite3.Connection) -> None:
-    """Add the Phase 18 physical codec fields without changing schema v9."""
-
-    columns = {
-        str(row[1])
-        for row in connection.execute(
-            "PRAGMA table_info(replay_review_actor_anchor)"
-        ).fetchall()
-    }
-    if "payload_encoding" not in columns:
-        connection.execute(
-            """
-            ALTER TABLE replay_review_actor_anchor
-            ADD COLUMN payload_encoding TEXT NOT NULL DEFAULT 'RAW'
-                CHECK (payload_encoding IN ('RAW', 'ZLIB_V1'))
-            """
-        )
-    if "stored_bytes" not in columns:
-        connection.execute(
-            """
-            ALTER TABLE replay_review_actor_anchor
-            ADD COLUMN stored_bytes INTEGER NOT NULL DEFAULT 0
-                CHECK (stored_bytes >= 0)
-            """
-        )
-    # A Phase 17 binary can still be used for a disabled/default-off rollback.
-    # If it writes a legacy RAW row before a later re-upgrade, the default zero
-    # is repaired deterministically from the immutable BLOB on startup.
-    connection.execute(
-        """
-        UPDATE replay_review_actor_anchor
-        SET stored_bytes = length(payload)
-        WHERE stored_bytes = 0
-        """
     )
 
 

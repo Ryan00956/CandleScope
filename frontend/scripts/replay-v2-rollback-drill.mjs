@@ -22,7 +22,6 @@ Options:
   --baseline <commit>    Baseline commit used for the rollback worktree
   --chrome-path <path>   Chrome or Edge executable path
   --headed               Run browser checks with a visible browser window
-  --product-v2           Enable the replay v2 product during the current-HEAD probe
   --out <path>           Write the rollback evidence JSON to this path
   --timeout-ms <ms>      Per-probe timeout in milliseconds (minimum: 5000)
   -h, --help             Show this help message`;
@@ -33,7 +32,6 @@ function parseArgs(argv) {
     chromePath: process.env.CHROME_PATH || "",
     headed: false,
     out: path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-rollback-drill-20260722.json"),
-    productV2: true,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     help: false,
   };
@@ -43,7 +41,6 @@ function parseArgs(argv) {
     else if (value === "--baseline") result.baseline = String(argv[++index] || "");
     else if (value === "--chrome-path") result.chromePath = String(argv[++index] || "");
     else if (value === "--headed") result.headed = true;
-    else if (value === "--product-v2") result.productV2 = true;
     else if (value === "--out") result.out = path.resolve(String(argv[++index] || ""));
     else if (value === "--timeout-ms") result.timeoutMs = Number(argv[++index]);
     else if (/^[0-9]+$/.test(value)) result.timeoutMs = Number(value);
@@ -177,11 +174,10 @@ function runSync(command, args, { cwd = repositoryRoot, env = process.env } = {}
   return String(result.stdout || "").trim();
 }
 
-function startBackend({ python, root, port, enabled, productV2Enabled = false, paths, baseline = false }) {
+function startBackend({ python, root, port, enabled, paths, baseline = false }) {
   const backendEnv = {
     ...process.env,
     REPLAY_ENABLED: enabled ? "1" : "0",
-    REPLAY_PRODUCT_V2_ENABLED: productV2Enabled ? "1" : "0",
     REPLAY_HISTORICAL_BOOK_ENABLED: "0",
     KLINES_DB_PATH: paths.klines,
     REPLAY_DB_PATH: paths.replay,
@@ -222,7 +218,7 @@ function startBackend({ python, root, port, enabled, productV2Enabled = false, p
   return { child, tail: processTail(child) };
 }
 
-function startVite({ root, port, backendPort, entryEnabled, productV2Enabled = false }) {
+function startVite({ root, port, backendPort, entryEnabled }) {
   const vitePath = path.join(root, "node_modules", "vite", "bin", "vite.js");
   assert(fs.existsSync(vitePath), "Vite entrypoint is missing", { vitePath });
   // The detached baseline worktree deliberately reuses the installed
@@ -235,7 +231,6 @@ function startVite({ root, port, backendPort, entryEnabled, productV2Enabled = f
       VITE_DEV_PORT: String(port),
       VITE_API_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
       VITE_REPLAY_ENTRY_ENABLED: entryEnabled ? "1" : "0",
-      VITE_REPLAY_PRODUCT_V2_ENABLED: productV2Enabled ? "1" : "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -453,32 +448,29 @@ async function waitForLiveReady(cdp, timeoutMs) {
 async function openReplayFromLive({
   liveCdp,
   debugBase,
-  productV2,
   timeoutMs,
 }) {
   const targetsBefore = await readJson(`${debugBase}/json/list`);
   await click(liveCdp, '[data-replay-entry="enabled"]', timeoutMs);
-  if (productV2) {
-    await waitForValue(
-      liveCdp,
-      `document.querySelector('[data-replay-launcher="live-modal"]') !== null`,
-      timeoutMs,
-      "live v2 launcher modal",
-    );
-    await clickButtonByText(liveCdp, "新建训练", timeoutMs);
-    await waitForValue(
-      liveCdp,
-      `(() => {
-        const button = [...document.querySelectorAll("button")].find(
-          (item) => item.textContent?.trim() === "创建并进入训练",
-        );
-        return button instanceof HTMLButtonElement && !button.disabled;
-      })()`,
-      timeoutMs,
-      "live v2 create plan readiness",
-    );
-    await clickButtonByText(liveCdp, "创建并进入训练", timeoutMs);
-  }
+  await waitForValue(
+    liveCdp,
+    `document.querySelector('[data-replay-launcher="live-modal"]') !== null`,
+    timeoutMs,
+    "live v2 launcher modal",
+  );
+  await clickButtonByText(liveCdp, "新建训练", timeoutMs);
+  await waitForValue(
+    liveCdp,
+    `(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (item) => item.textContent?.trim() === "创建并进入训练",
+      );
+      return button instanceof HTMLButtonElement && !button.disabled;
+    })()`,
+    timeoutMs,
+    "live v2 create plan readiness",
+  );
+  await clickButtonByText(liveCdp, "创建并进入训练", timeoutMs);
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const targets = await readJson(`${debugBase}/json/list`);
@@ -673,7 +665,7 @@ async function main() {
 
     const enabledBackend = trackProcess(
       "current-enabled-backend",
-      startBackend({ python, root: backendRoot, port: backendPort, enabled: true, productV2Enabled: args.productV2, paths }),
+      startBackend({ python, root: backendRoot, port: backendPort, enabled: true, paths }),
     );
     await waitForHttp(`${currentBackendOrigin}/__replay_smoke__/fixture`, enabledBackend.child, args.timeoutMs);
     const enabledFixture = await readJson(
@@ -692,7 +684,7 @@ async function main() {
     );
     const enabledVite = trackProcess(
       "current-enabled-vite",
-      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: true, productV2Enabled: args.productV2 }),
+      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: true }),
     );
     await waitForHttp(`${currentFrontendOrigin}/`, enabledVite.child, args.timeoutMs);
 
@@ -708,39 +700,31 @@ async function main() {
     await waitForLiveReady(live.cdp, args.timeoutMs);
     const liveBefore = await liveSnapshot(live.cdp);
     assert(
-      liveBefore.replayEntry === (args.productV2 ? "K 线回放" : "K 线回放 ↗"),
-      "enabled build did not expose the selected replay entry mode",
+      liveBefore.replayEntry === "K 线回放",
+      "enabled build did not expose the v2 replay entry",
       liveBefore,
     );
 
     const replay = await openReplayFromLive({
       liveCdp: live.cdp,
       debugBase,
-      productV2: args.productV2,
       timeoutMs: args.timeoutMs,
     });
     connections.push(replay.cdp);
     const replayCapture = trackBrowser("current-replay", replay.cdp);
     assert(await evaluate(replay.cdp, "window.opener === null"), "current replay target retained window.opener");
-    if (!args.productV2) {
-      await clickButtonByText(replay.cdp, "新建训练", args.timeoutMs);
-      await clickButtonByText(replay.cdp, "创建并进入训练", args.timeoutMs);
-    }
     const initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
     const sessionUrl = await evaluate(replay.cdp, "location.href");
     const sessionId = new URL(sessionUrl).searchParams.get("session");
     assert(sessionId, "replay session URL lost its session id");
-    const speedAction = args.productV2 ? "playback-rate" : "speed";
+    const speedAction = "playback-rate";
     const speedChanged = await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="${speedAction}"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "60"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
     assert(speedChanged, "rollback replay speed control was unavailable", {
       speedAction,
-      productV2: args.productV2,
     });
     await waitForReplayStatus(
       replay.cdp,
-      args.productV2
-        ? `(value) => value.clockRate === 60 && value.controlPending === ""`
-        : `(value) => value.revision > ${initial.revision}`,
+      `(value) => value.clockRate === 60 && value.controlPending === ""`,
       args.timeoutMs,
       "speed ack",
     );
@@ -774,12 +758,12 @@ async function main() {
 
     const disabledBackend = trackProcess(
       "current-disabled-backend",
-      startBackend({ python, root: backendRoot, port: backendPort, enabled: false, productV2Enabled: false, paths }),
+      startBackend({ python, root: backendRoot, port: backendPort, enabled: false, paths }),
     );
     await waitForHttp(`${currentBackendOrigin}/__replay_smoke__/fixture`, disabledBackend.child, args.timeoutMs);
     const disabledVite = trackProcess(
       "current-disabled-vite",
-      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: false, productV2Enabled: false }),
+      startVite({ root: frontendRoot, port: frontendPort, backendPort, entryEnabled: false }),
     );
     await waitForHttp(`${currentFrontendOrigin}/`, disabledVite.child, args.timeoutMs);
     const disabledCapabilities = await readJson(`${currentBackendOrigin}/api/v1/replay/capabilities`);
@@ -853,12 +837,12 @@ async function main() {
     const oldFrontendOrigin = `http://127.0.0.1:${oldFrontendPort}`;
     const oldBackend = trackProcess(
       "baseline-backend",
-      startBackend({ python, root: oldBackendRoot, port: oldBackendPort, enabled: true, productV2Enabled: false, paths, baseline: true }),
+      startBackend({ python, root: oldBackendRoot, port: oldBackendPort, enabled: true, paths, baseline: true }),
     );
     await waitForHttp(`${oldBackendOrigin}/__replay_smoke__/fixture`, oldBackend.child, args.timeoutMs);
     const oldVite = trackProcess(
       "baseline-vite",
-      startVite({ root: oldFrontendRoot, port: oldFrontendPort, backendPort: oldBackendPort, entryEnabled: true, productV2Enabled: false }),
+      startVite({ root: oldFrontendRoot, port: oldFrontendPort, backendPort: oldBackendPort, entryEnabled: true }),
     );
     await waitForHttp(`${oldFrontendOrigin}/`, oldVite.child, args.timeoutMs);
 

@@ -161,9 +161,6 @@ test("Hub rebinds blind and visible catalogs when disclosure or start mode chang
       async createRun() {
         throw new Error("not used");
       },
-      async migrateLegacy() {
-        throw new Error("not used");
-      },
     },
   });
   context.after(() => lifecycle.dispose());
@@ -246,7 +243,6 @@ test("manual create panel renders an accessible UTC picker, earliest action, and
       setDraft: noop,
       refreshCreatePlan: noop,
       createRun: noop,
-      migrateLegacy: noop,
       deleteRun: noop,
       continueRun: noop,
     },

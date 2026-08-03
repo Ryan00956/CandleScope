@@ -11,8 +11,10 @@ export async function returnToTrainingHub(
   signal?: AbortSignal,
 ): Promise<TrainingRunReturnResponse> {
   const result = await api.returnToHub(sessionId, signal);
-  if (result.state !== "PAUSED" || !result.checkpointed || !result.released) {
-    throw new Error("服务端未确认暂停、checkpoint 与运行时释放；不会离开训练页");
+  if (!new Set(["PAUSED", "ENDED", "ERROR"]).has(result.state)
+    || !result.checkpointed
+    || !result.released) {
+    throw new Error("服务端未确认可持久化状态、checkpoint 与运行时释放；不会离开训练页");
   }
   navigate("/replay.html");
   return result;

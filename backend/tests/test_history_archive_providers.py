@@ -131,20 +131,67 @@ def test_binance_replay_parser_audits_partial_and_off_grid_legacy_rows(
         _zip_bytes(ref.expected_filename[:-4] + ".csv", payload)
     )
 
-    with pytest.raises(ArchiveDataError, match="close timestamp"):
+    with pytest.raises(ArchiveDataError, match="interval-aligned"):
         provider.parse_bars(archive_path, ref)
 
     audited = provider.parse_bars_for_replay(archive_path, ref)
     assert [bar.open_time for bar in audited.bars] == [
         ref.start_ms,
+        ref.start_ms + 60_000,
         ref.start_ms + 180_000,
     ]
+    normalized = audited.bars[1]
+    assert normalized.close_time == ref.start_ms + 119_999
+    assert normalized.open == 100
+    assert normalized.high == 110
+    assert normalized.low == 90
+    assert normalized.close == 105
+    assert normalized.volume == 1.5
+    assert normalized.quote_volume == 157.5
+    assert normalized.trades == 10
+    assert normalized.taker_buy_base == 0.7
+    assert normalized.taker_buy_quote == 73.5
+    assert normalized.source == (
+        "backfill_archive_verified_close_boundary_normalized"
+    )
     assert audited.source_row_count == 4
-    assert audited.rejected_row_count == 2
+    assert audited.rejected_row_count == 1
+    assert audited.normalized_row_count == 1
+    assert dict(audited.rejection_reasons) == {
+        "open_not_interval_aligned": 1,
+    }
+
+
+def test_binance_replay_parser_rejects_close_before_open(tmp_path) -> None:
+    provider, ref = _monthly_binance_ref(market_type="spot", year=2017, month=12)
+
+    def row(open_time: int, close_time: int) -> str:
+        return (
+            f"{open_time},100,110,90,105,1.5,{close_time},"
+            "157.5,10,0.7,73.5,0\n"
+        )
+
+    payload = "".join(
+        (
+            row(ref.start_ms, ref.start_ms + 59_999),
+            row(ref.start_ms + 60_000, ref.start_ms + 59_999),
+        )
+    )
+    archive_path = tmp_path / ref.expected_filename
+    archive_path.write_bytes(
+        _zip_bytes(ref.expected_filename[:-4] + ".csv", payload)
+    )
+
+    with pytest.raises(ArchiveDataError, match="close timestamp"):
+        provider.parse_bars(archive_path, ref)
+
+    audited = provider.parse_bars_for_replay(archive_path, ref)
+    assert [bar.open_time for bar in audited.bars] == [ref.start_ms]
+    assert audited.source_row_count == 2
+    assert audited.rejected_row_count == 1
     assert audited.normalized_row_count == 0
     assert dict(audited.rejection_reasons) == {
         "close_timestamp_inconsistent": 1,
-        "open_not_interval_aligned": 1,
     }
 
 

@@ -77,7 +77,6 @@ def test_agg_trade_readiness_requires_a_matching_bar_identity(
 
     settings = replace(
         replay_settings(tmp_path / "governance.db"),
-        product_v2_enabled=True,
         replay_agg_trade_enabled=True,
     )
     categories = {
@@ -161,7 +160,7 @@ def test_review_anchor_codec_is_bounded_and_integrity_checked() -> None:
     assert tiny.payload == b"x"
 
 
-async def test_review_anchor_compression_preserves_exact_fork_and_legacy_raw_upgrade(
+async def test_review_anchor_compression_preserves_exact_fork(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "review-anchor-codec.db"
@@ -192,18 +191,6 @@ async def test_review_anchor_compression_preserves_exact_fork_and_legacy_raw_upg
         review = await service.training.start_review(run_id, event_id=None)
         event_id = str(review["selected_event_id"])
         state_hash = str(review["selected_state_hash"])
-        checkpoint = await service.training.store.checkpoint_for_event(
-            run_id,
-            event_id,
-        )
-        primary = next(
-            anchor
-            for anchor in checkpoint["anchors"]
-            if anchor["track_id"] == "track-1"
-        )
-        raw_payload = bytes(primary["payload"])
-        anchor_id = str(primary["anchor_id"])
-
         with sqlite3.connect(database) as connection:
             row = connection.execute(
                 """
@@ -223,62 +210,6 @@ async def test_review_anchor_compression_preserves_exact_fork_and_legacy_raw_upg
         assert forked["run"]["state_hash"] == state_hash
     finally:
         await service.shutdown(step_timeout=1.0)
-
-    # Simulate a disabled/default-off Phase 17 rollback writing a legacy RAW
-    # row with the additive columns' defaults before the new binary starts.
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            UPDATE replay_review_actor_anchor
-            SET payload = ?, payload_encoding = 'RAW', stored_bytes = 0
-            WHERE run_id = ? AND anchor_id = ?
-            """,
-            (raw_payload, run_id, anchor_id),
-        )
-
-    restarted = await _review_service(database)
-    try:
-        assert restarted.training is not None
-        restarted._session_id_factory = type(  # noqa: SLF001
-            restarted._session_id_factory  # noqa: SLF001
-        )("phase18-codec-restart-adapter")
-        restarted.training._run_id_factory = type(  # noqa: SLF001
-            restarted.training._run_id_factory  # noqa: SLF001
-        )("phase18-codec-restart-run")
-        with sqlite3.connect(database) as connection:
-            upgraded = connection.execute(
-                """
-                SELECT payload_encoding, payload_bytes, stored_bytes,
-                       length(payload)
-                FROM replay_review_actor_anchor
-                WHERE run_id = ? AND anchor_id = ?
-                """,
-                (run_id, anchor_id),
-            ).fetchone()
-            assert upgraded == (
-                ANCHOR_PAYLOAD_ENCODING_RAW,
-                len(raw_payload),
-                len(raw_payload),
-                len(raw_payload),
-            )
-        forked = await restarted.training.fork_run(run_id, event_id=event_id)
-        assert forked["run"]["state_hash"] == state_hash
-
-        corrupted = bytearray(raw_payload)
-        corrupted[len(corrupted) // 2] ^= 0x01
-        with sqlite3.connect(database) as connection:
-            connection.execute(
-                """
-                UPDATE replay_review_actor_anchor SET payload = ?
-                WHERE run_id = ? AND anchor_id = ?
-                """,
-                (bytes(corrupted), run_id, anchor_id),
-            )
-        with pytest.raises(TrainingRunError) as failure:
-            await restarted.training.store.checkpoint_for_event(run_id, event_id)
-        assert failure.value.code == "REVIEW_ANCHOR_CORRUPT"
-    finally:
-        await restarted.shutdown(step_timeout=1.0)
 
 
 def _assert_inventory_is_redacted(value: object, field: str = "inventory") -> None:
@@ -540,7 +471,7 @@ async def test_account_gc_source_drift_fails_closed_and_schema_is_additive(
                 SELECT version FROM replay_training_schema_version
                 WHERE singleton = 1
                 """
-            ).fetchone() == (9,)
+            ).fetchone() == (10,)
             assert connection.execute(
                 """
                 SELECT name FROM sqlite_master

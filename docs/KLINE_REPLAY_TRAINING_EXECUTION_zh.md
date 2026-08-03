@@ -1,6 +1,8 @@
 # CandleScope 回放训练 v2 重构执行文档
 
-状态：`PHASE_17_COMMITTED / PHASE_18_CODE_COMPLETE / RELEASE_RESULT_EXTERNAL_MANIFEST / PRODUCTION_HOLD`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 代码、迁移、存储治理、真实来源和发布合同已完成提交前门禁。Phase 18 的最终完成状态只读取仓库外 `<完整 Phase 18 HEAD>\replay-v2\release-manifest.json`，本文不嵌入提交后的结果，避免为了记录证据改变 HEAD 并使 4 小时证据失效。任何旧发布清单都不得继承到新 HEAD；即使 implementation manifest PASS，生产决策仍因缺少 BOOK/account 生产 capture 与运维观察窗保持 HOLD。2026-07-30 的显式产品决策把前后端 v2 选择器改为默认开启，但 `REPLAY_ENABLED` 与 `VITE_REPLAY_ENTRY_ENABLED` 总闸仍默认关闭；下文各 Phase 中记录的旧 `=0` 值是当时的历史验收快照。
+状态：`PHASE_17_COMMITTED / PHASE_18_CODE_COMPLETE / RELEASE_RESULT_EXTERNAL_MANIFEST / PRODUCTION_HOLD`。Phase 10 的 `PHASE_10_PASS` 只对仓库外 `H:\program\CandleScope-release-evidence\<完整 Phase 10 HEAD>\replay-v2\release-manifest.json` 所绑定的 clean HEAD 有效；Phase 11–17 已独立提交，Phase 18 代码、迁移、存储治理、真实来源和发布合同已完成提交前门禁。Phase 18 的最终完成状态只读取仓库外 `<完整 Phase 18 HEAD>\replay-v2\release-manifest.json`，本文不嵌入提交后的结果，避免为了记录证据改变 HEAD 并使 4 小时证据失效。任何旧发布清单都不得继承到新 HEAD；即使 implementation manifest PASS，生产决策仍因缺少 BOOK/account 生产 capture 与运维观察窗保持 HOLD。当前后端只保留 `REPLAY_ENABLED` 总闸，前端只保留 `VITE_REPLAY_ENTRY_ENABLED` 入口开关；下文各 Phase 中的双产品选择器与 v1 fallback 描述均是已淘汰的历史验收快照，不是当前配置。
+
+2026-08-03 开发期 cutover：训练数据允许清空重建，v1 不再作为用户产品或存档兼容目标。大厅只列 v2 `TrainingRun`，裸 `replay_session` 不再生成 `LEGACY_V1` 卡片，`LEGACY_ADAPTER`/`OPEN_V1` 和 legacy migration API 已退役；`ReplayV1App`、v1 shell 以及前后端产品选择器均已删除。`REPLAY_ENABLED=1` 时必须构造 TrainingRun 服务，关闭时整个 replay runtime fail closed。下文旧 Phase 中的兼容、迁移与回滚描述只保留为历史记录；仍出现的 `replay.v1` 指 v2 当前依赖的内部 actor/adapter 线协议，不代表对外提供 v1 训练产品。
 
 工作树：`H:\program\CandleScope-kline-replay`
 
@@ -127,7 +129,7 @@ git show f70234bf1b36f905c46430cc6241b7335987f8ed:docs/KLINE_REPLAY_TRAINING_EXE
 2. 每次只实现一个 Phase；完成测试、证据、执行记录和独立提交后再进入下一 Phase。
 3. 先写契约测试和失败用例，再写最小实现；不能为了过门禁放宽 exact、coverage、hash、账本或 no-lookahead 语义。
 4. 默认保持 `REPLAY_ENABLED=0`、`VITE_REPLAY_ENTRY_ENABLED=0`、`RAW_AGG_TRADE_ARCHIVE_ENABLED=0`。
-5. v2 增加独立选择开关；未通过 Phase 10 前不得让普通用户路径默认进入 v2。
+5. `REPLAY_ENABLED` 是唯一后端产品总闸；开启后不得降级或切换到 v1 产品。
 6. replay 开发实例使用独立端口、SQLite 和 archive；禁止读写主工作树活动数据库。
 7. 所有 schema 迁移先加后减；在至少两个可回滚发布窗口内不删除 v1 表和 v1 读取路径。
 8. 每个 Phase 都必须提供运行时开关回滚和提交级回滚证据；回滚不得删除存档或历史 archive。
@@ -145,22 +147,19 @@ git show f70234bf1b36f905c46430cc6241b7335987f8ed:docs/KLINE_REPLAY_TRAINING_EXE
 
 ```text
 backend/data/replay-dev/source-candlescope.db
-backend/data/replay-dev/replay-v1.db
 backend/data/replay-dev/replay-v2.db
 backend/data/replay-dev/raw_agg_trades/
 backend/data/replay-dev/replay_segments/
 ```
 
-开发早期让 v1/v2 使用不同 replay DB。只有迁移门禁通过后，才允许在可恢复快照上验证同库升级。
+开发期 cutover 后只创建全新的 v2 replay DB；旧 schema 不升级，直接清空重建。
 
 ### 3.2 建议的新增开关
 
 | 开关 | 默认 | 所有权 |
 |---|---:|---|
 | `REPLAY_ENABLED` | `0` | 后端总开关，保持权威 |
-| `REPLAY_PRODUCT_V2_ENABLED` | `1` | 后端 run/protocol/schema v2 选择器；显式 `0` 回退 v1 |
 | `VITE_REPLAY_ENTRY_ENABLED` | `0` | live 页入口显示 |
-| `VITE_REPLAY_PRODUCT_V2_ENABLED` | `1` | replay document 默认选择 v2 hub/workspace；显式 `0` 回退 v1 |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | 成交 archive 能力 |
 | `REPLAY_HISTORICAL_BOOK_ENABLED` | `0` | Phase 9 可选 verified Binance USD-M 历史 L2；关闭时既有 BOOK Run 明确暂停/降级，不回退成交模型 |
 | `REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES` | `1099511627776` | 受管历史盘口对象总预算，默认 1 TiB；可收紧不可超过冻结上限，回收只允许显式 dry-run/run 且活动 pin 受保护 |
@@ -208,7 +207,6 @@ $env:KLINES_DB_PATH = 'H:\program\CandleScope-kline-replay\backend\data\replay-d
 $env:REPLAY_DB_PATH = 'H:\program\CandleScope-kline-replay\backend\data\replay-dev\replay-v2.db'
 $env:RAW_AGG_TRADE_ARCHIVE_DIR = 'H:\program\CandleScope-kline-replay\backend\data\replay-dev\raw_agg_trades'
 $env:REPLAY_ENABLED = '1'
-$env:REPLAY_PRODUCT_V2_ENABLED = '1'
 $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
 $env:REPLAY_HISTORICAL_BOOK_ENABLED = '0'
 $env:REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = '0'
@@ -224,11 +222,10 @@ Set-Location H:\program\CandleScope-kline-replay\frontend
 $env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:18082'
 $env:VITE_DEV_PORT = '15175'
 $env:VITE_REPLAY_ENTRY_ENABLED = '1'
-$env:VITE_REPLAY_PRODUCT_V2_ENABLED = '1'
 npm run dev
 ```
 
-`REPLAY_ENABLED=1` 与 `VITE_REPLAY_ENTRY_ENABLED=1` 仍只用于显式本地验证；v2 两个选择器的 `=1` 已成为仓库默认。其余 archive、BOOK、worker、GC 与优化能力继续保持默认关闭，并通过 capability/入口审计确认总闸没有被绕过。
+`REPLAY_ENABLED=1` 与 `VITE_REPLAY_ENTRY_ENABLED=1` 仍只用于显式本地验证；replay document 固定进入 v2 Hub/workspace，不再有产品选择器。其余 archive、BOOK、worker、GC 与优化能力继续保持默认关闭，并通过 capability/入口审计确认总闸没有被绕过。
 
 ---
 
@@ -304,7 +301,7 @@ flowchart TB
     T2 --> DATA
 ```
 
-### 5.2 v1 兼容策略
+### 5.2 v1 兼容策略（历史方案，当前已全部退役）
 
 - 现有 `replay_session` 记录在大厅中显示为 `LEGACY_V1`。
 - Phase 1 先提供只读元数据和兼容恢复入口，不改写 v1 config/hash。
@@ -1753,7 +1750,7 @@ GC 保持三套独立协议：
 7. 自动回归：Phase 18 后端 8 passed；Phase 10/18、segment benchmark、smoke fixture 合集 25 passed；后端最终全量 2,098 passed，只有 4 条既有 FastAPI `on_event` 弃用警告。首轮全量准确捕获训练包显式白名单缺少 `storage_governance.py`，补入后对应 27/27 和隔离全量均通过；一次并行工具中断遗留的 pytest 进程经 PID/命令行核对清理，随后启用 180 秒 faulthandler 的独立全量在 150.95 s 正常完成。变更 Python scope Ruff、compileall 和 Node 脚本语法均通过。
 8. 前端 Phase 18/Hub/Phase 12/16 定向 30 passed；最终 `npm run check` 的 architecture、两个 TypeScript project、ESLint、2,445 tests 和 Vite production build 全部通过。acceptance matrix 从 Phase 10 的 28 项扩展为连续 1..40，新增 storage 与 real_source gate；formal benchmark 加入 10k bounded inventory 和 1/2/4/8 exact-account capacity。
 9. rollback drill 现同时快照 replay schema、16 张存储/引用/Review/ledger/GC 表计数、active refs 和 run/session/ledger 语义 hash；关闭开关、disabled restart、旧 baseline 运行中与关停后必须与首次 graceful shutdown 快照逐字段相等，并继续要求 replay DB 文件集合/大小/SHA-256 完全相同。
-10. Phase 18 独立提交后，最终 clean-HEAD suite 固定生成 checks、formal benchmark、real-source validation、v1 smoke、v2 short smoke、真实 BAR 的 4h/100-cycle/1M projection soak、v2 storage-preserving rollback 与 release manifest。每份 artifact 都必须在仓库外包含同一完整 HEAD；任一失败都不得复用旧 artifact。仓库文件只记录这一门禁合同，最终 PASS/HOLD 事实以外部 manifest 为唯一权威。
+10. Phase 18 独立提交后，最终 clean-HEAD suite 固定生成 checks、formal benchmark、real-source validation、v2 short smoke、真实 BAR 的 4h/100-cycle/1M projection soak、v2 storage-preserving rollback 与 release manifest。每份 artifact 都必须在仓库外包含同一完整 HEAD；任一失败都不得复用旧 artifact。仓库文件只记录这一门禁合同，最终 PASS/HOLD 事实以外部 manifest 为唯一权威。
 11. 后续 clean-HEAD formal benchmark 准确捕获 exact-account 4 轨一次 `556.642 ms` 的长尾。排查确认常态路径会在每个 30 秒账户 mark 波为每条 FULL 轨分别持久化 `ADVANCE_BY`，并把 8 个样本的所谓 p95 实际算成 max。修复后，纯账户波只持久应用权威 mark/rule/funding，并在下一个市场/目标屏障统一对齐；若中间 mark 触发模拟强平，则以该账户波的精确 VirtualTime 立即强制对齐后再 cancel/close。未写入全局序列的账户事件继续由既有幂等恢复查询修复，取消只在屏障提交后生效。SQLite 仍保持 `synchronous=FULL`，WAL 自动 checkpoint 从 16,384 页收紧为 256 页以摊平合并；重复 actor ref 激活不再制造脏写，直接交易在租约已自然过期且无人占用时安全重获同一客户端控制权。
 12. 正式 exact-account 容量门禁改为 20 个样本后计算真实 p95，仍报告 max，500 ms 冻结上限和 64 MiB RSS 上限均未放宽；临时数据库根由 release aggregator 显式放在仓库外同 HEAD 证据盘并写入 artifact，避免 Windows 系统 TEMP 的新文件扫描污染 release 盘测量。5 轮独立的 1/2/4/8 持仓轨复验全部 PASS，p95 范围分别为 `41.37–67.40 / 52.91–80.80 / 117.93–137.52 / 220.33–247.10 ms`。新增回归证明中间账户 mark 不产生 adapter `ADVANCE_BY`、全局顺序仍完整、精确强平时间不退化；提交前后端 `2,105 passed`，前端 `2,460 passed`，architecture/typecheck/ESLint/Vite build 全通过。该修复提交后的 formal benchmark、4h soak 与最终 manifest 仍必须从零重跑，不能继承此前 artifact。
 13. 首次绑定 `ec8c5f7cfca41e7dccc0196e94ce3af4d0f36c1b` 的正式 4 小时 soak 在启动约 12 小时后仍无成功或失败 artifact：Chrome CDP 只剩 `about:blank`，后端已持续 GC 且无训练 Run/Session，harness Node 进程几乎不再消耗 CPU。现有进程树和端口经只读核对后按精确 PID 终止，失败临时目录保留作现场证据。根因是 `readJson` 的 `fetch`/响应体读取、HTTP readiness/shutdown 与 CDP connect/command 都没有硬截止；target 消失时 WebSocket close/error 也不会拒绝 pending Promise。修复为 abort 加独立 `Promise.race` 的 HTTP 整体截止、5 秒 readiness/shutdown 单次截止、CDP connect/command 截止和断连全量 reject；即使底层实现忽略 abort 也会按时失败并进入 `.failed.json` 与清理路径。新增 fetch 卡死、body 卡死、connect 卡死、command 卡死、target 消失和正常响应回归，定向套件连续 50/50 轮通过；完整 frontend architecture/typecheck/ESLint、`2,466 tests` 与 production build 全部通过。该 harness 修复形成新 HEAD 后，所有旧 HEAD artifact 继续作废，正式 checks、真实来源、smoke、benchmark、4 小时 soak、rollback 与 manifest 必须全量重建。
@@ -2236,10 +2233,9 @@ Commands run:
   pre-commit targeted: python -m pytest -q backend/tests/test_replay_v2_training_phase10.py；npm run typecheck；npm run test:replay；node --check replay-smoke/replay-soak/replay-rollback-drill
   clean-HEAD full: python backend/scripts/run_replay_v2_release_checks.py --npm <npm.cmd> --out <external HEAD>/replay-v2/checks.json
   clean-HEAD benchmark: python backend/scripts/benchmark_replay_v2_release.py --out <external HEAD>/replay-v2/benchmark.json
-  clean-HEAD v1 browser: npm run smoke:replay -- --out <external HEAD>/replay-v2/replay-v1-smoke.json
-  clean-HEAD v2 browser harness: npm run smoke:replay:v2 -- --out <external HEAD>/replay-v2/replay-v2-smoke.json
-  clean-HEAD v2 formal soak: node scripts/replay-soak.mjs --product-v2 --duration-ms 14400000 --cycles 100 --projection-events 1000000 --sample-ms 60000 --out <external HEAD>/replay-v2/replay-v2-soak.json
-  clean-HEAD rollback: node scripts/replay-v2-rollback-drill.mjs --product-v2 --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f --out <external HEAD>/replay-v2/replay-v2-rollback.json
+  clean-HEAD v2 browser harness: npm run smoke:replay -- --out <external HEAD>/replay-v2/replay-v2-smoke.json
+  clean-HEAD v2 formal soak: node scripts/replay-soak.mjs --duration-ms 14400000 --cycles 100 --projection-events 1000000 --sample-ms 60000 --out <external HEAD>/replay-v2/replay-v2-soak.json
+  clean-HEAD rollback: node scripts/replay-v2-rollback-drill.mjs --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f --out <external HEAD>/replay-v2/replay-v2-rollback.json
   clean-HEAD final: python backend/scripts/verify_replay_v2_release.py --evidence-dir <external HEAD>/replay-v2 --out <external HEAD>/replay-v2/release-manifest.json
   visual audit: Playwright CLI wrapper against the isolated v2 fixture, with snapshot/screenshot artifacts outside tracked source
   repository: git diff --check；scoped Python static checks；detached git revert --no-commit in final verifier

@@ -24,7 +24,7 @@ const RAIL_TABS = [
   ["book", "盘口"],
   ["flow", "订单流"],
   ["risk", "账户与风险"],
-  ["notes", "记录"],
+  ["indicators", "指标"],
 ] as const;
 
 type RailTab = typeof RAIL_TABS[number][0];
@@ -54,7 +54,7 @@ function contractPortfolio(value: unknown): ReplayTrainingContractPortfolio | nu
 
 export interface ReplayRightRailProps {
   readonly runtime: ReplayRuntime;
-  readonly viewer?: ReplayViewerRuntime;
+  readonly viewer: ReplayViewerRuntime;
   readonly indicatorStatus: {
     readonly mode: string;
     readonly sourceBarCount: number;
@@ -76,24 +76,22 @@ export function ReplayPaperTradingDock({
   const [price, setPrice] = useState("");
   const [reduceOnly, setReduceOnly] = useState(false);
   const [isolatedAmount, setIsolatedAmount] = useState("0");
-  const [journalText, setJournalText] = useState("");
   const store = runtime.store;
   const config = store.sessionConfig;
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const commandReady = ownsController
     && store.connectionState === "connected"
     && runtime.pendingCommand === null
-    && !runtime.forkPending
-    && viewer?.viewerPending !== true
+    && !viewer.viewerPending
     && store.state !== "ENDED";
-  const portfolio = viewer?.marketTracks?.portfolio ?? null;
+  const portfolio = viewer.marketTracks?.portfolio ?? null;
   const contract = contractPortfolio(portfolio);
   const accountHistory = contract?.account_history ?? null;
-  const selectedTrackId = viewer?.viewerState?.selected_track_id ?? "track-1";
-  const selectedTrack = viewer?.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId);
+  const selectedTrackId = viewer.viewerState?.selected_track_id ?? "track-1";
+  const selectedTrack = viewer.marketTracks?.tracks.find((item) => item.track_id === selectedTrackId);
   const historicalBook = selectedTrack?.historical_book ?? null;
   const tradeFlow = useReplayTradeFlow({
-    runId: viewer?.viewerState?.run_id ?? null,
+    runId: viewer.viewerState?.run_id ?? null,
     trackId: selectedTrackId,
     sourceKind: config?.source_kind ?? null,
     revealedSequence: store.sourceSequence,
@@ -112,16 +110,12 @@ export function ReplayPaperTradingDock({
     .reverse();
   const closedTrades = runtime.report?.report.closed_trades ?? store.closedTrades;
   const recentClosedTrades = useMemo(() => recentReplayActivity(closedTrades), [closedTrades]);
-  const recentJournal = useMemo(() => recentReplayActivity(store.journal), [store.journal]);
   const warningCount = store.warnings.length;
   const trade = (
     type: "place_order" | "cancel_order" | "close_position",
     payload: Readonly<Record<string, string | boolean | null>>,
   ) => {
-    const result = viewer === undefined
-      ? runtime.actions.submitCommand(type, payload)
-      : viewer.actions.submitTrade(type, payload);
-    void result.catch(() => undefined);
+    void viewer.actions.submitTrade(type, payload).catch(() => undefined);
   };
   const time = (value: number) => formatTime?.(value)
     ?? formatReplayPublicTime(value, {
@@ -159,11 +153,11 @@ export function ReplayPaperTradingDock({
     <div className="replay-paper-trading" data-replay-paper-surface="account">
       <header
         className="replay-rail-account-strip"
-        data-replay-account-model={contract?.account_model ?? "PAPER_LINEAR_V1"}
-        data-replay-account-history-mode={accountHistory?.mode ?? "LEGACY"}
+        data-replay-account-model={contract?.account_model ?? "UNAVAILABLE"}
+        data-replay-account-history-mode={accountHistory?.mode ?? "UNAVAILABLE"}
       >
         <div>
-          <small>账户模型 · {contract === null ? "Legacy paper account" : "TOUCH_OR_TAPE_V2"}</small>
+          <small>账户模型 · {contract === null ? "加载中" : "TOUCH_OR_TAPE_V2"}</small>
           <strong>{portfolio?.equity ?? store.account?.equity ?? "--"} {settlementAsset}</strong>
         </div>
         <span data-account-status={contract?.status ?? "ACTIVE"}>{contract?.status ?? "ACTIVE"}</span>
@@ -332,14 +326,12 @@ export function ReplayPaperTradingDock({
               <strong>{historicalBook.status} · 已清空旧盘口</strong>
               <p>{historicalBook.message}</p>
               <p>整个 BOOK_ASSISTED Run 保持暂停，不会静默退回 Touch/Tape 继续成交。</p>
-              {viewer !== undefined && (
-                <button
-                  type="button"
-                  data-replay-action="resync-historical-book"
-                  disabled={viewer.viewerPending || viewer.marketTracks?.global_clock.state !== "PAUSED"}
-                  onClick={() => void viewer.actions.resyncHistoricalBook().catch(() => undefined)}
-                >重新校验并 resync</button>
-              )}
+              <button
+                type="button"
+                data-replay-action="resync-historical-book"
+                disabled={viewer.viewerPending || viewer.marketTracks?.global_clock.state !== "PAUSED"}
+                onClick={() => void viewer.actions.resyncHistoricalBook().catch(() => undefined)}
+              >重新校验并 resync</button>
             </div>
           ) : (
             <>
@@ -425,12 +417,12 @@ export function ReplayPaperTradingDock({
               <div><dt>Cash</dt><dd>{portfolio?.cash_balance ?? "--"}</dd></div>
               <div><dt>Reserved</dt><dd>{portfolio?.reserved_margin ?? "--"}</dd></div>
               <div><dt>Fees</dt><dd>{portfolio?.fees_paid ?? "--"}</dd></div>
-              <div><dt>Maintenance</dt><dd>{contract?.maintenance_margin ?? "legacy n/a"}</dd></div>
+              <div><dt>Maintenance</dt><dd>{contract?.maintenance_margin ?? "--"}</dd></div>
               <div><dt>Risk ratio</dt><dd>{contract?.risk_ratio ?? "--"}</dd></div>
               <div><dt>Funding cashflow</dt><dd>{contract?.funding_cashflow ?? "OFF"}</dd></div>
               <div><dt>Liquidation fees</dt><dd>{contract?.liquidation_fees_paid ?? "--"}</dd></div>
             </dl>
-            {contract?.margin_mode === "ISOLATED" && viewer !== undefined && (
+            {contract?.margin_mode === "ISOLATED" && (
               <div className="replay-isolated-allocation">
                 <label>选中轨道逐仓分配
                   <input value={isolatedAmount} inputMode="decimal" onChange={(event) => setIsolatedAmount(event.target.value)} />
@@ -450,11 +442,11 @@ export function ReplayPaperTradingDock({
 
           <section className="replay-rail-section replay-fidelity-panel" data-replay-panel="fidelity">
             <h2>执行与账本 fidelity</h2>
-            <p><strong>{contract?.execution_model ?? "PAPER_LINEAR_V1"}</strong> · {contract?.execution_fidelity ?? "legacy adapter"}</p>
-            <p>Mark：{contract === null ? "legacy" : recordText(contract.fidelity, "mark")}</p>
-            <p>Funding：{contract === null ? "legacy" : recordText(contract.fidelity, "funding")}</p>
-            <p>强平：{contract === null ? "unsupported" : recordText(contract.fidelity, "liquidation")}</p>
-            <p>账本重算差异：{contract === null ? "n/a" : recordText(contract.ledger, "reconciliation_delta")}</p>
+            <p><strong>{contract?.execution_model ?? "--"}</strong> · {contract?.execution_fidelity ?? "--"}</p>
+            <p>Mark：{contract === null ? "--" : recordText(contract.fidelity, "mark")}</p>
+            <p>Funding：{contract === null ? "--" : recordText(contract.fidelity, "funding")}</p>
+            <p>强平：{contract === null ? "--" : recordText(contract.fidelity, "liquidation")}</p>
+            <p>账本重算差异：{contract === null ? "--" : recordText(contract.ledger, "reconciliation_delta")}</p>
             <small>
               {accountHistory?.mode === "HISTORICAL_EXACT"
                 ? "Mark/index、版本化交易规则与可选 funding 来自已固定并校验的归档；账户强平仍是本训练账户模型的计算事件。"
@@ -481,16 +473,14 @@ export function ReplayPaperTradingDock({
                   ? ""
                   : ` · ${accountHistory.auditor.proof_hash}`}
               </p>
-              {viewer !== undefined && (
-                <button
-                  type="button"
-                  data-replay-action="audit-account"
-                  disabled={viewer.viewerPending}
-                  onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}
-                >
-                  重新运行独立账户审计
-                </button>
-              )}
+              <button
+                type="button"
+                data-replay-action="audit-account"
+                disabled={viewer.viewerPending}
+                onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}
+              >
+                重新运行独立账户审计
+              </button>
               {accountHistory.auditor.differences.length > 0 && (
                 <div className="replay-command-error" role="alert">
                   审计发现 {accountHistory.auditor.differences.length} 项差异；Run 不应被视为可验证 exact 结果。
@@ -538,28 +528,12 @@ export function ReplayPaperTradingDock({
         </>
       )}
 
-      {activeTab === "notes" && (
-        <>
-          <section className="replay-rail-section" data-replay-panel="journal">
-            <h2>训练日志</h2>
-            <textarea value={journalText} maxLength={4000} placeholder="记录当前判断；内容绑定虚拟时间。" onChange={(event) => setJournalText(event.target.value)} />
-            <button
-              type="button"
-              disabled={!ownsController || !journalText.trim() || runtime.pendingCommand !== null || runtime.forkPending}
-              onClick={() => {
-                const text = journalText.trim();
-                setJournalText("");
-                void runtime.actions.submitCommand("add_journal_note", { text }).catch(() => setJournalText(text));
-              }}
-            >添加日志</button>
-            {recentJournal.map((entry) => <article className="replay-list-card" key={entry.entry_id}><span>{time(entry.virtual_time_ms)}</span><p>{entry.text}</p></article>)}
-          </section>
-          <section className="replay-rail-section replay-indicator-boundary" data-replay-panel="indicators">
-            <h2>本地指标</h2>
-            <p>SMA 20 · 仅 {indicatorStatus.sourceBarCount} 根已揭示 bars。</p>
-            <p>Hosted / range / security 指标已禁用：回放页不会请求后端或未来窗口。</p>
-          </section>
-        </>
+      {activeTab === "indicators" && (
+        <section className="replay-rail-section replay-indicator-boundary" data-replay-panel="indicators">
+          <h2>本地指标</h2>
+          <p>SMA 20 · 仅 {indicatorStatus.sourceBarCount} 根已揭示 bars。</p>
+          <p>Hosted / range / security 指标已禁用：回放页不会请求后端或未来窗口。</p>
+        </section>
       )}
       </div>
     </div>

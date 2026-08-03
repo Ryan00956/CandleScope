@@ -31,7 +31,6 @@ import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
 import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.js";
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
-import ReplaySessionDialog from "./components/ReplaySessionDialog.js";
 import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
 import {
   buildReplayIntervalCatalog,
@@ -124,7 +123,6 @@ function ReplayReviewRightRail({ review }: { readonly review: ReplayReviewRespon
 }
 
 function ReplayStatePanel({ runtime }: { readonly runtime: ReplayRuntime }) {
-  if (runtime.phase === "CONFIGURING") return <ReplaySessionDialog runtime={runtime} />;
   if (runtime.phase === "ERROR" || runtime.phase === "ENTRY_ERROR") {
     return (
       <div className="chart-area" data-replay-state="error" data-replay-error={runtime.error?.code ?? "REPLAY_RUNTIME_ERROR"}>
@@ -559,7 +557,7 @@ export default function ReplayTrainingPageShell({
         if (integrityRuntime.review !== null
           || !ownsController || runtime.store.connectionState !== "connected"
           || runtime.pendingCommand !== null || viewer.controlPending !== null
-          || viewer.viewerPending || runtime.forkPending) return false;
+          || viewer.viewerPending) return false;
         if (action === "toggle-play" && effectiveState === "PLAYING") {
           void viewer.actions.submitControl("pause", {}).catch(() => undefined);
           return true;
@@ -599,7 +597,7 @@ export default function ReplayTrainingPageShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [effectiveState, globalClock, integrityRuntime.review, ownsController, runtime.forkPending, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
+  }, [effectiveState, globalClock, integrityRuntime.review, ownsController, runtime.pendingCommand, runtime.store.connectionState, viewer.actions, viewer.controlPending, viewer.viewerPending]);
 
   const interval = (viewer.viewerState?.display_interval ?? config?.base_interval ?? "1m") as IntervalString;
   const reviewSelectedTrack = review?.projection.tracks.find((track) => (

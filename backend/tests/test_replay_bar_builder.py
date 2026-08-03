@@ -10,7 +10,12 @@ from app.replay.bars.builder import (
     ReplayBarBuilder,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.market_halts import ReplayBarHalt
+from app.replay.market_halts import (
+    MAINTENANCE_NOTICE,
+    OFFICIAL_KLINES_BOUNDARY,
+    ReplayBarHalt,
+    ReplayBarHaltEvidence,
+)
 from app.replay.sources.bar_source import BarReplaySource
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
@@ -35,6 +40,19 @@ def _builder(
         warmup_bars=warmup,
         max_closed_bars=max_closed_bars,
         verified_halts=verified_halts,
+    )
+
+
+def _fixture_halt_evidence(label: str) -> tuple[ReplayBarHaltEvidence, ...]:
+    return (
+        ReplayBarHaltEvidence(
+            MAINTENANCE_NOTICE,
+            f"https://example.com/{label}-notice",
+        ),
+        ReplayBarHaltEvidence(
+            OFFICIAL_KLINES_BOUNDARY,
+            f"https://example.com/{label}-boundary",
+        ),
     )
 
 
@@ -224,7 +242,8 @@ def test_verified_halt_skips_missing_opens_without_fabricating_display_component
         halt_id="fixture-reviewed-halt",
         resume_ms=REPLAY_START_MS + 4 * INTERVAL_MS,
         reason="exchange_scheduled_system_upgrade",
-        evidence_url="https://example.com/reviewed-halt",
+        boundary_source="fixture_exact_gap.v1",
+        evidence=_fixture_halt_evidence("reviewed-halt"),
     )
     builder = _builder(verified_halts=(halt,))
 
@@ -241,7 +260,7 @@ def test_verified_halt_skips_missing_opens_without_fabricating_display_component
     assert closed.last_base_open_ms == REPLAY_START_MS + 4 * INTERVAL_MS
     assert closed.component_count == 3
     assert closed.expected_components == 3
-    assert updates[-1].gap_policy == "verified_market_halts_v1"
+    assert updates[-1].gap_policy == "verified_market_halts_v2"
     assert builder.replay_events_applied == 3
 
     snapshot = builder.snapshot()
@@ -261,7 +280,8 @@ def test_verified_halt_can_skip_whole_display_buckets_and_restore_closed_tail() 
         halt_id="fixture-full-bucket-halt",
         resume_ms=REPLAY_START_MS + 10 * INTERVAL_MS,
         reason="exchange_scheduled_system_upgrade",
-        evidence_url="https://example.com/full-bucket-halt",
+        boundary_source="fixture_exact_gap.v1",
+        evidence=_fixture_halt_evidence("full-bucket-halt"),
     )
     builder = _builder(verified_halts=(halt,))
     for offset in (*range(5), *range(10, 15)):
@@ -286,7 +306,8 @@ def test_replay_can_start_at_resume_after_a_fully_halted_display_prefix() -> Non
         halt_id="fixture-halted-display-prefix",
         resume_ms=REPLAY_START_MS + 3 * INTERVAL_MS,
         reason="exchange_scheduled_system_upgrade",
-        evidence_url="https://example.com/halted-display-prefix",
+        boundary_source="fixture_exact_gap.v1",
+        evidence=_fixture_halt_evidence("halted-display-prefix"),
     )
     builder = _builder(
         replay_start_ms=halt.resume_ms,

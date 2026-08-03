@@ -102,11 +102,11 @@
       "RESYNC_REQUIRED"
     ]
   },
-  "schema_migration_contract": {
-    "strategy": "ADDITIVE_ONLY",
-    "legacy_protocol": "replay.v1",
-    "legacy_json_rewrite": false,
-    "legacy_tables": [
+  "adapter_storage_contract": {
+    "ownership": "V2_INTERNAL_ADAPTER",
+    "adapter_protocol": "replay.v1",
+    "public_legacy_import": false,
+    "adapter_tables": [
       "replay_session",
       "replay_dataset_ref",
       "replay_command_log",

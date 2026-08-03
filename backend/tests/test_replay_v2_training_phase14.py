@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from app.replay.training.models import (
     TrainingCursor,
     TrainingRunCreateRequest,
 )
-from app.replay.training.schema import TRAINING_SCHEMA_VERSION, data_policy_hash
 from app.replay.training.segments import resolve_history_policy
 from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
@@ -54,7 +52,7 @@ async def _service(
             ],
         )
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=repository,
         now_ms=lambda: NOW_MS,
@@ -303,7 +301,7 @@ async def test_phase14_random_selection_occurs_once_then_freezes_exact_start(
     service = await _service(tmp_path / "random.db")
     try:
         public_calls = 0
-        original_public = service._catalog.select_random
+        original_public = service._catalog.select_random_from_ranges
 
         def counted_public(*args: object, **kwargs: object):
             nonlocal public_calls
@@ -313,7 +311,11 @@ async def test_phase14_random_selection_occurs_once_then_freezes_exact_start(
         def forbidden_internal(*_args: object, **_kwargs: object):
             pytest.fail("expanded training catalog re-randomized the selected start")
 
-        monkeypatch.setattr(service._catalog, "select_random", counted_public)
+        monkeypatch.setattr(
+            service._catalog,
+            "select_random_from_ranges",
+            counted_public,
+        )
         monkeypatch.setattr(
             service._training_history_catalog,
             "select_random",
@@ -731,70 +733,3 @@ async def test_phase14_segment_covers_full_frozen_history_and_policy_roles(
         )
     finally:
         await service.shutdown()
-
-
-async def test_phase14_v9_additive_policy_table_backfills_and_keeps_rollback_version(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "additive.db"
-    service = await _service(path)
-    try:
-        created = await service.training.create_run(  # type: ignore[union-attr]
-            await _request(
-                service,
-                indicator_warmup_bars=2,
-                visible_duration_ms=2 * INTERVAL_MS,
-            )
-        )
-        run_id = str(created["run"]["run_id"])
-    finally:
-        await service.shutdown()
-
-    with sqlite3.connect(path) as connection:
-        connection.execute("DROP TABLE replay_training_data_policy")
-        connection.commit()
-
-    restarted = await _service(path)
-    try:
-        with sqlite3.connect(path) as connection:
-            connection.row_factory = sqlite3.Row
-            version = connection.execute(
-                """
-                SELECT version FROM replay_training_schema_version
-                WHERE singleton = 1
-                """
-            ).fetchone()
-            policy = connection.execute(
-                """
-                SELECT * FROM replay_training_data_policy
-                WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            quick_check = connection.execute("PRAGMA quick_check").fetchone()
-            foreign_key_check = connection.execute(
-                "PRAGMA foreign_key_check"
-            ).fetchall()
-        assert version is not None
-        assert version["version"] == TRAINING_SCHEMA_VERSION == 9
-        assert policy is not None
-        assert policy["indicator_warmup_bars"] == 2
-        assert policy["visible_history_mode"] == "DURATION"
-        assert policy["visible_history_rows"] == 2
-        assert policy["effective_warmup_bars"] == 2
-        assert policy["policy_hash"] == data_policy_hash(
-            indicator_warmup_bars=policy["indicator_warmup_bars"],
-            visible_history_mode=policy["visible_history_mode"],
-            visible_history_lookback_ms=policy["visible_history_lookback_ms"],
-            visible_history_rows=policy["visible_history_rows"],
-            actual_visible_history_start_ms=policy["actual_visible_history_start_ms"],
-            actual_replay_start_ms=policy["actual_replay_start_ms"],
-            effective_warmup_bars=policy["effective_warmup_bars"],
-            forward_cache_ms=policy["forward_cache_ms"],
-            interval_ms=policy["interval_ms"],
-        )
-        assert quick_check is not None
-        assert quick_check[0] == "ok"
-        assert foreign_key_check == []
-    finally:
-        await restarted.shutdown()

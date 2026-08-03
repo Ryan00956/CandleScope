@@ -104,19 +104,16 @@ CandleScope is a local-first market charting application with:
 
 ## Replay Training (Opt-In)
 
-Replay v1 is a local-first, deterministic market-training runtime. It opens in
+Replay is a local-first, deterministic v2 market-training product. It opens in
 an independent `replay.html` document with its own composition root; the live
 page never swaps its market source or owns replay state. The authoritative
-replay capability and live-page entry remain disabled by default. Once those
-gates are enabled, v2 is the default replay product; aggregate-trade archive,
+replay capability and live-page entry remain disabled by default. Aggregate-trade archive,
 historical-book, background workers, and optimized paths remain independently
 closed:
 
 ```text
 REPLAY_ENABLED=0
-REPLAY_PRODUCT_V2_ENABLED=1
 VITE_REPLAY_ENTRY_ENABLED=0
-VITE_REPLAY_PRODUCT_V2_ENABLED=1
 RAW_AGG_TRADE_ARCHIVE_ENABLED=0
 REPLAY_HISTORICAL_BOOK_ENABLED=0
 REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0
@@ -128,7 +125,7 @@ REPLAY_ACCOUNT_HISTORY_ENABLED=0
 The frontend flag only hides or shows the live-page entry. The backend
 capability is authoritative, including for direct `replay.html` access.
 
-Supported v1 fidelity:
+Internal adapter fidelity used by v2:
 
 | Source | Data fidelity | Execution fidelity | Boundary |
 |---|---|---|---|
@@ -136,18 +133,16 @@ Supported v1 fidelity:
 | Binance USD-M aggregate trades | `EXACT_AGG_TRADE_COVERAGE` | `AGG_TRADE_TAPE` | Requires a checksum-verified, exact archive partition. Fills are tape-volume constrained and strict-cross; they are not queue-exact. |
 
 Both sources use the same deterministic actor, virtual clock,
-`paper_linear_v1` broker, ledger, replay.v1 HTTP/WebSocket protocol, blind
-timeline, report, and independent replay UI. Sessions restart in `PAUSED`, and
+`paper_linear_v1` broker, ledger, and replay.v1 HTTP/WebSocket protocol. These
+are internal execution contracts, not a selectable v1 product. Sessions restart in `PAUSED`, and
 the report exposes its actual data/execution fidelity and integrity hashes.
 
-Replay v1 explicitly does **not** support:
+The internal adapter explicitly does **not** support:
 
 - `RAW_TRADE`: aggregate trades are not renamed or claimed as raw individual fills.
 - `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
 - `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
 
-Replay v2 is selected by default after the replay gates are opened. Setting
-either v2 selector explicitly to `0` keeps the corresponding v1 rollback path.
 Phase 8 adds explainable
 `CHECKPOINT_JUMP` / `AGGREGATE_SCAN` / `FULL_EVENT_SCAN` / `BLOCKED` planning,
 bounded source-page scans, cancellable committed chunks, and a replay-isolated
@@ -167,12 +162,10 @@ explicit revalidation/resync. The execution model remains `TOUCH_OR_TAPE_V2`
 and reports `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`: L2 is an exact
 continuity capability, not proof of queue position or maker-fill priority.
 
-The v2 selectors default to on; optimization and historical-book capabilities
-remain default-off:
+`REPLAY_ENABLED` is the only backend product gate. Optional optimization and
+historical-book capabilities remain default-off:
 
 ```text
-REPLAY_PRODUCT_V2_ENABLED=1
-VITE_REPLAY_PRODUCT_V2_ENABLED=1
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
 REPLAY_HISTORICAL_BOOK_ENABLED=0
 REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES=1099511627776
@@ -273,7 +266,6 @@ pair avoids the normal `18080` / `15173` services:
 Set-Location backend
 $env:CANDLE_DATA_DIR = '.\data\replay-dev'
 $env:REPLAY_DB_PATH = '.\data\replay-dev\replay.db'
-$env:REPLAY_BAR_SOURCE = 'archive'
 $env:REPLAY_HISTORY_ARCHIVE_DIR = '.\data\replay-dev\replay-history'
 $env:REPLAY_ENABLED = '1'
 # Set to 1 only after an exact AGG_TRADE archive passes the audit above.
@@ -328,17 +320,13 @@ Set-Location backend
 
 Set-Location ..\frontend
 & $ReplayNpm run smoke:replay -- --timeout-ms 120000 `
-  --out "$ReplayEvidenceRoot\replay-v1-smoke.json"
-& $ReplayNpm run smoke:replay:v2 -- --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-smoke.json"
 node scripts\replay-soak.mjs `
-  --product-v2 `
   --real-klines-source ..\backend\data\replay-dev\source-candlescope.db `
   --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
   --sample-ms 60000 --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-soak.json"
 node scripts\replay-v2-rollback-drill.mjs `
-  --product-v2 `
   --baseline c9a1ddbfe316c68c91787b69c783baeeb0670a9f `
   --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-rollback.json"

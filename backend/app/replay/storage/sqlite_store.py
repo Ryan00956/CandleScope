@@ -150,7 +150,7 @@ class StoredCommand:
 class StoredCheckpoint:
     checkpoint_id: int
     session_id: str
-    mutation_id: int | None
+    mutation_id: int
     source_sequence: int
     command_log_offset: int
     event_sequence: int
@@ -898,11 +898,7 @@ class ReplaySQLiteStore:
                     StoredCheckpoint(
                         checkpoint_id=int(row["checkpoint_id"]),
                         session_id=row["session_id"],
-                        mutation_id=(
-                            None
-                            if row["mutation_id"] is None
-                            else int(row["mutation_id"])
-                        ),
+                        mutation_id=int(row["mutation_id"]),
                         source_sequence=int(row["source_sequence"]),
                         command_log_offset=int(row["command_log_offset"]),
                         event_sequence=int(row["event_sequence"]),

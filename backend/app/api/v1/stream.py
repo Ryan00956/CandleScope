@@ -18,7 +18,7 @@ from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
 from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
-from app.api.v1.replay import replay_v2_unavailable_payload
+from app.api.v1.replay import replay_training_unavailable_payload
 from app.api.v1.stream_replay import stream_replay_session
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
@@ -27,8 +27,9 @@ from app.api.v1.stream_utils import (
     send_json_with_timeout as _send_json_with_timeout,
     validate_ws_interval as _validate_ws_interval,
 )
-from app.replay.models import MAX_COUNTER
+from app.replay.models import MAX_COUNTER, validate_identifier
 from app.replay.constants import REPLAY_PROTOCOL
+from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import REPLAY_V2_PROTOCOL
 
 router = APIRouter(prefix="/stream", tags=["stream"])
@@ -62,8 +63,11 @@ async def replay_stream(
     if protocol != REPLAY_PROTOCOL:
         await websocket.accept()
         if protocol == REPLAY_V2_PROTOCOL:
-            await _send_json_with_timeout(websocket, replay_v2_unavailable_payload())
-            await websocket.close(code=1013, reason="replay v2 unavailable")
+            await _send_json_with_timeout(
+                websocket,
+                replay_training_unavailable_payload(),
+            )
+            await websocket.close(code=1013, reason="replay training unavailable")
         else:
             await _send_json_with_timeout(
                 websocket,
@@ -79,9 +83,42 @@ async def replay_stream(
             await websocket.close(code=1008, reason="unsupported replay protocol")
         return
 
+    service = getattr(websocket.app.state, "replay_service", None)
+    training = getattr(service, "training", None)
+    if service is None or training is None:
+        await websocket.accept()
+        await _send_json_with_timeout(websocket, replay_training_unavailable_payload())
+        await websocket.close(code=1013, reason="replay training unavailable")
+        return
+
+    try:
+        normalized_session_id = validate_identifier(
+            session_id,
+            field_name="session_id",
+        )
+        await training.store.run_id_for_session(normalized_session_id)
+    except (TypeError, ValueError):
+        error = TrainingRunError(
+            "TRAINING_RUN_NOT_FOUND",
+            "training adapter session does not exist",
+            status_code=404,
+        )
+        await websocket.accept()
+        await _send_json_with_timeout(websocket, error.to_payload())
+        await websocket.close(code=1008, reason="training adapter session not found")
+        return
+    except TrainingRunError as error:
+        await websocket.accept()
+        await _send_json_with_timeout(websocket, error.to_payload())
+        await websocket.close(
+            code=1008 if error.status_code < 500 else 1013,
+            reason="training adapter session unavailable",
+        )
+        return
+
     await stream_replay_session(
         websocket,
-        session_id=session_id,
+        session_id=normalized_session_id,
         after_sequence=after_sequence,
         data_epoch=data_epoch,
     )

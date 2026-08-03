@@ -37,6 +37,9 @@ from app.replay.history_archive import (  # noqa: E402
     SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH,
     SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
 )
+from app.replay.remote_history import (  # noqa: E402
+    publish_catalog_and_remote_index_if_current,
+)
 
 
 def _date(value: str) -> date:
@@ -157,6 +160,23 @@ def _daily_fallbacks_by_month(
     }
 
 
+def _source_filter_policy(alignment_policy: str | None) -> str:
+    """Version the parser contract independently from the source checksum.
+
+    Binance occasionally publishes a valid, interval-aligned K-line whose
+    close timestamp precedes the canonical bucket end (for example, the final
+    traded bar before maintenance).  Parser v2 preserves and normalizes those
+    rows.  Including the policy in reuse eligibility ensures unchanged ZIPs
+    are rebuilt when parser semantics change instead of pinning a stale gap.
+    """
+
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED:
+        return "binance_checksum_catalog_fixed_grid_v2"
+    if alignment_policy == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH:
+        return "binance_checksum_calendar_month_grid_v2"
+    return "binance_checksum_utc_grid_v2"
+
+
 async def import_history(args: argparse.Namespace) -> dict[str, object]:
     if args.start > args.end:
         raise ReplayHistoryArchiveError("--start must not be after --end")
@@ -215,6 +235,7 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
         str(args.symbol).strip().upper(),
     )
     current = writer.current_manifest(identity, args.interval)
+    base_catalog_epoch = None if current is None else current.catalog_epoch
     alignment_policy = (
         SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
         if args.interval == "3d"
@@ -236,6 +257,7 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
         if current is not None
         else {}
     )
+    source_filter_policy = _source_filter_policy(alignment_policy)
     cache = HistoricalArchiveCache(
         cache_dir,
         max_bytes=args.cache_max_bytes,
@@ -274,6 +296,7 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                     existing is not None
                     and existing.source_content_sha256 == content_digest
                     and existing.source_provider_checksum == checksum_digest
+                    and existing.source_filter_policy == source_filter_policy
                 ):
                     objects.append(existing)
                     reused.append(ref.object_key)
@@ -317,17 +340,7 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                         source_row_count=parsed.source_row_count,
                         source_rejected_rows=parsed.rejected_row_count,
                         source_normalized_rows=parsed.normalized_row_count,
-                        source_filter_policy=(
-                            "binance_checksum_catalog_fixed_grid_v1"
-                            if alignment_policy
-                            == SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED
-                            else (
-                                "binance_checksum_calendar_month_grid_v1"
-                                if alignment_policy
-                                == SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH
-                                else "binance_checksum_utc_grid_v1"
-                            )
-                        ),
+                        source_filter_policy=source_filter_policy,
                         source_rejection_reasons=parsed.rejection_reasons,
                         source_bucket_anchor_ms=source_bucket_anchor_ms,
                         alignment_policy=alignment_policy,
@@ -395,8 +408,10 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
                         total=len(refs),
                     )
 
-    manifest = await asyncio.to_thread(
-        writer.publish_catalog,
+    manifest, remote_index = await asyncio.to_thread(
+        publish_catalog_and_remote_index_if_current,
+        writer,
+        base_catalog_epoch,
         identity,
         args.interval,
         objects,
@@ -411,6 +426,8 @@ async def import_history(args: argparse.Namespace) -> dict[str, object]:
         "plan_only": False,
         "identity": identity.to_dict(),
         "interval": args.interval,
+        "base_catalog_epoch": base_catalog_epoch,
+        "remote_index_epoch": remote_index.index_epoch,
         "requested_start": args.start.isoformat(),
         "requested_end": args.end.isoformat(),
         "catalog_epoch": manifest.catalog_epoch,

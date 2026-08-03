@@ -2,9 +2,8 @@
 
 Replay is a server-authoritative historical market runtime. It is not a source
 toggle inside the live application. The backend replay capability and live-page
-entry remain disabled by default. The v2 product selector defaults on, so an
-enabled replay entry opens the verified v2 workbench unless an operator
-explicitly selects the v1 rollback path.
+entry remain disabled by default. An enabled replay entry opens the verified v2
+workbench; there is no v1 product selector or fallback UI.
 
 The phase-gated v2 workbench now includes the Training Hub, source-neutral market
 workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
@@ -13,10 +12,9 @@ Phase 6 versioned contract account, plus Phase 7 on-demand data segments and
 safe GC, and Phase 8 explainable fast-forward plus aggregate-trade flow. New TrainingRuns use `TOUCH_OR_TAPE_V2`,
 configured maker/taker policies, CROSS or ISOLATED margin, approximate Sandbox
 funding, simulated-account liquidation events, and a hash-chained cash ledger.
-The UI continuously labels the no-book execution boundary. With
-`VITE_REPLAY_PRODUCT_V2_ENABLED=1`, a direct `replay.html`
-configure entry opens the Hub; opaque `?session=<id>` entries continue through
-the proven v1 runtime adapter. Hub bootstrap performs only the bounded lightweight
+The UI continuously labels the no-book execution boundary. A direct
+`replay.html` configure entry opens the Hub; opaque `?session=<id>` entries open
+the v2 workspace backed by the internal deterministic adapter. Hub bootstrap performs only the bounded lightweight
 `GET /api/v1/replay/runs` request. Historical datasets are not loaded until a
 concrete training session is entered.
 
@@ -61,12 +59,10 @@ aggressor/CVD is explicitly approximate because side is inferred from
 buyer-maker. Any gap or epoch change clears the projection and requires resync.
 BAR shows `UNSUPPORTED_SOURCE_MODE`; it never renders missing history as zero.
 
-With the repository-default `VITE_REPLAY_PRODUCT_V2_ENABLED=1`, the configure
-entry opens the v2 Hub. Explicit `0` keeps composition exactly v1. The backend
-still requires its authoritative replay gate before serving v2 routes. The
-frozen v1 public execution enum and legacy
-`PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER` restore path remain unchanged; the v2
-TrainingRun selects its internal execution version explicitly. Historical-exact
+The configure entry always opens the v2 Hub. The backend still requires its
+authoritative replay gate before serving v2 routes. The internal `replay.v1`
+actor protocol and `PAPER_LINEAR_V1` broker remain implementation details of a
+v2 TrainingRun; they are not user-selectable products or archive formats. Historical-exact
 funding remains fail-closed because this repository has no aligned historical
 funding plus authoritative mark source. Historical L2/book-assisted execution is
 also unavailable; neither boundary silently falls back to last price or zero.

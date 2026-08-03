@@ -100,11 +100,10 @@ async def start_replay_runtime(
     service: ReplayService | None = None
     archive_lease: ReplayHistoryArchiveRuntimeLease | None = None
     try:
-        if settings.replay_bar_source == "archive":
-            archive_lease = ReplayHistoryArchiveRuntimeLease(
-                settings.replay_history_archive_dir
-            )
-            archive_lease.acquire()
+        archive_lease = ReplayHistoryArchiveRuntimeLease(
+            settings.replay_history_archive_dir
+        )
+        archive_lease.acquire()
         store_task = asyncio.create_task(
             asyncio.to_thread(factory, str(settings.db_path)),
             name="replay-store-open",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 
@@ -179,3 +181,43 @@ def test_empty_account_final_state_bar_batch_matches_per_bar_state(
         reference.apply_bar(source_bar)
 
     assert batched.snapshot() == reference.snapshot()
+
+
+def test_final_state_transport_projection_keeps_one_day_under_128_kib() -> None:
+    source_bars = []
+    for index in range(2_048):
+        price = Decimal("60000.00000000") + Decimal(index % 997) / Decimal("100")
+        open_price = f"{price:.8f}"
+        close_price = f"{price + Decimal((index % 11) - 5) / Decimal('100'):.8f}"
+        volume = f"{Decimal('12.34567890') + Decimal(index % 31) / Decimal('100000000'):.8f}"
+        quote_volume = f"{Decimal(volume) * Decimal(close_price):.8f}"
+        source_bars.append(
+            replace(
+                bar(index, open_price),
+                open=open_price,
+                high=f"{price + Decimal('12.34000000'):.8f}",
+                low=f"{price - Decimal('8.76000000'):.8f}",
+                close=close_price,
+                volume=volume,
+                quote_volume=quote_volume,
+                trades=100 + (index % 300),
+                taker_buy_base=f"{Decimal(volume) / Decimal(2):.8f}",
+                taker_buy_quote=f"{Decimal(quote_volume) / Decimal(2):.8f}",
+            )
+        )
+
+    broker = make_broker(max_closed_bars=2_048)
+    broker.apply_source_events_final_state(tuple(source_bars[:608]))
+    anchor = broker.final_state_transport_anchor()
+    broker.apply_source_events_final_state(tuple(source_bars[608:]))
+    projection = broker.final_state_transport_projection(anchor)
+    encoded = json.dumps(projection, separators=(",", ":")).encode()
+    snapshot = json.dumps(broker.snapshot(), separators=(",", ":")).encode()
+
+    series = projection["series"]
+    assert isinstance(series, dict)
+    assert series["bar_count"] == 1_441
+    assert series["retained_count"] == 2_048
+    assert series["replace_from_open_ms"] == source_bars[607].open_time_ms
+    assert len(encoded) < 128 * 1_024
+    assert len(encoded) * 8 < len(snapshot)

@@ -13,6 +13,7 @@ import {
   BASE_TIME_MS,
   replayDeltaEvent,
   replayDigest,
+  replayFinalStateEvent,
   replaySnapshotEvent,
   replayStatusEvent,
 } from "./fixtures.js";
@@ -699,6 +700,59 @@ test("an exact terminal fast-forward reset may atomically publish the exhausted 
   assert.equal(controller.diagnostics().lastSequence, 11);
   assert.equal(controller.diagnostics().lastSourceSequence, 128);
   assert.equal(controller.diagnostics().state, "connected");
+  controller.stop();
+});
+
+test("compact final-state advances transport, source, revision, time, and hash together", () => {
+  const timers = new FakeTimers();
+  const socket = new FakeSocket();
+  const events: string[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => socket,
+    onEvent: (event) => events.push(event.type),
+  });
+  controller.start();
+  socket.open();
+  socket.message(replaySnapshotEvent());
+  socket.message(replayFinalStateEvent({ state: "ENDED" }));
+  const diagnostics = controller.diagnostics();
+  assert.deepEqual(events, ["replay.final_state"]);
+  assert.equal(diagnostics.lastSequence, 1);
+  assert.equal(diagnostics.lastRevision, 1);
+  assert.equal(diagnostics.lastSourceSequence, 2);
+  assert.equal(diagnostics.lastStateHash, replayDigest("9"));
+  assert.equal(diagnostics.state, "connected");
+  controller.stop();
+});
+
+test("compact final-state source gaps fail closed into full resync", () => {
+  const timers = new FakeTimers();
+  const sockets: FakeSocket[] = [];
+  const errors: string[] = [];
+  const controller = new ReplayStreamController({
+    sessionId: "session-0001",
+    initialDataEpoch: replayDigest("c"),
+    baseUrl: "ws://example.test",
+    timers,
+    socketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onError: (error) => errors.push(error.code),
+  });
+  controller.start();
+  sockets[0]!.open();
+  sockets[0]!.message(replaySnapshotEvent());
+  sockets[0]!.message(replayFinalStateEvent({ sourceFrom: 2, sourceTo: 3 }));
+  assert.deepEqual(errors, ["REPLAY_PROTOCOL_ERROR"]);
+  assert.equal(controller.diagnostics().state, "resyncing");
+  timers.runAll();
+  assert.equal(sockets.length, 2);
   controller.stop();
 });
 

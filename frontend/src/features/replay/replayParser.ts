@@ -33,6 +33,9 @@ import type {
   ReplayErrorCode,
   ReplayErrorEnvelope,
   ReplayFill,
+  ReplayFinalStateEventData,
+  ReplayFinalStateProjection,
+  ReplayFinalStateSeriesPatch,
   ReplayJournalEntry,
   ReplayJson,
   ReplayOrder,
@@ -513,6 +516,176 @@ export function parseReplayProjection(value: unknown, path = "$"): ReplayProject
   };
 }
 
+const BASE36_TOKEN = /^-?[0-9a-z]+$/;
+
+function base36BigInt(value: string, path: string): bigint {
+  if (!BASE36_TOKEN.test(value)) return fail(path, "expected signed lowercase base36 integer");
+  const negative = value.startsWith("-");
+  const digits = negative ? value.slice(1) : value;
+  let parsed = 0n;
+  for (const character of digits) {
+    const code = character.charCodeAt(0);
+    const digit = code >= 48 && code <= 57 ? code - 48 : code - 87;
+    parsed = parsed * 36n + BigInt(digit);
+  }
+  return negative ? -parsed : parsed;
+}
+
+function safeBigInt(value: bigint, path: string, min = 0): number {
+  if (value < BigInt(min) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return fail(path, `decoded integer is outside [${min}, ${Number.MAX_SAFE_INTEGER}]`);
+  }
+  return Number(value);
+}
+
+function scaledDecimal(value: bigint, scale: number): ReplayDecimalString {
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(scale + 1, "0");
+  if (scale === 0) return `${negative ? "-" : ""}${digits}` as ReplayDecimalString;
+  const integerPart = digits.slice(0, -scale) || "0";
+  const fraction = digits.slice(-scale).replace(/0+$/, "");
+  if (!fraction && /^0+$/.test(integerPart)) return "0";
+  return `${negative ? "-" : ""}${integerPart}${fraction ? `.${fraction}` : ""}` as ReplayDecimalString;
+}
+
+function parseFinalStateSeriesPatch(value: unknown, path: string): ReplayFinalStateSeriesPatch {
+  const source = record(value, path);
+  exact(source, [
+    "schema_version", "encoding", "replace_from_open_ms", "retained_start_open_ms",
+    "retained_end_open_ms", "retained_count", "bar_count", "first_open_ms",
+    "default_close_span_ms", "decimal_scales", "packed_bars",
+  ], path);
+  if (source.schema_version !== "replay-series-tail-patch.v1") {
+    fail(`${path}.schema_version`, "unsupported final-state series patch schema");
+  }
+  if (source.encoding !== "delta-base36-decimal-columns.v1") {
+    fail(`${path}.encoding`, "unsupported final-state series encoding");
+  }
+  const replaceFrom = nullableTimestamp(source.replace_from_open_ms, `${path}.replace_from_open_ms`);
+  const retainedStart = nullableTimestamp(source.retained_start_open_ms, `${path}.retained_start_open_ms`);
+  const retainedEnd = nullableTimestamp(source.retained_end_open_ms, `${path}.retained_end_open_ms`);
+  const retainedCount = integer(source.retained_count, `${path}.retained_count`);
+  const barCount = integer(source.bar_count, `${path}.bar_count`);
+  const firstOpen = timestamp(source.first_open_ms, `${path}.first_open_ms`);
+  const defaultSpan = source.default_close_span_ms === null
+    ? null
+    : integer(source.default_close_span_ms, `${path}.default_close_span_ms`, 1);
+  const scalesSource = record(source.decimal_scales, `${path}.decimal_scales`);
+  exact(scalesSource, ["price", "volume", "quote_volume", "taker_buy_base", "taker_buy_quote"], `${path}.decimal_scales`);
+  const scales = {
+    price: integer(scalesSource.price, `${path}.decimal_scales.price`, 0, 64),
+    volume: integer(scalesSource.volume, `${path}.decimal_scales.volume`, 0, 64),
+    quoteVolume: integer(scalesSource.quote_volume, `${path}.decimal_scales.quote_volume`, 0, 64),
+    takerBuyBase: integer(scalesSource.taker_buy_base, `${path}.decimal_scales.taker_buy_base`, 0, 64),
+    takerBuyQuote: integer(scalesSource.taker_buy_quote, `${path}.decimal_scales.taker_buy_quote`, 0, 64),
+  };
+  const packed = string(source.packed_bars, `${path}.packed_bars`, { nonEmpty: false });
+  const records = packed === "" ? [] : packed.split(";");
+  if (records.length !== barCount) fail(`${path}.bar_count`, "does not match packed bar count");
+  if ((barCount === 0) !== (replaceFrom === null)) {
+    fail(path, "empty patch and replace boundary disagree");
+  }
+  if (barCount > 0 && defaultSpan === null) fail(`${path}.default_close_span_ms`, "non-empty patch requires a default span");
+  if (retainedCount === 0) {
+    if (retainedStart !== null || retainedEnd !== null || barCount !== 0 || firstOpen !== 0) {
+      fail(path, "empty retained series has non-empty boundaries");
+    }
+  } else if (retainedStart === null || retainedEnd === null || retainedStart > retainedEnd) {
+    fail(path, "retained series boundaries are invalid");
+  }
+
+  let previousOpen: number | null = null;
+  let previousClose = 0n;
+  const bars: ReplayDisplayBar[] = [];
+  for (const [index, recordValue] of records.entries()) {
+    const itemPath = `${path}.packed_bars[${index}]`;
+    const fields = recordValue.split(",");
+    if (fields.length !== 16) fail(itemPath, "packed bar must contain exactly 16 columns");
+    const [
+      openDeltaToken, spanToken, openToken, highToken, lowToken, closeToken,
+      volumeToken, quoteVolumeToken, tradesToken, takerBaseToken, takerQuoteToken,
+      firstBaseToken, lastBaseToken, componentToken, expectedToken, flagsToken,
+    ] = fields as [string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string];
+    if (index === 0 && openDeltaToken !== "") fail(itemPath, "first packed bar must use first_open_ms");
+    if (index > 0 && openDeltaToken === "") fail(itemPath, "later packed bar is missing its open-time delta");
+    const openTime: number = index === 0
+      ? firstOpen
+      : safeBigInt(BigInt(previousOpen!) + base36BigInt(openDeltaToken, `${itemPath}.open_delta`), `${itemPath}.open_time_ms`);
+    if (previousOpen !== null && openTime <= previousOpen) fail(itemPath, "packed bar times are not strictly increasing");
+    const span = spanToken === ""
+      ? defaultSpan!
+      : safeBigInt(base36BigInt(spanToken, `${itemPath}.close_span`), `${itemPath}.close_span`, 1);
+    const openValue = previousClose + base36BigInt(openToken, `${itemPath}.open`);
+    const highValue = previousClose + base36BigInt(highToken, `${itemPath}.high`);
+    const lowValue = previousClose + base36BigInt(lowToken, `${itemPath}.low`);
+    const closeValue = previousClose + base36BigInt(closeToken, `${itemPath}.close`);
+    const optionalScaled = (token: string, scale: number, tokenPath: string): ReplayDecimalString | null => (
+      token === "~" ? null : scaledDecimal(base36BigInt(token, tokenPath), scale)
+    );
+    const firstBaseOffset = safeBigInt(base36BigInt(firstBaseToken, `${itemPath}.first_base_offset`), `${itemPath}.first_base_offset`);
+    const lastBaseOffset = safeBigInt(base36BigInt(lastBaseToken, `${itemPath}.last_base_offset`), `${itemPath}.last_base_offset`);
+    const flags = safeBigInt(base36BigInt(flagsToken, `${itemPath}.flags`), `${itemPath}.flags`);
+    if (flags > 3) fail(`${itemPath}.flags`, "contains unknown flag bits");
+    const bar = parseReplayDisplayBar({
+      open_time_ms: openTime,
+      close_time_ms: openTime + span - 1,
+      open: scaledDecimal(openValue, scales.price),
+      high: scaledDecimal(highValue, scales.price),
+      low: scaledDecimal(lowValue, scales.price),
+      close: scaledDecimal(closeValue, scales.price),
+      volume: scaledDecimal(base36BigInt(volumeToken, `${itemPath}.volume`), scales.volume),
+      quote_volume: optionalScaled(quoteVolumeToken, scales.quoteVolume, `${itemPath}.quote_volume`),
+      trades: tradesToken === "~" ? null : safeBigInt(base36BigInt(tradesToken, `${itemPath}.trades`), `${itemPath}.trades`),
+      taker_buy_base: optionalScaled(takerBaseToken, scales.takerBuyBase, `${itemPath}.taker_buy_base`),
+      taker_buy_quote: optionalScaled(takerQuoteToken, scales.takerBuyQuote, `${itemPath}.taker_buy_quote`),
+      first_base_open_ms: openTime + firstBaseOffset,
+      last_base_open_ms: openTime + lastBaseOffset,
+      component_count: safeBigInt(base36BigInt(componentToken, `${itemPath}.component_count`), `${itemPath}.component_count`, 1),
+      expected_components: safeBigInt(base36BigInt(expectedToken, `${itemPath}.expected_components`), `${itemPath}.expected_components`, 1),
+      is_closed: (flags & 1) !== 0,
+      synthetic: (flags & 2) !== 0,
+    }, itemPath);
+    bars.push(bar);
+    previousOpen = openTime;
+    previousClose = closeValue;
+  }
+  if (bars.length > 0) {
+    if (bars[0]!.open_time_ms !== firstOpen || bars[0]!.open_time_ms !== replaceFrom) {
+      fail(path, "patch first bar does not match its replacement boundary");
+    }
+    if (retainedStart === null || retainedEnd === null || replaceFrom! < retainedStart || bars.at(-1)!.open_time_ms !== retainedEnd) {
+      fail(path, "patch does not terminate at the retained series tail");
+    }
+  }
+  if (barCount > retainedCount) fail(`${path}.bar_count`, "patch exceeds retained series count");
+  return {
+    schema_version: "replay-series-tail-patch.v1",
+    replace_from_open_ms: replaceFrom,
+    retained_start_open_ms: retainedStart,
+    retained_end_open_ms: retainedEnd,
+    retained_count: retainedCount,
+    bars,
+  };
+}
+
+function parseFinalStateProjection(value: unknown, path: string): ReplayFinalStateProjection {
+  const source = record(value, path);
+  exact(source, ["schema_version", "series", "orders", "fills", "closed_trades", "warnings", "position", "account"], path);
+  if (source.schema_version !== "replay-final-state-projection.v1") {
+    fail(`${path}.schema_version`, "unsupported final-state projection schema");
+  }
+  return {
+    schema_version: "replay-final-state-projection.v1",
+    series: parseFinalStateSeriesPatch(source.series, `${path}.series`),
+    orders: array(source.orders, `${path}.orders`, parseOrder),
+    fills: array(source.fills, `${path}.fills`, parseFill),
+    closed_trades: array(source.closed_trades, `${path}.closed_trades`, parseClosedTrade),
+    warnings: array(source.warnings, `${path}.warnings`, parseWarning),
+    position: parsePosition(source.position, `${path}.position`),
+    account: parseAccount(source.account, `${path}.account`),
+  };
+}
+
 function parseBarBuilder(value: unknown, path: string): ReplayBarBuilderSnapshot {
   const source = record(value, path);
   exact(source, [
@@ -803,24 +976,20 @@ export function parseReplaySessionSnapshot(value: unknown, path = "$"): ReplaySe
 
 export function parseReplaySessionResponse(value: unknown, path = "$"): ReplaySessionResponse {
   const source = record(value, path);
-  const optional = ["forked", "forked_from_session_id"].filter((key) => Object.hasOwn(source, key));
-  exact(source, [
-    "protocol", "session_id", "data_fidelity", "execution_fidelity", "snapshot",
-    ...optional,
-  ], path);
+  exact(source, ["protocol", "session_id", "data_fidelity", "execution_fidelity", "snapshot"], path);
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
   const sessionId = identifier(source.session_id, `${path}.session_id`);
   const snapshot = parseReplaySessionSnapshot(source.snapshot, `${path}.snapshot`);
   if (snapshot.session_id !== sessionId) fail(path, "outer and snapshot session id disagree");
   const dataFidelity = enumeration(source.data_fidelity, REPLAY_DATA_FIDELITIES, `${path}.data_fidelity`);
   const executionFidelity = enumeration(source.execution_fidelity, REPLAY_EXECUTION_FIDELITIES, `${path}.execution_fidelity`);
-  const expectedDataFidelities: readonly ReplayDataFidelity[] = snapshot.config.source_kind === "agg_trade"
-    ? ["EXACT_AGG_TRADE_COVERAGE", "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"]
-    : ["EXACT_BAR_COVERAGE"];
+  const expectedDataFidelity: ReplayDataFidelity = snapshot.config.source_kind === "agg_trade"
+    ? "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
+    : "EXACT_BAR_COVERAGE";
   const expectedExecutionFidelity = snapshot.config.source_kind === "agg_trade"
     ? "AGG_TRADE_TAPE"
     : "BAR_CONSERVATIVE";
-  if (!expectedDataFidelities.includes(dataFidelity)
+  if (dataFidelity !== expectedDataFidelity
     || executionFidelity !== expectedExecutionFidelity) {
     fail(path, "session fidelity disagrees with source kind");
   }
@@ -830,10 +999,6 @@ export function parseReplaySessionResponse(value: unknown, path = "$"): ReplaySe
     data_fidelity: dataFidelity,
     execution_fidelity: executionFidelity,
     snapshot,
-    ...(Object.hasOwn(source, "forked") ? { forked: bool(source.forked, `${path}.forked`) } : {}),
-    ...(Object.hasOwn(source, "forked_from_session_id")
-      ? { forked_from_session_id: identifier(source.forked_from_session_id, `${path}.forked_from_session_id`) }
-      : {}),
   };
 }
 
@@ -863,15 +1028,13 @@ function parseSourceCapability(value: unknown, path: string, sourceKind: "bar" |
     `${path}.execution_fidelity`,
   );
   const requiresExactDataset = bool(source.requires_exact_dataset, `${path}.requires_exact_dataset`);
-  const supportedFidelity = fidelity === "EXACT_AGG_TRADE_COVERAGE"
-    || fidelity === "VERIFIED_AGG_TRADE_APPROXIMATE_BARS";
   const barParityRequired = hasBarParityPolicy
     ? bool(source.bar_parity_required, `${path}.bar_parity_required`)
-    : fidelity === "EXACT_AGG_TRADE_COVERAGE";
-  if (!supportedFidelity
+    : false;
+  if (fidelity !== "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
     || executionFidelity !== "AGG_TRADE_TAPE"
     || !requiresExactDataset
-    || (fidelity === "VERIFIED_AGG_TRADE_APPROXIMATE_BARS" && barParityRequired)
+    || barParityRequired
     || source.reader !== "paged") {
     fail(path, "aggregate-trade capability has an inconsistent fidelity contract");
   }
@@ -1133,6 +1296,32 @@ function assertProjectionAdvances(projection: ReplayProjection, floor: number, p
 }
 
 export function assertReplayEventCausality(event: ReplayParsedEvent, currentSourceSequence: number): void {
+  if (event.type === "replay.final_state") {
+    const data = event.data as ReplayFinalStateEventData;
+    if (data.source_sequence_to < currentSourceSequence) {
+      fail("$.data.source_sequence_to", "final-state projection moved the source cursor backward");
+    }
+    if (data.source_sequence_to === currentSourceSequence) {
+      if (data.source_sequence_from !== currentSourceSequence) {
+        fail("$.data.source_sequence_from", "same-cursor final-state projection has a non-empty source range");
+      }
+    } else if (data.source_sequence_from > currentSourceSequence + 1
+      || data.source_sequence_to < currentSourceSequence + 1) {
+      fail("$.data.source_sequence_from", "final-state source range does not cover the next unrevealed event");
+    }
+    assertProjectionCausality({
+      bar_update: null,
+      orders: data.projection.orders,
+      fills: data.projection.fills,
+      warnings: data.projection.warnings,
+      position: data.projection.position,
+      account: data.projection.account,
+    }, data.source_sequence_to, "$.data.projection");
+    for (const [index, trade] of data.projection.closed_trades.entries()) {
+      assertCausalSequence(trade.source_sequence, data.source_sequence_to, `$.data.projection.closed_trades[${index}].source_sequence`);
+    }
+    return;
+  }
   if (event.type === "replay.delta") {
     const data = event.data as { readonly source_sequence: number; readonly projection: ReplayProjection };
     const sequenceFrom = event.sequence_from ?? event.sequence;
@@ -1165,6 +1354,56 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
         speed: parseSpeed(source.speed, `${path}.speed`),
         controller_client_id: source.controller_client_id === null ? null : identifier(source.controller_client_id, `${path}.controller_client_id`),
       };
+    }
+    case "replay.final_state": {
+      exact(source, [
+        "source_sequence_from", "source_sequence_to", "cursor", "state",
+        "status_reason", "speed", "controller_client_id", "projection",
+      ], path);
+      const sourceFrom = integer(source.source_sequence_from, `${path}.source_sequence_from`);
+      const sourceTo = integer(source.source_sequence_to, `${path}.source_sequence_to`);
+      if (sourceFrom > sourceTo) fail(path, "final-state source range is reversed");
+      const cursor = parseCursor(source.cursor, `${path}.cursor`);
+      if (cursor.source_sequence !== sourceTo) fail(`${path}.cursor.source_sequence`, "does not match final-state source range");
+      if (cursor.virtual_time_ms !== virtualTime) fail(`${path}.cursor.virtual_time_ms`, "does not match event time");
+      const state = enumeration(source.state, REPLAY_SESSION_STATES, `${path}.state`);
+      const controllerClientId = source.controller_client_id === null
+        ? null
+        : identifier(source.controller_client_id, `${path}.controller_client_id`);
+      if (state === "ENDED" && (!cursor.at_end || controllerClientId !== null)) {
+        fail(path, "ENDED final-state projection must end its cursor and release its controller");
+      }
+      const projection = parseFinalStateProjection(source.projection, `${path}.projection`);
+      for (const [index, bar] of projection.series.bars.entries()) {
+        if (bar.open_time_ms > virtualTime || bar.last_base_open_ms > virtualTime || (bar.is_closed && bar.close_time_ms > virtualTime)) {
+          fail(`${path}.projection.series.bars[${index}]`, "contains unrevealed bar time");
+        }
+      }
+      assertProjectionTime({
+        bar_update: null,
+        orders: projection.orders,
+        fills: projection.fills,
+        warnings: projection.warnings,
+        position: projection.position,
+        account: projection.account,
+      }, virtualTime, `${path}.projection`);
+      for (const [index, trade] of projection.closed_trades.entries()) {
+        assertCausalSequence(trade.source_sequence, sourceTo, `${path}.projection.closed_trades[${index}].source_sequence`);
+      }
+      if (state === "ENDED" && projection.series.retained_count > 0
+        && projection.series.bars.at(-1)?.open_time_ms !== projection.series.retained_end_open_ms) {
+        fail(`${path}.projection.series`, "ENDED projection is missing its final retained bar");
+      }
+      return {
+        source_sequence_from: sourceFrom,
+        source_sequence_to: sourceTo,
+        cursor,
+        state,
+        status_reason: string(source.status_reason, `${path}.status_reason`),
+        speed: parseSpeed(source.speed, `${path}.speed`),
+        controller_client_id: controllerClientId,
+        projection,
+      } satisfies ReplayFinalStateEventData;
     }
     case "replay.delta": {
       exact(source, ["source_sequence", "source_event", "projection"], path);

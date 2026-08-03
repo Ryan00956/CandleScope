@@ -240,11 +240,11 @@ REPLAY_V2_ENUMS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {name: tuple(member.value for member in enum_type) for name, enum_type in _ENUM_TYPES}
 )
 
-SCHEMA_MIGRATION_CONTRACT: dict[str, object] = {
-    "strategy": "ADDITIVE_ONLY",
-    "legacy_protocol": "replay.v1",
-    "legacy_json_rewrite": False,
-    "legacy_tables": [
+ADAPTER_STORAGE_CONTRACT: dict[str, object] = {
+    "ownership": "V2_INTERNAL_ADAPTER",
+    "adapter_protocol": "replay.v1",
+    "public_legacy_import": False,
+    "adapter_tables": [
         "replay_session",
         "replay_dataset_ref",
         "replay_command_log",
@@ -1499,7 +1499,7 @@ __all__ = [
     "ReplayV2EventType",
     "RunState",
     "POLICY_MUTATION_VALUES",
-    "SCHEMA_MIGRATION_CONTRACT",
+    "ADAPTER_STORAGE_CONTRACT",
     "StartMode",
     "SubscriptionTier",
     "TimeDisclosurePolicy",

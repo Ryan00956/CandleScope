@@ -104,9 +104,7 @@ class ReplayStorageGovernance:
         }
         support_matrix = self._support_matrix(categories)
         alerts = self._alerts(categories)
-        core_enabled = bool(
-            self.settings.enabled and self.settings.product_v2_enabled
-        )
+        core_enabled = self.settings.enabled
         return {
             "protocol": STORAGE_INVENTORY_PROTOCOL,
             "decision": {
@@ -125,7 +123,6 @@ class ReplayStorageGovernance:
             },
             "feature_flags": {
                 "replay_enabled": self.settings.enabled,
-                "product_v2_enabled": self.settings.product_v2_enabled,
                 "agg_trade_enabled": self.settings.replay_agg_trade_enabled,
                 "segment_download_worker_enabled": (
                     self.settings.replay_segment_download_worker_enabled
@@ -758,9 +755,7 @@ class ReplayStorageGovernance:
             except Exception:
                 return []
 
-        core_enabled = bool(
-            self.settings.enabled and self.settings.product_v2_enabled
-        )
+        core_enabled = self.settings.enabled
         bar_identities = current_bar_identities()
         raw_agg_identities = current_agg_identities()
         bar_identity_keys = {
@@ -796,7 +791,7 @@ class ReplayStorageGovernance:
                 "declared_scope": "DYNAMIC_EXCHANGE_MARKET_SYMBOL_INTERVAL_CATALOG",
                 "fidelity": "EXACT_CLOSED_BAR_COVERAGE_INTRABAR_CONSERVATIVE",
                 "queue_exact": False,
-                "required_flags": ["REPLAY_ENABLED", "REPLAY_PRODUCT_V2_ENABLED"],
+                "required_flags": ["REPLAY_ENABLED"],
                 "observed_identities": bar_identities,
                 "production_readiness": "ENABLE" if bar_ready else "HOLD",
                 "reason_codes": [] if bar_ready else ["CURRENT_BAR_SOURCE_UNAVAILABLE"],
@@ -811,7 +806,6 @@ class ReplayStorageGovernance:
                 "queue_exact": False,
                 "required_flags": [
                     "REPLAY_ENABLED",
-                    "REPLAY_PRODUCT_V2_ENABLED",
                     "REPLAY_AGG_TRADE_ENABLED",
                 ],
                 "observed_identities": agg_identities,
@@ -861,14 +855,13 @@ class ReplayStorageGovernance:
         categories: Mapping[str, object],
     ) -> list[dict[str, str]]:
         alerts: list[dict[str, str]] = []
-        if not (self.settings.enabled and self.settings.product_v2_enabled):
+        if not self.settings.enabled:
             alerts.append({
                 "severity": "INFO",
                 "code": "REPLAY_CORE_DEFAULT_OFF",
                 "category": "release",
                 "message": (
-                    "Replay remains gated by the default-off core switch; "
-                    "v2 is selected when replay is enabled."
+                    "Replay remains gated by the default-off core switch."
                 ),
             })
         if not self.settings.replay_historical_book_enabled:

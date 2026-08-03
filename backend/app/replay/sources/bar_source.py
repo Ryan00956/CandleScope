@@ -25,8 +25,8 @@ from ..market_halts import ReplayBarHalt
 from .base import SourceCursor
 
 
-PAGED_BAR_SOURCE_SCHEMA_VERSION = "replay-paged-bar-source.v1"
-PAGED_BAR_SOURCE_SCHEMA_VERSION_V2 = "replay-paged-bar-source.v2"
+PAGED_BAR_SOURCE_SCHEMA_VERSION = "replay-paged-bar-source.v3"
+BAR_TERMINAL_SOURCE_LATEST_CLOSED = "SOURCE_LATEST_CLOSED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +218,7 @@ class PagedBarReplaySource:
         snapshot: BarDatasetSnapshot,
         *,
         terminal_open_ms: int,
+        terminal_kind: str,
         source_revision: str,
         source_fingerprint: str,
         page_rows: int,
@@ -227,6 +228,8 @@ class PagedBarReplaySource:
         if not isinstance(snapshot, BarDatasetSnapshot):
             raise TypeError("snapshot must be BarDatasetSnapshot")
         BarReplaySource._validate_snapshot(snapshot)
+        if terminal_kind != BAR_TERMINAL_SOURCE_LATEST_CLOSED:
+            raise ValueError("paged BAR terminal kind must bind the source latest close")
         for field_name, value in (
             ("source_revision", source_revision),
             ("source_fingerprint", source_fingerprint),
@@ -252,22 +255,16 @@ class PagedBarReplaySource:
         )
         initial_ref = snapshot.snapshot_ref().to_dict()
         snapshot_ref: dict[str, object] = {
-            "schema_version": (
-                PAGED_BAR_SOURCE_SCHEMA_VERSION_V2
-                if verified_halts
-                else PAGED_BAR_SOURCE_SCHEMA_VERSION
-            ),
+            "schema_version": PAGED_BAR_SOURCE_SCHEMA_VERSION,
             "data_epoch": snapshot.data_epoch,
             "initial_snapshot_ref": initial_ref,
             "source_revision": source_revision,
             "source_fingerprint": source_fingerprint,
             "terminal_open_ms": terminal_open_ms,
+            "terminal_kind": terminal_kind,
             "page_rows": page_rows,
+            "verified_market_halts": [halt.to_dict() for halt in verified_halts],
         }
-        if verified_halts:
-            snapshot_ref["verified_market_halts"] = [
-                halt.to_dict() for halt in verified_halts
-            ]
         self._snapshot_ref: Mapping[str, object] = MappingProxyType(snapshot_ref)
         self._index = 0
 

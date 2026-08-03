@@ -3,8 +3,6 @@ import {
   parseReplayCatalog,
   parseReplayCommandResult,
   parseReplayErrorEnvelope,
-  parseReplayJournalResponse,
-  parseReplayReportResponse,
   parseReplaySessionResponse,
   ReplayPayloadParseError,
 } from "./replayParser.js";
@@ -14,10 +12,8 @@ import type {
   ReplayCommandEnvelope,
   ReplayCommandResult,
   ReplayErrorCode,
-  ReplaySessionConfig,
   ReplaySessionResponse,
 } from "./replayTypes.js";
-import type { ReplayJournalResponse, ReplayReportResponse } from "./replayParser.js";
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -92,39 +88,16 @@ export class ReplayApiClient {
     return this.request(`/catalog${suffix}`, parseReplayCatalog, signal ? { signal } : {});
   }
 
-  createSession(config: ReplaySessionConfig, signal?: AbortSignal): Promise<ReplaySessionResponse> {
-    return this.request("/sessions", parseReplaySessionResponse, {
-      method: "POST",
-      body: JSON.stringify(config),
-      ...(signal ? { signal } : {}),
-    });
-  }
-
   getSession(sessionId: string, signal?: AbortSignal): Promise<ReplaySessionResponse> {
-    return this.request(`/sessions/${sessionSegment(sessionId)}`, parseReplaySessionResponse, signal ? { signal } : {});
+    return this.request(`/runs/session/${sessionSegment(sessionId)}`, parseReplaySessionResponse, signal ? { signal } : {});
   }
 
   command(sessionId: string, command: ReplayCommandEnvelope, signal?: AbortSignal): Promise<ReplayCommandResult> {
-    return this.request(`/sessions/${sessionSegment(sessionId)}/commands`, parseReplayCommandResult, {
+    return this.request(`/runs/session/${sessionSegment(sessionId)}/commands`, parseReplayCommandResult, {
       method: "POST",
       body: JSON.stringify(command),
       ...(signal ? { signal } : {}),
     });
-  }
-
-  forkSession(sessionId: string, signal?: AbortSignal): Promise<ReplaySessionResponse> {
-    return this.request(`/sessions/${sessionSegment(sessionId)}/fork`, parseReplaySessionResponse, {
-      method: "POST",
-      ...(signal ? { signal } : {}),
-    });
-  }
-
-  report(sessionId: string, signal?: AbortSignal): Promise<ReplayReportResponse> {
-    return this.request(`/sessions/${sessionSegment(sessionId)}/report`, parseReplayReportResponse, signal ? { signal } : {});
-  }
-
-  journal(sessionId: string, signal?: AbortSignal): Promise<ReplayJournalResponse> {
-    return this.request(`/sessions/${sessionSegment(sessionId)}/journal`, parseReplayJournalResponse, signal ? { signal } : {});
   }
 
   private async request<T>(

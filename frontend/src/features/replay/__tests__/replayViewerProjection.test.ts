@@ -6,6 +6,7 @@ import type { KlineBar } from "../../market-data/marketDataTypes.js";
 import {
   applyReplayViewerSeriesDelta,
   buildReplayViewerSeriesKey,
+  replayUsesAuthoritativeSourceBucketProjection,
   ReplayViewerProjectionError,
   ReplayViewerSeriesCache,
   aggregateReplayBaseBars,
@@ -26,6 +27,25 @@ test("viewer store identity commits the source-bucket mapping contract", () => {
   assert.match(
     String(buildReplayViewerSeriesKey(source, "1d")),
     /\|viewer:1d\|mapping:source-bucket-v3$/,
+  );
+});
+
+test("every coarse BAR view uses the authoritative source-bucket projection", () => {
+  assert.equal(
+    replayUsesAuthoritativeSourceBucketProjection("bar", "1m", "1d"),
+    true,
+  );
+  assert.equal(
+    replayUsesAuthoritativeSourceBucketProjection("bar", "60s", "1m"),
+    false,
+  );
+  assert.equal(
+    replayUsesAuthoritativeSourceBucketProjection("agg_trade", "1m", "1d"),
+    false,
+  );
+  assert.equal(
+    replayUsesAuthoritativeSourceBucketProjection("bar", null, "1d"),
+    false,
   );
 });
 

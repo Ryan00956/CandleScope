@@ -86,6 +86,7 @@ from .models import (
     REPLAY_V2_PROTOCOL,
     ReplaySource,
     ReplayV2CommandType,
+    RunState,
     StartMode,
     SubscriptionTier,
     TimeDisclosurePolicy,
@@ -1784,35 +1785,7 @@ class TrainingRunService:
         return {
             "protocol": "replay.v2",
             "created": True,
-            "migrated": False,
             "run": run,
-        }
-
-    async def migrate_legacy(
-        self,
-        session_id: str,
-        *,
-        name: str | None,
-    ) -> dict[str, object]:
-        normalized_session = self._identifier(session_id, field_name="session_id")
-        candidate_run = self._identifier(self._run_id_factory(), field_name="run_id")
-        try:
-            run_id, created = await self.store.migrate_legacy(
-                session_id=normalized_session,
-                run_id=candidate_run,
-                name=name,
-            )
-        except sqlite3.IntegrityError as exc:
-            raise TrainingRunError(
-                "TRAINING_RUN_CONFLICT",
-                "legacy replay migration conflicts with an existing run",
-                status_code=409,
-            ) from exc
-        return {
-            "protocol": "replay.v2",
-            "created": created,
-            "migrated": created,
-            "run": await self.store.get_run(run_id),
         }
 
     async def return_to_hub_by_session(self, session_id: str) -> dict[str, object]:
@@ -1830,6 +1803,7 @@ class TrainingRunService:
                     status_code=503,
                 )
             released = 0
+            durable_states: list[str] = []
             for track in sorted(
                 tracks,
                 key=lambda item: (int(item["stable_ordinal"]), str(item["track_id"])),
@@ -1850,20 +1824,45 @@ class TrainingRunService:
                         },
                     ) from exc
                 record = await self.replay_service.store.get_session(adapter_session_id)
-                if record is None or record["state"] != "PAUSED":
+                durable_state = None if record is None else str(record["state"])
+                if durable_state not in {
+                    RunState.PAUSED.value,
+                    RunState.ENDED.value,
+                    RunState.ERROR.value,
+                }:
                     raise TrainingRunError(
                         "TRAINING_RUN_STORAGE_DEGRADED",
-                        "training run did not durably pause before returning to the Hub",
+                        "training run did not reach a durable Hub-safe state",
                         status_code=503,
-                        details={"track_id": track["track_id"]},
+                        details={
+                            "track_id": track["track_id"],
+                            "state": durable_state,
+                        },
                     )
+                durable_states.append(durable_state)
                 released += 1
             checkpoint = await self.store.checkpoint_market_tracks(run_id)
             await self.store.set_actor_segment_refs(run_id, active=False)
+            card = await self.store.get_run(run_id)
+            run_state = str(card["state"])
+            if run_state not in {
+                RunState.PAUSED.value,
+                RunState.ENDED.value,
+                RunState.ERROR.value,
+            } or run_state not in set(durable_states):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "training run Hub state is inconsistent with its durable tracks",
+                    status_code=503,
+                    details={
+                        "run_state": run_state,
+                        "track_states": durable_states,
+                    },
+                )
         result: dict[str, object] = {
             "protocol": "replay.v2",
             "run_id": run_id,
-            "state": "PAUSED",
+            "state": run_state,
             "checkpointed": True,
             "released": True,
         }
@@ -2092,16 +2091,13 @@ class TrainingRunService:
             interval=base_interval,
         )
         if base_pin is None:
-            if (
-                native_display_required
-                and self.replay_service.settings.replay_bar_source == "archive"
-            ):
+            if native_display_required:
                 raise TrainingRunError(
                     "HISTORY_NATIVE_DISPLAY_REQUIRED",
                     "native replay display history requires an immutable base archive pin",
                     status_code=503,
                 )
-            # Legacy SQLite Runs keep their existing repository-bound path.
+            # A same-interval projection does not require a separate native pin.
             return dict(binding)
         assert_pin_identity(base_pin, interval=base_interval)
         display_pin = await self.store.history_archive_pin(
@@ -2375,6 +2371,13 @@ class TrainingRunService:
         return {
             **binding,
             "display_source_revision": pinned_source_revision,
+            # The display catalog is immutable at ``pinned_source_revision``,
+            # but it can legitimately lag the newer pinned base catalog near
+            # the live tail.  Carry its exact bounds so projection can use
+            # native authority only where that revision actually has rows and
+            # aggregate the remaining closed tail from the pinned base source.
+            "display_source_range_start_ms": pinned_start_ms,
+            "display_source_range_end_ms": pinned_end_ms,
             "display_source_bucket_anchor_ms": display_source_bucket_anchor_ms,
             "display_alignment_policy": display_alignment_policy,
             "display_grid_commitment": display_grid_commitment,

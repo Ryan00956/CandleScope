@@ -32,7 +32,6 @@ const FORMAL_V2_REAL_WINDOW_ROWS = (
 const SHUTDOWN_REQUEST_TIMEOUT_MS = 5_000;
 
 function parseArgs(argv) {
-  const defaultV1Output = path.join(repositoryRoot, "docs", "perf-baselines", "replay-v1-browser-soak-20260718.json");
   const result = {
     allowShort: false,
     chromePath: process.env.CHROME_PATH || "",
@@ -40,8 +39,7 @@ function parseArgs(argv) {
     diagnosticGapSteps: 0,
     durationMs: RELEASE_DURATION_MS,
     headed: false,
-    out: defaultV1Output,
-    productV2: false,
+    out: path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-browser-soak-20260722.json"),
     projectionEvents: RELEASE_PROJECTION_EVENTS,
     realKlinesSource: process.env.REPLAY_REAL_KLINES_SOURCE
       ? path.resolve(process.env.REPLAY_REAL_KLINES_SOURCE)
@@ -53,7 +51,6 @@ function parseArgs(argv) {
     const value = argv[index];
     if (value === "--allow-short") result.allowShort = true;
     else if (value === "--headed") result.headed = true;
-    else if (value === "--product-v2") result.productV2 = true;
     else if (value === "--chrome-path") result.chromePath = String(argv[++index] || "");
     else if (value === "--cycles") result.cycles = Number(argv[++index]);
     else if (value === "--diagnostic-gap-steps") result.diagnosticGapSteps = Number(argv[++index]);
@@ -64,9 +61,6 @@ function parseArgs(argv) {
     else if (value === "--sample-ms") result.sampleMs = Number(argv[++index]);
     else if (value === "--timeout-ms") result.timeoutMs = Number(argv[++index]);
     else throw new Error(`Unknown replay soak option: ${value}`);
-  }
-  if (result.productV2 && result.out === defaultV1Output) {
-    result.out = path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-browser-soak-20260722.json");
   }
   for (const [name, value, minimum] of [
     ["--duration-ms", result.durationMs, 10_000],
@@ -99,7 +93,7 @@ function parseArgs(argv) {
   ) {
     throw new Error("--real-klines-source must point to an existing SQLite file");
   }
-  if (!result.allowShort && result.productV2 && !result.realKlinesSource) {
+  if (!result.allowShort && !result.realKlinesSource) {
     throw new Error("Phase 18 replay.v2 release soak requires --real-klines-source");
   }
   return result;
@@ -855,13 +849,12 @@ function isAuthoritativeReplayStatus(value) {
     && value.sourceSequence >= 0;
 }
 
-function replaySpeedRequestState(value, targetSpeed, productV2 = false, revisionFloor = 0) {
+function replaySpeedRequestState(value, targetSpeed) {
   if (!isAuthoritativeReplayStatus(value)) return "waiting";
-  if (productV2 && value.clockRate === targetSpeed && value.controlPending === "") {
+  if (value.clockRate === targetSpeed && value.controlPending === "") {
     return "acknowledged";
   }
   if (value.controlPending === "set_speed") return "started";
-  if (!productV2 && value.revision > revisionFloor) return "acknowledged";
   return "waiting";
 }
 
@@ -875,12 +868,12 @@ async function waitForAuthoritativeReplayStatus(cdp, predicateSource, timeoutMs,
   );
 }
 
-export function replayStepAction(productV2 = false) {
-  return productV2 ? "advance-display" : "step";
+export function replayStepAction() {
+  return "advance-display";
 }
 
-export function replaySpeedAction(productV2 = false) {
-  return productV2 ? "playback-rate" : "speed";
+export function replaySpeedAction() {
+  return "playback-rate";
 }
 
 export function replayTrainingTargetSpeed(optionValues, index) {
@@ -902,12 +895,10 @@ export function replayTrainingTargetSpeed(optionValues, index) {
 async function requestReplayTrainingSpeed({
   cdp,
   label,
-  productV2,
-  revisionFloor,
   targetSpeed,
   timeoutMs,
 }) {
-  const action = replaySpeedAction(productV2);
+  const action = replaySpeedAction();
   const targetValue = String(targetSpeed);
   const startedAt = Date.now();
   const attempts = [];
@@ -921,7 +912,7 @@ async function requestReplayTrainingSpeed({
   })()`, timeoutMs, `${label} control readiness`);
 
   const initialStatus = await replayStatus(cdp);
-  if (replaySpeedRequestState(initialStatus, targetSpeed, productV2, revisionFloor) === "acknowledged") {
+  if (replaySpeedRequestState(initialStatus, targetSpeed) === "acknowledged") {
     return {
       acknowledged: initialStatus,
       attempts,
@@ -980,7 +971,7 @@ async function requestReplayTrainingSpeed({
       } catch (error) {
         attemptDetail.lastStatusError = error?.message || String(error);
       }
-      const state = replaySpeedRequestState(status, targetSpeed, productV2, revisionFloor);
+      const state = replaySpeedRequestState(status, targetSpeed);
       attemptDetail.statuses.push({ state, status });
       if (attemptDetail.statuses.length > 5) attemptDetail.statuses.shift();
       if (state === "acknowledged") {
@@ -997,9 +988,7 @@ async function requestReplayTrainingSpeed({
         if (remainingForAck <= 0) break;
         const acknowledged = await waitForAuthoritativeReplayStatus(
           cdp,
-          productV2
-            ? `(value) => value.clockRate === ${targetSpeed} && value.controlPending === ""`
-            : `(value) => value.revision > ${revisionFloor}`,
+          `(value) => value.clockRate === ${targetSpeed} && value.controlPending === ""`,
           remainingForAck,
           label,
         );
@@ -1024,16 +1013,16 @@ async function requestReplayTrainingSpeed({
   })}`);
 }
 
-async function waitForCommandReady(cdp, timeoutMs, productV2 = false) {
-  const action = replayStepAction(productV2);
+async function waitForCommandReady(cdp, timeoutMs) {
+  const action = replayStepAction();
   return waitForValue(cdp, `(() => {
     const button = document.querySelector('[data-replay-action="${action}"]');
     return button instanceof HTMLButtonElement && !button.disabled;
   })()`, timeoutMs, "replay command readiness");
 }
 
-async function restoreCommandReadinessAfterReconnect(cdp, timeoutMs, productV2 = false) {
-  const action = replayStepAction(productV2);
+async function restoreCommandReadinessAfterReconnect(cdp, timeoutMs) {
+  const action = replayStepAction();
   const recovery = await waitForValue(cdp, `(() => {
     const command = document.querySelector('[data-replay-action="${action}"]');
     if (command instanceof HTMLButtonElement && !command.disabled) return "ready";
@@ -1044,11 +1033,11 @@ async function restoreCommandReadinessAfterReconnect(cdp, timeoutMs, productV2 =
   if (recovery === "takeover") {
     await click(cdp, '[data-replay-action="takeover-controller"]');
   }
-  await waitForCommandReady(cdp, timeoutMs, productV2);
+  await waitForCommandReady(cdp, timeoutMs);
   return recovery;
 }
 
-async function restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs, productV2 = false) {
+async function restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs) {
   const recovery = await waitForValue(cdp, `(() => {
     const pause = document.querySelector('[data-replay-action="pause"]');
     if (pause instanceof HTMLButtonElement && !pause.disabled) return "playing";
@@ -1060,7 +1049,7 @@ async function restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs, productV2 = f
   })()`, timeoutMs, "training cycle playback or controller recovery readiness");
   if (recovery === "takeover") {
     await click(cdp, '[data-replay-action="takeover-controller"]');
-    await waitForCommandReady(cdp, timeoutMs, productV2);
+    await waitForCommandReady(cdp, timeoutMs);
   }
   const status = await waitForAuthoritativeReplayStatus(
     cdp,
@@ -1084,8 +1073,8 @@ async function restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs, productV2 = f
   return { recovery, status: playing };
 }
 
-async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGapSteps, index, productV2, timeoutMs }) {
-  const cycleStart = await restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs, productV2);
+async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGapSteps, index, timeoutMs }) {
+  const cycleStart = await restoreTrainingPlaybackAtCycleStart(cdp, timeoutMs);
   const before = cycleStart.status;
   await click(cdp, '[data-replay-action="pause"]');
   const paused = await waitForAuthoritativeReplayStatus(cdp, `(value) => value.state === "PAUSED"`, timeoutMs, "training pause ack");
@@ -1098,7 +1087,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   );
   assert(pauseStable.sourceSequence === paused.sourceSequence, "training cursor advanced after pause ack", { paused, pauseStable });
 
-  const speedAction = replaySpeedAction(productV2);
+  const speedAction = replaySpeedAction();
   const speedOptions = await evaluate(cdp, `(() => {
     const select = document.querySelector('[data-replay-action="${speedAction}"]');
     return select instanceof HTMLSelectElement
@@ -1110,13 +1099,11 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   const acceleratedRequest = await requestReplayTrainingSpeed({
     cdp,
     label: "training speed ack",
-    productV2,
-    revisionFloor: paused.revision,
     targetSpeed,
     timeoutMs,
   });
   const accelerated = acceleratedRequest.acknowledged;
-  await waitForCommandReady(cdp, timeoutMs, productV2);
+  await waitForCommandReady(cdp, timeoutMs);
 
   const side = index % 2 === 0 ? "BUY" : "SELL";
   const sideChanged = await evaluate(cdp, `(() => {
@@ -1140,30 +1127,21 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     timeoutMs,
     "training market order ack",
   );
-  const immediatelyFilled = productV2
-    ? await waitForAuthoritativeReplayStatus(
-      cdp,
-      `(value) => value.fillCount > ${beforeOrder.fillCount}`,
-      timeoutMs,
-      "training immediate v2 market fill",
-    )
-    : null;
-  await waitForCommandReady(cdp, timeoutMs, productV2);
+  const immediatelyFilled = await waitForAuthoritativeReplayStatus(
+    cdp,
+    `(value) => value.fillCount > ${beforeOrder.fillCount}`,
+    timeoutMs,
+    "training immediate market fill",
+  );
+  await waitForCommandReady(cdp, timeoutMs);
   await click(cdp, '[data-replay-action="play"]');
   await waitForAuthoritativeReplayStatus(cdp, `(value) => value.state === "PLAYING"`, timeoutMs, "accelerated play ack");
-  const filled = productV2
-    ? await waitForAuthoritativeReplayStatus(
-      cdp,
-      `(value) => value.sourceSequence > ${ordered.sourceSequence}`,
-      timeoutMs,
-      "training v2 post-fill progress",
-    )
-    : await waitForAuthoritativeReplayStatus(
-      cdp,
-      `(value) => value.sourceSequence > ${ordered.sourceSequence} && value.fillCount > ${ordered.fillCount}`,
-      timeoutMs,
-      "training market fill",
-    );
+  const filled = await waitForAuthoritativeReplayStatus(
+    cdp,
+    `(value) => value.sourceSequence > ${ordered.sourceSequence}`,
+    timeoutMs,
+    "training post-fill progress",
+  );
   await click(cdp, '[data-replay-action="pause"]');
   const filledPaused = await waitForAuthoritativeReplayStatus(cdp, `(value) => value.state === "PAUSED"`, timeoutMs, "post-fill pause ack");
   await wait(250);
@@ -1179,37 +1157,34 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     { filledPaused, filledPauseStable },
   );
 
-  let adapterRecovery = null;
-  if (productV2) {
-    const evicted = await readJson(
-      `${backendOrigin}/__replay_smoke__/evict-replay-adapter/${encodeURIComponent(sessionId)}`,
-      { method: "POST" },
-    );
-    assert(
-      isRecordedAdapterEviction(evicted, sessionId),
-      "primary replay adapter eviction was not recorded",
-      evicted,
-    );
-    const recovered = await waitForAuthoritativeReplayStatus(
-      cdp,
-      `(value) => value.state === "PAUSED" && value.generation > ${filledPauseStable.generation} && value.sourceSequence >= ${filledPauseStable.sourceSequence}`,
-      timeoutMs,
-      "authoritative primary adapter recovery",
-    );
-    const readiness = await restoreCommandReadinessAfterReconnect(cdp, timeoutMs, productV2);
-    adapterRecovery = { evicted, recovered, readiness };
-  }
+  const evicted = await readJson(
+    `${backendOrigin}/__replay_smoke__/evict-replay-adapter/${encodeURIComponent(sessionId)}`,
+    { method: "POST" },
+  );
+  assert(
+    isRecordedAdapterEviction(evicted, sessionId),
+    "primary replay adapter eviction was not recorded",
+    evicted,
+  );
+  const recovered = await waitForAuthoritativeReplayStatus(
+    cdp,
+    `(value) => value.state === "PAUSED" && value.generation > ${filledPauseStable.generation} && value.sourceSequence >= ${filledPauseStable.sourceSequence}`,
+    timeoutMs,
+    "authoritative primary adapter recovery",
+  );
+  const readiness = await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
+  const adapterRecovery = { evicted, recovered, readiness };
 
-  let gapStatus = adapterRecovery?.recovered ?? filledPauseStable;
+  let gapStatus = adapterRecovery.recovered;
   for (let stepIndex = 0; stepIndex < diagnosticGapSteps; stepIndex += 1) {
-    await waitForCommandReady(cdp, timeoutMs, productV2);
+    await waitForCommandReady(cdp, timeoutMs);
     const beforeGapStep = await waitForAuthoritativeReplayStatus(
       cdp,
       `(value) => value.state === "PAUSED"`,
       timeoutMs,
       "authoritative pre-gap-step snapshot",
     );
-    await click(cdp, `[data-replay-action="${replayStepAction(productV2)}"]`);
+    await click(cdp, `[data-replay-action="${replayStepAction()}"]`);
     gapStatus = await waitForAuthoritativeReplayStatus(
       cdp,
       `(value) => value.sourceSequence > ${beforeGapStep.sourceSequence}`,
@@ -1221,13 +1196,11 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   const normalSpeedRequest = await requestReplayTrainingSpeed({
     cdp,
     label: "training speed reset ack",
-    productV2,
-    revisionFloor: gapStatus.revision,
     targetSpeed: 1,
     timeoutMs,
   });
   const normalSpeed = normalSpeedRequest.acknowledged;
-  await waitForCommandReady(cdp, timeoutMs, productV2);
+  await waitForCommandReady(cdp, timeoutMs);
 
   const disconnectRequest = readJson(
     `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
@@ -1246,7 +1219,7 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     timeoutMs,
     "training replay reconnect convergence",
   );
-  const reconnectRecovery = await restoreCommandReadinessAfterReconnect(cdp, timeoutMs, productV2);
+  const reconnectRecovery = await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
   await click(cdp, '[data-replay-action="play"]');
   const resumed = await waitForAuthoritativeReplayStatus(cdp, `(value) => value.state === "PLAYING"`, timeoutMs, "training resume ack");
   return {
@@ -1403,7 +1376,7 @@ async function v2ArchiveLifecycleCycle({ backendOrigin, createPayload, index }) 
   );
   assert(returned?.state === "PAUSED" && returned?.checkpointed === true && returned?.released === true, "v2 lifecycle return-to-hub failed", returned);
 
-  const resumed = await readJson(`${backendOrigin}/api/v1/replay/sessions/${encodeURIComponent(sessionId)}`);
+  const resumed = await readJson(`${backendOrigin}/api/v1/replay/runs/session/${encodeURIComponent(sessionId)}`);
   assert(resumed?.snapshot?.state === "PAUSED", "v2 lifecycle resume did not restore PAUSED", resumed);
   const acquired = await postJson(
     `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/commands`,
@@ -1411,7 +1384,7 @@ async function v2ArchiveLifecycleCycle({ backendOrigin, createPayload, index }) 
   );
   assert(acquired?.state === "PAUSED", "v2 lifecycle acquire changed the paused state", acquired);
 
-  const acquiredSession = await readJson(`${backendOrigin}/api/v1/replay/sessions/${encodeURIComponent(sessionId)}`);
+  const acquiredSession = await readJson(`${backendOrigin}/api/v1/replay/runs/session/${encodeURIComponent(sessionId)}`);
   const ended = await postJson(
     `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/commands`,
     replayV2Command(runId, `phase10-end-${index + 1}`, acquiredSession, "end", {
@@ -1421,10 +1394,10 @@ async function v2ArchiveLifecycleCycle({ backendOrigin, createPayload, index }) 
   );
   assert(ended?.state === "ENDED", "v2 lifecycle end did not persist ENDED", ended);
 
-  const beforeReview = await readJson(`${backendOrigin}/api/v1/replay/sessions/${encodeURIComponent(sessionId)}`);
+  const beforeReview = await readJson(`${backendOrigin}/api/v1/replay/runs/session/${encodeURIComponent(sessionId)}`);
   const report = await readJson(`${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/report`);
   const review = await postJson(`${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/review`, {});
-  const afterReview = await readJson(`${backendOrigin}/api/v1/replay/sessions/${encodeURIComponent(sessionId)}`);
+  const afterReview = await readJson(`${backendOrigin}/api/v1/replay/runs/session/${encodeURIComponent(sessionId)}`);
   const beforeStateHash = beforeReview?.snapshot?.state_hash;
   const afterStateHash = afterReview?.snapshot?.state_hash;
   assert(review?.read_only === true && typeof review?.selected_event_id === "string", "v2 lifecycle review is not read-only", review);
@@ -1717,7 +1690,6 @@ export function replaySoakFrontendPlan({
   backendPort,
   frontendPort,
   outDir,
-  productV2,
 }) {
   validateHarnessPort(backendPort, "backendPort");
   validateHarnessPort(frontendPort, "frontendPort");
@@ -1737,7 +1709,6 @@ export function replaySoakFrontendPlan({
     VITE_DEV_PORT: String(frontendPort),
     VITE_API_PROXY_TARGET: `http://127.0.0.1:${backendPort}`,
     VITE_REPLAY_ENTRY_ENABLED: "1",
-    VITE_REPLAY_PRODUCT_V2_ENABLED: productV2 ? "1" : "0",
     VITE_REPLAY_SOAK_PROJECTION_ENABLED: "1",
   };
   return {
@@ -2179,7 +2150,7 @@ function writeJson(outputPath, payload) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const useBoundRealProfile = args.productV2 && Boolean(args.realKlinesSource);
+  const useBoundRealProfile = Boolean(args.realKlinesSource);
   const releaseEvidence = captureReplayReleaseEvidence(repositoryRoot);
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; set CHROME_PATH or --chrome-path");
@@ -2200,7 +2171,6 @@ async function main() {
     backendPort,
     frontendPort,
     outDir: frontendDist,
-    productV2: args.productV2,
   });
   const frontendProcessEnvironment = replaySoakFrontendProcessEnvironment(
     frontendPlan.environment,
@@ -2238,9 +2208,7 @@ async function main() {
     frontendBuild = inspectReplaySoakFrontendBuild(frontendDist);
   } catch (error) {
     writeJson(`${args.out}.failed.json`, {
-      schema_version: args.productV2
-        ? "replay-v2-browser-soak-failure.v1"
-        : "replay-v1-browser-soak-failure.v1",
+      schema_version: "replay-v2-browser-soak-failure.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       passed: false,
@@ -2278,9 +2246,8 @@ async function main() {
     env: {
       ...process.env,
       REPLAY_ENABLED: "1",
-      REPLAY_PRODUCT_V2_ENABLED: args.productV2 ? "1" : "0",
       REPLAY_HISTORICAL_BOOK_ENABLED: "0",
-      REPLAY_IDLE_TTL_SECONDS: args.productV2 ? "1" : (process.env.REPLAY_IDLE_TTL_SECONDS || "3600"),
+      REPLAY_IDLE_TTL_SECONDS: "1",
       KLINES_DB_PATH: path.join(tempRoot, "candlescope.db"),
       REPLAY_DB_PATH: path.join(tempRoot, "replay.db"),
       CANDLE_DATA_DIR: path.join(tempRoot, "data"),
@@ -2364,9 +2331,7 @@ async function main() {
     await projectionPage.cdp.send("Page.navigate", { url: `${frontendOrigin}/replay.html` });
     await waitForValue(
       projectionPage.cdp,
-      args.productV2
-        ? "document.querySelector('[data-training-hub-phase]') !== null"
-        : "document.querySelector('[data-replay-action=\"create-session\"]') !== null",
+      "document.querySelector('[data-training-hub-phase]') !== null",
       args.timeoutMs,
       "projection soak module host",
     );
@@ -2386,45 +2351,39 @@ async function main() {
     const replayCapture = captureTarget(replay.cdp, { auditReplayBoundaries: true });
     await replay.cdp.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: downloadDir });
     await replay.cdp.send("Page.navigate", { url: `${frontendOrigin}/replay.html` });
-    let hubKeyboard = null;
-    if (args.productV2) {
-      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "新建训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "v2 Training Hub readiness");
-      const opened = await keyboardActivateButton(replay.cdp, { text: "新建训练" }, args.timeoutMs);
-      try {
-        await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建并进入训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "v2 create plan readiness");
-        if (formalTrainingPlan !== null) {
-          await configureFormalV2TrainingPlan(
-            replay.cdp,
-            formalTrainingPlan,
-            args.timeoutMs,
-          );
-        }
-      } catch (error) {
-        await replayCapture.settle();
-        phaseDiagnostics = {
-          phase: "v2-create-plan-readiness",
-          page: await evaluate(replay.cdp, `({
-            url: location.href,
-            text: (document.body?.innerText || "").slice(-5000),
-            buttons: [...document.querySelectorAll("button")].map((button) => ({
-              text: button.textContent?.trim() || "",
-              disabled: button.disabled,
-            })),
-          })`).catch(() => null),
-          apiRequests: replayCapture.requests.filter((item) => item.url.includes("/api/")).slice(-30),
-          apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/")).slice(-30),
-          responseBodies: replayCapture.responseBodies.slice(-30),
-          consoleErrors: replayCapture.consoleErrors,
-          exceptions: replayCapture.exceptions,
-        };
-        throw error;
+    await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "新建训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "Training Hub readiness");
+    const opened = await keyboardActivateButton(replay.cdp, { text: "新建训练" }, args.timeoutMs);
+    try {
+      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建并进入训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "create plan readiness");
+      if (formalTrainingPlan !== null) {
+        await configureFormalV2TrainingPlan(
+          replay.cdp,
+          formalTrainingPlan,
+          args.timeoutMs,
+        );
       }
-      const created = await keyboardActivateButton(replay.cdp, { text: "创建并进入训练" }, args.timeoutMs);
-      hubKeyboard = { opened, created };
-    } else {
-      await waitForValue(replay.cdp, `(() => { const button = document.querySelector('[data-replay-action="create-session"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "replay session dialog");
-      await click(replay.cdp, '[data-replay-action="create-session"]');
+    } catch (error) {
+      await replayCapture.settle();
+      phaseDiagnostics = {
+        phase: "create-plan-readiness",
+        page: await evaluate(replay.cdp, `({
+          url: location.href,
+          text: (document.body?.innerText || "").slice(-5000),
+          buttons: [...document.querySelectorAll("button")].map((button) => ({
+            text: button.textContent?.trim() || "",
+            disabled: button.disabled,
+          })),
+        })`).catch(() => null),
+        apiRequests: replayCapture.requests.filter((item) => item.url.includes("/api/")).slice(-30),
+        apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/")).slice(-30),
+        responseBodies: replayCapture.responseBodies.slice(-30),
+        consoleErrors: replayCapture.consoleErrors,
+        exceptions: replayCapture.exceptions,
+      };
+      throw error;
     }
+    const created = await keyboardActivateButton(replay.cdp, { text: "创建并进入训练" }, args.timeoutMs);
+    const hubKeyboard = { opened, created };
     let initial;
     try {
       initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
@@ -2452,13 +2411,11 @@ async function main() {
     }
     const sessionId = new URL(await evaluate(replay.cdp, "location.href")).searchParams.get("session");
     assert(sessionId, "replay session URL is missing an opaque session id");
-    const v2CreateRequest = args.productV2
-      ? [...replayCapture.requests].reverse().find((item) => (
-        item.method === "POST" && /\/api\/v1\/replay\/runs$/.test(new URL(item.url).pathname)
-      ))
-      : null;
+    const v2CreateRequest = [...replayCapture.requests].reverse().find((item) => (
+      item.method === "POST" && /\/api\/v1\/replay\/runs$/.test(new URL(item.url).pathname)
+    ));
     const v2CreatePayload = v2CreateRequest?.postData ? JSON.parse(v2CreateRequest.postData) : null;
-    if (args.productV2) assert(v2CreatePayload?.protocol === "replay.v2", "v2 create payload was not captured", v2CreateRequest);
+    assert(v2CreatePayload?.protocol === "replay.v2", "training create payload was not captured", v2CreateRequest);
     const formalTrainingBinding = formalTrainingPlan === null
       ? null
       : {
@@ -2482,7 +2439,7 @@ async function main() {
     assert(await evaluate(replay.cdp, "window.opener === null"), "primary replay target retained opener");
     const blindInitialDom = await evaluate(replay.cdp, "document.body.innerText");
     assert(!/\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/.test(String(blindInitialDom)), "blind replay DOM rendered a calendar date before reveal");
-    const accessibility = args.productV2 ? await v2AccessibilityAudit(replay.cdp, args.timeoutMs) : null;
+    const accessibility = await v2AccessibilityAudit(replay.cdp, args.timeoutMs);
 
     // Establish the live/replay coexistence proof only after the archive session
     // exists. An offline live target can legitimately probe missing present-day
@@ -2521,8 +2478,7 @@ async function main() {
     assert(liveBefore.bars > 0 && liveBefore.canvasCount > 0, "live page failed to become ready", liveBefore);
     await replay.cdp.send("Page.bringToFront");
 
-    const beforeSpeed = await replayStatus(replay.cdp);
-    const speedAction = replaySpeedAction(args.productV2);
+    const speedAction = replaySpeedAction();
     const primarySpeed = await evaluate(replay.cdp, `(() => {
       const select = document.querySelector('[data-replay-action="${speedAction}"]');
       if (!(select instanceof HTMLSelectElement)) return null;
@@ -2539,22 +2495,18 @@ async function main() {
       {
         primarySpeed,
         action: speedAction,
-        productV2: args.productV2,
       },
     );
     if (primarySpeed.changed) {
       await waitForReplayStatus(
         replay.cdp,
-        args.productV2
-          ? `(value) => value.clockRate === 1 && value.controlPending === ""`
-          : `(value) => value.revision > ${beforeSpeed.revision}`,
+        `(value) => value.clockRate === 1 && value.controlPending === ""`,
         args.timeoutMs,
         "1x speed ack",
       );
     }
     assert(primarySpeed !== null, "primary replay speed state is missing", {
       action: speedAction,
-      productV2: args.productV2,
     });
     await waitForValue(
       replay.cdp,
@@ -2619,7 +2571,6 @@ async function main() {
             sessionId,
             diagnosticGapSteps: args.diagnosticGapSteps,
             index: cycleIndex,
-            productV2: args.productV2,
             timeoutMs: args.timeoutMs,
           });
         } catch (error) {
@@ -2651,37 +2602,35 @@ async function main() {
           throw error;
         }
         trainingCycles.push({ index: cycleIndex + 1, elapsedFromStartMs: Date.now() - startedAtMs, ...training });
-        if (args.productV2) {
-          let archiveLifecycle;
-          try {
-            archiveLifecycle = await v2ArchiveLifecycleCycle({
-              backendOrigin,
-              createPayload: v2CreatePayload,
-              index: cycleIndex,
-            });
-          } catch (error) {
-            phaseDiagnostics = {
-              phase: "v2-archive-lifecycle",
-              cycle: cycleIndex + 1,
-              elapsedFromStartMs: Date.now() - startedAtMs,
-              backend: await readJson(diagnosticsUrl).catch((backendError) => ({
-                error: backendError.message || String(backendError),
-              })),
-              http: {
-                status: error?.status ?? null,
-                url: error?.url ?? null,
-                responseBody: error?.responseBody ?? null,
-              },
-              error: error?.stack || error?.message || String(error),
-            };
-            throw error;
-          }
-          archiveLifecycleCycles.push({
-            index: cycleIndex + 1,
-            elapsedFromStartMs: Date.now() - startedAtMs,
-            ...archiveLifecycle,
+        let archiveLifecycle;
+        try {
+          archiveLifecycle = await v2ArchiveLifecycleCycle({
+            backendOrigin,
+            createPayload: v2CreatePayload,
+            index: cycleIndex,
           });
+        } catch (error) {
+          phaseDiagnostics = {
+            phase: "v2-archive-lifecycle",
+            cycle: cycleIndex + 1,
+            elapsedFromStartMs: Date.now() - startedAtMs,
+            backend: await readJson(diagnosticsUrl).catch((backendError) => ({
+              error: backendError.message || String(backendError),
+            })),
+            http: {
+              status: error?.status ?? null,
+              url: error?.url ?? null,
+              responseBody: error?.responseBody ?? null,
+            },
+            error: error?.stack || error?.message || String(error),
+          };
+          throw error;
         }
+        archiveLifecycleCycles.push({
+          index: cycleIndex + 1,
+          elapsedFromStartMs: Date.now() - startedAtMs,
+          ...archiveLifecycle,
+        });
         let cycle;
         try {
           cycle = await lifecycleCycle({
@@ -2846,11 +2795,9 @@ async function main() {
     const exportPath = await waitForDownload(downloadDir, args.timeoutMs);
     const exportedText = fs.readFileSync(exportPath, "utf8");
     const exported = JSON.parse(exportedText);
-    assert(exported.protocol === (args.productV2 ? "replay.v2" : "replay.v1"), "report export protocol drifted", exported);
+    assert(exported.protocol === "replay.v2", "report export protocol drifted", exported);
     assert(exported.revealed === false && !Object.hasOwn(exported, "actual_history"), "unrevealed export included actual history", exported);
-    const exportedReportHash = args.productV2
-      ? exported.report?.report_hash
-      : exported.integrity?.report_hash;
+    const exportedReportHash = exported.report?.report_hash;
     assert(typeof exportedReportHash === "string" && exportedReportHash.startsWith("sha256:"), "report export hash is missing", exported);
     await wait(300);
     await replayCapture.settle();
@@ -2917,8 +2864,8 @@ async function main() {
       duration_complete: finalMetrics.elapsedMs >= args.durationMs,
       lifecycle_cycles_complete: cycles.length === args.cycles,
       training_action_cycles_complete: trainingCycles.length === args.cycles,
-      v2_archive_lifecycle_cycles_complete: !args.productV2 || archiveLifecycleCycles.length === args.cycles,
-      v2_archive_lifecycle_exact: !args.productV2 || archiveLifecycleCycles.every((cycle) => (
+      v2_archive_lifecycle_cycles_complete: archiveLifecycleCycles.length === args.cycles,
+      v2_archive_lifecycle_exact: archiveLifecycleCycles.every((cycle) => (
         cycle.returnedToHub === true
         && cycle.resumedState === "PAUSED"
         && cycle.endedState === "ENDED"
@@ -2929,7 +2876,7 @@ async function main() {
         && cycle.catalogEpochRefreshes >= 0
         && cycle.catalogEpochRefreshes <= 1
       )),
-      v2_keyboard_accessible: !args.productV2 || (
+      v2_keyboard_accessible: (
         hubKeyboard?.opened?.active?.text === "新建训练"
         && hubKeyboard?.created?.active?.text === "创建并进入训练"
         && accessibility?.keyboardOnly?.paperTab?.active?.text === "纸面交易"
@@ -2939,7 +2886,7 @@ async function main() {
         && accessibility?.dangerDialog?.wrapped === true
         && accessibility?.dangerDialog?.restored === true
       ),
-      v2_reduced_motion_effective: !args.productV2 || (
+      v2_reduced_motion_effective: (
         accessibility?.reducedMotion?.mediaMatches === true
         && accessibility?.reducedMotion?.animationName === "none"
       ),
@@ -2954,7 +2901,7 @@ async function main() {
       training_controller_lease_recoveries_bounded: trainingCycles.filter(
         (cycle) => cycle.cycleStart.recovery === "takeover",
       ).length <= 1,
-      v2_primary_actor_recoveries_complete: !args.productV2 || trainingCycles.every((cycle) => (
+      v2_primary_actor_recoveries_complete: trainingCycles.every((cycle) => (
         isRecordedAdapterEviction(cycle.adapterRecovery?.evicted, sessionId)
         && cycle.adapterRecovery.recovered.generation > cycle.filledPauseStable.generation
         && cycle.adapterRecovery.recovered.sourceSequence >= cycle.filledPauseStable.sourceSequence
@@ -2980,7 +2927,7 @@ async function main() {
       live_offline_backfill_quiet: backendLogCounts.backfillFailures === 0,
     };
     result = {
-      schema_version: args.productV2 ? "replay-v2-browser-soak.v1" : "replay-v1-browser-soak.v1",
+      schema_version: "replay-v2-browser-soak.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       mode: args.allowShort ? "harness-validation" : "release-4h",
@@ -2991,7 +2938,7 @@ async function main() {
         diagnosticGapSteps: args.diagnosticGapSteps,
         sampleMs: args.sampleMs,
         projectionEvents: args.projectionEvents,
-        product: args.productV2 ? "replay.v2" : "replay.v1",
+        product: "replay.v2",
         chrome: path.basename(chromePath),
         sourceProfile: fixture.source_profile,
         realSource: fixture.real_source,
@@ -3094,7 +3041,7 @@ async function main() {
     }, null, 2));
   } catch (error) {
     const failure = {
-      schema_version: args.productV2 ? "replay-v2-browser-soak-failure.v1" : "replay-v1-browser-soak-failure.v1",
+      schema_version: "replay-v2-browser-soak-failure.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       passed: false,

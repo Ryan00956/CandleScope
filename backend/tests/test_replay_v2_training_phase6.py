@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -43,11 +42,12 @@ from tests.fixtures.replay.bar_builder_fakes import (
     REPLAY_START_MS,
 )
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, request
-from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
+from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
     START_MS,
+    ImmutableReplayHistoryFake,
     SessionIdFactory,
     replay_settings,
 )
@@ -713,7 +713,7 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
 
 
 async def _risk_service(path: Path) -> ReplayService:
-    repository = FakeKlinesRepo()
+    repository = ImmutableReplayHistoryFake()
     prices = ["100", "101", "102", "103", "104", "50"] + ["50"] * 14
     repository.add_rows(
         FixtureIdentity("binance", "spot", "BTCUSDT"),
@@ -724,7 +724,7 @@ async def _risk_service(path: Path) -> ReplayService:
         ],
     )
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=repository,
         now_ms=lambda: NOW_MS,

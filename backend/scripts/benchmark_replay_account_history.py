@@ -202,7 +202,6 @@ async def _run_case(root: Path, *, track_count: int, iterations: int) -> dict[st
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
             replay_account_history_enabled=True,
             replay_account_history_max_archive_bytes=512 * 1024**2,
         ),

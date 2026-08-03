@@ -152,41 +152,6 @@ async def test_launch_context_accepts_hyphenated_market_symbols(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_schema_v8_backfills_direct_hub_context_for_existing_runs(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "migration.db"
-    initial = await _service(path, run_prefix="phase11")
-    try:
-        created = await initial.training.create_run(  # type: ignore[union-attr]
-            await _request(initial)
-        )
-        run_id = str(created["run"]["run_id"])
-    finally:
-        await initial.shutdown(step_timeout=1.0)
-
-    with sqlite3.connect(path) as connection:
-        connection.execute("DROP TABLE replay_training_launch_context")
-        connection.execute(
-            """
-            UPDATE replay_training_schema_version
-            SET version = 7
-            WHERE singleton = 1
-            """
-        )
-        connection.commit()
-
-    restored = await _service(path, run_prefix="restored")
-    try:
-        projection = await restored.training.get_market_tracks(run_id)  # type: ignore[union-attr]
-        context = projection["launch_context"]
-        assert context["source"] == "DIRECT_HUB"
-        assert context["symbol"] == "BTCUSDT"
-        assert context["watchlist_snapshot"]["groups"] == []
-    finally:
-        await restored.shutdown(step_timeout=1.0)
-
-
 @pytest.mark.parametrize("damage", ("missing", "invalid_json", "invalid_hash"))
 async def test_launch_context_storage_damage_fails_closed(
     tmp_path: Path,

@@ -355,17 +355,36 @@ async def test_final_state_scan_stops_at_first_interaction_boundary() -> None:
         assert [part["target_reached"] for part in parts] == [False, False, True]
         assert reducer.snapshot() == {"count": 5, "total": 15}
         assert (await actor.snapshot()).cursor.source_sequence == 5
-        interaction_snapshots = [
+        interaction_projections = [
+            event
+            for event in actor.event_buffer_after(0) or ()
+            if event.type is ReplayEventType.FINAL_STATE
+            and event.data["status_reason"]
+            == "fast_forward_final_state_interaction"
+        ]
+        assert len(interaction_projections) == 1
+        assert interaction_projections[0].data["cursor"][
+            "source_sequence"
+        ] == 3
+        completion_projections = [
+            event
+            for event in actor.event_buffer_after(0) or ()
+            if event.type is ReplayEventType.FINAL_STATE
+            and event.data["status_reason"]
+            == "fast_forward_final_state_complete"
+        ]
+        assert len(completion_projections) == 1
+        assert completion_projections[0].data["source_sequence_from"] == 4
+        assert completion_projections[0].data["source_sequence_to"] == 5
+        assert completion_projections[0].data["cursor"]["source_sequence"] == 5
+        assert not [
             event
             for event in actor.event_buffer_after(0) or ()
             if event.type is ReplayEventType.SNAPSHOT
-            and event.data["snapshot"]["status_reason"]
-            == "fast_forward_final_state_interaction"
+            and event.data["snapshot"]["status_reason"].startswith(
+                "fast_forward_final_state"
+            )
         ]
-        assert len(interaction_snapshots) == 1
-        assert interaction_snapshots[0].data["snapshot"]["cursor"][
-            "source_sequence"
-        ] == 3
     finally:
         await actor.shutdown(step_timeout=1.0)
 
@@ -433,6 +452,11 @@ async def test_final_state_cancel_snapshot_does_not_consume_same_time_event() ->
         assert synchronized.sequence == stepped.sequence + 1
         public = await actor.public_snapshot()
         assert public["status_reason"] == "fast_forward_final_state_cancelled"
+        emitted = actor.event_buffer_after(stepped.sequence) or ()
+        assert len(emitted) == 1
+        assert emitted[0].type is ReplayEventType.FINAL_STATE
+        assert emitted[0].data["source_sequence_from"] == 1
+        assert emitted[0].data["source_sequence_to"] == 1
     finally:
         await actor.shutdown(step_timeout=1.0)
 

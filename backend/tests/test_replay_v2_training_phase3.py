@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.replay.service import ReplayService
-from app.replay.storage import REPLAY_SCHEMA_VERSION, ReplaySQLiteStore
+from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.commands import ReplayV2Command
 from app.replay.training.control import (
     aligned_step_target_ms,
@@ -22,7 +22,6 @@ from app.replay.training.models import (
     TrainingRunCreateRequest,
     ViewerState,
 )
-from app.replay.training.schema import TRAINING_SCHEMA_VERSION
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -45,7 +44,7 @@ pytestmark = pytest.mark.anyio
 
 async def _service(path: Path, *, prefix: str = "run") -> ReplayService:
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=replay_repository(),
         now_ms=lambda: NOW_MS,
@@ -337,43 +336,20 @@ async def test_create_and_viewer_switch_support_calendar_but_reject_inexact_inte
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_schema_v1_upgrade_backfills_viewer_state_without_touching_v1(
+async def test_obsolete_schema_v1_fails_closed_instead_of_backfilling(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "upgrade.db"
     service = await _service(path)
-    created = await service.training.create_run(  # type: ignore[union-attr]
-        await _request(service, display_interval="15m")
-    )
-    run_id = created["run"]["run_id"]
     await service.shutdown(step_timeout=1.0)
 
     with sqlite3.connect(path) as connection:
-        connection.execute("DROP TABLE replay_training_command")
-        connection.execute("DROP TABLE replay_training_viewer_event")
-        connection.execute("DROP TABLE replay_training_viewer_state")
         connection.execute(
             "UPDATE replay_training_schema_version SET version = 1 WHERE singleton = 1"
         )
 
-    restored = await _service(path, prefix="unused")
-    try:
-        viewer = await restored.training.get_viewer_state(run_id)  # type: ignore[union-attr]
-        assert viewer["display_interval"] == "15m"
-        assert viewer["semantic_view_revision"] == 0
-        with sqlite3.connect(path) as connection:
-            assert connection.execute(
-                "SELECT version FROM replay_schema_version WHERE singleton = 1"
-            ).fetchone() == (REPLAY_SCHEMA_VERSION,)
-            assert connection.execute(
-                "SELECT version FROM replay_training_schema_version WHERE singleton = 1"
-                ).fetchone() == (TRAINING_SCHEMA_VERSION,)
-            assert connection.execute(
-                "SELECT event_type FROM replay_training_viewer_event WHERE run_id = ?",
-                (run_id,),
-            ).fetchone() == ("INITIAL_VIEWER_STATE",)
-    finally:
-        await restored.shutdown(step_timeout=1.0)
+    with pytest.raises(RuntimeError, match="clear replay training data"):
+        await _service(path, prefix="unused")
 
 
 async def test_display_switch_is_persistent_and_does_not_move_domain_state(
@@ -763,7 +739,6 @@ async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: TRADE_NOW_MS),
         repository=trade_replay_repository(),

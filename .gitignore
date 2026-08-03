@@ -219,11 +219,17 @@ backend/data/history_archives/
 backend/data/replay-history/
 backend/data/replay-history-cache/
 backend/data/replay-history-source-cache/
+backend/data/replay-history-source-cache-parallel/
 backend/data/replay-history-import*.json
 backend/data/replay-agg-trades/
 backend/data/replay-agg-trades-cache/
+backend/data/raw_agg_trades/
 backend/data/raw-agg-live-spool/
 backend/data/replay.db.datasets/
+/data/raw_agg_trades/
+/data/raw-agg-live-spool/
+/data/replay-history/
+/data/replay-history-cache/
 
 # CandleScope generated perf/test artifacts. Keep ad-hoc/raw runs local, while
 # allowing the curated drawing-engine V2 baselines required by its execution

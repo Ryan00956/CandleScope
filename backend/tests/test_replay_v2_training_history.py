@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -94,7 +93,7 @@ async def test_pinned_calendar_month_history_uses_calendar_bucket_ordinals() -> 
 async def _service(path: Path) -> tuple[ReplayService, object]:
     repository = replay_repository()
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=repository,
         now_ms=lambda: NOW_MS,
@@ -279,10 +278,10 @@ async def test_all_available_history_pages_repository_to_the_bound_source_start(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_legacy_all_available_run_refuses_a_different_history_backend(
+async def test_all_available_run_fails_closed_when_bound_archive_is_unavailable(
     tmp_path: Path,
 ) -> None:
-    service, repository = await _service(tmp_path / "legacy-source-change.db")
+    service, repository = await _service(tmp_path / "archive-unavailable.db")
     try:
         _created, snapshot = await _create_run(
             service,
@@ -309,8 +308,8 @@ async def test_legacy_all_available_run_refuses_a_different_history_backend(
                 data_epoch=str(snapshot["data_epoch"]),
                 history_epoch=None,
             )
-        assert captured.value.code == "HISTORY_SOURCE_MIGRATION_REQUIRED"
-        assert captured.value.status_code == 409
+        assert captured.value.code == "HISTORY_SOURCE_UNAVAILABLE"
+        assert captured.value.status_code == 503
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -357,7 +356,8 @@ async def test_history_rejects_epoch_boundary_and_source_identity_drift(
 
         with sqlite3.connect(path) as connection:
             connection.execute(
-                "UPDATE replay_training_track SET symbol = 'ETHUSDT' WHERE run_id = 'run-1'"
+                "UPDATE replay_training_market_track "
+                "SET symbol = 'ETHUSDT' WHERE run_id = 'run-1'"
             )
             connection.commit()
         with pytest.raises(TrainingRunError) as drift:
@@ -407,7 +407,7 @@ async def test_agg_trade_training_all_available_history_uses_chart_only_bars(
     archive = verified_trade_archive(tmp_path / "trade-archive")
     path = tmp_path / "trade-history.db"
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: TRADE_NOW_MS),
         repository=trade_replay_repository(),
         raw_trade_archive=archive,

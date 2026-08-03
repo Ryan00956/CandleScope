@@ -80,6 +80,29 @@ def test_parse_exact_bar_preserves_identity_and_fields() -> None:
     }
 
 
+def test_parse_exact_bar_normalizes_same_bucket_early_close() -> None:
+    bar = patcher._parse_exact_bar(
+        _body(close_ms=OPEN_MS + 13_524),
+        expected_open_ms=OPEN_MS,
+        interval="1w",
+    )
+
+    assert bar == {
+        "open_time": OPEN_MS,
+        "close_time": OPEN_MS + WEEK_MS - 1,
+        "open": "100.1",
+        "high": "120.2",
+        "low": "90.3",
+        "close": "110.4",
+        "volume": "12.5",
+        "quote_volume": "1337.6",
+        "trades": 42,
+        "taker_buy_base": "6.7",
+        "taker_buy_quote": "712.8",
+        "source": "binance_rest_api_exact_close_boundary_normalized",
+    }
+
+
 def test_parse_exact_response_accepts_exchange_confirmed_empty_array() -> None:
     assert (
         patcher._parse_exact_response(
@@ -114,6 +137,15 @@ def test_parse_exact_bar_rejects_non_exact_response(body: bytes) -> None:
     with pytest.raises(ReplayHistoryArchiveError):
         patcher._parse_exact_bar(
             body,
+            expected_open_ms=OPEN_MS,
+            interval="1w",
+        )
+
+
+def test_parse_exact_bar_rejects_close_before_open() -> None:
+    with pytest.raises(ReplayHistoryArchiveError):
+        patcher._parse_exact_bar(
+            _body(close_ms=OPEN_MS - 1),
             expected_open_ms=OPEN_MS,
             interval="1w",
         )
@@ -407,7 +439,7 @@ def test_patch_history_publishes_exact_rows_and_retains_confirmed_empty(
                 SimpleNamespace(
                     status=200,
                     headers={"content-type": "application/json"},
-                    body=_body(open_ms=OPEN_MS),
+                    body=_body(open_ms=OPEN_MS, close_ms=OPEN_MS + 13_524),
                 ),
                 SimpleNamespace(
                     status=200,
@@ -460,6 +492,12 @@ def test_patch_history_publishes_exact_rows_and_retains_confirmed_empty(
     assert report["total_count"] == 4
     assert report["objects_verified"] == 4
     assert report["imported"][0]["open_time_ms"] == OPEN_MS
+    manifest = writer.current_manifest(identity, "1w")
+    assert manifest is not None
+    normalized_object = next(
+        item for item in manifest.objects if item.first_open_ms == OPEN_MS
+    )
+    assert normalized_object.source_normalized_rows == 1
     empty = report["exchange_confirmed_true_gaps"][0]
     assert empty["open_time_ms"] == OPEN_MS + 3 * WEEK_MS
     assert empty["status"] == "exchange_confirmed_true_gap"
@@ -469,7 +507,7 @@ def test_patch_history_publishes_exact_rows_and_retains_confirmed_empty(
     assert (tmp_path / receipt["response_path"]).read_bytes() == b"[]"
 
     repository = patcher.ReplayHistoryRepository(tmp_path)
-    assert repository.query_bars_at_revision(
+    patched_bar = repository.query_bars_at_revision(
         report["catalog_epoch"],
         "BTCUSDT",
         "1w",
@@ -477,4 +515,9 @@ def test_patch_history_publishes_exact_rows_and_retains_confirmed_empty(
         end_ms=OPEN_MS,
         exchange="binance",
         market_type="spot",
-    )[0]["open_time"] == OPEN_MS
+    )[0]
+    assert patched_bar["open_time"] == OPEN_MS
+    assert patched_bar["close_time"] == OPEN_MS + WEEK_MS - 1
+    assert patched_bar["source"] == (
+        "binance_rest_api_exact_close_boundary_normalized"
+    )

@@ -622,17 +622,16 @@ def bind_historical_book_archive(
             now_ms,
         ),
     )
-    for table in ("replay_training_track", "replay_training_market_track"):
-        connection.execute(
-            f"""
-            UPDATE {table}
-            SET capabilities_json = json_set(
-                capabilities_json, '$.ORDER_BOOK', 'AVAILABLE_EXACT'
-            ), updated_at_ms = ?
-            WHERE run_id = ? AND track_id = ?
-            """,
-            (now_ms, run_id, track_id),
-        )
+    connection.execute(
+        """
+        UPDATE replay_training_market_track
+        SET capabilities_json = json_set(
+            capabilities_json, '$.ORDER_BOOK', 'AVAILABLE_EXACT'
+        ), updated_at_ms = ?
+        WHERE run_id = ? AND track_id = ?
+        """,
+        (now_ms, run_id, track_id),
+    )
     connection.execute(
         """
         INSERT INTO replay_historical_book_event(

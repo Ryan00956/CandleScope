@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -34,7 +33,7 @@ pytestmark = pytest.mark.anyio
 
 async def _service(path: Path, *, prefix: str = "run") -> ReplayService:
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=replay_repository(),
         now_ms=lambda: NOW_MS,

@@ -66,11 +66,6 @@ export default function ReplayLauncherDialog({
         await runtime.actions.createRun(draft);
         closeUnusedReplayWindow();
       },
-      migrateLegacy: async (sessionId, name) => {
-        reserveReplayWindow();
-        await runtime.actions.migrateLegacy(sessionId, name);
-        closeUnusedReplayWindow();
-      },
     },
   }), [closeUnusedReplayWindow, reserveReplayWindow, runtime]);
 

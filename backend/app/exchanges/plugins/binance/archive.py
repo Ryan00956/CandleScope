@@ -199,9 +199,9 @@ class BinanceKlineArchiveProvider:
         """Keep checksum-valid UTC-grid rows and audit legacy off-grid rows.
 
         Early Binance spot archives contain a few maintenance-period partial or
-        event-anchored candles. They cannot be replay base bars. Excluding them
-        turns the affected range into an explicit manifest gap while preserving
-        all later UTC-aligned history.
+        event-anchored candles. Aligned partial candles retain valid market data,
+        so their close boundary is normalized; off-grid event-anchored candles
+        cannot be replay base bars and remain explicit manifest gaps.
         """
 
         return self._parse_archive(path, ref, allow_replay_grid_rejections=True)
@@ -396,12 +396,16 @@ def _parse_row(fields: list[str], ref: ArchiveObjectRef, spec, line_number: int)
             "Binance K-line timestamp is not interval-aligned",
         )
     expected_close_time = spec.next_ms(open_time) - 1
-    normalized_legacy_close_boundary = close_time == expected_close_time + 1
-    if normalized_legacy_close_boundary:
+    normalized_close_boundary = (
+        close_time == expected_close_time + 1
+        or open_time <= close_time < expected_close_time
+    )
+    if normalized_close_boundary:
         # A small number of checksum-verified early Binance spot files encode
-        # the final candle before a maintenance gap with the next bucket
-        # boundary itself instead of boundary - 1 ms.  Preserve the bar but
-        # normalize it to CandleScope's half-open interval contract.
+        # maintenance-boundary candles with either an early close inside their
+        # own bucket or the next bucket boundary itself. Preserve the source
+        # OHLCV/trade fields but normalize the close to CandleScope's canonical
+        # half-open interval contract. A close before its open remains invalid.
         close_time = expected_close_time
     elif close_time != expected_close_time:
         raise _BinanceReplayGridError(
@@ -430,7 +434,7 @@ def _parse_row(fields: list[str], ref: ArchiveObjectRef, spec, line_number: int)
         }),
         source=(
             "backfill_archive_verified_close_boundary_normalized"
-            if normalized_legacy_close_boundary
+            if normalized_close_boundary
             else "backfill_archive_verified"
         ),
     )

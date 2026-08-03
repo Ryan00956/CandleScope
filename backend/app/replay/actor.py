@@ -70,6 +70,13 @@ class ReplayReducer(Protocol):
 
     def has_trading_state(self) -> bool: ...
 
+    def final_state_transport_anchor(self) -> int | None: ...
+
+    def final_state_transport_projection(
+        self,
+        replace_from_open_ms: int | None,
+    ) -> Mapping[str, object]: ...
+
 
 class NullReplayReducer:
     def apply_source_event(self, event: object) -> Mapping[str, object]:
@@ -88,6 +95,19 @@ class NullReplayReducer:
 
     def has_trading_state(self) -> bool:
         return False
+
+    def final_state_transport_anchor(self) -> int | None:
+        return None
+
+    def final_state_transport_projection(
+        self,
+        replace_from_open_ms: int | None,
+    ) -> Mapping[str, object]:
+        del replace_from_open_ms
+        raise ReplayDomainError(
+            ReplayErrorCode.INVALID_STATE_TRANSITION,
+            "final-state projection is unavailable without a replay reducer",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +196,8 @@ class _ActorRollback:
     event_chain_hash: str
     revealed: bool
     journal_entries: tuple[Mapping[str, object], ...]
+    final_state_anchor_source_sequence: int | None
+    final_state_anchor_bar_open_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,6 +545,8 @@ class ReplaySessionActor:
         self._status_reason = "initializing"
         self._revealed = False
         self._journal_entries: list[dict[str, object]] = []
+        self._final_state_anchor_source_sequence: int | None = None
+        self._final_state_anchor_bar_open_ms: int | None = None
         self._controller_client_id: str | None = None
         self._controller_deadline_wall: float | None = None
         self._last_checkpoint_source_sequence = 0
@@ -1150,6 +1174,11 @@ class ReplaySessionActor:
                 )
         finally:
             self._recovering_tail = False
+            # Recovery has no surviving stream subscriber. Its first frame is
+            # an authoritative full snapshot, so a pre-crash hidden-prefix
+            # transport anchor must not leak into the next live command.
+            self._final_state_anchor_source_sequence = None
+            self._final_state_anchor_bar_open_ms = None
         self._revision = target.revision
         self._sequence = target.event_sequence
         self._command_log_offset = target.command_log_offset
@@ -1959,9 +1988,10 @@ class ReplaySessionActor:
                     ReplayErrorCode.INVALID_STATE_TRANSITION,
                     "empty-account final-state advance found active trading state",
                 )
+            self._ensure_final_state_transport_anchor()
             self._revision += 1
             if snapshot_only:
-                self._emit_reset_snapshot(
+                self._emit_final_state_projection(
                     "fast_forward_final_state_cancelled",
                     mandatory=True,
                 )
@@ -2083,7 +2113,7 @@ class ReplaySessionActor:
                     "empty-account final-state advance created trading state",
                 )
             if target_reached:
-                self._emit_reset_snapshot(
+                self._emit_final_state_projection(
                     "fast_forward_final_state_complete",
                     mandatory=True,
                 )
@@ -2757,11 +2787,15 @@ class ReplaySessionActor:
                 # Earlier final-state chunks may have consumed source events
                 # without publishing transport frames. A DELTA here would
                 # therefore cross the client's causal source-sequence floor.
-                # Publish the exact post-interaction state atomically instead.
-                self._emit_reset_snapshot(
+                # Publish the exact compact post-interaction state atomically.
+                self._emit_final_state_projection(
                     "fast_forward_final_state_interaction",
                     mandatory=True,
                 )
+                # The command may continue scanning after this mandatory
+                # interaction. Start the next compact suffix exactly at the
+                # state the client has just observed.
+                self._ensure_final_state_transport_anchor()
             else:
                 self._emit(
                     ReplayEventType.DELTA,
@@ -3441,6 +3475,10 @@ class ReplaySessionActor:
             journal_entries=tuple(
                 MappingProxyType(dict(entry)) for entry in self._journal_entries
             ),
+            final_state_anchor_source_sequence=(
+                self._final_state_anchor_source_sequence
+            ),
+            final_state_anchor_bar_open_ms=self._final_state_anchor_bar_open_ms,
         )
 
     def _begin_candidate(
@@ -3502,6 +3540,12 @@ class ReplaySessionActor:
         self._event_chain_hash = rollback.event_chain_hash
         self._revealed = rollback.revealed
         self._journal_entries = [dict(entry) for entry in rollback.journal_entries]
+        self._final_state_anchor_source_sequence = (
+            rollback.final_state_anchor_source_sequence
+        )
+        self._final_state_anchor_bar_open_ms = (
+            rollback.final_state_anchor_bar_open_ms
+        )
         self._status_reason = rollback.status_reason
         self._controller_client_id = rollback.controller_client_id
         self._controller_deadline_wall = rollback.controller_deadline_wall
@@ -4289,6 +4333,74 @@ class ReplaySessionActor:
             },
             mandatory=mandatory,
         )
+
+    def _ensure_final_state_transport_anchor(self) -> None:
+        if self._final_state_anchor_source_sequence is not None:
+            return
+        anchor = getattr(self._reducer, "final_state_transport_anchor", None)
+        if not callable(anchor):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "replay reducer does not provide a final-state transport anchor",
+            )
+        bar_open_ms = anchor()
+        if bar_open_ms is not None:
+            bar_open_ms = validate_timestamp_ms(
+                bar_open_ms,
+                field_name="final_state_transport_anchor_open_ms",
+            )
+        self._final_state_anchor_source_sequence = (
+            self._source.cursor().source_sequence
+        )
+        self._final_state_anchor_bar_open_ms = bar_open_ms
+
+    def _emit_final_state_projection(self, reason: str, *, mandatory: bool) -> None:
+        """Publish a compact atomic replacement after source events were hidden."""
+
+        source_before = self._final_state_anchor_source_sequence
+        if source_before is None:
+            raise RuntimeError("final-state transport projection has no causal anchor")
+        build_projection = getattr(
+            self._reducer,
+            "final_state_transport_projection",
+            None,
+        )
+        if not callable(build_projection):
+            raise ReplayDomainError(
+                ReplayErrorCode.INVALID_STATE_TRANSITION,
+                "replay reducer does not provide a final-state transport projection",
+            )
+        projection = build_projection(self._final_state_anchor_bar_open_ms)
+        if not isinstance(projection, Mapping):
+            raise TypeError("final-state transport projection must be an object")
+        cursor = self._cursor_dict()
+        source_to = validate_counter(
+            cursor["source_sequence"],
+            field_name="final_state_source_sequence_to",
+        )
+        if source_to < source_before:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "final-state transport source sequence moved backward",
+            )
+        source_from = source_before if source_to == source_before else source_before + 1
+        self._status_reason = reason
+        self._emit(
+            ReplayEventType.FINAL_STATE,
+            {
+                "source_sequence_from": source_from,
+                "source_sequence_to": source_to,
+                "cursor": cursor,
+                "state": self._state.value,
+                "status_reason": reason,
+                "speed": self._clock.speed,
+                "controller_client_id": self._controller_client_id,
+                "projection": dict(projection),
+            },
+            mandatory=mandatory,
+        )
+        self._final_state_anchor_source_sequence = None
+        self._final_state_anchor_bar_open_ms = None
 
     def _emit_reset_snapshot(self, reason: str, *, mandatory: bool) -> None:
         """Publish one sequenced snapshot that atomically replaces client state.

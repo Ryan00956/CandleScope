@@ -32,7 +32,7 @@ pytestmark = pytest.mark.anyio
 
 async def _service(path: Path) -> ReplayService:
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=replay_repository(),
         now_ms=lambda: NOW_MS,
@@ -92,30 +92,6 @@ async def _payload(service: ReplayService) -> dict[str, object]:
         "margin_mode": "CROSS",
         "funding_mode": "OFF",
         "allow_rule_changes": False,
-    }
-
-
-async def test_v2_routes_are_disabled_by_explicit_v1_rollback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        replay_api,
-        "REPLAY_SETTINGS",
-        replace(
-            replay_api.REPLAY_SETTINGS,
-            enabled=True,
-            product_v2_enabled=False,
-        ),
-    )
-    response = await _request(_app(), "GET", "/api/v1/replay/runs")
-    assert response.status_code == 503
-    assert response.json() == {
-        "protocol": "replay.v2",
-        "error": {
-            "code": "REPLAY_PRODUCT_V2_DISABLED",
-            "message": "Replay training v2 is disabled",
-            "details": {},
-        },
     }
 
 
@@ -814,7 +790,7 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
         snapshot_response = await _request(
             app,
             "GET",
-            "/api/v1/replay/sessions/adapter-1",
+            "/api/v1/replay/runs/session/adapter-1",
         )
         snapshot = snapshot_response.json()["snapshot"]
         boundary = snapshot["cursor"]["virtual_time_ms"]
@@ -881,7 +857,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
         snapshot_response = await _request(
             app,
             "GET",
-            f"/api/v1/replay/sessions/{run['adapter_session_id']}",
+            f"/api/v1/replay/runs/session/{run['adapter_session_id']}",
         )
         before = snapshot_response.json()["snapshot"]
         assert before["config"]["display_interval"] == "1m"
@@ -923,7 +899,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
             await _request(
                 app,
                 "GET",
-                f"/api/v1/replay/sessions/{run['adapter_session_id']}",
+                f"/api/v1/replay/runs/session/{run['adapter_session_id']}",
             )
         ).json()["snapshot"]
         assert after["cursor"] == before["cursor"]
@@ -1089,50 +1065,27 @@ async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_legacy_migration_route_is_additive_and_idempotent(tmp_path: Path) -> None:
-    service = await _service(tmp_path / "migration.db")
-    app = _app(service)
-    try:
-        legacy = await service.create_session(replay_config())
-        session_id = str(legacy["session_id"])
-        first = await _request(
-            app,
-            "POST",
-            f"/api/v1/replay/runs/{session_id}/migrate",
-            json={"protocol": "replay.v2", "name": "迁移存档"},
-        )
-        assert first.status_code == 201
-        assert first.json()["migrated"] is True
-        second = await _request(
-            app,
-            "POST",
-            f"/api/v1/replay/runs/{session_id}/migrate",
-            json={"protocol": "replay.v2", "name": None},
-        )
-        assert second.status_code == 200
-        assert second.json()["created"] is False
-        assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
-    finally:
-        await service.shutdown(step_timeout=1.0)
-
-
-async def test_legacy_v1_archive_can_be_deleted_from_the_hub(
+async def test_unowned_adapter_session_has_no_training_migration_or_delete_surface(
     tmp_path: Path,
 ) -> None:
-    service = await _service(tmp_path / "delete-legacy.db")
+    service = await _service(tmp_path / "retired-legacy-surface.db")
     app = _app(service)
     try:
-        legacy = await service.create_session(replay_config())
-        session_id = str(legacy["session_id"])
+        adapter = await service.create_session(replay_config())
+        session_id = str(adapter["session_id"])
+
+        migration = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{session_id}/migrate",
+            json={"protocol": "replay.v2", "name": "retired"},
+        )
+        assert migration.status_code == 404
+
         deleted = await _request(app, "DELETE", f"/api/v1/replay/runs/{session_id}")
-        assert deleted.status_code == 200
-        assert deleted.json() == {
-            "protocol": "replay.v2",
-            "deleted": True,
-            "run_id": session_id,
-            "session_ids": [session_id],
-        }
-        assert await service.store.get_session(session_id) is None
+        assert deleted.status_code == 404
+        assert deleted.json()["error"]["code"] == "TRAINING_RUN_NOT_FOUND"
+        assert await service.store.get_session(session_id) is not None
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -1146,9 +1099,8 @@ async def test_enabled_flags_without_a_started_training_service_fail_closed(
         replace(
             replay_api.REPLAY_SETTINGS,
             enabled=True,
-            product_v2_enabled=True,
         ),
     )
     response = await _request(_app(), "GET", "/api/v1/replay/runs")
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "REPLAY_PRODUCT_V2_UNAVAILABLE"
+    assert response.json()["error"]["code"] == "REPLAY_TRAINING_UNAVAILABLE"

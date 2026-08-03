@@ -7,6 +7,7 @@ import { SeriesWindowRegistry } from "../market-data/window/windowRegistry.js";
 import {
   canonicalizeIntervalValue,
   intervalTiles,
+  intervalsSemanticallyEquivalent,
   parseIntervalSeconds,
 } from "../../utils/intervals.js";
 import { createIntervalTimeline } from "../../utils/intervalTimeline.js";
@@ -37,6 +38,26 @@ function replayIntervalTimeline(
     throw new ReplayViewerProjectionError(`${fieldName} is invalid`);
   }
   return timeline;
+}
+
+/**
+ * BAR runs with a display interval different from their execution interval
+ * must use the server-owned source-bucket projection. The actor intentionally
+ * retains only a bounded execution tail, so locally aggregating that tail can
+ * neither reconstruct the complete visible window nor preserve its history
+ * seam. This is a data-lineage rule for every BAR run, not a blind-mode rule.
+ */
+export function replayUsesAuthoritativeSourceBucketProjection(
+  sourceKind: string | null | undefined,
+  baseInterval: string | null | undefined,
+  displayInterval: string | null | undefined,
+): boolean {
+  return sourceKind === "bar"
+    && baseInterval !== null
+    && baseInterval !== undefined
+    && displayInterval !== null
+    && displayInterval !== undefined
+    && !intervalsSemanticallyEquivalent(baseInterval, displayInterval);
 }
 
 export function buildReplayViewerSeriesKey(

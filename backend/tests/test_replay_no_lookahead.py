@@ -212,7 +212,7 @@ async def test_blind_public_boundary_never_leaks_future_or_actual_history_before
         )
         assert revealed["data"]["actual_history"] == {
             "replay_start_ms": START_MS + 4 * INTERVAL_MS,
-            "replay_end_open_ms": START_MS + 8 * INTERVAL_MS,
+            "replay_end_open_ms": START_MS + (ROW_COUNT - 1) * INTERVAL_MS,
         }
         revealed_report = await service.report(session_id)
         assert revealed_report["revealed"] is True

@@ -18,6 +18,7 @@ import { defaultReplayV2Api } from "./replayV2Api.js";
 import type { ReplayPeriodSummaryStatusResponse } from "./replayPeriodSummary.js";
 import {
   applyReplayViewerSeriesDelta,
+  replayUsesAuthoritativeSourceBucketProjection,
   ReplayViewerSeriesCache,
   replaceReplayViewerSeriesFromServer,
 } from "./replayViewerProjection.js";
@@ -63,6 +64,49 @@ export interface ReplayViewerProjectionScheduler {
   readonly cancel: () => void;
 }
 
+export interface ReplayViewerProjectionRequestGate {
+  readonly begin: (key: string) => AbortController | null;
+  readonly isCurrent: (key: string, request: AbortController) => boolean;
+  readonly commit: (key: string, request: AbortController) => boolean;
+  readonly finish: (request: AbortController) => void;
+  readonly cancel: () => void;
+}
+
+export function createReplayViewerProjectionRequestGate(
+  createController: () => AbortController = () => new AbortController(),
+): ReplayViewerProjectionRequestGate {
+  let active: { readonly key: string; readonly request: AbortController } | null = null;
+  let committedKey: string | null = null;
+  const isCurrent = (key: string, request: AbortController): boolean => (
+    active?.key === key
+    && active.request === request
+    && !request.signal.aborted
+  );
+  return {
+    begin: (key) => {
+      if (active?.key === key || committedKey === key) return null;
+      active?.request.abort();
+      const request = createController();
+      active = { key, request };
+      return request;
+    },
+    isCurrent,
+    commit: (key, request) => {
+      if (!isCurrent(key, request)) return false;
+      committedKey = key;
+      active = null;
+      return true;
+    },
+    finish: (request) => {
+      if (active?.request === request) active = null;
+    },
+    cancel: () => {
+      active?.request.abort();
+      active = null;
+    },
+  };
+}
+
 export function createReplayViewerProjectionScheduler(
   rebuild: () => void,
   requestFrame: (callback: FrameRequestCallback) => number = requestAnimationFrame,
@@ -85,15 +129,56 @@ export function createReplayViewerProjectionScheduler(
   };
 }
 
+export interface ReplayViewerProjectionRequestScheduler {
+  schedule(): void;
+  cancel(): void;
+}
+
+/**
+ * Coalesce source-authority notifications without gating HTTP work on paint.
+ *
+ * The source series publishes synchronously while ReplayStore applies a stream
+ * event, before the enclosing event handler commits its envelope cursor.  A
+ * microtask therefore provides the required authority barrier.  Unlike
+ * requestAnimationFrame, it also remains prompt when Chrome throttles paint in
+ * an occluded/background tab, so a coarse display projection does not inherit
+ * a roughly one-second frame delay before its request even starts.
+ */
+export function createReplayViewerProjectionRequestScheduler(
+  refresh: () => void,
+  enqueueMicrotask: (callback: () => void) => void = queueMicrotask,
+): ReplayViewerProjectionRequestScheduler {
+  let pending = false;
+  let generation = 0;
+  return {
+    schedule: () => {
+      if (pending) return;
+      pending = true;
+      const scheduledGeneration = generation;
+      enqueueMicrotask(() => {
+        if (!pending || scheduledGeneration !== generation) return;
+        pending = false;
+        refresh();
+      });
+    },
+    cancel: () => {
+      pending = false;
+      generation += 1;
+    },
+  };
+}
+
 interface ReplayRevisionStore {
   readonly getAuthoritySnapshot: () => { readonly revision: number };
   readonly subscribe: (listener: () => void) => () => void;
 }
 
+export const REPLAY_STORE_REVISION_ACK_TIMEOUT_MS = 1_000;
+
 export function waitForReplayStoreRevision(
   store: ReplayRevisionStore,
   targetRevision: number,
-  timeoutMs = 250,
+  timeoutMs = REPLAY_STORE_REVISION_ACK_TIMEOUT_MS,
 ): Promise<boolean> {
   if (store.getAuthoritySnapshot().revision >= targetRevision) {
     return Promise.resolve(true);
@@ -266,11 +351,11 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const sourceMarketType = config?.market_type ?? null;
   const sourceSymbol = config?.symbol ?? null;
   const dataEpoch = runtime.store.dataEpoch;
-  const requiresSourceBucketProjection = config?.source_kind === "bar"
-    && config.blind_mode === true
-    && baseInterval !== null
-    && displayInterval !== null
-    && !intervalsSemanticallyEquivalent(baseInterval, displayInterval);
+  const requiresSourceBucketProjection = replayUsesAuthoritativeSourceBucketProjection(
+    config?.source_kind,
+    baseInterval,
+    displayInterval,
+  );
   const sourceSeriesKey = sourceStore.seriesKey;
   const sourcePublicTimeMsRef = useRef(runtime.store.virtualTimeMs);
   sourcePublicTimeMsRef.current = runtime.store.virtualTimeMs;
@@ -288,12 +373,11 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     )) {
       throw new Error("authoritative replay adapter is not projected at the base interval");
     }
-    if (config?.source_kind === "bar"
-      && config.blind_mode === true
-      && !intervalsSemanticallyEquivalent(
-        baseInterval,
-        next.display_interval,
-      )) {
+    if (replayUsesAuthoritativeSourceBucketProjection(
+      config?.source_kind,
+      baseInterval,
+      next.display_interval,
+    )) {
       viewerSeriesCache.storeFor(sourceStore, next.display_interval).clear({
         source: "replay-viewer-awaiting-source-bucket-projection",
       });
@@ -308,7 +392,6 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   }, [
     adapterDisplayInterval,
     baseInterval,
-    config?.blind_mode,
     config?.source_kind,
     sourceStore,
     viewerSeriesCache,
@@ -442,15 +525,10 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   useEffect(() => {
     if (requiresSourceBucketProjection) {
       let disposed = false;
-      let activeRequest: AbortController | null = null;
-      let refreshPending = false;
+      const requestGate = createReplayViewerProjectionRequestGate();
       const refresh = () => {
-        if (activeRequest !== null) {
-          refreshPending = true;
-          return;
-        }
-        const boundaryMs = runtime.store.virtualTimeMs;
-        const activeDataEpoch = runtime.store.dataEpoch;
+        const boundaryMs = runtime.replayStore.getAuthoritySnapshot().virtualTimeMs;
+        const activeDataEpoch = dataEpoch;
         const trackId = viewerRef.current?.selected_track_id ?? null;
         if (sessionId === null
           || displayInterval === null
@@ -460,9 +538,15 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
           seriesStore.clear({ source: "replay-viewer-source-bucket-unavailable" });
           return;
         }
-        const request = new AbortController();
-        activeRequest = request;
-        refreshPending = false;
+        const requestKey = JSON.stringify([
+          sessionId,
+          trackId,
+          displayInterval,
+          activeDataEpoch,
+          boundaryMs,
+        ]);
+        const request = requestGate.begin(requestKey);
+        if (request === null) return;
         void defaultReplayV2Api.displayProjectionBySession(
           sessionId,
           {
@@ -473,9 +557,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
           },
           request.signal,
         ).then((response) => {
-          if (disposed || request.signal.aborted) return;
-          const latestBoundaryMs = runtime.store.virtualTimeMs;
-          const latestDataEpoch = runtime.store.dataEpoch;
+          if (disposed || !requestGate.isCurrent(requestKey, request)) return;
+          const latestBoundaryMs = runtime.replayStore.getAuthoritySnapshot().virtualTimeMs;
           if (response.session_id !== sessionId
             || response.track_id !== trackId
             || response.display_interval !== displayInterval
@@ -493,8 +576,8 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
             throw new Error("source-bucket projection identity changed");
           }
           if (latestBoundaryMs !== boundaryMs
-            || latestDataEpoch !== activeDataEpoch) {
-            refreshPending = true;
+            || dataEpoch !== activeDataEpoch) {
+            projectionRequestScheduler.schedule();
             return;
           }
           replaceReplayViewerSeriesFromServer(
@@ -509,6 +592,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
             sourceStore,
             response.revealed_boundary_ms,
           );
+          requestGate.commit(requestKey, request);
           setError(null);
         }).catch((cause: unknown) => {
           if (disposed
@@ -517,20 +601,19 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
           seriesStore.clear({ source: "replay-viewer-source-bucket-error" });
           setError(cause instanceof Error ? cause.message : "交易所周期 K 线重建失败");
         }).finally(() => {
-          if (activeRequest === request) activeRequest = null;
-          if (!disposed && refreshPending) projectionScheduler.schedule();
+          requestGate.finish(request);
         });
       };
-      const projectionScheduler = createReplayViewerProjectionScheduler(refresh);
+      const projectionRequestScheduler = createReplayViewerProjectionRequestScheduler(refresh);
       refresh();
       const unsubscribe = sourceStore.subscribe(() => {
-        projectionScheduler.schedule();
+        projectionRequestScheduler.schedule();
       });
       return () => {
         disposed = true;
         unsubscribe();
-        projectionScheduler.cancel();
-        activeRequest?.abort();
+        projectionRequestScheduler.cancel();
+        requestGate.cancel();
       };
     }
     let initialized = false;
@@ -590,7 +673,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     dataEpoch,
     displayInterval,
     requiresSourceBucketProjection,
-    runtime.store,
+    runtime.replayStore,
     seriesStore,
     sessionId,
     sourceExchange,

@@ -79,6 +79,10 @@ async def test_schema_migration_is_versioned_and_does_not_touch_klines_db(
             version = connection.execute(
                 "SELECT version FROM replay_schema_version WHERE singleton = 1"
             ).fetchone()[0]
+            checkpoint_columns = {
+                row[1]: row
+                for row in connection.execute("PRAGMA table_info(replay_checkpoint)")
+            }
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -86,6 +90,7 @@ async def test_schema_migration_is_versioned_and_does_not_touch_klines_db(
                 )
             }
         assert version == REPLAY_SCHEMA_VERSION
+        assert checkpoint_columns["mutation_id"][3] == 1
         assert {
             "replay_session",
             "replay_dataset_ref",
@@ -282,31 +287,72 @@ async def test_delete_session_compensation_cascades_even_when_store_is_degraded(
         await store.close()
 
 
-async def test_v1_migration_keeps_legacy_checkpoint_watermark_ambiguous(
+@pytest.mark.parametrize("obsolete_version", [1, 2, 3])
+async def test_obsolete_base_schema_requires_a_fresh_database(
     tmp_path: Path,
+    obsolete_version: int,
 ) -> None:
-    path = tmp_path / "legacy-v1.db"
-    store = await _created_store(path)
-    await store.close()
-
+    path = tmp_path / f"legacy-v{obsolete_version}.db"
     with sqlite3.connect(path) as connection:
-        connection.execute("ALTER TABLE replay_checkpoint DROP COLUMN mutation_id")
         connection.execute(
-            "UPDATE replay_schema_version SET version = 1 WHERE singleton = 1"
+            """
+            CREATE TABLE replay_schema_version (
+                singleton INTEGER PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO replay_schema_version VALUES (1, ?, 1)",
+            (obsolete_version,),
         )
 
-    migrated = ReplaySQLiteStore(path, now_ms=lambda: 1_800_000_000_000)
-    try:
-        checkpoints = await migrated.load_valid_checkpoints("session-1")
-        assert len(checkpoints) == 1
-        assert checkpoints[0].mutation_id is None
-        assert checkpoints[0].is_latest is True
-        with sqlite3.connect(path) as connection:
-            assert connection.execute(
-                "SELECT version FROM replay_schema_version WHERE singleton = 1"
-            ).fetchone()[0] == REPLAY_SCHEMA_VERSION
-    finally:
-        await migrated.close()
+    with pytest.raises(
+        RuntimeError,
+        match=rf"obsolete replay schema {obsolete_version}.*clear REPLAY_DB_PATH",
+    ):
+        ReplaySQLiteStore(path)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT version FROM replay_schema_version WHERE singleton = 1"
+        ).fetchone() == (obsolete_version,)
+
+
+@pytest.mark.parametrize("version_table", [False, True])
+async def test_unversioned_replay_tables_require_a_fresh_database(
+    tmp_path: Path,
+    version_table: bool,
+) -> None:
+    path = tmp_path / f"unversioned-{version_table}.db"
+    with sqlite3.connect(path) as connection:
+        if version_table:
+            connection.execute(
+                """
+                CREATE TABLE replay_schema_version (
+                    singleton INTEGER PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    applied_at_ms INTEGER NOT NULL
+                )
+                """
+            )
+        else:
+            connection.execute("CREATE TABLE replay_session(session_id TEXT)")
+
+    with pytest.raises(RuntimeError, match="unversioned replay.*clear REPLAY_DB_PATH"):
+        ReplaySQLiteStore(path)
+
+    with sqlite3.connect(path) as connection:
+        names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'replay_%'"
+            )
+        }
+    assert names == {
+        "replay_schema_version" if version_table else "replay_session"
+    }
 
 
 async def test_command_is_one_transaction_and_same_payload_is_idempotent(

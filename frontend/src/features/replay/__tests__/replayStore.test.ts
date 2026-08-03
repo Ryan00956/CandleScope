@@ -9,6 +9,7 @@ import {
   replayDeltaEvent,
   replayEndedEvent,
   replayFill,
+  replayFinalStateEvent,
   replaySessionResponse,
   replayTradeDeltaEvent,
   replayTradeSessionResponse,
@@ -126,6 +127,35 @@ test("fills and paused state flush immediately", () => {
   assert.equal(store.getSnapshot().fills.length, 1);
   assert.equal(store.getSnapshot().uiFlushCount, before + 1);
   assert.equal(scheduler.tasks.size, 0);
+});
+
+test("compact final-state atomically replaces the retained series and account authority", () => {
+  const store = new ReplayStore();
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse()).snapshot);
+  const event = parseReplayEvent(replayFinalStateEvent({ state: "ENDED" }));
+  assert.equal(store.applyEvent(1, event), true);
+  const snapshot = store.getSnapshot();
+  assert.equal(store.seriesStore.barCount, 3);
+  assert.equal(snapshot.lastPrice?.close, 102);
+  assert.equal(snapshot.sourceSequence, 2);
+  assert.equal(snapshot.sequence, 1);
+  assert.equal(snapshot.state, "ENDED");
+  assert.equal(snapshot.cursorAtEnd, true);
+  assert.equal(snapshot.controllerClientId, null);
+});
+
+test("a non-convergent compact suffix changes neither store authority nor chart", () => {
+  const store = new ReplayStore();
+  store.beginGeneration(1, { resetAuthoritativeState: true, connectionState: "connecting" });
+  store.applyAtomicSnapshot(1, parseReplaySessionResponse(replaySessionResponse()).snapshot);
+  const malformed = structuredClone(replayFinalStateEvent());
+  malformed.data.projection.series.retained_count = 4;
+  const event = parseReplayEvent(malformed);
+  assert.throws(() => store.applyEvent(1, event), /does not converge/);
+  assert.equal(store.getSnapshot().sourceSequence, 0);
+  assert.equal(store.getSnapshot().sequence, 0);
+  assert.equal(store.seriesStore.barCount, 1);
 });
 
 test("an HTTP journal refresh merges without dropping newer WebSocket entries", () => {

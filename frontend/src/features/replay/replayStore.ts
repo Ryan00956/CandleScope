@@ -1,11 +1,17 @@
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
-import { applyReplayBarUpdate, latestReplayBar, replaceReplaySeriesFromSnapshot } from "./replaySeriesProjection.js";
+import {
+  applyReplayBarUpdate,
+  latestReplayBar,
+  replaceReplaySeriesFromFinalState,
+  replaceReplaySeriesFromSnapshot,
+} from "./replaySeriesProjection.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type {
   ReplayAccount,
   ReplayClosedTrade,
   ReplayDigest,
   ReplayFill,
+  ReplayFinalStateEventData,
   ReplayJournalEntry,
   ReplayOrder,
   ReplayParsedEvent,
@@ -220,7 +226,31 @@ export class ReplayStore {
   applyEvent(generation: number, event: ReplayParsedEvent): boolean {
     if (generation !== this.generation || !this.hasAuthoritativeSnapshot) return false;
     let mandatory = false;
-    if (event.type === "replay.delta") {
+    if (event.type === "replay.final_state") {
+      const data = event.data as ReplayFinalStateEventData;
+      // Validate and replace the chart suffix before mutating any authority or
+      // account maps. A malformed patch therefore leaves one coherent old
+      // state and lets the stream controller trigger a full snapshot resync.
+      replaceReplaySeriesFromFinalState(
+        this.seriesStore,
+        data.projection.series,
+        event.virtual_time_ms,
+        data.source_sequence_to,
+      );
+      this.ordersById = new Map(data.projection.orders.map((order) => [order.order_id, order]));
+      this.fillsById = new Map(data.projection.fills.map((fill) => [fill.fill_id, fill]));
+      this.closedTradesById = new Map(data.projection.closed_trades.map((trade) => [trade.trade_id, trade]));
+      this.warningsById = new Map(data.projection.warnings.map((warning) => [warning.warning_id, warning]));
+      this.position = data.projection.position;
+      this.account = data.projection.account;
+      this.sourceSequence = data.source_sequence_to;
+      this.state = data.state;
+      this.statusReason = data.status_reason;
+      this.speed = data.speed;
+      this.controllerClientId = data.controller_client_id;
+      this.cursorAtEnd = data.cursor.at_end;
+      mandatory = true;
+    } else if (event.type === "replay.delta") {
       const data = event.data as { source_sequence: number; projection: ReplayProjection };
       this.applyProjection(data.projection, event.virtual_time_ms);
       this.sourceSequence = data.source_sequence;

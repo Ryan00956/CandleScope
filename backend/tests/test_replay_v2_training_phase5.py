@@ -78,7 +78,6 @@ async def _service(
     service = ReplayService(
         settings=replace(
             settings,
-            product_v2_enabled=True,
             controller_ttl_seconds=(
                 settings.controller_ttl_seconds
                 if controller_ttl_seconds is None
@@ -186,7 +185,7 @@ async def _trade_service(
 ) -> ReplayService:
     repository, archive = _multi_trade_sources(archive_root, symbols)
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: TRADE_NOW_MS),
         repository=repository,
         raw_trade_archive=archive,

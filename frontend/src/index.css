@@ -8640,8 +8640,7 @@ body {
 .replay-entry-link:focus-visible,
 .replay-top-bar a:focus-visible,
 .replay-control-stack button:focus-visible,
-.replay-right-rail button:focus-visible,
-.replay-session-dialog :is(button, input, select, summary, a):focus-visible {
+.replay-right-rail button:focus-visible {
   outline: 2px solid #f59e0b;
   outline-offset: 2px;
 }
@@ -8679,8 +8678,6 @@ body {
   white-space: nowrap;
   cursor: help;
 }
-.replay-ohlcv { display: flex; align-items: center; gap: 9px; margin-left: auto; font: 11px "JetBrains Mono", monospace; color: var(--text-muted); }
-.replay-ohlcv strong { color: #e2e8f0; font-size: 15px; }
 .replay-live-link { color: #93c5fd; text-decoration: none; white-space: nowrap; }
 .replay-integrity-toggle {
   min-height: 30px;
@@ -8697,43 +8694,17 @@ body {
   color: #ddd6fe;
   background: rgba(109, 40, 217, .32);
 }
-.replay-toolbar-slot { display: flex; flex-direction: column; min-width: 0; }
-.replay-toolbar-slot .interval-toolbar-wrap {
-  display: flex;
-  align-items: center;
-  min-height: 34px;
-  gap: 10px;
-  padding: 0 10px;
-  overflow-x: auto;
-  color: var(--text-muted);
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-.replay-toolbar-slot .interval-toolbar-wrap::-webkit-scrollbar { display: none; }
-.replay-blind-chip { color: #c4b5fd; font-weight: 700; }
 .replay-chart-toolbar { gap: 10px; width: 42px; overflow: hidden; writing-mode: vertical-rl; padding-top: 8px; color: #94a3b8; font-size: 10px; }
 
-.replay-config-page { flex: 1; min-height: 0; overflow: auto; padding: 28px; background: radial-gradient(circle at 20% 0%, rgba(59, 130, 246, .12), transparent 42%), #0b1220; }
-.replay-session-dialog { width: min(920px, 100%); margin: 0 auto; padding: 24px; border: 1px solid #243249; border-radius: 12px; background: rgba(15, 23, 42, .96); box-shadow: 0 24px 80px rgba(0, 0, 0, .35); }
-.replay-dialog-heading, .replay-report-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.replay-dialog-heading h1, .replay-report-heading h2 { margin: 8px 0 4px; color: #f8fafc; }
-.replay-dialog-heading p { margin: 0; color: #94a3b8; }
-.replay-dialog-heading a { color: #93c5fd; white-space: nowrap; }
-.replay-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin: 22px 0; }
-.replay-form-grid label, .replay-order-ticket label, .replay-end-dialog label { display: flex; flex-direction: column; gap: 6px; color: #cbd5e1; font-size: 12px; font-weight: 600; }
-.replay-form-grid :is(input, select), .replay-order-ticket :is(input, select), .replay-end-dialog select, .replay-right-rail textarea {
+.replay-order-ticket label, .replay-end-dialog label { display: flex; flex-direction: column; gap: 6px; color: #cbd5e1; font-size: 12px; font-weight: 600; }
+.replay-order-ticket :is(input, select), .replay-end-dialog select, .replay-right-rail textarea {
   min-height: 36px; padding: 7px 9px; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; background: #0b1220;
 }
-.replay-form-grid small, .replay-order-ticket small { color: #64748b; font-weight: 400; }
+.replay-order-ticket small { color: #64748b; font-weight: 400; }
 .replay-checkbox-field { flex-direction: row !important; align-items: center; }
 .replay-checkbox-field input { min-height: auto !important; }
-.replay-advanced-settings { margin: 8px 0 18px; color: #94a3b8; }
-.replay-advanced-settings summary { cursor: pointer; font-weight: 700; }
-.replay-fidelity-summary { display: grid; gap: 4px; padding: 13px; border: 1px solid rgba(59, 130, 246, .4); border-radius: 8px; color: #bfdbfe; background: rgba(59, 130, 246, .08); }
-.replay-fidelity-summary span:last-child { color: #fbbf24; }
 .replay-primary-action { width: 100%; min-height: 42px; margin-top: 16px; border: 0; border-radius: 7px; background: #2563eb; color: white; font-weight: 800; cursor: pointer; }
 .replay-primary-action:disabled { background: #334155; color: #94a3b8; cursor: not-allowed; }
-.replay-disabled-reason { color: #fca5a5; text-align: center; }
 .replay-error-summary, .replay-command-error { display: grid; gap: 3px; margin-top: 14px; padding: 10px 12px; border: 1px solid rgba(239, 68, 68, .5); border-radius: 7px; color: #fecaca; background: rgba(127, 29, 29, .25); }
 .error-message small { display: block; margin-top: 8px; color: var(--text-muted); }
 .replay-loading-spinner { width: 28px; height: 28px; border: 3px solid #334155; border-top-color: #f59e0b; border-radius: 50%; animation: replay-spin 900ms linear infinite; }
@@ -9278,21 +9249,9 @@ body {
 .replay-dialog-actions button { padding: 7px 12px; border: 1px solid #475569; border-radius: 5px; color: white; background: #1e293b; }
 .replay-dialog-actions button:last-child { background: #b91c1c; }
 
-.replay-report-panel { position: fixed; z-index: 9000; inset: 62px 24px 38px; overflow: auto; padding: 22px; border: 1px solid #334155; border-radius: 10px; color: #cbd5e1; background: rgba(8, 15, 28, .985); box-shadow: 0 25px 100px #000; }
-.replay-report-actions, .replay-report-footer { display: flex; align-items: center; gap: 8px; }
-.replay-report-actions button, .replay-report-footer :is(button, a), .replay-reveal-panel button { padding: 7px 10px; border: 1px solid #475569; border-radius: 5px; color: #e2e8f0; background: #1e293b; text-decoration: none; }
-.replay-report-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 20px 0; }
-.replay-report-summary div { display: grid; gap: 5px; padding: 12px; border: 1px solid #243249; border-radius: 6px; background: #0f172a; }
-.replay-report-summary span { color: #64748b; font-size: 11px; }
-.replay-report-summary strong { font: 16px "JetBrains Mono", monospace; }
-.replay-report-integrity { display: grid; gap: 5px; padding: 12px; border-radius: 6px; background: #111827; }
-.replay-report-integrity code { overflow-wrap: anywhere; color: #94a3b8; }
-.replay-reveal-panel { display: grid; gap: 6px; margin: 14px 0; padding: 13px; border: 1px solid #7c3aed; border-radius: 7px; color: #ddd6fe; background: rgba(76, 29, 149, .2); }
-.replay-reveal-panel button { width: fit-content; background: #6d28d9; }
+.replay-report-actions { display: flex; align-items: center; gap: 8px; }
+.replay-report-actions button { padding: 7px 10px; border: 1px solid #475569; border-radius: 5px; color: #e2e8f0; background: #1e293b; text-decoration: none; }
 .replay-revealed { border-color: #047857; color: #a7f3d0; background: rgba(6, 78, 59, .2); }
-.replay-timeline-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
-.replay-timeline-grid section { max-height: 220px; overflow: auto; padding: 12px; border: 1px solid #243249; border-radius: 6px; }
-.replay-timeline-grid section > div { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1e293b; }
 .replay-status-bar { white-space: nowrap; }
 .replay-return-hub { padding: 6px 10px; border: 1px solid #7c3aed; border-radius: 6px; color: #ddd6fe; background: rgba(76, 29, 149, .35); white-space: nowrap; }
 .replay-return-hub:disabled { opacity: .55; cursor: wait; }
@@ -9338,8 +9297,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .training-hub-page *,
   .replay-control-stack *,
-  .replay-right-rail *,
-  .replay-report-panel * {
+  .replay-right-rail * {
     scroll-behavior: auto !important;
     animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
@@ -9567,7 +9525,6 @@ body {
 .replay-storage-support article p { margin: 5px 0 0; overflow-wrap: anywhere; color: #94a3b8; font-size: 10px; }
 
 @media (max-width: 1100px) {
-  .replay-ohlcv { display: none; }
   .replay-right-rail { width: 310px; min-width: 280px; }
   .replay-fidelity-chips { display: none; }
   .training-hub-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -9586,9 +9543,6 @@ body {
   .replay-top-bar .price-change { display: none; }
 }
 @media (max-width: 760px) {
-  .replay-form-grid, .replay-report-summary, .replay-timeline-grid { grid-template-columns: 1fr; }
-  .replay-config-page { padding: 10px; }
-  .replay-session-dialog { padding: 15px; }
   .replay-right-rail { display: none; }
   .right-market-rail[data-runtime-source="replay"] { display: none; }
   .replay-bottom-control-dock .replay-fidelity-chips { display: none; }

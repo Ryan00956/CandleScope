@@ -6,6 +6,7 @@ import {
 } from "./replayParser.js";
 import type {
   ReplayDigest,
+  ReplayFinalStateEventData,
   ReplayParsedEvent,
   ReplaySessionSnapshot,
 } from "./replayTypes.js";
@@ -494,6 +495,8 @@ export class ReplayStreamController {
     this.lastStateHash = event.state_hash;
     if (event.type === "replay.delta") {
       this.lastSourceSequence = (event.data as { readonly source_sequence: number }).source_sequence;
+    } else if (event.type === "replay.final_state") {
+      this.lastSourceSequence = (event.data as ReplayFinalStateEventData).source_sequence_to;
     }
     this.reconnectAttempt = 0;
     this.consecutiveProtocolFaults = 0;

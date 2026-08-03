@@ -40,7 +40,6 @@ export type TrainingHubOperation =
   | "plan"
   | "create"
   | "delete"
-  | "migrate"
   | "storage-list"
   | "storage-plan"
   | "storage-run"
@@ -117,11 +116,6 @@ export interface TrainingHubApiBoundary {
     objectId: string,
     signal?: AbortSignal,
   ): Promise<{ readonly object_id: string; readonly health: "READY" }>;
-  migrateLegacy(
-    sessionId: string,
-    name?: string | null,
-    signal?: AbortSignal,
-  ): Promise<TrainingRunMutationResponse>;
 }
 
 export interface TrainingHubLifecycleOptions {
@@ -607,27 +601,6 @@ export class TrainingHubLifecycle {
     }
   }
 
-  async migrateLegacy(sessionId: string, name: string | null = null): Promise<void> {
-    if (this.disposed) return;
-    this.operation = "migrate";
-    this.error = null;
-    this.publish();
-    const token = ++this.requestToken;
-    try {
-      const result = await this.api.migrateLegacy(
-        sessionId,
-        name,
-        this.abortController.signal,
-      );
-      if (!this.accept(token)) return;
-      this.operation = null;
-      this.publish();
-      this.navigateToSession(result.run.adapter_session_id);
-    } catch (error) {
-      this.fail(token, error);
-    }
-  }
-
   async deleteRun(runId: string): Promise<void> {
     if (this.disposed || this.operation !== null) return;
     if (this.api.deleteRun === undefined) {
@@ -874,7 +847,6 @@ export interface TrainingHubRuntime extends TrainingHubSnapshot {
     setDraft(draft: TrainingRunDraft): void;
     refreshCreatePlan(): void | Promise<void>;
     createRun(draft: TrainingRunDraft): void | Promise<void>;
-    migrateLegacy(sessionId: string, name?: string | null): void | Promise<void>;
     deleteRun(runId: string): void | Promise<void>;
     continueRun(card: TrainingRunCard): void;
   };
@@ -938,9 +910,6 @@ export function useTrainingHub(
       setDraft: (draft: TrainingRunDraft) => lifecycle.setDraft(draft),
       refreshCreatePlan: () => lifecycle.refreshCreatePlan(),
       createRun: (draft: TrainingRunDraft) => lifecycle.createRun(draft),
-      migrateLegacy: (sessionId: string, name: string | null = null) => (
-        lifecycle.migrateLegacy(sessionId, name)
-      ),
       deleteRun: (runId: string) => lifecycle.deleteRun(runId),
       continueRun: (card: TrainingRunCard) => lifecycle.continueRun(card),
     },

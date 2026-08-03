@@ -20,14 +20,18 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .canonical import canonical_sha256
+from .catalog import ReplaySeriesIdentity
 from .history_archive import (
+    REPLAY_HISTORY_POINTER_SCHEMA_VERSION,
     ReplayHistoryArchiveError,
+    ReplayHistoryArchiveWriter,
     ReplayHistoryCatalogManifest,
     ReplayHistoryObject,
     ReplayHistoryRepository,
+    _archive_mutation_lock,
     _atomic_write_json,
     _catalog_directory,
     _digest_token,
@@ -465,7 +469,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
         self._next_remote_refresh = 0.0
         self._remote_index_epoch: str | None = None
         self._remote_generated_at_ms: int | None = None
-        self._remote_metadata_fallback = False
         self._refresh_lock = threading.Lock()
         self._object_locks_guard = threading.Lock()
         self._object_locks: dict[str, threading.Lock] = {}
@@ -474,7 +477,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
             "remote_index_unchanged_refreshes": 0,
             "remote_manifests_loaded": 0,
             "remote_manifests_reused": 0,
-            "remote_metadata_cache_fallbacks": 0,
             "object_cache_hits": 0,
             "object_downloads": 0,
             "object_download_bytes": 0,
@@ -502,7 +504,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                 if reusable and index.index_epoch == committed_epoch:
                     with self._lock:
                         self._remote_generated_at_ms = index.generated_at_ms
-                        self._remote_metadata_fallback = False
                         self._next_remote_refresh = now + self._refresh_seconds
                         self._metrics["refreshes"] += 1
                         self._remote_metrics["remote_index_refreshes"] += 1
@@ -515,24 +516,13 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                     reusable=reusable,
                 )
                 self._cache_remote_snapshot(index, changed)
-                fallback = False
             except ReplayHistoryOriginUnavailable:
-                if reusable:
-                    # ``reusable`` is already checksum-bound and validated in
-                    # memory.  Reloading every cached manifest here only turns
-                    # a control-plane outage into latency on the chart path.
-                    with self._lock:
-                        self._remote_metadata_fallback = True
-                        self._next_remote_refresh = now + self._refresh_seconds
-                        self._metrics["refreshes"] += 1
-                        self._remote_metrics["remote_index_refreshes"] += 1
-                        self._remote_metrics[
-                            "remote_metadata_cache_fallbacks"
-                        ] += 1
-                    return
-                index, manifests = self._load_cached_snapshot()
-                changed = manifests
-                fallback = True
+                # New catalog/selection work is freshness-sensitive.  A
+                # checksum-valid cache still cannot prove that the origin has
+                # not published a newer tail, so never silently reuse it here.
+                # Revision-bound reads bypass current-catalog refresh in the
+                # base repository and may continue from immutable cached data.
+                raise
             current: dict[
                 tuple[str, str, str, str], ReplayHistoryCatalogManifest
             ] = {}
@@ -553,7 +543,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                 self._series_errors = {}
                 self._remote_index_epoch = index.index_epoch
                 self._remote_generated_at_ms = index.generated_at_ms
-                self._remote_metadata_fallback = fallback
                 self._next_remote_refresh = now + self._refresh_seconds
                 self._metrics["refreshes"] += 1
                 self._remote_metrics["remote_index_refreshes"] += 1
@@ -561,8 +550,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                 self._remote_metrics["remote_manifests_reused"] += (
                     len(manifests) - len(changed)
                 )
-                if fallback:
-                    self._remote_metrics["remote_metadata_cache_fallbacks"] += 1
 
     def _load_origin_index(self) -> ReplayRemoteCatalogIndex:
         return ReplayRemoteCatalogIndex.from_dict(
@@ -639,35 +626,6 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
             index.to_dict(),
         )
         _atomic_write_json(metadata_dir / "current.json", index.to_dict())
-
-    def _load_cached_snapshot(
-        self,
-    ) -> tuple[ReplayRemoteCatalogIndex, tuple[ReplayHistoryCatalogManifest, ...]]:
-        path = self.root / "remote-metadata" / "current.json"
-        if not path.is_file():
-            raise ReplayHistoryOriginUnavailable(
-                "remote replay-history metadata is unavailable and no cache exists"
-            )
-        index = ReplayRemoteCatalogIndex.from_dict(_read_local_json(path))
-        manifests: list[ReplayHistoryCatalogManifest] = []
-        for entry in index.catalogs:
-            manifest_path = self.root / Path(entry.manifest_path)
-            if not manifest_path.is_file():
-                raise ReplayHistoryOriginUnavailable(
-                    "cached replay-history manifest is unavailable"
-                )
-            manifest = ReplayHistoryCatalogManifest.from_dict(
-                _read_local_json(manifest_path)
-            )
-            if (
-                _manifest_key(manifest) != _remote_entry_key(entry)
-                or manifest.catalog_epoch != entry.catalog_epoch
-            ):
-                raise ReplayHistoryArchiveError(
-                    "cached replay-history metadata failed validation"
-                )
-            manifests.append(manifest)
-        return index, tuple(manifests)
 
     def _validate_manifest_objects_shallow(
         self,
@@ -751,17 +709,16 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                 "origin": "<redacted>" if redact_paths else self.origin.base_uri,
                 "remote_index_epoch": self._remote_index_epoch,
                 "remote_generated_at_ms": self._remote_generated_at_ms,
-                "remote_metadata_fallback": self._remote_metadata_fallback,
                 **self._remote_metrics,
             }
 
 
-def publish_remote_history_index(
+def _build_remote_history_index(
     origin_root: str | Path,
     *,
     now_ms: int | None = None,
 ) -> ReplayRemoteCatalogIndex:
-    """Publish a checksum-bound index over every current catalog pointer."""
+    """Build and validate an index over a locked current-pointer snapshot."""
 
     root = Path(origin_root).expanduser().resolve()
     pointers = sorted((root / "catalogs").glob("*/*/*/*/current.json"))
@@ -799,8 +756,103 @@ def publish_remote_history_index(
         generated_at_ms=generated,
         catalogs=catalogs,
     )
-    _atomic_write_json(root / "index.json", index.to_dict())
     return ReplayRemoteCatalogIndex.from_dict(index.to_dict())
+
+
+def _publish_remote_history_index_locked(
+    origin_root: str | Path,
+    *,
+    now_ms: int | None = None,
+) -> ReplayRemoteCatalogIndex:
+    root = Path(origin_root).expanduser().resolve()
+    index = _build_remote_history_index(root, now_ms=now_ms)
+    _atomic_write_json(root / "index.json", index.to_dict())
+    return index
+
+
+def publish_remote_history_index(
+    origin_root: str | Path,
+    *,
+    now_ms: int | None = None,
+) -> ReplayRemoteCatalogIndex:
+    """Atomically publish an index over one locked current-pointer snapshot."""
+
+    root = Path(origin_root).expanduser().resolve()
+    with _archive_mutation_lock(root / ".mutation.lock"):
+        return _publish_remote_history_index_locked(root, now_ms=now_ms)
+
+
+def publish_catalog_and_remote_index_if_current(
+    writer: ReplayHistoryArchiveWriter,
+    expected_catalog_epoch: str | None,
+    identity: ReplaySeriesIdentity,
+    interval: str,
+    new_objects: Sequence[ReplayHistoryObject],
+    *,
+    merge_current: bool = True,
+    listing_boundary_source: str = "first_checksum_verified_archive_bar",
+    source_bucket_anchor_ms: int | None = None,
+    alignment_policy: str | None = None,
+    now_ms: int | None = None,
+) -> tuple[ReplayHistoryCatalogManifest, ReplayRemoteCatalogIndex]:
+    """Commit one catalog pointer and the origin index as one locked operation.
+
+    The immutable catalog manifest may safely remain as an orphan if the index
+    write fails, but the mutable catalog pointer is restored before the error
+    escapes.  Readers therefore observe either the previous catalog/index pair
+    or the new pair, never a successfully reported split publication.
+    """
+
+    root = writer.root
+    pointer = _catalog_directory(root, identity, interval) / "current.json"
+    with _archive_mutation_lock(root / ".mutation.lock"):
+        previous = writer.current_manifest(identity, interval)
+        manifest = writer._publish_catalog_if_current_locked(
+            expected_catalog_epoch,
+            identity,
+            interval,
+            new_objects,
+            merge_current=merge_current,
+            listing_boundary_source=listing_boundary_source,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+            alignment_policy=alignment_policy,
+        )
+        try:
+            index = _build_remote_history_index(root, now_ms=now_ms)
+            entry = next(
+                (
+                    item
+                    for item in index.catalogs
+                    if _remote_entry_key(item) == _manifest_key(manifest)
+                ),
+                None,
+            )
+            if entry is None or entry.catalog_epoch != manifest.catalog_epoch:
+                raise ReplayHistoryArchiveError(
+                    "remote index does not expose the pending catalog"
+                )
+            _atomic_write_json(root / "index.json", index.to_dict())
+        except BaseException:
+            try:
+                if previous is None:
+                    pointer.unlink(missing_ok=True)
+                else:
+                    _atomic_write_json(
+                        pointer,
+                        {
+                            "schema_version": REPLAY_HISTORY_POINTER_SCHEMA_VERSION,
+                            "catalog_epoch": previous.catalog_epoch,
+                            "manifest": (
+                                f"{_digest_token(previous.catalog_epoch)}.json"
+                            ),
+                        },
+                    )
+            except BaseException as rollback_error:
+                raise ReplayHistoryArchiveError(
+                    "remote index publish and catalog pointer rollback both failed"
+                ) from rollback_error
+            raise
+    return manifest, index
 
 
 def _read_local_json(path: Path) -> Mapping[str, object]:
@@ -822,5 +874,6 @@ __all__ = [
     "ReplayHistoryOriginUnavailable",
     "ReplayRemoteCatalogEntry",
     "ReplayRemoteCatalogIndex",
+    "publish_catalog_and_remote_index_if_current",
     "publish_remote_history_index",
 ]

@@ -46,7 +46,9 @@ from app.replay.history_archive import (  # noqa: E402
     ReplayHistoryCatalogManifest,
     ReplayHistoryObject,
     ReplayHistoryRepository,
-    _archive_mutation_lock,
+)
+from app.replay.remote_history import (  # noqa: E402
+    publish_catalog_and_remote_index_if_current,
 )
 
 
@@ -158,11 +160,17 @@ def _parse_exact_response(
         raise ReplayHistoryArchiveError(
             "Binance REST K-line bounds are invalid"
         ) from exc
-    if (
-        open_time != expected_open_ms
-        or close_time != _bucket_end_ms(expected_open_ms, interval)
-        or trades < 0
-    ):
+    canonical_close_time = _bucket_end_ms(expected_open_ms, interval)
+    normalized_close_boundary = (
+        expected_open_ms <= close_time < canonical_close_time
+    )
+    if open_time != expected_open_ms or trades < 0:
+        raise ReplayHistoryArchiveError(
+            "Binance REST K-line does not match the exact requested bucket"
+        )
+    if normalized_close_boundary:
+        close_time = canonical_close_time
+    elif close_time != canonical_close_time:
         raise ReplayHistoryArchiveError(
             "Binance REST K-line does not match the exact requested bucket"
         )
@@ -188,7 +196,11 @@ def _parse_exact_response(
         "trades": trades,
         "taker_buy_base": _decimal(row[9], "taker_buy_base"),
         "taker_buy_quote": _decimal(row[10], "taker_buy_quote"),
-        "source": "binance_rest_api_exact",
+        "source": (
+            "binance_rest_api_exact_close_boundary_normalized"
+            if normalized_close_boundary
+            else "binance_rest_api_exact"
+        ),
     }
 
 
@@ -509,29 +521,23 @@ def _publish_pinned_batches(
     source_bucket_anchor_ms: int,
     alignment_policy: str,
 ) -> tuple[ReplayHistoryCatalogManifest, tuple[ReplayHistoryObject, ...]]:
-    """Publish under the archive writer lock with a pinned-revision CAS check."""
+    """Publish one revision-pinned catalog and matching remote index."""
 
-    with _archive_mutation_lock(writer.root / ".mutation.lock"):
-        locked_current = writer.current_manifest(identity, interval)
-        if locked_current is None or locked_current.catalog_epoch != base_revision:
-            raise ReplayHistoryArchiveError(
-                "current catalog changed after REST probes; no patch was published"
-            )
-        if not batches:
-            return locked_current, ()
-        objects = tuple(
-            writer.write_object(identity, interval, batch) for batch in batches
-        )
-        manifest = writer.publish_catalog(
-            identity,
-            interval,
-            objects,
-            merge_current=True,
-            listing_boundary_source=listing_boundary_source,
-            source_bucket_anchor_ms=source_bucket_anchor_ms,
-            alignment_policy=alignment_policy,
-        )
-        return manifest, objects
+    objects = tuple(
+        writer.write_object(identity, interval, batch) for batch in batches
+    )
+    manifest, _index = publish_catalog_and_remote_index_if_current(
+        writer,
+        base_revision,
+        identity,
+        interval,
+        objects,
+        merge_current=True,
+        listing_boundary_source=listing_boundary_source,
+        source_bucket_anchor_ms=source_bucket_anchor_ms,
+        alignment_policy=alignment_policy,
+    )
+    return manifest, objects
 
 
 async def patch_history(args: argparse.Namespace) -> dict[str, object]:
@@ -645,7 +651,9 @@ async def patch_history(args: argparse.Namespace) -> dict[str, object]:
                     source_provider_checksum=None,
                     source_row_count=1,
                     source_rejected_rows=0,
-                    source_normalized_rows=0,
+                    source_normalized_rows=int(
+                        str(bar["source"]).endswith("_normalized")
+                    ),
                     source_filter_policy=(
                         "binance_rest_exact_identity_bounds_receipt_v1"
                     ),

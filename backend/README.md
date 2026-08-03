@@ -34,6 +34,14 @@ enabled:
 
 The Windows entrypoint leaves Uvicorn reload disabled because its Selector
 event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
+For backend development, use the watch mode instead:
+
+```powershell
+.\dev-server.ps1 -Watch
+```
+
+It watches Python files below `app`, then gracefully restarts the normal
+single-process server (including sidecar shutdown) after each change.
 
 Default API base:
 
@@ -88,7 +96,7 @@ All application APIs are mounted under `/api/v1`.
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test, storage repair, gap scan, storage health, cache limits |
 | Subscriptions | list, sync, prices snapshot, get/set/delete symbol tier |
-| Replay (opt-in) | capabilities, catalog, session create/get/fork/command, journal, report, and `WS /stream/replay/{session_id}` |
+| Replay (opt-in) | v2 TrainingRun catalog/create/list/command/review/fork/report routes, plus gated internal adapter get/command/journal/report and `WS /stream/replay/{session_id}` |
 
 The enhanced K-line volume, delta, and CVD-contribution contract is documented in [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md).
 
@@ -105,12 +113,10 @@ Replay is disabled by default. `REPLAY_ENABLED=0` does not construct the
 creation. The disabled capability response remains stable so the independent
 frontend page can show `REPLAY_DISABLED` instead of falling back to live data.
 
-Replay training v2 has an additional subordinate switch,
-`REPLAY_PRODUCT_V2_ENABLED`. It defaults to enabled so v2 is selected whenever
-the authoritative `REPLAY_ENABLED` gate is opened. Explicitly setting the
-subordinate switch to `0` restores the v1 route; it does not weaken the
-authoritative gate or enable optional archive, book, worker, or optimization
-capabilities.
+`REPLAY_ENABLED` is the sole replay product gate. When it is enabled, the
+TrainingRun service is always constructed; there is no product selector or v1
+fallback. Optional archive, book, worker, and optimization capabilities remain
+independently fail closed.
 
 When enabled, replay owns a separate SQLite database and a bounded runtime:
 
@@ -147,11 +153,9 @@ cannot reveal data after the durable virtual-time cursor.
 | Variable | Default | Meaning |
 |---|---:|---|
 | `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
-| `REPLAY_PRODUCT_V2_ENABLED` | `1` | Subordinate v2 product selector; explicit `0` restores v1 while the authoritative replay gate remains unchanged |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
-| `REPLAY_BAR_SOURCE` | `archive` | `archive` uses the isolated immutable history plane; `legacy_sqlite` is an explicit rollback mode |
 | `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Local archive, or disposable metadata/object cache when `REPLAY_HISTORY_ORIGIN_URI` is set |
-| `REPLAY_HISTORY_ORIGIN_URI` | unset | Authoritative `file`/HTTP(S) history root; its index and manifests define random eligibility independently of cache bodies |
+| `REPLAY_HISTORY_ORIGIN_URI` | unset | Authoritative `file`/HTTP(S) history root; new catalogs/Runs fail closed when its current index is unavailable, while pinned Runs may read cached immutable revisions |
 | `REPLAY_HISTORY_CATALOG_REFRESH_SECONDS` | `300` | Remote metadata refresh TTL; `0` refreshes on every catalog access |
 | `REPLAY_HISTORY_DOWNLOAD_TIMEOUT_SECONDS` | `60` | Bounded timeout for remote metadata and selected-object downloads |
 | `REPLAY_AGG_TRADE_ENABLED` | `0` | Independent exact aggregate-trade replay gate |
@@ -203,11 +207,11 @@ they do not invalidate later continuous segments:
 
 The importer publishes content-addressed objects before atomically moving
 `current.json`. Runs pin the selected catalog epoch, so a later import cannot
-change their snapshot or `ALL_AVAILABLE` history. For emergency compatibility
-only, set `REPLAY_BAR_SOURCE=legacy_sqlite` and use
-`scripts/snapshot_replay_klines.py`; this opt-in mode restores the previous
-read-only SQLite source. The full BAR archive contract and operations runbook
-is [`../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md).
+change their snapshot or `ALL_AVAILABLE` history. The retired SQLite reader is
+not a runtime fallback: if the archive control plane or required immutable
+objects are unavailable, creation of new Runs fails closed. The full BAR
+archive contract and operations runbook is
+[`../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md`](../docs/KLINE_REPLAY_HISTORY_ARCHIVE_zh.md).
 When a closed monthly checksum is absent, the importer automatically attempts
 that month's checksum-verified daily objects before declaring a source gap.
 
@@ -292,9 +296,9 @@ the fidelity claim.
   The capability reports persistence unopened; retain `replay.db`.
 - To roll back only aggregate-trade replay, set
   `REPLAY_AGG_TRADE_ENABLED=0`; live capture and BAR replay are independent.
-- To roll back only the BAR history reader, set
-  `REPLAY_BAR_SOURCE=legacy_sqlite` and restart. Do not delete
-  `REPLAY_HISTORY_ARCHIVE_DIR`; old catalog epochs remain Run dependencies.
+- BAR replay has no legacy SQLite fallback. Keep
+  `REPLAY_HISTORY_ARCHIVE_DIR` and its published epochs intact because active
+  Runs pin those immutable catalog revisions.
 - Replay storage schema upgrades are forward-only. Before starting a build that
   migrates `replay.db`, stop replay and back up both `replay.db` and its
   `.datasets` directory. A full rollback to an older replay-aware build must

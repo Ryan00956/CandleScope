@@ -159,7 +159,6 @@ async def run_benchmark(
         manager = ReplaySegmentManager(store, root=owned_root)
         settings = replace(
             replay_settings(database),
-            product_v2_enabled=True,
             replay_segment_max_archive_bytes=segment_count * byte_size * 2,
         )
         books = HistoricalBookArchiveManager(

@@ -54,7 +54,6 @@ class ReplaySettings:
     event_subscriber_queue: int
     controller_ttl_seconds: int
     idle_ttl_seconds: int
-    product_v2_enabled: bool = True
     replay_segment_download_worker_enabled: bool = False
     replay_segment_auto_gc_enabled: bool = False
     replay_segment_max_archive_bytes: int = 1_099_511_627_776
@@ -63,7 +62,6 @@ class ReplaySettings:
     replay_historical_book_max_archive_bytes: int = 1_099_511_627_776
     replay_account_history_enabled: bool = False
     replay_account_history_max_archive_bytes: int = 137_438_953_472
-    replay_bar_source: str = "archive"
     replay_history_archive_dir: Path = Path("data/replay-history")
     replay_history_origin_uri: str | None = None
     replay_history_catalog_refresh_seconds: int = 300
@@ -71,13 +69,6 @@ class ReplaySettings:
     replay_agg_trade_enabled: bool = False
     replay_agg_trade_archive_dir: Path = Path("data/replay-agg-trades")
     replay_agg_trade_origin_uri: str | None = None
-
-    @property
-    def product_v2_available(self) -> bool:
-        """The product switch is subordinate to the authoritative replay switch."""
-
-        return self.enabled and self.product_v2_enabled
-
 
 def _strict_replay_bool(environment: Mapping[str, str], name: str, default: str) -> bool:
     raw_value = environment.get(name, default)
@@ -124,12 +115,18 @@ def load_replay_settings(
 ) -> ReplaySettings:
     """Load strict, fail-closed replay limits from an environment mapping."""
 
+    if "REPLAY_PRODUCT_V2_ENABLED" in environment:
+        raise ValueError(
+            "REPLAY_PRODUCT_V2_ENABLED was removed; REPLAY_ENABLED is the only replay product gate"
+        )
+
     replay_db_path = Path(environment.get("REPLAY_DB_PATH", str(data_dir / "replay.db")))
     if _paths_refer_to_same_file(replay_db_path, klines_db_path):
         raise ValueError("REPLAY_DB_PATH must not identify KLINES_DB_PATH")
-    replay_bar_source = environment.get("REPLAY_BAR_SOURCE", "archive").strip().lower()
-    if replay_bar_source not in {"archive", "legacy_sqlite"}:
-        raise ValueError("REPLAY_BAR_SOURCE must be archive or legacy_sqlite")
+    if "REPLAY_BAR_SOURCE" in environment:
+        raise ValueError(
+            "REPLAY_BAR_SOURCE was removed; BAR replay always uses the immutable archive"
+        )
     replay_history_archive_dir = Path(
         environment.get(
             "REPLAY_HISTORY_ARCHIVE_DIR",
@@ -227,9 +224,6 @@ def load_replay_settings(
         event_subscriber_queue=values["REPLAY_EVENT_SUBSCRIBER_QUEUE"],
         controller_ttl_seconds=values["REPLAY_CONTROLLER_TTL_SECONDS"],
         idle_ttl_seconds=values["REPLAY_IDLE_TTL_SECONDS"],
-        product_v2_enabled=_strict_replay_bool(
-            environment, "REPLAY_PRODUCT_V2_ENABLED", "1"
-        ),
         replay_segment_download_worker_enabled=_strict_replay_bool(
             environment, "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED", "0"
         ),
@@ -254,7 +248,6 @@ def load_replay_settings(
         replay_account_history_max_archive_bytes=values[
             "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES"
         ],
-        replay_bar_source=replay_bar_source,
         replay_history_archive_dir=replay_history_archive_dir,
         replay_history_origin_uri=replay_history_origin_uri,
         replay_history_catalog_refresh_seconds=(
@@ -300,8 +293,6 @@ REPLAY_SETTINGS = load_replay_settings(
     klines_db_path=KLINES_DB_PATH,
 )
 REPLAY_ENABLED = REPLAY_SETTINGS.enabled
-REPLAY_PRODUCT_V2_ENABLED = REPLAY_SETTINGS.product_v2_enabled
-REPLAY_PRODUCT_V2_AVAILABLE = REPLAY_SETTINGS.product_v2_available
 REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
     REPLAY_SETTINGS.replay_segment_download_worker_enabled
 )
@@ -320,7 +311,6 @@ REPLAY_ACCOUNT_HISTORY_ENABLED = REPLAY_SETTINGS.replay_account_history_enabled
 REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES = (
     REPLAY_SETTINGS.replay_account_history_max_archive_bytes
 )
-REPLAY_BAR_SOURCE = REPLAY_SETTINGS.replay_bar_source
 REPLAY_HISTORY_ARCHIVE_DIR = REPLAY_SETTINGS.replay_history_archive_dir
 REPLAY_AGG_TRADE_ENABLED = REPLAY_SETTINGS.replay_agg_trade_enabled
 REPLAY_AGG_TRADE_ARCHIVE_DIR = REPLAY_SETTINGS.replay_agg_trade_archive_dir

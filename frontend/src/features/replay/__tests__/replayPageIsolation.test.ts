@@ -46,7 +46,6 @@ test("replay composition source has no live runtime value import", () => {
   const paths = [
     "src/replay-main.tsx",
     "src/features/replay/ReplayApp.tsx",
-    "src/features/replay/ReplayPageShell.tsx",
     "src/features/replay/ReplayTrainingPageShell.tsx",
     "src/features/replay/components/ReplayRightMarketRail.tsx",
     "src/features/replay/useReplaySharedIndicatorRuntime.ts",
@@ -104,7 +103,7 @@ test("startup network boundary emits only replay HTTP and replay WebSocket URLs"
   await settle();
   assert.deepEqual(requests, [
     "/api/v1/replay/capabilities",
-    "/api/v1/replay/sessions/session-0001",
+    "/api/v1/replay/runs/session/session-0001",
   ]);
   assert.equal(sockets.length, 1);
   assert.match(sockets[0] ?? "", /^ws:\/\/replay\.test\/api\/v1\/stream\/replay\//);

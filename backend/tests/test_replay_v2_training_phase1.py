@@ -15,7 +15,10 @@ from app.replay.service import ReplayService
 from app.replay.storage import REPLAY_SCHEMA_VERSION, ReplaySQLiteStore
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import StartMode, TrainingRunCreateRequest
-from app.replay.training.schema import TRAINING_SCHEMA_VERSION
+from app.replay.training.schema import (
+    TRAINING_SCHEMA_VERSION,
+    migrate_training_schema,
+)
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -31,7 +34,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def _service(path: Path, *, run_prefix: str = "run") -> ReplayService:
-    settings = replace(replay_settings(path), product_v2_enabled=True)
+    settings = replay_settings(path)
     store = ReplaySQLiteStore(path, now_ms=lambda: NOW_MS)
     service = ReplayService(
         settings=settings,
@@ -107,7 +110,7 @@ def _command(
     )
 
 
-async def test_training_schema_is_additive_and_old_v1_store_ignores_it(
+async def test_training_schema_is_separate_from_internal_adapter_schema(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "replay.db"
@@ -129,22 +132,36 @@ async def test_training_schema_is_additive_and_old_v1_store_ignores_it(
         }
     assert {
         "replay_training_run",
-        "replay_training_track",
+        "replay_training_market_track",
         "replay_training_rule",
         "replay_training_action",
         "replay_training_pin",
         "replay_training_selection_preparation",
     }.issubset(tables)
-
-    old_build_store = ReplaySQLiteStore(path, now_ms=lambda: NOW_MS)
-    try:
-        assert old_build_store.schema_version == REPLAY_SCHEMA_VERSION
-    finally:
-        await old_build_store.close()
+    assert "replay_training_track" not in tables
 
 
-async def test_v2_flag_off_does_not_create_training_schema(tmp_path: Path) -> None:
-    path = tmp_path / "v1-only.db"
+@pytest.mark.parametrize("obsolete_version", range(1, TRAINING_SCHEMA_VERSION))
+def test_obsolete_training_schema_requires_a_fresh_database(
+    obsolete_version: int,
+) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE replay_training_schema_version "
+            "(singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO replay_training_schema_version VALUES (1, ?)",
+            (obsolete_version,),
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=rf"schema {obsolete_version} is obsolete.*clear replay training data",
+        ):
+            migrate_training_schema(connection, now_ms=NOW_MS)
+
+async def test_enabled_replay_always_creates_training_schema(tmp_path: Path) -> None:
+    path = tmp_path / "training-required.db"
     settings = replay_settings(path)
     service = ReplayService(
         settings=settings,
@@ -155,12 +172,12 @@ async def test_v2_flag_off_does_not_create_training_schema(tmp_path: Path) -> No
     )
     await service.start()
     try:
-        assert service.training is None
+        assert service.training is not None
         with sqlite3.connect(path) as connection:
             assert connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master "
                 "WHERE type = 'table' AND name LIKE 'replay_training_%'"
-            ).fetchone() == (0,)
+            ).fetchone()[0] > 0
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -173,7 +190,6 @@ async def test_return_to_hub_transfers_recovery_lease_before_idle_reaper(
     now = [NOW_MS]
     settings = replace(
         replay_settings(path),
-        product_v2_enabled=True,
         idle_ttl_seconds=60,
     )
     service = ReplayService(
@@ -271,7 +287,7 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
                     "replay_checkpoint",
                     "replay_training_run",
                     "replay_training_launch_context",
-                    "replay_training_track",
+                    "replay_training_market_track",
                     "replay_training_rule",
                     "replay_training_action",
                     "replay_training_pin",
@@ -284,7 +300,7 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
             "replay_checkpoint": 1,
             "replay_training_run": 1,
             "replay_training_launch_context": 1,
-            "replay_training_track": 1,
+            "replay_training_market_track": 1,
             "replay_training_rule": 1,
             "replay_training_action": 1,
             "replay_training_pin": 1,
@@ -321,12 +337,14 @@ async def test_create_run_rolls_back_every_row_and_runtime_pin_on_late_failure(
                 "replay_checkpoint",
                 "replay_training_run",
                 "replay_training_launch_context",
-                "replay_training_track",
+                "replay_training_market_track",
                 "replay_training_rule",
                 "replay_training_action",
                 "replay_training_pin",
             ):
-                assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+                assert connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone() == (0,)
             failed = connection.execute(
                 """
                 SELECT status, error_code
@@ -401,9 +419,12 @@ async def test_failed_materialization_retry_reuses_committed_random_selection(
                 "catalog_epoch": row["catalog_epoch"],
                 "source_fingerprint": row["source_fingerprint"],
             }
-            assert connection.execute(
-                "SELECT COUNT(*) FROM replay_training_run"
-            ).fetchone()[0] == 0
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_run"
+                ).fetchone()[0]
+                == 0
+            )
 
         retried = await training.retry_selection_preparation("run-1")
         assert retried["run"]["run_id"] == "run-1"
@@ -425,9 +446,12 @@ async def test_failed_materialization_retry_reuses_committed_random_selection(
                 "catalog_epoch": row["catalog_epoch"],
                 "source_fingerprint": row["source_fingerprint"],
             } == committed
-            assert connection.execute(
-                "SELECT COUNT(*) FROM replay_training_run"
-            ).fetchone()[0] == 1
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_run"
+                ).fetchone()[0]
+                == 1
+            )
 
         with pytest.raises(TrainingRunError) as not_retryable:
             await training.retry_selection_preparation("run-1")
@@ -450,90 +474,48 @@ async def test_create_rejects_catalog_epoch_drift_without_partial_rows(
             await service.training.create_run(request)  # type: ignore[union-attr]
         assert stale.value.code == "CATALOG_EPOCH_MISMATCH"
         with sqlite3.connect(path) as connection:
-            assert connection.execute("SELECT COUNT(*) FROM replay_session").fetchone() == (0,)
-            assert connection.execute("SELECT COUNT(*) FROM replay_training_run").fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_session"
+            ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone() == (0,)
     finally:
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_thousands_of_legacy_saves_page_without_reading_dataset_blob(
+async def test_unowned_adapter_sessions_never_enter_the_training_hub(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "paging.db"
-    service = await _service(path)
+    service = await _service(tmp_path / "adapter-only.db")
     training = service.training
     assert training is not None
-    rows = []
-    for index in range(2_000):
-        session_id = f"legacy-{index:04d}"
-        blind = index % 2 == 0
-        config = {
-            **replay_config(blind_mode=blind).to_dict(),
-            "requested_start_ms": START_MS + index * INTERVAL_MS,
-        }
-        rows.append(
-            (
-                session_id,
-                json.dumps(config, separators=(",", ":")),
-                json.dumps({"initial_equity": "10000", "quote_asset": "USDT"}),
-                "PAUSED",
-                "initialized",
-                index,
-                index,
-                index,
-                0,
-                f"sha256:{index:064x}",
-                f"sha256:{(index + 1):064x}",
-                0,
-                1,
-                None,
-                NOW_MS + index,
-                NOW_MS + index,
-            )
-        )
-    with sqlite3.connect(path) as connection:
-        connection.executemany(
-            """
-            INSERT INTO replay_session(
-                session_id, config_json, broker_config_json, state, status_reason,
-                revision, event_sequence, source_sequence, command_log_offset,
-                state_hash, data_epoch, revealed, accepting, degraded_reason,
-                created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-
-    statements: list[str] = []
-    service.store._connection.set_trace_callback(statements.append)
     try:
-        first = await training.list_runs(
+        adapter = await service.create_session(replay_config())
+        listed = await training.list_runs(
             limit=50,
             cursor=None,
-            state="PAUSED",
-            source_kind="BAR",
-            compatibility="LEGACY_V1",
+            state=None,
+            source_kind=None,
+            compatibility=None,
         )
-        second = await training.list_runs(
-            limit=50,
-            cursor=first["next_cursor"],
-            state="PAUSED",
-            source_kind="BAR",
-            compatibility="LEGACY_V1",
-        )
-    finally:
-        service.store._connection.set_trace_callback(None)
-        await service.shutdown(step_timeout=1.0)
+        assert listed["items"] == []
 
-    assert len(first["items"]) == len(second["items"]) == 50
-    assert {item["run_id"] for item in first["items"]}.isdisjoint(
-        item["run_id"] for item in second["items"]
-    )
-    assert all(item["kind"] == "LEGACY_V1" for item in first["items"])
-    assert all("actual" not in json.dumps(item).lower() for item in first["items"])
-    traced = "\n".join(statements).lower()
-    assert "replay_dataset_ref" not in traced
-    assert "snapshot_blob" not in traced
+        with pytest.raises(TrainingRunError) as invalid_filter:
+            await training.list_runs(
+                limit=50,
+                cursor=None,
+                state=None,
+                source_kind=None,
+                compatibility="LEGACY_V1",
+            )
+        assert invalid_filter.value.code == "TRAINING_RUN_INVALID"
+
+        with pytest.raises(TrainingRunError) as unowned_session:
+            await training.store.run_id_for_session(str(adapter["session_id"]))
+        assert unowned_session.value.code == "TRAINING_RUN_NOT_FOUND"
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_blind_run_card_never_exposes_history_identity_or_actual_time(
@@ -560,58 +542,6 @@ async def test_blind_run_card_never_exposes_history_identity_or_actual_time(
         assert "snapshot" not in serialized
         assert "partition" not in serialized
         assert listed["items"][0]["time_disclosure_policy"] == "HIDE_ALL"
-    finally:
-        await service.shutdown(step_timeout=1.0)
-
-
-async def test_legacy_migration_creates_wrapper_without_changing_v1_hashes(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "legacy.db"
-    service = await _service(path, run_prefix="migrated")
-    try:
-        legacy = await service.create_session(replay_config())
-        legacy_id = str(legacy["session_id"])
-        with sqlite3.connect(path) as connection:
-            before = connection.execute(
-                """
-                SELECT s.config_json, s.state_hash, d.snapshot_sha256
-                FROM replay_session AS s
-                JOIN replay_dataset_ref AS d USING(session_id)
-                WHERE s.session_id = ?
-                """,
-                (legacy_id,),
-            ).fetchone()
-        listed = await service.training.list_runs(  # type: ignore[union-attr]
-            limit=20,
-            cursor=None,
-            state=None,
-            source_kind=None,
-            compatibility="LEGACY_V1",
-        )
-        assert [item["run_id"] for item in listed["items"]] == [legacy_id]
-        assert listed["items"][0]["resume_action"] == "OPEN_V1"
-
-        migrated = await service.training.migrate_legacy(  # type: ignore[union-attr]
-            legacy_id,
-            name="迁移后的训练",
-        )
-        assert migrated["run"]["run_id"] == "migrated-1"
-        assert migrated["run"]["adapter_session_id"] == legacy_id
-        assert migrated["run"]["parent_legacy_session_id"] == legacy_id
-        with sqlite3.connect(path) as connection:
-            after = connection.execute(
-                """
-                SELECT s.config_json, s.state_hash, d.snapshot_sha256
-                FROM replay_session AS s
-                JOIN replay_dataset_ref AS d USING(session_id)
-                WHERE s.session_id = ?
-                """,
-                (legacy_id,),
-            ).fetchone()
-        assert after == before
-        repeated = await service.training.migrate_legacy(legacy_id, name=None)  # type: ignore[union-attr]
-        assert repeated["run"]["run_id"] == "migrated-1"
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -658,5 +588,70 @@ async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
             assert latest_checkpoint == durable
         recovered = await service.get_session(session_id)
         assert recovered["snapshot"]["state"] == "PAUSED"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_ended_run_card_is_labeled_for_review_instead_of_continue(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "ended-card.db")
+    try:
+        training = service.training
+        assert training is not None
+        created = await training.create_run(await _request(service))
+        session_id = str(created["run"]["adapter_session_id"])
+        await service.command(
+            session_id,
+            _command("acquire-ended", CommandType.ACQUIRE_CONTROLLER, revision=0),
+        )
+        revision = 1
+        ended: dict[str, object] | None = None
+        for index in range(30):
+            result = await service.command(
+                session_id,
+                ReplayCommand(
+                    protocol=REPLAY_PROTOCOL,
+                    command_id=f"step-to-end-{index}",
+                    client_instance_id="phase1-browser",
+                    expected_revision=revision,
+                    type=CommandType.STEP,
+                    payload={"count": 1},
+                ),
+            )
+            revision = int(result["revision"])
+            if result["state"] == "ENDED":
+                ended = result
+                break
+        assert ended is not None
+        assert ended["state"] == "ENDED"
+
+        listed = await training.list_runs(
+            limit=20,
+            cursor=None,
+            state="ENDED",
+            source_kind=None,
+            compatibility=None,
+        )
+        assert len(listed["items"]) == 1
+        card = listed["items"][0]
+        assert card["state"] == "ENDED"
+        assert card["resume_action"] == "OPEN_ADAPTER"
+        assert card["status"] == {
+            "code": "ENDED",
+            "message": "训练已结束，可打开复盘。",
+        }
+        returned = await training.return_to_hub_by_session(session_id)
+        assert returned == {
+            "protocol": "replay.v2",
+            "run_id": "run-1",
+            "state": "ENDED",
+            "checkpointed": True,
+            "released": True,
+        }
+        assert session_id not in service._sessions
+        durable = await service.store.get_session(session_id)
+        assert durable is not None
+        assert durable["state"] == "ENDED"
     finally:
         await service.shutdown(step_timeout=1.0)

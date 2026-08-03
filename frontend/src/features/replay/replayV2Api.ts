@@ -212,7 +212,7 @@ type Parser<T> = (value: unknown) => T;
 export class ReplayV2ApiClient {
   private readonly basePath: string;
   private readonly fetcher: typeof fetch;
-  private readonly replayV1: ReplayApiClient;
+  private readonly adapterApi: ReplayApiClient;
 
   constructor({
     basePath = "/api/v1/replay",
@@ -223,15 +223,15 @@ export class ReplayV2ApiClient {
     }
     this.basePath = basePath.replace(/\/$/, "");
     this.fetcher = fetcher;
-    this.replayV1 = new ReplayApiClient({ basePath: this.basePath, fetcher });
+    this.adapterApi = new ReplayApiClient({ basePath: this.basePath, fetcher });
   }
 
   capabilities(signal?: AbortSignal): Promise<ReplayCapabilities> {
-    return this.replayV1.capabilities(signal);
+    return this.adapterApi.capabilities(signal);
   }
 
   catalog(query: ReplayCatalogQuery = {}, signal?: AbortSignal): Promise<ReplayCatalog> {
-    return this.replayV1.catalog(query, signal);
+    return this.adapterApi.catalog(query, signal);
   }
 
   listRuns(query: TrainingRunListQuery = {}, signal?: AbortSignal): Promise<TrainingRunListResponse> {
@@ -363,26 +363,9 @@ export class ReplayV2ApiClient {
       (value) => ({ run: parseTrainingRunMutationResponse({
         protocol: "replay.v2",
         created: false,
-        migrated: false,
         run: value,
       }).run }),
       signal ? { signal } : {},
-    );
-  }
-
-  migrateLegacy(
-    sessionId: string,
-    name: string | null = null,
-    signal?: AbortSignal,
-  ): Promise<TrainingRunMutationResponse> {
-    return this.request(
-      `/runs/${safeSegment(sessionId, "legacy session id")}/migrate`,
-      parseTrainingRunMutationResponse,
-      {
-        method: "POST",
-        body: JSON.stringify({ protocol: "replay.v2", name }),
-        ...(signal ? { signal } : {}),
-      },
     );
   }
 

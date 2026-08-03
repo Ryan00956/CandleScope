@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -11,14 +12,13 @@ from fastapi import FastAPI
 from app.api.v1.replay import MAX_REPLAY_REQUEST_BYTES, router
 from app.replay.constants import REPLAY_PROTOCOL
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.service import ReplayService, SYNTHETIC_TIME_ANCHOR_MS
+from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
+from app.replay.training.errors import TrainingRunError
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
-    START_MS,
     SessionIdFactory,
-    replay_config_payload,
     replay_repository,
     replay_settings,
 )
@@ -27,19 +27,26 @@ from tests.fixtures.replay.service_fakes import (
 pytestmark = pytest.mark.anyio
 
 
+class FakeTrainingStore:
+    async def run_id_for_session(self, session_id: str) -> str:
+        if session_id != "session-1":
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training adapter session does not exist",
+                status_code=404,
+            )
+        return "run-1"
+
+
 class FakeReplayService:
+    def __init__(self) -> None:
+        self.training = SimpleNamespace(store=FakeTrainingStore())
+
     def capabilities(self) -> dict[str, object]:
         return {"protocol": REPLAY_PROTOCOL, "enabled": True, "available": True}
 
     async def catalog(self, **kwargs: object) -> dict[str, object]:
         return {"protocol": REPLAY_PROTOCOL, "query": kwargs, "entries": []}
-
-    async def create_session(self, config) -> dict[str, object]:
-        return {
-            "protocol": REPLAY_PROTOCOL,
-            "session_id": "session-1",
-            "snapshot": {"config": config.to_dict()},
-        }
 
     async def get_session(self, session_id: str) -> dict[str, object]:
         return {"protocol": REPLAY_PROTOCOL, "session_id": session_id}
@@ -56,9 +63,6 @@ class FakeReplayService:
             "session_id": session_id,
             "command_id": command.command_id,
         }
-
-    async def fork_session(self, session_id: str) -> dict[str, object]:
-        return {"protocol": REPLAY_PROTOCOL, "session_id": f"{session_id}-fork"}
 
     async def report(self, session_id: str) -> dict[str, object]:
         return {"protocol": REPLAY_PROTOCOL, "session_id": session_id, "report": {}}
@@ -92,7 +96,7 @@ async def _request(app: FastAPI, method: str, url: str, **kwargs):
         return await client.request(method, url, **kwargs)
 
 
-async def test_disabled_capability_is_stable_and_mutations_fail_closed() -> None:
+async def test_disabled_capability_is_stable_and_retired_creation_is_absent() -> None:
     app = _app()
     capability = await _request(app, "GET", "/api/v1/replay/capabilities")
     assert capability.status_code == 200
@@ -100,52 +104,74 @@ async def test_disabled_capability_is_stable_and_mutations_fail_closed() -> None
     assert capability.json()["enabled"] is False
     assert capability.json()["persistence"]["opened"] is False
 
-    create = await _request(
-        app,
-        "POST",
-        "/api/v1/replay/sessions",
-        json=replay_config_payload(),
-    )
-    assert create.status_code == 503
-    assert create.json()["error"]["code"] == "REPLAY_DISABLED"
+    create = await _request(app, "POST", "/api/v1/replay/sessions", json={})
+    assert create.status_code == 404
 
 
 async def test_http_routes_parse_strict_models_and_map_domain_errors() -> None:
     app = _app(FakeReplayService())
-    created = await _request(
-        app,
-        "POST",
-        "/api/v1/replay/sessions",
-        json=replay_config_payload(blind_mode=True),
-    )
-    assert created.status_code == 201
-    assert created.json()["snapshot"]["config"]["blind_mode"] is True
-
     conflict = await _request(
         app,
         "POST",
-        "/api/v1/replay/sessions/session-1/commands",
+        "/api/v1/replay/runs/session/session-1/commands",
         json=_command(revision=99),
     )
     assert conflict.status_code == 409
     assert conflict.json() == {
-        "protocol": REPLAY_PROTOCOL,
+        "protocol": "replay.v2",
         "error": {
-            "code": "REVISION_CONFLICT",
-            "message": "revision does not match",
-            "details": {"latest_revision": 3},
+            "code": "TRAINING_RUN_INVALID",
+            "message": "training run request is invalid",
+            "details": {"reason": "REVISION_CONFLICT"},
         },
     }
 
     unknown = await _request(
         app,
         "POST",
-        "/api/v1/replay/sessions/session-1/commands",
+        "/api/v1/replay/runs/session/session-1/commands",
         json={**_command(), "future_field": True},
     )
     assert unknown.status_code == 422
-    assert unknown.json()["protocol"] == REPLAY_PROTOCOL
-    assert unknown.json()["error"]["code"] == "INVALID_STATE_TRANSITION"
+    assert unknown.json()["protocol"] == "replay.v2"
+    assert unknown.json()["error"]["code"] == "TRAINING_RUN_INVALID"
+
+    snapshot = await _request(
+        app,
+        "GET",
+        "/api/v1/replay/runs/session/session-1",
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()["session_id"] == "session-1"
+
+    bare = await _request(
+        app,
+        "GET",
+        "/api/v1/replay/runs/session/bare-session",
+    )
+    assert bare.status_code == 404
+    assert bare.json()["protocol"] == "replay.v2"
+    assert bare.json()["error"]["code"] == "TRAINING_RUN_NOT_FOUND"
+
+    retired = await _request(
+        app,
+        "GET",
+        "/api/v1/replay/sessions/session-1",
+    )
+    assert retired.status_code == 404
+
+
+async def test_internal_adapter_routes_fail_closed_without_training_runtime() -> None:
+    service = FakeReplayService()
+    service.training = None
+    response = await _request(
+        _app(service),
+        "GET",
+        "/api/v1/replay/runs/session/session-1",
+    )
+    assert response.status_code == 503
+    assert response.json()["protocol"] == "replay.v2"
+    assert response.json()["error"]["code"] == "REPLAY_TRAINING_UNAVAILABLE"
 
 
 async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
@@ -153,12 +179,15 @@ async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
     oversized = await _request(
         app,
         "POST",
-        "/api/v1/replay/sessions/session-1/commands",
+        "/api/v1/replay/runs/session/session-1/commands",
         headers={"content-length": str(MAX_REPLAY_REQUEST_BYTES + 1)},
         json=_command(),
     )
     assert oversized.status_code == 413
-    assert oversized.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
+    assert oversized.json()["error"]["code"] == "TRAINING_RUN_INVALID"
+    assert oversized.json()["error"]["details"] == {
+        "reason": "SCAN_LIMIT_EXCEEDED"
+    }
 
     oversized_body = json.dumps(
         {
@@ -169,7 +198,7 @@ async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
     lying_length = await _request(
         app,
         "POST",
-        "/api/v1/replay/sessions/session-1/commands",
+        "/api/v1/replay/runs/session/session-1/commands",
         headers={
             "content-type": "application/json",
             "content-length": "1",
@@ -177,7 +206,7 @@ async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
         content=oversized_body,
     )
     assert lying_length.status_code == 413
-    assert lying_length.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
+    assert lying_length.json()["error"]["code"] == "TRAINING_RUN_INVALID"
 
     async def chunked_body():
         encoded = oversized_body.encode("utf-8")
@@ -187,61 +216,33 @@ async def test_request_size_limit_and_openapi_examples_are_frozen() -> None:
     chunked = await _request(
         app,
         "POST",
-        "/api/v1/replay/sessions/session-1/commands",
+        "/api/v1/replay/runs/session/session-1/commands",
         headers={"content-type": "application/json"},
         content=chunked_body(),
     )
     assert chunked.status_code == 413
-    assert chunked.json()["error"]["code"] == "SCAN_LIMIT_EXCEEDED"
+    assert chunked.json()["error"]["code"] == "TRAINING_RUN_INVALID"
 
     schema = app.openapi()
     paths = schema["paths"]
     assert {
         "/api/v1/replay/capabilities",
         "/api/v1/replay/catalog",
-        "/api/v1/replay/sessions",
-        "/api/v1/replay/sessions/{session_id}",
-        "/api/v1/replay/sessions/{session_id}/commands",
-        "/api/v1/replay/sessions/{session_id}/fork",
-        "/api/v1/replay/sessions/{session_id}/report",
-        "/api/v1/replay/sessions/{session_id}/journal",
+        "/api/v1/replay/runs/session/{session_id}",
+        "/api/v1/replay/runs/session/{session_id}/commands",
     }.issubset(paths)
-    create_schema = schema["components"]["schemas"]["ReplaySessionCreatePayload"]
     command_schema = schema["components"]["schemas"]["ReplayCommandPayload"]
-    assert create_schema["examples"][0]["protocol"] == REPLAY_PROTOCOL
     assert command_schema["examples"][0]["type"] == "step"
+    assert "/api/v1/replay/sessions" not in paths
+    assert "/api/v1/replay/sessions/{session_id}" not in paths
+    assert "/api/v1/replay/sessions/{session_id}/commands" not in paths
+    assert "/api/v1/replay/sessions/{session_id}/report" not in paths
+    assert "/api/v1/replay/sessions/{session_id}/journal" not in paths
+    assert "/api/v1/replay/sessions/{session_id}/fork" not in paths
+    assert "ReplaySessionCreatePayload" not in schema["components"]["schemas"]
 
 
-async def test_api_blind_snapshot_contains_only_synthetic_time_and_no_paths(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "replay.db"
-    store = ReplaySQLiteStore(path, now_ms=lambda: NOW_MS)
-    service = ReplayService(
-        settings=replay_settings(path),
-        store=store,
-        repository=replay_repository(),
-        now_ms=lambda: NOW_MS,
-        session_id_factory=SessionIdFactory("blind-api"),
-        native_intervals=lambda _identity: ("1m",),
-    )
-    await service.start()
-    response = await _request(
-        _app(service),
-        "POST",
-        "/api/v1/replay/sessions",
-        json=replay_config_payload(blind_mode=True),
-    )
-    assert response.status_code == 201
-    payload = response.json()
-    serialized = json.dumps(payload, sort_keys=True)
-    assert str(START_MS + 4 * INTERVAL_MS) not in serialized
-    assert str(tmp_path) not in serialized
-    assert payload["snapshot"]["cursor"]["virtual_time_ms"] == SYNTHETIC_TIME_ANCHOR_MS
-    await service.shutdown(step_timeout=1.0)
-
-
-async def test_blind_api_redacts_unexpected_data_dependency_errors(
+async def test_blind_catalog_redacts_unexpected_data_dependency_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,8 +257,6 @@ async def test_blind_api_redacts_unexpected_data_dependency_errors(
     )
     await service.start()
     sentinel = "H:\\secret\\bars.db @ 1700000123456"
-    original_build = service._catalog.build
-
     def broken_catalog(*args, **kwargs):
         raise ValueError(sentinel)
 
@@ -282,26 +281,6 @@ async def test_blind_api_redacts_unexpected_data_dependency_errors(
         }
         assert sentinel not in catalog.text
 
-        monkeypatch.setattr(service._catalog, "build", original_build)
-
-        def broken_materialization(*args, **kwargs):
-            raise TypeError(sentinel)
-
-        monkeypatch.setattr(service._dataset_builder, "create", broken_materialization)
-        created = await _request(
-            _app(service),
-            "POST",
-            "/api/v1/replay/sessions",
-            json=replay_config_payload(blind_mode=True),
-        )
-        assert created.status_code == 422
-        assert created.json()["error"] == {
-            "code": "DATASET_INCOMPLETE",
-            "message": "blind replay dataset validation failed",
-            "details": {"blind_redacted": True},
-        }
-        assert sentinel not in created.text
-        assert service.diagnostics()["pending_session_reservations"] == 0
     finally:
         await service.shutdown(step_timeout=1.0)
 

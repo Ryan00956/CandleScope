@@ -1479,6 +1479,96 @@ class ReplayHistoryArchiveWriter:
         )
         return manifest
 
+    def publish_catalog_if_current(
+        self,
+        expected_catalog_epoch: str | None,
+        identity: ReplaySeriesIdentity,
+        interval: str,
+        new_objects: Sequence[ReplayHistoryObject],
+        *,
+        merge_current: bool = True,
+        listing_boundary_source: str = "first_checksum_verified_archive_bar",
+        source_bucket_anchor_ms: int | None = None,
+        alignment_policy: str | None = None,
+    ) -> ReplayHistoryCatalogManifest:
+        """Publish only while the selected series still points at one revision.
+
+        Importers may spend substantial time downloading and parsing source
+        objects before they are ready to publish.  The final compare-and-swap
+        prevents a concurrent importer from silently overwriting a newer
+        catalog pointer.  Object files are revalidated while holding the same
+        mutation lock so garbage collection cannot remove an unreferenced,
+        prebuilt object between validation and publication.
+        """
+
+        with _archive_mutation_lock(self.root / ".mutation.lock"):
+            return self._publish_catalog_if_current_locked(
+                expected_catalog_epoch,
+                identity,
+                interval,
+                new_objects,
+                merge_current=merge_current,
+                listing_boundary_source=listing_boundary_source,
+                source_bucket_anchor_ms=source_bucket_anchor_ms,
+                alignment_policy=alignment_policy,
+            )
+
+    def _publish_catalog_if_current_locked(
+        self,
+        expected_catalog_epoch: str | None,
+        identity: ReplaySeriesIdentity,
+        interval: str,
+        new_objects: Sequence[ReplayHistoryObject],
+        *,
+        merge_current: bool,
+        listing_boundary_source: str,
+        source_bucket_anchor_ms: int | None,
+        alignment_policy: str | None,
+    ) -> ReplayHistoryCatalogManifest:
+        """Locked implementation shared by catalog/index transactions."""
+
+        expected = (
+            None
+            if expected_catalog_epoch is None
+            else _digest(expected_catalog_epoch, "expected_catalog_epoch")
+        )
+        objects = tuple(new_objects)
+        current = self.current_manifest(identity, interval)
+        actual = None if current is None else current.catalog_epoch
+        if actual != expected:
+            raise ReplayHistoryArchiveError(
+                "current replay-history catalog changed before publish"
+            )
+        self._verify_publish_objects(objects)
+        return self.publish_catalog(
+            identity,
+            interval,
+            objects,
+            merge_current=merge_current,
+            listing_boundary_source=listing_boundary_source,
+            source_bucket_anchor_ms=source_bucket_anchor_ms,
+            alignment_policy=alignment_policy,
+        )
+
+    def _verify_publish_objects(
+        self,
+        objects: Sequence[ReplayHistoryObject],
+    ) -> None:
+        for item in objects:
+            token = _digest_token(item.object_sha256)
+            expected = (self.objects_dir / token[:2] / f"{token}.parquet").resolve()
+            candidate = (self.root / item.relative_path).resolve()
+            if (
+                candidate != expected
+                or candidate.is_symlink()
+                or not candidate.is_file()
+                or candidate.stat().st_size != item.size_bytes
+                or _file_sha256(candidate) != item.object_sha256
+            ):
+                raise ReplayHistoryArchiveError(
+                    "replay-history publish object is missing or changed"
+                )
+
     def import_batches(
         self,
         identity: ReplaySeriesIdentity,
@@ -3028,7 +3118,14 @@ class ReplayHistoryRepository:
         market_type: str | None,
         source_revision: str | None = None,
     ) -> ReplayHistoryCatalogManifest:
-        self._refresh()
+        # Current-catalog discovery must refresh its control-plane view.  A
+        # revision-bound Run, however, is allowed to keep reading an already
+        # cached immutable manifest while the origin is unavailable.  This
+        # distinction prevents stale metadata from being used to create a new
+        # Run without turning a temporary catalog outage into drift for an
+        # existing pinned Run.
+        if source_revision is None:
+            self._refresh()
         key = (
             str(exchange or "binance"),
             str(market_type or "spot"),

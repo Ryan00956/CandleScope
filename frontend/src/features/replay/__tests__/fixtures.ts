@@ -397,6 +397,107 @@ export function replaySnapshotEvent(options: Parameters<typeof replaySnapshot>[0
   };
 }
 
+function packFixtureFinalBars(bars: ReturnType<typeof replayBar>[]): string {
+  let previousOpen: number | null = null;
+  let previousClose = 0;
+  return bars.map((bar) => {
+    const fields = [
+      previousOpen === null ? "" : (bar.open_time_ms - previousOpen).toString(36),
+      "",
+      (Number(bar.open) - previousClose).toString(36),
+      (Number(bar.high) - previousClose).toString(36),
+      (Number(bar.low) - previousClose).toString(36),
+      (Number(bar.close) - previousClose).toString(36),
+      Number(bar.volume).toString(36),
+      Number(bar.quote_volume).toString(36),
+      Number(bar.trades).toString(36),
+      Number(bar.taker_buy_base).toString(36),
+      Number(bar.taker_buy_quote).toString(36),
+      "0",
+      "0",
+      "1",
+      "1",
+      "1",
+    ];
+    previousOpen = bar.open_time_ms;
+    previousClose = Number(bar.close);
+    return fields.join(",");
+  }).join(";");
+}
+
+export function replayFinalStateEvent({
+  sequence = 1,
+  sourceFrom = 1,
+  sourceTo = 2,
+  state = "PAUSED",
+}: {
+  sequence?: number;
+  sourceFrom?: number;
+  sourceTo?: number;
+  state?: "PAUSED" | "ENDED";
+} = {}) {
+  const bars = [
+    replayBar(BASE_TIME_MS, "100"),
+    replayBar(BASE_TIME_MS + 60_000, "101"),
+    replayBar(BASE_TIME_MS + 120_000, "102"),
+  ];
+  const virtualTimeMs = bars.at(-1)!.close_time_ms;
+  return {
+    type: "replay.final_state",
+    protocol: REPLAY_PROTOCOL,
+    session_id: "session-0001",
+    sequence,
+    revision: 1,
+    virtual_time_ms: virtualTimeMs,
+    state_hash: replayDigest("9"),
+    data_epoch: replayDigest("c"),
+    data: {
+      source_sequence_from: sourceFrom,
+      source_sequence_to: sourceTo,
+      cursor: {
+        virtual_time_ms: virtualTimeMs,
+        source_sequence: sourceTo,
+        last_base_bar_open_ms: bars.at(-1)!.open_time_ms,
+        last_trade_time_ms: null,
+        last_agg_trade_id: null,
+        at_end: state === "ENDED",
+      },
+      state,
+      status_reason: "fast_forward_final_state_complete",
+      speed: 1,
+      controller_client_id: null,
+      projection: {
+        schema_version: "replay-final-state-projection.v1",
+        series: {
+          schema_version: "replay-series-tail-patch.v1",
+          encoding: "delta-base36-decimal-columns.v1",
+          replace_from_open_ms: bars[0]!.open_time_ms,
+          retained_start_open_ms: bars[0]!.open_time_ms,
+          retained_end_open_ms: bars.at(-1)!.open_time_ms,
+          retained_count: bars.length,
+          bar_count: bars.length,
+          first_open_ms: bars[0]!.open_time_ms,
+          default_close_span_ms: 60_000,
+          decimal_scales: {
+            price: 0,
+            volume: 0,
+            quote_volume: 0,
+            taker_buy_base: 0,
+            taker_buy_quote: 0,
+          },
+          packed_bars: packFixtureFinalBars(bars),
+        },
+        orders: [],
+        fills: [],
+        closed_trades: [],
+        warnings: [],
+        position: flatPosition("102"),
+        account: replayAccount(),
+      },
+    },
+  };
+}
+
 export function replayDeltaEvent({
   sessionId = "session-0001",
   sequence = 1,

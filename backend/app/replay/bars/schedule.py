@@ -18,7 +18,7 @@ from ..market_halts import ReplayBarHalt
 
 
 BAR_SCHEDULE_SCHEMA_VERSION = "replay-bar-schedule.v1"
-VERIFIED_HALT_GAP_POLICY = "verified_market_halts_v1"
+VERIFIED_HALT_GAP_POLICY = "verified_market_halts_v2"
 
 
 @dataclass(frozen=True, slots=True)

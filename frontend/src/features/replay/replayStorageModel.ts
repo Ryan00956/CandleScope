@@ -106,7 +106,6 @@ export interface ReplayStorageInventory {
   };
   readonly feature_flags: {
     readonly replay_enabled: boolean;
-    readonly product_v2_enabled: boolean;
     readonly segment_download_worker_enabled: boolean;
     readonly segment_auto_gc_enabled: boolean;
     readonly fast_forward_optimization_enabled: boolean;
@@ -472,7 +471,6 @@ export function parseReplayStorageInventory(value: unknown): ReplayStorageInvent
   }
   const flags = exact(payload.feature_flags, "storage inventory.feature_flags", [
     "replay_enabled",
-    "product_v2_enabled",
     "segment_download_worker_enabled",
     "segment_auto_gc_enabled",
     "fast_forward_optimization_enabled",
@@ -580,7 +578,6 @@ export function parseReplayStorageInventory(value: unknown): ReplayStorageInvent
     },
     feature_flags: {
       replay_enabled: bool(flags.replay_enabled, "feature_flags.replay_enabled"),
-      product_v2_enabled: bool(flags.product_v2_enabled, "feature_flags.product_v2_enabled"),
       segment_download_worker_enabled: bool(
         flags.segment_download_worker_enabled,
         "feature_flags.segment_download_worker_enabled",

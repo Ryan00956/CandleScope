@@ -46,10 +46,11 @@ from tests.fixtures.replay.actor_fakes import (
     session_config,
     source_factory,
 )
-from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
+from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     START_MS,
+    ImmutableReplayHistoryFake,
     SessionIdFactory,
     replay_settings,
 )
@@ -183,8 +184,8 @@ _AGG_MINUTES = 100
 _AGG_NOW_MS = _AGG_START_MS + (_AGG_MINUTES + 5) * INTERVAL_MS
 
 
-def _long_repository() -> FakeKlinesRepo:
-    repository = FakeKlinesRepo()
+def _long_repository() -> ImmutableReplayHistoryFake:
+    repository = ImmutableReplayHistoryFake()
     repository.add_rows(
         FixtureIdentity("binance", "spot", "BTCUSDT"),
         "1m",
@@ -202,7 +203,6 @@ def _long_repository() -> FakeKlinesRepo:
 async def _bar_service(path: Path, *, optimized: bool) -> ReplayService:
     settings = replace(
         replay_settings(path),
-        product_v2_enabled=True,
         replay_fast_forward_optimization_enabled=optimized,
         event_buffer_size=256,
         controller_ttl_seconds=60,
@@ -262,8 +262,8 @@ async def _bar_request(service: ReplayService) -> TrainingRunCreateRequest:
 
 def _agg_sources(
     root: Path,
-) -> tuple[FakeKlinesRepo, ParquetRawAggTradeArchive]:
-    repository = FakeKlinesRepo()
+) -> tuple[ImmutableReplayHistoryFake, ParquetRawAggTradeArchive]:
+    repository = ImmutableReplayHistoryFake()
     identity = FixtureIdentity("binance", "futures", "BTCUSDT")
     repository.add_rows(
         identity,
@@ -350,7 +350,6 @@ async def _agg_service(
     service = ReplayService(
         settings=replace(
             replay_settings(path),
-            product_v2_enabled=True,
             replay_fast_forward_optimization_enabled=optimized,
             event_buffer_size=256,
             trade_page_rows=32,

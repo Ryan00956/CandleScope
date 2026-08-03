@@ -125,15 +125,10 @@ def _validate_default_flags() -> dict[str, str]:
         REPOSITORY_ROOT
         / "frontend/src/features/replay/useReplayEntryCapability.ts"
     ).read_text(encoding="utf-8")
-    product_source = (
-        REPOSITORY_ROOT / "frontend/src/features/replay/replayProductFlag.ts"
-    ).read_text(encoding="utf-8")
     readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
     flags = {
         "REPLAY_ENABLED": "0",
-        "REPLAY_PRODUCT_V2_ENABLED": "1",
         "VITE_REPLAY_ENTRY_ENABLED": "0",
-        "VITE_REPLAY_PRODUCT_V2_ENABLED": "1",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
         "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
@@ -143,7 +138,6 @@ def _validate_default_flags() -> dict[str, str]:
     }
     checks = {
         "backend_core_off": settings.enabled is False,
-        "backend_product_on": settings.product_v2_enabled is True,
         "backend_book_off": settings.replay_historical_book_enabled is False,
         "backend_segment_worker_off": (
             settings.replay_segment_download_worker_enabled is False
@@ -157,10 +151,6 @@ def _validate_default_flags() -> dict[str, str]:
         ),
         "backend_raw_agg_default_source": '"RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"' in backend_source,
         "frontend_entry_strict_default_off": "return value === true || value === \"1\" || value === \"true\";" in entry_source,
-        "frontend_product_strict_default_on": (
-            "return value === undefined || value === true || value === \"1\" || value === \"true\";"
-            in product_source
-        ),
         "readme_freezes_all_defaults": all(f"{name}={value}" in readme for name, value in flags.items()),
     }
     if not all(checks.values()):
@@ -253,7 +243,6 @@ def main() -> int:
             "real-source-validation.json",
             "replay.v2.real-source-validation.v1",
         ),
-        "v1_smoke": ("replay-v1-smoke.json", "replay-v1-browser-smoke.v1"),
         "v2_smoke": ("replay-v2-smoke.json", "replay-v2-browser-soak.v1"),
         "v2_soak": ("replay-v2-soak.json", "replay-v2-browser-soak.v1"),
         "rollback": ("replay-v2-rollback.json", "replay-v2-rollback-drill.v2"),
@@ -375,7 +364,7 @@ def main() -> int:
         "commit_revert_drill": revert,
         "repository_defaults": default_flags,
         "implementation_decision": "PASS",
-        "production_enablement": "HOLD_CORE_DEFAULT_OFF_V2_DEFAULT_ON",
+        "production_enablement": "HOLD_CORE_DEFAULT_OFF",
         "production_observation": (
             "REQUIRED_FOR_BOOK_AND_EXACT_ACCOUNT_BEFORE_ANY_ENABLEMENT_DECISION"
         ),

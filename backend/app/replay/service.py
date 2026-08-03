@@ -26,8 +26,6 @@ from app.data_engine.storage.raw_trade_archive import (
     RawAggTradeDatasetRef,
     RawAggTradeSelectionWindow,
 )
-from app.data_engine.storage.klines_repo import KlinesRepoAdapter
-
 from .actor import (
     ActorMutation,
     ActorRecoveryTarget,
@@ -102,10 +100,14 @@ from .period_summary import (
     encode_component_state,
 )
 from .source_chain import next_source_chain_hash
-from .sources.bar_source import BarReplaySource, PagedBarReplaySource
+from .sources.bar_source import (
+    BAR_TERMINAL_SOURCE_LATEST_CLOSED,
+    BarReplaySource,
+    PagedBarReplaySource,
+)
 from .sources.trade_reader import PagedReplayTradeReader
 from .sources.trade_source import TradeReplaySource
-from .storage.sqlite_store import ReplaySQLiteStore, StoredCheckpoint, StoredCommand
+from .storage.sqlite_store import ReplaySQLiteStore, StoredCommand
 from .training.service import TrainingRunService
 
 
@@ -117,8 +119,7 @@ TRADE_SESSION_DATASET_SCHEMA_VERSION = "replay-trade-session-dataset.v1"
 TRADE_SESSION_REF_SCHEMA_VERSION = "replay-trade-session-ref.v1"
 PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION = "replay-paged-bar-session-dataset.v1"
 PAGED_BAR_SESSION_REF_SCHEMA_VERSION = "replay-paged-bar-session-ref.v1"
-PAGED_BAR_MANIFEST_SCHEMA_VERSION = "replay-paged-bar-manifest.v1"
-PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2 = "replay-paged-bar-manifest.v2"
+PAGED_BAR_MANIFEST_SCHEMA_VERSION = "replay-paged-bar-manifest.v3"
 BAR_REPLAY_RETAINED_TAIL_BARS = 2_048
 _TaskResult = TypeVar("_TaskResult")
 
@@ -178,7 +179,7 @@ class ReplayService:
         self.store = store
         if repository is not None:
             self._repository = repository
-        elif settings.replay_bar_source == "archive":
+        else:
             self._repository = (
                 RemoteReplayHistoryRepository(
                     settings.replay_history_archive_dir,
@@ -191,23 +192,13 @@ class ReplayService:
                 if settings.replay_history_origin_uri is not None
                 else ReplayHistoryRepository(settings.replay_history_archive_dir)
             )
-        elif settings.replay_bar_source == "legacy_sqlite":
-            self._repository = KlinesRepoAdapter()
-        else:  # ReplaySettings is normally constructed by strict config parsing.
-            raise ValueError(
-                f"unsupported replay BAR source: {settings.replay_bar_source}"
-            )
         self._raw_trade_archive = raw_trade_archive or DisabledRawAggTradeArchive()
         self._now_ms = now_ms
         self._session_id_factory = session_id_factory
-        self.training = (
-            TrainingRunService(
-                replay_service=self,
-                run_id_factory=training_run_id_factory,
-                random_seed_factory=training_random_seed_factory,
-            )
-            if settings.product_v2_available
-            else None
+        self.training = TrainingRunService(
+            replay_service=self,
+            run_id_factory=training_run_id_factory,
+            random_seed_factory=training_random_seed_factory,
         )
         self._native_intervals_explicit = native_intervals is not None
         self._native_intervals = native_intervals or self._all_local_intervals
@@ -430,6 +421,12 @@ class ReplayService:
             )
         except ReplayDomainError as exc:
             raise self._blind_safe_dataset_error(blind_mode, exc) from exc
+        except ReplayHistoryArchiveError as exc:
+            unavailable = ReplayDomainError(
+                ReplayErrorCode.ARCHIVE_DEGRADED,
+                "replay history catalog is unavailable",
+            )
+            raise self._blind_safe_dataset_error(blind_mode, unavailable) from exc
         except Exception as exc:
             if blind_mode:
                 raise self._blind_unexpected_dataset_error() from exc
@@ -478,6 +475,12 @@ class ReplayService:
             )
         except ReplayDomainError as exc:
             raise self._blind_safe_dataset_error(config, exc) from exc
+        except ReplayHistoryArchiveError as exc:
+            unavailable = ReplayDomainError(
+                ReplayErrorCode.ARCHIVE_DEGRADED,
+                "replay history catalog is unavailable",
+            )
+            raise self._blind_safe_dataset_error(config, unavailable) from exc
         if catalog.catalog_epoch != expected_catalog_epoch:
             # The client already supplied the opaque epoch, so reporting this
             # comparison does not disclose source dates or a hidden start.
@@ -501,8 +504,10 @@ class ReplayService:
                     config,
                 )
             else:
-                window = self._catalog.select_manual(
+                window = self._select_manual_window(
+                    self._catalog,
                     entry,
+                    config,
                     start_ms=self._required_manual_start(config),
                 )
                 trade_catalog_epoch = await self._trade_selection_catalog_epoch(config)
@@ -562,8 +567,17 @@ class ReplayService:
                 ):
                     verified_market_halts.append(halt)
                     continue
-                continuous_future_end_ms = gap.start_ms - window.interval_ms
-                break
+                # Selection is restricted to the tail reachable after the last
+                # unverified gap.  Reaching this branch means the commitment no
+                # longer agrees with the catalog used to choose it.
+                raise self._blind_safe_dataset_error(
+                    config,
+                    ReplayDomainError(
+                        ReplayErrorCode.DATASET_INCOMPLETE,
+                        "selected BAR start cannot reach the frozen source tail",
+                        details={"reason": "UNVERIFIED_FUTURE_GAP"},
+                    ),
+                )
         return {
             "catalog_epoch": catalog.catalog_epoch,
             "source_fingerprint": entry.source_fingerprint,
@@ -577,6 +591,11 @@ class ReplayService:
             # never expose this boundary before an authorized reveal.
             "continuous_future_end_ms": continuous_future_end_ms,
             "interval_ms": window.interval_ms,
+            **(
+                {"bar_terminal_kind": BAR_TERMINAL_SOURCE_LATEST_CLOSED}
+                if config.source_kind is SourceKind.BAR
+                else {}
+            ),
             **(
                 {
                     "verified_market_halts": [
@@ -714,18 +733,34 @@ class ReplayService:
     ) -> dict[str, object] | None:
         """Bind future BAR pages without treating the eager cache as the end."""
 
-        if config.source_kind is not SourceKind.BAR or selection is None:
+        if config.source_kind is not SourceKind.BAR:
             return None
+        if selection is None:
+            selection = {
+                "continuous_future_end_ms": (
+                    dataset.provenance.source_latest_closed_open_ms
+                ),
+                "bar_terminal_kind": BAR_TERMINAL_SOURCE_LATEST_CLOSED,
+                "source_revision": dataset.provenance.source_revision,
+                "source_fingerprint": dataset.provenance.source_fingerprint,
+                "verified_market_halts": [],
+            }
         terminal_value = selection.get("continuous_future_end_ms")
+        terminal_kind = selection.get("bar_terminal_kind")
         source_revision = selection.get("source_revision")
         source_fingerprint = selection.get("source_fingerprint")
         if terminal_value is None:
-            return None
-        # Legacy/local repositories do not expose an immutable revision that
-        # can safely rebuild future pages.  Keep their existing fixed snapshot
-        # behavior instead of paging from mutable live storage.
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training BAR terminal commitment is missing",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
         if source_revision is None:
-            return None
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training BAR source revision is missing",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
         try:
             terminal_open_ms = validate_timestamp_ms(
                 terminal_value,
@@ -737,8 +772,16 @@ class ReplayService:
                 "training future boundary is invalid",
                 details={"reason": "SELECTION_COMMITMENT_INVALID"},
             ) from exc
-        if terminal_open_ms <= dataset.replay_end_open_ms:
-            return None
+        if (
+            terminal_kind != BAR_TERMINAL_SOURCE_LATEST_CLOSED
+            or terminal_open_ms != dataset.provenance.source_latest_closed_open_ms
+            or terminal_open_ms < dataset.replay_end_open_ms
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training BAR terminal is not the frozen source latest close",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
         digests = {
             "source_revision": source_revision,
             "source_fingerprint": source_fingerprint,
@@ -762,6 +805,15 @@ class ReplayService:
                     "training future source commitment is invalid",
                     details={"reason": "SELECTION_COMMITMENT_INVALID"},
                 ) from exc
+        if (
+            source_revision != dataset.provenance.source_revision
+            or source_fingerprint != dataset.provenance.source_fingerprint
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "training future source commitment changed",
+                details={"reason": "SELECTION_COMMITMENT_INVALID"},
+            )
         interval_ms = parse_interval_ms(dataset.interval)
         if (
             interval_ms is None
@@ -796,21 +848,15 @@ class ReplayService:
                 details={"reason": "SELECTION_COMMITMENT_INVALID"},
             )
         payload: dict[str, object] = {
-            "schema_version": (
-                PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2
-                if verified_halts
-                else PAGED_BAR_MANIFEST_SCHEMA_VERSION
-            ),
+            "schema_version": PAGED_BAR_MANIFEST_SCHEMA_VERSION,
             "data_epoch": dataset.data_epoch,
             "source_revision": source_revision,
             "source_fingerprint": source_fingerprint,
             "terminal_open_ms": terminal_open_ms,
+            "terminal_kind": terminal_kind,
             "page_rows": len(dataset.replay_rows),
+            "verified_market_halts": [halt.to_dict() for halt in verified_halts],
         }
-        if verified_halts:
-            payload["verified_market_halts"] = [
-                halt.to_dict() for halt in verified_halts
-            ]
         payload["manifest_hash"] = canonical_sha256(payload)
         return payload
 
@@ -820,17 +866,23 @@ class ReplayService:
         dataset: BarDatasetSnapshot,
     ) -> dict[str, object]:
         schema_version = payload.get("schema_version")
+        if schema_version != PAGED_BAR_MANIFEST_SCHEMA_VERSION:
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR manifest schema is unsupported",
+                details={"schema_version": schema_version},
+            )
         expected = {
             "schema_version",
             "data_epoch",
             "source_revision",
             "source_fingerprint",
             "terminal_open_ms",
+            "terminal_kind",
             "page_rows",
+            "verified_market_halts",
             "manifest_hash",
         }
-        if schema_version == PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2:
-            expected.add("verified_market_halts")
         if set(payload) != expected:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -838,15 +890,9 @@ class ReplayService:
             )
         material = dict(payload)
         manifest_hash = material.pop("manifest_hash")
-        if (
-            material.get("schema_version")
-            not in {
-                PAGED_BAR_MANIFEST_SCHEMA_VERSION,
-                PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2,
-            }
-            or material.get("data_epoch") != dataset.data_epoch
-            or manifest_hash != canonical_sha256(material)
-        ):
+        if material.get(
+            "data_epoch"
+        ) != dataset.data_epoch or manifest_hash != canonical_sha256(material):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "persisted paged BAR manifest identity is incompatible",
@@ -855,12 +901,15 @@ class ReplayService:
             material.get("terminal_open_ms"),
             field_name="terminal_open_ms",
         )
+        terminal_kind = material.get("terminal_kind")
         page_rows = material.get("page_rows")
         if (
             isinstance(page_rows, bool)
             or not isinstance(page_rows, int)
             or page_rows < 1
-            or terminal_open_ms <= dataset.replay_end_open_ms
+            or terminal_kind != BAR_TERMINAL_SOURCE_LATEST_CLOSED
+            or terminal_open_ms != dataset.provenance.source_latest_closed_open_ms
+            or terminal_open_ms < dataset.replay_end_open_ms
         ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -886,13 +935,22 @@ class ReplayService:
                     "persisted paged BAR source digest is invalid",
                     details={"field": field_name},
                 ) from exc
+        if (
+            material.get("source_revision") != dataset.provenance.source_revision
+            or material.get("source_fingerprint")
+            != dataset.provenance.source_fingerprint
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "persisted paged BAR source commitment is incompatible",
+            )
         interval_ms = parse_interval_ms(dataset.interval)
         if interval_ms is None or interval_ms <= 0:
             raise ReplayDomainError(
                 ReplayErrorCode.UNSUPPORTED_INTERVAL,
                 "persisted paged BAR interval is unsupported",
             )
-        raw_halts = material.get("verified_market_halts", [])
+        raw_halts = material["verified_market_halts"]
         try:
             verified_halts = validate_registered_bar_halts(
                 raw_halts,
@@ -904,11 +962,6 @@ class ReplayService:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "persisted paged BAR halt commitment is invalid",
             ) from exc
-        if schema_version == PAGED_BAR_MANIFEST_SCHEMA_VERSION and verified_halts:
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "legacy paged BAR manifest cannot contain verified halts",
-            )
         if any(
             halt.start_open_ms <= dataset.replay_end_open_ms
             or halt.resume_ms > terminal_open_ms
@@ -1028,8 +1081,10 @@ class ReplayService:
                         )
                     window = bound_window
                 elif _internal_forced_start_ms is not None:
-                    window = catalog_owner.select_manual(
+                    window = self._select_manual_window(
+                        catalog_owner,
                         entry,
+                        config,
                         start_ms=_internal_forced_start_ms,
                     )
                 else:
@@ -1040,8 +1095,10 @@ class ReplayService:
                             config,
                         )
                         if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
-                        else catalog_owner.select_manual(
+                        else self._select_manual_window(
+                            catalog_owner,
                             entry,
+                            config,
                             start_ms=self._required_manual_start(config),
                         )
                     )
@@ -2040,7 +2097,7 @@ class ReplayService:
             "bar_history": repository,
             "trade_history": trade_history,
             "dataset_pins": dict(self._datasets.diagnostics()),
-            "training_product_v2": self.training is not None,
+            "training_available": True,
             "persistence": persistence,
         }
 
@@ -2229,7 +2286,7 @@ class ReplayService:
             )
             extension_write = None
             if extension_factory is not None:
-                extension_ref, extension_blob = self._persisted_dataset(
+                extension_ref, extension_blob = self._persisted_extension_dataset(
                     actual_dataset,
                     trade_dataset_ref,
                 )
@@ -2434,31 +2491,27 @@ class ReplayService:
                     "persisted trade dataset epoch does not match session",
                 )
         else:
+            expected = {
+                "schema_version",
+                "bar_dataset",
+                "paging_manifest",
+            }
             if (
-                decoded.get("schema_version")
-                == PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION
+                set(decoded) != expected
+                or decoded.get("schema_version")
+                != PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION
+                or not isinstance(decoded.get("bar_dataset"), Mapping)
+                or not isinstance(decoded.get("paging_manifest"), Mapping)
             ):
-                expected = {
-                    "schema_version",
-                    "bar_dataset",
-                    "paging_manifest",
-                }
-                if (
-                    set(decoded) != expected
-                    or not isinstance(decoded.get("bar_dataset"), Mapping)
-                    or not isinstance(decoded.get("paging_manifest"), Mapping)
-                ):
-                    raise ReplayDomainError(
-                        ReplayErrorCode.DATASET_MISMATCH,
-                        "persisted paged BAR dataset bundle is incompatible",
-                    )
-                actual_dataset = BarDatasetSnapshot.from_dict(decoded["bar_dataset"])
-                bar_paging_manifest = self._validated_bar_paging_manifest(
-                    decoded["paging_manifest"],
-                    actual_dataset,
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "persisted paged BAR dataset bundle is incompatible",
                 )
-            else:
-                actual_dataset = BarDatasetSnapshot.from_dict(decoded)
+            actual_dataset = BarDatasetSnapshot.from_dict(decoded["bar_dataset"])
+            bar_paging_manifest = self._validated_bar_paging_manifest(
+                decoded["paging_manifest"],
+                actual_dataset,
+            )
             if actual_dataset.data_epoch != record["data_epoch"]:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
@@ -2493,22 +2546,10 @@ class ReplayService:
                     task_name=f"replay-recovery-pin-{session_id}",
                 )
             for checkpoint_index, checkpoint in enumerate(checkpoints):
-                if checkpoint.mutation_id is None:
-                    if not self._legacy_checkpoint_matches_record(
-                        checkpoint,
-                        record,
-                    ):
-                        last_error = ReplayDomainError(
-                            ReplayErrorCode.DATASET_MISMATCH,
-                            "legacy replay checkpoint has an ambiguous mutation tail",
-                        )
-                        continue
-                    tail: tuple[dict[str, object], ...] = ()
-                else:
-                    tail = await self.store.recovery_mutations_after(
-                        session_id,
-                        mutation_id=checkpoint.mutation_id,
-                    )
+                tail = await self.store.recovery_mutations_after(
+                    session_id,
+                    mutation_id=checkpoint.mutation_id,
+                )
                 target = ActorRecoveryTarget(
                     mutations=tail,
                     revision=int(record["revision"]),
@@ -2612,26 +2653,6 @@ class ReplayService:
                     pass
             raise
 
-    @staticmethod
-    def _legacy_checkpoint_matches_record(
-        checkpoint: StoredCheckpoint,
-        record: Mapping[str, object],
-    ) -> bool:
-        """Allow V1 recovery only when no unrepresented tail can exist.
-
-        The physical latest-checkpoint requirement is important: if that row
-        is corrupt, an older row can have the same public state hash while
-        differing in revision, controller, or clock speed.
-        """
-
-        return (
-            checkpoint.is_latest
-            and checkpoint.source_sequence == int(record["source_sequence"])
-            and checkpoint.command_log_offset == int(record["command_log_offset"])
-            and checkpoint.event_sequence == int(record["event_sequence"])
-            and checkpoint.state_hash == str(record["state_hash"])
-        )
-
     def _actor(
         self,
         *,
@@ -2703,6 +2724,7 @@ class ReplayService:
             actor_dataset.replay_start_ms - actual_dataset.replay_start_ms
         )
         terminal_open_ms = int(manifest["terminal_open_ms"]) + timeline_delta_ms
+        terminal_kind = str(manifest["terminal_kind"])
         source_revision = str(manifest["source_revision"])
         source_fingerprint = str(manifest["source_fingerprint"])
         page_rows = int(manifest["page_rows"])
@@ -2729,6 +2751,7 @@ class ReplayService:
         return PagedBarReplaySource(
             actor_dataset,
             terminal_open_ms=terminal_open_ms,
+            terminal_kind=terminal_kind,
             source_revision=source_revision,
             source_fingerprint=source_fingerprint,
             page_rows=page_rows,
@@ -3604,14 +3627,102 @@ class ReplayService:
         )
         return window
 
+    @staticmethod
+    def _bar_tail_reachable_ranges(
+        entry: ReplayCatalogEntry,
+    ) -> tuple[EligibleWindowRange, ...]:
+        """Keep starts that can reach the immutable latest closed BAR.
+
+        Exact reviewed exchange halts are traversable by the paged BAR
+        schedule.  Every other gap is a data-integrity boundary, so only starts
+        after the final such gap may become an open-ended training Run.
+        """
+
+        if entry.bounds is None or entry.selected_base_interval is None:
+            return ()
+        interval_ms = parse_interval_ms(entry.selected_base_interval)
+        if interval_ms is None or interval_ms <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "BAR tail reachability requires a fixed base interval",
+            )
+        reachable_floor_ms = entry.bounds.earliest_open_ms
+        for gap in entry.gap_summary.gaps:
+            halt = match_verified_market_halt(
+                entry.identity,
+                gap,
+                interval_ms=interval_ms,
+            )
+            if (
+                halt is not None
+                and halt.resume_ms <= entry.bounds.latest_closed_open_ms
+            ):
+                continue
+            reachable_floor_ms = max(
+                reachable_floor_ms,
+                gap.end_ms + interval_ms,
+            )
+
+        reachable: list[EligibleWindowRange] = []
+        for candidate in entry.eligible_ranges:
+            if candidate.last_start_ms < reachable_floor_ms:
+                continue
+            first_start_ms = candidate.first_start_ms
+            if first_start_ms < reachable_floor_ms:
+                offset = (
+                    reachable_floor_ms
+                    - first_start_ms
+                    + candidate.interval_ms
+                    - 1
+                ) // candidate.interval_ms
+                first_start_ms += offset * candidate.interval_ms
+            if first_start_ms > candidate.last_start_ms:
+                continue
+            reachable.append(
+                replace(
+                    candidate,
+                    first_start_ms=first_start_ms,
+                    count=(
+                        (candidate.last_start_ms - first_start_ms)
+                        // candidate.interval_ms
+                    )
+                    + 1,
+                )
+            )
+        return tuple(reachable)
+
+    def _select_manual_window(
+        self,
+        catalog: ReplayCatalog,
+        entry: ReplayCatalogEntry,
+        config: ReplaySessionConfig,
+        *,
+        start_ms: int,
+    ) -> EligibleWindow:
+        selection_entry = entry
+        if config.source_kind is SourceKind.BAR:
+            selection_entry = replace(
+                entry,
+                eligible_ranges=self._bar_tail_reachable_ranges(entry),
+            )
+        return catalog.select_manual(selection_entry, start_ms=start_ms)
+
     async def _select_random_window_bound(
         self,
         catalog: ReplayCatalog,
         entry: ReplayCatalogEntry,
         config: ReplaySessionConfig,
     ) -> tuple[EligibleWindow, str | None]:
-        if config.source_kind is not SourceKind.AGG_TRADE:
-            return catalog.select_random(entry, seed=config.random_seed), None
+        if config.source_kind is SourceKind.BAR:
+            return (
+                catalog.select_random_from_ranges(
+                    entry,
+                    eligible_ranges=self._bar_tail_reachable_ranges(entry),
+                    seed=config.random_seed,
+                    selection_namespace="bar_source_latest_reachable.v1",
+                ),
+                None,
+            )
         if parse_interval_ms(config.base_interval) is None:
             raise ReplayDomainError(
                 ReplayErrorCode.UNSUPPORTED_INTERVAL,
@@ -3850,6 +3961,20 @@ class ReplayService:
         )
 
     @staticmethod
+    def _persisted_extension_dataset(
+        dataset: BarDatasetSnapshot,
+        trade_dataset_ref: RawAggTradeDatasetRef | None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Encode the immutable archive segment owned by a training Run."""
+
+        if trade_dataset_ref is not None:
+            return ReplayService._persisted_dataset(dataset, trade_dataset_ref)
+        reference = dataset.snapshot_ref().to_dict()
+        if dataset.provenance.source_revision is not None:
+            reference["source_revision"] = dataset.provenance.source_revision
+        return reference, dataset.to_dict()
+
+    @staticmethod
     def _persisted_dataset(
         dataset: BarDatasetSnapshot,
         trade_dataset_ref: RawAggTradeDatasetRef | None,
@@ -3858,24 +3983,23 @@ class ReplayService:
     ) -> tuple[dict[str, object], dict[str, object]]:
         bar_reference = dataset.snapshot_ref().to_dict()
         if dataset.provenance.source_revision is not None:
-            # Keep the actor-facing BarDatasetRef byte-for-byte compatible with
-            # replay.v1 checkpoints.  The archive revision is persistence-only:
-            # it protects the immutable history objects used by this Run.
+            # The archive revision is persistence-only: it protects the
+            # immutable history objects used by this Run.
             bar_reference["source_revision"] = dataset.provenance.source_revision
-        if trade_dataset_ref is None and bar_paging_manifest is None:
-            return bar_reference, dataset.to_dict()
         if trade_dataset_ref is None:
+            if bar_paging_manifest is None:
+                raise ValueError("BAR persistence requires a paging manifest")
             reference = {
                 "schema_version": PAGED_BAR_SESSION_REF_SCHEMA_VERSION,
                 "data_epoch": dataset.data_epoch,
                 "source_kind": SourceKind.BAR.value,
                 "bar_snapshot_ref": bar_reference,
-                "paging_manifest": dict(bar_paging_manifest or {}),
+                "paging_manifest": dict(bar_paging_manifest),
             }
             bundle = {
                 "schema_version": PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION,
                 "bar_dataset": dataset.to_dict(),
-                "paging_manifest": dict(bar_paging_manifest or {}),
+                "paging_manifest": dict(bar_paging_manifest),
             }
             return reference, bundle
         reference = {

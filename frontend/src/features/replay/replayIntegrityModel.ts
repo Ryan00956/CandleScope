@@ -60,7 +60,7 @@ export interface ReplayPublicTimeBatchResponse {
 export interface ReplayStartSelection {
   readonly schema_version: "replay.start-selection.v1";
   readonly start_mode: "MANUAL" | "RANDOM";
-  readonly seed_source: "SERVER" | "MANUAL" | "LEGACY_CLIENT" | "FORK";
+  readonly seed_source: "SERVER" | "MANUAL" | "FORK";
   readonly seed_disclosed: boolean;
   readonly random_seed: number | null;
   readonly dataset_epoch: `sha256:${string}`;
@@ -811,7 +811,7 @@ function parseStartSelection(value: unknown): ReplayStartSelection {
     ),
     seed_source: enumValue(
       source.seed_source,
-      ["SERVER", "MANUAL", "LEGACY_CLIENT", "FORK"] as const,
+      ["SERVER", "MANUAL", "FORK"] as const,
       "integrity.start_selection.seed_source",
     ),
     seed_disclosed: seedDisclosed,

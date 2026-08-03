@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -9,13 +11,14 @@ import pytest
 
 from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.models import ReplayCommand
+from app.replay.models import ReplayCommand, ReplaySessionConfig
 from app.replay.service import ReplayService
 from app.replay import service as replay_service_module
 from app.replay.storage import ReplaySQLiteStore
-from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
+from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
+    ImmutableReplayHistoryFake,
     NOW_MS,
     START_MS,
     SessionIdFactory,
@@ -58,13 +61,37 @@ async def _service(path: Path) -> ReplayService:
     return service
 
 
+async def _create_current_bar_session(
+    service: ReplayService,
+    config: ReplaySessionConfig,
+) -> dict[str, object]:
+    catalog = await service.catalog(
+        warmup_bars=config.warmup_bars,
+        horizon_ms=config.horizon_ms,
+        quality_mode=config.quality_mode.value,
+        blind_mode=config.blind_mode,
+    )
+    catalog_epoch = str(catalog["catalog_epoch"])
+    selection = await service.select_training_window(
+        config,
+        expected_catalog_epoch=catalog_epoch,
+    )
+    return await service.create_session(
+        config,
+        _expected_catalog_epoch=catalog_epoch,
+        _internal_forced_start_ms=int(selection["selected_start_ms"]),
+        _internal_expected_source_fingerprint=str(selection["source_fingerprint"]),
+        _internal_training_selection=selection,
+    )
+
+
 async def _durable_session(
     path: Path,
     *,
     playing: bool = False,
 ) -> tuple[str, str, int]:
     service = await _service(path)
-    created = await service.create_session(replay_config())
+    created = await _create_current_bar_session(service, replay_config())
     session_id = str(created["session_id"])
     await service.command(
         session_id,
@@ -110,14 +137,14 @@ async def test_restart_recovers_paused_without_autoplay_and_matches_durable_hash
     await service.shutdown(step_timeout=1.0)
 
 
-async def test_restart_preserves_legacy_full_dataset_bar_retention(
+async def test_restart_preserves_current_paged_bar_retention(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "legacy-retention.db"
     row_count = 2_600
     now_ms = START_MS + (row_count + 2) * INTERVAL_MS
-    repository = FakeKlinesRepo()
+    repository = ImmutableReplayHistoryFake()
     repository.add_rows(
         FixtureIdentity("binance", "spot", "BTCUSDT"),
         "1m",
@@ -149,12 +176,13 @@ async def test_restart_preserves_legacy_full_dataset_bar_retention(
     )
     original = build_service()
     await original.start()
-    created = await original.create_session(
+    created = await _create_current_bar_session(
+        original,
         replace(
             replay_config(),
             requested_start_ms=START_MS + 2 * INTERVAL_MS,
             horizon_ms=2_200 * INTERVAL_MS,
-        )
+        ),
     )
     session_id = str(created["session_id"])
     old_snapshot = (await original.get_session(session_id))["snapshot"]
@@ -203,7 +231,7 @@ async def test_recovered_actor_retains_original_initial_checkpoint_for_seek(
 ) -> None:
     path = tmp_path / "replay.db"
     service = await _service(path)
-    created = await service.create_session(replay_config())
+    created = await _create_current_bar_session(service, replay_config())
     session_id = str(created["session_id"])
     initial_time_ms = int(created["snapshot"]["cursor"]["virtual_time_ms"])
     await service.command(
@@ -240,66 +268,58 @@ async def test_recovered_actor_retains_original_initial_checkpoint_for_seek(
     await recovered_service.shutdown(step_timeout=1.0)
 
 
-@pytest.mark.parametrize("corrupt_latest", [False, True])
-async def test_v1_recovery_uses_only_exact_latest_legacy_checkpoint(
+async def test_obsolete_base_schema_is_rejected_before_recovery(
     tmp_path: Path,
-    corrupt_latest: bool,
 ) -> None:
-    path = tmp_path / "legacy.db"
-    session_id, _state_hash, _source_sequence = await _durable_session(path)
+    path = tmp_path / "obsolete-recovery.db"
+    await _durable_session(path)
     with sqlite3.connect(path) as connection:
-        connection.row_factory = sqlite3.Row
-        durable = connection.execute(
-            "SELECT * FROM replay_session WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        assert durable is not None
-        if corrupt_latest:
-            # Make every older row look identical at the V1 metadata level.
-            # Recovery must still reject it after the physical latest row is
-            # corrupted because speed/controller/status are not hash-bound.
-            connection.execute(
-                """
-                UPDATE replay_checkpoint
-                SET source_sequence = ?, command_log_offset = ?,
-                    event_sequence = ?, state_hash = ?, created_at_ms = ?
-                WHERE session_id = ?
-                """,
-                (
-                    durable["source_sequence"],
-                    durable["command_log_offset"],
-                    durable["event_sequence"],
-                    durable["state_hash"],
-                    durable["updated_at_ms"],
-                    session_id,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE replay_checkpoint SET payload = X'00'
-                WHERE checkpoint_id = (
-                    SELECT MAX(checkpoint_id) FROM replay_checkpoint
-                    WHERE session_id = ?
-                )
-                """,
-                (session_id,),
-            )
-        connection.execute("ALTER TABLE replay_checkpoint DROP COLUMN mutation_id")
         connection.execute(
-            "UPDATE replay_schema_version SET version = 1 WHERE singleton = 1"
+            "UPDATE replay_schema_version SET version = 3 WHERE singleton = 1"
+        )
+
+    with pytest.raises(RuntimeError, match="obsolete replay schema 3.*clear"):
+        await _service(path)
+
+
+async def test_legacy_inline_bar_dataset_recovery_fails_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "inline-bar-recovery.db"
+    service = await _service(path)
+    created = await _create_current_bar_session(service, replay_config())
+    session_id = str(created["session_id"])
+    persisted = await service.store.load_dataset(session_id)
+    assert persisted is not None
+    bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
+    assert bundle["schema_version"] == (
+        replay_service_module.PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION
+    )
+    legacy_blob = json.dumps(
+        bundle["bar_dataset"],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    legacy_sha256 = f"sha256:{hashlib.sha256(legacy_blob).hexdigest()}"
+    await service.shutdown(step_timeout=1.0)
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            UPDATE replay_dataset_ref
+            SET snapshot_blob = ?, snapshot_sha256 = ?,
+                snapshot_object_id = NULL, snapshot_size_bytes = NULL
+            WHERE session_id = ?
+            """,
+            (legacy_blob, legacy_sha256, session_id),
         )
 
     recovered_service = await _service(path)
     try:
-        if corrupt_latest:
-            with pytest.raises(ReplayDomainError) as captured:
-                await recovered_service.get_session(session_id)
-            assert captured.value.code is ReplayErrorCode.DATASET_MISMATCH
-        else:
-            snapshot = (await recovered_service.get_session(session_id))["snapshot"]
-            assert snapshot["state"] == SessionState.PAUSED.value
-            assert snapshot["state_hash"] == _state_hash
-            assert snapshot["cursor"]["source_sequence"] == _source_sequence
+        with pytest.raises(ReplayDomainError) as captured:
+            await recovered_service.get_session(session_id)
+        assert captured.value.code is ReplayErrorCode.DATASET_MISMATCH
+        assert "paged BAR dataset bundle" in captured.value.message
     finally:
         await recovered_service.shutdown(step_timeout=1.0)
 
@@ -309,7 +329,7 @@ async def test_old_checkpoint_replays_play_command_and_autonomous_source_tail(
 ) -> None:
     path = tmp_path / "replay.db"
     service = await _service(path)
-    created = await service.create_session(replay_config())
+    created = await _create_current_bar_session(service, replay_config())
     session_id = str(created["session_id"])
     acquired = await service.command(
         session_id,
@@ -354,7 +374,7 @@ async def test_recovery_tail_preserves_autonomous_events_replayed_after_seek(
 ) -> None:
     path = tmp_path / "rewound-autonomous.db"
     service = await _service(path)
-    created = await service.create_session(replay_config())
+    created = await _create_current_bar_session(service, replay_config())
     session_id = str(created["session_id"])
     initial_time_ms = int(created["snapshot"]["cursor"]["virtual_time_ms"])
 

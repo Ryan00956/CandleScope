@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertReplayEventCausality,
   parseReplayCapabilities,
   parseReplayCatalog,
   parseReplayCommandResult,
@@ -21,6 +22,7 @@ import {
   replayBar,
   replayDeltaEvent,
   replayDigest,
+  replayFinalStateEvent,
   replayReport,
   replaySessionResponse,
   replaySnapshotEvent,
@@ -123,10 +125,120 @@ test("session and atomic snapshot parsers bind protocol, session, counters, hash
   assert.equal(event.sequence, response.snapshot.sequence);
 });
 
-test("strict parser rejects unknown fields and mismatched atomic envelope counters", () => {
+test("compact final-state bars decode exactly and cover old and mid-scan subscriber floors", () => {
+  const event = parseReplayEvent(replayFinalStateEvent());
+  assert.equal(event.type, "replay.final_state");
+  assertReplayEventCausality(event, 0);
+  assertReplayEventCausality(event, 1);
+  if (event.type !== "replay.final_state" || !("source_sequence_to" in event.data)) {
+    assert.fail("expected final-state event");
+  }
+  assert.equal(event.data.source_sequence_to, 2);
+  assert.deepEqual(event.data.projection.series.bars.map((bar) => bar.close), ["100", "101", "102"]);
+  assert.equal(event.data.projection.series.retained_count, 3);
+  assert.equal(event.data.projection.series.bars.at(-1)?.open_time_ms, BASE_TIME_MS + 120_000);
+});
+
+test("compact final-state decoder matches the backend decimal/base36 golden vector", () => {
+  const event = structuredClone(replayFinalStateEvent());
+  const firstOpen = 1_710_000_000_000;
+  const secondOpen = firstOpen + 60_000;
+  Object.assign(event.data.projection.series, {
+    replace_from_open_ms: firstOpen,
+    retained_start_open_ms: firstOpen,
+    retained_end_open_ms: secondOpen,
+    retained_count: 2,
+    bar_count: 2,
+    first_open_ms: firstOpen,
+    decimal_scales: {
+      price: 8,
+      volume: 8,
+      quote_volume: 7,
+      taker_buy_base: 8,
+      taker_buy_quote: 8,
+    },
+    packed_bars: ",,24kd8fnm6,24keome4g,24kd131mn,24kduupvk,kf12oi,2miy2fvdh,8x,a4koy6,d0ug7ihji,0,0,1,1,1;1aao,,-44ud8g,evu4g,-gy9b28,-8w0hnk,1,~,~,~,~,0,0,1,1,1",
+  });
+  event.virtual_time_ms = secondOpen + 59_999;
+  event.data.cursor.virtual_time_ms = event.virtual_time_ms;
+  event.data.cursor.last_base_bar_open_ms = secondOpen;
+  const parsed = parseReplayEvent(event);
+  if (parsed.type !== "replay.final_state" || !("source_sequence_to" in parsed.data)) assert.fail("expected final-state event");
+  assert.deepEqual(parsed.data.projection.series.bars.map((bar) => ({
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+    volume: bar.volume,
+    quoteVolume: bar.quote_volume,
+    trades: bar.trades,
+  })), [
+    {
+      open: "60000.12345678",
+      high: "60001",
+      low: "59999.99999999",
+      close: "60000.5",
+      volume: "12.3456789",
+      quoteVolume: "740747.3456789",
+      trades: 321,
+    },
+    {
+      open: "59998",
+      high: "60000.75",
+      low: "59990.25",
+      close: "59995.125",
+      volume: "0.00000001",
+      quoteVolume: null,
+      trades: null,
+    },
+  ]);
+});
+
+test("compact final-state parser rejects corrupt counts, future bars, and uncovered source gaps", () => {
+  const corruptCount = structuredClone(replayFinalStateEvent());
+  corruptCount.data.projection.series.bar_count += 1;
+  assert.throws(() => parseReplayEvent(corruptCount), /packed bar count/);
+
+  const future = structuredClone(replayFinalStateEvent());
+  future.virtual_time_ms -= 60_000;
+  future.data.cursor.virtual_time_ms = future.virtual_time_ms;
+  assert.throws(() => parseReplayEvent(future), /unrevealed bar time/);
+
+  const gap = parseReplayEvent(replayFinalStateEvent({ sourceFrom: 2, sourceTo: 3 }));
+  assert.throws(() => assertReplayEventCausality(gap, 0), /does not cover/);
+});
+
+test("ENDED compact final-state synchronizes terminal cursor, controller, and final bar", () => {
+  const event = parseReplayEvent(replayFinalStateEvent({ state: "ENDED" }));
+  assert.equal(event.type, "replay.final_state");
+  if (event.type !== "replay.final_state" || !("cursor" in event.data)) {
+    assert.fail("expected final-state event");
+  }
+  assert.equal(event.data.state, "ENDED");
+  assert.equal(event.data.cursor.at_end, true);
+  assert.equal(event.data.controller_client_id, null);
+  assert.equal(
+    event.data.projection.series.bars.at(-1)?.open_time_ms,
+    event.data.projection.series.retained_end_open_ms,
+  );
+});
+
+test("strict parser rejects retired session fields, fidelity values, and mismatched atomic counters", () => {
   const response = structuredClone(replaySessionResponse());
   Object.assign(response, { unexpected: true });
   assert.throws(() => parseReplaySessionResponse(response), ReplayPayloadParseError);
+
+  const legacyFork = structuredClone(replaySessionResponse());
+  Object.assign(legacyFork, { forked: true, forked_from_session_id: "session-0000" });
+  assert.throws(() => parseReplaySessionResponse(legacyFork), /unknown field/);
+
+  const legacySessionFidelity = structuredClone(replayTradeSessionResponse());
+  Object.assign(legacySessionFidelity, { data_fidelity: "EXACT_AGG_TRADE_COVERAGE" });
+  assert.throws(() => parseReplaySessionResponse(legacySessionFidelity), ReplayPayloadParseError);
+
+  const legacyCapabilityFidelity = structuredClone(enabledAggTradeCapabilities());
+  Object.assign(legacyCapabilityFidelity.sources.agg_trade, { fidelity: "EXACT_AGG_TRADE_COVERAGE" });
+  assert.throws(() => parseReplayCapabilities(legacyCapabilityFidelity), ReplayPayloadParseError);
 
   const event = structuredClone(replaySnapshotEvent());
   event.sequence = 7;

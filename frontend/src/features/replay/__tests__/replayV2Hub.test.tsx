@@ -6,7 +6,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import TrainingHubDialog, {
   TrainingRunDeleteConfirmation,
 } from "../components/TrainingHubDialog.js";
-import { resolveReplayProduct } from "../replayProduct.js";
 import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
 import {
   buildTrainingRunCreateRequest,
@@ -22,6 +21,7 @@ import {
   parseTrainingRunDeleteResponse,
   parseTrainingRunListResponse,
   parseTrainingRunMutationResponse,
+  parseTrainingRunReturnResponse,
 } from "../replayV2Types.js";
 import { parseReplaySegmentPreparePlan } from "../replaySegmentTypes.js";
 import type { ReplayDigest } from "../replayTypes.js";
@@ -48,7 +48,6 @@ function runCard(overrides: Record<string, unknown> = {}) {
     compatibility: "READY",
     resume_action: "OPEN_ADAPTER",
     adapter_session_id: "adapter-1",
-    parent_legacy_session_id: null,
     status: { code: "READY", message: "训练可继续" },
     report_available: false,
     review_available: false,
@@ -69,7 +68,6 @@ function mutationResponse() {
   return {
     protocol: "replay.v2",
     created: true,
-    migrated: false,
     run: runCard(),
   };
 }
@@ -312,9 +310,6 @@ test("Hub clears the run and every server-returned session scope after a matchin
           session_ids: ["adapter-1", "adapter-track-2"],
         });
       },
-      async migrateLegacy() {
-        throw new Error("not used");
-      },
     },
     clearDeletedRunState: (runId, sessionIds) => {
       cleared.push({ runId, sessionIds: [...sessionIds] });
@@ -401,9 +396,6 @@ test("Hub loads a segment plan only after create opens and refreshes it before c
         calls.push("create");
         return parseTrainingRunMutationResponse(mutationResponse());
       },
-      async migrateLegacy() {
-        throw new Error("not used");
-      },
     },
     navigateToSession: (sessionId) => calls.push(`navigate:${sessionId}`),
   });
@@ -439,9 +431,6 @@ test("hub bootstrap loads only lightweight saves; create capability work starts 
       async createRun() {
         calls.push("create");
         return parseTrainingRunMutationResponse(mutationResponse());
-      },
-      async migrateLegacy() {
-        throw new Error("not used");
       },
     },
     navigateToSession: (sessionId) => calls.push(`navigate:${sessionId}`),
@@ -488,9 +477,6 @@ test("catalog drift stays rejected and an explicit revalidation reloads create c
           "data capability changed after validation; refresh and try again",
           { status: 409 },
         );
-      },
-      async migrateLegacy() {
-        throw new Error("not used");
       },
     },
   });
@@ -542,9 +528,6 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
       async createRun(payload) {
         submittedEpoch = payload.catalog_epoch;
         return parseTrainingRunMutationResponse(mutationResponse());
-      },
-      async migrateLegacy() {
-        throw new Error("not used");
       },
     },
   });
@@ -670,7 +653,18 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   const draft = createTrainingRunDraft(catalog);
   const runtime = {
     phase: "READY",
-    items: parseTrainingRunListResponse(listResponse()).items,
+    items: parseTrainingRunListResponse(listResponse([
+      runCard(),
+      runCard({
+        run_id: "run-ended",
+        name: "ETH 已结束训练",
+        state: "ENDED",
+        last_symbol: "ETHUSDT",
+        adapter_session_id: "adapter-ended",
+        status: { code: "READY", message: "STALE_ENDED_STATUS: 训练可继续" },
+        report_available: true,
+      }),
+    ])).items,
     nextCursor: null,
     filters: { state: null, sourceKind: null, compatibility: null },
     operation: null,
@@ -706,7 +700,6 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
       setDraft() {},
       refreshCreatePlan() {},
       createRun() {},
-      migrateLegacy() {},
       deleteRun() {},
       continueRun() {},
     },
@@ -716,6 +709,16 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /训练存档大厅/);
   assert.match(html, /BTC 手动训练/);
   assert.match(html, /继续训练/);
+  const endedNameOffset = html.indexOf("ETH 已结束训练");
+  const endedCardStart = html.lastIndexOf("<article", endedNameOffset);
+  const endedCardEnd = html.indexOf("</article>", endedNameOffset);
+  assert.notEqual(endedNameOffset, -1);
+  assert.notEqual(endedCardStart, -1);
+  assert.notEqual(endedCardEnd, -1);
+  const endedCardHtml = html.slice(endedCardStart, endedCardEnd);
+  assert.match(endedCardHtml, /训练已结束，可打开复盘/);
+  assert.match(endedCardHtml, /打开复盘/);
+  assert.doesNotMatch(endedCardHtml, /训练可继续|继续训练|STALE_ENDED_STATUS/);
   assert.match(html, /删除存档/);
   assert.match(html, /新建训练/);
   assert.match(html, /资金费.*HISTORICAL_EXACT/);
@@ -761,15 +764,19 @@ test("archive deletion uses an application-owned explicit confirmation dialog", 
   assert.match(html, /本机工作区偏好/);
 });
 
-test("product routing keeps v1 exact when the flag is off and opens Hub only for configure", () => {
-  assert.equal(resolveReplayProduct(false, { kind: "configure" }), "v1");
-  assert.equal(resolveReplayProduct(true, { kind: "configure" }), "hub");
-  assert.equal(resolveReplayProduct(true, { kind: "session", sessionId: "adapter-1" }), "v1");
-  assert.equal(resolveReplayProduct(true, {
-    kind: "error",
-    code: "REPLAY_ENTRY_INVALID",
-    message: "invalid",
-  }), "v1");
+test("Hub parser rejects every retired v1 archive shape", () => {
+  assert.throws(() => parseTrainingRunListResponse(listResponse([
+    runCard({ kind: "LEGACY_V1", integrity_mode: null }),
+  ])));
+  assert.throws(() => parseTrainingRunListResponse(listResponse([
+    runCard({ compatibility: "LEGACY_ADAPTER" }),
+  ])));
+  assert.throws(() => parseTrainingRunListResponse(listResponse([
+    runCard({ resume_action: "OPEN_V1" }),
+  ])));
+  assert.throws(() => parseTrainingRunListResponse(listResponse([
+    runCard({ parent_legacy_session_id: "adapter-old" }),
+  ])));
 });
 
 test("return-to-hub waits for the server checkpoint before navigation", async () => {
@@ -791,4 +798,30 @@ test("return-to-hub waits for the server checkpoint before navigation", async ()
     (url) => calls.push(`navigate:${url}`),
   );
   assert.deepEqual(calls, ["checkpoint:adapter-1", "navigate:/replay.html"]);
+});
+
+test("return-to-hub preserves terminal durable states and still navigates", async () => {
+  for (const state of ["ENDED", "ERROR"] as const) {
+    const parsed = parseTrainingRunReturnResponse({
+      protocol: "replay.v2",
+      run_id: `run-${state.toLowerCase()}`,
+      state,
+      checkpointed: true,
+      released: true,
+    });
+    const calls: string[] = [];
+    await returnToTrainingHub(
+      "adapter-terminal",
+      { returnToHub: async () => parsed },
+      (url) => calls.push(url),
+    );
+    assert.deepEqual(calls, ["/replay.html"]);
+  }
+  assert.throws(() => parseTrainingRunReturnResponse({
+    protocol: "replay.v2",
+    run_id: "run-playing",
+    state: "PLAYING",
+    checkpointed: true,
+    released: true,
+  }));
 });

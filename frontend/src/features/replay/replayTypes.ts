@@ -8,8 +8,6 @@ export type ReplayQualityMode = (typeof REPLAY_QUALITY_MODES)[number];
 
 export const REPLAY_DATA_FIDELITIES = [
   "EXACT_BAR_COVERAGE",
-  // Legacy payload compatibility; current AGG_TRADE sessions use the next value.
-  "EXACT_AGG_TRADE_COVERAGE",
   "VERIFIED_AGG_TRADE_APPROXIMATE_BARS",
   "BEST_EFFORT",
 ] as const;
@@ -53,6 +51,7 @@ export type ReplayCommandType = (typeof REPLAY_COMMAND_TYPES)[number];
 
 export const REPLAY_EVENT_TYPES = [
   "replay.delta",
+  "replay.final_state",
   "replay.snapshot",
   "replay.status",
   "replay.bar.replace",
@@ -423,6 +422,37 @@ export interface ReplayProjection {
   readonly account: ReplayAccount;
 }
 
+export interface ReplayFinalStateSeriesPatch {
+  readonly schema_version: "replay-series-tail-patch.v1";
+  readonly replace_from_open_ms: ReplayTimestampMs | null;
+  readonly retained_start_open_ms: ReplayTimestampMs | null;
+  readonly retained_end_open_ms: ReplayTimestampMs | null;
+  readonly retained_count: number;
+  readonly bars: readonly ReplayDisplayBar[];
+}
+
+export interface ReplayFinalStateProjection {
+  readonly schema_version: "replay-final-state-projection.v1";
+  readonly series: ReplayFinalStateSeriesPatch;
+  readonly orders: readonly ReplayOrder[];
+  readonly fills: readonly ReplayFill[];
+  readonly closed_trades: readonly ReplayClosedTrade[];
+  readonly warnings: readonly ReplayWarning[];
+  readonly position: ReplayPosition;
+  readonly account: ReplayAccount;
+}
+
+export interface ReplayFinalStateEventData {
+  readonly source_sequence_from: ReplaySequence;
+  readonly source_sequence_to: ReplaySequence;
+  readonly cursor: ReplayCursor;
+  readonly state: ReplaySessionState;
+  readonly status_reason: string;
+  readonly speed: ReplaySpeed;
+  readonly controller_client_id: string | null;
+  readonly projection: ReplayFinalStateProjection;
+}
+
 export interface ReplayJournalEntry {
   readonly entry_id: string;
   readonly virtual_time_ms: ReplayTimestampMs;
@@ -596,8 +626,6 @@ export interface ReplaySessionResponse {
   readonly data_fidelity: ReplayDataFidelity;
   readonly execution_fidelity: ReplayExecutionFidelity;
   readonly snapshot: ReplaySessionSnapshot;
-  readonly forked?: boolean;
-  readonly forked_from_session_id?: string;
 }
 
 export interface ReplayCommandResult {
@@ -615,6 +643,7 @@ export interface ReplayCommandResult {
 export type ReplayParsedEvent = Omit<ReplayEventEnvelope, "data"> & {
   readonly data:
     | { readonly reset: true; readonly snapshot: ReplaySessionSnapshot }
+    | ReplayFinalStateEventData
     | { readonly state: ReplaySessionState; readonly reason: string; readonly speed: ReplaySpeed; readonly controller_client_id: string | null }
     | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceEvent; readonly projection: ReplayProjection }
     | { readonly command_type: ReplayCommandType; readonly projection: ReplayProjection }

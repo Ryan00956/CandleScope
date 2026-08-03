@@ -9,6 +9,7 @@ import type {
   ReplayBarProjectionUpdate,
   ReplayBarUpdate,
   ReplayDisplayBar,
+  ReplayFinalStateSeriesPatch,
   ReplaySessionSnapshot,
   ReplayTradeBarBuilderSnapshot,
 } from "./replayTypes.js";
@@ -148,6 +149,54 @@ export function applyReplayBarUpdate(
   for (const item of planned) last = applyPlannedReplayBarUpdate(store, item);
   if (last === null) throw new ReplaySeriesProjectionError("replay update batch is empty");
   return last;
+}
+
+export function replaceReplaySeriesFromFinalState(
+  store: SeriesWindowStore,
+  patch: ReplayFinalStateSeriesPatch,
+  publicTimeMs: number,
+  sourceSequence: number,
+): WindowDelta {
+  for (const bar of patch.bars) assertRevealed(bar, publicTimeMs);
+  if (patch.retained_count === 0) {
+    if (patch.bars.length !== 0) {
+      throw new ReplaySeriesProjectionError("empty final-state series carries bars");
+    }
+    return store.replace([], {
+      source: "replay-final-state",
+      sourceSequence,
+      publicTimeMs,
+    });
+  }
+  const retainedStart = patch.retained_start_open_ms;
+  const retainedEnd = patch.retained_end_open_ms;
+  const replaceFrom = patch.replace_from_open_ms;
+  if (retainedStart === null || retainedEnd === null || replaceFrom === null) {
+    throw new ReplaySeriesProjectionError("final-state series boundaries are incomplete");
+  }
+  const prefix = store.snapshot().filter((row) => {
+    const openTimeMs = Number(row.time) * 1_000;
+    return openTimeMs >= retainedStart && openTimeMs < replaceFrom;
+  });
+  const suffix = patch.bars.map(replayDisplayBarToKline);
+  const rows = [...prefix, ...suffix];
+  if (rows.length !== patch.retained_count) {
+    throw new ReplaySeriesProjectionError("final-state retained bar count does not converge");
+  }
+  if (Number(rows[0]?.time) * 1_000 !== retainedStart
+    || Number(rows.at(-1)?.time) * 1_000 !== retainedEnd) {
+    throw new ReplaySeriesProjectionError("final-state retained series boundary does not converge");
+  }
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index]!.time <= rows[index - 1]!.time) {
+      throw new ReplaySeriesProjectionError("final-state retained series is not strictly increasing");
+    }
+  }
+  return store.replace(rows, {
+    source: "replay-final-state",
+    sourceSequence,
+    publicTimeMs,
+  });
 }
 
 interface PlannedReplayBarUpdate {

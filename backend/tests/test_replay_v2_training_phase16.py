@@ -26,12 +26,13 @@ from tests.fixtures.replay.account_history import (
     account_rule_fixture,
     build_account_history_archive,
 )
-from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
+from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
     ROW_COUNT,
     START_MS,
+    ImmutableReplayHistoryFake,
     SessionIdFactory,
     replay_settings,
 )
@@ -44,10 +45,6 @@ from tests.test_replay_v2_training_phase5 import (
     _command,
     _multi_trade_sources,
     _trade_request,
-)
-from tests.test_replay_v2_training_api import (
-    _app as _api_app,
-    _request as _api_request,
 )
 
 
@@ -97,8 +94,8 @@ async def test_operator_account_history_import_cli_contract(tmp_path: Path) -> N
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def _repository(*symbols: str) -> FakeKlinesRepo:
-    repository = FakeKlinesRepo()
+def _repository(*symbols: str) -> ImmutableReplayHistoryFake:
+    repository = ImmutableReplayHistoryFake()
     for offset, symbol in enumerate(symbols):
         repository.add_rows(
             FixtureIdentity("binance", "futures", symbol),
@@ -125,7 +122,6 @@ async def _service(
     service = ReplayService(
         settings=replace(
             settings,
-            product_v2_enabled=True,
             replay_account_history_enabled=enabled,
             replay_account_history_max_archive_bytes=max_archive_bytes,
         ),
@@ -152,7 +148,6 @@ async def _agg_service(
     service = ReplayService(
         settings=replace(
             settings,
-            product_v2_enabled=True,
             replay_account_history_enabled=True,
             replay_account_history_max_archive_bytes=64 * 1024 * 1024,
         ),
@@ -551,8 +546,7 @@ async def test_exact_plan_create_binding_ordering_funding_and_restart(
         settlement = [
             event
             for event in events
-            if event["actual_event_time_ms"]
-            == REPLAY_START + 2 * INTERVAL_MS - 1
+            if event["actual_event_time_ms"] == REPLAY_START + 2 * INTERVAL_MS - 1
         ]
         assert [event["event_phase"] for event in settlement] == [20, 30, 40]
         assert any(
@@ -583,7 +577,6 @@ async def test_exact_plan_create_binding_ordering_funding_and_restart(
             )
     finally:
         await service.shutdown(step_timeout=1.0)
-
     restored = await _service(database)
     try:
         projection = await restored.training.get_market_tracks(run_id)  # type: ignore[union-attr]
@@ -616,9 +609,7 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
         range_start_ms=REPLAY_START,
         range_end_ms=ARCHIVE_END,
         funding_interval_ms=0,
-        price_at=lambda timestamp: str(
-            100 + (timestamp - REPLAY_START) // INTERVAL_MS
-        ),
+        price_at=lambda timestamp: str(100 + (timestamp - REPLAY_START) // INTERVAL_MS),
     )
     service = await _service(database)
     try:
@@ -729,9 +720,7 @@ async def test_exact_create_fail_closed_for_flag_random_ref_and_budget(
         reference = dict(plan["account_history"]["account_history_ref"])
         stale = {**reference, "checksum_sha256": "sha256:" + "f" * 64}
         with pytest.raises(TrainingRunError) as rejected:
-            await enabled.training.create_run(
-                _exact_request(base, reference=stale)
-            )  # type: ignore[union-attr]
+            await enabled.training.create_run(_exact_request(base, reference=stale))  # type: ignore[union-attr]
         assert rejected.value.code == "ACCOUNT_HISTORY_REF_STALE"
         random_payload = base.to_dict()
         random_payload.update(
@@ -780,10 +769,7 @@ async def test_exact_create_rejects_coverage_identity_and_public_proxy(
         )
         await service.training.account_history.import_archive(short)  # type: ignore[union-attr]
         plan = await service.training.segment_plan(_exact_request(base))  # type: ignore[union-attr]
-        assert (
-            plan["account_history"]["capability_state"]
-            == "UNSUPPORTED_NO_HISTORY"
-        )
+        assert plan["account_history"]["capability_state"] == "UNSUPPORTED_NO_HISTORY"
         assert plan["account_history"]["account_history_ref"] is None
 
         wrong_symbol = tmp_path / "eth.sqlite3"
@@ -899,10 +885,7 @@ async def test_owned_archive_tamper_degrades_without_proxy_fallback(
         projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
         assert projection["portfolio"]["account_history"]["status"] == "DEGRADED"
         assert projection["tracks"][0]["state"] == "DEGRADED"
-        assert (
-            projection["tracks"][0]["position"]["mark_price"]
-            != "999"
-        )
+        assert projection["tracks"][0]["position"]["mark_price"] != "999"
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -978,13 +961,9 @@ async def test_account_auditor_detects_ledger_tamper(tmp_path: Path) -> None:
             )
         projection_failed = await service.training.audit_account(run_id)  # type: ignore[union-attr]
         assert projection_failed["status"] == "FAIL"
-        assert (
-            "projection[track-1].mark_price"
-            in {
-                str(item["field"])
-                for item in projection_failed["differences"]
-            }
-        )
+        assert "projection[track-1].mark_price" in {
+            str(item["field"]) for item in projection_failed["differences"]
+        }
         with sqlite3.connect(database) as connection:
             connection.execute(
                 """
@@ -1024,9 +1003,10 @@ async def test_account_auditor_detects_ledger_tamper(tmp_path: Path) -> None:
             )
         failed = await service.training.audit_account(run_id)  # type: ignore[union-attr]
         assert failed["status"] == "FAIL"
-        assert {
-            str(item["field"]) for item in failed["differences"]
-        } & {"ledger[1].entry_hash", "cash_balance"}
+        assert {str(item["field"]) for item in failed["differences"]} & {
+            "ledger[1].entry_hash",
+            "cash_balance",
+        }
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -1048,9 +1028,7 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
                 contract_size="10",
             ),
         ),
-        price_at=lambda timestamp: (
-            "100" if timestamp == REPLAY_START else "1"
-        ),
+        price_at=lambda timestamp: "100" if timestamp == REPLAY_START else "1",
     )
     service = await _service(database)
     try:
@@ -1102,17 +1080,11 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
         assert portfolio["liquidations"]
         assert portfolio["liquidations"][0]["state"] == "COMPLETED"
         liquidation = portfolio["liquidations"][0]
-        assert (
-            liquidation["trigger_virtual_time_ms"]
-            == REPLAY_START + 30_000
-        )
+        assert liquidation["trigger_virtual_time_ms"] == REPLAY_START + 30_000
         assert Decimal(liquidation["bankruptcy_price"]) == (
             Decimal(portfolio["fills"][0]["price"])
             - Decimal(liquidation["account_equity_before"])
-            / (
-                abs(Decimal(liquidation["position_quantity"]))
-                * Decimal("10")
-            )
+            / (abs(Decimal(liquidation["position_quantity"])) * Decimal("10"))
         ), liquidation
         assert (
             portfolio["liquidation_channels"]["simulated_account"]["fidelity"]
@@ -1486,11 +1458,9 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
                 (run_id,),
             ).fetchone()["current_equity"]
             assert stored_equity == projection["portfolio"]["equity"]
-            descriptor_domain = (
-                service.training.store._review._descriptor_domain(  # noqa: SLF001
-                    connection,
-                    run_id=run_id,
-                )
+            descriptor_domain = service.training.store._review._descriptor_domain(  # noqa: SLF001
+                connection,
+                run_id=run_id,
             )
             review_projection = service.training.store._review.projection(  # noqa: SLF001
                 connection,
@@ -1499,8 +1469,7 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
                 source_sequence=int(tracks[0]["cursor"]["source_sequence"]),
             )
             assert descriptor_domain == {
-                key: review_projection["domain"][key]
-                for key in descriptor_domain
+                key: review_projection["domain"][key] for key in descriptor_domain
             }
             event_types = {
                 str(row["event_type"])
@@ -1549,12 +1518,10 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
         settlement_events = [
             event
             for event in await service.training.store.global_events(run_id)  # type: ignore[union-attr]
-            if event["actual_event_time_ms"]
-            == REPLAY_START + 2 * INTERVAL_MS - 1
+            if event["actual_event_time_ms"] == REPLAY_START + 2 * INTERVAL_MS - 1
         ]
         assert [
-            (event["event_phase"], event["track_id"])
-            for event in settlement_events
+            (event["event_phase"], event["track_id"]) for event in settlement_events
         ] == [
             (20, "track-1"),
             (20, "track-2"),
@@ -1650,7 +1617,10 @@ async def test_exact_isolated_margin_and_review_fork_boundary(
             payload={"quantity": None},
         )
         assert closed["data"]["portfolio"]["isolated_allocations"] == {}
-        assert closed["data"]["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
+        assert (
+            closed["data"]["portfolio"]["account_history"]["auditor"]["status"]
+            == "PASS"
+        )
         review = await service.training.start_review(run_id, event_id=None)  # type: ignore[union-attr]
         assert review["run_id"] == run_id
         forked = await service.training.fork_run(  # type: ignore[union-attr]
@@ -1745,8 +1715,7 @@ async def test_exact_contract_size_leverage_partial_close_and_fee_decimal_golden
             payload={"quantity": "0.6"},
         )
         assert (
-            closed["data"]["portfolio"]["positions"][0]["position"]["quantity"]
-            == "0.4"
+            closed["data"]["portfolio"]["positions"][0]["position"]["quantity"] == "0.4"
         )
         assert closed["data"]["portfolio"]["margin_used"] == "200"
         assert closed["data"]["portfolio"]["maintenance_margin"] == "2"
@@ -1755,10 +1724,7 @@ async def test_exact_contract_size_leverage_partial_close_and_fee_decimal_golden
         await service.training.store.finalize_account_history(run_id)
         await service.training.store.finalize_account_history(run_id)
         after_finalize = await service.training.get_market_tracks(run_id)
-        assert (
-            after_finalize["portfolio"]["positions"]
-            == before_finalize["positions"]
-        )
+        assert after_finalize["portfolio"]["positions"] == before_finalize["positions"]
         assert (
             after_finalize["portfolio"]["cash_balance"]
             == before_finalize["cash_balance"]
@@ -1784,105 +1750,3 @@ async def test_exact_contract_size_leverage_partial_close_and_fee_decimal_golden
         assert audit["differences"] == []
     finally:
         await service.shutdown(step_timeout=1.0)
-
-
-async def test_phase15_database_migrates_additively_and_account_api_is_auditable(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "migration.db"
-    service = await _service(database)
-    try:
-        approximate = await service.training.create_run(await _base_request(service))  # type: ignore[union-attr]
-        run_id = str(approximate["run"]["run_id"])
-    finally:
-        await service.shutdown(step_timeout=1.0)
-
-    phase16_tables = (
-        "replay_account_history_audit",
-        "replay_account_history_applied_event",
-        "replay_account_history_projection",
-        "replay_account_history_ref",
-        "replay_training_account_history",
-        "replay_account_history_archive",
-    )
-    with sqlite3.connect(database) as connection:
-        run_before = connection.execute(
-            "SELECT * FROM replay_training_run WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
-        session_before = connection.execute(
-            """
-            SELECT state_hash, data_epoch, config_json
-            FROM replay_session
-            WHERE session_id = (
-                SELECT adapter_session_id FROM replay_training_run WHERE run_id = ?
-            )
-            """,
-            (run_id,),
-        ).fetchone()
-        connection.execute("PRAGMA foreign_keys = OFF")
-        for table in phase16_tables:
-            connection.execute(f"DROP TABLE {table}")
-        connection.execute("PRAGMA foreign_keys = ON")
-
-    restored = await _service(database)
-    try:
-        app = _api_app(restored)
-        listed = await _api_request(
-            app,
-            "GET",
-            "/api/v1/replay/runs/account-history",
-        )
-        assert listed.status_code == 200
-        assert listed.json()["items"] == []
-        audit = await _api_request(
-            app,
-            "POST",
-            f"/api/v1/replay/runs/{run_id}/account-audit",
-        )
-        assert audit.status_code == 200
-        assert audit.json()["status"] == "PASS"
-        assert audit.json()["snapshot"]["account_data_mode"] == "APPROX_PROXY"
-        with sqlite3.connect(database) as connection:
-            run_after = connection.execute(
-                "SELECT * FROM replay_training_run WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            session_after = connection.execute(
-                """
-                SELECT state_hash, data_epoch, config_json
-                FROM replay_session
-                WHERE session_id = (
-                    SELECT adapter_session_id
-                    FROM replay_training_run WHERE run_id = ?
-                )
-                """,
-                (run_id,),
-            ).fetchone()
-            account = connection.execute(
-                """
-                SELECT account_data_mode, status, fidelity, auditor_status
-                FROM replay_training_account_history WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-            assert connection.execute(
-                "SELECT version FROM replay_training_schema_version"
-            ).fetchone() == (9,)
-        assert run_after == run_before
-        assert session_after == session_before
-        assert account == (
-            "APPROX_PROXY",
-            "ACTIVE",
-            "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT",
-            "PASS",
-        )
-    finally:
-        await restored.shutdown(step_timeout=1.0)
-    with sqlite3.connect(database) as connection:
-        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        assert checkpoint is not None
-        assert checkpoint == (0, 0, 0)
-    connection.close()

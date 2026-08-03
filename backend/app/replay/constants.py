@@ -82,6 +82,7 @@ class CommandType(_StringEnum):
 
 class ReplayEventType(_StringEnum):
     DELTA = "replay.delta"
+    FINAL_STATE = "replay.final_state"
     SNAPSHOT = "replay.snapshot"
     STATUS = "replay.status"
     BAR_REPLACE = "replay.bar.replace"

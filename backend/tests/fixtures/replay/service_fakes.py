@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.config import ReplaySettings
+from app.replay.canonical import canonical_sha256
 from app.replay.constants import REPLAY_PROTOCOL
 from app.replay.models import FeeModel, ReplaySessionConfig, SlippageModel
 from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
@@ -24,6 +25,178 @@ class SessionIdFactory:
         return f"{self._prefix}-{self._counter}"
 
 
+class ImmutableReplayHistoryFake(FakeKlinesRepo):
+    """Archive-shaped fixture whose reads are pinned to a content revision."""
+
+    def _revision(
+        self,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+    ) -> str:
+        rows = self.rows.get((exchange, market_type, symbol, interval), [])
+        revision_rows = [
+            {
+                key: value.hex() if isinstance(value, float) else value
+                for key, value in sorted(row.items())
+            }
+            for row in rows
+        ]
+        return canonical_sha256(
+            {
+                "schema": "immutable-replay-history-fixture.v1",
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "interval": interval,
+                "rows": revision_rows,
+            }
+        )
+
+    def _require_revision(
+        self,
+        source_revision: str,
+        *,
+        exchange: str | None,
+        market_type: str | None,
+        symbol: str,
+        interval: str,
+    ) -> None:
+        expected = self._revision(
+            exchange or "binance",
+            market_type or "spot",
+            symbol,
+            interval,
+        )
+        if source_revision != expected:
+            raise ValueError("fixture source revision is no longer current")
+
+    def list_all_series(self, custom_only: bool = False) -> list[dict[str, object]]:
+        summaries = super().list_all_series(custom_only=custom_only)
+        return [
+            {
+                **summary,
+                "source_revision": self._revision(
+                    str(summary["exchange"]),
+                    str(summary["market_type"]),
+                    str(summary["symbol"]),
+                    str(summary["interval"]),
+                ),
+            }
+            for summary in summaries
+        ]
+
+    def get_bounds(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict[str, object]:
+        bounds = super().get_bounds(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        if int(bounds["total_count"]) < 1:
+            return bounds
+        return {
+            **bounds,
+            "source_revision": self._revision(
+                exchange or "binance",
+                market_type or "spot",
+                symbol,
+                interval,
+            ),
+            "source_bucket_anchor_ms": 0,
+            "alignment_policy": "CATALOG_ANCHORED_FIXED_V1",
+        }
+
+    def get_bounds_at_revision(
+        self,
+        source_revision: str,
+        symbol: str,
+        interval: str,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict[str, object]:
+        self._require_revision(
+            source_revision,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        return self.get_bounds(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
+
+    def scan_gaps_at_revision(
+        self,
+        source_revision: str,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
+        limit: int = 50_000,
+        calendar: object | None = None,
+    ) -> dict[str, object]:
+        self._require_revision(
+            source_revision,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        return self.scan_gaps(
+            symbol,
+            interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            exchange=exchange,
+            market_type=market_type,
+            limit=limit,
+            calendar=calendar,
+        )
+
+    def query_bars_at_revision(
+        self,
+        source_revision: str,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+        order: str = "ASC",
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> list[dict[str, object]]:
+        self._require_revision(
+            source_revision,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        return self.query_bars(
+            symbol,
+            interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            order=order,
+            exchange=exchange,
+            market_type=market_type,
+        )
+
+
 def replay_settings(path: Path, *, enabled: bool = True) -> ReplaySettings:
     return ReplaySettings(
         enabled=enabled,
@@ -41,7 +214,6 @@ def replay_settings(path: Path, *, enabled: bool = True) -> ReplaySettings:
         event_subscriber_queue=8,
         controller_ttl_seconds=1,
         idle_ttl_seconds=60,
-        product_v2_enabled=False,
     )
 
 
@@ -51,7 +223,7 @@ def replay_repository() -> FakeKlinesRepo:
         make_bar(START_MS + index * INTERVAL_MS, price=str(100 + index))
         for index in range(ROW_COUNT)
     ]
-    repository = FakeKlinesRepo()
+    repository = ImmutableReplayHistoryFake()
     repository.add_rows(identity, "1m", rows)
     return repository
 

@@ -1,13 +1,3 @@
-import {
-  REPLAY_PRODUCT_V2_ENABLED,
-  replayV2ProductFlagEnabled,
-} from "./replayProductFlag.js";
-
-export {
-  REPLAY_PRODUCT_V2_ENABLED,
-  replayV2ProductFlagEnabled,
-};
-
 export const REPLAY_V2_PROTOCOL = "replay.v2" as const;
 export const REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0" as const;
 
@@ -1748,18 +1738,17 @@ export function parseReplayV2Event(
   };
 }
 
-export type TrainingRunKind = "V2" | "LEGACY_V1";
-export type TrainingRunCompatibility = "READY" | "LEGACY_ADAPTER" | "LEGACY_V1" | "UNAVAILABLE";
-export type TrainingRunResumeAction = "OPEN_ADAPTER" | "OPEN_V1" | "UNAVAILABLE";
-export type TrainingRunEquityStatus = "CURRENT" | "STALE" | "UNAVAILABLE";
+export type TrainingRunCompatibility = "READY" | "UNAVAILABLE";
+export type TrainingRunResumeAction = "OPEN_ADAPTER" | "UNAVAILABLE";
+export type TrainingRunEquityStatus = "CURRENT" | "STALE";
 
 export interface TrainingRunCard {
   readonly run_id: string;
-  readonly kind: TrainingRunKind;
+  readonly kind: "V2";
   readonly name: string;
   readonly state: ReplayV2RunState;
   readonly source_kind: ReplayV2SourceKind;
-  readonly integrity_mode: ReplayV2IntegrityMode | null;
+  readonly integrity_mode: ReplayV2IntegrityMode;
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly last_symbol: string;
   readonly subscribed_track_count: number;
@@ -1771,7 +1760,6 @@ export interface TrainingRunCard {
   readonly compatibility: TrainingRunCompatibility;
   readonly resume_action: TrainingRunResumeAction;
   readonly adapter_session_id: string;
-  readonly parent_legacy_session_id: string | null;
   readonly status: { readonly code: string; readonly message: string };
   readonly report_available: boolean;
   readonly review_available: boolean;
@@ -1787,7 +1775,6 @@ export interface TrainingRunListResponse {
 export interface TrainingRunMutationResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly created: boolean;
-  readonly migrated: boolean;
   readonly run: TrainingRunCard;
 }
 
@@ -1801,7 +1788,7 @@ export interface TrainingRunDeleteResponse {
 export interface TrainingRunReturnResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly run_id: string;
-  readonly state: "PAUSED";
+  readonly state: "PAUSED" | "ENDED" | "ERROR";
   readonly checkpointed: boolean;
   readonly released: boolean;
 }
@@ -1895,18 +1882,16 @@ function parseTrainingRunCard(value: unknown, fieldName: string): TrainingRunCar
     "compatibility",
     "resume_action",
     "adapter_session_id",
-    "parent_legacy_session_id",
     "status",
     "report_available",
     "review_available",
   ]);
-  const kind = enumValue(card.kind, enumValues("V2", "LEGACY_V1"), `${fieldName}.kind`);
-  const integrityMode = card.integrity_mode === null
-    ? null
-    : enumValue(card.integrity_mode, REPLAY_V2_ENUMS.integrity_mode, `${fieldName}.integrity_mode`);
-  if ((kind === "V2") !== (integrityMode !== null)) {
-    throw new TypeError(`${fieldName}.integrity_mode does not match run kind`);
-  }
+  const kind = enumValue(card.kind, enumValues("V2"), `${fieldName}.kind`);
+  const integrityMode = enumValue(
+    card.integrity_mode,
+    REPLAY_V2_ENUMS.integrity_mode,
+    `${fieldName}.integrity_mode`,
+  );
   const progress = exactObject(card.progress, `${fieldName}.progress`, ["source_sequence"]);
   const status = exactObject(card.status, `${fieldName}.status`, ["code", "message"]);
   return {
@@ -1927,26 +1912,22 @@ function parseTrainingRunCard(value: unknown, fieldName: string): TrainingRunCar
     equity: nullableCanonicalDecimal(card.equity, `${fieldName}.equity`),
     equity_status: enumValue(
       card.equity_status,
-      enumValues("CURRENT", "STALE", "UNAVAILABLE"),
+      enumValues("CURRENT", "STALE"),
       `${fieldName}.equity_status`,
     ),
     settlement_asset: identifier(card.settlement_asset, `${fieldName}.settlement_asset`),
     updated_at_ms: timestamp(card.updated_at_ms, `${fieldName}.updated_at_ms`),
     compatibility: enumValue(
       card.compatibility,
-      enumValues("READY", "LEGACY_ADAPTER", "LEGACY_V1", "UNAVAILABLE"),
+      enumValues("READY", "UNAVAILABLE"),
       `${fieldName}.compatibility`,
     ),
     resume_action: enumValue(
       card.resume_action,
-      enumValues("OPEN_ADAPTER", "OPEN_V1", "UNAVAILABLE"),
+      enumValues("OPEN_ADAPTER", "UNAVAILABLE"),
       `${fieldName}.resume_action`,
     ),
     adapter_session_id: identifier(card.adapter_session_id, `${fieldName}.adapter_session_id`),
-    parent_legacy_session_id: nullableIdentifier(
-      card.parent_legacy_session_id,
-      `${fieldName}.parent_legacy_session_id`,
-    ),
     status: {
       code: identifier(status.code, `${fieldName}.status.code`),
       message: displayString(status.message, `${fieldName}.status.message`, 512),
@@ -1986,14 +1967,13 @@ export function parseTrainingRunListResponse(value: unknown): TrainingRunListRes
 }
 
 export function parseTrainingRunMutationResponse(value: unknown): TrainingRunMutationResponse {
-  const payload = exactObject(value, "run mutation", ["protocol", "created", "migrated", "run"]);
+  const payload = exactObject(value, "run mutation", ["protocol", "created", "run"]);
   if (payload.protocol !== REPLAY_V2_PROTOCOL) {
     throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
   }
   return {
     protocol: REPLAY_V2_PROTOCOL,
     created: boolValue(payload.created, "run mutation.created"),
-    migrated: boolValue(payload.migrated, "run mutation.migrated"),
     run: parseTrainingRunCard(payload.run, "run mutation.run"),
   };
 }
@@ -2033,13 +2013,18 @@ export function parseTrainingRunReturnResponse(value: unknown): TrainingRunRetur
     "checkpointed",
     "released",
   ]);
-  if (payload.protocol !== REPLAY_V2_PROTOCOL || payload.state !== "PAUSED") {
+  if (payload.protocol !== REPLAY_V2_PROTOCOL) {
     throw new TypeError("return-to-Hub response is unsupported");
   }
+  const state = enumValue(
+    payload.state,
+    enumValues("PAUSED", "ENDED", "ERROR"),
+    "return to Hub.state",
+  );
   return {
     protocol: REPLAY_V2_PROTOCOL,
     run_id: identifier(payload.run_id, "return to Hub.run_id"),
-    state: "PAUSED",
+    state,
     checkpointed: boolValue(payload.checkpointed, "return to Hub.checkpointed"),
     released: boolValue(payload.released, "return to Hub.released"),
   };

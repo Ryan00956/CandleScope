@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   auditBoundary,
@@ -25,6 +26,27 @@ import {
   restoreCommandReadinessAfterReconnect,
   selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
+
+test("public replay scripts cannot select or launch the retired v1 product", () => {
+  const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const frontendRoot = path.resolve(scriptDirectory, "..");
+  const packageJson = JSON.parse(fs.readFileSync(path.join(frontendRoot, "package.json"), "utf8"));
+
+  assert.match(packageJson.scripts["smoke:replay"], /replay-soak\.mjs/);
+  assert.doesNotMatch(packageJson.scripts["smoke:replay"], /replay-smoke\.mjs/);
+  assert.match(packageJson.scripts["drill:replay:rollback"], /replay-v2-rollback-drill\.mjs/);
+  assert.doesNotMatch(packageJson.scripts["drill:replay:rollback"], /replay-rollback-drill\.(?:mjs|ps1)/);
+
+  const historicalSmoke = fs.readFileSync(path.join(scriptDirectory, "replay-smoke.mjs"), "utf8");
+  const historicalRollback = fs.readFileSync(path.join(scriptDirectory, "replay-rollback-drill.mjs"), "utf8");
+  const powershellRollback = fs.readFileSync(path.join(scriptDirectory, "replay-rollback-drill.ps1"), "utf8");
+  const soak = fs.readFileSync(path.join(scriptDirectory, "replay-soak.mjs"), "utf8");
+  assert.match(historicalSmoke, /replay-soak\.mjs/);
+  assert.match(historicalRollback, /replay-v2-rollback-drill\.mjs/);
+  assert.match(powershellRollback, /replay-v2-rollback-drill\.mjs/);
+  assert.match(soak, /\/api\/v1\/replay\/runs\/session\/\$\{encodeURIComponent\(sessionId\)\}/);
+  assert.doesNotMatch(soak, /\/api\/v1\/replay\/sessions(?:\/|\$\{)/);
+});
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {
   const evidence = {
@@ -60,12 +82,10 @@ test("replay soak builds and serves the same flag-enabled production output", ()
     backendPort: 18_080,
     frontendPort: 15_173,
     outDir,
-    productV2: true,
   });
   assert.equal(plan.runtime, "vite-production-preview");
   assert.equal(plan.environment.VITE_API_PROXY_TARGET, "http://127.0.0.1:18080");
   assert.equal(plan.environment.VITE_REPLAY_ENTRY_ENABLED, "1");
-  assert.equal(plan.environment.VITE_REPLAY_PRODUCT_V2_ENABLED, "1");
   assert.equal(plan.environment.VITE_REPLAY_SOAK_PROJECTION_ENABLED, "1");
   assert.deepEqual(plan.buildArgs.slice(1), [
     "build",
@@ -84,21 +104,11 @@ test("replay soak builds and serves the same flag-enabled production output", ()
     "15173",
     "--strictPort",
   ]);
-  assert.equal(
-    replaySoakFrontendPlan({
-      backendPort: 18_080,
-      frontendPort: 15_173,
-      outDir,
-      productV2: false,
-    }).environment.VITE_REPLAY_PRODUCT_V2_ENABLED,
-    "0",
-  );
   assert.throws(
     () => replaySoakFrontendPlan({
       backendPort: 0,
       frontendPort: 15_173,
       outDir,
-      productV2: true,
     }),
     /backendPort/,
   );
@@ -107,7 +117,6 @@ test("replay soak builds and serves the same flag-enabled production output", ()
       backendPort: 18_080,
       frontendPort: 15_173,
       outDir: "relative-dist",
-      productV2: true,
     }),
     /absolute child of the OS temp directory/,
   );
@@ -117,14 +126,12 @@ test("replay soak builds and serves the same flag-enabled production output", ()
       NODE_ENV: "development",
       PATH: "trusted-path",
       VITE_API_PROXY_TARGET: "https://untrusted.invalid",
-      VITE_REPLAY_PRODUCT_V2_ENABLED: "0",
       VITE_UNRELATED_FLAG: "ambient-leak",
     },
   );
   assert.equal(processEnvironment.PATH, "trusted-path");
   assert.equal(processEnvironment.NODE_ENV, "production");
   assert.equal(processEnvironment.VITE_API_PROXY_TARGET, "http://127.0.0.1:18080");
-  assert.equal(processEnvironment.VITE_REPLAY_PRODUCT_V2_ENABLED, "1");
   assert.equal(processEnvironment.VITE_UNRELATED_FLAG, undefined);
 });
 
@@ -463,21 +470,14 @@ test("replay soak reconnect takes over before waiting for command readiness", as
   assert.equal(cdp.calls.at(-1).includes('data-replay-action="advance-display"'), true);
 });
 
-test("replay soak maps v1 and v2 controls to their rendered action contracts", () => {
-  assert.equal(replayStepAction(false), "step");
-  assert.equal(replayStepAction(true), "advance-display");
-  assert.equal(replaySpeedAction(false), "speed");
-  assert.equal(replaySpeedAction(true), "playback-rate");
+test("replay soak uses only the v2 rendered action contracts", () => {
+  assert.equal(replayStepAction(), "advance-display");
+  assert.equal(replaySpeedAction(), "playback-rate");
 });
 
-test("replay soak rotates only through fast speeds rendered by each product", () => {
-  const v1Options = ["1", "5", "15", "30", "60", "120", "300", "600", "MAX"];
+test("replay soak rotates only through fast speeds rendered by v2", () => {
   const v2Options = ["1", "2", "5", "10", "30", "60", "120", "600", "1000", "10000"];
 
-  assert.deepEqual(
-    Array.from({ length: 5 }, (_, index) => replayTrainingTargetSpeed(v1Options, index)),
-    [60, 120, 300, 600, 60],
-  );
   assert.deepEqual(
     Array.from({ length: 6 }, (_, index) => replayTrainingTargetSpeed(v2Options, index)),
     [60, 120, 600, 1000, 10000, 60],
@@ -662,21 +662,17 @@ test("replay soak distinguishes speed dispatch, pending work, and authoritative 
     state: "PAUSED",
     stateHash: `sha256:${"a".repeat(64)}`,
   };
-  assert.equal(replaySpeedRequestState(null, 600, true, 652), "waiting");
-  assert.equal(replaySpeedRequestState(authoritative, 600, true, 652), "waiting");
+  assert.equal(replaySpeedRequestState(null, 600), "waiting");
+  assert.equal(replaySpeedRequestState(authoritative, 600), "waiting");
   assert.equal(
-    replaySpeedRequestState({ ...authoritative, controlPending: "set_speed" }, 600, true, 652),
+    replaySpeedRequestState({ ...authoritative, controlPending: "set_speed" }, 600),
     "started",
   );
   assert.equal(
-    replaySpeedRequestState({ ...authoritative, clockRate: 600 }, 600, true, 652),
+    replaySpeedRequestState({ ...authoritative, clockRate: 600 }, 600),
     "acknowledged",
   );
-  assert.equal(replaySpeedRequestState(authoritative, 600, false, 652), "waiting");
-  assert.equal(
-    replaySpeedRequestState({ ...authoritative, revision: 653 }, 600, false, 652),
-    "acknowledged",
-  );
+  assert.equal(replaySpeedRequestState({ ...authoritative, revision: 653 }, 600), "waiting");
 });
 
 test("replay soak treats an evicted actor as zero retained subscribers", () => {

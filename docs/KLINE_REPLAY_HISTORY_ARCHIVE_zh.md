@@ -28,13 +28,12 @@ replay.db.datasets/
   <prefix>/<snapshot-hash>.json.zlib
 ```
 
-`REPLAY_BAR_SOURCE=archive` 是默认值。配置 `REPLAY_HISTORY_ORIGIN_URI` 后，
-远端 `index.json` 与不可变 manifest 是随机范围的唯一权威；
+BAR 回放固定使用 immutable archive，不再存在数据源选择器。配置
+`REPLAY_HISTORY_ORIGIN_URI` 后，远端 `index.json` 与不可变 manifest 是随机范围的唯一权威；
 `REPLAY_HISTORY_ARCHIVE_DIR` 退化为可淘汰本地缓存，缓存中有无 Parquet
 都不会改变候选范围。选中起点并持久化 selection commitment 后，运行时才
 下载与 `warmup + forward` 相交的内容寻址对象。不会用实时 SQLite 填补
 归档缺口，也不会触发在线 backfill。
-`REPLAY_BAR_SOURCE=legacy_sqlite` 仅用于显式回滚。
 
 `replay.db` 与 `replay.db.datasets` 是同一个恢复集合。备份或恢复前必须停止
 回放后端，确保 SQLite 中的引用与内容寻址快照来自同一时点。存储 schema
@@ -174,7 +173,6 @@ normalized row 数量。
 
 ```dotenv
 REPLAY_ENABLED=1
-REPLAY_BAR_SOURCE=archive
 REPLAY_HISTORY_ARCHIVE_DIR=./data/replay-history-cache
 REPLAY_HISTORY_ORIGIN_URI=https://replay.example.com/replay-history/
 REPLAY_HISTORY_CATALOG_REFRESH_SECONDS=300
@@ -193,22 +191,19 @@ REPLAY_DB_PATH=./data/replay.db
 ```
 
 `ORIGIN_URI` 支持只读 `file`、`http` 和 `https` 根地址；本机 `file` origin
-适合 shadow/开发，生产可直接切到同目录布局的 HTTP(S) 对象存储。远端暂时
-不可达时只允许使用最后一次完整校验的元数据快照；远端返回损坏的 live index
-则 fail closed，不会用旧快照掩盖发布错误。正文下载有超时和大小上限，并在
-原子进入缓存前校验 size/checksum。
+适合 shadow/开发，生产可直接切到同目录布局的 HTTP(S) 对象存储。远端元数据
+不可达或 live index 损坏时，新的 catalog、随机选择和 Run 创建一律 fail
+closed；不会用旧元数据缓存把过期尾部伪装成当前数据。已经存在的 Run 仍可按
+固定 revision 读取本地已校验的不可变 manifest/object。正文下载有超时和大小
+上限，并在原子进入缓存前校验 size/checksum。
 
-归档不存在时 catalog 为空，不会回退到实时库。需要临时恢复旧行为时：
-
-```dotenv
-REPLAY_BAR_SOURCE=legacy_sqlite
-KLINES_DB_PATH=./data/replay-dev/source-candlescope.db
-```
+归档不存在或权威索引不可达时 catalog 直接 fail closed，不会回退到实时
+SQLite、旧元数据快照或 eager cache 尾部。BAR 数据源选择器和
+`legacy_sqlite` 回滚路径均已删除。
 
 回滚不应删除 `replay-history`。旧 Run、审计和复现仍可能引用旧 catalog
-epoch。Run 创建时会把 revision 写入 `replay_archive_pin`；启动迁移还会为
-旧 Run 从其持久化快照引用补 pin。GC 另外扫描所有回放 session 的引用和旧版
-内联快照，因此非 TrainingRun 的 v1 session 也受保护。归档 GC 默认只做
+epoch。Run 创建时会把 revision 写入 `replay_archive_pin`。GC 另外扫描所有
+内部 adapter session 的不可变引用。归档 GC 默认只做
 dry-run；物理删除要求回放后端已停止，以取得 archive runtime lease，并
 始终保留所有 current revision、session 引用与 Run pin：
 

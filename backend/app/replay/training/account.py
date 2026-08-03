@@ -12,7 +12,6 @@ from app.replay.models import validate_identifier, validate_timestamp_ms
 
 
 CONTRACT_ACCOUNT_MODEL = "TOUCH_OR_TAPE_V2"
-LEGACY_ACCOUNT_MODEL = "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER"
 CONTRACT_ACCOUNT_SCHEMA_VERSION = "replay.training.portfolio.v2"
 CONTRACT_RULE_VERSION = "CANDLESCOPE_LINEAR_CONTRACT_V1"
 CONTRACT_LEDGER_CHAIN_VERSION = "replay.training.contract-ledger.v1"
@@ -403,7 +402,6 @@ __all__ = [
     "CONTRACT_LEDGER_CHAIN_VERSION",
     "CONTRACT_RULE_VERSION",
     "InstrumentRule",
-    "LEGACY_ACCOUNT_MODEL",
     "MaintenanceTier",
     "SANDBOX_FUNDING_FIDELITY",
     "fee_for_notional",

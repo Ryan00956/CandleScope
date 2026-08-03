@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 from typing import Mapping, Sequence
 
-from ..bars.builder import ReplayBarBuilder
+from ..bars.builder import ReplayBarBuilder, ReplayDisplayBar
 from ..bars.trade_builder import TradeReplayBarBuilder
 from ..canonical import canonical_sha256
 from ..constants import CommandType
@@ -58,6 +59,98 @@ from .risk import (
 
 BROKER_STATE_SCHEMA_VERSION = "replay-conservative-broker-state.v1"
 BROKER_STATE_HASH_SCHEMA_VERSION = "replay-conservative-broker-hash.v1"
+FINAL_STATE_PROJECTION_SCHEMA_VERSION = "replay-final-state-projection.v1"
+FINAL_STATE_SERIES_PATCH_SCHEMA_VERSION = "replay-series-tail-patch.v1"
+
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _base36(value: int) -> str:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("base36 value must be an integer")
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    remaining = abs(value)
+    encoded: list[str] = []
+    while remaining:
+        remaining, digit = divmod(remaining, 36)
+        encoded.append(_BASE36_DIGITS[digit])
+    return sign + "".join(reversed(encoded))
+
+
+def _decimal_scale(values: Sequence[str | None]) -> int:
+    return max(
+        (
+            max(0, -Decimal(value).as_tuple().exponent)
+            for value in values
+            if value is not None
+        ),
+        default=0,
+    )
+
+
+def _scaled_decimal(value: str, scale: int) -> int:
+    scaled = Decimal(value).scaleb(scale)
+    integral = scaled.to_integral_value()
+    if scaled != integral:
+        raise ValueError("display bar decimal cannot be represented at its declared scale")
+    return int(integral)
+
+
+def _pack_final_state_bars(
+    bars: Sequence[ReplayDisplayBar],
+) -> tuple[dict[str, int], int, int | None, str]:
+    """Pack exact decimals and monotone times without repeated JSON field names."""
+
+    price_scale = _decimal_scale(
+        tuple(value for bar in bars for value in (bar.open, bar.high, bar.low, bar.close))
+    )
+    volume_scale = _decimal_scale(tuple(bar.volume for bar in bars))
+    quote_volume_scale = _decimal_scale(tuple(bar.quote_volume for bar in bars))
+    taker_buy_base_scale = _decimal_scale(tuple(bar.taker_buy_base for bar in bars))
+    taker_buy_quote_scale = _decimal_scale(tuple(bar.taker_buy_quote for bar in bars))
+    scales = {
+        "price": price_scale,
+        "volume": volume_scale,
+        "quote_volume": quote_volume_scale,
+        "taker_buy_base": taker_buy_base_scale,
+        "taker_buy_quote": taker_buy_quote_scale,
+    }
+    spans = [bar.close_time_ms - bar.open_time_ms + 1 for bar in bars]
+    default_close_span_ms = None if not spans else Counter(spans).most_common(1)[0][0]
+    previous_open_ms: int | None = None
+    previous_close = 0
+    records: list[str] = []
+    for bar in bars:
+        open_value = _scaled_decimal(bar.open, price_scale)
+        high_value = _scaled_decimal(bar.high, price_scale)
+        low_value = _scaled_decimal(bar.low, price_scale)
+        close_value = _scaled_decimal(bar.close, price_scale)
+        span = bar.close_time_ms - bar.open_time_ms + 1
+        flags = int(bar.is_closed) | (int(bar.synthetic) << 1)
+        fields = (
+            "" if previous_open_ms is None else _base36(bar.open_time_ms - previous_open_ms),
+            "" if span == default_close_span_ms else _base36(span),
+            _base36(open_value - previous_close),
+            _base36(high_value - previous_close),
+            _base36(low_value - previous_close),
+            _base36(close_value - previous_close),
+            _base36(_scaled_decimal(bar.volume, volume_scale)),
+            "~" if bar.quote_volume is None else _base36(_scaled_decimal(bar.quote_volume, quote_volume_scale)),
+            "~" if bar.trades is None else _base36(bar.trades),
+            "~" if bar.taker_buy_base is None else _base36(_scaled_decimal(bar.taker_buy_base, taker_buy_base_scale)),
+            "~" if bar.taker_buy_quote is None else _base36(_scaled_decimal(bar.taker_buy_quote, taker_buy_quote_scale)),
+            _base36(bar.first_base_open_ms - bar.open_time_ms),
+            _base36(bar.last_base_open_ms - bar.open_time_ms),
+            _base36(bar.component_count),
+            _base36(bar.expected_components),
+            _base36(flags),
+        )
+        records.append(",".join(fields))
+        previous_open_ms = bar.open_time_ms
+        previous_close = close_value
+    return scales, (0 if not bars else bars[0].open_time_ms), default_close_span_ms, ";".join(records)
 
 
 @dataclass(slots=True)
@@ -255,6 +348,72 @@ class ConservativeBarBroker:
     @property
     def state_hash(self) -> str:
         return str(self.snapshot()["state_hash"])
+
+    def final_state_transport_anchor(self) -> int | None:
+        """Return the mutable public tail that a later suffix must replace."""
+
+        active = self._bar_builder.active_bar
+        if active is not None:
+            return active.open_time_ms
+        closed = self._bar_builder.closed_bars
+        return None if not closed else closed[-1].open_time_ms
+
+    def final_state_transport_projection(
+        self,
+        replace_from_open_ms: int | None,
+    ) -> dict[str, object]:
+        """Build an exact compact public-state replacement after a hidden scan.
+
+        Broker checkpoints retain 2,048 rich display-bar objects. Repeating
+        their JSON field names on every one-day step dominated the wire frame.
+        The stream only needs the changed retained suffix plus the complete
+        small interaction state. Decimal values stay exact; the browser
+        reconstructs and validates the final retained boundary fail-closed.
+        """
+
+        bars = [*self._bar_builder.closed_bars]
+        active = self._bar_builder.active_bar
+        if active is not None:
+            bars.append(active)
+        retained_start = None if not bars else bars[0].open_time_ms
+        retained_end = None if not bars else bars[-1].open_time_ms
+        if replace_from_open_ms is None or retained_start is None:
+            suffix = bars
+        else:
+            suffix = [
+                bar
+                for bar in bars
+                if bar.open_time_ms >= max(replace_from_open_ms, retained_start)
+            ]
+        effective_replace_from = None if not suffix else suffix[0].open_time_ms
+        scales, first_open_ms, default_span_ms, packed = _pack_final_state_bars(
+            suffix
+        )
+        return {
+            "schema_version": FINAL_STATE_PROJECTION_SCHEMA_VERSION,
+            "series": {
+                "schema_version": FINAL_STATE_SERIES_PATCH_SCHEMA_VERSION,
+                "encoding": "delta-base36-decimal-columns.v1",
+                "replace_from_open_ms": effective_replace_from,
+                "retained_start_open_ms": retained_start,
+                "retained_end_open_ms": retained_end,
+                "retained_count": len(bars),
+                "bar_count": len(suffix),
+                "first_open_ms": first_open_ms,
+                "default_close_span_ms": default_span_ms,
+                "decimal_scales": scales,
+                "packed_bars": packed,
+            },
+            # Interaction collections are deliberately replacements, not
+            # deltas. A fill/order boundary is mandatory and cannot leave a
+            # client that subscribed during a hidden prefix with stale state.
+            "orders": [order.to_dict() for order in self.orders],
+            "fills": [fill.to_dict() for fill in self.fills],
+            "closed_trades": [trade.to_dict() for trade in self.closed_trades],
+            "warnings": [warning.to_dict() for warning in self.warnings],
+            "position": self.position.to_dict(),
+            "account": self.account.to_dict(),
+        }
 
     def order(self, order_id: str) -> ReplayOrder:
         order = self._orders.get(order_id)

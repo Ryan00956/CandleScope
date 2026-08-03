@@ -5,8 +5,17 @@ from dataclasses import replace
 import pytest
 
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from app.replay.market_halts import ReplayBarHalt
-from app.replay.sources.bar_source import BarReplaySource, PagedBarReplaySource
+from app.replay.market_halts import (
+    MAINTENANCE_NOTICE,
+    OFFICIAL_KLINES_BOUNDARY,
+    ReplayBarHalt,
+    ReplayBarHaltEvidence,
+)
+from app.replay.sources.bar_source import (
+    BAR_TERMINAL_SOURCE_LATEST_CLOSED,
+    BarReplaySource,
+    PagedBarReplaySource,
+)
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
     REPLAY_START_MS,
@@ -80,11 +89,16 @@ def test_paged_bar_source_treats_initial_snapshot_as_cache_not_terminal() -> Non
     source = PagedBarReplaySource(
         initial,
         terminal_open_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        terminal_kind=BAR_TERMINAL_SOURCE_LATEST_CLOSED,
         source_revision="sha256:" + "1" * 64,
         source_fingerprint="sha256:" + "2" * 64,
         page_rows=2,
         page_loader=load_page,
     )
+
+    assert source.snapshot_ref()["schema_version"] == "replay-paged-bar-source.v3"
+    assert source.snapshot_ref()["terminal_kind"] == "SOURCE_LATEST_CLOSED"
+    assert source.snapshot_ref()["verified_market_halts"] == []
 
     assert source.next() == initial.replay_rows[0]
     assert source.next() == initial.replay_rows[1]
@@ -120,6 +134,7 @@ def test_paged_bar_source_restores_late_cursor_without_scanning_prefix() -> None
     source = PagedBarReplaySource(
         initial,
         terminal_open_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
+        terminal_kind=BAR_TERMINAL_SOURCE_LATEST_CLOSED,
         source_revision="sha256:" + "3" * 64,
         source_fingerprint="sha256:" + "4" * 64,
         page_rows=2,
@@ -144,7 +159,17 @@ def test_paged_bar_source_pages_across_only_an_explicit_verified_halt() -> None:
         halt_id="fixture-reviewed-halt",
         resume_ms=REPLAY_START_MS + 5 * INTERVAL_MS,
         reason="exchange_scheduled_system_upgrade",
-        evidence_url="https://example.com/reviewed-halt",
+        boundary_source="fixture_exact_gap.v1",
+        evidence=(
+            ReplayBarHaltEvidence(
+                MAINTENANCE_NOTICE,
+                "https://example.com/reviewed-halt-notice",
+            ),
+            ReplayBarHaltEvidence(
+                OFFICIAL_KLINES_BOUNDARY,
+                "https://example.com/reviewed-halt-boundary",
+            ),
+        ),
     )
     loaded: list[tuple[int, int, int]] = []
 
@@ -158,6 +183,7 @@ def test_paged_bar_source_pages_across_only_an_explicit_verified_halt() -> None:
     source = PagedBarReplaySource(
         initial,
         terminal_open_ms=REPLAY_START_MS + 7 * INTERVAL_MS,
+        terminal_kind=BAR_TERMINAL_SOURCE_LATEST_CLOSED,
         source_revision="sha256:" + "5" * 64,
         source_fingerprint="sha256:" + "6" * 64,
         page_rows=4,
@@ -180,7 +206,7 @@ def test_paged_bar_source_pages_across_only_an_explicit_verified_halt() -> None:
     ]
     assert source.cursor().source_sequence == 3
     assert source.cursor().last_base_bar_open_ms == resumed.open_time_ms
-    assert source.snapshot_ref()["schema_version"] == "replay-paged-bar-source.v2"
+    assert source.snapshot_ref()["schema_version"] == "replay-paged-bar-source.v3"
     assert (
         source.fork_at_sequence(
             3,

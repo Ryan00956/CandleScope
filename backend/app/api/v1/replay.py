@@ -1,4 +1,4 @@
-"""Strict replay.v1 HTTP routes and stable transport error envelopes."""
+"""Replay v2 product routes and its gated internal adapter transport."""
 
 from __future__ import annotations
 
@@ -14,11 +14,7 @@ from app.core.config import REPLAY_SETTINGS
 from app.replay.constants import (
     REPLAY_PROTOCOL,
     CommandType,
-    ExecutionModel,
     QualityMode,
-    SlippageKind,
-    SourceKind,
-    StartPolicy,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import (
@@ -26,7 +22,6 @@ from app.replay.models import (
     MAX_RANDOM_SEED,
     MAX_TIMESTAMP_MS,
     ReplayCommand,
-    ReplaySessionConfig,
     validate_identifier,
 )
 from app.replay.service import ReplayService
@@ -63,16 +58,14 @@ def replay_error_payload(error: ReplayDomainError) -> dict[str, object]:
     }
 
 
-def replay_v2_unavailable_payload() -> dict[str, object]:
-    if REPLAY_SETTINGS.product_v2_available:
-        code = "REPLAY_PRODUCT_V2_UNAVAILABLE"
-        message = "Replay training v2 runtime is unavailable"
-    else:
-        code = "REPLAY_PRODUCT_V2_DISABLED"
-        message = "Replay training v2 is disabled"
+def replay_training_unavailable_payload() -> dict[str, object]:
     return {
         "protocol": REPLAY_V2_PROTOCOL,
-        "error": {"code": code, "message": message, "details": {}},
+        "error": {
+            "code": "REPLAY_TRAINING_UNAVAILABLE",
+            "message": "Replay training runtime is unavailable",
+            "details": {},
+        },
     }
 
 
@@ -175,74 +168,6 @@ router = APIRouter(
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class FeeModelPayload(_StrictModel):
-    maker_bps: str = Field(min_length=1, max_length=128)
-    taker_bps: str = Field(min_length=1, max_length=128)
-
-
-class SlippageModelPayload(_StrictModel):
-    kind: SlippageKind
-    market_bps: str = Field(min_length=1, max_length=128)
-
-
-class ReplaySessionCreatePayload(_StrictModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "examples": [
-                {
-                    "protocol": REPLAY_PROTOCOL,
-                    "source_kind": "bar",
-                    "exchange": "binance",
-                    "market_type": "spot",
-                    "symbol": "BTCUSDT",
-                    "base_interval": "1m",
-                    "display_interval": "5m",
-                    "start_policy": "random_eligible",
-                    "requested_start_ms": None,
-                    "warmup_bars": 200,
-                    "horizon_ms": 86_400_000,
-                    "random_seed": 42,
-                    "quality_mode": "exact",
-                    "blind_mode": True,
-                    "initial_equity": "10000",
-                    "quote_asset": "USDT",
-                    "execution_model": "paper_linear_v1",
-                    "fee_model": {"maker_bps": "2", "taker_bps": "5"},
-                    "slippage_model": {
-                        "kind": "fixed_bps",
-                        "market_bps": "1",
-                    },
-                    "max_leverage": "3",
-                    "pause_on_controller_loss": True,
-                }
-            ]
-        },
-    )
-
-    protocol: Literal["replay.v1"]
-    source_kind: SourceKind
-    exchange: str = Field(min_length=1, max_length=128)
-    market_type: str = Field(min_length=1, max_length=128)
-    symbol: str = Field(min_length=1, max_length=128)
-    base_interval: str = Field(min_length=1, max_length=128)
-    display_interval: str = Field(min_length=1, max_length=128)
-    start_policy: StartPolicy
-    requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
-    warmup_bars: int = Field(ge=0, le=REPLAY_SETTINGS.max_warmup_bars)
-    horizon_ms: int = Field(ge=1, le=_MAX_HORIZON_MS)
-    random_seed: int = Field(ge=0, le=MAX_RANDOM_SEED)
-    quality_mode: QualityMode
-    blind_mode: bool
-    initial_equity: str = Field(min_length=1, max_length=128)
-    quote_asset: str = Field(min_length=1, max_length=128)
-    execution_model: ExecutionModel
-    fee_model: FeeModelPayload
-    slippage_model: SlippageModelPayload
-    max_leverage: str = Field(min_length=1, max_length=128)
-    pause_on_controller_loss: bool
 
 
 class ReplayCommandPayload(_StrictModel):
@@ -353,11 +278,6 @@ class TrainingRunCreatePayload(_StrictModel):
     allow_rule_changes: bool
     allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
     launch_context: ReplayLaunchContextPayload | None = None
-
-
-class TrainingRunMigrationPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
-    name: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class TrainingCursorPayload(_StrictModel):
@@ -522,6 +442,12 @@ def _session_id(value: str) -> str:
         ) from exc
 
 
+async def _owned_adapter_session_id(request: Request, value: str) -> str:
+    session_id = _session_id(value)
+    await _training_service(request).store.run_id_for_session(session_id)
+    return session_id
+
+
 @router.get("/capabilities")
 async def replay_capabilities(request: Request) -> dict[str, object]:
     service = getattr(request.app.state, "replay_service", None)
@@ -560,16 +486,8 @@ def _training_service(request: Request) -> TrainingRunService:
     if training is not None:
         return training
     raise TrainingRunError(
-        (
-            "REPLAY_PRODUCT_V2_UNAVAILABLE"
-            if REPLAY_SETTINGS.product_v2_available
-            else "REPLAY_PRODUCT_V2_DISABLED"
-        ),
-        (
-            "Replay training v2 runtime is unavailable"
-            if REPLAY_SETTINGS.product_v2_available
-            else "Replay training v2 is disabled"
-        ),
+        "REPLAY_TRAINING_UNAVAILABLE",
+        "Replay training runtime is unavailable",
         status_code=503,
     )
 
@@ -820,6 +738,32 @@ async def rehydrate_replay_v2_data_segment(
 
 
 @router.post(
+    "/runs/session/{session_id}/commands",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def command_replay_adapter_session(
+    request: Request,
+    session_id: str,
+    payload: ReplayCommandPayload,
+) -> dict[str, object]:
+    owned_session_id = await _owned_adapter_session_id(request, session_id)
+    command = ReplayCommand.from_dict(payload.model_dump(mode="json"))
+    return await _service(request).command(owned_session_id, command)
+
+
+@router.get(
+    "/runs/session/{session_id}",
+    dependencies=[Depends(_training_service)],
+)
+async def get_replay_adapter_session(
+    request: Request,
+    session_id: str,
+) -> dict[str, object]:
+    owned_session_id = await _owned_adapter_session_id(request, session_id)
+    return await _service(request).get_session(owned_session_id)
+
+
+@router.post(
     "/runs/session/{session_id}/return-to-hub",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
 )
@@ -889,22 +833,6 @@ async def replay_v2_training_tracks_by_session(
     session_id: str,
 ) -> dict[str, object]:
     return await _training_service(request).get_market_tracks_by_session(session_id)
-
-
-@router.post(
-    "/runs/{legacy_session_id}/migrate",
-    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
-)
-async def migrate_legacy_replay_v2_run(
-    request: Request,
-    legacy_session_id: str,
-    payload: TrainingRunMigrationPayload,
-) -> Response:
-    result = await _training_service(request).migrate_legacy(
-        legacy_session_id,
-        name=payload.name,
-    )
-    return JSONResponse(status_code=201 if result["created"] else 200, content=result)
 
 
 @router.get("/runs/{run_id}/viewer")
@@ -1179,7 +1107,10 @@ async def delete_replay_v2_run(request: Request, run_id: str) -> dict[str, objec
     return await _training_service(request).delete_run(run_id)
 
 
-@router.get("/catalog")
+@router.get(
+    "/catalog",
+    dependencies=[Depends(_training_service)],
+)
 async def replay_catalog(
     request: Request,
     warmup_bars: int = Query(default=200, ge=0, le=REPLAY_SETTINGS.max_warmup_bars),
@@ -1195,63 +1126,13 @@ async def replay_catalog(
     )
 
 
-@router.post(
-    "/sessions",
-    status_code=201,
-    dependencies=[Depends(enforce_replay_request_limit)],
-)
-async def create_replay_session(
-    request: Request,
-    payload: ReplaySessionCreatePayload,
-) -> dict[str, object]:
-    config = ReplaySessionConfig.from_dict(payload.model_dump(mode="json"))
-    return await _service(request).create_session(config)
-
-
-@router.get("/sessions/{session_id}")
-async def get_replay_session(request: Request, session_id: str) -> dict[str, object]:
-    return await _service(request).get_session(_session_id(session_id))
-
-
-@router.post(
-    "/sessions/{session_id}/commands",
-    dependencies=[Depends(enforce_replay_request_limit)],
-)
-async def command_replay_session(
-    request: Request,
-    session_id: str,
-    payload: ReplayCommandPayload,
-) -> dict[str, object]:
-    command = ReplayCommand.from_dict(payload.model_dump(mode="json"))
-    return await _service(request).command(_session_id(session_id), command)
-
-
-@router.post("/sessions/{session_id}/fork", status_code=201)
-async def fork_replay_session(request: Request, session_id: str) -> dict[str, object]:
-    return await _service(request).fork_session(_session_id(session_id))
-
-
-@router.get("/sessions/{session_id}/report")
-async def replay_session_report(request: Request, session_id: str) -> dict[str, object]:
-    return await _service(request).report(_session_id(session_id))
-
-
-@router.get("/sessions/{session_id}/journal")
-async def replay_session_journal(
-    request: Request, session_id: str
-) -> dict[str, object]:
-    return await _service(request).journal(_session_id(session_id))
-
-
 __all__ = [
     "MAX_REPLAY_REQUEST_BYTES",
     "ReplayCommandPayload",
     "ReplayV2CommandPayload",
-    "ReplaySessionCreatePayload",
     "TrainingRunCreatePayload",
-    "TrainingRunMigrationPayload",
     "replay_error_payload",
-    "replay_v2_unavailable_payload",
+    "replay_training_unavailable_payload",
     "replay_service_from_state",
     "router",
 ]

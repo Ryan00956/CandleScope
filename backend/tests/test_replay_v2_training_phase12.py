@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,7 +12,7 @@ from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.disclosure import project_public_time
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import TimeDisclosurePolicy, TrainingRunCreateRequest
-from app.replay.training.schema import TRAINING_SCHEMA_VERSION, start_selection_hash
+from app.replay.training.schema import start_selection_hash
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -44,7 +43,7 @@ async def _service(
 ) -> ReplayService:
     _source, next_seed = _seed_factory(seeds)
     service = ReplayService(
-        settings=replace(replay_settings(path), product_v2_enabled=True),
+        settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=replay_repository(),
         now_ms=lambda: NOW_MS,
@@ -240,69 +239,6 @@ async def test_public_time_batch_uses_exact_server_projection_for_every_policy(
             assert "2024" not in json.dumps(response)
     finally:
         await service.shutdown(step_timeout=1.0)
-
-
-async def test_v8_start_selection_backfill_is_additive_and_does_not_rewrite_v1(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "v8-backfill.db"
-    service = await _service(path, seeds=(123_456,))
-    try:
-        created = await service.training.create_run(  # type: ignore[union-attr]
-            await _request(service, disclosure="HIDE_DAY")
-        )
-        run_id = str(created["run"]["run_id"])
-        session_id = str(created["run"]["adapter_session_id"])
-    finally:
-        await service.shutdown(step_timeout=1.0)
-
-    with sqlite3.connect(path) as connection:
-        config_before = connection.execute(
-            "SELECT config_json FROM replay_session WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        assert config_before is not None
-        connection.execute("DROP TABLE replay_training_start_selection")
-        connection.execute(
-            """
-            UPDATE replay_training_schema_version
-            SET version = 8
-            WHERE singleton = 1
-            """
-        )
-        connection.commit()
-
-    migrated = await _service(path, seeds=(999,), prefix="phase12-migrated")
-    try:
-        assert TRAINING_SCHEMA_VERSION == 9
-        with sqlite3.connect(path) as connection:
-            connection.row_factory = sqlite3.Row
-            version = connection.execute(
-                """
-                SELECT version FROM replay_training_schema_version
-                WHERE singleton = 1
-                """
-            ).fetchone()
-            selection = connection.execute(
-                """
-                SELECT * FROM replay_training_start_selection
-                WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            config_after = connection.execute(
-                "SELECT config_json FROM replay_session WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-        assert version is not None and version["version"] == 9
-        assert selection is not None
-        assert selection["seed_source"] == "LEGACY_CLIENT"
-        assert selection["random_seed"] == 123_456
-        assert selection["selection_hash"].startswith("sha256:")
-        assert config_after is not None
-        assert config_after["config_json"] == config_before[0]
-    finally:
-        await migrated.shutdown(step_timeout=1.0)
 
 
 async def test_public_time_batch_allows_display_bucket_alignment_but_not_dataset_escape(

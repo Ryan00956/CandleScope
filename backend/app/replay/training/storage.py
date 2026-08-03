@@ -1,4 +1,4 @@
-"""Lightweight TrainingRun metadata storage layered on the replay.v1 database."""
+"""TrainingRun metadata storage layered on the internal replay adapter database."""
 
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ from .account import (
     CONFIGURED_FEE_FIDELITY,
     CONTRACT_ACCOUNT_MODEL,
     CONTRACT_ACCOUNT_SCHEMA_VERSION,
-    LEGACY_ACCOUNT_MODEL,
     SANDBOX_FUNDING_FIDELITY,
     InstrumentRule,
     fee_for_notional,
@@ -98,7 +97,7 @@ from .segments import (
 
 
 _LIST_LIMIT_MAX = 100
-_COMPATIBILITY_FILTERS = {"READY", "LEGACY_ADAPTER", "LEGACY_V1", "UNAVAILABLE"}
+_COMPATIBILITY_FILTERS = {"READY", "UNAVAILABLE"}
 _STATES = {"PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
 _VIEW_EVENT_LIMIT = 2_048
@@ -134,10 +133,15 @@ WITH cards AS (
         END AS equity_status,
         r.settlement_asset AS settlement_asset,
         CASE WHEN s.updated_at_ms > r.updated_at_ms THEN s.updated_at_ms ELSE r.updated_at_ms END AS updated_at_ms,
-        CASE WHEN s.degraded_reason IS NULL THEN r.compatibility ELSE 'UNAVAILABLE' END AS compatibility,
-        CASE WHEN s.degraded_reason IS NULL THEN 'OPEN_ADAPTER' ELSE 'UNAVAILABLE' END AS resume_action,
+        CASE
+            WHEN s.degraded_reason IS NULL AND r.compatibility = 'READY' THEN 'READY'
+            ELSE 'UNAVAILABLE'
+        END AS compatibility,
+        CASE
+            WHEN s.degraded_reason IS NULL AND r.compatibility = 'READY' THEN 'OPEN_ADAPTER'
+            ELSE 'UNAVAILABLE'
+        END AS resume_action,
         selected_track.adapter_session_id AS adapter_session_id,
-        r.parent_legacy_session_id AS parent_legacy_session_id,
         s.degraded_reason AS degraded_reason,
         s.status_reason AS status_reason,
         EXISTS(
@@ -159,47 +163,6 @@ WITH cards AS (
      AND selected_track.track_id = viewer.selected_track_id
      AND selected_track.adapter_session_id IS NOT NULL
     JOIN replay_session AS s ON s.session_id = selected_track.adapter_session_id
-
-    UNION ALL
-
-    SELECT
-        s.session_id AS run_id,
-        'LEGACY_V1' AS kind,
-        'Legacy ' || COALESCE(json_extract(s.config_json, '$.symbol'), s.session_id) AS name,
-        CASE WHEN s.state = 'INITIALIZING' THEN 'PAUSED' ELSE s.state END AS state,
-        CASE json_extract(s.config_json, '$.source_kind')
-            WHEN 'agg_trade' THEN 'AGG_TRADE'
-            ELSE 'BAR'
-        END AS source_kind,
-        NULL AS integrity_mode,
-        CASE WHEN json_extract(s.config_json, '$.blind_mode') = 1 THEN 'HIDE_ALL' ELSE 'NONE' END AS time_disclosure_policy,
-        COALESCE(json_extract(s.config_json, '$.symbol'), 'UNKNOWN') AS last_symbol,
-        1 AS subscribed_track_count,
-        s.source_sequence AS progress_sequence,
-        NULL AS equity,
-        'UNAVAILABLE' AS equity_status,
-        COALESCE(json_extract(s.config_json, '$.quote_asset'), 'UNKNOWN') AS settlement_asset,
-        s.updated_at_ms AS updated_at_ms,
-        CASE WHEN s.degraded_reason IS NULL THEN 'LEGACY_V1' ELSE 'UNAVAILABLE' END AS compatibility,
-        CASE WHEN s.degraded_reason IS NULL THEN 'OPEN_V1' ELSE 'UNAVAILABLE' END AS resume_action,
-        s.session_id AS adapter_session_id,
-        NULL AS parent_legacy_session_id,
-        s.degraded_reason AS degraded_reason,
-        s.status_reason AS status_reason,
-        EXISTS(
-            SELECT 1 FROM replay_report AS report
-            WHERE report.session_id = s.session_id
-        ) AS report_available,
-        0 AS review_available
-    FROM replay_session AS s
-    WHERE NOT EXISTS(
-        SELECT 1 FROM replay_training_run AS r
-        WHERE r.adapter_session_id = s.session_id
-    )
-      AND NOT EXISTS(
-        SELECT 1 FROM replay_training_market_track AS t
-        WHERE t.adapter_session_id = s.session_id
-    )
 )
 """
 
@@ -291,7 +254,7 @@ def _encode_cursor(row: Mapping[str, object]) -> str:
 
 
 class TrainingRunStore:
-    """Own v2 metadata while reusing the v1 transaction and dataset owner."""
+    """Own v2 metadata while reusing the internal adapter transaction owner."""
 
     def __init__(self, base_store: ReplaySQLiteStore) -> None:
         self.base_store = base_store
@@ -650,7 +613,6 @@ class TrainingRunStore:
                 {
                     "run_id": run_id,
                     "adapter_session_id": adapter_session_id,
-                    "parent_legacy_session_id": None,
                     "name": name,
                     "state": str(session_state["state"]),
                     "source_kind": request.source_kind.value,
@@ -3197,7 +3159,6 @@ class TrainingRunStore:
                 {
                     "run_id": child_run_id,
                     "adapter_session_id": session_id,
-                    "parent_legacy_session_id": parent["parent_legacy_session_id"],
                     "name": _safe_name(
                         f"{parent['name']} · Fork"[:80],
                         fallback=f"Fork {child_run_id[-8:]}",
@@ -3768,65 +3729,43 @@ class TrainingRunStore:
                 "SELECT adapter_session_id FROM replay_training_run WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-            if run is not None:
-                child = connection.execute(
-                    """
-                    SELECT child_run_id FROM replay_run_lineage
-                    WHERE parent_run_id = ?
-                    UNION ALL
-                    SELECT child_run_id FROM replay_review_fork_lineage
-                    WHERE parent_run_id = ?
-                    LIMIT 1
-                    """,
-                    (run_id, run_id),
-                ).fetchone()
-                if child is not None:
-                    raise TrainingRunError(
-                        "TRAINING_RUN_HAS_CHILDREN",
-                        "delete child archives before deleting this training run",
-                        status_code=409,
-                        details={"child_run_id": str(child["child_run_id"])},
-                    )
-                sessions = connection.execute(
-                    """
-                    SELECT adapter_session_id
-                    FROM replay_training_market_track
-                    WHERE run_id = ? AND adapter_session_id IS NOT NULL
-                    UNION
-                    SELECT adapter_session_id
-                    FROM replay_training_run
-                    WHERE run_id = ?
-                    """,
-                    (run_id, run_id),
-                ).fetchall()
-                return "V2", tuple(sorted(str(row[0]) for row in sessions))
-
-            legacy = connection.execute(
-                "SELECT session_id FROM replay_session WHERE session_id = ?",
-                (run_id,),
-            ).fetchone()
-            if legacy is None:
+            if run is None:
                 raise TrainingRunError(
                     "TRAINING_RUN_NOT_FOUND",
                     "training run does not exist",
                     status_code=404,
                 )
-            dependent = connection.execute(
+            child = connection.execute(
                 """
-                SELECT run_id FROM replay_training_run
-                WHERE parent_legacy_session_id = ?
+                SELECT child_run_id FROM replay_run_lineage
+                WHERE parent_run_id = ?
+                UNION ALL
+                SELECT child_run_id FROM replay_review_fork_lineage
+                WHERE parent_run_id = ?
                 LIMIT 1
                 """,
-                (run_id,),
+                (run_id, run_id),
             ).fetchone()
-            if dependent is not None:
+            if child is not None:
                 raise TrainingRunError(
-                    "TRAINING_RUN_HAS_DEPENDENTS",
-                    "legacy replay session is still referenced by a training run",
+                    "TRAINING_RUN_HAS_CHILDREN",
+                    "delete child archives before deleting this training run",
                     status_code=409,
-                    details={"run_id": str(dependent["run_id"])},
+                    details={"child_run_id": str(child["child_run_id"])},
                 )
-            return "LEGACY_V1", (run_id,)
+            sessions = connection.execute(
+                """
+                SELECT adapter_session_id
+                FROM replay_training_market_track
+                WHERE run_id = ? AND adapter_session_id IS NOT NULL
+                UNION
+                SELECT adapter_session_id
+                FROM replay_training_run
+                WHERE run_id = ?
+                """,
+                (run_id, run_id),
+            ).fetchall()
+            return "V2", tuple(sorted(str(row[0]) for row in sessions))
 
         return await self.base_store.run_extension_read(read)
 
@@ -3921,52 +3860,11 @@ class TrainingRunStore:
                 )
                 return session_ids
 
-            legacy = connection.execute(
-                "SELECT session_id FROM replay_session WHERE session_id = ?",
-                (run_id,),
-            ).fetchone()
-            if legacy is None:
-                raise TrainingRunError(
-                    "TRAINING_RUN_NOT_FOUND",
-                    "training run does not exist",
-                    status_code=404,
-                )
-            dependent = connection.execute(
-                """
-                SELECT run_id FROM replay_training_run
-                WHERE parent_legacy_session_id = ?
-                LIMIT 1
-                """,
-                (run_id,),
-            ).fetchone()
-            if dependent is not None:
-                raise TrainingRunError(
-                    "TRAINING_RUN_HAS_DEPENDENTS",
-                    "legacy replay session is still referenced by a training run",
-                    status_code=409,
-                    details={"run_id": str(dependent["run_id"])},
-                )
-            if expected != (run_id,):
-                raise TrainingRunError(
-                    "TRAINING_RUN_CHANGED",
-                    "legacy replay session changed while deletion was being prepared",
-                    status_code=409,
-                    details={
-                        "expected_session_ids": expected,
-                        "actual_session_ids": (run_id,),
-                    },
-                )
-            deleted = connection.execute(
-                "DELETE FROM replay_session WHERE session_id = ?",
-                (run_id,),
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
             )
-            if deleted.rowcount != 1:
-                raise TrainingRunError(
-                    "TRAINING_RUN_NOT_FOUND",
-                    "training run does not exist",
-                    status_code=404,
-                )
-            return (run_id,)
 
         deleted_sessions = await self.base_store.run_extension_write(
             write,
@@ -3974,218 +3872,6 @@ class TrainingRunStore:
         )
         await self.base_store.collect_dataset_objects()
         return deleted_sessions
-
-    async def migrate_legacy(
-        self,
-        *,
-        session_id: str,
-        run_id: str,
-        name: str | None,
-    ) -> tuple[str, bool]:
-        def write(connection: sqlite3.Connection) -> tuple[str, bool]:
-            existing = connection.execute(
-                "SELECT run_id FROM replay_training_run WHERE adapter_session_id = ?",
-                (session_id,),
-            ).fetchone()
-            if existing is not None:
-                return str(existing["run_id"]), False
-            row = connection.execute(
-                """
-                SELECT s.*, d.data_epoch AS dataset_epoch,
-                       d.actual_replay_start_ms, d.actual_replay_end_ms
-                FROM replay_session AS s
-                LEFT JOIN replay_dataset_ref AS d USING(session_id)
-                WHERE s.session_id = ?
-                """,
-                (session_id,),
-            ).fetchone()
-            if row is None:
-                raise TrainingRunError(
-                    "TRAINING_RUN_NOT_FOUND",
-                    "legacy replay session does not exist",
-                    status_code=404,
-                )
-            if row["dataset_epoch"] is None:
-                raise TrainingRunError(
-                    "TRAINING_RUN_UNAVAILABLE",
-                    "legacy replay dataset reference is missing",
-                    status_code=409,
-                )
-            config = json.loads(row["config_json"])
-            broker = json.loads(row["broker_config_json"])
-            blind = bool(config.get("blind_mode"))
-            source_kind = "AGG_TRADE" if config.get("source_kind") == "agg_trade" else "BAR"
-            start_mode = "RANDOM" if config.get("start_policy") == "random_eligible" else "MANUAL"
-            symbol = str(config.get("symbol") or "UNKNOWN")
-            run_name = _safe_name(name, fallback=f"Legacy {symbol}")
-            requested_start = None if blind else config.get("requested_start_ms")
-            public_config = {
-                **config,
-                "requested_start_ms": requested_start,
-                "random_seed": (
-                    None if blind else config.get("random_seed")
-                ),
-            }
-            rule = {
-                "schema": "replay.training.legacy-rule.v1",
-                "legacy_protocol": "replay.v1",
-                "config": public_config,
-                "broker_config": broker,
-            }
-            cursor = {
-                "virtual_time_ms": 0,
-                "source_sequence": int(row["source_sequence"]),
-                "revision": int(row["revision"]),
-            }
-            self._insert_run(
-                connection,
-                {
-                    "run_id": run_id,
-                    "adapter_session_id": session_id,
-                    "parent_legacy_session_id": session_id,
-                    "name": run_name,
-                    "state": str(row["state"]),
-                    "source_kind": source_kind,
-                    "start_mode": start_mode,
-                    "integrity_mode": "CHALLENGE",
-                    "time_disclosure_policy": "HIDE_ALL" if blind else "NONE",
-                    "book_mode": "OFF",
-                    "margin_mode": "CROSS",
-                    "funding_mode": "OFF",
-                    "allow_rule_changes": 0,
-                    "exchange": str(config.get("exchange") or "unknown"),
-                    "market_type": str(config.get("market_type") or "unknown"),
-                    "last_symbol": symbol,
-                    "settlement_asset": str(config.get("quote_asset") or "UNKNOWN"),
-                    "base_interval": str(config.get("base_interval") or "unknown"),
-                    "display_interval": str(config.get("display_interval") or "unknown"),
-                    "initial_equity": str(broker.get("initial_equity") or config.get("initial_equity") or "0"),
-                    "current_equity": None,
-                    "summary_revision": None,
-                    "revision": int(row["revision"]),
-                    "source_sequence": int(row["source_sequence"]),
-                    "virtual_time_ms": 0,
-                    "catalog_epoch": str(row["data_epoch"]),
-                    "dataset_epoch": str(row["dataset_epoch"]),
-                    "compatibility": "LEGACY_ADAPTER",
-                    "now_ms": self.base_store._validated_now_ms(),
-                },
-            )
-            now_ms = self.base_store._validated_now_ms()
-            self._insert_approx_account_history(
-                connection,
-                run_id=run_id,
-                now_ms=now_ms,
-            )
-            self._insert_launch_context(
-                connection,
-                run_id=run_id,
-                context=ReplayLaunchContext.direct_hub(
-                    exchange=str(config.get("exchange") or "unknown"),
-                    market_type=str(config.get("market_type") or "unknown"),
-                    symbol=symbol,
-                    display_interval=str(config.get("display_interval") or "unknown"),
-                ),
-                now_ms=now_ms,
-            )
-            self._insert_start_selection(
-                connection,
-                run_id=run_id,
-                start_mode=start_mode,
-                seed_source=(
-                    "LEGACY_CLIENT" if start_mode == "RANDOM" else "MANUAL"
-                ),
-                random_seed=(
-                    int(config["random_seed"])
-                    if start_mode == "RANDOM"
-                    and config.get("random_seed") is not None
-                    else None
-                ),
-                actual_start_ms=int(row["actual_replay_start_ms"]),
-                actual_end_ms=int(row["actual_replay_end_ms"]),
-                dataset_epoch=str(row["dataset_epoch"]),
-                parent_selection_hash=None,
-                now_ms=now_ms,
-            )
-            interval_ms = parse_interval_ms(str(config.get("base_interval", "")))
-            if interval_ms is None:
-                raise TrainingRunError(
-                    "TRAINING_RUN_UNAVAILABLE",
-                    "legacy replay base interval is unsupported",
-                    status_code=409,
-                )
-            legacy_warmup = int(config["warmup_bars"])
-            legacy_start_ms = int(row["actual_replay_start_ms"])
-            self._insert_data_policy(
-                connection,
-                run_id=run_id,
-                policy=ResolvedHistoryPolicy(
-                    indicator_warmup_bars=legacy_warmup,
-                    visible_history_mode=VisibleHistoryMode.DURATION,
-                    visible_history_lookback_ms=legacy_warmup * interval_ms,
-                    visible_history_rows=legacy_warmup,
-                    actual_visible_history_start_ms=(
-                        legacy_start_ms - legacy_warmup * interval_ms
-                    ),
-                    actual_replay_start_ms=legacy_start_ms,
-                    effective_warmup_bars=legacy_warmup,
-                    forward_cache_ms=int(config["horizon_ms"]),
-                    interval_ms=interval_ms,
-                ),
-                actual_replay_start_ms=legacy_start_ms,
-                now_ms=now_ms,
-            )
-            self._insert_track(
-                connection,
-                run_id=run_id,
-                adapter_session_id=session_id,
-                source_kind=source_kind,
-                exchange=str(config.get("exchange") or "unknown"),
-                market_type=str(config.get("market_type") or "unknown"),
-                symbol=symbol,
-                settlement_asset=str(config.get("quote_asset") or "UNKNOWN"),
-                dataset_epoch=str(row["dataset_epoch"]),
-                cursor=cursor,
-                component_state=None,
-                now_ms=now_ms,
-            )
-            self._insert_viewer_state(
-                connection,
-                ViewerState(
-                    run_id=run_id,
-                    selected_track_id="track-1",
-                    display_interval=str(config.get("display_interval") or "unknown"),
-                    chart_type="candles",
-                    visible_range=None,
-                    pane_layout={},
-                    rail_layout={},
-                    semantic_view_revision=0,
-                ),
-                now_ms=now_ms,
-            )
-            self._insert_rule(connection, run_id=run_id, rule=rule, now_ms=now_ms)
-            self._insert_initial_action(
-                connection,
-                run_id=run_id,
-                action_type="MIGRATE_LEGACY_V1",
-                action={
-                    "schema": "replay.training.action.v1",
-                    "parent_legacy_session_id": session_id,
-                    "legacy_hash_unchanged": True,
-                },
-                now_ms=now_ms,
-            )
-            self._insert_pin(
-                connection,
-                run_id=run_id,
-                track_id="track-1",
-                adapter_session_id=session_id,
-                dataset_epoch=str(row["dataset_epoch"]),
-                now_ms=now_ms,
-            )
-            return run_id, True
-
-        return await self.base_store.run_extension_write(write)
 
     async def run_id_for_session(self, session_id: str) -> str:
         def read(connection: sqlite3.Connection) -> str | None:
@@ -4201,13 +3887,7 @@ class TrainingRunStore:
                     "SELECT run_id FROM replay_training_run WHERE adapter_session_id = ?",
                     (session_id,),
                 ).fetchone()
-            if row is not None:
-                return str(row["run_id"])
-            legacy = connection.execute(
-                "SELECT 1 FROM replay_session WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            return session_id if legacy is not None else None
+            return str(row["run_id"]) if row is not None else None
 
         run_id = await self.base_store.run_extension_read(read)
         if run_id is None:
@@ -7311,7 +6991,7 @@ class TrainingRunStore:
             if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
                 raise TrainingRunError(
                     "CONTRACT_ACCOUNT_UNAVAILABLE",
-                    "isolated margin is unavailable for this legacy run",
+                    "isolated margin requires a current v2 contract account",
                     status_code=409,
                 )
             if str(account["margin_mode"]) != "ISOLATED":
@@ -7466,7 +7146,7 @@ class TrainingRunStore:
             if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
                 raise TrainingRunError(
                     "CONTRACT_ACCOUNT_UNAVAILABLE",
-                    "policy revision is unavailable for this legacy run",
+                    "policy revision requires a current v2 contract account",
                     status_code=409,
                 )
             replayed = connection.execute(
@@ -8569,22 +8249,18 @@ class TrainingRunStore:
                         """,
                         (run_id, track_id),
                     )
-                    for table in (
-                        "replay_training_track",
-                        "replay_training_market_track",
-                    ):
-                        connection.execute(
-                            f"""
-                            UPDATE {table}
-                            SET capabilities_json = json_set(
-                                capabilities_json,
-                                '$.ORDER_BOOK',
-                                'UNSUPPORTED_NO_HISTORY'
-                            ), updated_at_ms = ?
-                            WHERE run_id = ? AND track_id = ?
-                            """,
-                            (now_ms, run_id, track_id),
-                        )
+                    connection.execute(
+                        """
+                        UPDATE replay_training_market_track
+                        SET capabilities_json = json_set(
+                            capabilities_json,
+                            '$.ORDER_BOOK',
+                            'UNSUPPORTED_NO_HISTORY'
+                        ), updated_at_ms = ?
+                        WHERE run_id = ? AND track_id = ?
+                        """,
+                        (now_ms, run_id, track_id),
+                    )
             state = "DORMANT" if subscription_tier == "NONE" else "READY"
             connection.execute(
                 """
@@ -9237,11 +8913,6 @@ class TrainingRunStore:
                     t.symbol,
                     t.source_kind,
                     t.subscription_tier,
-                    legacy.exchange AS legacy_exchange,
-                    legacy.market_type AS legacy_market_type,
-                    legacy.symbol AS legacy_symbol,
-                    legacy.source_kind AS legacy_source_kind,
-                    legacy.dataset_epoch AS legacy_dataset_epoch,
                     t.dataset_epoch AS track_dataset_epoch,
                     t.virtual_time_ms,
                     t.source_sequence,
@@ -9262,8 +8933,6 @@ class TrainingRunStore:
                     policy.policy_hash
                 FROM replay_training_run AS r
                 JOIN replay_training_market_track AS t ON t.run_id = r.run_id
-                LEFT JOIN replay_training_track AS legacy
-                  ON legacy.run_id = t.run_id AND legacy.track_id = t.track_id
                 JOIN replay_session AS s ON s.session_id = t.adapter_session_id
                 JOIN replay_training_data_policy AS policy USING(run_id)
                 WHERE t.adapter_session_id = ? AND t.track_id = ?
@@ -9291,18 +8960,6 @@ class TrainingRunStore:
                 "TRAINING_RUN_STORAGE_DEGRADED",
                 "training adapter display interval is invalid",
                 status_code=503,
-            )
-        if row["legacy_symbol"] is not None and (
-            str(row["legacy_exchange"]) != str(row["exchange"])
-            or str(row["legacy_market_type"]) != str(row["market_type"])
-            or str(row["legacy_symbol"]) != str(row["symbol"])
-            or str(row["legacy_source_kind"]) != str(row["source_kind"])
-            or str(row["legacy_dataset_epoch"]) != str(row["track_dataset_epoch"])
-        ):
-            raise TrainingRunError(
-                "HISTORY_SOURCE_IDENTITY_DRIFT",
-                "training history track identity changed",
-                status_code=409,
             )
         history_policy = self._data_policy_from_row(row)
         return {
@@ -11041,27 +10698,11 @@ class TrainingRunStore:
             if isinstance(item, Mapping) and isinstance(item.get("track_id"), str)
         }
         if str(parent["account_model"]) != CONTRACT_ACCOUNT_MODEL:
-            connection.execute(
-                """
-                INSERT INTO replay_training_contract_account(
-                    run_id, account_model, margin_mode, funding_mode,
-                    fixed_funding_rate, funding_interval_ms, next_funding_time_ms,
-                    overlay_cash, isolated_margin_json, status, fidelity,
-                    ledger_tail_hash, created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, '0', '{}', 'ACTIVE',
-                          'LEGACY_FORK_NO_REINTERPRETATION', ?, ?, ?)
-                """,
-                (
-                    child_run_id,
-                    LEGACY_ACCOUNT_MODEL,
-                    parent["margin_mode"],
-                    parent["funding_mode"],
-                    parent["ledger_tail_hash"],
-                    now_ms,
-                    now_ms,
-                ),
+            raise TrainingRunError(
+                "CONTRACT_ACCOUNT_UNAVAILABLE",
+                "review fork requires a current v2 contract account",
+                status_code=409,
             )
-            return
 
         parent_ledger = tuple(
             connection.execute(
@@ -11622,7 +11263,7 @@ class TrainingRunStore:
         connection.execute(
             """
             INSERT INTO replay_training_run(
-                run_id, adapter_session_id, parent_legacy_session_id, protocol,
+                run_id, adapter_session_id, protocol,
                 schema_version, name, state, source_kind, start_mode,
                 integrity_mode, time_disclosure_policy, book_mode, margin_mode,
                 funding_mode, execution_model, allow_rule_changes, exchange,
@@ -11632,7 +11273,7 @@ class TrainingRunStore:
                 catalog_epoch, dataset_epoch, compatibility, created_at_ms,
                 updated_at_ms, saved_at_ms
             ) VALUES (
-                :run_id, :adapter_session_id, :parent_legacy_session_id, 'replay.v2',
+                :run_id, :adapter_session_id, 'replay.v2',
                 'replay.training.v1', :name, :state, :source_kind, :start_mode,
                 :integrity_mode, :time_disclosure_policy, :book_mode, :margin_mode,
                 :funding_mode, 'TOUCH_OR_TAPE_V2', :allow_rule_changes, :exchange,
@@ -11833,11 +11474,11 @@ class TrainingRunStore:
     ) -> None:
         if start_mode not in {"MANUAL", "RANDOM"}:
             raise TypeError("training start selection mode is invalid")
-        if seed_source not in {"SERVER", "MANUAL", "LEGACY_CLIENT", "FORK"}:
+        if seed_source not in {"SERVER", "MANUAL", "FORK"}:
             raise TypeError("training start selection seed source is invalid")
         if seed_source == "MANUAL" and start_mode != "MANUAL":
             raise TypeError("manual seed source requires a manual start")
-        if seed_source in {"SERVER", "LEGACY_CLIENT"} and start_mode != "RANDOM":
+        if seed_source == "SERVER" and start_mode != "RANDOM":
             raise TypeError("random seed source requires a random start")
         if start_mode == "MANUAL" and random_seed is not None:
             raise TypeError("manual start selection cannot persist a random seed")
@@ -12143,37 +11784,6 @@ class TrainingRunStore:
         component_state: Mapping[str, object] | None,
         now_ms: int,
     ) -> None:
-        connection.execute(
-            """
-            INSERT INTO replay_training_track(
-                run_id, track_id, adapter_session_id, exchange, market_type,
-                symbol, source_kind, state, subscription_tier, dataset_epoch,
-                virtual_time_ms, source_sequence, revision,
-                forced_full_reasons_json, capabilities_json,
-                created_at_ms, updated_at_ms
-            ) VALUES (?, 'track-1', ?, ?, ?, ?, ?, 'READY', 'FULL', ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                adapter_session_id,
-                exchange,
-                market_type,
-                symbol,
-                source_kind,
-                dataset_epoch,
-                validate_v2_counter(
-                    cursor["virtual_time_ms"], field_name="virtual_time_ms"
-                ),
-                validate_v2_counter(
-                    cursor["source_sequence"], field_name="source_sequence"
-                ),
-                validate_v2_counter(cursor["revision"], field_name="revision"),
-                canonical_json(["VIEWED"]),
-                canonical_json(_phase1_capabilities(source_kind)),
-                now_ms,
-                now_ms,
-            ),
-        )
         position, account, open_orders, public_price = TrainingRunStore._track_components(
             component_state
         )
@@ -12493,16 +12103,8 @@ class TrainingRunStore:
                 "code": "UNAVAILABLE",
                 "message": "存档当前不可恢复；请检查服务端诊断或导出记录。",
             }
-        elif row["kind"] == "LEGACY_V1":
-            status = {
-                "code": "LEGACY_V1",
-                "message": "Legacy v1 存档可通过兼容运行时打开；迁移不会改写原记录。",
-            }
-        elif row["compatibility"] == "LEGACY_ADAPTER":
-            status = {
-                "code": "LEGACY_ADAPTER",
-                "message": "已建立 v2 存档包装；活动训练暂由 v1 单轨 adapter 恢复。",
-            }
+        elif row["state"] == "ENDED":
+            status = {"code": "ENDED", "message": "训练已结束，可打开复盘。"}
         else:
             status = {"code": "READY", "message": "训练可继续"}
         return {
@@ -12523,7 +12125,6 @@ class TrainingRunStore:
             "compatibility": str(row["compatibility"]),
             "resume_action": str(row["resume_action"]),
             "adapter_session_id": str(row["adapter_session_id"]),
-            "parent_legacy_session_id": row["parent_legacy_session_id"],
             "status": status,
             "report_available": bool(row["report_available"]),
             "review_available": bool(row["review_available"]),
@@ -13277,23 +12878,6 @@ class TrainingRunStore:
                 session_id,
             ),
         )
-        connection.execute(
-            """
-            UPDATE replay_training_track
-            SET state = CASE WHEN ? = 'ERROR' THEN 'ERROR' ELSE 'READY' END,
-                virtual_time_ms = ?, source_sequence = ?, revision = ?, updated_at_ms = ?
-            WHERE adapter_session_id = ?
-            """,
-            (
-                state["state"],
-                cursor["virtual_time_ms"],
-                state["source_sequence"],
-                state["revision"],
-                now_ms,
-                session_id,
-            ),
-        )
-
         run_id = str(track["run_id"])
         track_id = str(track["track_id"])
         self._sync_contract_components(

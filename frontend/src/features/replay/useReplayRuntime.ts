@@ -3,7 +3,6 @@ import type { MarketDataRuntimeContract } from "../market-data/marketDataRuntime
 import type { ReplayEntry } from "./replayEntry.js";
 import { defaultReplayApi, ReplayApiError } from "./replayApi.js";
 import type { ReplayApiClient } from "./replayApi.js";
-import type { ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayJournalResponse, ReplayReportResponse } from "./replayParser.js";
 import { assertReplayArtifactCausality } from "./replayParser.js";
 import { ReplayStore } from "./replayStore.js";
@@ -12,14 +11,11 @@ import { ReplayStreamController, ReplayStreamError } from "./replayStreamControl
 import type { ReplayStreamControllerOptions, ReplayStreamState } from "./replayStreamController.js";
 import type {
   ReplayCapabilities,
-  ReplayCatalog,
   ReplayCommandEnvelope,
   ReplayCommandResult,
   ReplayCommandTimelineEntry,
   ReplayCommandType,
   ReplayJson,
-  ReplaySessionConfig,
-  ReplaySessionResponse,
   ReplaySessionSnapshot,
 } from "./replayTypes.js";
 
@@ -27,7 +23,6 @@ export type ReplayRuntimePhase =
   | "IDLE"
   | "ENTRY_ERROR"
   | "LOADING_CAPABILITIES"
-  | "CONFIGURING"
   | "VALIDATING_SESSION"
   | "CONNECTING_SESSION"
   | "ACTIVE"
@@ -58,17 +53,15 @@ interface ReplayCommandRecoveryTarget {
   readonly retryAfterGeneration: boolean;
 }
 
-export type ReplayRuntimeOperation = "catalog" | "create" | "fork" | "command" | "report" | "journal" | null;
+export type ReplayRuntimeOperation = "command" | "report" | "journal" | null;
 
 export interface ReplayRuntimeSnapshot {
   readonly phase: ReplayRuntimePhase;
   readonly capabilities: ReplayCapabilities | null;
-  readonly catalog: ReplayCatalog | null;
   readonly error: ReplayRuntimeError | null;
   readonly sessionId: string | null;
   readonly clientInstanceId: string;
   readonly operation: ReplayRuntimeOperation;
-  readonly forkPending: boolean;
   readonly commandRecoveryPending: boolean;
   readonly commandRecoveryInFlight: boolean;
   readonly commandRecoveryReady: boolean;
@@ -83,10 +76,7 @@ export interface ReplayRuntimeSnapshot {
 interface ReplayApiBoundary {
   capabilities(signal?: AbortSignal): ReturnType<ReplayApiClient["capabilities"]>;
   getSession(sessionId: string, signal?: AbortSignal): ReturnType<ReplayApiClient["getSession"]>;
-  catalog?(query?: ReplayCatalogQuery, signal?: AbortSignal): Promise<ReplayCatalog>;
-  createSession?(config: ReplaySessionConfig, signal?: AbortSignal): Promise<ReplaySessionResponse>;
   command?(sessionId: string, command: ReplayCommandEnvelope, signal?: AbortSignal): Promise<ReplayCommandResult>;
-  forkSession?(sessionId: string, signal?: AbortSignal): Promise<ReplaySessionResponse>;
   report?(sessionId: string, signal?: AbortSignal): Promise<ReplayReportResponse>;
   journal?(sessionId: string, signal?: AbortSignal): Promise<ReplayJournalResponse>;
 }
@@ -104,7 +94,6 @@ export interface ReplayRuntimeLifecycleOptions {
   streamFactory?: (options: ReplayStreamControllerOptions) => ReplayStreamBoundary;
   clientInstanceId?: string;
   commandIdFactory?: () => string;
-  replaceSessionUrl?: (sessionId: string) => void;
 }
 
 type Listener = () => void;
@@ -192,15 +181,6 @@ function randomIdentity(prefix: string): string {
   return `${prefix}-${Date.now()}-${fallbackIdentityCounter}`;
 }
 
-function defaultReplaceSessionUrl(sessionId: string): void {
-  if (typeof history !== "object" || typeof location !== "object") return;
-  const url = new URL(location.href);
-  url.pathname = url.pathname.replace(/[^/]*$/, "replay.html");
-  url.search = new URLSearchParams({ session: sessionId }).toString();
-  url.hash = "";
-  history.replaceState(null, "", url);
-}
-
 function connectionState(state: ReplayStreamState): ReplayConnectionState {
   return state;
 }
@@ -251,17 +231,14 @@ export class ReplayRuntimeLifecycle {
   private readonly streamFactory: (options: ReplayStreamControllerOptions) => ReplayStreamBoundary;
   private readonly clientInstanceId: string;
   private readonly commandIdFactory: () => string;
-  private readonly replaceSessionUrl: (sessionId: string) => void;
   private readonly listeners = new Set<Listener>();
   private readonly storePublishScheduler: ReplayRuntimeStorePublishScheduler;
   private readonly unsubscribeStore: () => void;
   private phase: ReplayRuntimePhase = "IDLE";
   private capabilities: ReplayCapabilities | null = null;
-  private catalog: ReplayCatalog | null = null;
   private error: ReplayRuntimeError | null = null;
   private sessionId: string | null = null;
   private operation: ReplayRuntimeOperation = null;
-  private forkPending = false;
   private pendingCommand: ReplayCommandEnvelope | null = null;
   private awaitingStreamAck: ReplayStreamAckTarget | null = null;
   private commandRecoveryTarget: ReplayCommandRecoveryTarget | null = null;
@@ -272,13 +249,10 @@ export class ReplayRuntimeLifecycle {
   private reportError: ReplayRuntimeError | null = null;
   private reportRequest: Promise<ReplayReportResponse> | null = null;
   private reportRefreshQueued = false;
-  private createRequest: Promise<string> | null = null;
-  private forkRequest: Promise<string> | null = null;
   private stream: ReplayStreamBoundary | null = null;
   private abortController: AbortController | null = null;
   private runToken = 0;
   private streamToken = 0;
-  private catalogRequestToken = 0;
   private started = false;
   private disposed = false;
   private acquireAfterSnapshot = false;
@@ -297,7 +271,6 @@ export class ReplayRuntimeLifecycle {
     streamFactory = (options) => new ReplayStreamController(options),
     clientInstanceId = randomIdentity("browser"),
     commandIdFactory = () => randomIdentity("command"),
-    replaceSessionUrl = defaultReplaceSessionUrl,
   }: ReplayRuntimeLifecycleOptions) {
     this.entry = entry;
     this.api = api;
@@ -313,7 +286,6 @@ export class ReplayRuntimeLifecycle {
     this.streamFactory = streamFactory;
     this.clientInstanceId = clientInstanceId;
     this.commandIdFactory = commandIdFactory;
-    this.replaceSessionUrl = replaceSessionUrl;
     this.snapshot = this.buildSnapshot();
     this.storePublishScheduler = typeof document === "object"
       ? createReplayRuntimeStorePublishScheduler(() => this.publish())
@@ -409,147 +381,6 @@ export class ReplayRuntimeLifecycle {
     return promise;
   }
 
-  async loadCatalog(query: ReplayCatalogQuery = {
-    warmupBars: 200,
-    horizonMs: 86_400_000,
-    qualityMode: "exact",
-    blindMode: true,
-  }): Promise<ReplayCatalog> {
-    const catalogApi = this.api.catalog;
-    if (!catalogApi) throw new Error("replay catalog API is unavailable");
-    if (this.disposed) throw new Error("replay runtime is stopped");
-    const token = this.runToken;
-    const requestToken = this.catalogRequestToken + 1;
-    this.catalogRequestToken = requestToken;
-    this.operation = "catalog";
-    this.error = null;
-    this.publish();
-    try {
-      const catalog = await catalogApi.call(this.api, query, this.abortController?.signal);
-      if (!this.isCurrent(token)) {
-        throw new Error("replay runtime changed while loading the catalog");
-      }
-      if (requestToken !== this.catalogRequestToken) return catalog;
-      this.catalog = catalog;
-      return catalog;
-    } catch (error) {
-      if (this.isCurrent(token)
-        && requestToken === this.catalogRequestToken
-        && !(error instanceof DOMException && error.name === "AbortError")) {
-        this.error = runtimeError(error);
-      }
-      throw error;
-    } finally {
-      if (this.isCurrent(token) && requestToken === this.catalogRequestToken) {
-        if (this.operation === "catalog") this.operation = null;
-        this.publish();
-      }
-    }
-  }
-
-  createSession(config: ReplaySessionConfig): Promise<string> {
-    if (this.createRequest !== null) return this.createRequest;
-    const request = this.performCreateSession(config);
-    this.createRequest = request;
-    void request.then(
-      () => this.completeCreateRequest(request),
-      () => this.completeCreateRequest(request),
-    );
-    return request;
-  }
-
-  private async performCreateSession(config: ReplaySessionConfig): Promise<string> {
-    const createApi = this.api.createSession;
-    if (!createApi) throw new Error("replay session creation API is unavailable");
-    if (this.phase !== "CONFIGURING") throw new Error("replay runtime is not configuring a session");
-    this.operation = "create";
-    this.error = null;
-    this.publish();
-    const token = this.runToken;
-    try {
-      const response = await createApi.call(this.api, config, this.abortController?.signal);
-      if (!this.isCurrent(token) || this.sessionId !== null || this.phase !== "CONFIGURING") {
-        throw new Error("replay runtime changed while creating a session");
-      }
-      if (response.snapshot.session_id !== response.session_id) {
-        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "create response session identity is inconsistent", { fatal: false });
-      }
-      this.replaceSessionUrl(response.session_id);
-      this.acquireAfterSnapshot = true;
-      this.connectValidatedSession(response.snapshot, token);
-      return response.session_id;
-    } catch (error) {
-      if (this.isCurrent(token) && !(error instanceof DOMException && error.name === "AbortError")) {
-        this.phase = "CONFIGURING";
-        this.error = runtimeError(error);
-      }
-      throw error;
-    } finally {
-      if (this.isCurrent(token)) {
-        this.operation = null;
-        this.publish();
-      }
-    }
-  }
-
-  private completeCreateRequest(request: Promise<string>): void {
-    if (this.createRequest === request) this.createRequest = null;
-  }
-
-  forkSession(): Promise<string> {
-    if (this.forkRequest !== null) return this.forkRequest;
-    this.forkPending = true;
-    const request = this.performForkSession();
-    this.forkRequest = request;
-    void request.then(
-      () => this.completeForkRequest(request),
-      () => this.completeForkRequest(request),
-    );
-    return request;
-  }
-
-  private async performForkSession(): Promise<string> {
-    const forkApi = this.api.forkSession;
-    const sessionId = this.sessionId;
-    if (!forkApi || !sessionId) throw new Error("replay fork API is unavailable");
-    if (this.pendingCommand) throw new Error("wait for the pending replay command");
-    this.operation = "fork";
-    this.publish();
-    const token = this.runToken;
-    try {
-      const response = await forkApi.call(this.api, sessionId, this.abortController?.signal);
-      if (!this.isCurrent(token) || this.sessionId !== sessionId) {
-        throw new Error("replay runtime changed while forking a session");
-      }
-      if (response.session_id === sessionId
-        || response.snapshot.session_id !== response.session_id
-        || response.forked !== true
-        || response.forked_from_session_id !== sessionId) {
-        throw new ReplayStreamError("REPLAY_PROTOCOL_ERROR", "fork response is not bound to its parent session", { fatal: false });
-      }
-      this.replaceSessionUrl(response.session_id);
-      this.acquireAfterSnapshot = true;
-      this.connectValidatedSession(response.snapshot, token);
-      return response.session_id;
-    } catch (error) {
-      if (this.isCurrent(token)) this.commandError = runtimeError(error);
-      throw error;
-    } finally {
-      if (this.isCurrent(token)) {
-        this.publish();
-      }
-    }
-  }
-
-  private completeForkRequest(request: Promise<string>): void {
-    if (this.forkRequest !== request) return;
-    this.forkRequest = null;
-    this.forkPending = false;
-    if (this.operation === "fork") this.operation = null;
-    this.publish();
-    this.drainQueuedReportRefresh();
-  }
-
   async submitCommand(
     type: ReplayCommandType,
     payload: Readonly<Record<string, ReplayJson>> = {},
@@ -559,7 +390,6 @@ export class ReplayRuntimeLifecycle {
     if (!commandApi || !sessionId || this.phase !== "ACTIVE") {
       throw new Error("replay session is not command-ready");
     }
-    if (this.forkRequest !== null) throw new Error("wait for the pending replay fork");
     if (this.pendingCommand !== null) throw new Error("another replay command is pending");
     if (this.store.getSnapshot().connectionState !== "connected") {
       throw new Error("replay stream must reconnect before commands are accepted");
@@ -763,7 +593,6 @@ export class ReplayRuntimeLifecycle {
   }
 
   loadReport(): Promise<ReplayReportResponse> {
-    if (this.forkPending) return Promise.reject(new Error("wait for the pending replay fork"));
     if (this.reportRequest !== null) return this.reportRequest;
     const request = this.performLoadReport();
     this.reportRequest = request;
@@ -854,7 +683,7 @@ export class ReplayRuntimeLifecycle {
 
   private queueReportRefresh(): void {
     if (!this.api.report || !this.sessionId || this.disposed) return;
-    if (this.reportRequest !== null || this.forkPending) {
+    if (this.reportRequest !== null) {
       this.reportRefreshQueued = true;
       return;
     }
@@ -864,7 +693,6 @@ export class ReplayRuntimeLifecycle {
   private drainQueuedReportRefresh(): void {
     if (!this.reportRefreshQueued
       || this.disposed
-      || this.forkPending
       || this.reportRequest !== null) return;
     this.reportRefreshQueued = false;
     void this.loadReport().catch(() => undefined);
@@ -936,6 +764,16 @@ export class ReplayRuntimeLifecycle {
       this.publish();
       return;
     }
+    if (this.entry.kind === "configure") {
+      this.phase = "ENTRY_ERROR";
+      this.error = {
+        code: "REPLAY_ENTRY_INVALID",
+        message: "Replay workspace requires a v2 training run session.",
+      };
+      this.publish();
+      return;
+    }
+    const currentSessionId = this.entry.sessionId;
     const abortController = new AbortController();
     this.abortController = abortController;
     this.phase = "LOADING_CAPABILITIES";
@@ -952,27 +790,6 @@ export class ReplayRuntimeLifecycle {
         });
         return;
       }
-      const currentSessionId = this.sessionId ?? (this.entry.kind === "session" ? this.entry.sessionId : null);
-      if (currentSessionId === null) {
-        this.phase = "CONFIGURING";
-        this.publish();
-        if (this.api.catalog) {
-          const request = this.loadCatalog();
-          // loadCatalog increments its token synchronously before the first
-          // await. A later user refresh owns the configuration surface; a
-          // late rejection from this bootstrap request must not turn that
-          // newer state into a runtime-wide ERROR.
-          const requestToken = this.catalogRequestToken;
-          try {
-            await request;
-          } catch (error) {
-            if (!this.isCurrent(token) || requestToken !== this.catalogRequestToken) return;
-            throw error;
-          }
-        }
-        return;
-      }
-
       this.sessionId = currentSessionId;
       this.phase = "VALIDATING_SESSION";
       this.publish();
@@ -1180,7 +997,6 @@ export class ReplayRuntimeLifecycle {
       || this.disposed
       || this.phase !== "ACTIVE"
       || this.pendingCommand !== null
-      || this.forkRequest !== null
       || snapshot.connectionState !== "connected"
       || snapshot.sessionId !== this.sessionId
       || snapshot.controllerClientId !== null) return;
@@ -1234,9 +1050,6 @@ export class ReplayRuntimeLifecycle {
       this.commandRecoveryTarget = null;
     }
     this.commandRecoveryRequest = null;
-    this.createRequest = null;
-    this.forkRequest = null;
-    this.forkPending = false;
     this.acquireAfterSnapshot = false;
     this.controllerOwnershipIntent = false;
     this.operation = preservePendingCommand && this.pendingCommand !== null ? "command" : null;
@@ -1290,12 +1103,10 @@ export class ReplayRuntimeLifecycle {
     return {
       phase: this.phase,
       capabilities: this.capabilities,
-      catalog: this.catalog,
       error: this.error,
       sessionId: this.sessionId,
       clientInstanceId: this.clientInstanceId,
       operation: this.operation,
-      forkPending: this.forkPending,
       commandRecoveryPending: this.commandRecoveryTarget !== null,
       commandRecoveryInFlight: this.commandRecoveryRequest !== null,
       commandRecoveryReady: this.commandRecoveryTarget !== null
@@ -1362,7 +1173,7 @@ export function buildReplayMarketDataRuntime(
         committedAt: snapshot.store.virtualTimeMs,
         dataRevision: store.seriesStore.version,
       },
-      loading: !["ACTIVE", "CONFIGURING", "ERROR", "ENTRY_ERROR"].includes(snapshot.phase),
+      loading: !["ACTIVE", "ERROR", "ENTRY_ERROR"].includes(snapshot.phase),
       error: snapshot.error,
       crosshairData: null,
       lastPrice,
@@ -1413,9 +1224,6 @@ export interface ReplayRuntime extends ReplayRuntimeSnapshot {
   readonly actions: {
     retry(): void;
     requestResync(reason?: string): void;
-    loadCatalog(query?: ReplayCatalogQuery): Promise<ReplayCatalog>;
-    createSession(config: ReplaySessionConfig): Promise<string>;
-    forkSession(): Promise<string>;
     submitCommand(type: ReplayCommandType, payload?: Readonly<Record<string, ReplayJson>>): Promise<ReplayCommandResult>;
     retryPendingCommandRecovery(): Promise<ReplayCommandResult>;
     acquireController(takeover?: boolean): Promise<ReplayCommandResult>;
@@ -1462,7 +1270,6 @@ export function useReplayRuntime(
     streamFactory,
     clientInstanceId,
     commandIdFactory,
-    replaceSessionUrl,
   }: Omit<ReplayRuntimeLifecycleOptions, "entry"> = {},
 ): ReplayRuntime {
   const lifecycle = useMemo(() => new ReplayRuntimeLifecycle({
@@ -1472,8 +1279,7 @@ export function useReplayRuntime(
     ...(streamFactory === undefined ? {} : { streamFactory }),
     ...(clientInstanceId === undefined ? {} : { clientInstanceId }),
     ...(commandIdFactory === undefined ? {} : { commandIdFactory }),
-    ...(replaceSessionUrl === undefined ? {} : { replaceSessionUrl }),
-  }), [api, clientInstanceId, commandIdFactory, entry, replaceSessionUrl, store, streamFactory]);
+  }), [api, clientInstanceId, commandIdFactory, entry, store, streamFactory]);
   const lifecycleEffectGuard = useMemo(() => new ReplayLifecycleEffectGuard(), []);
   useEffect(
     () => lifecycleEffectGuard.mount(lifecycle),
@@ -1492,9 +1298,6 @@ export function useReplayRuntime(
     actions: {
       retry: () => lifecycle.restart(),
       requestResync: (reason?: string) => lifecycle.requestResync(reason),
-      loadCatalog: (query?: ReplayCatalogQuery) => lifecycle.loadCatalog(query),
-      createSession: (config: ReplaySessionConfig) => lifecycle.createSession(config),
-      forkSession: () => lifecycle.forkSession(),
       submitCommand: (type: ReplayCommandType, payload?: Readonly<Record<string, ReplayJson>>) => (
         lifecycle.submitCommand(type, payload)
       ),

@@ -374,6 +374,8 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
     "utf8",
   );
   assert.match(paper, /viewer\.actions\.submitTrade/);
+  assert.match(paper, /readonly viewer: ReplayViewerRuntime/);
+  assert.doesNotMatch(paper, /viewer === undefined|viewer !== undefined|runtime\.actions\.submitCommand/);
   assert.match(paper, /portfolioPositions|marketTracks\?\.portfolio/);
   assert.match(paper, /模拟账户强平/);
   assert.match(paper, /历史市场爆仓/);
@@ -395,4 +397,6 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
     "utf8",
   );
   assert.match(controls, /phase3Command\("acquire_controller", \{ takeover: false \}\)/);
+  assert.match(controls, /readonly viewer: ReplayViewerRuntime/);
+  assert.doesNotMatch(controls, /viewer === undefined|viewer !== undefined|runtime\.actions\.submitCommand/);
 });

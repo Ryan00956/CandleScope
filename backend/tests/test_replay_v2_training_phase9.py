@@ -148,7 +148,6 @@ async def _service(
     repository, trade_archive = _multi_trade_sources(archive_root, symbols)
     settings = replace(
         replay_settings(path),
-        product_v2_enabled=True,
         replay_historical_book_enabled=enabled,
         replay_historical_book_max_archive_bytes=64 * 1024 * 1024,
     )

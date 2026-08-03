@@ -136,7 +136,7 @@ test("Phase 11 preselects the live chart and carries its snapshot only on create
   assert.equal(Object.hasOwn(directPayload, "launch_context"), false);
 });
 
-test("Phase 11 live launcher is lazy, modal, and preserves the isolated v1 fallback", () => {
+test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
   const testDirectory = dirname(fileURLToPath(import.meta.url));
   const frontendRoot = resolve(testDirectory, "../../../..");
   const source = (path: string) => readFileSync(resolve(frontendRoot, path), "utf8");
@@ -148,16 +148,12 @@ test("Phase 11 live launcher is lazy, modal, and preserves the isolated v1 fallb
 
   assert.match(app, /lazy\(loadReplayLauncherDialog\)/);
   assert.match(app, /showReplayLauncher\s*\?\s*buildLiveReplayLaunchContext/);
-  assert.match(topBar, /REPLAY_PRODUCT_V2_ENABLED/);
   assert.match(topBar, /onClick=\{onOpenReplayLauncher\}/);
-  assert.match(topBar, /href=\{replayEntry\.href\}/);
-  assert.match(topBar, /target="_blank"/);
-  assert.match(topBar, /rel="noopener noreferrer"/);
-  assert.match(topBar, /K 线回放 ↗/);
+  assert.doesNotMatch(topBar, /REPLAY_PRODUCT_V2_ENABLED|href=\{replayEntry\.href\}|K 线回放 ↗/);
   assert.match(launcher, /presentation="modal"/);
   assert.match(launcher, /window\.open\("about:blank", "_blank"\)/);
   assert.match(launcher, /pendingReplayWindowRef/);
-  assert.match(launcher, /migrateLegacy: async/);
+  assert.doesNotMatch(launcher, /migrateLegacy|LEGACY_V1|LEGACY_ADAPTER/);
   assert.match(launcher, /reserveReplayWindow\(\)/);
   assert.match(launcher, /child\.opener = null/);
   assert.match(launcher, /location\.replace\(url\)/);

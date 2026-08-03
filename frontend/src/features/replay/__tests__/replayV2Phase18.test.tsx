@@ -69,7 +69,6 @@ function inventoryRaw() {
     },
     feature_flags: {
       replay_enabled: true,
-      product_v2_enabled: true,
       segment_download_worker_enabled: false,
       segment_auto_gc_enabled: false,
       fast_forward_optimization_enabled: false,
@@ -238,9 +237,6 @@ function baseApi(
     async createRun() {
       throw new Error("unused");
     },
-    async migrateLegacy() {
-      throw new Error("unused");
-    },
     ...overrides,
   } as TrainingHubApiBoundary;
 }
@@ -390,7 +386,6 @@ test("storage panel exposes HOLD, protected Review evidence and exact plan confi
       setDraft: noop,
       refreshCreatePlan: noop,
       createRun: noop,
-      migrateLegacy: noop,
       deleteRun: noop,
       continueRun: noop,
     },

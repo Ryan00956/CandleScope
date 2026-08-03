@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from copy import deepcopy
 from dataclasses import replace
@@ -21,7 +20,7 @@ from app.replay.training.events import ReplayV2Event
 from app.replay.training.models import (
     REPLAY_V2_ENUMS,
     REPLAY_V2_PROTOCOL,
-    SCHEMA_MIGRATION_CONTRACT,
+    ADAPTER_STORAGE_CONTRACT,
     MarketTrackContract,
     TimeDisclosurePolicy,
     TrainingRunContract,
@@ -32,11 +31,6 @@ from app.replay.training.models import (
 
 ROOT = Path(__file__).parents[2]
 GOLDEN_PATH = Path(__file__).parent / "fixtures" / "replay" / "v2_contract_golden.json"
-BASELINE_PATH = (
-    ROOT / "docs" / "perf-baselines" / "replay-v2-phase0-v1-baseline-20260721.json"
-)
-
-
 def _golden() -> dict[str, object]:
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
@@ -54,7 +48,7 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
     assert golden["enums"] == {
         name: list(values) for name, values in REPLAY_V2_ENUMS.items()
     }
-    assert golden["schema_migration_contract"] == SCHEMA_MIGRATION_CONTRACT
+    assert golden["adapter_storage_contract"] == ADAPTER_STORAGE_CONTRACT
 
 
 def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
@@ -177,15 +171,13 @@ def test_replay_v2_source_mix_and_silent_disclosure_downgrade_fail_closed() -> N
         )
 
 
-def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
+def test_replay_has_one_strict_core_gate_and_optional_capabilities(
     tmp_path: Path,
 ) -> None:
     default = load_replay_settings(
         {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
     )
     assert default.enabled is False
-    assert default.product_v2_enabled is True
-    assert default.product_v2_available is False
     assert default.replay_segment_download_worker_enabled is False
     assert default.replay_segment_auto_gc_enabled is False
     assert default.replay_fast_forward_optimization_enabled is False
@@ -193,27 +185,20 @@ def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
     assert default.replay_account_history_enabled is False
     assert default.replay_account_history_max_archive_bytes == 128 * 1024**3
 
-    nested_off = load_replay_settings(
-        {"REPLAY_PRODUCT_V2_ENABLED": "0"},
-        data_dir=tmp_path,
-        klines_db_path=tmp_path / "candlescope.db",
-    )
-    assert nested_off.product_v2_enabled is False
-    assert nested_off.product_v2_available is False
-
     enabled = load_replay_settings(
         {"REPLAY_ENABLED": "1"},
         data_dir=tmp_path,
         klines_db_path=tmp_path / "candlescope.db",
     )
-    assert enabled.product_v2_available is True
+    assert enabled.enabled is True
 
-    with pytest.raises(ValueError, match="REPLAY_PRODUCT_V2_ENABLED"):
-        load_replay_settings(
-            {"REPLAY_PRODUCT_V2_ENABLED": "sometimes"},
-            data_dir=tmp_path,
-            klines_db_path=tmp_path / "candlescope.db",
-        )
+    for retired_value in ("0", "1", "sometimes"):
+        with pytest.raises(ValueError, match="REPLAY_PRODUCT_V2_ENABLED was removed"):
+            load_replay_settings(
+                {"REPLAY_PRODUCT_V2_ENABLED": retired_value},
+                data_dir=tmp_path,
+                klines_db_path=tmp_path / "candlescope.db",
+            )
     for variable in (
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED",
         "REPLAY_SEGMENT_AUTO_GC_ENABLED",
@@ -230,7 +215,7 @@ def test_replay_v2_flags_are_strict_default_on_and_nested_under_replay(
 
 
 @pytest.mark.anyio
-async def test_replay_v2_http_paths_fail_closed_while_core_default_is_off(
+async def test_training_http_paths_fail_closed_without_a_started_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -239,7 +224,6 @@ async def test_replay_v2_http_paths_fail_closed_while_core_default_is_off(
         replace(
             replay_api.REPLAY_SETTINGS,
             enabled=False,
-            product_v2_enabled=True,
         ),
     )
     app = _app()
@@ -251,8 +235,8 @@ async def test_replay_v2_http_paths_fail_closed_while_core_default_is_off(
             assert response.json() == {
                 "protocol": "replay.v2",
                 "error": {
-                    "code": "REPLAY_PRODUCT_V2_DISABLED",
-                    "message": "Replay training v2 is disabled",
+                    "code": "REPLAY_TRAINING_UNAVAILABLE",
+                    "message": "Replay training runtime is unavailable",
                     "details": {},
                 },
             }
@@ -261,7 +245,7 @@ async def test_replay_v2_http_paths_fail_closed_while_core_default_is_off(
 
 
 @pytest.mark.anyio
-async def test_replay_v2_enabled_flag_without_started_runtime_fails_closed(
+async def test_enabled_replay_without_started_runtime_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -270,7 +254,6 @@ async def test_replay_v2_enabled_flag_without_started_runtime_fails_closed(
         replace(
             replay_api.REPLAY_SETTINGS,
             enabled=True,
-            product_v2_enabled=True,
         ),
     )
     transport = httpx.ASGITransport(app=_app())
@@ -278,13 +261,13 @@ async def test_replay_v2_enabled_flag_without_started_runtime_fails_closed(
         response = await client.get("/api/v1/replay/runs")
     assert response.status_code == 503
     assert response.json()["error"] == {
-        "code": "REPLAY_PRODUCT_V2_UNAVAILABLE",
-        "message": "Replay training v2 runtime is unavailable",
+        "code": "REPLAY_TRAINING_UNAVAILABLE",
+        "message": "Replay training runtime is unavailable",
         "details": {},
     }
 
 
-def test_replay_v2_websocket_path_fails_while_core_default_is_off(
+def test_training_websocket_path_fails_without_a_started_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -293,7 +276,6 @@ def test_replay_v2_websocket_path_fails_while_core_default_is_off(
         replace(
             replay_api.REPLAY_SETTINGS,
             enabled=False,
-            product_v2_enabled=True,
         ),
     )
     with TestClient(_app()) as client:
@@ -303,8 +285,8 @@ def test_replay_v2_websocket_path_fails_while_core_default_is_off(
             assert websocket.receive_json() == {
                 "protocol": "replay.v2",
                 "error": {
-                    "code": "REPLAY_PRODUCT_V2_DISABLED",
-                    "message": "Replay training v2 is disabled",
+                    "code": "REPLAY_TRAINING_UNAVAILABLE",
+                    "message": "Replay training runtime is unavailable",
                     "details": {},
                 },
             }
@@ -313,24 +295,23 @@ def test_replay_v2_websocket_path_fails_while_core_default_is_off(
             assert closed.value.code == 1013
 
 
-def test_phase0_manifest_freezes_v1_golden_performance_and_rollback_bytes() -> None:
-    manifest = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-    assert manifest["baseline_head"] == "2346dba32c0ce9e35dd6941bc4445366da4362a7"
-    assert manifest["v1_protocol"] == "replay.v1"
-    assert set(manifest) == {
-        "schema",
-        "captured_at",
-        "baseline_head",
-        "v1_protocol",
-        "hash_algorithm",
-        "golden",
-        "performance",
-        "rollback",
+def test_phase0_contract_does_not_freeze_retired_v1_product_assets() -> None:
+    golden = _golden()
+    assert golden["protocol"] == REPLAY_V2_PROTOCOL
+    assert set(golden) == {
+        "protocol",
+        "schema_version",
+        "enums",
+        "adapter_storage_contract",
+        "sample_command",
+        "sample_event",
+        "sample_run",
+        "sample_track",
     }
-    for category in ("golden", "performance", "rollback"):
-        assert manifest[category]
-        for entry in manifest[category]:
-            path = ROOT / entry["path"]
-            payload = path.read_bytes()
-            assert len(payload) == entry["bytes"], path
-            assert hashlib.sha256(payload).hexdigest() == entry["sha256"], path
+    assert set(golden).isdisjoint(
+        {"baseline_head", "v1_protocol", "golden", "performance", "rollback"}
+    )
+    adapter = golden["adapter_storage_contract"]
+    assert isinstance(adapter, dict)
+    assert adapter["ownership"] == "V2_INTERNAL_ADAPTER"
+    assert adapter["public_legacy_import"] is False

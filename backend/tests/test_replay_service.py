@@ -17,6 +17,7 @@ from app.replay.storage import ReplaySQLiteStore
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
+    ROW_COUNT,
     START_MS,
     SessionIdFactory,
     replay_config,
@@ -212,7 +213,7 @@ async def test_blind_service_redacts_actual_time_until_explicit_reveal(
     )
     assert revealed["data"]["actual_history"] == {
         "replay_start_ms": START_MS + 4 * INTERVAL_MS,
-        "replay_end_open_ms": START_MS + 8 * INTERVAL_MS,
+        "replay_end_open_ms": START_MS + (ROW_COUNT - 1) * INTERVAL_MS,
     }
     await service.shutdown(step_timeout=1.0)
 

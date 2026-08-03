@@ -64,6 +64,17 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+function trainingRunStatusMessage(card: TrainingRunCard): string {
+  if (card.state !== "ENDED") return card.status.message;
+  return card.resume_action === "UNAVAILABLE"
+    ? "训练已结束；当前存档无法打开复盘。"
+    : "训练已结束，可打开复盘。";
+}
+
+function trainingRunPrimaryActionLabel(card: TrainingRunCard): string {
+  return card.state === "ENDED" ? "打开复盘" : "继续训练";
+}
+
 export interface TrainingRunDeleteConfirmationProps {
   readonly card: TrainingRunCard;
   readonly busy: boolean;
@@ -663,7 +674,7 @@ export default function TrainingHubDialog({
             </select>
           </label>
           <label>
-            兼容性
+            可用性
             <select
               value={runtime.filters.compatibility ?? ""}
               onChange={(event) => runtime.actions.setFilters({
@@ -673,10 +684,8 @@ export default function TrainingHubDialog({
                   : event.target.value as TrainingRunCompatibility,
               })}
             >
-              <option value="">全部兼容性</option>
+              <option value="">全部可用性</option>
               <option value="READY">READY</option>
-              <option value="LEGACY_ADAPTER">LEGACY_ADAPTER</option>
-              <option value="LEGACY_V1">LEGACY_V1</option>
               <option value="UNAVAILABLE">UNAVAILABLE</option>
             </select>
           </label>
@@ -704,10 +713,10 @@ export default function TrainingHubDialog({
         ) : (
           <div className="training-hub-card-grid">
             {runtime.items.map((card) => (
-              <article className="training-hub-card" key={`${card.kind}:${card.run_id}`}>
+              <article className="training-hub-card" key={card.run_id}>
                 <header>
                   <div>
-                    <span>{card.kind === "LEGACY_V1" ? "LEGACY V1" : "TRAINING RUN"}</span>
+                    <span>TRAINING RUN</span>
                     <h2>{card.name}</h2>
                   </div>
                   <strong data-run-state={card.state}>{card.state}</strong>
@@ -721,26 +730,17 @@ export default function TrainingHubDialog({
                     <dd>{card.equity_status === "CURRENT" ? `${card.equity} ${card.settlement_asset}` : card.equity_status}</dd>
                   </div>
                   <div><dt>时间披露</dt><dd>{card.time_disclosure_policy}</dd></div>
-                  <div><dt>兼容层</dt><dd>{card.compatibility}</dd></div>
+                  <div><dt>可用性</dt><dd>{card.compatibility}</dd></div>
                 </dl>
-                <p>{card.status.message}</p>
+                <p>{trainingRunStatusMessage(card)}</p>
                 <footer>
                   <button
                     type="button"
                     disabled={busy || card.resume_action === "UNAVAILABLE"}
                     onClick={() => runtime.actions.continueRun(card)}
                   >
-                    继续训练
+                    {trainingRunPrimaryActionLabel(card)}
                   </button>
-                  {card.kind === "LEGACY_V1" && card.resume_action !== "UNAVAILABLE" && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void runtime.actions.migrateLegacy(card.adapter_session_id, card.name)}
-                    >
-                      建立 v2 包装并继续
-                    </button>
-                  )}
                   <button
                     className="training-hub-delete-action"
                     type="button"

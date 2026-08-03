@@ -748,7 +748,6 @@ def _settings(path: Path, *, optimized: bool) -> ReplaySettings:
         event_subscriber_queue=64,
         controller_ttl_seconds=3_600,
         idle_ttl_seconds=3_600,
-        product_v2_enabled=True,
         replay_fast_forward_optimization_enabled=optimized,
     )
 

@@ -27,6 +27,7 @@ from app.replay.history_archive import (
 )
 from app.replay.remote_history import (
     RemoteReplayHistoryRepository,
+    ReplayHistoryOriginUnavailable,
     publish_remote_history_index,
 )
 from app.replay.service import ReplayService
@@ -43,6 +44,7 @@ from app.replay.training.schema import migrate_training_schema
 from scripts.import_binance_replay_history import (
     _daily_fallbacks_by_month,
     _select_source_objects,
+    _source_filter_policy,
 )
 from tests.fixtures.replay.fakes import make_bar
 from tests.fixtures.replay.service_fakes import SessionIdFactory, replay_settings
@@ -72,6 +74,14 @@ def test_binance_monthly_history_plan_retains_checksum_daily_fallbacks() -> None
         "2019-09-02",
         "2019-09-03",
     ]
+
+
+def test_binance_history_parser_policy_requires_v2_rebuild() -> None:
+    assert _source_filter_policy(None) == "binance_checksum_utc_grid_v2"
+    assert (
+        _source_filter_policy(SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED)
+        == "binance_checksum_catalog_fixed_grid_v2"
+    )
 
 
 def _batch(
@@ -569,8 +579,6 @@ async def test_failed_random_preparation_retries_immutable_remote_revision(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=tmp_path / "cache",
             replay_history_origin_uri=str(origin),
             replay_history_catalog_refresh_seconds=0,
@@ -696,7 +704,6 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         instance = ReplayService(
             settings=replace(
                 replay_settings(database),
-                product_v2_enabled=True,
             ),
             store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
             repository=ReplayHistoryRepository(root),
@@ -851,6 +858,24 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
         assert bundle["schema_version"] == "replay-paged-bar-session-dataset.v1"
         assert bundle["paging_manifest"]["source_revision"] == manifest.catalog_epoch
+        assert bundle["paging_manifest"]["schema_version"] == (
+            "replay-paged-bar-manifest.v3"
+        )
+        assert bundle["paging_manifest"]["terminal_kind"] == (
+            "SOURCE_LATEST_CLOSED"
+        )
+        assert bundle["paging_manifest"]["verified_market_halts"] == []
+        retired_manifest = dict(bundle["paging_manifest"])
+        retired_manifest["schema_version"] = "replay-paged-bar-manifest.v2"
+        with pytest.raises(
+            ReplayDomainError,
+            match="paged BAR manifest schema is unsupported",
+        ) as retired_error:
+            service._validated_bar_paging_manifest(
+                retired_manifest,
+                BarDatasetSnapshot.from_dict(bundle["bar_dataset"]),
+            )
+        assert retired_error.value.code is ReplayErrorCode.DATASET_MISMATCH
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -917,7 +942,6 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
         instance = ReplayService(
             settings=replace(
                 replay_settings(database),
-                product_v2_enabled=True,
             ),
             store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
             repository=ReplayHistoryRepository(root),
@@ -979,19 +1003,35 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
         assert persisted is not None
         bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
         manifest = bundle["paging_manifest"]
-        assert manifest["schema_version"] == "replay-paged-bar-manifest.v2"
+        assert manifest["schema_version"] == "replay-paged-bar-manifest.v3"
+        assert manifest["terminal_kind"] == "SOURCE_LATEST_CLOSED"
         assert manifest["verified_market_halts"] == [
             {
-                "schema_version": "replay-bar-halt.v1",
+                "schema_version": "replay-bar-halt.v2",
                 "halt_id": "binance-system-upgrade-2019-05-15",
                 "start_open_ms": halt_start_ms,
                 "end_open_ms": resume_ms - INTERVAL_MS,
                 "resume_ms": resume_ms,
                 "reason": "exchange_scheduled_system_upgrade",
-                "evidence_url": (
-                    "https://binance.zendesk.com/hc/en-us/articles/"
-                    "360028054052-System-Upgrade-Notice"
-                ),
+                "boundary_source": "binance_spot_klines_bracketed_gap.v1",
+                "evidence": [
+                    {
+                        "role": "maintenance_notice",
+                        "url": (
+                            "https://www.binance.com/en/support/articles/"
+                            "360028054052"
+                        ),
+                    },
+                    {
+                        "role": "official_klines_boundary",
+                        "url": (
+                            "https://api.binance.com/api/v3/klines?"
+                            "symbol=BTCUSDT&interval=1m&"
+                            "startTime=1557889140000&endTime=1557925200000&"
+                            "limit=1000"
+                        ),
+                    },
+                ],
             }
         ]
 
@@ -1050,7 +1090,7 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
         assert resumed["cursor"]["last_base_bar_open_ms"] == resume_ms
         snapshot = (await service.get_session(session_id))["snapshot"]
         builder = snapshot["components"]["bar_builder"]
-        assert builder["gap_policy"] == "verified_market_halts_v1"
+        assert builder["gap_policy"] == "verified_market_halts_v2"
         assert builder["replay_events_applied"] == 6
         assert [bar["open_time_ms"] for bar in builder["closed_bars"][-2:]] == [
             halt_start_ms - INTERVAL_MS,
@@ -1067,6 +1107,175 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
         assert snapshot["cursor"]["last_base_bar_open_ms"] == resume_ms
     finally:
         await recovered.shutdown(step_timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "unverified-gap-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [*range(0, 10), *range(11, 21)],
+                price_base=100,
+                source_key="fixture-unverified-future-gap",
+                digest_character="8",
+            )
+        ],
+    )
+    database = tmp_path / "unverified-gap.db"
+    service = ReplayService(
+        settings=replace(
+            replay_settings(database),
+        ),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        repository=ReplayHistoryRepository(root),
+        now_ms=lambda: NOW_MS,
+        session_id_factory=SessionIdFactory("unverified-gap-session"),
+        training_run_id_factory=SessionIdFactory("unverified-gap-run"),
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=3 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        early_request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v2",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Unverified future gap",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "requested_start_ms": START_MS + 5 * INTERVAL_MS,
+                "indicator_warmup_bars": 2,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 3 * INTERVAL_MS,
+                "random_seed": None,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        assert service.training is not None
+        with pytest.raises(TrainingRunError) as early_rejected:
+            await service.training.create_run(early_request)
+        assert early_rejected.value.code == "TRAINING_RUN_CREATE_FAILED"
+        assert early_rejected.value.details["reason"] == "NO_ELIGIBLE_WINDOW"
+
+        reachable_floor_ms = START_MS + 13 * INTERVAL_MS
+        random_payload = early_request.to_dict()
+        random_payload.update(
+            {
+                "start_mode": "RANDOM",
+                "requested_start_ms": None,
+            }
+        )
+        for seed in range(32):
+            random_request = TrainingRunCreateRequest.from_dict(
+                {**random_payload, "random_seed": seed}
+            )
+            random_config = service.training._adapter_config(random_request)
+            selection = await service.select_training_window(
+                random_config,
+                expected_catalog_epoch=catalog["catalog_epoch"],
+            )
+            assert int(selection["selected_start_ms"]) >= reachable_floor_ms
+            assert selection["bar_terminal_kind"] == "SOURCE_LATEST_CLOSED"
+            assert selection["continuous_future_end_ms"] == (
+                START_MS + 20 * INTERVAL_MS
+            )
+
+        valid_request = TrainingRunCreateRequest.from_dict(
+            {
+                **early_request.to_dict(),
+                "name": "Reachable post-gap tail",
+                "requested_start_ms": reachable_floor_ms,
+            }
+        )
+        created = await service.training.create_run(valid_request)
+        session_id = str(created["run"]["adapter_session_id"])
+
+        persisted = await service.store.load_dataset(session_id)
+        assert persisted is not None
+        bundle = json.loads(bytes(persisted["snapshot_blob"]).decode("utf-8"))
+        paging_manifest = bundle["paging_manifest"]
+        assert paging_manifest["source_revision"] == manifest.catalog_epoch
+        assert paging_manifest["terminal_open_ms"] == START_MS + 20 * INTERVAL_MS
+        assert paging_manifest["terminal_kind"] == "SOURCE_LATEST_CLOSED"
+        assert paging_manifest["schema_version"] == "replay-paged-bar-manifest.v3"
+        assert paging_manifest["verified_market_halts"] == []
+
+        await service.command(
+            session_id,
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="acquire-reachable-tail",
+                client_instance_id="unverified-gap-browser",
+                expected_revision=0,
+                type=CommandType.ACQUIRE_CONTROLLER,
+                payload={},
+            ),
+        )
+        before_latest = await service.command(
+            session_id,
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="step-before-real-tail",
+                client_instance_id="unverified-gap-browser",
+                expected_revision=1,
+                type=CommandType.STEP,
+                payload={"count": 7},
+            ),
+        )
+        assert before_latest["state"] == "PAUSED"
+        assert before_latest["cursor"]["at_end"] is False
+        assert before_latest["cursor"]["last_base_bar_open_ms"] == (
+            START_MS + 19 * INTERVAL_MS
+        )
+
+        ended = await service.command(
+            session_id,
+            ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id="step-real-tail",
+                client_instance_id="unverified-gap-browser",
+                expected_revision=2,
+                type=CommandType.STEP,
+                payload={"count": 1},
+            ),
+        )
+        assert ended["state"] == "ENDED"
+        assert ended["cursor"]["at_end"] is True
+        assert ended["cursor"]["last_base_bar_open_ms"] == (
+            START_MS + 20 * INTERVAL_MS
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 def test_corrupt_live_remote_index_fails_closed_instead_of_using_stale_cache(
@@ -1097,6 +1306,155 @@ def test_corrupt_live_remote_index_fails_closed_instead_of_using_stale_cache(
 
     with pytest.raises(ReplayHistoryArchiveError, match="index fields"):
         repository.list_all_series()
+
+
+def test_unavailable_remote_index_rejects_new_catalog_but_keeps_pinned_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-unavailable-index",
+                digest_character="9",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    cache = tmp_path / "cache"
+    repository = RemoteReplayHistoryRepository(
+        cache,
+        origin,
+        refresh_seconds=0,
+    )
+    assert repository.list_all_series()
+    expected = repository.query_bars_at_revision(
+        manifest.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        start_ms=START_MS,
+        end_ms=START_MS + INTERVAL_MS,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise ReplayHistoryOriginUnavailable(
+            "remote replay-history origin is unavailable"
+        )
+
+    monkeypatch.setattr(repository.origin, "read_json", unavailable)
+    monkeypatch.setattr(repository.origin, "fetch_object", unavailable)
+    with pytest.raises(ReplayHistoryOriginUnavailable, match="unavailable"):
+        repository.list_all_series()
+
+    # Existing Runs address an immutable revision, not the mutable current
+    # index.  Once its manifest/object are cached it remains reproducible while
+    # freshness-sensitive catalog discovery is rejected.
+    assert repository.query_bars_at_revision(
+        manifest.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        start_ms=START_MS,
+        end_ms=START_MS + INTERVAL_MS,
+        exchange="binance",
+        market_type="spot",
+    ) == expected
+
+    cold = RemoteReplayHistoryRepository(cache, origin, refresh_seconds=0)
+    monkeypatch.setattr(cold.origin, "read_json", unavailable)
+    monkeypatch.setattr(cold.origin, "fetch_object", unavailable)
+    with pytest.raises(ReplayHistoryOriginUnavailable, match="unavailable"):
+        cold.list_all_series()
+    assert cold.query_bars_at_revision(
+        manifest.catalog_epoch,
+        "BTCUSDT",
+        "1m",
+        start_ms=START_MS,
+        end_ms=START_MS + INTERVAL_MS,
+        exchange="binance",
+        market_type="spot",
+    ) == expected
+
+
+@pytest.mark.anyio
+async def test_service_maps_unavailable_remote_catalog_to_503_domain_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "service-origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-service-unavailable-index",
+                digest_character="a",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    repository = RemoteReplayHistoryRepository(
+        tmp_path / "service-cache",
+        origin,
+        refresh_seconds=0,
+    )
+    database = tmp_path / "service-unavailable-index.db"
+    service = ReplayService(
+        settings=replay_settings(database),
+        store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+        repository=repository,
+        now_ms=lambda: NOW_MS,
+    )
+    await service.start()
+    try:
+        assert (
+            await service.catalog(
+                warmup_bars=1,
+                horizon_ms=2 * INTERVAL_MS,
+                quality_mode="exact",
+                blind_mode=False,
+            )
+        )["entries"]
+
+        def unavailable(*_args, **_kwargs):
+            raise ReplayHistoryOriginUnavailable(
+                "remote replay-history origin is unavailable"
+            )
+
+        monkeypatch.setattr(repository.origin, "read_json", unavailable)
+        monkeypatch.setattr(repository.origin, "fetch_object", unavailable)
+
+        with pytest.raises(ReplayDomainError) as visible_error:
+            await service.catalog(
+                warmup_bars=1,
+                horizon_ms=2 * INTERVAL_MS,
+                quality_mode="exact",
+                blind_mode=False,
+            )
+        assert visible_error.value.code is ReplayErrorCode.ARCHIVE_DEGRADED
+        assert visible_error.value.message == "replay history catalog is unavailable"
+
+        with pytest.raises(ReplayDomainError) as blind_error:
+            await service.catalog(
+                warmup_bars=1,
+                horizon_ms=2 * INTERVAL_MS,
+                quality_mode="exact",
+                blind_mode=True,
+            )
+        assert blind_error.value.code is ReplayErrorCode.ARCHIVE_DEGRADED
+        assert blind_error.value.details == {"blind_redacted": True}
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 def test_closed_archive_catalog_epoch_does_not_churn_with_wall_clock(
@@ -1435,7 +1793,7 @@ def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     assert pinned.provenance.source_revision == first_manifest.catalog_epoch
     assert pinned.replay_rows[0].open == "104"
     assert "source_revision" not in pinned.snapshot_ref().to_dict()
-    persisted_bar_ref, _ = ReplayService._persisted_dataset(pinned, None)
+    persisted_bar_ref, _ = ReplayService._persisted_extension_dataset(pinned, None)
     assert persisted_bar_ref["source_revision"] == first_manifest.catalog_epoch
     persisted_trade_ref, _ = ReplayService._persisted_dataset(
         pinned,
@@ -1510,8 +1868,6 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
@@ -1589,6 +1945,7 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
         assert persisted is not None
         with sqlite3.connect(database) as connection:
             connection.row_factory = sqlite3.Row
+            connection.execute("SAVEPOINT retired_schema_probe")
             legacy_ref = dict(persisted["snapshot_ref"])
             nested_bar_ref = legacy_ref.get("bar_snapshot_ref")
             if isinstance(nested_bar_ref, dict):
@@ -1614,8 +1971,28 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
             legacy_pin = connection.execute(
                 "SELECT source_revision FROM replay_archive_pin"
             ).fetchone()
-        assert legacy_pin is not None
-        assert legacy_pin["source_revision"] == (
+            assert legacy_pin is None
+
+            connection.execute(
+                """
+                UPDATE replay_training_schema_version
+                SET version = 9
+                WHERE singleton = 1
+                """
+            )
+            with pytest.raises(
+                RuntimeError,
+                match="schema 9 is obsolete.*clear replay training data",
+            ):
+                migrate_training_schema(connection, now_ms=NOW_MS)
+
+            connection.execute("ROLLBACK TO retired_schema_probe")
+            connection.execute("RELEASE retired_schema_probe")
+            restored_pin = connection.execute(
+                "SELECT source_revision FROM replay_archive_pin"
+            ).fetchone()
+        assert restored_pin is not None
+        assert restored_pin["source_revision"] == (
             writer.current_manifest(IDENTITY, "1m").catalog_epoch
         )
         session = await service.get_session("archive-session-1")
@@ -1673,8 +2050,6 @@ async def test_all_available_history_crosses_a_revision_declared_archive_gap(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
@@ -1797,8 +2172,6 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
@@ -1991,8 +2364,6 @@ async def test_weekly_native_gap_fails_before_pin_then_accepts_continuous_revisi
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
@@ -2172,8 +2543,6 @@ async def test_blind_native_daily_history_uses_source_bucket_ordinal_mapping(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: fixture_now_ms),
@@ -2342,8 +2711,6 @@ async def test_duration_projection_uses_pinned_three_day_source_phase(
     service = ReplayService(
         settings=replace(
             replay_settings(database),
-            product_v2_enabled=True,
-            replay_bar_source="archive",
             replay_history_archive_dir=root,
         ),
         store=ReplaySQLiteStore(database, now_ms=lambda: fixture_now_ms),

@@ -1,0 +1,161 @@
+{
+  "expected": {
+    "responseSha256": [
+      "sha256:bf0aceab9a6d31fa08d2d41f9623ad6a2ad1707a3ca6b2e84247f817595c105d",
+      "sha256:71b1b8e3ebe1bd5e02fdbe1f91abad0b39f78aa4a4da1c565ead8336b7c92e22",
+      "sha256:ca5717b70d14e8bc041efc4e3de2dd531148901e9de1fbddef6dbdf751a37507",
+      "sha256:13955430836e84bf8ce68900269d71e9a1bc2406b64d9cba6ef30e686e269f3e",
+      "sha256:4fc53d8674913e1dcc993e9518e73ab606428d6b7a647673ba27d1709c865b2b",
+      "sha256:49f93c7685461ba85d437db58efb5fa6a2f44c4eeb337837ce8864758c60b86f",
+      "sha256:8906445368ad21331be5977269c43cd16c17d9c5fae0ff33142ae15715696cb7",
+      "sha256:7e0945cb0caf55456a8452be1a9f34e33d7424fa735786a4876d8bcab27f4ce8",
+      "sha256:783b75eb948d22dc06496546a20fa83645c71b37e19e514bf3cb951301f2e864",
+      "sha256:655d1a656003a2d1a6ecc30042ea0ab785a34b24d3ab619a9cad33baa4f035a4",
+      "sha256:5b54214c508e88259af2d693f57079ec15e78789bef8d390d8e48051c81c6448",
+      "sha256:fe00b8380f0851c685bb362898cdf976c4c102aa2aaa1cdbcc3bbc176f477697"
+    ],
+    "transcriptSha256": "sha256:6984851b56ecf44f860501c4fee6043742e34afa20e9198c102d858f344c91e2"
+  },
+  "protocol": "candlescope.plugin/2",
+  "requests": [
+    {
+      "generation": 0,
+      "id": "handshake-1",
+      "jsonrpc": "2.0",
+      "method": "handshake",
+      "params": {
+        "entrypointId": "main",
+        "host": {
+          "name": "CandleScope",
+          "version": "0.4.0"
+        },
+        "hostApis": [],
+        "protocols": [
+          "candlescope.plugin/2"
+        ],
+        "transports": [
+          "jsonl/1"
+        ]
+      }
+    },
+    {
+      "generation": 0,
+      "id": "describe-1",
+      "jsonrpc": "2.0",
+      "method": "describe",
+      "params": {}
+    },
+    {
+      "generation": 1,
+      "id": "activate-1",
+      "jsonrpc": "2.0",
+      "method": "activate",
+      "params": {
+        "capabilities": [],
+        "generation": 1,
+        "instanceId": "aho-corasick-instance-1"
+      }
+    },
+    {
+      "generation": 1,
+      "id": "invoke-1",
+      "jsonrpc": "2.0",
+      "method": "invoke",
+      "params": {
+        "contributionId": "candlescope-aho-corasick",
+        "input": {
+          "asciiCaseInsensitive": true,
+          "haystack": "ushers 波浪-wave-WAVE",
+          "maxMatches": 100,
+          "overlapping": true,
+          "patterns": [
+            "he",
+            "she",
+            "hers",
+            "波浪",
+            "wave"
+          ]
+        },
+        "requestContext": {
+          "contributionId": "candlescope-aho-corasick",
+          "generation": 1,
+          "traceId": "phase9-aho-corasick",
+          "userAction": true
+        }
+      }
+    },
+    {
+      "generation": 1,
+      "id": "health-1",
+      "jsonrpc": "2.0",
+      "method": "healthCheck",
+      "params": {}
+    },
+    {
+      "generation": 1,
+      "id": "cancel-1",
+      "jsonrpc": "2.0",
+      "method": "cancel",
+      "params": {
+        "requestId": "not-pending"
+      }
+    },
+    {
+      "generation": 1,
+      "id": "prepare-1",
+      "jsonrpc": "2.0",
+      "method": "prepareUpgrade",
+      "params": {}
+    },
+    {
+      "generation": 1,
+      "id": "health-2",
+      "jsonrpc": "2.0",
+      "method": "healthCheck",
+      "params": {}
+    },
+    {
+      "generation": 1,
+      "id": "deactivate-1",
+      "jsonrpc": "2.0",
+      "method": "deactivate",
+      "params": {
+        "reason": "phase9 transcript"
+      }
+    },
+    {
+      "generation": 2,
+      "id": "activate-2",
+      "jsonrpc": "2.0",
+      "method": "activate",
+      "params": {
+        "capabilities": [],
+        "generation": 2,
+        "instanceId": "aho-corasick-instance-2"
+      }
+    },
+    {
+      "generation": 2,
+      "id": "events-1",
+      "jsonrpc": "2.0",
+      "method": "eventBatch",
+      "params": {
+        "delivery": {},
+        "events": [
+          {
+            "type": "tick"
+          }
+        ]
+      }
+    },
+    {
+      "generation": 2,
+      "id": "shutdown-1",
+      "jsonrpc": "2.0",
+      "method": "shutdown",
+      "params": {}
+    }
+  ],
+  "schemaVersion": "candlescope.plugin-v2-transcript.v1",
+  "transport": "jsonl/1"
+}

@@ -17,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
         from app.plugin_installer_v2.cli import main as platform_v2_main
 
         return platform_v2_main(arguments[1:])
+    if arguments[:1] == ["v3"]:
+        from app.plugin_github_import_v3.cli import main as platform_v3_main
+
+        return platform_v3_main(arguments[1:])
     from app.plugin_runtime.installer_cli import main as legacy_main
 
     return legacy_main(arguments)

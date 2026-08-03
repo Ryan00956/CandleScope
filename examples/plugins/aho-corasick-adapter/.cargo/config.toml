@@ -1,0 +1,8 @@
+[target.x86_64-pc-windows-msvc]
+# MSVC's default PE timestamp and CodeView GUID vary between invocations.
+# /Brepro replaces them with content-derived values; the Phase 9 gate builds in
+# two different target directories and requires byte-identical executables.
+rustflags = ["-C", "link-arg=/Brepro"]
+
+[net]
+offline = true

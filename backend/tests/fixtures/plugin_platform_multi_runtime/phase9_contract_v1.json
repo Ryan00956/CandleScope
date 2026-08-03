@@ -1,0 +1,102 @@
+{
+  "assessment": {
+    "assessmentFileSha256": "sha256:c7ba06a5e797dc560dcabb64eb81c0921def9225352a10397ef75604bc1999fe",
+    "assessmentIdentity": "sha256:c2944ab10b1920ad6729fa6bf546e0516e781c30515e594c0f1daada8b37fb5d",
+    "commit": "17f8b32e3b7c845ef3c5429b823804f552f14ec9",
+    "commitVerified": true,
+    "executedRepositoryCode": false,
+    "mayExecute": false,
+    "releaseStatus": "not-published",
+    "repository": "https://github.com/BurntSushi/aho-corasick",
+    "schemaVersion": "candlescope.github-assessment/1",
+    "tag": "1.1.4",
+    "tagObject": "4fb4e803829ae895e3c11f7a93e05c2a65a6a719"
+  },
+  "exitGate": {
+    "assessmentToLocalInstall": true,
+    "disableEnable": true,
+    "freshInstall": true,
+    "freshProcessCheck": true,
+    "helperRollbackPreservesBundle": true,
+    "nativeFlagOffFailsClosed": true,
+    "quickRepeat": true,
+    "secondProject": "BurntSushi/aho-corasick"
+  },
+  "helper": {
+    "binaryExecution": false,
+    "clone": false,
+    "defaultEnabled": false,
+    "fixedApiOrigin": "https://api.github.com",
+    "flag": "CANDLESCOPE_PLUGIN_GITHUB_IMPORT_ENABLED",
+    "installScriptExecution": false,
+    "networkConfirmationRequired": true,
+    "optionalTokenEnvironments": [
+      "GITHUB_TOKEN",
+      "GH_TOKEN"
+    ],
+    "pendingSourceLockExecutable": false,
+    "releaseAssetDownload": false,
+    "repositoryWorkflowExecution": false
+  },
+  "implementedOn": "2026-08-03",
+  "referenceAdapter": {
+    "buildReceiptSha256": "sha256:f82f4c4f1e2e50493e14cf39335e40c492e7ceafc08d4ea970239c3e445e3d00",
+    "bundleSha256": "sha256:9fbb59299b2f3d900b4d8a2bd1c677f36b801eb27cfd39c2dca73efa44bcc249",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "hostInternalImports": false,
+    "networkAccessDuringBuild": false,
+    "permissions": {
+      "optional": [],
+      "required": []
+    },
+    "pluginId": "candlescope.aho-corasick",
+    "publisher": "candlescope-contributors",
+    "reproducibleBuilds": 2,
+    "runtimeArtifact": "runtime/adapter.exe",
+    "runtimeKind": "native-executable",
+    "runtimeSha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d",
+    "runtimeSize": 427008,
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "sourceCompilation": true,
+    "sourceLockSha256": "sha256:390532a08d0b1760eb71aeda207de044dedbe45c5709dc6eb622b0ccbb1da786",
+    "target": "x86_64-pc-windows-msvc",
+    "transcriptResponses": 12,
+    "transcriptSha256": "sha256:6984851b56ecf44f860501c4fee6043742e34afa20e9198c102d858f344c91e2",
+    "upstreamAlgorithmCopied": false,
+    "upstreamCrates": [
+      {
+        "licenseSpdx": "Unlicense OR MIT",
+        "name": "aho-corasick",
+        "sha256": "sha256:ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301",
+        "size": 184015,
+        "version": "1.1.4"
+      },
+      {
+        "licenseSpdx": "Unlicense OR MIT",
+        "name": "memchr",
+        "sha256": "sha256:cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+        "size": 99165,
+        "version": "2.8.3"
+      }
+    ],
+    "version": "0.1.0"
+  },
+  "scaffold": {
+    "activeWorkflowGenerated": false,
+    "atomicNewDirectoryOnly": true,
+    "bundleDevelopmentTreeSeparated": true,
+    "hostInternalImportsAllowed": false,
+    "receiptBindsEveryPackageInput": true,
+    "schemaVersion": "candlescope.adapter-scaffold/1",
+    "templates": [
+      "java-library",
+      "native-cli",
+      "node-library",
+      "python-package",
+      "sandbox-view",
+      "service",
+      "wasm-computation"
+    ]
+  },
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase9-contract/1"
+}

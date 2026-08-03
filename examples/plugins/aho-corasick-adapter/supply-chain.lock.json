@@ -1,0 +1,91 @@
+{
+  "dependencies": [
+    {
+      "file": "aho-corasick-1.1.4.crate",
+      "licenseSpdx": "Unlicense OR MIT",
+      "name": "aho-corasick",
+      "sha256": "sha256:ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301",
+      "size": 184015,
+      "url": "https://static.crates.io/crates/aho-corasick/aho-corasick-1.1.4.crate",
+      "version": "1.1.4"
+    },
+    {
+      "file": "memchr-2.8.3.crate",
+      "licenseSpdx": "Unlicense OR MIT",
+      "name": "memchr",
+      "sha256": "sha256:cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+      "size": 99165,
+      "url": "https://static.crates.io/crates/memchr/memchr-2.8.3.crate",
+      "version": "2.8.3"
+    }
+  ],
+  "inputs": [
+    {
+      "path": ".cargo/config.toml",
+      "root": "adapter",
+      "sha256": "sha256:4d3001153428f67913cbb61377a421665fc27cd6b30712e49f6178e5861d0890",
+      "size": 323
+    },
+    {
+      "path": "Cargo.lock",
+      "root": "adapter",
+      "sha256": "sha256:291af1eb731ba6aa4018a38ff3199fbf7a521b7e2763cee8e4b93865ebacb39a",
+      "size": 728
+    },
+    {
+      "path": "Cargo.toml",
+      "root": "adapter",
+      "sha256": "sha256:4f7325c0f069648cbd0f372bde279bba762acd8661616cf8f3832a8d8386fe7e",
+      "size": 482
+    },
+    {
+      "path": "scripts/build_release.py",
+      "root": "adapter",
+      "sha256": "sha256:f062e0cafb9fe0893704c500d3139d9be25945fe354ebe99ec903cb271d2c336",
+      "size": 6800
+    },
+    {
+      "path": "src/main.rs",
+      "root": "adapter",
+      "sha256": "sha256:d7dbe18112bb93e38ba1af5201610ce1f5d6bc07e63c478d46f1d4f9d996282b",
+      "size": 10689
+    },
+    {
+      "path": "packages/candlescope-plugin-sdk-rust-wasm/Cargo.lock",
+      "root": "repository",
+      "sha256": "sha256:cec1fb15ff4bd7430feea0e568a7e08bd34eb98b21cdbf28c6abfed927ff3d85",
+      "size": 171
+    },
+    {
+      "path": "packages/candlescope-plugin-sdk-rust-wasm/Cargo.toml",
+      "root": "repository",
+      "sha256": "sha256:5975bac9386a9490a3e90d7b8873bc31fb5d0176b355ac9174695d0b8dd7ee89",
+      "size": 281
+    },
+    {
+      "path": "packages/candlescope-plugin-sdk-rust-wasm/src/lib.rs",
+      "root": "repository",
+      "sha256": "sha256:b06467dea51e4f9cfa2c756ea6aff5c0db3e6b81307aee0fcea2faffa270e164",
+      "size": 29864
+    }
+  ],
+  "networkAccessDuringBuild": false,
+  "releaseArtifact": {
+    "path": "runtime/adapter.exe",
+    "sha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d",
+    "size": 427008
+  },
+  "schemaVersion": "candlescope.aho-corasick-build-lock/1",
+  "sourceDateEpoch": 1767225600,
+  "target": "x86_64-pc-windows-msvc",
+  "toolchain": {
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "upstream": {
+    "commit": "17f8b32e3b7c845ef3c5429b823804f552f14ec9",
+    "repository": "https://github.com/BurntSushi/aho-corasick",
+    "tag": "1.1.4",
+    "tagObject": "4fb4e803829ae895e3c11f7a93e05c2a65a6a719"
+  }
+}

@@ -1,0 +1,20 @@
+CandleScope aho-corasick Adapter 0.1.0 third-party notices
+
+aho-corasick 1.1.4
+- Copyright (c) 2015 Andrew Gallant
+- License: Unlicense OR MIT
+- Source: https://github.com/BurntSushi/aho-corasick/tree/17f8b32e3b7c845ef3c5429b823804f552f14ec9
+- Crate: sha256:ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301
+
+memchr 2.8.3 (transitive dependency selected by Cargo.lock)
+- Copyright (c) 2015 Andrew Gallant
+- License: Unlicense OR MIT
+- Crate: sha256:cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98
+
+Both crates ship byte-identical COPYING, LICENSE-MIT, and UNLICENSE files. Those
+reviewed texts are included once in this directory and apply to both crates.
+
+candlescope-plugin-sdk-wasm 0.1.0
+- License: GPL-3.0-only
+- Source is the public SDK under packages/candlescope-plugin-sdk-rust-wasm.
+- Adapter and SDK source are compiled together; no Host-private module is imported.

@@ -1,0 +1,61 @@
+{
+  "backend": {
+    "entrypoints": [
+      {
+        "activationEvents": [
+          "onCommand"
+        ],
+        "id": "main",
+        "resourceProfile": "standard",
+        "runtime": {
+          "architectures": [
+            "x86_64"
+          ],
+          "artifact": "runtime/adapter.exe",
+          "kind": "native-executable",
+          "operatingSystems": [
+            "windows"
+          ]
+        },
+        "transport": "jsonl/1"
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "configuration": {
+        "placements": [
+          "commandPalette"
+        ],
+        "requiresUserAction": true
+      },
+      "entrypoint": "main",
+      "id": "candlescope-aho-corasick",
+      "kind": "command/1",
+      "title": "Run aho-corasick Search"
+    }
+  ],
+  "permissions": {
+    "optional": [],
+    "required": []
+  },
+  "plugin": {
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    },
+    "id": "candlescope.aho-corasick",
+    "license": "GPL-3.0-only",
+    "name": "aho-corasick Search",
+    "publisher": "candlescope-contributors",
+    "version": "0.1.0"
+  },
+  "probes": [
+    {
+      "entrypoint": "main",
+      "id": "control-transcript",
+      "kind": "controlTranscript",
+      "sha256": "sha256:6984851b56ecf44f860501c4fee6043742e34afa20e9198c102d858f344c91e2"
+    }
+  ],
+  "schemaVersion": 3
+}

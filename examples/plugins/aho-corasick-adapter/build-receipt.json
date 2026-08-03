@@ -1,0 +1,66 @@
+{
+  "commands": [
+    "cargo test --locked --offline",
+    "python scripts/build_release.py --report evidence/build-report.json"
+  ],
+  "networkAccessDuringBuild": false,
+  "outputs": [
+    {
+      "path": "conformance/control-transcript.json",
+      "sha256": "sha256:c9ad3a65cbfcd24dd820a881dea38c02212cb7f816000d480874630478cf5e08",
+      "size": 4125
+    },
+    {
+      "path": "licenses/GPL-3.0-only.txt",
+      "sha256": "sha256:3bb2416c7ca51b3f799a837a63690df4c224b14624fd3dace8dfcdccad057e3d",
+      "size": 35194
+    },
+    {
+      "path": "licenses/THIRD_PARTY_NOTICES.txt",
+      "sha256": "sha256:9bba91423d4a15a0a021cafe84b1c0b2ead2799ead32da0090521880202a643a",
+      "size": 907
+    },
+    {
+      "path": "licenses/UPSTREAM_COPYING.txt",
+      "sha256": "sha256:01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+      "size": 126
+    },
+    {
+      "path": "licenses/UPSTREAM_LICENSE_MIT.txt",
+      "sha256": "sha256:0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+      "size": 1081
+    },
+    {
+      "path": "licenses/UPSTREAM_UNLICENSE.txt",
+      "sha256": "sha256:7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+      "size": 1211
+    },
+    {
+      "path": "manifest.json",
+      "sha256": "sha256:dc702315e4be7fc9bd17e10c218fda1be6a8304e0d460983f2147f234fe52b16",
+      "size": 1327
+    },
+    {
+      "path": "runtime/adapter.exe",
+      "sha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d",
+      "size": 427008
+    },
+    {
+      "path": "sbom/cyclonedx.json",
+      "sha256": "sha256:6042bde2ffa5632847eb2deb21348491e9814d87e5253b355dfb8b5173dc4c89",
+      "size": 2098
+    }
+  ],
+  "pluginId": "candlescope.aho-corasick",
+  "reproducibleBuilds": 2,
+  "reviewedCommit": "17f8b32e3b7c845ef3c5429b823804f552f14ec9",
+  "schemaVersion": "candlescope.adapter-build-receipt/1",
+  "sourceCompilation": true,
+  "sourceDateEpoch": 1767225600,
+  "status": "complete",
+  "templateKind": "native-cli",
+  "toolchain": {
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  }
+}

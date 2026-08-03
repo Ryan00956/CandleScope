@@ -1,0 +1,94 @@
+{
+  "adapter": {
+    "buildReceipt": "build-receipt.json",
+    "buildReceiptSha256": "sha256:f82f4c4f1e2e50493e14cf39335e40c492e7ceafc08d4ea970239c3e445e3d00",
+    "conformanceTranscriptSha256": "sha256:c9ad3a65cbfcd24dd820a881dea38c02212cb7f816000d480874630478cf5e08",
+    "entryArtifact": "runtime/adapter.exe",
+    "entryArtifactSha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d"
+  },
+  "artifactPins": [
+    {
+      "licenseSpdx": "Unlicense OR MIT",
+      "name": "aho-corasick-1.1.4.crate",
+      "role": "upstream-source",
+      "sha256": "sha256:ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301",
+      "size": 184015,
+      "url": "https://static.crates.io/crates/aho-corasick/aho-corasick-1.1.4.crate"
+    },
+    {
+      "licenseSpdx": "Unlicense OR MIT",
+      "name": "memchr-2.8.3.crate",
+      "role": "upstream-source",
+      "sha256": "sha256:cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+      "size": 99165,
+      "url": "https://static.crates.io/crates/memchr/memchr-2.8.3.crate"
+    }
+  ],
+  "assessment": {
+    "assessmentIdentity": "sha256:c2944ab10b1920ad6729fa6bf546e0516e781c30515e594c0f1daada8b37fb5d",
+    "present": true,
+    "schemaVersion": "candlescope.github-assessment/1",
+    "sha256": "sha256:c7ba06a5e797dc560dcabb64eb81c0921def9225352a10397ef75604bc1999fe"
+  },
+  "licenses": {
+    "files": [
+      {
+        "licenseSpdx": "Unlicense OR MIT",
+        "localPath": "licenses/UPSTREAM_COPYING.txt",
+        "name": "aho-corasick COPYING",
+        "role": "upstream-license-selection",
+        "sha256": "sha256:01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+        "size": 126,
+        "url": "https://github.com/BurntSushi/aho-corasick/blob/17f8b32e3b7c845ef3c5429b823804f552f14ec9/COPYING"
+      },
+      {
+        "licenseSpdx": "MIT",
+        "localPath": "licenses/UPSTREAM_LICENSE_MIT.txt",
+        "name": "aho-corasick LICENSE-MIT",
+        "role": "upstream-license",
+        "sha256": "sha256:0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+        "size": 1081,
+        "url": "https://github.com/BurntSushi/aho-corasick/blob/17f8b32e3b7c845ef3c5429b823804f552f14ec9/LICENSE-MIT"
+      },
+      {
+        "licenseSpdx": "Unlicense",
+        "localPath": "licenses/UPSTREAM_UNLICENSE.txt",
+        "name": "aho-corasick UNLICENSE",
+        "role": "upstream-license",
+        "sha256": "sha256:7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+        "size": 1211,
+        "url": "https://github.com/BurntSushi/aho-corasick/blob/17f8b32e3b7c845ef3c5429b823804f552f14ec9/UNLICENSE"
+      },
+      {
+        "licenseSpdx": "GPL-3.0-only",
+        "localPath": "licenses/GPL-3.0-only.txt",
+        "name": "GNU GPL version 3",
+        "role": "adapter-and-sdk-license",
+        "sha256": "sha256:3bb2416c7ca51b3f799a837a63690df4c224b14624fd3dace8dfcdccad057e3d",
+        "size": 35194,
+        "url": "https://www.gnu.org/licenses/gpl-3.0.txt"
+      }
+    ],
+    "redistributionApproved": true,
+    "reviewed": true
+  },
+  "pluginId": "candlescope.aho-corasick",
+  "review": {
+    "capabilities": [],
+    "confirmedAt": "2026-08-03T21:05:17Z",
+    "confirmedBy": "codex-phase9-reviewed-build",
+    "generatedSourceContainsHostInternalImports": false,
+    "marketplaceApproved": false,
+    "stablePublicApi": true,
+    "thirdPartyCodeExecutionApproved": true
+  },
+  "schemaVersion": "candlescope.adapter-source-lock/1",
+  "status": "complete",
+  "templateKind": "native-cli",
+  "upstream": {
+    "commit": "17f8b32e3b7c845ef3c5429b823804f552f14ec9",
+    "pinKind": "tag",
+    "repository": "https://github.com/BurntSushi/aho-corasick",
+    "requestedPin": "1.1.4"
+  }
+}

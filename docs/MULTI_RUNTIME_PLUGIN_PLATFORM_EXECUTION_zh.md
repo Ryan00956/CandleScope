@@ -1,14 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～8 已完成；Phase 9～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～9 已完成；Phase 10～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
 当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE8_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；Phase 9～11 仍是计划，不是当前能力声明。
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE9_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；Phase 10～11 仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
 
@@ -958,17 +958,20 @@ Linux 只声明 WASI boundary，不虚报 OS sandbox。Provider、多运行时�
 
 把接入流程产品化，但不自动执行不可信仓库。
 
-**CLI 提案**
+**已交付 CLI**
 
 ```powershell
-backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 assess-github https://github.com/ta4j/ta4j --tag 0.23.0 --output docs/plugin-adapters/ta4j-assessment.md
+$env:CANDLESCOPE_PLUGIN_GITHUB_IMPORT_ENABLED = "1"
+backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 assess-github https://github.com/ta4j/ta4j --tag 0.23.0 --output docs/plugin-adapters/ta4j-assessment.md --allow-network
 
-backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 scaffold-adapter java-jar --id io.candlescope.ta4j-elliott --output examples/plugins/ta4j-elliott-adapter
+backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 scaffold-adapter java-library --id io.candlescope.ta4j-elliott --assessment docs/plugin-adapters/ta4j-assessment.json --output examples/plugins/ta4j-elliott-adapter
 
 backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build examples/plugins/ta4j-elliott-adapter dist/ta4j-elliott.cspkg
 ```
 
-命令名称是目标接口，Phase 9 实现前不可当作现有命令运行。
+`assess-github` 仅在功能开关与 `--allow-network` 同时显式启用时读取固定
+`api.github.com/repos/...` 元数据；可选 `GITHUB_TOKEN` 或 `GH_TOKEN` 只进入该固定 origin
+的 Authorization header，不写入 URL、报告或错误。
 
 **assessment 行为边界**
 
@@ -983,6 +986,7 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 
 - Java library Adapter；
 - native CLI Adapter；
+- Python package Adapter；
 - Node library Adapter；
 - WASM computation Adapter；
 - service Adapter；
@@ -999,6 +1003,18 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 **回滚**
 
 关闭 `CANDLESCOPE_PLUGIN_GITHUB_IMPORT_ENABLED`；模板和已构建 `.cspkg` 不依赖该助手运行。
+
+**完成状态：已完成（2026-08-03）**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE9_zh.md`。Phase 9 已交付默认关闭、固定 origin、
+显式网络确认的 GitHub metadata assessment，七类 pending/non-executable Adapter 脚手架，
+human-completed source lock 与逐文件 build receipt 门禁，以及 v3 build/inspect CLI。第二个真实
+项目 `BurntSushi/aho-corasick` 固定 signed tag `1.1.4` 和 commit
+`17f8b32e3b7c845ef3c5429b823804f552f14ec9`，Windows x86_64 native Adapter 以
+Rust 1.97.1 离线双构建并通过 fresh install、quick repeat、fresh-process check、
+disable/enable、helper flag rollback 和 uninstall。助手关闭后已构建 bundle 仍可正常运行。
+Phase 9 专用门禁 `37 passed`；全量 60 个插件测试文件按互斥集合完成 `558 passed`，Python SDK
+`98 passed`，Rust/WASM SDK 与 Adapter 各 `3 passed`，并通过 Ruff 与 Rust 格式检查。
 
 ---
 
@@ -1209,17 +1225,15 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 - [x] ta4j 与当前 Python Elliott 插件完成 point-in-time 对照；
 - [ ] install/check/update/rollback/failure injection/soak 全部有原始证据；
 - [ ] 新功能全部关闭时，v1 compatibility 与 v2 Python 回归通过；
-- [ ] 作者可以按文档接入第二个 GitHub 项目；
+- [x] 作者可以按文档接入第二个 GitHub 项目；
 - [x] 用户能在 Plugin Manager 看懂“运行什么、信任谁、开放什么、如何撤销”。
 
 ## 16. 推荐的立即下一步
 
-下一阶段只实施 Phase 9，不提前混入 Marketplace GA：
+下一阶段只实施 Phase 10，不提前混入 GA：
 
-1. 冻结 GitHub assessment 的输入、输出、网络和不执行边界；
-2. 只读取用户明确给出的仓库、tag/commit 和 Release metadata；
-3. 不 clone 后自动运行 workflow、install script 或二进制；
-4. 实现 Java library、native CLI、Python package、Node 和 WASM Adapter 模板；
-5. scaffold 默认只生成源文件、manifest、SBOM/许可证占位和待人工完成的 lock；
-6. 实现显式 build/package 命令，不把 assessment 结果当可信 Release；
-7. 用第二个真实 GitHub 项目验证文档可执行性，完成独立 Phase 9 提交后再进入 Phase 10。
+1. 冻结 Marketplace 多运行时 release 与信任证据契约；
+2. 将 runtime kind、OS/arch artifact digest、SBOM、licenses 与 registry revision 绑定发布；
+3. 拒绝源码编译、系统 runtime fallback、未声明下载与跨平台假声明；
+4. 用 Java 与 native reference release 验证 fresh/offline/update/rollback/revocation；
+5. 保持 Marketplace flag 默认关闭，完成独立 Phase 10 提交后再进入 Phase 11。

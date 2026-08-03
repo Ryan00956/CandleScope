@@ -1,0 +1,12 @@
+name: CandleScope Adapter review
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # TODO: pin every action to a reviewed full commit SHA before activating this workflow.
+      # TODO: run only repository-owned validation; never execute assessment output.
+      - run: echo "pending human review; no third-party build executed"

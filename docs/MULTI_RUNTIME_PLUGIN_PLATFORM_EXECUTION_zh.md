@@ -1,16 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～4 已完成；Phase 5～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～6 已完成；Phase 7～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
-当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md`、
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE1_zh.md`、
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md` 和
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE3_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；后续章节仍是计划，不是当前能力声明。
+当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE6_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；Phase 7～11 仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
 
@@ -469,7 +467,7 @@ ta4j 本身不需要子进程，`java-jar` 参考插件应保持 `maxProcesses=1
 
 ## 9. 逐阶段实施计划
 
-### Phase 0：冻结基线与 RFC
+### Phase 0：冻结基线与 RFC（已完成）
 
 **目标**
 
@@ -647,7 +645,7 @@ Node 或 WASM 已可安装运行。
 
 ---
 
-### Phase 3：`native-executable` Provider
+### Phase 3：`native-executable` Provider（已完成）
 
 **目标**
 
@@ -692,7 +690,7 @@ OS/arch 检查、Windows 原子 Job Object 启动、trusted-local 与真实 AppC
 
 ---
 
-### Phase 4：Managed Runtime Registry
+### Phase 4：Managed Runtime Registry（已完成）
 
 **目标**
 
@@ -739,7 +737,7 @@ Plugin Manager 投影。真实干净目录 JRE gate 与完整回归通过；Regi
 
 ---
 
-### Phase 5：`java-jar` Provider、Java SDK 与 ta4j 参考插件
+### Phase 5：`java-jar` Provider、Java SDK 与 ta4j 参考插件（已完成）
 
 **目标**
 
@@ -815,9 +813,16 @@ Plugin Manager 投影。真实干净目录 JRE gate 与完整回归通过；Regi
 
 关闭 `CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED` 或回滚 ta4j activation；Python 插件与平台 v2 不受影响。
 
+**完成证据**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE5_zh.md`。Phase 5 已交付 Java Provider、零依赖
+Java SDK、签名 Registry revision 2、固定 JDK/JRE/Maven 供应链和 ta4j 0.23.0 Elliott
+参考 Adapter；真实安装、调用、取消、故障、更新、回滚、进程残留和 point-in-time 对照门均
+通过。Phase 6 后续仅把 ta4j 包装版本迁移到 AppContainer 兼容 JRE，Phase 5 冻结合同仍保留。
+
 ---
 
-### Phase 6：信任模式、授权 UX 与多运行时沙箱
+### Phase 6：信任模式、授权 UX 与多运行时沙箱（已完成）
 
 **目标**
 
@@ -859,6 +864,14 @@ Plugin Manager 投影。真实干净目录 JRE gate 与完整回归通过；Regi
 **回滚**
 
 禁用新 trust UX 后保持现有 `local-trusted`/`verified-publisher` 行为；不得丢失或错误扩大授权记录。
+
+**完成证据**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE6_zh.md`。Phase 6 已交付 canonical trust
+migration、runtime-bound Grant Store schema 2、本地代码逐项双重确认、trust change 重启、
+Python/Java/Node/native 受限 profile，以及 Python/Java/native 的真实 Windows AppContainer
+attack matrix。签名 Runtime Registry revision 3 将 ta4j 包装迁移到 Temurin 26.0.2+10，
+解决 Java 25 的已知 AppContainer 兼容问题；所有 Live 与新增 rollout flags 仍默认关闭。
 
 ---
 

@@ -9,12 +9,16 @@ import type {
   PluginCommandFileInput,
   PluginDeclarativeViewContribution,
   PluginManagementDetail,
+  PluginLocalInstallCandidate,
   PluginJsonSchema,
   PluginMarketplaceStatus,
   PluginPlatformRuntime,
   PluginPaperContribution,
   PluginProviderContribution,
   PluginRuntimeRegistryStatus,
+  PluginTrustReview,
+  PluginTrustSummary,
+  PluginTrustChangeReview,
   PluginSandboxViewContribution,
   PluginSettingsContribution,
   PluginViewContribution,
@@ -641,7 +645,7 @@ function MarketplacePanel({
   if (catalog === null) {
     return (
       <section className="plugin-marketplace-panel plugin-settings-card">
-        <p>正在读取可信插件市场配置…</p>
+        <p>正在读取签名插件市场配置…</p>
       </section>
     );
   }
@@ -649,8 +653,8 @@ function MarketplacePanel({
     <section className="plugin-marketplace-panel plugin-settings-card" data-plugin-marketplace>
       <header className="plugin-settings-card-header">
         <div>
-          <h3>可信插件市场</h3>
-          <p>仅接收 Host 验证过签名、构建摘要与透明度记录的插件版本。</p>
+          <h3>签名插件市场</h3>
+          <p>Host 会验证发布者身份、构建摘要与透明度记录；身份已验证不代表代码安全或官方背书。</p>
         </div>
         <span
           className={`plugin-state-pill ${catalog.enabled ? "is-ready" : "is-muted"}`}
@@ -661,12 +665,12 @@ function MarketplacePanel({
       </header>
       {!catalog.enabled && !catalog.marketplaces.length && (
         <div className="plugin-empty-state plugin-marketplace-empty">
-          <strong>尚未配置可信插件市场</strong>
+          <strong>尚未配置签名插件市场</strong>
           <p>当前仍可通过上方的本地安装加入经 SHA-256 校验的 .cspkg 插件包。</p>
         </div>
       )}
       <details className="plugin-technical-details">
-        <summary>安全与更新策略</summary>
+        <summary>签名边界与更新策略</summary>
         <p>市场元数据不会自动授予权限。下载只会生成已验证的候选版本，应用与激活均需显式操作，自动更新保持关闭。</p>
       </details>
       <div className="plugin-marketplace-roots">
@@ -706,7 +710,7 @@ function MarketplacePanel({
               <div className="plugin-marketplace-title">
                 <div>
                   <strong>{entry.pluginId}</strong>
-                  <small>{entry.publisher.displayName} · verified key {entry.publisher.keyId.slice(0, 24)}…</small>
+                  <small>{entry.publisher.displayName} · publisher key {entry.publisher.keyId.slice(0, 24)}… · 非安全背书</small>
                 </div>
                 <span>
                   {entry.latest.version} · {entry.latest.licenseExpression}
@@ -829,6 +833,307 @@ function RuntimeRegistryPanel({ status }: { status: PluginRuntimeRegistryStatus 
   );
 }
 
+function trustAcknowledgementLabel(value: string): string {
+  if (value === "execute-local-code") return "我确认这会以当前 Windows 用户身份执行本地应用代码";
+  if (value === "sandbox-status") return "我已核对上方沙箱状态，而不是仅依据发布者名称判断安全性";
+  if (value === "live-authority-separate") return "我确认账户、密钥与实盘权限不会由本次信任选择自动开放";
+  if (value.startsWith("runtime:")) return `我确认运行时：${value.slice("runtime:".length).replaceAll(":", " · ")}`;
+  if (value.startsWith("permission:")) return `我确认插件声明了权限：${value.slice("permission:".length)}`;
+  return value;
+}
+
+function TrustRequestMatrix({ trust }: { trust: PluginTrustSummary["requests"] }) {
+  const rows = [
+    ["网络", trust.network],
+    ["文件", trust.files],
+    ["密钥", trust.secrets],
+    ["账户", trust.accounts],
+    ["交易", trust.trading],
+  ] as const;
+  return (
+    <div className="plugin-trust-risk-grid">
+      {rows.map(([label, value]) => (
+        <div key={label} data-requested={value.requested ? "true" : "false"}>
+          <strong>{label}</strong>
+          <span>{value.requested ? value.permissionIds.join("、") : "未请求"}</span>
+        </div>
+      ))}
+      <div data-requested="false">
+        <strong>子进程</strong>
+        <span>未声明 · 上限 {trust.subprocess.maxProcesses}</span>
+      </div>
+    </div>
+  );
+}
+
+function LocalTrustInstallPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
+  const [candidate, setCandidate] = useState<PluginLocalInstallCandidate | null>(null);
+  const [reason, setReason] = useState("");
+  const [accepted, setAccepted] = useState<Set<string>>(new Set());
+  const [review, setReview] = useState<PluginTrustReview | null>(null);
+  const [busy, setBusy] = useState<"prepare" | "review" | "confirm" | null>(null);
+
+  const resetReview = () => setReview(null);
+  const prepare = async (file: File) => {
+    setBusy("prepare");
+    setCandidate(null);
+    setReason("");
+    setAccepted(new Set());
+    setReview(null);
+    try { setCandidate(await runtime.actions.prepareLocalInstall(file)); } catch { /* notice published */ }
+    finally { setBusy(null); }
+  };
+  const required = candidate?.preview.requiredAcknowledgements ?? [];
+  const allAccepted = required.length > 0 && required.every((item) => accepted.has(item));
+  const firstConfirmation = async () => {
+    if (!candidate || !allAccepted) return;
+    setBusy("review");
+    try {
+      setReview(await runtime.actions.reviewLocalInstall(
+        candidate.candidateId,
+        candidate.previewSha256,
+        reason.trim(),
+        [...accepted].sort(),
+      ));
+    } catch { setReview(null); }
+    finally { setBusy(null); }
+  };
+  const secondConfirmation = async () => {
+    if (!candidate || !review) return;
+    setBusy("confirm");
+    try {
+      await runtime.actions.confirmLocalInstall(
+        candidate.candidateId,
+        candidate.previewSha256,
+        review.confirmationToken,
+      );
+      setCandidate(null);
+      setReview(null);
+      setAccepted(new Set());
+      setReason("");
+    } catch { setReview(null); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <section className="plugin-settings-card plugin-install-card plugin-trust-install-card" data-plugin-trust-flow="itemized-double-confirmation">
+      <header className="plugin-settings-card-header">
+        <div>
+          <h3>从本地安装</h3>
+          <p>先验证并展示来源、运行时、沙箱和权限；完成两次独立确认后才首次执行插件代码。</p>
+        </div>
+        <span className="plugin-state-pill is-warn">本地代码</span>
+      </header>
+      <div className="plugin-install-row">
+        <label className="plugin-install-button">
+          <input
+            type="file"
+            accept=".cspkg,application/vnd.candlescope.plugin+zip"
+            data-plugin-install-input
+            disabled={!runtime.view.managementAvailable || busy !== null}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void prepare(file);
+            }}
+          />
+          <span>{busy === "prepare" ? "正在验证（不会执行插件）…" : "选择 .cspkg 并生成审阅单"}</span>
+        </label>
+        <small>浏览器与 Host 分别复算 SHA-256；准备阶段不会运行语义探针或插件进程。</small>
+      </div>
+      {candidate && (
+        <div className="plugin-trust-review" data-preview-sha256={candidate.previewSha256}>
+          <div className="plugin-trust-source">
+            <strong>{candidate.preview.plugin.name} {candidate.preview.plugin.version}</strong>
+            <span>{candidate.preview.plugin.publisher} · {candidate.preview.source.source}</span>
+            <small>
+              发布者身份 {candidate.preview.source.publisherIdentity}
+              {candidate.preview.source.signatureRoot
+                ? ` · 签名根 ${candidate.preview.source.signatureRoot}`
+                : " · 未签名本地来源"}
+            </small>
+            <code>{candidate.preview.plugin.bundleSha256}</code>
+          </div>
+          <p className="plugin-trust-warning">{candidate.preview.warning}</p>
+          <h4>将运行什么</h4>
+          {candidate.preview.authorization.entrypoints.map((entrypoint) => (
+            <div className="plugin-trust-runtime" key={entrypoint.entrypointId}>
+              <strong>{entrypoint.entrypointId}</strong>
+              <span>{entrypoint.runtimeKind} · {entrypoint.runtimeId} · {entrypoint.supplySource}</span>
+              <small>
+                {entrypoint.hostManaged ? "Host-managed" : "插件随包 runtime"}
+                {` · ${entrypoint.profile.profileId} · maxProcesses=${entrypoint.profile.limits.maxProcesses}`}
+              </small>
+              {entrypoint.systemRuntimePath && <code>{entrypoint.systemRuntimePath}</code>}
+            </div>
+          ))}
+          <p data-sandbox-status={candidate.preview.authorization.sandbox.status}>
+            沙箱：{candidate.preview.authorization.sandbox.status} · 当前模式 {candidate.preview.authorization.mode}
+          </p>
+          <TrustRequestMatrix trust={candidate.preview.requests} />
+          <div className="plugin-trust-diffs">
+            <div>
+              <strong>Runtime diff</strong>
+              <span>{candidate.preview.runtimeDiff.changed ? "已变化，必须确认" : "未变化"}</span>
+              <small>
+                kind/id {candidate.preview.runtimeDiff.kindOrIdChanged ? "变化" : "不变"}
+                {` · 签名根 ${candidate.preview.runtimeDiff.signatureRootChanged ? "变化" : "不变"}`}
+                {` · 系统路径 ${candidate.preview.runtimeDiff.systemRuntimePathChanged ? "变化" : "不变"}`}
+              </small>
+            </div>
+            <div>
+              <strong>Permission diff</strong>
+              <span>{candidate.preview.permissionDiff.requiresConfirmation ? "需要重新确认" : "无扩权"}</span>
+              <small>{candidate.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || "未声明 Host API 权限"}</small>
+            </div>
+          </div>
+          <label className="plugin-trust-reason">
+            <span>安装原因（写入审计日志，至少 12 个字符）</span>
+            <textarea
+              value={reason}
+              maxLength={500}
+              onChange={(event) => { setReason(event.target.value); resetReview(); }}
+              placeholder="例如：从本地源码构建，用于离线回测 ta4j 指标"
+            />
+          </label>
+          <fieldset className="plugin-trust-acknowledgements">
+            <legend>逐项确认</legend>
+            {required.map((item) => (
+              <label key={item}>
+                <input
+                  type="checkbox"
+                  checked={accepted.has(item)}
+                  onChange={(event) => {
+                    const next = new Set(accepted);
+                    if (event.target.checked) next.add(item); else next.delete(item);
+                    setAccepted(next);
+                    resetReview();
+                  }}
+                />
+                <span>{trustAcknowledgementLabel(item)}</span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="plugin-action-row plugin-trust-confirmations">
+            <button
+              type="button"
+              data-trust-confirmation-step="1"
+              disabled={!allAccepted || reason.trim().length < 12 || busy !== null || review !== null}
+              onClick={() => void firstConfirmation()}
+            >
+              {busy === "review" ? "正在记录第一次确认…" : "第一次确认：复核以上明细"}
+            </button>
+            <button
+              type="button"
+              data-trust-confirmation-step="2"
+              className="is-danger"
+              disabled={review === null || busy !== null}
+              onClick={() => void secondConfirmation()}
+            >
+              {busy === "confirm" ? "正在安装并首次执行…" : "第二次确认：安装并执行本地代码"}
+            </button>
+          </div>
+          {review && <small>第一次确认已记录；第二次确认令牌将在 {review.expiresAt} 失效，且只能使用一次。</small>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TrustModeControl({
+  runtime,
+  pluginId,
+  trust,
+  onComplete,
+}: {
+  runtime: PluginPlatformRuntime;
+  pluginId: string;
+  trust: PluginTrustSummary;
+  onComplete: () => Promise<void>;
+}) {
+  const target = trust.mode === "trusted-local" ? "marketplace-sandboxed" : "trusted-local";
+  const acknowledgements = useMemo(() => {
+    const values = new Set<string>(["execute-local-code", "sandbox-status", "live-authority-separate"]);
+    trust.authorization.entrypoints.forEach((item) => values.add(`runtime:${item.entrypointId}:${item.runtimeKind}:${item.runtimeId}`));
+    trust.requests.permissions.forEach((item) => values.add(`permission:${item.permissionId}`));
+    return [...values].sort();
+  }, [trust.authorization.entrypoints, trust.requests.permissions]);
+  const [reason, setReason] = useState("");
+  const [accepted, setAccepted] = useState<Set<string>>(new Set());
+  const [review, setReview] = useState<PluginTrustChangeReview | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setReason(""); setAccepted(new Set()); setReview(null); }, [pluginId, trust.mode]);
+  const allAccepted = acknowledgements.every((item) => accepted.has(item));
+  const begin = async () => {
+    setBusy(true);
+    try { setReview(await runtime.actions.reviewTrustChange(pluginId, target, reason.trim(), [...accepted].sort())); }
+    catch { setReview(null); }
+    finally { setBusy(false); }
+  };
+  const confirm = async () => {
+    if (!review) return;
+    setBusy(true);
+    try {
+      await runtime.actions.confirmTrustChange(pluginId, review.changeId, review.previewSha256, review.confirmationToken);
+      setReview(null);
+      await onComplete();
+    } catch { setReview(null); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="plugin-trust-mode-control">
+      <p className="plugin-trust-warning">发布者签名已验证，只说明来源身份与工件完整性；不表示代码“安全”“官方”或无漏洞。</p>
+      <label className="plugin-trust-reason">
+        <span>变更原因（写入审计日志）</span>
+        <textarea value={reason} maxLength={500} onChange={(event) => { setReason(event.target.value); setReview(null); }} />
+      </label>
+      <fieldset className="plugin-trust-acknowledgements">
+        <legend>{target === "trusted-local" ? "提升为 trusted-local" : "撤销本地信任并恢复沙箱"}</legend>
+        {acknowledgements.map((item) => (
+          <label key={item}>
+            <input type="checkbox" checked={accepted.has(item)} onChange={(event) => {
+              const next = new Set(accepted);
+              if (event.target.checked) next.add(item); else next.delete(item);
+              setAccepted(next);
+              setReview(null);
+            }} />
+            <span>{trustAcknowledgementLabel(item)}</span>
+          </label>
+        ))}
+      </fieldset>
+      {review && (
+        <div className="plugin-trust-diffs" data-trust-change-preview={review.previewSha256}>
+          <div>
+            <strong>已冻结的目标运行边界</strong>
+            <span>{review.preview.to.mode} · {review.preview.to.sandbox.status}</span>
+            <small>
+              runtime {review.preview.runtimeDiff.changed ? "变化" : "不变"}
+              {` · kind/id ${review.preview.runtimeDiff.kindOrIdChanged ? "变化" : "不变"}`}
+              {` · 签名根 ${review.preview.runtimeDiff.signatureRootChanged ? "变化" : "不变"}`}
+              {` · 系统路径 ${review.preview.runtimeDiff.systemRuntimePathChanged ? "变化" : "不变"}`}
+            </small>
+          </div>
+          <div>
+            <strong>已冻结的权限 diff</strong>
+            <span>{review.preview.permissionDiff.requiresConfirmation ? "旧授权不会继承，需重新确认" : "无授权扩张"}</span>
+            <small>
+              {review.preview.permissionDiff.permissions.map((item) => `${item.permissionId}: ${item.change}`).join(" · ") || "未声明 Host API 权限"}
+            </small>
+          </div>
+        </div>
+      )}
+      <div className="plugin-action-row">
+        <button type="button" disabled={busy || !allAccepted || reason.trim().length < 12 || review !== null} onClick={() => void begin()}>
+          第一次确认：审阅 {target}
+        </button>
+        <button type="button" disabled={busy || review === null} onClick={() => void confirm()}>
+          第二次确认：应用并终止旧 generation
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   const { closeManager, openManager } = runtime.actions;
   useEffect(() => {
@@ -843,7 +1148,6 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
   const [detail, setDetail] = useState<PluginManagementDetail | null>(null);
   const [marketplaceStatus, setMarketplaceStatus] = useState<PluginMarketplaceStatus | null>(null);
   const [loading, setLoading] = useState(false);
-  const [installing, setInstalling] = useState(false);
   const [marketplaceBusy, setMarketplaceBusy] = useState<string | null>(null);
   const [compatibilityPreview, setCompatibilityPreview] = useState<PluginV1CompatibilityPreview | null>(null);
   const [compatibilityBusy, setCompatibilityBusy] = useState<"import" | "rollback" | null>(null);
@@ -959,7 +1263,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
         <div><strong>{runtimeCount}</strong><span>脚本运行时</span></div>
         <div>
           <strong>{marketplaceEnabled ? "已开启" : "未配置"}</strong>
-          <span>可信插件市场</span>
+          <span>签名插件市场</span>
         </div>
       </div>
       {compatibility && (
@@ -1066,7 +1370,9 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
         <RuntimeRegistryPanel status={runtime.view.catalog.runtimeRegistry} />
       )}
       {platformEnabled && (
-        <section className="plugin-settings-card plugin-install-card">
+        runtime.view.catalog?.trustUx?.enabled
+          ? <LocalTrustInstallPanel runtime={runtime} />
+          : <section className="plugin-settings-card plugin-install-card">
           <header className="plugin-settings-card-header">
             <div>
               <h3>从本地安装</h3>
@@ -1079,17 +1385,15 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                 type="file"
                 accept=".cspkg,application/vnd.candlescope.plugin+zip"
               data-plugin-install-input
-              disabled={!runtime.view.managementAvailable || installing}
+              disabled={!runtime.view.managementAvailable}
               onChange={async (event) => {
                 const file = event.target.files?.[0];
                 event.target.value = "";
                 if (!file) return;
-                setInstalling(true);
                 try { await runtime.actions.installBundle(file); } catch { /* notice published */ }
-                finally { setInstalling(false); }
               }}
               />
-              <span>{installing ? "正在校验并安装…" : "选择 .cspkg 文件"}</span>
+              <span>选择 .cspkg 文件</span>
             </label>
             <div>
               <strong>经过摘要校验的本地插件包</strong>
@@ -1118,7 +1422,7 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
           {!plugins.length && (
             <div className="plugin-empty-state">
               <strong>还没有安装插件</strong>
-              <p>可以从上方选择本地插件包，或在配置可信插件市场后安装扩展。</p>
+              <p>可以从上方选择本地插件包，或在配置签名插件市场后安装扩展。</p>
             </div>
           )}
           {plugins.length > 0 && (
@@ -1134,7 +1438,9 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                 {selected && (
                   <>
                     <h3>{selected.name}</h3>
-                    <p>{selected.id} · {selected.publisher} · {selected.trustLevel}</p>
+                    <p>
+                      {selected.id} · {selected.publisher} · {selected.trust?.mode ?? selected.trustLevel}
+                    </p>
                     <div className="plugin-action-row">
                       {selected.state === "active"
                         ? <button type="button" disabled={!runtime.view.managementAvailable} onClick={() => void mutate("disable")}>停用</button>
@@ -1144,6 +1450,34 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                     </div>
                     {!runtime.view.managementAvailable && <p>当前为只读模式：缺少受信任的桌面管理会话。</p>}
                     {loading && <p>正在读取受保护的插件详情…</p>}
+                    {(detail?.trust ?? selected.trust) && (() => {
+                      const trust = (detail?.trust ?? selected.trust)!;
+                      return (
+                        <section className="plugin-trust-installed-summary" data-trust-mode={trust.mode}>
+                          <h4>信任与运行时</h4>
+                          <p>
+                            来源 {trust.source.source} · 发布者身份 {trust.source.publisherIdentity}
+                            {trust.source.signatureRoot ? ` · 签名根 ${trust.source.signatureRoot}` : " · 未签名本地来源"}
+                          </p>
+                          <p>
+                            模式 {trust.mode} · 沙箱 {trust.authorization.sandbox.status}
+                            {` · ${trust.decisionRecorded ? "已有可撤销决定" : "默认策略"}`}
+                          </p>
+                          {trust.authorization.entrypoints.map((item) => (
+                            <div className="plugin-trust-runtime" key={item.entrypointId}>
+                              <strong>{item.entrypointId}</strong>
+                              <span>{item.runtimeKind} · {item.runtimeId} · {item.supplySource}</span>
+                              <small>{item.hostManaged ? "Host-managed" : "插件随包 runtime"} · {item.profile.profileId}</small>
+                            </div>
+                          ))}
+                          <TrustRequestMatrix trust={trust.requests} />
+                          <small>账户、密钥与实盘 authority 始终独立保护；信任模式不会自动授予它们。</small>
+                          {trust.changeAllowed && runtime.view.managementAvailable && (
+                            <TrustModeControl runtime={runtime} pluginId={selected.id} trust={trust} onComplete={reload} />
+                          )}
+                        </section>
+                      );
+                    })()}
                     <ProviderRows providers={selected.contributions.filter(
                       (item): item is PluginProviderContribution => (
                         item.kind === "symbol-provider/1" || item.kind === "market-data-provider/1"

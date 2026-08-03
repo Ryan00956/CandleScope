@@ -29,6 +29,7 @@ import type {
   SettingsShellRuntime,
 } from "./appShellContracts.js";
 import "../index.css";
+import "../features/plugins/pluginTrustUx.css";
 
 const ReplayLauncherDialog = lazy(loadReplayLauncherDialog);
 

@@ -25,6 +25,143 @@ SANDBOX_MODE_WINDOWS_APPCONTAINER = "windows-appcontainer"
 _PROFILE_NAME = re.compile(r"^[-_. A-Za-z0-9]{1,64}$")
 
 
+@dataclass(frozen=True, slots=True)
+class RestrictedRuntimeProfile:
+    """Host-owned sandbox limits for one executable runtime kind.
+
+    These profiles are product policy, not plugin-controlled manifest values.  A
+    future manifest process model may request a stricter subset; it must never
+    raise these ceilings implicitly.
+    """
+
+    runtime_kind: str
+    profile_id: str
+    memory_limit_bytes: int
+    cpu_rate_percent: int
+    probe_cpu_time_seconds: int
+    runtime_cpu_time_seconds: int
+    disk_limit_bytes: int
+    max_processes: int
+    probe_wall_seconds: int
+    runtime_wall_seconds: int
+    sandbox_platforms: tuple[str, ...] = ("windows",)
+
+    def __post_init__(self) -> None:
+        if self.runtime_kind not in {
+            "python-module",
+            "java-jar",
+            "node-module",
+            "native-executable",
+        }:
+            raise ValueError("restricted runtime profile kind is invalid")
+        if not re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", self.profile_id):
+            raise ValueError("restricted runtime profile id is invalid")
+        if self.max_processes != 1:
+            raise ValueError(
+                "Phase 6 profiles must remain single-process until a declared process model ships"
+            )
+
+    def supported(self, platform_name: str | None = None) -> bool:
+        target = platform_name or ("windows" if os.name == "nt" else sys.platform)
+        return target in self.sandbox_platforms
+
+    def to_wire(self, *, platform_name: str | None = None) -> dict[str, Any]:
+        supported = self.supported(platform_name)
+        return {
+            "profileId": self.profile_id,
+            "runtimeKind": self.runtime_kind,
+            "sandboxMode": (
+                SANDBOX_MODE_WINDOWS_APPCONTAINER if supported else "unavailable"
+            ),
+            "sandboxSupported": supported,
+            "trustedLocalOnly": not supported,
+            "networkDefault": "denied",
+            "subprocessDeclared": False,
+            "limits": {
+                "memoryBytes": self.memory_limit_bytes,
+                "cpuRatePercent": self.cpu_rate_percent,
+                "probeCpuTimeSeconds": self.probe_cpu_time_seconds,
+                "runtimeCpuTimeSeconds": self.runtime_cpu_time_seconds,
+                "diskBytes": self.disk_limit_bytes,
+                "maxProcesses": self.max_processes,
+                "probeWallSeconds": self.probe_wall_seconds,
+                "runtimeWallSeconds": self.runtime_wall_seconds,
+            },
+        }
+
+
+_RESTRICTED_RUNTIME_PROFILES = {
+    "python-module": RestrictedRuntimeProfile(
+        "python-module",
+        "restricted-python-v1",
+        256 * 1024 * 1024,
+        25,
+        60,
+        300,
+        64 * 1024 * 1024,
+        1,
+        90,
+        86_400,
+    ),
+    "java-jar": RestrictedRuntimeProfile(
+        "java-jar",
+        "restricted-java-v1",
+        512 * 1024 * 1024,
+        35,
+        120,
+        600,
+        64 * 1024 * 1024,
+        1,
+        180,
+        86_400,
+    ),
+    "node-module": RestrictedRuntimeProfile(
+        "node-module",
+        "restricted-node-v1",
+        384 * 1024 * 1024,
+        30,
+        120,
+        600,
+        64 * 1024 * 1024,
+        1,
+        180,
+        86_400,
+    ),
+    "native-executable": RestrictedRuntimeProfile(
+        "native-executable",
+        "restricted-native-v1",
+        256 * 1024 * 1024,
+        25,
+        60,
+        300,
+        64 * 1024 * 1024,
+        1,
+        90,
+        86_400,
+    ),
+}
+
+
+def restricted_runtime_profile(runtime_kind: str) -> RestrictedRuntimeProfile:
+    try:
+        return _RESTRICTED_RUNTIME_PROFILES[runtime_kind]
+    except KeyError as exc:
+        raise security_error(
+            "PLUGIN_SANDBOX_PROFILE_UNAVAILABLE",
+            "no restricted sandbox profile exists for this runtime kind",
+            details={"runtimeKind": runtime_kind},
+        ) from exc
+
+
+def restricted_runtime_profiles_status(
+    *, platform_name: str | None = None
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        _RESTRICTED_RUNTIME_PROFILES[key].to_wire(platform_name=platform_name)
+        for key in sorted(_RESTRICTED_RUNTIME_PROFILES)
+    )
+
+
 def sandbox_profile_name(
     plugin_id: str, publisher_identity: str, major_version: int
 ) -> str:

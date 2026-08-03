@@ -4,6 +4,7 @@ import type {
   PluginCatalog,
   PluginCatalogContribution,
   PluginCatalogPlugin,
+  PluginCanonicalTrustMode,
   PluginChartLayer,
   PluginCommandFileInput,
   PluginCommandContribution,
@@ -15,6 +16,8 @@ import type {
   PluginLiveConfirmationReceipt,
   PluginLiveControlStatus,
   PluginLiveExecutionRecord,
+  PluginLocalInstallCandidate,
+  PluginLocalInstallPreview,
   PluginMarketProviderChannel,
   PluginMarketplaceCandidate,
   PluginMarketplaceCatalog,
@@ -27,6 +30,7 @@ import type {
   PluginPaperStatus,
   PluginPlacement,
   PluginRuntimeRegistryStatus,
+  PluginRuntimeDiff,
   PluginRuntimeSupply,
   PluginSettingsContribution,
   PluginUiSnapshot,
@@ -36,6 +40,15 @@ import type {
   PluginV1CompatibilityCatalog,
   PluginV1CompatibilityContribution,
   PluginV1CompatibilityPreview,
+  PluginRestrictedRuntimeProfile,
+  PluginTrustAuthorization,
+  PluginTrustChangeReview,
+  PluginTrustRequests,
+  PluginTrustReview,
+  PluginTrustRuntimeEntrypoint,
+  PluginTrustSource,
+  PluginTrustSummary,
+  PluginTrustUxStatus,
 } from "./pluginPlatformTypes.js";
 
 const PLUGIN_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$/;
@@ -753,9 +766,295 @@ function runtimeRegistryStatus(value: unknown, path: string): PluginRuntimeRegis
   };
 }
 
+const TRUST_MODES = new Set([
+  "first-party-pinned",
+  "marketplace-sandboxed",
+  "trusted-local",
+  "developer-local",
+  "ui-only-untrusted",
+] as const);
+
+const TRUST_ALIASES = new Map<string, PluginCanonicalTrustMode>([
+  ["first-party-pinned", "first-party-pinned"],
+  ["verified-publisher", "marketplace-sandboxed"],
+  ["marketplace-sandboxed", "marketplace-sandboxed"],
+  ["local-trusted", "trusted-local"],
+  ["trusted-local", "trusted-local"],
+  ["local-developer", "developer-local"],
+  ["developer-local", "developer-local"],
+  ["untrusted", "marketplace-sandboxed"],
+  ["ui-only-untrusted", "ui-only-untrusted"],
+]);
+
+function nullableString(value: unknown, path: string, maximum = 2048): string | null {
+  return value === null ? null : string(value, path, maximum);
+}
+
+function trustProfile(value: unknown, path: string): PluginRestrictedRuntimeProfile {
+  const data = record(value, path);
+  exact(data, [
+    "profileId", "runtimeKind", "sandboxMode", "sandboxSupported", "trustedLocalOnly",
+    "networkDefault", "subprocessDeclared", "limits",
+  ], [], path);
+  const limits = record(data.limits, `${path}.limits`);
+  exact(limits, ["maxProcesses"], [
+    "memoryBytes", "cpuRatePercent", "probeCpuTimeSeconds", "runtimeCpuTimeSeconds",
+    "diskBytes", "probeWallSeconds", "runtimeWallSeconds",
+  ], `${path}.limits`);
+  const sandboxSupported = boolean(data.sandboxSupported, `${path}.sandboxSupported`);
+  const trustedLocalOnly = boolean(data.trustedLocalOnly, `${path}.trustedLocalOnly`);
+  if (
+    sandboxSupported === trustedLocalOnly
+    || data.networkDefault !== "denied"
+    || data.subprocessDeclared !== false
+    || (sandboxSupported ? data.sandboxMode !== "windows-appcontainer" : data.sandboxMode !== "unavailable")
+  ) fail(path);
+  const optionalInteger = (key: string, maximum = Number.MAX_SAFE_INTEGER): number | undefined => (
+    limits[key] === undefined ? undefined : integer(limits[key], `${path}.limits.${key}`, 1, maximum)
+  );
+  const memoryBytes = optionalInteger("memoryBytes");
+  const cpuRatePercent = optionalInteger("cpuRatePercent", 100);
+  const probeCpuTimeSeconds = optionalInteger("probeCpuTimeSeconds", 3600);
+  const runtimeCpuTimeSeconds = optionalInteger("runtimeCpuTimeSeconds", 3600);
+  const diskBytes = optionalInteger("diskBytes");
+  const probeWallSeconds = optionalInteger("probeWallSeconds", 86400);
+  const runtimeWallSeconds = optionalInteger("runtimeWallSeconds", 86400);
+  return {
+    profileId: string(data.profileId, `${path}.profileId`, 64),
+    runtimeKind: string(data.runtimeKind, `${path}.runtimeKind`, 64),
+    sandboxMode: oneOf(data.sandboxMode, new Set(["windows-appcontainer", "unavailable"] as const), `${path}.sandboxMode`),
+    sandboxSupported,
+    trustedLocalOnly,
+    networkDefault: "denied",
+    subprocessDeclared: false,
+    limits: {
+      ...(memoryBytes === undefined ? {} : { memoryBytes }),
+      ...(cpuRatePercent === undefined ? {} : { cpuRatePercent }),
+      ...(probeCpuTimeSeconds === undefined ? {} : { probeCpuTimeSeconds }),
+      ...(runtimeCpuTimeSeconds === undefined ? {} : { runtimeCpuTimeSeconds }),
+      ...(diskBytes === undefined ? {} : { diskBytes }),
+      maxProcesses: integer(limits.maxProcesses, `${path}.limits.maxProcesses`, 1, 32),
+      ...(probeWallSeconds === undefined ? {} : { probeWallSeconds }),
+      ...(runtimeWallSeconds === undefined ? {} : { runtimeWallSeconds }),
+    },
+  };
+}
+
+function trustRuntimeEntrypoint(value: unknown, path: string): PluginTrustRuntimeEntrypoint {
+  const data = record(value, path);
+  exact(data, [
+    "entrypointId", "runtimeKind", "runtimeId", "descriptor", "pluginArtifactSha256",
+    "runtimeArtifactSha256", "runtimeArtifactSize", "supplySource", "hostManaged",
+    "registrySha256", "systemRuntimePath", "signatureRoot", "profile",
+  ], [], path);
+  const descriptor = jsonValue(data.descriptor, `${path}.descriptor`);
+  if (descriptor === null || typeof descriptor !== "object" || Array.isArray(descriptor)) fail(`${path}.descriptor`);
+  const runtimeKind = string(data.runtimeKind, `${path}.runtimeKind`, 64);
+  const supplySource = oneOf(data.supplySource, new Set(["host-python", "host-managed", "plugin-bundled", "system"] as const), `${path}.supplySource`);
+  const hostManaged = boolean(data.hostManaged, `${path}.hostManaged`);
+  const profile = trustProfile(data.profile, `${path}.profile`);
+  if (
+    profile.runtimeKind !== runtimeKind
+    || hostManaged !== (supplySource === "host-python" || supplySource === "host-managed")
+  ) fail(path);
+  return {
+    entrypointId: string(data.entrypointId, `${path}.entrypointId`, 128),
+    runtimeKind,
+    runtimeId: string(data.runtimeId, `${path}.runtimeId`, 128),
+    descriptor,
+    pluginArtifactSha256: data.pluginArtifactSha256 === null ? null : digest(data.pluginArtifactSha256, `${path}.pluginArtifactSha256`),
+    runtimeArtifactSha256: data.runtimeArtifactSha256 === null ? null : digest(data.runtimeArtifactSha256, `${path}.runtimeArtifactSha256`),
+    runtimeArtifactSize: data.runtimeArtifactSize === null ? null : integer(data.runtimeArtifactSize, `${path}.runtimeArtifactSize`, 1, 1024 * 1024 * 1024),
+    supplySource,
+    hostManaged,
+    registrySha256: data.registrySha256 === null ? null : digest(data.registrySha256, `${path}.registrySha256`),
+    systemRuntimePath: nullableString(data.systemRuntimePath, `${path}.systemRuntimePath`),
+    signatureRoot: nullableString(data.signatureRoot, `${path}.signatureRoot`, 512),
+    profile,
+  };
+}
+
+function trustAuthorization(value: unknown, path: string): PluginTrustAuthorization {
+  const data = record(value, path);
+  exact(data, ["runtimeIdentity", "authorizationIdentity", "mode", "entrypoints", "signatureRoots", "sandbox"], [], path);
+  const entrypoints = array(data.entrypoints, `${path}.entrypoints`, 64).map((item, index) => trustRuntimeEntrypoint(item, `${path}.entrypoints[${index}]`));
+  const sandbox = record(data.sandbox, `${path}.sandbox`);
+  exact(sandbox, ["requested", "active", "status", "supported", "trustedLocalOnly", "profiles"], [], `${path}.sandbox`);
+  const requested = boolean(sandbox.requested, `${path}.sandbox.requested`);
+  const active = boolean(sandbox.active, `${path}.sandbox.active`);
+  const supported = boolean(sandbox.supported, `${path}.sandbox.supported`);
+  const mode = oneOf(data.mode, TRUST_MODES, `${path}.mode`);
+  const profiles = array(sandbox.profiles, `${path}.sandbox.profiles`, 64).map((item, index) => trustProfile(item, `${path}.sandbox.profiles[${index}]`));
+  const expectedSupported = profiles.length > 0 && profiles.every((item) => item.sandboxSupported);
+  const expectedRequested = mode === "marketplace-sandboxed";
+  const expectedActive = expectedRequested && expectedSupported;
+  const expectedTrustedLocalOnly = expectedRequested && !expectedSupported;
+  const expectedStatus = expectedActive
+    ? "windows-appcontainer"
+    : mode === "trusted-local"
+      ? "trusted-local-user-approved"
+      : "unavailable-trusted-local-only";
+  const entrypointIds = entrypoints.map((item) => item.entrypointId);
+  const signatureRoots = array(data.signatureRoots, `${path}.signatureRoots`, 64).map((item, index) => string(item, `${path}.signatureRoots[${index}]`, 512));
+  if (
+    entrypointIds.join("\0") !== [...new Set(entrypointIds)].sort().join("\0")
+    || signatureRoots.join("\0") !== [...new Set(signatureRoots)].sort().join("\0")
+    || JSON.stringify(profiles) !== JSON.stringify(entrypoints.map((item) => item.profile))
+    || requested !== expectedRequested
+    || supported !== expectedSupported
+    || active !== expectedActive
+    || boolean(sandbox.trustedLocalOnly, `${path}.sandbox.trustedLocalOnly`) !== expectedTrustedLocalOnly
+    || sandbox.status !== expectedStatus
+  ) fail(path);
+  return {
+    runtimeIdentity: digest(data.runtimeIdentity, `${path}.runtimeIdentity`),
+    authorizationIdentity: digest(data.authorizationIdentity, `${path}.authorizationIdentity`),
+    mode,
+    entrypoints,
+    signatureRoots,
+    sandbox: {
+      requested,
+      active,
+      status: expectedStatus,
+      supported,
+      trustedLocalOnly: expectedTrustedLocalOnly,
+      profiles,
+    },
+  };
+}
+
+function trustSource(value: unknown, path: string): PluginTrustSource {
+  const data = record(value, path);
+  exact(data, ["rawTrustLevel", "canonicalDefault", "publisherIdentity", "source", "marketplaceId", "signatureRoot"], [], path);
+  const rawTrustLevel = string(data.rawTrustLevel, `${path}.rawTrustLevel`, 64);
+  const canonicalDefault = oneOf(data.canonicalDefault, TRUST_MODES, `${path}.canonicalDefault`);
+  const publisherIdentity = string(data.publisherIdentity, `${path}.publisherIdentity`, 256);
+  const source = string(data.source, `${path}.source`, 128);
+  const marketplaceId = nullableString(data.marketplaceId, `${path}.marketplaceId`, 128);
+  const signatureRoot = nullableString(data.signatureRoot, `${path}.signatureRoot`, 512);
+  const expectedCanonical = TRUST_ALIASES.get(rawTrustLevel);
+  const signedMarketplace = source === "signed-marketplace";
+  if (
+    expectedCanonical === undefined
+    || expectedCanonical !== canonicalDefault
+    || (publisherIdentity.startsWith("publisher-key:") ? signatureRoot !== publisherIdentity : signatureRoot !== null)
+    || signedMarketplace !== (rawTrustLevel === "verified-publisher")
+    || signedMarketplace !== (marketplaceId !== null)
+  ) fail(path);
+  return { rawTrustLevel, canonicalDefault, publisherIdentity, source, marketplaceId, signatureRoot };
+}
+
+function trustRequests(value: unknown, path: string): PluginTrustRequests {
+  const data = record(value, path);
+  exact(data, ["permissions", "network", "files", "secrets", "accounts", "trading", "subprocess", "liveAuthority"], [], path);
+  const category = (key: "network" | "files" | "secrets" | "accounts" | "trading") => {
+    const item = record(data[key], `${path}.${key}`);
+    exact(item, ["requested", "permissionIds"], [], `${path}.${key}`);
+    const permissionIds = array(item.permissionIds, `${path}.${key}.permissionIds`, 128).map((raw, index) => string(raw, `${path}.${key}.permissionIds[${index}]`, 128));
+    const requested = boolean(item.requested, `${path}.${key}.requested`);
+    if (requested !== (permissionIds.length > 0)) fail(`${path}.${key}.requested`);
+    return { requested, permissionIds };
+  };
+  const subprocess = record(data.subprocess, `${path}.subprocess`);
+  exact(subprocess, ["requested", "declared", "maxProcesses", "reason"], [], `${path}.subprocess`);
+  const live = record(data.liveAuthority, `${path}.liveAuthority`);
+  exact(live, ["grantedByTrust", "independentlyProtected"], [], `${path}.liveAuthority`);
+  if (subprocess.requested !== false || subprocess.declared !== false || subprocess.maxProcesses !== 1 || live.grantedByTrust !== false || live.independentlyProtected !== true) fail(path);
+  const permissions = array(data.permissions, `${path}.permissions`, 128).map((raw, index) => {
+      const item = record(raw, `${path}.permissions[${index}]`);
+      exact(item, ["permissionId", "kind", "scope"], [], `${path}.permissions[${index}]`);
+      const scope = jsonValue(item.scope, `${path}.permissions[${index}].scope`);
+      if (scope === null || typeof scope !== "object" || Array.isArray(scope)) fail(`${path}.permissions[${index}].scope`);
+      return {
+        permissionId: string(item.permissionId, `${path}.permissions[${index}].permissionId`, 128),
+        kind: oneOf(item.kind, new Set(["required", "optional"] as const), `${path}.permissions[${index}].kind`),
+        scope,
+      };
+    });
+  const permissionIds = permissions.map((item) => item.permissionId);
+  if (permissionIds.join("\0") !== [...new Set(permissionIds)].sort().join("\0")) fail(`${path}.permissions`);
+  const categories = {
+    network: category("network"),
+    files: category("files"),
+    secrets: category("secrets"),
+    accounts: category("accounts"),
+    trading: category("trading"),
+  };
+  const expectedCategories = {
+    network: permissionIds.filter((item) => item === "network.connect"),
+    files: permissionIds.filter((item) => item.startsWith("filesystem.")),
+    secrets: permissionIds.filter((item) => item === "secrets.use"),
+    accounts: permissionIds.filter((item) => item === "accounts.read"),
+    trading: permissionIds.filter((item) => item.startsWith("trade.")),
+  };
+  for (const key of ["network", "files", "secrets", "accounts", "trading"] as const) {
+    if (categories[key].permissionIds.join("\0") !== expectedCategories[key].join("\0")) fail(`${path}.${key}`);
+  }
+  return {
+    permissions,
+    ...categories,
+    subprocess: { requested: false, declared: false, maxProcesses: 1, reason: string(subprocess.reason, `${path}.subprocess.reason`, 512) },
+    liveAuthority: { grantedByTrust: false, independentlyProtected: true },
+  };
+}
+
+function runtimeDiff(value: unknown, path: string): PluginRuntimeDiff {
+  const data = record(value, path);
+  exact(data, ["changed", "requiresConfirmation", "kindOrIdChanged", "signatureRootChanged", "systemRuntimePathChanged", "supplyChanged", "previous", "current"], [], path);
+  const changed = boolean(data.changed, `${path}.changed`);
+  const requiresConfirmation = boolean(data.requiresConfirmation, `${path}.requiresConfirmation`);
+  if (changed !== requiresConfirmation) fail(`${path}.requiresConfirmation`);
+  return {
+    changed,
+    requiresConfirmation,
+    kindOrIdChanged: boolean(data.kindOrIdChanged, `${path}.kindOrIdChanged`),
+    signatureRootChanged: boolean(data.signatureRootChanged, `${path}.signatureRootChanged`),
+    systemRuntimePathChanged: boolean(data.systemRuntimePathChanged, `${path}.systemRuntimePathChanged`),
+    supplyChanged: boolean(data.supplyChanged, `${path}.supplyChanged`),
+    previous: array(data.previous, `${path}.previous`, 64).map((item, index) => trustRuntimeEntrypoint(item, `${path}.previous[${index}]`)),
+    current: array(data.current, `${path}.current`, 64).map((item, index) => trustRuntimeEntrypoint(item, `${path}.current[${index}]`)),
+  };
+}
+
+function trustSummary(value: unknown, path: string): PluginTrustSummary {
+  const data = record(value, path);
+  exact(data, ["schemaVersion", "uxEnabled", "mode", "defaultMode", "decisionRecorded", "source", "authorization", "requests", "profiles", "changeAllowed", "highRiskAuthorityIndependent"], [], path);
+  if (data.schemaVersion !== "candlescope.plugin-trust-summary/1" || data.highRiskAuthorityIndependent !== true) fail(path);
+  const authorization = trustAuthorization(data.authorization, `${path}.authorization`);
+  const mode = oneOf(data.mode, TRUST_MODES, `${path}.mode`);
+  if (authorization.mode !== mode) fail(`${path}.authorization.mode`);
+  return {
+    schemaVersion: "candlescope.plugin-trust-summary/1",
+    uxEnabled: boolean(data.uxEnabled, `${path}.uxEnabled`),
+    mode,
+    defaultMode: oneOf(data.defaultMode, TRUST_MODES, `${path}.defaultMode`),
+    decisionRecorded: boolean(data.decisionRecorded, `${path}.decisionRecorded`),
+    source: trustSource(data.source, `${path}.source`),
+    authorization,
+    requests: trustRequests(data.requests, `${path}.requests`),
+    profiles: array(data.profiles, `${path}.profiles`, 16).map((item, index) => trustProfile(item, `${path}.profiles[${index}]`)),
+    changeAllowed: boolean(data.changeAllowed, `${path}.changeAllowed`),
+    highRiskAuthorityIndependent: true,
+  };
+}
+
+function trustUxStatus(value: unknown, path: string): PluginTrustUxStatus {
+  const data = record(value, path);
+  exact(data, ["schemaVersion", "enabled", "localInstallFlow", "actor", "profiles", "highRiskAuthorityIndependent"], [], path);
+  if (data.schemaVersion !== "candlescope.plugin-trust-ux/1" || data.enabled !== true || data.localInstallFlow !== "itemized-double-confirmation" || data.actor !== "local-desktop-user" || data.highRiskAuthorityIndependent !== true) fail(path);
+  return {
+    schemaVersion: "candlescope.plugin-trust-ux/1",
+    enabled: true,
+    localInstallFlow: "itemized-double-confirmation",
+    actor: "local-desktop-user",
+    profiles: array(data.profiles, `${path}.profiles`, 16).map((item, index) => trustProfile(item, `${path}.profiles[${index}]`)),
+    highRiskAuthorityIndependent: true,
+  };
+}
+
 function catalogPlugin(value: unknown, path: string, contributionIds: Set<string>): PluginCatalogPlugin {
   const data = record(value, path);
-  exact(data, ["id", "name", "version", "publisher", "state", "enabled", "trustLevel", "available", "permissions", "contributions", "runtime"], ["unavailableReason"], path);
+  exact(data, ["id", "name", "version", "publisher", "state", "enabled", "trustLevel", "available", "permissions", "contributions", "runtime"], ["unavailableReason", "trust"], path);
   const pluginId = string(data.id, `${path}.id`, 128);
   if (!PLUGIN_ID.test(pluginId)) fail(`${path}.id`);
   const permissions = record(data.permissions, `${path}.permissions`);
@@ -783,6 +1082,7 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
     state: oneOf(data.state, new Set(["active", "disabled", "staged"] as const), `${path}.state`),
     enabled: boolean(data.enabled, `${path}.enabled`),
     trustLevel: oneOf(data.trustLevel, new Set(["first-party-pinned", "verified-publisher", "local-developer", "local-trusted", "untrusted"] as const), `${path}.trustLevel`),
+    ...(data.trust === undefined ? {} : { trust: trustSummary(data.trust, `${path}.trust`) }),
     available: boolean(data.available, `${path}.available`),
     ...(data.unavailableReason === undefined ? {} : { unavailableReason: string(data.unavailableReason, `${path}.unavailableReason`, 128) }),
     permissions: {
@@ -804,11 +1104,14 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
     runtime: {
       entrypoints: array(runtime.entrypoints, `${path}.runtime.entrypoints`, 64).map((raw, index) => {
         const item = record(raw, `${path}.runtime.entrypoints[${index}]`);
-        exact(item, ["entrypointId", "state", "generation"], ["runtimeSupply"], `${path}.runtime.entrypoints[${index}]`);
+        exact(item, ["entrypointId", "state", "generation"], ["runtimeKind", "runtimeId", "artifactSha256", "runtimeSupply"], `${path}.runtime.entrypoints[${index}]`);
         return {
           entrypointId: string(item.entrypointId, `${path}.runtime.entrypoints[${index}].entrypointId`, 128),
           state: string(item.state, `${path}.runtime.entrypoints[${index}].state`, 64),
           generation: integer(item.generation, `${path}.runtime.entrypoints[${index}].generation`),
+          ...(item.runtimeKind === undefined ? {} : { runtimeKind: string(item.runtimeKind, `${path}.runtime.entrypoints[${index}].runtimeKind`, 64) }),
+          ...(item.runtimeId === undefined ? {} : { runtimeId: string(item.runtimeId, `${path}.runtime.entrypoints[${index}].runtimeId`, 128) }),
+          ...(item.artifactSha256 === undefined ? {} : { artifactSha256: item.artifactSha256 === null ? null : digest(item.artifactSha256, `${path}.runtime.entrypoints[${index}].artifactSha256`) }),
           ...(item.runtimeSupply === undefined ? {} : { runtimeSupply: runtimeSupply(item.runtimeSupply, `${path}.runtime.entrypoints[${index}].runtimeSupply`) }),
         };
       }),
@@ -1057,7 +1360,7 @@ function v1CompatibilityCatalog(
 export function parsePluginCatalog(value: unknown): PluginCatalog {
   if (JSON.stringify(value).length > 2 * 1024 * 1024) fail("catalog");
   const data = record(value, "catalog");
-  exact(data, ["schemaVersion", "platform", "plugins", "compatibility"], ["runtimeRegistry"], "catalog");
+  exact(data, ["schemaVersion", "platform", "plugins", "compatibility"], ["runtimeRegistry", "trustUx"], "catalog");
   if (data.schemaVersion !== "candlescope.plugin-catalog/2") fail("catalog.schemaVersion");
   const platform = record(data.platform, "catalog.platform");
   exact(platform, ["enabled", "started", "status", "registryRevision"], [], "catalog.platform");
@@ -1075,6 +1378,7 @@ export function parsePluginCatalog(value: unknown): PluginCatalog {
     plugins,
     compatibility: v1CompatibilityCatalog(data.compatibility, "catalog.compatibility"),
     ...(data.runtimeRegistry === undefined ? {} : { runtimeRegistry: runtimeRegistryStatus(data.runtimeRegistry, "catalog.runtimeRegistry") }),
+    ...(data.trustUx === undefined ? {} : { trustUx: trustUxStatus(data.trustUx, "catalog.trustUx") }),
   };
 }
 
@@ -1952,7 +2256,7 @@ function marketplacePermissionDiff(value: unknown, path: string): PluginMarketpl
     "bundleChanged",
     "requiresConfirmation",
     "permissions",
-  ], [], path);
+  ], ["authorizationIdentityChanged"], path);
   const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
   if (!PLUGIN_ID.test(pluginId)) fail(`${path}.pluginId`);
   const permissions = array(data.permissions, `${path}.permissions`, 128).map((raw, index) => {
@@ -1998,14 +2302,159 @@ function marketplacePermissionDiff(value: unknown, path: string): PluginMarketpl
     };
   });
   const requiresConfirmation = boolean(data.requiresConfirmation, `${path}.requiresConfirmation`);
-  if (requiresConfirmation !== permissions.some((item) => item.requiresConfirmation)) fail(`${path}.requiresConfirmation`);
+  const authorizationIdentityChanged = data.authorizationIdentityChanged === undefined
+    ? undefined
+    : boolean(data.authorizationIdentityChanged, `${path}.authorizationIdentityChanged`);
+  if (requiresConfirmation !== (permissions.some((item) => item.requiresConfirmation) || authorizationIdentityChanged === true)) fail(`${path}.requiresConfirmation`);
   return {
     pluginId,
     publisherIdentityChanged: boolean(data.publisherIdentityChanged, `${path}.publisherIdentityChanged`),
     majorVersionChanged: boolean(data.majorVersionChanged, `${path}.majorVersionChanged`),
     bundleChanged: boolean(data.bundleChanged, `${path}.bundleChanged`),
+    ...(authorizationIdentityChanged === undefined ? {} : { authorizationIdentityChanged }),
     requiresConfirmation,
     permissions,
+  };
+}
+
+function exactAcknowledgements(value: unknown, path: string): string[] {
+  const values = array(value, path, 256).map((item, index) => string(item, `${path}[${index}]`, 256));
+  if (values.join("\0") !== [...new Set(values)].sort().join("\0")) fail(path);
+  return values;
+}
+
+function expectedTrustAcknowledgements(
+  authorization: PluginTrustAuthorization,
+  requests: PluginTrustRequests,
+): string[] {
+  return [
+    "execute-local-code",
+    "sandbox-status",
+    "live-authority-separate",
+    ...authorization.entrypoints.map((item) => `runtime:${item.entrypointId}:${item.runtimeKind}:${item.runtimeId}`),
+    ...requests.permissions.map((item) => `permission:${item.permissionId}`),
+  ].sort();
+}
+
+function localInstallPreview(value: unknown, path: string): PluginLocalInstallPreview {
+  const data = record(value, path);
+  exact(data, ["schemaVersion", "plugin", "source", "authorization", "permissionDiff", "runtimeDiff", "requests", "requiredAcknowledgements", "warning"], [], path);
+  if (data.schemaVersion !== "candlescope.plugin-trust-preview/1") fail(`${path}.schemaVersion`);
+  const plugin = record(data.plugin, `${path}.plugin`);
+  exact(plugin, ["id", "name", "version", "publisher", "bundleSha256", "manifestSha256"], [], `${path}.plugin`);
+  const pluginId = string(plugin.id, `${path}.plugin.id`, 128);
+  if (!PLUGIN_ID.test(pluginId)) fail(`${path}.plugin.id`);
+  const permissionDiff = marketplacePermissionDiff(data.permissionDiff, `${path}.permissionDiff`);
+  if (permissionDiff.pluginId !== pluginId) fail(`${path}.permissionDiff.pluginId`);
+  const source = trustSource(data.source, `${path}.source`);
+  const authorization = trustAuthorization(data.authorization, `${path}.authorization`);
+  const parsedRuntimeDiff = runtimeDiff(data.runtimeDiff, `${path}.runtimeDiff`);
+  const requests = trustRequests(data.requests, `${path}.requests`);
+  const requiredAcknowledgements = exactAcknowledgements(data.requiredAcknowledgements, `${path}.requiredAcknowledgements`);
+  if (
+    authorization.mode !== "trusted-local"
+    || source.rawTrustLevel !== "local-developer"
+    || source.source !== "local-file"
+    || source.publisherIdentity !== `manifest:${string(plugin.publisher, `${path}.plugin.publisher`, 128)}`
+    || JSON.stringify(parsedRuntimeDiff.current) !== JSON.stringify(authorization.entrypoints)
+    || requiredAcknowledgements.join("\0") !== expectedTrustAcknowledgements(authorization, requests).join("\0")
+  ) fail(path);
+  return {
+    schemaVersion: "candlescope.plugin-trust-preview/1",
+    plugin: {
+      id: pluginId,
+      name: string(plugin.name, `${path}.plugin.name`, 128),
+      version: string(plugin.version, `${path}.plugin.version`, 64),
+      publisher: string(plugin.publisher, `${path}.plugin.publisher`, 128),
+      bundleSha256: digest(plugin.bundleSha256, `${path}.plugin.bundleSha256`),
+      manifestSha256: digest(plugin.manifestSha256, `${path}.plugin.manifestSha256`),
+    },
+    source,
+    authorization,
+    permissionDiff,
+    runtimeDiff: parsedRuntimeDiff,
+    requests,
+    requiredAcknowledgements,
+    warning: string(data.warning, `${path}.warning`, 1024),
+  };
+}
+
+export function parsePluginLocalInstallCandidate(value: unknown): PluginLocalInstallCandidate {
+  const data = record(value, "localInstallCandidate");
+  exact(data, ["candidateId", "previewSha256", "expiresAt", "preview"], [], "localInstallCandidate");
+  const candidateId = string(data.candidateId, "localInstallCandidate.candidateId", 64);
+  if (!/^candidate-[0-9a-f]{32}$/.test(candidateId)) fail("localInstallCandidate.candidateId");
+  return {
+    candidateId,
+    previewSha256: digest(data.previewSha256, "localInstallCandidate.previewSha256"),
+    expiresAt: utcTimestamp(data.expiresAt, "localInstallCandidate.expiresAt"),
+    preview: localInstallPreview(data.preview, "localInstallCandidate.preview"),
+  };
+}
+
+export function parsePluginTrustReview(value: unknown): PluginTrustReview {
+  const data = record(value, "trustReview");
+  exact(data, ["candidateId", "previewSha256", "confirmationToken", "expiresAt", "confirmationStep"], [], "trustReview");
+  const candidateId = string(data.candidateId, "trustReview.candidateId", 64);
+  if (!/^candidate-[0-9a-f]{32}$/.test(candidateId) || data.confirmationStep !== 1) fail("trustReview");
+  const confirmationToken = string(data.confirmationToken, "trustReview.confirmationToken", 256);
+  if (!/^trust-review-[A-Za-z0-9_-]{32,192}$/.test(confirmationToken)) fail("trustReview.confirmationToken");
+  return {
+    candidateId,
+    previewSha256: digest(data.previewSha256, "trustReview.previewSha256"),
+    confirmationToken,
+    expiresAt: utcTimestamp(data.expiresAt, "trustReview.expiresAt"),
+    confirmationStep: 1,
+  };
+}
+
+export function parsePluginTrustChangeReview(value: unknown): PluginTrustChangeReview {
+  const data = record(value, "trustChangeReview");
+  exact(data, ["changeId", "previewSha256", "confirmationToken", "expiresAt", "preview"], [], "trustChangeReview");
+  const changeId = string(data.changeId, "trustChangeReview.changeId", 64);
+  if (!/^trust-change-[0-9a-f]{32}$/.test(changeId)) fail("trustChangeReview.changeId");
+  const preview = record(data.preview, "trustChangeReview.preview");
+  exact(preview, ["schemaVersion", "action", "pluginId", "bundleSha256", "source", "from", "to", "permissionDiff", "runtimeDiff", "requests", "requiredAcknowledgements"], [], "trustChangeReview.preview");
+  if (preview.schemaVersion !== "candlescope.plugin-trust-preview/1" || preview.action !== "trust-change") fail("trustChangeReview.preview");
+  const pluginId = string(preview.pluginId, "trustChangeReview.preview.pluginId", 128);
+  if (!PLUGIN_ID.test(pluginId)) fail("trustChangeReview.preview.pluginId");
+  const source = trustSource(preview.source, "trustChangeReview.preview.source");
+  const from = trustAuthorization(preview.from, "trustChangeReview.preview.from");
+  const to = trustAuthorization(preview.to, "trustChangeReview.preview.to");
+  const permissionDiff = marketplacePermissionDiff(preview.permissionDiff, "trustChangeReview.preview.permissionDiff");
+  const parsedRuntimeDiff = runtimeDiff(preview.runtimeDiff, "trustChangeReview.preview.runtimeDiff");
+  const requests = trustRequests(preview.requests, "trustChangeReview.preview.requests");
+  const requiredAcknowledgements = exactAcknowledgements(preview.requiredAcknowledgements, "trustChangeReview.preview.requiredAcknowledgements");
+  const confirmationToken = string(data.confirmationToken, "trustChangeReview.confirmationToken", 256);
+  if (
+    !/^trust-change-[A-Za-z0-9_-]{32,192}$/.test(confirmationToken)
+    || source.source !== "signed-marketplace"
+    || permissionDiff.pluginId !== pluginId
+    || from.mode === to.mode
+    || !new Set([from.mode, to.mode]).has("marketplace-sandboxed")
+    || !new Set([from.mode, to.mode]).has("trusted-local")
+    || JSON.stringify(parsedRuntimeDiff.previous) !== JSON.stringify(from.entrypoints)
+    || JSON.stringify(parsedRuntimeDiff.current) !== JSON.stringify(to.entrypoints)
+    || requiredAcknowledgements.join("\0") !== expectedTrustAcknowledgements(to, requests).join("\0")
+  ) fail("trustChangeReview.preview");
+  return {
+    changeId,
+    previewSha256: digest(data.previewSha256, "trustChangeReview.previewSha256"),
+    confirmationToken,
+    expiresAt: utcTimestamp(data.expiresAt, "trustChangeReview.expiresAt"),
+    preview: {
+      schemaVersion: "candlescope.plugin-trust-preview/1",
+      action: "trust-change",
+      pluginId,
+      bundleSha256: digest(preview.bundleSha256, "trustChangeReview.preview.bundleSha256"),
+      source,
+      from,
+      to,
+      permissionDiff,
+      runtimeDiff: parsedRuntimeDiff,
+      requests,
+      requiredAcknowledgements,
+    },
   };
 }
 
@@ -2242,7 +2691,7 @@ export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceS
 
 export function parsePluginManagementDetail(value: unknown): PluginManagementDetail {
   const data = record(value, "detail");
-  exact(data, ["schemaVersion", "plugin", "permissions", "health", "update", "rollback", "paperTrading", "dataRetention"], [], "detail");
+  exact(data, ["schemaVersion", "plugin", "permissions", "health", "update", "rollback", "paperTrading", "dataRetention"], ["trust"], "detail");
   if (data.schemaVersion !== "candlescope.plugin-management-detail/1") fail("detail.schemaVersion");
   const contributionIds = new Set<string>();
   const plugin = catalogPlugin(data.plugin, "detail.plugin", contributionIds);
@@ -2292,13 +2741,14 @@ export function parsePluginManagementDetail(value: unknown): PluginManagementDet
   return {
     schemaVersion: "candlescope.plugin-management-detail/1",
     plugin,
+    ...(data.trust === undefined ? {} : { trust: trustSummary(data.trust, "detail.trust") }),
     permissions,
     health: {
       available: boolean(health.available, "detail.health.available"),
       ...(health.unavailableReason == null ? {} : { unavailableReason: string(health.unavailableReason, "detail.health.unavailableReason", 128) }),
       entrypoints: array(health.entrypoints, "detail.health.entrypoints", 64).map((raw, index) => {
         const item = record(raw, `detail.health.entrypoints[${index}]`);
-        exact(item, ["entrypointId", "state", "generation"], ["runtimeSupply"], `detail.health.entrypoints[${index}]`);
+        exact(item, ["entrypointId", "state", "generation"], ["runtimeKind", "runtimeId", "artifactSha256", "runtimeSupply"], `detail.health.entrypoints[${index}]`);
         return {
           entrypointId: string(item.entrypointId, "detail.health.entrypointId", 128),
           state: string(item.state, "detail.health.state", 64),

@@ -31,6 +31,7 @@ CONTRACT_PATH = (
     / "plugin_platform_multi_runtime"
     / "phase5_contract_v1.json"
 )
+PHASE5_MANIFEST_PATH = CONTRACT_PATH.with_name("phase5_ta4j_manifest_v1.json")
 REAL_EVIDENCE_PATH = (
     REPOSITORY_ROOT
     / "docs"
@@ -98,14 +99,14 @@ def capture_contract() -> dict[str, Any]:
         EVIDENCE_ROLES,
         OFFICIAL_REGISTRY_V1_PATH,
         OFFICIAL_REGISTRY_V2_PATH,
-        OFFICIAL_ROOTS_PATH,
+        OFFICIAL_ROOTS_V2_PATH,
         load_runtime_registry_roots_bytes,
         verify_runtime_registry_bytes,
     )
     from scripts import plugin_platform_multi_runtime_phase4 as phase4
 
     phase4_contract = phase4.validate_contract()
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V2_PATH.read_bytes())
     revision_1 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V1_PATH.read_bytes(), roots
     )
@@ -115,7 +116,7 @@ def capture_contract() -> dict[str, Any]:
     release = next(
         item for item in revision_2.runtimes if item.runtime_id == JAVA_RUNTIME_ID
     )
-    manifest = _strict_json(REFERENCE / "manifest.json")
+    manifest = _strict_json(PHASE5_MANIFEST_PATH)
     lock = _strict_json(REFERENCE / "supply-chain.lock.json")
     transcript = _strict_json(REFERENCE / "probes" / "ta4j-control.json")
     golden = _strict_json(REFERENCE / "evidence" / "golden-corpus.json")

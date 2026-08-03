@@ -22,10 +22,9 @@ from app.plugin_runtime_registry_v3 import (
     ManagedRuntimeRegistryService,
     OFFICIAL_REGISTRY_V1_PATH,
     OFFICIAL_REGISTRY_V2_PATH,
-    OFFICIAL_REGISTRY_PATH,
     OFFICIAL_ROOTS_PATH,
+    OFFICIAL_ROOTS_V2_PATH,
     RuntimeRegistryError,
-    build_official_runtime_registry,
     load_runtime_registry_roots_bytes,
     verify_runtime_registry_bytes,
 )
@@ -134,7 +133,7 @@ def _fixture(tmp_path: Path):
 
 
 def test_official_registry_revision_2_pins_temurin_25_and_retains_revision_1() -> None:
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V2_PATH.read_bytes())
     revision_1 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V1_PATH.read_bytes(), roots
     )
@@ -142,7 +141,6 @@ def test_official_registry_revision_2_pins_temurin_25_and_retains_revision_1() -
         OFFICIAL_REGISTRY_V2_PATH.read_bytes(), roots
     )
 
-    assert OFFICIAL_REGISTRY_PATH == OFFICIAL_REGISTRY_V2_PATH
     assert len(roots) == 2
     assert revision_1.revision == 1
     assert revision_2.revision == 2
@@ -167,7 +165,14 @@ def test_official_registry_revision_2_pins_temurin_25_and_retains_revision_1() -
 def test_official_registry_bootstraps_the_continuous_history_and_can_rollback(
     tmp_path: Path,
 ) -> None:
-    service = build_official_runtime_registry(root=tmp_path / "official", enabled=True)
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V2_PATH.read_bytes())
+    service = ManagedRuntimeRegistryService(
+        root=tmp_path / "official",
+        roots=roots,
+        bootstrap_registry=OFFICIAL_REGISTRY_V2_PATH.read_bytes(),
+        bootstrap_history=(OFFICIAL_REGISTRY_V1_PATH.read_bytes(),),
+        enabled=True,
+    )
     status = service.public_status()
 
     assert status["active"]["revision"] == 2

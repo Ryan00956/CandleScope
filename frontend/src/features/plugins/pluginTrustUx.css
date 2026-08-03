@@ -1,0 +1,115 @@
+.plugin-trust-install-card {
+  border-color: color-mix(in srgb, #f59e0b 42%, var(--border-color, #263142));
+}
+
+.plugin-trust-review,
+.plugin-trust-installed-summary,
+.plugin-trust-mode-control {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, #f59e0b 30%, var(--border-color, #263142));
+  border-radius: 10px;
+  background: color-mix(in srgb, #111827 94%, #f59e0b 6%);
+}
+
+.plugin-trust-source,
+.plugin-trust-runtime,
+.plugin-trust-diffs > div {
+  display: grid;
+  gap: 4px;
+}
+
+.plugin-trust-source code,
+.plugin-trust-runtime code {
+  overflow-wrap: anywhere;
+  color: #a5b4fc;
+  font-size: 11px;
+}
+
+.plugin-trust-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #f59e0b;
+  background: rgb(245 158 11 / 10%);
+  color: #fde68a;
+}
+
+.plugin-trust-risk-grid,
+.plugin-trust-diffs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.plugin-trust-risk-grid > div,
+.plugin-trust-diffs > div {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color, #263142);
+  border-radius: 8px;
+  background: rgb(15 23 42 / 60%);
+}
+
+.plugin-trust-risk-grid > div[data-requested="true"] {
+  border-color: rgb(245 158 11 / 55%);
+}
+
+.plugin-trust-risk-grid span,
+.plugin-trust-diffs span,
+.plugin-trust-diffs small,
+.plugin-trust-runtime span,
+.plugin-trust-runtime small {
+  overflow-wrap: anywhere;
+  color: var(--text-secondary, #a8b0bf);
+}
+
+.plugin-trust-reason {
+  display: grid;
+  gap: 6px;
+}
+
+.plugin-trust-reason textarea {
+  min-height: 74px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color, #263142);
+  border-radius: 8px;
+  background: var(--surface-raised, #111827);
+  color: var(--text-primary, #f4f7fb);
+}
+
+.plugin-trust-acknowledgements {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border-color, #263142);
+  border-radius: 8px;
+}
+
+.plugin-trust-acknowledgements label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.plugin-trust-confirmations .is-danger {
+  border-color: #ef4444;
+  color: #fecaca;
+}
+
+.plugin-state-pill.is-warn {
+  border-color: rgb(245 158 11 / 45%);
+  color: #fbbf24;
+}
+
+@media (max-width: 720px) {
+  .plugin-trust-risk-grid,
+  .plugin-trust-diffs {
+    grid-template-columns: 1fr;
+  }
+}

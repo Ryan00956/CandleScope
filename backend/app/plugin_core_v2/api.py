@@ -783,6 +783,11 @@ def create_core_plugin_router() -> APIRouter:
     @router.post("/manage/install")
     async def install(request: Request) -> dict[str, Any]:
         platform = await _guarded_platform(request)
+        if platform.trust_ux_enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="direct local install is disabled; use the Phase 6 prepare/review/confirm flow",
+            )
         upload = None
         try:
             upload, expected_sha256 = await _bundle_upload(request, platform)
@@ -811,6 +816,137 @@ def create_core_plugin_router() -> APIRouter:
         finally:
             if upload is not None:
                 await asyncio.to_thread(upload.unlink, missing_ok=True)
+
+    @router.post("/manage/install/prepare")
+    async def prepare_local_install(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        upload = None
+        try:
+            upload, expected_sha256 = await _bundle_upload(request, platform)
+            bundle = await asyncio.to_thread(
+                verify_platform_bundle,
+                upload,
+                expected_sha256=expected_sha256,
+                host_version=platform.installer.host_version,
+            )
+            action = request.state.plugin_user_action
+            return await asyncio.to_thread(
+                platform.prepare_local_install,
+                upload,
+                bundle,
+                user_action_id=action,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_api_error(exc)
+        finally:
+            if upload is not None:
+                await asyncio.to_thread(upload.unlink, missing_ok=True)
+
+    @router.post("/manage/install/review")
+    async def review_local_install(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(
+            request,
+            required={
+                "candidateId",
+                "previewSha256",
+                "reason",
+                "acknowledgements",
+            },
+        )
+        if (
+            not all(
+                isinstance(value[key], str)
+                for key in ("candidateId", "previewSha256", "reason")
+            )
+            or not isinstance(value["acknowledgements"], list)
+            or not all(isinstance(item, str) for item in value["acknowledgements"])
+        ):
+            raise HTTPException(status_code=400, detail="trust review body is invalid")
+        try:
+            return await asyncio.to_thread(
+                platform.review_local_install,
+                candidate_id=value["candidateId"],
+                preview_sha256=value["previewSha256"],
+                reason=value["reason"],
+                acknowledgements=value["acknowledgements"],
+                user_action_id=request.state.plugin_user_action,
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/install/confirm")
+    async def confirm_local_install(request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(
+            request,
+            required={"candidateId", "previewSha256", "confirmationToken"},
+        )
+        if not all(isinstance(value[key], str) for key in value):
+            raise HTTPException(
+                status_code=400, detail="trust confirmation body is invalid"
+            )
+        try:
+            return await platform.confirm_local_install(
+                candidate_id=value["candidateId"],
+                preview_sha256=value["previewSha256"],
+                confirmation_token=value["confirmationToken"],
+                user_action_id=request.state.plugin_user_action,
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/{plugin_id}/trust/review")
+    async def review_trust_change(plugin_id: str, request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(
+            request,
+            required={"targetMode", "reason", "acknowledgements"},
+        )
+        if (
+            not isinstance(value["targetMode"], str)
+            or not isinstance(value["reason"], str)
+            or not isinstance(value["acknowledgements"], list)
+            or not all(isinstance(item, str) for item in value["acknowledgements"])
+        ):
+            raise HTTPException(
+                status_code=400, detail="trust change review is invalid"
+            )
+        try:
+            return await asyncio.to_thread(
+                platform.begin_trust_change,
+                plugin_id,
+                target_mode=value["targetMode"],
+                reason=value["reason"],
+                acknowledgements=value["acknowledgements"],
+                user_action_id=request.state.plugin_user_action,
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
+
+    @router.post("/manage/{plugin_id}/trust/confirm")
+    async def confirm_trust_change(plugin_id: str, request: Request) -> dict[str, Any]:
+        platform = await _guarded_platform(request)
+        value = await _body(
+            request,
+            required={"changeId", "previewSha256", "confirmationToken"},
+        )
+        if not all(isinstance(value[key], str) for key in value):
+            raise HTTPException(
+                status_code=400, detail="trust change confirmation is invalid"
+            )
+        try:
+            return await platform.confirm_trust_change(
+                plugin_id,
+                change_id=value["changeId"],
+                preview_sha256=value["previewSha256"],
+                confirmation_token=value["confirmationToken"],
+                user_action_id=request.state.plugin_user_action,
+            )
+        except Exception as exc:
+            _raise_api_error(exc)
 
     @router.get("/manage/{plugin_id}/detail")
     async def plugin_detail(plugin_id: str, request: Request) -> dict[str, Any]:

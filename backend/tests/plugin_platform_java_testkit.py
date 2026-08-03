@@ -65,6 +65,12 @@ def build_java_reference_bundle(
         REFERENCE_ROOT / "sbom" / "cyclonedx.json",
         source / "sbom" / "cyclonedx.json",
     )
+    sbom_path = source / "sbom" / "cyclonedx.json"
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    sbom["metadata"]["component"]["version"] = version
+    sbom_path.write_text(
+        json.dumps(sbom, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     for license_path in sorted(
         (REFERENCE_ROOT / "licenses").iterdir(), key=lambda value: value.name
     ):

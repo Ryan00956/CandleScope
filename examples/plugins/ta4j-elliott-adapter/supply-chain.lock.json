@@ -16,12 +16,12 @@
     "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jdk_x64_windows_hotspot_25.0.4_7.zip"
   },
   "runtime": {
-    "runtimeId": "temurin-25.0.4.7",
-    "version": "25.0.4+7-LTS",
-    "archive": "OpenJDK25U-jre_x64_windows_hotspot_25.0.4_7.zip",
-    "size": 58474646,
-    "sha256": "sha256:5b0d58f043f762fa3ee6cc12b6774b59b245cafdcb357e45ce61f822aa9a56cb",
-    "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jre_x64_windows_hotspot_25.0.4_7.zip"
+    "runtimeId": "temurin-26.0.2.10",
+    "version": "26.0.2+10",
+    "archive": "OpenJDK26U-jre_x64_windows_hotspot_26.0.2_10.zip",
+    "size": 60081605,
+    "sha256": "sha256:4323e886b6320e2166072bdfd604a4236c3dba6e5ab289e10aef623f09d355a0",
+    "url": "https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26.0.2%2B10/OpenJDK26U-jre_x64_windows_hotspot_26.0.2_10.zip"
   },
   "upstream": {
     "repository": "https://github.com/ta4j/ta4j",

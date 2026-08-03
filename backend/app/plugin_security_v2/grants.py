@@ -23,6 +23,7 @@ from .storage import atomic_write_json, read_json, security_lock
 
 
 GRANT_STORE_SCHEMA_VERSION = 1
+RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION = 2
 GRANT_STORE_FILE_NAME = "platform-grants-v2.json"
 GRANT_DECISIONS = frozenset({"pending", "granted", "denied", "revoked"})
 PERMISSION_KINDS = frozenset({"required", "optional"})
@@ -245,6 +246,7 @@ class PluginGrantRecord:
     manifest_sha256: str
     updated_at: str
     permissions: tuple[GrantPermissionRecord, ...]
+    authorization_identity: str | None = None
 
     def __post_init__(self) -> None:
         if not _PLUGIN_ID.fullmatch(self.plugin_id):
@@ -252,6 +254,13 @@ class PluginGrantRecord:
                 "PLUGIN_GRANT_STORE_INVALID", "grant pluginId is invalid"
             )
         _require_string(self.publisher_identity, "grant.publisherIdentity")
+        if self.authorization_identity is not None and not _SHA256.fullmatch(
+            self.authorization_identity
+        ):
+            raise security_error(
+                "PLUGIN_GRANT_STORE_INVALID",
+                "grant authorizationIdentity is invalid",
+            )
         if (
             isinstance(self.major_version, bool)
             or not isinstance(self.major_version, int)
@@ -279,10 +288,17 @@ class PluginGrantRecord:
     def by_id(self) -> dict[str, GrantPermissionRecord]:
         return {item.permission_id: item for item in self.permissions}
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(
+        self, *, include_authorization_identity: bool = False
+    ) -> dict[str, Any]:
         return {
             "pluginId": self.plugin_id,
             "publisherIdentity": self.publisher_identity,
+            **(
+                {"authorizationIdentity": self.authorization_identity}
+                if include_authorization_identity
+                else {}
+            ),
             "majorVersion": self.major_version,
             "bundleSha256": self.bundle_sha256,
             "manifestSha256": self.manifest_sha256,
@@ -291,18 +307,23 @@ class PluginGrantRecord:
         }
 
     @classmethod
-    def from_wire(cls, value: Any, label: str) -> "PluginGrantRecord":
+    def from_wire(
+        cls, value: Any, label: str, *, schema_version: int = GRANT_STORE_SCHEMA_VERSION
+    ) -> "PluginGrantRecord":
+        keys = {
+            "pluginId",
+            "publisherIdentity",
+            "majorVersion",
+            "bundleSha256",
+            "manifestSha256",
+            "updatedAt",
+            "permissions",
+        }
+        if schema_version == RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION:
+            keys.add("authorizationIdentity")
         data = _require_keys(
             value,
-            {
-                "pluginId",
-                "publisherIdentity",
-                "majorVersion",
-                "bundleSha256",
-                "manifestSha256",
-                "updatedAt",
-                "permissions",
-            },
+            keys,
             label,
         )
         if not isinstance(data["permissions"], list):
@@ -320,6 +341,7 @@ class PluginGrantRecord:
                 GrantPermissionRecord.from_wire(item, f"{label}.permissions[{index}]")
                 for index, item in enumerate(data["permissions"])
             ),
+            authorization_identity=data.get("authorizationIdentity"),
         )
 
 
@@ -330,9 +352,12 @@ class GrantDocument:
     schema_version: int = GRANT_STORE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != GRANT_STORE_SCHEMA_VERSION:
+        if self.schema_version not in {
+            GRANT_STORE_SCHEMA_VERSION,
+            RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION,
+        }:
             raise security_error(
-                "PLUGIN_GRANT_STORE_INVALID", "grant schemaVersion must be 1"
+                "PLUGIN_GRANT_STORE_INVALID", "grant schemaVersion must be 1 or 2"
             )
         if (
             isinstance(self.revision, bool)
@@ -360,13 +385,26 @@ class GrantDocument:
         return GrantDocument(
             revision=self.revision + 1,
             plugins=tuple(values[key] for key in sorted(values)),
+            schema_version=(
+                RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION
+                if self.schema_version == RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION
+                or record.authorization_identity is not None
+                else GRANT_STORE_SCHEMA_VERSION
+            ),
         )
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "schemaVersion": self.schema_version,
             "revision": self.revision,
-            "plugins": [item.to_wire() for item in self.plugins],
+            "plugins": [
+                item.to_wire(
+                    include_authorization_identity=(
+                        self.schema_version == RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION
+                    )
+                )
+                for item in self.plugins
+            ],
         }
 
     @classmethod
@@ -378,11 +416,23 @@ class GrantDocument:
             raise security_error(
                 "PLUGIN_GRANT_STORE_INVALID", "grant store plugins must be an array"
             )
+        schema_version = data["schemaVersion"]
+        if schema_version not in {
+            GRANT_STORE_SCHEMA_VERSION,
+            RUNTIME_BOUND_GRANT_STORE_SCHEMA_VERSION,
+        }:
+            raise security_error(
+                "PLUGIN_GRANT_STORE_INVALID", "grant schemaVersion must be 1 or 2"
+            )
         return cls(
-            schema_version=data["schemaVersion"],
+            schema_version=schema_version,
             revision=data["revision"],
             plugins=tuple(
-                PluginGrantRecord.from_wire(item, f"grant store.plugins[{index}]")
+                PluginGrantRecord.from_wire(
+                    item,
+                    f"grant store.plugins[{index}]",
+                    schema_version=schema_version,
+                )
                 for index, item in enumerate(data["plugins"])
             ),
         )
@@ -419,10 +469,13 @@ class PermissionDiff:
     major_version_changed: bool
     bundle_changed: bool
     items: tuple[PermissionDiffItem, ...]
+    authorization_identity_changed: bool | None = None
 
     @property
     def requires_confirmation(self) -> bool:
-        return any(item.requires_confirmation for item in self.items)
+        return self.authorization_identity_changed is True or any(
+            item.requires_confirmation for item in self.items
+        )
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -430,6 +483,11 @@ class PermissionDiff:
             "publisherIdentityChanged": self.publisher_identity_changed,
             "majorVersionChanged": self.major_version_changed,
             "bundleChanged": self.bundle_changed,
+            **(
+                {"authorizationIdentityChanged": (self.authorization_identity_changed)}
+                if self.authorization_identity_changed is not None
+                else {}
+            ),
             "requiresConfirmation": self.requires_confirmation,
             "permissions": [item.to_wire() for item in self.items],
         }
@@ -518,7 +576,8 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None,
-    ) -> tuple[str, int, str, str]:
+        authorization_identity: str | None,
+    ) -> tuple[str, int, str, str, str | None]:
         if not _SHA256.fullmatch(bundle_sha256) or not _SHA256.fullmatch(
             manifest_sha256
         ):
@@ -529,11 +588,20 @@ class GrantStore:
             )
         identity = publisher_identity or manifest_publisher_identity(manifest)
         _require_string(identity, "publisherIdentity")
+        if authorization_identity is not None and not _SHA256.fullmatch(
+            authorization_identity
+        ):
+            raise security_error(
+                "PLUGIN_GRANT_BINDING_INVALID",
+                "grant authorization identity must be a prefixed SHA-256 value",
+                plugin_id=manifest.plugin.id,
+            )
         return (
             identity,
             _major_version(manifest.plugin.version),
             bundle_sha256,
             manifest_sha256,
+            authorization_identity,
         )
 
     def permission_diff(
@@ -543,6 +611,7 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
     ) -> PermissionDiff:
         document = self.load()
         return self._permission_diff(
@@ -551,6 +620,7 @@ class GrantStore:
             bundle_sha256=bundle_sha256,
             manifest_sha256=manifest_sha256,
             publisher_identity=publisher_identity,
+            authorization_identity=authorization_identity,
         )
 
     def _permission_diff(
@@ -561,9 +631,14 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None,
+        authorization_identity: str | None,
     ) -> PermissionDiff:
-        identity, major, digest, _ = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, _, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         current = _permission_map(manifest)
         previous = document.by_id().get(manifest.plugin.id)
@@ -571,6 +646,24 @@ class GrantStore:
             previous is not None and previous.publisher_identity != identity
         )
         major_changed = previous is not None and previous.major_version != major
+        authorization_changed: bool | None = None
+        if authorization is not None:
+            authorization_changed = bool(
+                previous is not None
+                and (
+                    (
+                        previous.authorization_identity is None
+                        and (
+                            previous.bundle_sha256 != digest
+                            or previous.manifest_sha256 != manifest_sha256
+                        )
+                    )
+                    or (
+                        previous.authorization_identity is not None
+                        and previous.authorization_identity != authorization
+                    )
+                )
+            )
         previous_permissions = previous.by_id() if previous is not None else {}
         items: list[PermissionDiffItem] = []
         for permission_id in sorted(set(current) | set(previous_permissions)):
@@ -595,7 +688,7 @@ class GrantStore:
             if old is None:
                 change = "added"
                 requires = True
-            elif identity_changed or major_changed:
+            elif identity_changed or major_changed or authorization_changed is True:
                 change = "identity-changed"
                 requires = True
             elif old.kind != kind:
@@ -622,6 +715,7 @@ class GrantStore:
             major_changed,
             previous is None or previous.bundle_sha256 != digest,
             tuple(items),
+            authorization_changed,
         )
 
     def _permission_available(self, permission_id: str) -> bool:
@@ -649,12 +743,17 @@ class GrantStore:
         major: int,
         bundle_sha256: str,
         manifest_sha256: str,
+        authorization_identity: str | None,
     ) -> bool:
         if (
             record.publisher_identity != identity
             or record.major_version != major
             or record.bundle_sha256 != bundle_sha256
             or record.manifest_sha256 != manifest_sha256
+            or (
+                authorization_identity is not None
+                and record.authorization_identity != authorization_identity
+            )
         ):
             return False
         requested = _permission_map(manifest)
@@ -675,12 +774,25 @@ class GrantStore:
         major: int,
         bundle_sha256: str,
         manifest_sha256: str,
+        authorization_identity: str | None,
     ) -> PluginGrantRecord:
         previous_permissions = previous.by_id() if previous is not None else {}
+        legacy_exact_migration = bool(
+            previous is not None
+            and previous.authorization_identity is None
+            and authorization_identity is not None
+            and previous.bundle_sha256 == bundle_sha256
+            and previous.manifest_sha256 == manifest_sha256
+        )
         same_identity = (
             previous is not None
             and previous.publisher_identity == identity
             and previous.major_version == major
+            and (
+                authorization_identity is None
+                or previous.authorization_identity == authorization_identity
+                or legacy_exact_migration
+            )
         )
         now = _utc_now()
         permissions: list[GrantPermissionRecord] = []
@@ -735,6 +847,11 @@ class GrantStore:
             manifest_sha256,
             now,
             tuple(permissions),
+            (
+                authorization_identity
+                if authorization_identity is not None
+                else (previous.authorization_identity if previous is not None else None)
+            ),
         )
 
     def reconcile(
@@ -744,6 +861,7 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
         with security_lock(self.lock_path, self.lock_timeout_seconds):
@@ -752,6 +870,7 @@ class GrantStore:
                 bundle_sha256=bundle_sha256,
                 manifest_sha256=manifest_sha256,
                 publisher_identity=publisher_identity,
+                authorization_identity=authorization_identity,
                 trace_id=trace_id,
             )
 
@@ -762,6 +881,7 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
         """Reconcile while the caller owns ``lock_path``.
@@ -771,8 +891,12 @@ class GrantStore:
         Other callers must use :meth:`reconcile`.
         """
 
-        identity, major, digest, manifest_digest = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, manifest_digest, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         trace = trace_id or f"grant-reconcile-{uuid.uuid4().hex}"
         document = self.load()
@@ -784,6 +908,7 @@ class GrantStore:
             major=major,
             bundle_sha256=digest,
             manifest_sha256=manifest_digest,
+            authorization_identity=authorization,
         ):
             return GrantMutationResult(
                 manifest.plugin.id,
@@ -800,6 +925,7 @@ class GrantStore:
             bundle_sha256=digest,
             manifest_sha256=manifest_digest,
             publisher_identity=identity,
+            authorization_identity=authorization,
         )
         record = self._reconciled_record(
             previous,
@@ -808,6 +934,7 @@ class GrantStore:
             major=major,
             bundle_sha256=digest,
             manifest_sha256=manifest_digest,
+            authorization_identity=authorization,
         )
         updated = document.replace(record)
         event = self.audit_log.append(
@@ -821,6 +948,11 @@ class GrantStore:
                 "toRevision": updated.revision,
                 "bundleSha256": digest,
                 "manifestSha256": manifest_digest,
+                **(
+                    {"authorizationIdentity": authorization}
+                    if authorization is not None
+                    else {}
+                ),
                 "permissionDiff": diff.to_wire(),
             },
         )
@@ -846,6 +978,7 @@ class GrantStore:
         granted_scope: dict[str, Any] | None,
         source: str,
         publisher_identity: str | None,
+        authorization_identity: str | None,
         trace_id: str | None,
     ) -> GrantMutationResult:
         if decision not in {"granted", "denied", "revoked"}:
@@ -867,8 +1000,12 @@ class GrantStore:
                 plugin_id=manifest.plugin.id,
                 details={"permissionId": permission_id},
             )
-        identity, major, digest, manifest_digest = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, manifest_digest, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         requests = _permission_map(manifest)
         requested = requests.get(permission_id)
@@ -890,6 +1027,7 @@ class GrantStore:
                 major=major,
                 bundle_sha256=digest,
                 manifest_sha256=manifest_digest,
+                authorization_identity=authorization,
             ):
                 previous = self._reconciled_record(
                     previous,
@@ -898,6 +1036,7 @@ class GrantStore:
                     major=major,
                     bundle_sha256=digest,
                     manifest_sha256=manifest_digest,
+                    authorization_identity=authorization,
                 )
                 document = document.replace(previous)
             current = previous.by_id()[permission_id]
@@ -951,6 +1090,11 @@ class GrantStore:
                     "fromRevision": document.revision,
                     "toRevision": updated.revision,
                     "bundleSha256": digest,
+                    **(
+                        {"authorizationIdentity": authorization}
+                        if authorization is not None
+                        else {}
+                    ),
                 },
             )
             atomic_write_json(self.path, updated.to_wire())
@@ -974,6 +1118,7 @@ class GrantStore:
         scope: dict[str, Any] | None = None,
         source: str = "cli",
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
         return self._mutate_permission(
@@ -985,6 +1130,7 @@ class GrantStore:
             granted_scope=scope,
             source=source,
             publisher_identity=publisher_identity,
+            authorization_identity=authorization_identity,
             trace_id=trace_id,
         )
 
@@ -997,6 +1143,7 @@ class GrantStore:
         permission_id: str,
         source: str = "cli",
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
         return self._mutate_permission(
@@ -1008,6 +1155,7 @@ class GrantStore:
             granted_scope=None,
             source=source,
             publisher_identity=publisher_identity,
+            authorization_identity=authorization_identity,
             trace_id=trace_id,
         )
 
@@ -1020,6 +1168,7 @@ class GrantStore:
         permission_id: str,
         source: str = "cli",
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
         trace_id: str | None = None,
     ) -> GrantMutationResult:
         return self._mutate_permission(
@@ -1031,6 +1180,7 @@ class GrantStore:
             granted_scope=None,
             source=source,
             publisher_identity=publisher_identity,
+            authorization_identity=authorization_identity,
             trace_id=trace_id,
         )
 
@@ -1041,9 +1191,14 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
     ) -> tuple[EffectiveGrant, ...]:
-        identity, major, digest, manifest_digest = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, manifest_digest, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         document = self.load()
         record = document.by_id().get(manifest.plugin.id)
@@ -1054,6 +1209,7 @@ class GrantStore:
             major=major,
             bundle_sha256=digest,
             manifest_sha256=manifest_digest,
+            authorization_identity=authorization,
         ):
             return ()
         return tuple(
@@ -1080,9 +1236,14 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
     ) -> bool:
-        identity, major, digest, manifest_digest = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, manifest_digest, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         record = self.load().by_id().get(manifest.plugin.id)
         return bool(
@@ -1094,6 +1255,7 @@ class GrantStore:
                 major=major,
                 bundle_sha256=digest,
                 manifest_sha256=manifest_digest,
+                authorization_identity=authorization,
             )
             and self._required_satisfied(record)
         )
@@ -1105,11 +1267,16 @@ class GrantStore:
         bundle_sha256: str,
         manifest_sha256: str,
         publisher_identity: str | None = None,
+        authorization_identity: str | None = None,
     ) -> bool:
         """Return true only after every prompt is resolved and required scope is full."""
 
-        identity, major, digest, manifest_digest = self._binding(
-            manifest, bundle_sha256, manifest_sha256, publisher_identity
+        identity, major, digest, manifest_digest, authorization = self._binding(
+            manifest,
+            bundle_sha256,
+            manifest_sha256,
+            publisher_identity,
+            authorization_identity,
         )
         record = self.load().by_id().get(manifest.plugin.id)
         return bool(
@@ -1121,6 +1288,7 @@ class GrantStore:
                 major=major,
                 bundle_sha256=digest,
                 manifest_sha256=manifest_digest,
+                authorization_identity=authorization,
             )
             and self._required_satisfied(record)
             and all(item.decision != "pending" for item in record.permissions)
@@ -1164,6 +1332,11 @@ class GrantStore:
             {
                 "pluginId": item.plugin_id,
                 "publisherIdentity": item.publisher_identity,
+                **(
+                    {"authorizationIdentity": item.authorization_identity}
+                    if item.authorization_identity is not None
+                    else {}
+                ),
                 "majorVersion": item.major_version,
                 "bundleSha256": item.bundle_sha256,
                 "manifestSha256": item.manifest_sha256,

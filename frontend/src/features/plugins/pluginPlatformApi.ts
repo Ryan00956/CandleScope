@@ -5,11 +5,14 @@ import {
   parsePluginLiveConfirmationReceipt,
   parsePluginLiveControlStatus,
   parsePluginLiveExecutionRecord,
+  parsePluginLocalInstallCandidate,
   parsePluginManagementDetail,
   parsePluginMarketplaceCatalog,
   parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
   parsePluginV1CompatibilityPreview,
+  parsePluginTrustChangeReview,
+  parsePluginTrustReview,
 } from "./pluginPlatformParsers.js";
 import type {
   JsonValue,
@@ -20,11 +23,14 @@ import type {
   PluginLiveConfirmationReceipt,
   PluginLiveControlStatus,
   PluginLiveExecutionRecord,
+  PluginLocalInstallCandidate,
   PluginManagementDetail,
   PluginMarketplaceCatalog,
   PluginMarketplaceStatus,
   PluginUiSnapshot,
   PluginV1CompatibilityPreview,
+  PluginTrustChangeReview,
+  PluginTrustReview,
 } from "./pluginPlatformTypes.js";
 
 interface PluginManagementBootstrapV1 {
@@ -260,8 +266,11 @@ export async function syncPluginChartContext(
   };
 }
 
+let actionSequence = 0;
+
 function actionId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 96);
+  actionSequence = actionSequence >= Number.MAX_SAFE_INTEGER ? 1 : actionSequence + 1;
+  return `${prefix}-${Date.now().toString(36)}-${actionSequence.toString(36)}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 96);
 }
 
 async function managementRequest(
@@ -479,6 +488,87 @@ export async function installPluginBundle(file: File): Promise<void> {
     body: file,
   });
   await responseJson(response);
+}
+
+async function pluginBundleUploadIdentity(file: File): Promise<string> {
+  if (!file.name.toLowerCase().endsWith(".cspkg") || file.size < 1 || file.size > 16 * 1024 * 1024) {
+    throw new PluginPlatformApiError("Select a .cspkg bundle no larger than 16 MiB", 400);
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()));
+  return `sha256:${[...digest].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export async function prepareLocalPluginInstall(file: File): Promise<PluginLocalInstallCandidate> {
+  const session = consumeManagementSession();
+  if (!session) throw new PluginPlatformApiError("Plugin management requires a trusted desktop session", 403);
+  const expectedSha256 = await pluginBundleUploadIdentity(file);
+  const response = await fetch(`${session.apiBase}/manage/install/prepare`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/vnd.candlescope.plugin+zip",
+      "X-CandleScope-Plugin-Session": session.sessionToken,
+      "X-CandleScope-CSRF": session.csrfToken,
+      "X-CandleScope-User-Action": actionId("install-prepare"),
+      "X-CandleScope-Bundle-SHA256": expectedSha256,
+    },
+    credentials: "omit",
+    body: file,
+  });
+  return parsePluginLocalInstallCandidate(await responseJson(response));
+}
+
+export async function reviewLocalPluginInstall(
+  candidateId: string,
+  previewSha256: string,
+  reason: string,
+  acknowledgements: string[],
+): Promise<PluginTrustReview> {
+  return parsePluginTrustReview(await managementRequest("/manage/install/review", {
+    method: "POST",
+    action: "install-review",
+    body: { candidateId, previewSha256, reason, acknowledgements },
+  }));
+}
+
+export async function confirmLocalPluginInstall(
+  candidateId: string,
+  previewSha256: string,
+  confirmationToken: string,
+): Promise<void> {
+  await managementRequest("/manage/install/confirm", {
+    method: "POST",
+    action: "install-confirm",
+    body: { candidateId, previewSha256, confirmationToken },
+  });
+}
+
+export async function reviewPluginTrustChange(
+  pluginId: string,
+  targetMode: "marketplace-sandboxed" | "trusted-local",
+  reason: string,
+  acknowledgements: string[],
+): Promise<PluginTrustChangeReview> {
+  return parsePluginTrustChangeReview(await managementRequest(
+    `/manage/${encodeURIComponent(pluginId)}/trust/review`,
+    {
+      method: "POST",
+      action: "trust-change-review",
+      body: { targetMode, reason, acknowledgements },
+    },
+  ));
+}
+
+export async function confirmPluginTrustChange(
+  pluginId: string,
+  changeId: string,
+  previewSha256: string,
+  confirmationToken: string,
+): Promise<void> {
+  await managementRequest(`/manage/${encodeURIComponent(pluginId)}/trust/confirm`, {
+    method: "POST",
+    action: "trust-change-confirm",
+    body: { changeId, previewSha256, confirmationToken },
+  });
 }
 
 export async function stagePluginUserFile(

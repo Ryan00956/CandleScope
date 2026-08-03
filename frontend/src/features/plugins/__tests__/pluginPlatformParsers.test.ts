@@ -6,10 +6,13 @@ import {
   parsePluginLiveConfirmationReceipt,
   parsePluginLiveControlStatus,
   parsePluginLiveExecutionRecord,
+  parsePluginLocalInstallCandidate,
   parsePluginManagementDetail,
   parsePluginMarketplaceCatalog,
   parsePluginMarketplaceStatus,
   parsePluginUiSnapshot,
+  parsePluginTrustChangeReview,
+  parsePluginTrustReview,
   parsePluginV1CompatibilityPreview,
 } from "../pluginPlatformParsers.js";
 import { buildPluginRegistries } from "../pluginRegistries.js";
@@ -115,6 +118,161 @@ function catalog<T = ReturnType<typeof plugin>>(plugins: T[] = [plugin()] as T[]
         },
         imported: true,
       }],
+    },
+  };
+}
+
+function phase6Profile() {
+  return {
+    profileId: "restricted-python-v1",
+    runtimeKind: "python-module",
+    sandboxMode: "windows-appcontainer",
+    sandboxSupported: true,
+    trustedLocalOnly: false,
+    networkDefault: "denied",
+    subprocessDeclared: false,
+    limits: {
+      memoryBytes: 268_435_456,
+      cpuRatePercent: 25,
+      probeCpuTimeSeconds: 60,
+      runtimeCpuTimeSeconds: 300,
+      diskBytes: 67_108_864,
+      maxProcesses: 1,
+      probeWallSeconds: 90,
+      runtimeWallSeconds: 86_400,
+    },
+  };
+}
+
+function phase6Entrypoint() {
+  return {
+    entrypointId: "main",
+    runtimeKind: "python-module",
+    runtimeId: "python-host",
+    descriptor: {
+      kind: "python-module",
+      runtimeId: "python-host",
+      pythonModule: "candlescope_plugin.entrypoint",
+    },
+    pluginArtifactSha256: null,
+    runtimeArtifactSha256: `sha256:${"1".repeat(64)}`,
+    runtimeArtifactSize: 102_400,
+    supplySource: "host-python",
+    hostManaged: true,
+    registrySha256: null,
+    systemRuntimePath: "C:\\Python\\python.exe",
+    signatureRoot: "host-python:3.12",
+    profile: phase6Profile(),
+  };
+}
+
+function phase6Authorization(mode: "marketplace-sandboxed" | "trusted-local") {
+  const profile = phase6Profile();
+  return {
+    runtimeIdentity: `sha256:${"2".repeat(64)}`,
+    authorizationIdentity: `sha256:${(mode === "trusted-local" ? "3" : "4").repeat(64)}`,
+    mode,
+    entrypoints: [phase6Entrypoint()],
+    signatureRoots: ["host-python:3.12"],
+    sandbox: {
+      requested: mode === "marketplace-sandboxed",
+      active: mode === "marketplace-sandboxed",
+      status: mode === "marketplace-sandboxed" ? "windows-appcontainer" : "trusted-local-user-approved",
+      supported: true,
+      trustedLocalOnly: false,
+      profiles: [profile],
+    },
+  };
+}
+
+function phase6Requests() {
+  return {
+    permissions: [{
+      permissionId: "network.connect",
+      kind: "optional",
+      scope: { origins: ["https://example.invalid"] },
+    }],
+    network: { requested: true, permissionIds: ["network.connect"] },
+    files: { requested: false, permissionIds: [] },
+    secrets: { requested: false, permissionIds: [] },
+    accounts: { requested: false, permissionIds: [] },
+    trading: { requested: false, permissionIds: [] },
+    subprocess: {
+      requested: false,
+      declared: false,
+      maxProcesses: 1,
+      reason: "No process model is declared.",
+    },
+    liveAuthority: { grantedByTrust: false, independentlyProtected: true },
+  };
+}
+
+function phase6Acknowledgements() {
+  return [
+    "execute-local-code",
+    "live-authority-separate",
+    "permission:network.connect",
+    "runtime:main:python-module:python-host",
+    "sandbox-status",
+  ];
+}
+
+function phase6LocalCandidate() {
+  const authorization = phase6Authorization("trusted-local");
+  return {
+    candidateId: `candidate-${"a".repeat(32)}`,
+    previewSha256: `sha256:${"5".repeat(64)}`,
+    expiresAt: "2026-08-03T12:15:00Z",
+    preview: {
+      schemaVersion: "candlescope.plugin-trust-preview/1",
+      plugin: {
+        id: "candlescope.phase6-example",
+        name: "Phase 6 Example",
+        version: "0.1.0",
+        publisher: "candlescope",
+        bundleSha256: `sha256:${"6".repeat(64)}`,
+        manifestSha256: `sha256:${"7".repeat(64)}`,
+      },
+      source: {
+        rawTrustLevel: "local-developer",
+        canonicalDefault: "developer-local",
+        publisherIdentity: "manifest:candlescope",
+        source: "local-file",
+        marketplaceId: null,
+        signatureRoot: null,
+      },
+      authorization,
+      permissionDiff: {
+        pluginId: "candlescope.phase6-example",
+        publisherIdentityChanged: false,
+        majorVersionChanged: false,
+        bundleChanged: true,
+        authorizationIdentityChanged: false,
+        requiresConfirmation: true,
+        permissions: [{
+          permissionId: "network.connect",
+          kind: "optional",
+          previousKind: null,
+          change: "added",
+          previousDecision: null,
+          requestedScope: { origins: ["https://example.invalid"] },
+          previousScope: null,
+          requiresConfirmation: true,
+        }],
+      },
+      runtimeDiff: {
+        changed: true,
+        requiresConfirmation: true,
+        kindOrIdChanged: true,
+        signatureRootChanged: true,
+        systemRuntimePathChanged: true,
+        supplyChanged: true,
+        previous: [],
+        current: authorization.entrypoints,
+      },
+      requests: phase6Requests(),
+      requiredAcknowledgements: phase6Acknowledgements(),
+      warning: "Local application code runs as the current user; Live authority remains separate.",
     },
   };
 }
@@ -812,6 +970,123 @@ test("UI snapshot accepts scalar projections and rejects executable-shaped extra
     chartLayers: [],
   };
   assert.throws(() => parsePluginUiSnapshot(invalid), /invalid/);
+});
+
+test("Phase 6 local trust preview cannot understate risk, runtime, or acknowledgements", () => {
+  const candidate = phase6LocalCandidate();
+  const parsed = parsePluginLocalInstallCandidate(candidate);
+  assert.equal(parsed.preview.authorization.mode, "trusted-local");
+  assert.equal(parsed.preview.authorization.entrypoints[0]?.systemRuntimePath, "C:\\Python\\python.exe");
+  assert.deepEqual(parsed.preview.requests.network.permissionIds, ["network.connect"]);
+  assert.deepEqual(parsed.preview.requiredAcknowledgements, phase6Acknowledgements());
+
+  const understatedRisk = structuredClone(candidate);
+  understatedRisk.preview.requests.network = { requested: false, permissionIds: [] };
+  assert.throws(() => parsePluginLocalInstallCandidate(understatedRisk), /network/);
+
+  const missingAcknowledgement = structuredClone(candidate);
+  missingAcknowledgement.preview.requiredAcknowledgements = phase6Acknowledgements().slice(1);
+  assert.throws(() => parsePluginLocalInstallCandidate(missingAcknowledgement), /preview/);
+
+  const falseSandbox = structuredClone(candidate);
+  falseSandbox.preview.authorization.sandbox.active = true;
+  assert.throws(() => parsePluginLocalInstallCandidate(falseSandbox), /authorization/);
+
+  const falseProfile = structuredClone(candidate);
+  falseProfile.preview.authorization.entrypoints[0]!.profile.sandboxMode = "unavailable";
+  falseProfile.preview.authorization.sandbox.profiles[0]!.sandboxMode = "unavailable";
+  assert.throws(() => parsePluginLocalInstallCandidate(falseProfile), /profile/);
+
+  const extraExecutionField = structuredClone(candidate) as typeof candidate & { executable?: string };
+  extraExecutionField.executable = "powershell.exe";
+  assert.throws(() => parsePluginLocalInstallCandidate(extraExecutionField), /invalid/i);
+});
+
+test("Phase 6 review tokens and signed trust changes are exact and fail closed", () => {
+  const candidate = phase6LocalCandidate();
+  const review = parsePluginTrustReview({
+    candidateId: candidate.candidateId,
+    previewSha256: candidate.previewSha256,
+    confirmationToken: `trust-review-${"A".repeat(43)}`,
+    expiresAt: "2026-08-03T12:10:00Z",
+    confirmationStep: 1,
+  });
+  assert.equal(review.confirmationStep, 1);
+  assert.throws(() => parsePluginTrustReview({ ...review, confirmationToken: "reusable" }), /confirmationToken/);
+
+  const from = phase6Authorization("marketplace-sandboxed");
+  from.signatureRoots = [`publisher-key:ed25519:${"a".repeat(64)}`, "host-python:3.12"].sort();
+  const to = phase6Authorization("trusted-local");
+  to.signatureRoots = [...from.signatureRoots];
+  const change = {
+    changeId: `trust-change-${"b".repeat(32)}`,
+    previewSha256: `sha256:${"c".repeat(64)}`,
+    confirmationToken: `trust-change-${"D".repeat(43)}`,
+    expiresAt: "2026-08-03T12:10:00Z",
+    preview: {
+      schemaVersion: "candlescope.plugin-trust-preview/1",
+      action: "trust-change",
+      pluginId: "candlescope.phase6-example",
+      bundleSha256: `sha256:${"6".repeat(64)}`,
+      source: {
+        rawTrustLevel: "verified-publisher",
+        canonicalDefault: "marketplace-sandboxed",
+        publisherIdentity: `publisher-key:ed25519:${"a".repeat(64)}`,
+        source: "signed-marketplace",
+        marketplaceId: "candlescope.community",
+        signatureRoot: `publisher-key:ed25519:${"a".repeat(64)}`,
+      },
+      from,
+      to,
+      permissionDiff: {
+        pluginId: "candlescope.phase6-example",
+        publisherIdentityChanged: false,
+        majorVersionChanged: false,
+        bundleChanged: false,
+        authorizationIdentityChanged: true,
+        requiresConfirmation: true,
+        permissions: [{
+          permissionId: "network.connect",
+          kind: "optional",
+          previousKind: "optional",
+          change: "identity-changed",
+          previousDecision: "granted",
+          requestedScope: { origins: ["https://example.invalid"] },
+          previousScope: { origins: ["https://example.invalid"] },
+          requiresConfirmation: true,
+        }],
+      },
+      runtimeDiff: {
+        changed: false,
+        requiresConfirmation: false,
+        kindOrIdChanged: false,
+        signatureRootChanged: false,
+        systemRuntimePathChanged: false,
+        supplyChanged: false,
+        previous: from.entrypoints,
+        current: to.entrypoints,
+      },
+      requests: phase6Requests(),
+      requiredAcknowledgements: phase6Acknowledgements(),
+    },
+  };
+  const parsed = parsePluginTrustChangeReview(change);
+  assert.equal(parsed.preview.from.mode, "marketplace-sandboxed");
+  assert.equal(parsed.preview.to.mode, "trusted-local");
+
+  const unsigned = structuredClone(change);
+  (unsigned.preview as { source: unknown }).source = candidate.preview.source;
+  assert.throws(() => parsePluginTrustChangeReview(unsigned), /preview/);
+
+  const noModeChange = structuredClone(change);
+  noModeChange.preview.to = structuredClone(noModeChange.preview.from);
+  assert.throws(() => parsePluginTrustChangeReview(noModeChange), /preview/);
+
+  const hiddenPermission = structuredClone(change);
+  hiddenPermission.preview.requiredAcknowledgements = hiddenPermission.preview.requiredAcknowledgements.filter(
+    (item) => item !== "permission:network.connect",
+  );
+  assert.throws(() => parsePluginTrustChangeReview(hiddenPermission), /preview/);
 });
 
 test("Phase 4 catalog strictly preserves managed Registry and runtime supply provenance", () => {

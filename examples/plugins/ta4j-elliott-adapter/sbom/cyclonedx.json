@@ -8,7 +8,7 @@
     "component": {
       "type": "application",
       "name": "candlescope-ta4j-elliott-adapter",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "licenses": [{"license": {"id": "GPL-3.0-only"}}],
       "hashes": [
         {

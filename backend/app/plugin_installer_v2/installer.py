@@ -159,7 +159,13 @@ def _read_json(
 
 
 def _grant_record_sha256(record: PluginGrantRecord | None) -> str:
-    payload = canonical_dumps(record.to_wire() if record is not None else None)
+    payload = canonical_dumps(
+        record.to_wire(
+            include_authorization_identity=record.authorization_identity is not None
+        )
+        if record is not None
+        else None
+    )
     return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
@@ -796,6 +802,9 @@ class PlatformPluginInstaller:
         publisher_identity_resolver: (
             Callable[[VerifiedPlatformBundle], str] | None
         ) = None,
+        authorization_identity_resolver: (
+            Callable[[VerifiedPlatformBundle], str | None] | None
+        ) = None,
         execution_trust_resolver: (
             Callable[[VerifiedPlatformBundle], str] | None
         ) = None,
@@ -906,6 +915,7 @@ class PlatformPluginInstaller:
                 audit_log=self.audit_log,
             )
         self.publisher_identity_resolver = publisher_identity_resolver
+        self.authorization_identity_resolver = authorization_identity_resolver
         self.execution_trust_resolver = execution_trust_resolver
         self.probe_sandbox_factory = probe_sandbox_factory
         self.probe_python_runtime_factory = probe_python_runtime_factory
@@ -1054,7 +1064,9 @@ class PlatformPluginInstaller:
         plugin_id: str,
     ) -> dict[str, Any]:
         return {
-            item.plugin_id: item.to_wire()
+            item.plugin_id: item.to_wire(
+                include_authorization_identity=document.schema_version >= 2
+            )
             for item in document.plugins
             if item.plugin_id != plugin_id
         }
@@ -2351,6 +2363,7 @@ class PlatformPluginInstaller:
             host_version=self.host_version,
         )
         self._assert_bundle_installable(bundle)
+        authorization_identity = self._authorization_identity(bundle)
         plugin_id = bundle.manifest.plugin.id
         final_path = self._installation_path(plugin_id, bundle.installation_id)
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):
@@ -2365,6 +2378,14 @@ class PlatformPluginInstaller:
                 self._verify_installation(final_path)
             else:
                 self._create_installation(bundle, final_path)
+            verified_authorization_identity = self._authorization_identity(bundle)
+            if verified_authorization_identity != authorization_identity:
+                if not reused and final_path.exists():
+                    self._quarantine(final_path, plugin_id)
+                raise PlatformInstallerError(
+                    "runtime authorization changed while the immutable installation was being prepared",
+                    plugin_id=plugin_id,
+                )
             with security_lock(
                 self.grant_store.lock_path,
                 self.grant_store.lock_timeout_seconds,
@@ -2383,18 +2404,21 @@ class PlatformPluginInstaller:
                         bundle_sha256=bundle.sha256,
                         manifest_sha256=bundle.manifest_sha256,
                         publisher_identity=publisher_identity,
+                        authorization_identity=authorization_identity,
                     )
                     grant_reconciliation = self.grant_store._reconcile_locked(
                         bundle.manifest,
                         bundle_sha256=bundle.sha256,
                         manifest_sha256=bundle.manifest_sha256,
                         publisher_identity=publisher_identity,
+                        authorization_identity=authorization_identity,
                     )
                     activation_ready = self.grant_store.activation_ready(
                         bundle.manifest,
                         bundle_sha256=bundle.sha256,
                         manifest_sha256=bundle.manifest_sha256,
                         publisher_identity=publisher_identity,
+                        authorization_identity=authorization_identity,
                     )
                     grant_record_sha256 = _grant_record_sha256(
                         self.grant_store.load().by_id().get(plugin_id)
@@ -2464,12 +2488,29 @@ class PlatformPluginInstaller:
             raise PlatformInstallerError("resolved publisher identity is invalid")
         return identity
 
+    def _authorization_identity(self, bundle: VerifiedPlatformBundle) -> str | None:
+        if self.authorization_identity_resolver is None:
+            return None
+        identity = self.authorization_identity_resolver(bundle)
+        if identity is not None and (
+            not isinstance(identity, str) or _SHA256.fullmatch(identity) is None
+        ):
+            raise PlatformInstallerError(
+                "resolved runtime authorization identity is invalid",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        return identity
+
     def _grant_arguments(self, bundle: VerifiedPlatformBundle) -> dict[str, str]:
-        return {
+        arguments: dict[str, str] = {
             "bundle_sha256": bundle.sha256,
             "manifest_sha256": bundle.manifest_sha256,
             "publisher_identity": self._publisher_identity(bundle),
         }
+        authorization_identity = self._authorization_identity(bundle)
+        if authorization_identity is not None:
+            arguments["authorization_identity"] = authorization_identity
+        return arguments
 
     def _current_bundle(
         self,

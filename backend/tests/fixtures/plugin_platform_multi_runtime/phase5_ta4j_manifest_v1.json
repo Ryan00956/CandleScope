@@ -3,7 +3,7 @@
   "plugin": {
     "id": "candlescope.ta4j-elliott",
     "name": "ta4j Elliott Wave Reference",
-    "version": "0.1.1",
+    "version": "0.1.0",
     "publisher": "candlescope",
     "license": "GPL-3.0-only",
     "engines": {
@@ -17,7 +17,7 @@
         "runtime": {
           "kind": "java-jar",
           "artifact": "runtime/ta4j-elliott-adapter-0.1.0.jar",
-          "runtimeId": "temurin-26.0.2.10",
+          "runtimeId": "temurin-25.0.4.7",
           "mainClass": "io.candlescope.plugins.ta4j.elliott.Main",
           "jvmArgs": [
             "-Xms32m",

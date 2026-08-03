@@ -23,8 +23,9 @@ python scripts/build_release.py `
 脚本不访问网络；它先验证每个依赖的大小和 SHA-256，再以固定时间戳、排序路径
 和固定压缩级别生成 fat JAR。MIT、Apache-2.0、Commons Math 完整原始
 LICENSE/NOTICE、SLF4J 原始 LICENSE、第三方 attribution 和 Adapter GPL 正文都随
-JAR / bundle 分发；独立检查会逐字节核对这些法律文件。运行时只接受 Runtime Registry 管理的
-`temurin-25.0.4.7`，Java Provider 默认由
+JAR / bundle 分发；独立检查会逐字节核对这些法律文件。`0.1.1` 是只迁移运行时供应链、
+不改变 Adapter JAR 的打包修订：编译仍由冻结的 JDK 25 完成，运行时只接受 Runtime Registry
+管理、已通过 Windows AppContainer 门禁的 `temurin-26.0.2.10`。Java Provider 默认由
 `CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED=0` 关闭。
 
 ## 数据契约

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import math
 import os
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -24,7 +25,10 @@ from candlescope_plugin_sdk.platform_v2 import (
 
 from app.plugin_host import EntrypointProcessSpec, EntrypointSupervisor
 from app.plugin_installer_v2 import PlatformPluginInstaller
-from app.plugin_installer_v2.bundle import VerifiedPlatformBundle
+from app.plugin_installer_v2.bundle import (
+    VerifiedPlatformBundle,
+    verify_platform_bundle,
+)
 from app.plugin_installer_v2.registry import (
     ActivationRecord,
     ActivationRegistry,
@@ -52,7 +56,11 @@ from app.plugin_security_v2 import (
     CapabilityHandleAuthority,
     GrantStore,
     PinnedPythonRuntime,
+    PluginTrustService,
+    TrustEvidence,
     prepare_pinned_python_runtime,
+    restricted_runtime_profile,
+    restricted_runtime_profiles_status,
 )
 from app.plugin_security_v2.grants import (
     EffectiveGrant,
@@ -169,6 +177,7 @@ class CorePluginPlatform:
         runtime_registry_enabled: bool | None = None,
         runtime_registry_network_updates_enabled: bool | None = None,
         managed_runtime_registry: ManagedRuntimeRegistryService | None = None,
+        trust_ux_enabled: bool = False,
     ) -> None:
         if trust_level not in TRUST_LEVELS:
             raise ValueError("plugin platform trust level is invalid")
@@ -189,6 +198,8 @@ class CorePluginPlatform:
             raise ValueError("live_testnet_execution_enabled must be a boolean")
         if not isinstance(marketplace_enabled, bool):
             raise ValueError("marketplace_enabled must be a boolean")
+        if not isinstance(trust_ux_enabled, bool):
+            raise ValueError("trust_ux_enabled must be a boolean")
         if live_account_readonly_enabled and not live_broker_foundation_enabled:
             raise core_error(
                 "PLUGIN_LIVE_ACCOUNT_FOUNDATION_REQUIRED",
@@ -238,6 +249,7 @@ class CorePluginPlatform:
         self.live_native_control_enabled = live_native_control_enabled
         self.live_testnet_execution_enabled = live_testnet_execution_enabled
         self.marketplace_enabled = marketplace_enabled
+        self.trust_ux_enabled = trust_ux_enabled
         self._pinned_python_runtime: PinnedPythonRuntime | None = None
         if managed_runtime_registry is None:
             managed_runtime_registry = build_official_runtime_registry(
@@ -268,12 +280,29 @@ class CorePluginPlatform:
                 else ()
             ),
         )
+        base_python = Path(sys.base_prefix) / (
+            "python.exe" if os.name == "nt" else "bin/python"
+        )
+        if not base_python.is_file():
+            base_python = Path(sys.executable)
+        self.trust_policy = PluginTrustService(
+            root=self.root / "trust-v1",
+            audit_log=self.audit_log,
+            managed_runtime_registry=managed_runtime_registry,
+            python_executable=base_python,
+            enabled=trust_ux_enabled,
+            trust_evidence_resolver=self._trust_evidence,
+            legacy_installed_checker=self._legacy_bundle_is_installed,
+        )
         self.installer = PlatformPluginInstaller(
             root=self.root,
             host_version=self.host_version,
             audit_log=self.audit_log,
             grant_store=self.grant_store,
             publisher_identity_resolver=self._bundle_publisher_identity,
+            authorization_identity_resolver=(
+                self._bundle_authorization_identity if trust_ux_enabled else None
+            ),
             execution_trust_resolver=self._bundle_execution_trust,
             probe_sandbox_factory=(
                 self._marketplace_probe_sandbox_policy if os.name == "nt" else None
@@ -442,19 +471,36 @@ class CorePluginPlatform:
     def _bundle_publisher_identity(self, bundle: VerifiedPlatformBundle) -> str:
         return self._bundle_trust(bundle).publisher_identity
 
-    def _bundle_execution_trust(self, bundle: VerifiedPlatformBundle) -> str:
-        trust = self._bundle_trust(bundle).trust_level
-        if trust == "verified-publisher":
-            return "untrusted"
-        if trust in {"local-developer", "local-trusted"}:
-            return "local-trusted"
-        if trust in {"first-party-pinned", "untrusted"}:
-            return trust
-        raise core_error(
-            "PLUGIN_CORE_TRUST_INVALID",
-            "bundle trust evidence resolved to an unsupported level",
-            plugin_id=bundle.manifest.plugin.id,
+    def _trust_evidence(self, bundle: VerifiedPlatformBundle) -> TrustEvidence:
+        trust = self._bundle_trust(bundle)
+        return TrustEvidence(
+            trust.trust_level,
+            trust.publisher_identity,
+            trust.source,
+            trust.marketplace_id,
         )
+
+    def _legacy_bundle_is_installed(self, bundle: VerifiedPlatformBundle) -> bool:
+        installer = getattr(self, "installer", None)
+        if installer is None:
+            return False
+        try:
+            record = (
+                load_activation_registry(installer.registry_path)
+                .by_id()
+                .get(bundle.manifest.plugin.id)
+            )
+        except Exception:
+            return False
+        return bool(record is not None and record.bundle_sha256 == bundle.sha256)
+
+    def _bundle_authorization_identity(
+        self, bundle: VerifiedPlatformBundle
+    ) -> str | None:
+        return self.trust_policy.resolve_authorization_identity(bundle)
+
+    def _bundle_execution_trust(self, bundle: VerifiedPlatformBundle) -> str:
+        return self.trust_policy.execution_trust(bundle)
 
     @staticmethod
     def _sandbox_key(bundle: VerifiedPlatformBundle, publisher_identity: str) -> str:
@@ -499,15 +545,47 @@ class CorePluginPlatform:
         bundle: VerifiedPlatformBundle,
         installation: Path,
     ) -> tuple[Path, Path]:
-        trust = self._bundle_trust(bundle)
-        if trust.trust_level != "verified-publisher":
+        if self._bundle_execution_trust(bundle) != "untrusted":
             raise core_error(
                 "PLUGIN_CORE_SANDBOX_TRUST_INVALID",
-                "pinned probe Python is reserved for verified publisher artifacts",
+                "pinned probe Python is reserved for sandboxed artifacts",
                 plugin_id=bundle.manifest.plugin.id,
             )
         runtime = self._marketplace_python_runtime()
         return runtime.executable, self._sandbox_site_packages(installation)
+
+    def _sandbox_runtime_read_only_paths(self, runtime: Any) -> tuple[Path, ...]:
+        if runtime.kind == "python-module":
+            return (self._marketplace_python_runtime().root,)
+        supply_kind = {
+            "java-jar": "java",
+            "node-module": "node",
+            "wasm-component": "wasm",
+        }.get(runtime.kind)
+        if supply_kind is None:
+            return ()
+        try:
+            ensured = self.managed_runtime_registry.ensure(
+                runtime.runtime_id,
+                supply_kind,
+                offline=True,
+            )
+            root = Path(ensured.root).resolve(strict=True)
+        except Exception as exc:
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_RUNTIME_INVALID",
+                "Host-managed runtime root is unavailable for sandbox ACL binding",
+                details={
+                    "runtimeKind": runtime.kind,
+                    "runtimeId": runtime.runtime_id,
+                },
+            ) from exc
+        if root.is_symlink() or not root.is_dir():
+            raise core_error(
+                "PLUGIN_CORE_SANDBOX_RUNTIME_INVALID",
+                "Host-managed runtime root is unsafe",
+            )
+        return (root,)
 
     def _marketplace_probe_sandbox_policy(
         self,
@@ -516,10 +594,10 @@ class CorePluginPlatform:
         entrypoint_id: str,
     ) -> SandboxPolicy:
         trust = self._bundle_trust(bundle)
-        if trust.trust_level != "verified-publisher":
+        if self._bundle_execution_trust(bundle) != "untrusted":
             raise core_error(
                 "PLUGIN_CORE_SANDBOX_TRUST_INVALID",
-                "probe sandbox is reserved for verified publisher artifacts",
+                "probe sandbox is reserved for sandboxed artifacts",
                 plugin_id=bundle.manifest.plugin.id,
             )
         major = int(bundle.manifest.plugin.version.split(".", 1)[0])
@@ -531,11 +609,10 @@ class CorePluginPlatform:
             for item in bundle.manifest.normalized_entrypoints
             if item.id == entrypoint_id
         )
-        additional_read_only_paths = (
-            (self._marketplace_python_runtime().root,)
-            if declared.runtime.kind == "python-module"
-            else ()
+        additional_read_only_paths = self._sandbox_runtime_read_only_paths(
+            declared.runtime
         )
+        profile = restricted_runtime_profile(declared.runtime.kind)
         return SandboxPolicy(
             profile_name=sandbox_profile_name(
                 bundle.manifest.plugin.id,
@@ -560,12 +637,12 @@ class CorePluginPlatform:
                 / entrypoint_token
             ),
             additional_read_only_paths=additional_read_only_paths,
-            memory_limit_bytes=256 * 1024 * 1024,
-            cpu_rate_percent=25,
-            cpu_time_seconds=60,
-            disk_limit_bytes=16 * 1024 * 1024,
-            max_processes=1,
-            max_wall_seconds=90,
+            memory_limit_bytes=profile.memory_limit_bytes,
+            cpu_rate_percent=profile.cpu_rate_percent,
+            cpu_time_seconds=profile.probe_cpu_time_seconds,
+            disk_limit_bytes=profile.disk_limit_bytes,
+            max_processes=profile.max_processes,
+            max_wall_seconds=profile.probe_wall_seconds,
         )
 
     def _marketplace_runtime_sandbox_policy(
@@ -577,7 +654,7 @@ class CorePluginPlatform:
         if self.sandbox_factory is not None:
             return self.sandbox_factory(record, bundle, entrypoint_id)
         trust = self._bundle_trust(bundle)
-        if trust.trust_level != "verified-publisher" or os.name != "nt":
+        if self._bundle_execution_trust(bundle) != "untrusted" or os.name != "nt":
             return None
         major = int(bundle.manifest.plugin.version.split(".", 1)[0])
         key = self._sandbox_key(bundle, trust.publisher_identity)
@@ -588,11 +665,10 @@ class CorePluginPlatform:
             for item in bundle.manifest.normalized_entrypoints
             if item.id == entrypoint_id
         )
-        additional_read_only_paths = (
-            (self._marketplace_python_runtime().root,)
-            if declared.runtime.kind == "python-module"
-            else ()
+        additional_read_only_paths = self._sandbox_runtime_read_only_paths(
+            declared.runtime
         )
+        profile = restricted_runtime_profile(declared.runtime.kind)
         installation = next(
             item.working_directory
             for item in record.entrypoints
@@ -615,12 +691,12 @@ class CorePluginPlatform:
                 / entrypoint_token
             ),
             additional_read_only_paths=additional_read_only_paths,
-            memory_limit_bytes=256 * 1024 * 1024,
-            cpu_rate_percent=25,
-            cpu_time_seconds=300,
-            disk_limit_bytes=64 * 1024 * 1024,
-            max_processes=1,
-            max_wall_seconds=86_400,
+            memory_limit_bytes=profile.memory_limit_bytes,
+            cpu_rate_percent=profile.cpu_rate_percent,
+            cpu_time_seconds=profile.runtime_cpu_time_seconds,
+            disk_limit_bytes=profile.disk_limit_bytes,
+            max_processes=profile.max_processes,
+            max_wall_seconds=profile.runtime_wall_seconds,
         )
 
     async def start(self) -> None:
@@ -754,6 +830,7 @@ class CorePluginPlatform:
                     bundle_sha256=bundle.sha256,
                     manifest_sha256=bundle.manifest_sha256,
                     publisher_identity=self._bundle_publisher_identity(bundle),
+                    authorization_identity=self._bundle_authorization_identity(bundle),
                 )
             except Exception as exc:
                 failures[plugin_id] = self._failure_wire(exc)
@@ -819,6 +896,7 @@ class CorePluginPlatform:
             bundle_sha256=bundle.sha256,
             manifest_sha256=bundle.manifest_sha256,
             publisher_identity=self._bundle_publisher_identity(bundle),
+            authorization_identity=self._bundle_authorization_identity(bundle),
         ):
             self._load_failures[plugin_id] = {
                 "code": "PLUGIN_CORE_GRANTS_NOT_READY",
@@ -1956,6 +2034,11 @@ class CorePluginPlatform:
                         if bundle is not None
                         else "untrusted"
                     ),
+                    **(
+                        {"trust": self.trust_policy.summary(bundle)}
+                        if self.trust_ux_enabled and bundle is not None
+                        else {}
+                    ),
                     "available": available,
                     **(
                         {"unavailableReason": unavailable_reason}
@@ -1992,6 +2075,20 @@ class CorePluginPlatform:
                 self.v1_compatibility.public_catalog()
                 if self.v1_compatibility is not None
                 else _empty_v1_compatibility_catalog()
+            ),
+            **(
+                {
+                    "trustUx": {
+                        "schemaVersion": "candlescope.plugin-trust-ux/1",
+                        "enabled": True,
+                        "localInstallFlow": "itemized-double-confirmation",
+                        "actor": "local-desktop-user",
+                        "profiles": list(restricted_runtime_profiles_status()),
+                        "highRiskAuthorityIndependent": True,
+                    }
+                }
+                if self.trust_ux_enabled
+                else {}
             ),
         }
         if self.runtime_registry_enabled:
@@ -2122,6 +2219,247 @@ class CorePluginPlatform:
             else [],
         }
 
+    def prepare_local_install(
+        self,
+        upload_path: Path,
+        bundle: VerifiedPlatformBundle,
+        *,
+        user_action_id: str,
+    ) -> dict[str, Any]:
+        if not self.trust_ux_enabled:
+            raise core_error(
+                "PLUGIN_TRUST_UX_DISABLED",
+                "the Phase 6 trust UX is disabled",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        known = self._bundle_trust(bundle)
+        if known.source == "signed-marketplace":
+            raise core_error(
+                "PLUGIN_MARKETPLACE_TRUST_DOWNGRADE_DENIED",
+                "a signed Marketplace artifact cannot enter the unsigned local-install trust flow",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        evidence = TrustEvidence(
+            "local-developer",
+            manifest_publisher_identity(bundle.manifest),
+            "local-file",
+            None,
+        )
+        authorization = self.trust_policy.build_authorization(
+            bundle, evidence, mode="trusted-local"
+        )
+        permission_diff = self.grant_store.permission_diff(
+            bundle.manifest,
+            bundle_sha256=bundle.sha256,
+            manifest_sha256=bundle.manifest_sha256,
+            publisher_identity=evidence.publisher_identity,
+            authorization_identity=authorization.authorization_identity,
+        )
+        preview = self.trust_policy.build_preview(
+            bundle=bundle,
+            evidence=evidence,
+            mode="trusted-local",
+            permission_diff=permission_diff.to_wire(),
+            previous_bundle=self._bundles.get(bundle.manifest.plugin.id),
+        )
+        return self.trust_policy.prepare_local_install(
+            upload_path=upload_path,
+            bundle=bundle,
+            preview=preview,
+            user_action_id=user_action_id,
+        )
+
+    def review_local_install(
+        self,
+        *,
+        candidate_id: str,
+        preview_sha256: str,
+        reason: str,
+        acknowledgements: list[str],
+        user_action_id: str,
+    ) -> dict[str, Any]:
+        return self.trust_policy.review_local_install(
+            candidate_id=candidate_id,
+            preview_sha256=preview_sha256,
+            reason=reason,
+            acknowledgements=acknowledgements,
+            actor="local-desktop-user",
+            user_action_id=user_action_id,
+        )
+
+    async def confirm_local_install(
+        self,
+        *,
+        candidate_id: str,
+        preview_sha256: str,
+        confirmation_token: str,
+        user_action_id: str,
+    ) -> dict[str, Any]:
+        claim = await asyncio.to_thread(
+            self.trust_policy.claim_local_install,
+            candidate_id=candidate_id,
+            preview_sha256=preview_sha256,
+            confirmation_token=confirmation_token,
+            user_action_id=user_action_id,
+        )
+        previous_decision: dict[str, Any] | None = None
+        authorized = False
+        bundle: VerifiedPlatformBundle | None = None
+        try:
+            bundle = await asyncio.to_thread(
+                verify_platform_bundle,
+                claim.path,
+                expected_sha256=claim.bundle_sha256,
+                host_version=self.installer.host_version,
+            )
+            preview_plugin = claim.preview.get("plugin")
+            if (
+                not isinstance(preview_plugin, dict)
+                or preview_plugin.get("id") != bundle.manifest.plugin.id
+                or preview_plugin.get("bundleSha256") != bundle.sha256
+                or preview_plugin.get("manifestSha256") != bundle.manifest_sha256
+            ):
+                raise core_error(
+                    "PLUGIN_TRUST_BINDING_CHANGED",
+                    "the claimed local bundle no longer matches its reviewed identity",
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+            await asyncio.to_thread(self.marketplace.record_local_bundle, bundle)
+            evidence = self._trust_evidence(bundle)
+            previous_decision = await asyncio.to_thread(
+                self.trust_policy.authorize_claimed_local_install,
+                bundle=bundle,
+                claim=claim,
+                evidence=evidence,
+            )
+            authorized = True
+            result = await asyncio.to_thread(
+                self.installer.install,
+                claim.path,
+                expected_sha256=claim.bundle_sha256,
+                enabled=True,
+            )
+            await self.reconcile_plugin(result.plugin_id)
+            await asyncio.to_thread(
+                self.trust_policy.finalize_local_install,
+                claim=claim,
+                plugin_id=result.plugin_id,
+            )
+            return {"installation": result.to_wire()}
+        except BaseException as exc:
+            if bundle is not None and authorized:
+                await asyncio.to_thread(
+                    self.trust_policy.restore_decision_after_failed_install,
+                    bundle=bundle,
+                    previous=previous_decision,
+                    claim=claim,
+                    error_type=type(exc).__name__,
+                )
+            else:
+                await asyncio.to_thread(
+                    self.trust_policy.reset_claim_after_failed_confirmation,
+                    claim=claim,
+                    error_type=type(exc).__name__,
+                )
+            raise
+
+    def begin_trust_change(
+        self,
+        plugin_id: str,
+        *,
+        target_mode: str,
+        reason: str,
+        acknowledgements: list[str],
+        user_action_id: str,
+    ) -> dict[str, Any]:
+        bundle = self._bundles.get(plugin_id)
+        if bundle is None:
+            raise core_error(
+                "PLUGIN_CORE_PLUGIN_NOT_FOUND",
+                "plugin bundle is unavailable for trust review",
+                plugin_id=plugin_id,
+            )
+        evidence = self._trust_evidence(bundle)
+        target_authorization = self.trust_policy.build_authorization(
+            bundle, evidence, mode=target_mode
+        )
+        permission_diff = self.grant_store.permission_diff(
+            bundle.manifest,
+            bundle_sha256=bundle.sha256,
+            manifest_sha256=bundle.manifest_sha256,
+            publisher_identity=evidence.publisher_identity,
+            authorization_identity=target_authorization.authorization_identity,
+        )
+        return self.trust_policy.begin_trust_change(
+            bundle=bundle,
+            target_mode=target_mode,
+            reason=reason,
+            acknowledgements=acknowledgements,
+            permission_diff=permission_diff.to_wire(),
+            actor="local-desktop-user",
+            user_action_id=user_action_id,
+        )
+
+    async def confirm_trust_change(
+        self,
+        plugin_id: str,
+        *,
+        change_id: str,
+        preview_sha256: str,
+        confirmation_token: str,
+        user_action_id: str,
+    ) -> dict[str, Any]:
+        bundle = self._bundles.get(plugin_id)
+        if bundle is None:
+            raise core_error(
+                "PLUGIN_CORE_PLUGIN_NOT_FOUND",
+                "plugin bundle is unavailable for trust confirmation",
+                plugin_id=plugin_id,
+            )
+        result = await asyncio.to_thread(
+            self.trust_policy.confirm_trust_change,
+            bundle=bundle,
+            change_id=change_id,
+            preview_sha256=preview_sha256,
+            confirmation_token=confirmation_token,
+            user_action_id=user_action_id,
+        )
+        self.authority.revoke_plugin(plugin_id, trace_id=f"management-{user_action_id}")
+        # A trust-mode change invalidates the process boundary itself.  Stop the
+        # old supervisor before any Grant Store I/O so a failed reconciliation
+        # cannot leave trusted-local code running after a sandbox downgrade (or
+        # vice versa).  The full reconcile below rebuilds a fresh instance and
+        # capability generation only after authorization is current.
+        await self.manager.remove_plugin(plugin_id)
+        authorization_identity = self._bundle_authorization_identity(bundle)
+        await asyncio.to_thread(
+            self.grant_store.reconcile,
+            bundle.manifest,
+            bundle_sha256=bundle.sha256,
+            manifest_sha256=bundle.manifest_sha256,
+            publisher_identity=self._bundle_publisher_identity(bundle),
+            authorization_identity=authorization_identity,
+            trace_id=f"management-{user_action_id}",
+        )
+        ready = await asyncio.to_thread(
+            self.grant_store.activation_ready,
+            bundle.manifest,
+            bundle_sha256=bundle.sha256,
+            manifest_sha256=bundle.manifest_sha256,
+            publisher_identity=self._bundle_publisher_identity(bundle),
+            authorization_identity=authorization_identity,
+        )
+        if not ready:
+            await asyncio.to_thread(self.installer.disable, plugin_id)
+        await self.reconcile_plugin(plugin_id)
+        return {
+            "trustChange": result,
+            "activationReady": ready,
+            "plugin": next(
+                item for item in self.catalog()["plugins"] if item["id"] == plugin_id
+            ),
+        }
+
     def management_detail(self, plugin_id: str) -> dict[str, Any]:
         """Return guarded lifecycle, grant, health and retention metadata."""
 
@@ -2171,6 +2509,11 @@ class CorePluginPlatform:
         return {
             "schemaVersion": MANAGEMENT_DETAIL_SCHEMA_VERSION,
             "plugin": plugin,
+            **(
+                {"trust": self.trust_policy.summary(bundle)}
+                if self.trust_ux_enabled and bundle is not None
+                else {}
+            ),
             "permissions": permission_details,
             "health": {
                 "available": plugin["available"],

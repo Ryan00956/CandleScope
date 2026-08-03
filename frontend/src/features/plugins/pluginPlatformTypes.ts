@@ -309,6 +309,120 @@ export interface PluginRuntimeRegistryStatus {
   }>;
 }
 
+export type PluginCanonicalTrustMode =
+  | "first-party-pinned"
+  | "marketplace-sandboxed"
+  | "trusted-local"
+  | "developer-local"
+  | "ui-only-untrusted";
+
+export interface PluginRestrictedRuntimeProfile {
+  profileId: string;
+  runtimeKind: string;
+  sandboxMode: "windows-appcontainer" | "unavailable";
+  sandboxSupported: boolean;
+  trustedLocalOnly: boolean;
+  networkDefault: "denied";
+  subprocessDeclared: false;
+  limits: {
+    memoryBytes?: number;
+    cpuRatePercent?: number;
+    probeCpuTimeSeconds?: number;
+    runtimeCpuTimeSeconds?: number;
+    diskBytes?: number;
+    maxProcesses: number;
+    probeWallSeconds?: number;
+    runtimeWallSeconds?: number;
+  };
+}
+
+export interface PluginTrustRuntimeEntrypoint {
+  entrypointId: string;
+  runtimeKind: string;
+  runtimeId: string;
+  descriptor: Record<string, JsonValue>;
+  pluginArtifactSha256: string | null;
+  runtimeArtifactSha256: string | null;
+  runtimeArtifactSize: number | null;
+  supplySource: "host-python" | "host-managed" | "plugin-bundled" | "system";
+  hostManaged: boolean;
+  registrySha256: string | null;
+  systemRuntimePath: string | null;
+  signatureRoot: string | null;
+  profile: PluginRestrictedRuntimeProfile;
+}
+
+export interface PluginTrustAuthorization {
+  runtimeIdentity: string;
+  authorizationIdentity: string;
+  mode: PluginCanonicalTrustMode;
+  entrypoints: PluginTrustRuntimeEntrypoint[];
+  signatureRoots: string[];
+  sandbox: {
+    requested: boolean;
+    active: boolean;
+    status: "windows-appcontainer" | "trusted-local-user-approved" | "unavailable-trusted-local-only";
+    supported: boolean;
+    trustedLocalOnly: boolean;
+    profiles: PluginRestrictedRuntimeProfile[];
+  };
+}
+
+export interface PluginTrustRequests {
+  permissions: Array<{
+    permissionId: string;
+    kind: "required" | "optional";
+    scope: Record<string, JsonValue>;
+  }>;
+  network: { requested: boolean; permissionIds: string[] };
+  files: { requested: boolean; permissionIds: string[] };
+  secrets: { requested: boolean; permissionIds: string[] };
+  accounts: { requested: boolean; permissionIds: string[] };
+  trading: { requested: boolean; permissionIds: string[] };
+  subprocess: {
+    requested: false;
+    declared: false;
+    maxProcesses: 1;
+    reason: string;
+  };
+  liveAuthority: {
+    grantedByTrust: false;
+    independentlyProtected: true;
+  };
+}
+
+export interface PluginTrustSource {
+  rawTrustLevel: string;
+  canonicalDefault: PluginCanonicalTrustMode;
+  publisherIdentity: string;
+  source: string;
+  marketplaceId: string | null;
+  signatureRoot: string | null;
+}
+
+export interface PluginTrustSummary {
+  schemaVersion: "candlescope.plugin-trust-summary/1";
+  uxEnabled: boolean;
+  mode: PluginCanonicalTrustMode;
+  defaultMode: PluginCanonicalTrustMode;
+  decisionRecorded: boolean;
+  source: PluginTrustSource;
+  authorization: PluginTrustAuthorization;
+  requests: PluginTrustRequests;
+  profiles: PluginRestrictedRuntimeProfile[];
+  changeAllowed: boolean;
+  highRiskAuthorityIndependent: true;
+}
+
+export interface PluginTrustUxStatus {
+  schemaVersion: "candlescope.plugin-trust-ux/1";
+  enabled: true;
+  localInstallFlow: "itemized-double-confirmation";
+  actor: "local-desktop-user";
+  profiles: PluginRestrictedRuntimeProfile[];
+  highRiskAuthorityIndependent: true;
+}
+
 export interface PluginCatalogPlugin {
   id: string;
   name: string;
@@ -324,6 +438,7 @@ export interface PluginCatalogPlugin {
     | "untrusted";
   available: boolean;
   unavailableReason?: string;
+  trust?: PluginTrustSummary;
   permissions: {
     activationReady: boolean;
     requiredSatisfied: boolean;
@@ -341,6 +456,9 @@ export interface PluginCatalogPlugin {
       entrypointId: string;
       state: string;
       generation: number;
+      runtimeKind?: string;
+      runtimeId?: string;
+      artifactSha256?: string | null;
       runtimeSupply?: PluginRuntimeSupply;
     }>;
   };
@@ -422,6 +540,7 @@ export interface PluginCatalog {
   plugins: PluginCatalogPlugin[];
   compatibility: PluginV1CompatibilityCatalog;
   runtimeRegistry?: PluginRuntimeRegistryStatus;
+  trustUx?: PluginTrustUxStatus;
 }
 
 export interface PluginMarketplaceRelease {
@@ -459,6 +578,7 @@ export interface PluginMarketplacePermissionDiff {
   publisherIdentityChanged: boolean;
   majorVersionChanged: boolean;
   bundleChanged: boolean;
+  authorizationIdentityChanged?: boolean;
   requiresConfirmation: boolean;
   permissions: Array<{
     permissionId: string;
@@ -589,6 +709,71 @@ interface PluginChartLayerBase {
   series: { symbol: string; interval: string };
 }
 
+export interface PluginRuntimeDiff {
+  changed: boolean;
+  requiresConfirmation: boolean;
+  kindOrIdChanged: boolean;
+  signatureRootChanged: boolean;
+  systemRuntimePathChanged: boolean;
+  supplyChanged: boolean;
+  previous: PluginTrustRuntimeEntrypoint[];
+  current: PluginTrustRuntimeEntrypoint[];
+}
+
+export interface PluginLocalInstallPreview {
+  schemaVersion: "candlescope.plugin-trust-preview/1";
+  plugin: {
+    id: string;
+    name: string;
+    version: string;
+    publisher: string;
+    bundleSha256: string;
+    manifestSha256: string;
+  };
+  source: PluginTrustSource;
+  authorization: PluginTrustAuthorization;
+  permissionDiff: PluginMarketplacePermissionDiff;
+  runtimeDiff: PluginRuntimeDiff;
+  requests: PluginTrustRequests;
+  requiredAcknowledgements: string[];
+  warning: string;
+}
+
+export interface PluginLocalInstallCandidate {
+  candidateId: string;
+  previewSha256: string;
+  expiresAt: string;
+  preview: PluginLocalInstallPreview;
+}
+
+export interface PluginTrustReview {
+  candidateId: string;
+  previewSha256: string;
+  confirmationToken: string;
+  expiresAt: string;
+  confirmationStep: 1;
+}
+
+export interface PluginTrustChangeReview {
+  changeId: string;
+  previewSha256: string;
+  confirmationToken: string;
+  expiresAt: string;
+  preview: {
+    schemaVersion: "candlescope.plugin-trust-preview/1";
+    action: "trust-change";
+    pluginId: string;
+    bundleSha256: string;
+    source: PluginTrustSource;
+    from: PluginTrustAuthorization;
+    to: PluginTrustAuthorization;
+    permissionDiff: PluginMarketplacePermissionDiff;
+    runtimeDiff: PluginRuntimeDiff;
+    requests: PluginTrustRequests;
+    requiredAcknowledgements: string[];
+  };
+}
+
 export interface PluginChartLayerV1 extends PluginChartLayerBase {
   render: {
     schemaVersion: "candlescope.render/1";
@@ -697,6 +882,7 @@ export interface PluginRegistries {
 export interface PluginManagementDetail {
   schemaVersion: "candlescope.plugin-management-detail/1";
   plugin: PluginCatalogPlugin;
+  trust?: PluginTrustSummary;
   permissions: Array<{
     pluginId: string;
     activationReady: boolean;
@@ -941,6 +1127,30 @@ export interface PluginPlatformRuntime {
     previewV1CompatibilityRollback(): Promise<PluginV1CompatibilityPreview>;
     applyV1CompatibilityRollback(previewSha256: string): Promise<void>;
     installBundle(file: File): Promise<void>;
+    prepareLocalInstall(file: File): Promise<PluginLocalInstallCandidate>;
+    reviewLocalInstall(
+      candidateId: string,
+      previewSha256: string,
+      reason: string,
+      acknowledgements: string[],
+    ): Promise<PluginTrustReview>;
+    confirmLocalInstall(
+      candidateId: string,
+      previewSha256: string,
+      confirmationToken: string,
+    ): Promise<void>;
+    reviewTrustChange(
+      pluginId: string,
+      targetMode: "marketplace-sandboxed" | "trusted-local",
+      reason: string,
+      acknowledgements: string[],
+    ): Promise<PluginTrustChangeReview>;
+    confirmTrustChange(
+      pluginId: string,
+      changeId: string,
+      previewSha256: string,
+      confirmationToken: string,
+    ): Promise<void>;
     stageUserFile(id: string, field: string, file: File): Promise<PluginFileSelection>;
     prepareUserFileSave(id: string, field: string): Promise<PluginFileSelection>;
     downloadUserFile(pluginId: string, downloadId: string): Promise<Blob>;

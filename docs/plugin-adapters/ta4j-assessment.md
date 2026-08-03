@@ -7,6 +7,12 @@
 > 适用范围：Windows x86_64、CandleScope Plugin Platform v2、显式
 > `local-trusted`、Host-managed Temurin JRE 25.0.4+7。
 
+> Phase 6 运行时补充：上面的适用范围和本文后续 JRE 25 数据是 Phase 5 冻结历史。
+> 当前插件包装版本 `0.1.1` 因 OpenJDK `JDK-8352728` 的 Windows AppContainer
+> 兼容问题，已迁移到签名 Runtime Registry revision 3 的
+> `temurin-26.0.2.10`；Adapter JAR `0.1.0`、ta4j 版本和 golden 语义未改变。
+> 当前信任与沙箱证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE6_zh.md`。
+
 ## 1. 最终判断
 
 ta4j 是值得复用的成熟 Java 算法库，但它不是一个可以原样装入 CandleScope 的插件。它没有

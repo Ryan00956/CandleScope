@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from app.plugin_security_v2 import TRUST_UX_ENABLED_ENV
 from app.plugin_security_v2.management import LocalManagementGuard
 from app.plugin_runtime_registry_v3 import (
     RUNTIME_REGISTRY_ENABLED_ENV,
@@ -190,6 +191,7 @@ def build_core_plugin_platform_from_environment(
         runtime_registry_network_updates_enabled=_environment_bool(
             env, RUNTIME_REGISTRY_NETWORK_UPDATES_ENV, default=False
         ),
+        trust_ux_enabled=_environment_bool(env, TRUST_UX_ENABLED_ENV, default=False),
     )
 
 

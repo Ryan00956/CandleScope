@@ -195,3 +195,31 @@ test("enabled platform exposes separate import and rollback previews", () => {
   assert.match(manager, /自动网络更新已关闭/);
   assert.doesNotMatch(manager, /Apply exact import preview/);
 });
+
+test("Phase 6 trust UX replaces direct install with an explicit double-confirmation surface", () => {
+  const value = runtime(true);
+  if (!value.view.catalog) assert.fail("catalog missing");
+  value.view.catalog.trustUx = {
+    schemaVersion: "candlescope.plugin-trust-ux/1",
+    enabled: true,
+    localInstallFlow: "itemized-double-confirmation",
+    actor: "local-desktop-user",
+    profiles: [{
+      profileId: "restricted-python-v1",
+      runtimeKind: "python-module",
+      sandboxMode: "windows-appcontainer",
+      sandboxSupported: true,
+      trustedLocalOnly: false,
+      networkDefault: "denied",
+      subprocessDeclared: false,
+      limits: { maxProcesses: 1 },
+    }],
+    highRiskAuthorityIndependent: true,
+  };
+  const manager = renderToStaticMarkup(<PluginSettingsPanel runtime={value} />);
+  assert.match(manager, /data-plugin-trust-flow="itemized-double-confirmation"/);
+  assert.match(manager, /完成两次独立确认后才首次执行插件代码/);
+  assert.match(manager, /准备阶段不会运行语义探针或插件进程/);
+  assert.match(manager, /选择 \.cspkg 并生成审阅单/);
+  assert.doesNotMatch(manager, /经过摘要校验的本地插件包/);
+});

@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 RUNTIME_PROVIDER_API_VERSION = 1
@@ -14,6 +15,14 @@ _KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _LOCAL_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SUPPLY_KINDS = frozenset({"java", "node", "wasm"})
+_SUPPLY_SOURCES = frozenset({"host-managed", "system"})
+_SUPPLY_PROVIDER_KINDS = {
+    "java-jar": "java",
+    "node-module": "node",
+    "wasm-component": "wasm",
+}
+_MAX_RUNTIME_ARTIFACT_BYTES = 1024 * 1024 * 1024
 
 
 class RuntimeProviderError(RuntimeError):
@@ -160,11 +169,193 @@ class RuntimeInstallationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeSupplyBinding:
+    """Immutable provenance for a language runtime used by an activation.
+
+    This is deliberately distinct from the plugin artifact identity.  A Java
+    activation, for example, binds both its immutable JAR and the exact JRE
+    archive or explicitly selected system executable that launches it.
+    """
+
+    source: str
+    runtime_id: str
+    runtime_kind: str
+    version: str
+    executable: Path
+    artifact_sha256: str
+    artifact_size: int
+    probe_sha256: str
+    verification_status: str
+    reproducible: bool
+    registry_id: str | None = None
+    registry_revision: int | None = None
+    registry_sha256: str | None = None
+    source_url: str | None = None
+    license_spdx: str = "NOASSERTION"
+
+    def __post_init__(self) -> None:
+        if self.source not in _SUPPLY_SOURCES:
+            raise ValueError("runtime supply source is invalid")
+        if not _LOCAL_ID.fullmatch(self.runtime_id):
+            raise ValueError("runtime supply runtime_id is invalid")
+        if self.runtime_kind not in _SUPPLY_KINDS:
+            raise ValueError("runtime supply runtime_kind is invalid")
+        if (
+            not isinstance(self.version, str)
+            or not self.version
+            or len(self.version) > 128
+            or self.version != self.version.strip()
+        ):
+            raise ValueError("runtime supply version is invalid")
+        raw_executable = Path(self.executable)
+        if not raw_executable.is_absolute():
+            raise ValueError("runtime supply executable must be absolute")
+        executable = raw_executable.resolve(strict=False)
+        object.__setattr__(self, "executable", executable)
+        if not _SHA256.fullmatch(self.artifact_sha256):
+            raise ValueError("runtime supply artifact_sha256 is invalid")
+        if (
+            isinstance(self.artifact_size, bool)
+            or not isinstance(self.artifact_size, int)
+            or self.artifact_size <= 0
+            or self.artifact_size > _MAX_RUNTIME_ARTIFACT_BYTES
+        ):
+            raise ValueError("runtime supply artifact_size is invalid")
+        if not _SHA256.fullmatch(self.probe_sha256):
+            raise ValueError("runtime supply probe_sha256 is invalid")
+        if (
+            not isinstance(self.license_spdx, str)
+            or not self.license_spdx
+            or len(self.license_spdx) > 255
+            or self.license_spdx != self.license_spdx.strip()
+        ):
+            raise ValueError("runtime supply license_spdx is invalid")
+        if self.source == "host-managed":
+            source_url = (
+                urlsplit(self.source_url) if isinstance(self.source_url, str) else None
+            )
+            if (
+                self.verification_status != "verified"
+                or self.reproducible is not True
+                or not isinstance(self.registry_id, str)
+                or _LOCAL_ID.fullmatch(self.registry_id) is None
+                or isinstance(self.registry_revision, bool)
+                or not isinstance(self.registry_revision, int)
+                or self.registry_revision <= 0
+                or not isinstance(self.registry_sha256, str)
+                or _SHA256.fullmatch(self.registry_sha256) is None
+                or source_url is None
+                or source_url.scheme != "https"
+                or not source_url.hostname
+                or source_url.username is not None
+                or source_url.password is not None
+            ):
+                raise ValueError("host-managed runtime supply provenance is invalid")
+        elif (
+            self.verification_status != "probed"
+            or self.reproducible is not False
+            or self.license_spdx != "NOASSERTION"
+            or any(
+                value is not None
+                for value in (
+                    self.registry_id,
+                    self.registry_revision,
+                    self.registry_sha256,
+                    self.source_url,
+                )
+            )
+        ):
+            raise ValueError("system runtime supply provenance is invalid")
+
+    def to_wire(self) -> dict[str, Any]:
+        common: dict[str, Any] = {
+            "source": self.source,
+            "runtimeId": self.runtime_id,
+            "runtimeKind": self.runtime_kind,
+            "version": self.version,
+            "executable": str(self.executable),
+            "artifactSha256": self.artifact_sha256,
+            "artifactSize": self.artifact_size,
+            "probeSha256": self.probe_sha256,
+            "verificationStatus": self.verification_status,
+            "reproducible": self.reproducible,
+            "licenseSpdx": self.license_spdx,
+        }
+        if self.source == "host-managed":
+            common.update(
+                {
+                    "registryId": self.registry_id,
+                    "registryRevision": self.registry_revision,
+                    "registrySha256": self.registry_sha256,
+                    "sourceUrl": self.source_url,
+                }
+            )
+        return common
+
+    @classmethod
+    def from_wire(
+        cls, value: Any, *, label: str = "runtime supply"
+    ) -> "RuntimeSupplyBinding":
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{label} must be an object")
+        source = value.get("source")
+        common = {
+            "source",
+            "runtimeId",
+            "runtimeKind",
+            "version",
+            "executable",
+            "artifactSha256",
+            "artifactSize",
+            "probeSha256",
+            "verificationStatus",
+            "reproducible",
+            "licenseSpdx",
+        }
+        managed = {"registryId", "registryRevision", "registrySha256", "sourceUrl"}
+        expected = common | managed if source == "host-managed" else common
+        if source not in _SUPPLY_SOURCES or set(value) != expected:
+            raise ValueError(f"{label} fields are invalid")
+        string_fields = {
+            "runtimeId",
+            "runtimeKind",
+            "version",
+            "executable",
+            "artifactSha256",
+            "probeSha256",
+            "verificationStatus",
+            "licenseSpdx",
+        } | (managed - {"registryRevision"} if source == "host-managed" else set())
+        if not all(
+            isinstance(value.get(key), str) and value[key] for key in string_fields
+        ):
+            raise ValueError(f"{label} strings are invalid")
+        return cls(
+            source=source,
+            runtime_id=value["runtimeId"],
+            runtime_kind=value["runtimeKind"],
+            version=value["version"],
+            executable=Path(value["executable"]),
+            artifact_sha256=value["artifactSha256"],
+            artifact_size=value["artifactSize"],
+            probe_sha256=value["probeSha256"],
+            verification_status=value["verificationStatus"],
+            reproducible=value["reproducible"],
+            registry_id=value.get("registryId"),
+            registry_revision=value.get("registryRevision"),
+            registry_sha256=value.get("registrySha256"),
+            source_url=value.get("sourceUrl"),
+            license_spdx=value["licenseSpdx"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeProviderBinding:
     runtime_kind: str
     runtime_id: str
     provider_version: str
     runtime_identity: str
+    runtime_supply: RuntimeSupplyBinding | None = None
 
     def __post_init__(self) -> None:
         if not _KIND.fullmatch(self.runtime_kind):
@@ -175,13 +366,29 @@ class RuntimeProviderBinding:
             raise ValueError("provider_version is invalid")
         if not _SHA256.fullmatch(self.runtime_identity):
             raise ValueError("runtime_identity is invalid")
+        if self.runtime_supply is not None:
+            if not isinstance(self.runtime_supply, RuntimeSupplyBinding):
+                raise ValueError("runtime_supply is invalid")
+            if (
+                _SUPPLY_PROVIDER_KINDS.get(self.runtime_kind)
+                != self.runtime_supply.runtime_kind
+                or self.runtime_supply.runtime_id != self.runtime_id
+            ):
+                raise ValueError(
+                    "runtime supply identity does not match provider binding"
+                )
 
-    def to_wire(self) -> dict[str, str]:
+    def to_wire(self) -> dict[str, Any]:
         return {
             "runtimeKind": self.runtime_kind,
             "runtimeId": self.runtime_id,
             "providerVersion": self.provider_version,
             "runtimeIdentity": self.runtime_identity,
+            **(
+                {"runtimeSupply": self.runtime_supply.to_wire()}
+                if self.runtime_supply is not None
+                else {}
+            ),
         }
 
 
@@ -197,6 +404,7 @@ class PreparedRuntime:
     artifact: Path | None = None
     arguments: tuple[str, ...] = ()
     artifact_sha256: str | None = None
+    runtime_supply: RuntimeSupplyBinding | None = None
 
     def __post_init__(self) -> None:
         RuntimeProviderBinding(
@@ -204,6 +412,7 @@ class PreparedRuntime:
             self.runtime_id,
             self.provider_version,
             self.runtime_identity,
+            self.runtime_supply,
         )
         arguments = tuple(self.arguments)
         if len(arguments) > 64 or not all(
@@ -219,6 +428,11 @@ class PreparedRuntime:
             self.artifact_sha256
         ):
             raise ValueError("prepared runtime artifact_sha256 is invalid")
+        if self.runtime_supply is not None:
+            if not isinstance(self.runtime_supply, RuntimeSupplyBinding):
+                raise ValueError("prepared runtime runtime_supply is invalid")
+            if self.runtime_supply.runtime_id != self.runtime_id:
+                raise ValueError("prepared runtime supply identity does not match")
         object.__setattr__(
             self, "executable", Path(self.executable).resolve(strict=False)
         )

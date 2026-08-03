@@ -38,6 +38,18 @@
 - 完整契约、适用范围和限制见
   `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE3_zh.md`。
 
+多运行时 Phase 4 Managed Runtime Registry 基线：
+
+- `multi-runtime-phase4-2026-08-03-windows-amd64.json`：从 build-pinned Ed25519
+  Registry 在干净目录下载固定 Temurin 21.0.12+8 JRE，验证 archive、checksum、metadata、
+  SBOM、vendor signature、许可证 inventory 和双 fresh-process probe；
+- 同一 gate 还验证 quick repeat 不下载、完全断网 cache hit 为零网络调用，以及破坏
+  `java.exe` 后仅靠保留的 verified archive 完成 quarantine 与离线恢复；
+- 采集器、contract fixture 和 fail-closed gate：
+  `backend/scripts/plugin_platform_multi_runtime_phase4.py`；
+- 完整 Registry、cache、revision、共享引用、schema 4、CLI、回滚和限制见
+  `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE4_zh.md`。
+
 WP-B Broker foundation 基线：
 
 - `phase11b-wpb-2026-07-23-windows-amd64.json`：10 次独立 worker 冷启动和

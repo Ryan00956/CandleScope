@@ -9,6 +9,7 @@ from .base import (
     RuntimeProvider,
     RuntimeProviderBinding,
     RuntimeProviderError,
+    RuntimeSupplyBinding,
     SandboxRuntime,
 )
 from .native import (
@@ -37,6 +38,7 @@ __all__ = [
     "RuntimeProviderBinding",
     "RuntimeProviderError",
     "RuntimeProviderRegistry",
+    "RuntimeSupplyBinding",
     "SandboxRuntime",
     "default_runtime_provider_registry",
 ]

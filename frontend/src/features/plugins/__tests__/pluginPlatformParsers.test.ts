@@ -814,6 +814,99 @@ test("UI snapshot accepts scalar projections and rejects executable-shaped extra
   assert.throws(() => parsePluginUiSnapshot(invalid), /invalid/);
 });
 
+test("Phase 4 catalog strictly preserves managed Registry and runtime supply provenance", () => {
+  const runtimeSupply = {
+    source: "host-managed" as const,
+    runtimeId: "temurin-21.0.12.8",
+    runtimeKind: "java" as const,
+    version: "21.0.12+8-LTS",
+    executable: "C:\\CandleScope\\managed-runtimes\\bin\\java.exe",
+    artifactSha256: `sha256:${"a".repeat(64)}`,
+    artifactSize: 48_993_215,
+    probeSha256: `sha256:${"b".repeat(64)}`,
+    verificationStatus: "verified" as const,
+    reproducible: true as const,
+    licenseSpdx: "GPL-2.0 WITH Classpath-exception-2.0",
+    registryId: "candlescope.reference-runtime",
+    registryRevision: 1,
+    registrySha256: `sha256:${"c".repeat(64)}`,
+    sourceUrl: "https://github.com/adoptium/temurin21-binaries/releases/download/runtime.zip",
+  };
+  const value = {
+    ...catalog([{
+      ...plugin(),
+      runtime: {
+        entrypoints: [{
+          entrypointId: "main",
+          state: "stopped",
+          generation: 0,
+          runtimeSupply,
+        }],
+      },
+    }]),
+    runtimeRegistry: {
+      schemaVersion: "candlescope.runtime-registry-status/1",
+      enabled: true,
+      networkUpdatesEnabled: false,
+      automaticUpdates: false,
+      active: {
+        registryId: "candlescope.reference-runtime",
+        revision: 1,
+        registrySha256: `sha256:${"c".repeat(64)}`,
+        issuedAt: "2026-08-03T00:00:00Z",
+        rollbackAvailable: false,
+        revokedArtifactCount: 0,
+      },
+      runtimes: [{
+        runtimeId: "temurin-21.0.12.8",
+        kind: "java",
+        version: "21.0.12+8-LTS",
+        os: "windows",
+        arch: "x86_64",
+        sourceUrl: runtimeSupply.sourceUrl,
+        sha256: runtimeSupply.artifactSha256,
+        size: runtimeSupply.artifactSize,
+        license: runtimeSupply.licenseSpdx,
+        upstreamReleaseUrl: "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.12%2B8",
+        source: "host-managed",
+        registryId: runtimeSupply.registryId,
+        registryRevision: runtimeSupply.registryRevision,
+        registrySha256: runtimeSupply.registrySha256,
+        verificationStatus: "verified",
+        cached: true,
+        probeSha256: runtimeSupply.probeSha256,
+        referenceCount: 2,
+        reproducible: true,
+      }],
+      systemRuntimes: [],
+    },
+  };
+
+  const parsed = parsePluginCatalog(value);
+  assert.equal(parsed.runtimeRegistry?.runtimes[0]?.runtimeId, "temurin-21.0.12.8");
+  assert.equal(parsed.runtimeRegistry?.automaticUpdates, false);
+  assert.deepEqual(parsed.plugins[0]?.runtime.entrypoints[0]?.runtimeSupply, runtimeSupply);
+
+  const automatic = structuredClone(value);
+  automatic.runtimeRegistry.automaticUpdates = true;
+  assert.throws(() => parsePluginCatalog(automatic), /invalid/i);
+
+  const nonreproducible = structuredClone(value);
+  Object.assign(
+    nonreproducible.plugins[0]!.runtime.entrypoints[0]!.runtimeSupply,
+    { reproducible: false },
+  );
+  assert.throws(() => parsePluginCatalog(nonreproducible), /invalid/i);
+
+  const extra = structuredClone(value);
+  Object.assign(extra.runtimeRegistry, { updateUrl: "https://example.invalid/latest" });
+  assert.throws(() => parsePluginCatalog(extra), /invalid/i);
+
+  const insecureSource = structuredClone(value);
+  insecureSource.runtimeRegistry.runtimes[0]!.sourceUrl = "http://example.invalid/runtime.zip";
+  assert.throws(() => parsePluginCatalog(insecureSource), /invalid/i);
+});
+
 test("UI snapshot accepts bounded Render IR v2 analysis layers and rejects unknown items", () => {
   const wire = {
     schemaVersion: "candlescope.plugin-ui/1",

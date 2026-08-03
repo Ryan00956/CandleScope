@@ -7,6 +7,10 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from app.plugin_security_v2.management import LocalManagementGuard
+from app.plugin_runtime_registry_v3 import (
+    RUNTIME_REGISTRY_ENABLED_ENV,
+    RUNTIME_REGISTRY_NETWORK_UPDATES_ENV,
+)
 from app.plugin_marketplace_v2 import (
     MarketplaceError,
     MarketplaceRoot,
@@ -180,6 +184,12 @@ def build_core_plugin_platform_from_environment(
             default=False,
         ),
         marketplace_roots=marketplace_roots_from_environment(env),
+        runtime_registry_enabled=_environment_bool(
+            env, RUNTIME_REGISTRY_ENABLED_ENV, default=False
+        ),
+        runtime_registry_network_updates_enabled=_environment_bool(
+            env, RUNTIME_REGISTRY_NETWORK_UPDATES_ENV, default=False
+        ),
     )
 
 

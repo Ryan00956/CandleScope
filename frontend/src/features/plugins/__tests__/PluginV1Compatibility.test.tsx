@@ -62,6 +62,44 @@ function catalog(platformEnabled: boolean): PluginCatalog {
         imported: false,
       }],
     },
+    ...(platformEnabled ? {
+      runtimeRegistry: {
+        schemaVersion: "candlescope.runtime-registry-status/1",
+        enabled: true,
+        networkUpdatesEnabled: false,
+        automaticUpdates: false,
+        active: {
+          registryId: "candlescope.reference-runtime",
+          revision: 1,
+          registrySha256: `sha256:${"c".repeat(64)}`,
+          issuedAt: "2026-08-03T00:00:00Z",
+          rollbackAvailable: false,
+          revokedArtifactCount: 0,
+        },
+        runtimes: [{
+          runtimeId: "temurin-21.0.12.8",
+          kind: "java" as const,
+          version: "21.0.12+8-LTS",
+          os: "windows",
+          arch: "x86_64",
+          sourceUrl: "https://github.com/adoptium/temurin21-binaries/releases/download/runtime.zip",
+          sha256: `sha256:${"a".repeat(64)}`,
+          size: 48_993_215,
+          license: "GPL-2.0 WITH Classpath-exception-2.0",
+          upstreamReleaseUrl: "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.12%2B8",
+          source: "host-managed" as const,
+          registryId: "candlescope.reference-runtime",
+          registryRevision: 1,
+          registrySha256: `sha256:${"c".repeat(64)}`,
+          verificationStatus: "verified" as const,
+          cached: true,
+          probeSha256: `sha256:${"b".repeat(64)}`,
+          referenceCount: 0,
+          reproducible: true as const,
+        }],
+        systemRuntimes: [],
+      },
+    } : {}),
   };
 }
 
@@ -151,5 +189,9 @@ test("enabled platform exposes separate import and rollback previews", () => {
   assert.match(manager, /预览注册表导入/);
   assert.match(manager, /预览兼容层回滚/);
   assert.match(manager, /data-plugin-install-input/);
+  assert.match(manager, /data-runtime-registry-revision="1"/);
+  assert.match(manager, /宿主管理的运行时/);
+  assert.match(manager, /temurin-21\.0\.12\.8/);
+  assert.match(manager, /自动网络更新已关闭/);
   assert.doesNotMatch(manager, /Apply exact import preview/);
 });

@@ -26,6 +26,8 @@ import type {
   PluginPaperExecutorContribution,
   PluginPaperStatus,
   PluginPlacement,
+  PluginRuntimeRegistryStatus,
+  PluginRuntimeSupply,
   PluginSettingsContribution,
   PluginUiSnapshot,
   PluginViewContribution,
@@ -627,6 +629,130 @@ function contribution(value: unknown, path: string, pluginId: string): PluginCat
   } satisfies PluginViewContribution;
 }
 
+function runtimeSupply(value: unknown, path: string): PluginRuntimeSupply {
+  const data = record(value, path);
+  const common = [
+    "source", "runtimeId", "runtimeKind", "version", "executable",
+    "artifactSha256", "artifactSize", "probeSha256", "verificationStatus",
+    "reproducible", "licenseSpdx",
+  ];
+  const source = oneOf(data.source, new Set(["host-managed", "system"] as const), `${path}.source`);
+  exact(
+    data,
+    source === "host-managed"
+      ? [...common, "registryId", "registryRevision", "registrySha256", "sourceUrl"]
+      : common,
+    [],
+    path,
+  );
+  const base = {
+    runtimeId: string(data.runtimeId, `${path}.runtimeId`, 128),
+    runtimeKind: oneOf(data.runtimeKind, new Set(["java", "node", "wasm"] as const), `${path}.runtimeKind`),
+    version: string(data.version, `${path}.version`, 128),
+    executable: string(data.executable, `${path}.executable`, 2048),
+    artifactSha256: digest(data.artifactSha256, `${path}.artifactSha256`),
+    artifactSize: integer(data.artifactSize, `${path}.artifactSize`, 1, 1024 * 1024 * 1024),
+    probeSha256: digest(data.probeSha256, `${path}.probeSha256`),
+    licenseSpdx: string(data.licenseSpdx, `${path}.licenseSpdx`, 255),
+  };
+  if (source === "host-managed") {
+    if (data.verificationStatus !== "verified" || data.reproducible !== true) fail(path);
+    return {
+      source,
+      ...base,
+      verificationStatus: "verified",
+      reproducible: true,
+      registryId: string(data.registryId, `${path}.registryId`, 128),
+      registryRevision: integer(data.registryRevision, `${path}.registryRevision`, 1),
+      registrySha256: digest(data.registrySha256, `${path}.registrySha256`),
+      sourceUrl: httpsUrl(data.sourceUrl, `${path}.sourceUrl`),
+    };
+  }
+  if (data.verificationStatus !== "probed" || data.reproducible !== false || base.licenseSpdx !== "NOASSERTION") fail(path);
+  return {
+    source,
+    ...base,
+    licenseSpdx: "NOASSERTION",
+    verificationStatus: "probed",
+    reproducible: false,
+  };
+}
+
+function runtimeRegistryStatus(value: unknown, path: string): PluginRuntimeRegistryStatus {
+  const data = record(value, path);
+  exact(data, ["schemaVersion", "enabled", "networkUpdatesEnabled", "automaticUpdates", "active", "runtimes", "systemRuntimes"], [], path);
+  if (data.schemaVersion !== "candlescope.runtime-registry-status/1" || data.enabled !== true || data.automaticUpdates !== false) fail(path);
+  const active = record(data.active, `${path}.active`);
+  exact(active, ["registryId", "revision", "registrySha256", "issuedAt", "rollbackAvailable", "revokedArtifactCount"], [], `${path}.active`);
+  const runtimes = array(data.runtimes, `${path}.runtimes`, 4096).map((raw, index) => {
+    const itemPath = `${path}.runtimes[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, [
+      "runtimeId", "kind", "version", "os", "arch", "sourceUrl", "sha256", "size",
+      "license", "upstreamReleaseUrl", "source", "registryId", "registryRevision",
+      "registrySha256", "verificationStatus", "cached", "probeSha256", "referenceCount",
+      "reproducible",
+    ], [], itemPath);
+    if (item.source !== "host-managed" || item.reproducible !== true) fail(itemPath);
+    return {
+      runtimeId: string(item.runtimeId, `${itemPath}.runtimeId`, 128),
+      kind: oneOf(item.kind, new Set(["java", "node", "wasm"] as const), `${itemPath}.kind`),
+      version: string(item.version, `${itemPath}.version`, 128),
+      os: string(item.os, `${itemPath}.os`, 32),
+      arch: string(item.arch, `${itemPath}.arch`, 32),
+      sourceUrl: httpsUrl(item.sourceUrl, `${itemPath}.sourceUrl`),
+      sha256: digest(item.sha256, `${itemPath}.sha256`),
+      size: integer(item.size, `${itemPath}.size`, 1, 1024 * 1024 * 1024),
+      license: string(item.license, `${itemPath}.license`, 255),
+      upstreamReleaseUrl: httpsUrl(item.upstreamReleaseUrl, `${itemPath}.upstreamReleaseUrl`),
+      source: "host-managed" as const,
+      registryId: string(item.registryId, `${itemPath}.registryId`, 128),
+      registryRevision: integer(item.registryRevision, `${itemPath}.registryRevision`, 1),
+      registrySha256: digest(item.registrySha256, `${itemPath}.registrySha256`),
+      verificationStatus: oneOf(item.verificationStatus, new Set(["verified", "missing", "corrupt", "revoked"] as const), `${itemPath}.verificationStatus`),
+      cached: boolean(item.cached, `${itemPath}.cached`),
+      probeSha256: item.probeSha256 === null ? null : digest(item.probeSha256, `${itemPath}.probeSha256`),
+      referenceCount: integer(item.referenceCount, `${itemPath}.referenceCount`, 0),
+      reproducible: true as const,
+    };
+  });
+  const systemRuntimes = array(data.systemRuntimes, `${path}.systemRuntimes`, 256).map((raw, index) => {
+    const itemPath = `${path}.systemRuntimes[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, ["runtimeId", "kind", "version", "source", "executable", "artifactSha256", "artifactSize", "probeSha256", "verificationStatus", "reproducible", "license"], [], itemPath);
+    if (item.source !== "system" || item.verificationStatus !== "probed" || item.reproducible !== false || item.license !== "NOASSERTION") fail(itemPath);
+    return {
+      runtimeId: string(item.runtimeId, `${itemPath}.runtimeId`, 128),
+      kind: oneOf(item.kind, new Set(["java", "node", "wasm"] as const), `${itemPath}.kind`),
+      version: string(item.version, `${itemPath}.version`, 128),
+      source: "system" as const,
+      executable: string(item.executable, `${itemPath}.executable`, 2048),
+      artifactSha256: digest(item.artifactSha256, `${itemPath}.artifactSha256`),
+      artifactSize: integer(item.artifactSize, `${itemPath}.artifactSize`, 1, 1024 * 1024 * 1024),
+      probeSha256: digest(item.probeSha256, `${itemPath}.probeSha256`),
+      verificationStatus: "probed" as const,
+      reproducible: false as const,
+      license: "NOASSERTION" as const,
+    };
+  });
+  return {
+    schemaVersion: "candlescope.runtime-registry-status/1",
+    enabled: true,
+    networkUpdatesEnabled: boolean(data.networkUpdatesEnabled, `${path}.networkUpdatesEnabled`),
+    automaticUpdates: false,
+    active: {
+      registryId: string(active.registryId, `${path}.active.registryId`, 128),
+      revision: integer(active.revision, `${path}.active.revision`, 1),
+      registrySha256: digest(active.registrySha256, `${path}.active.registrySha256`),
+      issuedAt: utcTimestamp(active.issuedAt, `${path}.active.issuedAt`),
+      rollbackAvailable: boolean(active.rollbackAvailable, `${path}.active.rollbackAvailable`),
+      revokedArtifactCount: integer(active.revokedArtifactCount, `${path}.active.revokedArtifactCount`, 0),
+    },
+    runtimes,
+    systemRuntimes,
+  };
+}
+
 function catalogPlugin(value: unknown, path: string, contributionIds: Set<string>): PluginCatalogPlugin {
   const data = record(value, path);
   exact(data, ["id", "name", "version", "publisher", "state", "enabled", "trustLevel", "available", "permissions", "contributions", "runtime"], ["unavailableReason"], path);
@@ -678,11 +804,12 @@ function catalogPlugin(value: unknown, path: string, contributionIds: Set<string
     runtime: {
       entrypoints: array(runtime.entrypoints, `${path}.runtime.entrypoints`, 64).map((raw, index) => {
         const item = record(raw, `${path}.runtime.entrypoints[${index}]`);
-        exact(item, ["entrypointId", "state", "generation"], [], `${path}.runtime.entrypoints[${index}]`);
+        exact(item, ["entrypointId", "state", "generation"], ["runtimeSupply"], `${path}.runtime.entrypoints[${index}]`);
         return {
           entrypointId: string(item.entrypointId, `${path}.runtime.entrypoints[${index}].entrypointId`, 128),
           state: string(item.state, `${path}.runtime.entrypoints[${index}].state`, 64),
           generation: integer(item.generation, `${path}.runtime.entrypoints[${index}].generation`),
+          ...(item.runtimeSupply === undefined ? {} : { runtimeSupply: runtimeSupply(item.runtimeSupply, `${path}.runtime.entrypoints[${index}].runtimeSupply`) }),
         };
       }),
     },
@@ -930,7 +1057,7 @@ function v1CompatibilityCatalog(
 export function parsePluginCatalog(value: unknown): PluginCatalog {
   if (JSON.stringify(value).length > 2 * 1024 * 1024) fail("catalog");
   const data = record(value, "catalog");
-  exact(data, ["schemaVersion", "platform", "plugins", "compatibility"], [], "catalog");
+  exact(data, ["schemaVersion", "platform", "plugins", "compatibility"], ["runtimeRegistry"], "catalog");
   if (data.schemaVersion !== "candlescope.plugin-catalog/2") fail("catalog.schemaVersion");
   const platform = record(data.platform, "catalog.platform");
   exact(platform, ["enabled", "started", "status", "registryRevision"], [], "catalog.platform");
@@ -947,6 +1074,7 @@ export function parsePluginCatalog(value: unknown): PluginCatalog {
     },
     plugins,
     compatibility: v1CompatibilityCatalog(data.compatibility, "catalog.compatibility"),
+    ...(data.runtimeRegistry === undefined ? {} : { runtimeRegistry: runtimeRegistryStatus(data.runtimeRegistry, "catalog.runtimeRegistry") }),
   };
 }
 
@@ -2170,8 +2298,13 @@ export function parsePluginManagementDetail(value: unknown): PluginManagementDet
       ...(health.unavailableReason == null ? {} : { unavailableReason: string(health.unavailableReason, "detail.health.unavailableReason", 128) }),
       entrypoints: array(health.entrypoints, "detail.health.entrypoints", 64).map((raw, index) => {
         const item = record(raw, `detail.health.entrypoints[${index}]`);
-        exact(item, ["entrypointId", "state", "generation"], [], `detail.health.entrypoints[${index}]`);
-        return { entrypointId: string(item.entrypointId, "detail.health.entrypointId", 128), state: string(item.state, "detail.health.state", 64), generation: integer(item.generation, "detail.health.generation") };
+        exact(item, ["entrypointId", "state", "generation"], ["runtimeSupply"], `detail.health.entrypoints[${index}]`);
+        return {
+          entrypointId: string(item.entrypointId, "detail.health.entrypointId", 128),
+          state: string(item.state, "detail.health.state", 64),
+          generation: integer(item.generation, "detail.health.generation"),
+          ...(item.runtimeSupply === undefined ? {} : { runtimeSupply: runtimeSupply(item.runtimeSupply, `detail.health.entrypoints[${index}].runtimeSupply`) }),
+        };
       }),
     },
     update: parsedUpdate,

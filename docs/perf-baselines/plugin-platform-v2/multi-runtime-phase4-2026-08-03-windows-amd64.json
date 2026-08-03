@@ -1,0 +1,167 @@
+{
+  "contractSha256": "sha256:9cffde7b015200b4ed4af2a43a92eb12427fb48276fc618e770d3c6076b48423",
+  "deterministic": {
+    "corruption": {
+      "downloadedFiles": 0,
+      "offlineRecovery": true,
+      "quarantinedEntries": 1
+    },
+    "errors": {
+      "digestMismatch": "PLUGIN_RUNTIME_REGISTRY_ARTIFACT_MISMATCH",
+      "diskFull": "PLUGIN_RUNTIME_REGISTRY_DISK_FULL",
+      "extract": "PLUGIN_RUNTIME_REGISTRY_EXTRACT_FAILED",
+      "interrupted": "PLUGIN_RUNTIME_REGISTRY_DOWNLOAD_FAILED",
+      "offlineMiss": "PLUGIN_RUNTIME_REGISTRY_OFFLINE_CACHE_MISS",
+      "sizeMismatch": "PLUGIN_RUNTIME_REGISTRY_ARTIFACT_MISMATCH"
+    },
+    "receipts": {
+      "installationSchema": 4,
+      "runtimeSupply": true
+    },
+    "references": {
+      "archiveRetained": true,
+      "cleanupError": "PLUGIN_RUNTIME_REGISTRY_RUNTIME_REFERENCED",
+      "count": 2
+    },
+    "revision": {
+      "revocationsPreserved": [
+        "sha256:d51e198162620c9851cb35cdcc33bfa7741fb6b3788414c32a2724fdc84d8d58"
+      ],
+      "revoked": "PLUGIN_RUNTIME_REGISTRY_RUNTIME_REVOKED",
+      "revokedAfterRollback": "PLUGIN_RUNTIME_REGISTRY_RUNTIME_REVOKED",
+      "rollbackFrom": 2,
+      "rollbackTo": 1
+    },
+    "runtime": {
+      "artifactSha256": "sha256:d51e198162620c9851cb35cdcc33bfa7741fb6b3788414c32a2724fdc84d8d58",
+      "automaticUpdates": false,
+      "firstDownloadedFiles": 5,
+      "firstQuickRepeat": false,
+      "offlineDownloadedFiles": 0,
+      "offlineQuickRepeat": true,
+      "probeOutput": "candlescope-fixture-runtime-1.0.0",
+      "registryRevision": 1,
+      "repeatDownloadedFiles": 0,
+      "repeatQuickRepeat": true,
+      "runtimeId": "fixture-java-1",
+      "source": "host-managed",
+      "version": "1.0.0+fixture"
+    },
+    "system": {
+      "absoluteExecutable": true,
+      "confirmationError": "PLUGIN_RUNTIME_REGISTRY_SYSTEM_CONFIRMATION_REQUIRED",
+      "registrySha256": null,
+      "reproducible": false,
+      "source": "system"
+    }
+  },
+  "realJre": {
+    "cache": {
+      "firstQuickRepeat": false,
+      "offlineDownloadedFiles": 0,
+      "offlineNetworkCalls": 0,
+      "offlineQuickRepeat": true,
+      "recoveryDownloadedFiles": 0,
+      "recoveryQuarantinedEntries": 1,
+      "recoveryQuickRepeat": false,
+      "repeatDownloadedFiles": 0,
+      "repeatQuickRepeat": true,
+      "stagingEntries": 0,
+      "verificationStatus": "verified"
+    },
+    "cleanRoot": true,
+    "performance": {
+      "corruptionRecoveryMs": 2772.61,
+      "firstInstallMs": 22519.927,
+      "offlineHitMs": 463.279,
+      "quickRepeatMs": 469.685
+    },
+    "platform": {
+      "arch": "x86_64",
+      "os": "windows"
+    },
+    "result": "pass",
+    "runtime": {
+      "artifactSha256": "sha256:b8aa18fef5edb69bee8618f99677d66d0873d22cb40d974c15ac9ffcdecf73ba",
+      "artifactSize": 48993215,
+      "extractedSize": 151523285,
+      "fileCount": 315,
+      "legalFileCount": 179,
+      "legalSize": 228708,
+      "licenseSpdx": "GPL-2.0 WITH Classpath-exception-2.0",
+      "probeSha256": "sha256:a803f692120ea6cc34bc57a356e96037a371cff2d251030b6ae675acada33a1a",
+      "probeStderr": "openjdk version \"21.0.12\" 2026-07-21 LTS\r\nOpenJDK Runtime Environment Temurin-21.0.12+8 (build 21.0.12+8-LTS)\r\nOpenJDK 64-Bit Server VM Temurin-21.0.12+8 (build 21.0.12+8-LTS, mixed mode, sharing)\r\n",
+      "registryId": "candlescope.reference-runtime",
+      "registryRevision": 1,
+      "registrySha256": "sha256:d2e039f4d2a334db575513a3f532ab71e5384b613f05f7cf566806c50515b383",
+      "runtimeId": "temurin-21.0.12.8",
+      "version": "21.0.12+8-LTS"
+    },
+    "supplyChain": {
+      "automaticUpdates": false,
+      "downloadUrls": [
+        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip",
+        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sha256.txt",
+        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.json",
+        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-sbom_x64_windows_hotspot_21.0.12_8.json",
+        "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sig"
+      ],
+      "downloadedFiles": 5,
+      "evidence": [
+        {
+          "fileName": "OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sha256.txt",
+          "role": "vendor-checksum",
+          "sha256": "sha256:9590710168ac57e4f8f60aacd30d9c06eae549d2987b52485fba4c8ab6f78def",
+          "size": 115,
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sha256.txt"
+        },
+        {
+          "fileName": "OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.json",
+          "role": "vendor-metadata",
+          "sha256": "sha256:6c91bc29324e4194e3db7321cff97e7cbd0a0ac9eff4b7eb76db76c693fe09c5",
+          "size": 31177,
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.json"
+        },
+        {
+          "fileName": "OpenJDK21U-sbom_x64_windows_hotspot_21.0.12_8.json",
+          "role": "vendor-sbom",
+          "sha256": "sha256:80fa267586d5d76a625ec60838a33eda36ab2496f5c5d836e2ae1b023020cbef",
+          "size": 166521,
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-sbom_x64_windows_hotspot_21.0.12_8.json"
+        },
+        {
+          "fileName": "OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sig",
+          "role": "vendor-signature",
+          "sha256": "sha256:39fbe52ff3aeed0945d86aea2843fcc525638f5a1ec0bf08dd156222c097f296",
+          "size": 310,
+          "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_windows_hotspot_21.0.12_8.zip.sig"
+        }
+      ],
+      "licenseFiles": [
+        {
+          "path": "NOTICE",
+          "sha256": "sha256:c02756bcd9fa8191bf0fda4451bc018414dd44ee35bf09922c24377a475e4b5a",
+          "size": 2400
+        },
+        {
+          "path": "legal/java.base/ADDITIONAL_LICENSE_INFO",
+          "sha256": "sha256:a69bce275ba7a3570af6579cb0f55682cd75fedfcd49e0e8e9022270c447c916",
+          "size": 2114
+        },
+        {
+          "path": "legal/java.base/ASSEMBLY_EXCEPTION",
+          "sha256": "sha256:75292f03bf23d3db7c985aecc191029b93883200721ed23ed34a2e601463df33",
+          "size": 1514
+        },
+        {
+          "path": "legal/java.base/LICENSE",
+          "sha256": "sha256:4b9abebc4338048a7c2dc184e9f800deb349366bdf28eb23c2677a77b4c87726",
+          "size": 19274
+        }
+      ],
+      "networkUpdatesEnabled": false
+    }
+  },
+  "result": "pass",
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase4-gate/1"
+}

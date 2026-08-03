@@ -14,6 +14,7 @@ import type {
   PluginPlatformRuntime,
   PluginPaperContribution,
   PluginProviderContribution,
+  PluginRuntimeRegistryStatus,
   PluginSandboxViewContribution,
   PluginSettingsContribution,
   PluginViewContribution,
@@ -795,6 +796,39 @@ function MarketplacePanel({
   );
 }
 
+function RuntimeRegistryPanel({ status }: { status: PluginRuntimeRegistryStatus }) {
+  const size = (value: number) => `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  return (
+    <section className="plugin-settings-card plugin-runtime-registry-card" data-runtime-registry-revision={status.active.revision}>
+      <header className="plugin-settings-card-header">
+        <div>
+          <h3>宿主管理的运行时</h3>
+          <p>
+            {status.active.registryId} · revision {status.active.revision} · 自动网络更新已关闭
+          </p>
+        </div>
+        <span className="plugin-state-pill is-muted">{status.runtimes.length} 个</span>
+      </header>
+      {status.runtimes.map((item) => (
+        <article key={`${item.runtimeId}:${item.kind}:${item.os}:${item.arch}`} className="plugin-runtime-registry-row">
+          <strong>{item.runtimeId} · {item.version}</strong>
+          <p>{item.kind} · {item.os}/{item.arch} · {size(item.size)} · {item.verificationStatus}</p>
+          <small>
+            Host-managed · {item.license} · 引用 {item.referenceCount} · SHA-256 {item.sha256.slice(7, 19)}…
+          </small>
+        </article>
+      ))}
+      {status.systemRuntimes.map((item) => (
+        <article key={`${item.runtimeId}:${item.kind}`} className="plugin-runtime-registry-row is-system">
+          <strong>{item.runtimeId} · {item.version}</strong>
+          <p>{item.kind} · system · {size(item.artifactSize)} · 已探针验证</p>
+          <small>不可复现的 developer-local 选择：{item.executable}</small>
+        </article>
+      ))}
+    </section>
+  );
+}
+
 export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntime }) {
   const { closeManager, openManager } = runtime.actions;
   useEffect(() => {
@@ -1028,6 +1062,9 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
           )}
         </section>
       )}
+      {platformEnabled && runtime.view.catalog?.runtimeRegistry && (
+        <RuntimeRegistryPanel status={runtime.view.catalog.runtimeRegistry} />
+      )}
       {platformEnabled && (
         <section className="plugin-settings-card plugin-install-card">
           <header className="plugin-settings-card-header">
@@ -1124,6 +1161,20 @@ export function PluginSettingsPanel({ runtime }: { runtime: PluginPlatformRuntim
                     />
                     {detail && (
                       <>
+                        {detail.health.entrypoints.some((item) => item.runtimeSupply !== undefined) && (
+                          <>
+                            <h4>运行时供应</h4>
+                            {detail.health.entrypoints.filter((item) => item.runtimeSupply !== undefined).map((item) => {
+                              const supply = item.runtimeSupply!;
+                              return (
+                                <p key={item.entrypointId} data-runtime-supply={supply.source}>
+                                  {item.entrypointId} · {supply.runtimeId} {supply.version} · {supply.source}
+                                  · {supply.verificationStatus} · {supply.reproducible ? "可复现" : "不可复现"}
+                                </p>
+                              );
+                            })}
+                          </>
+                        )}
                         <h4>健康状态</h4>
                         <p>{detail.health.available ? "可用" : `不可用：${detail.health.unavailableReason ?? "原因未知"}`}</p>
                         <h4>更新与回滚</h4>

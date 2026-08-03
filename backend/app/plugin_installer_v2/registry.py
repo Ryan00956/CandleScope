@@ -10,11 +10,14 @@ from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import PlatformContractError, loads_strict
 
+from app.plugin_core_v2.runtime_providers.base import RuntimeSupplyBinding
+
 from .errors import PlatformInstallerError
 
 
 REGISTRY_SCHEMA_VERSION_V2 = 2
 REGISTRY_SCHEMA_VERSION_V3 = 3
+REGISTRY_SCHEMA_VERSION_V4 = 4
 REGISTRY_SCHEMA_VERSION = REGISTRY_SCHEMA_VERSION_V3
 REGISTRY_FILE_NAME = "platform-registry-v2.json"
 LEGACY_REGISTRY_FILE_NAME = "runtime-registry.json"
@@ -101,6 +104,13 @@ def _absolute_path(value: Any, label: str) -> Path:
     return path.resolve(strict=False)
 
 
+def _runtime_supply_from_wire(value: Any, label: str) -> RuntimeSupplyBinding:
+    try:
+        return RuntimeSupplyBinding.from_wire(value, label=label)
+    except ValueError as exc:
+        raise PlatformInstallerError(f"{label} is invalid") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class EntrypointActivation:
     id: str
@@ -115,6 +125,7 @@ class EntrypointActivation:
     main_class: str | None = None
     export_name: str | None = None
     wasi_profile: str | None = None
+    runtime_supply: RuntimeSupplyBinding | None = None
 
     def __post_init__(self) -> None:
         if not _ID.fullmatch(self.id):
@@ -148,6 +159,23 @@ class EntrypointActivation:
         ):
             raise PlatformInstallerError("activation launch arguments are invalid")
         object.__setattr__(self, "arguments", arguments)
+        if self.runtime_supply is not None:
+            if not isinstance(self.runtime_supply, RuntimeSupplyBinding):
+                raise PlatformInstallerError("activation runtimeSupply is invalid")
+            expected_supply_kind = {
+                "java-jar": "java",
+                "node-module": "node",
+                "wasm-component": "wasm",
+            }.get(self.runtime_kind)
+            if (
+                expected_supply_kind is None
+                or self.runtime_supply.runtime_kind != expected_supply_kind
+                or self.runtime_supply.runtime_id != self.runtime_id
+                or self.runtime_supply.executable != executable
+            ):
+                raise PlatformInstallerError(
+                    "activation runtimeSupply does not match its launch identity"
+                )
         if self.runtime_kind == "python-module":
             if (
                 not isinstance(self.module, str)
@@ -243,6 +271,11 @@ class EntrypointActivation:
             "runtimeId": self.runtime_id,
             "artifactSha256": self.artifact_sha256,
             "launch": launch,
+            **(
+                {"runtimeSupply": self.runtime_supply.to_wire()}
+                if self.runtime_supply is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -278,6 +311,7 @@ class EntrypointActivation:
             data,
             {"id", "runtimeKind", "runtimeId", "artifactSha256", "launch"},
             label,
+            optional={"runtimeSupply"},
         )
         runtime_kind = _string(data["runtimeKind"], f"{label}.runtimeKind", maximum=32)
         if runtime_kind not in _RUNTIME_KINDS:
@@ -364,6 +398,13 @@ class EntrypointActivation:
                 if "wasiProfile" in launch
                 else None
             ),
+            runtime_supply=(
+                _runtime_supply_from_wire(
+                    data["runtimeSupply"], f"{label}.runtimeSupply"
+                )
+                if "runtimeSupply" in data
+                else None
+            ),
         )
 
 
@@ -386,8 +427,11 @@ class ActivationRecord:
     schema_version: int = REGISTRY_SCHEMA_VERSION_V3
 
     def __post_init__(self) -> None:
-        if self.schema_version != REGISTRY_SCHEMA_VERSION_V3:
-            raise PlatformInstallerError("activation schemaVersion must be 3")
+        if self.schema_version not in {
+            REGISTRY_SCHEMA_VERSION_V3,
+            REGISTRY_SCHEMA_VERSION_V4,
+        }:
+            raise PlatformInstallerError("activation schemaVersion must be 3 or 4")
         if not _ID.fullmatch(self.plugin_id):
             raise PlatformInstallerError("activation pluginId is invalid")
         if not _HEX_ID.fullmatch(self.installation_id):
@@ -421,6 +465,13 @@ class ActivationRecord:
                 "activation entrypoints must be non-empty and unique"
             )
         object.__setattr__(self, "entrypoints", entrypoints)
+        if (
+            any(item.runtime_supply is not None for item in entrypoints)
+            and self.schema_version != REGISTRY_SCHEMA_VERSION_V4
+        ):
+            raise PlatformInstallerError(
+                "managed runtime activation must use schemaVersion 4"
+            )
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -474,8 +525,11 @@ class ActivationRecord:
                 raise PlatformInstallerError(
                     f"{label} legacy record must not declare schemaVersion"
                 )
-        elif data["schemaVersion"] != REGISTRY_SCHEMA_VERSION_V3:
-            raise PlatformInstallerError(f"{label}.schemaVersion must be 3")
+        elif data["schemaVersion"] not in {
+            REGISTRY_SCHEMA_VERSION_V3,
+            REGISTRY_SCHEMA_VERSION_V4,
+        }:
+            raise PlatformInstallerError(f"{label}.schemaVersion must be 3 or 4")
         raw_permissions = tuple(
             _string(item, f"{label}.requiredPermissions[]", maximum=128)
             for item in _sequence(
@@ -526,6 +580,9 @@ class ActivationRecord:
             ),
             required_permissions=raw_permissions,
             entrypoints=entrypoints,
+            schema_version=(
+                REGISTRY_SCHEMA_VERSION_V3 if is_legacy else data["schemaVersion"]
+            ),
         )
 
 
@@ -536,8 +593,13 @@ class ActivationRegistry:
     schema_version: int = REGISTRY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != REGISTRY_SCHEMA_VERSION:
-            raise PlatformInstallerError("activation registry schemaVersion must be 3")
+        if self.schema_version not in {
+            REGISTRY_SCHEMA_VERSION_V3,
+            REGISTRY_SCHEMA_VERSION_V4,
+        }:
+            raise PlatformInstallerError(
+                "activation registry schemaVersion must be 3 or 4"
+            )
         if (
             isinstance(self.revision, bool)
             or not isinstance(self.revision, int)
@@ -548,6 +610,16 @@ class ActivationRegistry:
         if len(set(ids)) != len(ids) or ids != sorted(ids):
             raise PlatformInstallerError(
                 "activation registry plugins must be ID-sorted and unique"
+            )
+        if (
+            any(
+                item.schema_version == REGISTRY_SCHEMA_VERSION_V4
+                for item in self.plugins
+            )
+            and self.schema_version != REGISTRY_SCHEMA_VERSION_V4
+        ):
+            raise PlatformInstallerError(
+                "schemaVersion 4 activation requires a schemaVersion 4 registry"
             )
 
     def by_id(self) -> dict[str, ActivationRecord]:
@@ -566,6 +638,15 @@ class ActivationRegistry:
         return ActivationRegistry(
             revision=self.revision + 1,
             plugins=tuple(by_id[key] for key in sorted(by_id)),
+            schema_version=(
+                REGISTRY_SCHEMA_VERSION_V4
+                if self.schema_version == REGISTRY_SCHEMA_VERSION_V4
+                or any(
+                    item.schema_version == REGISTRY_SCHEMA_VERSION_V4
+                    for item in by_id.values()
+                )
+                else REGISTRY_SCHEMA_VERSION_V3
+            ),
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -592,6 +673,7 @@ class ActivationRegistry:
                     or entrypoint.artifact_sha256 != record.bundle_sha256
                     or entrypoint.module is None
                     or entrypoint.arguments
+                    or entrypoint.runtime_supply is not None
                 ):
                     raise PlatformInstallerError(
                         "activation registry cannot be represented losslessly as schemaVersion 2"
@@ -624,12 +706,17 @@ class ActivationRegistry:
         if source_version not in {
             REGISTRY_SCHEMA_VERSION_V2,
             REGISTRY_SCHEMA_VERSION_V3,
+            REGISTRY_SCHEMA_VERSION_V4,
         }:
             raise PlatformInstallerError(
-                "activation registry schemaVersion must be 2 or 3"
+                "activation registry schemaVersion must be 2, 3, or 4"
             )
         return cls(
-            schema_version=REGISTRY_SCHEMA_VERSION_V3,
+            schema_version=(
+                REGISTRY_SCHEMA_VERSION_V4
+                if source_version == REGISTRY_SCHEMA_VERSION_V4
+                else REGISTRY_SCHEMA_VERSION_V3
+            ),
             revision=root["revision"],
             plugins=tuple(
                 ActivationRecord.from_wire(

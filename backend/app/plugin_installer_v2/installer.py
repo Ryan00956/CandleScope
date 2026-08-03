@@ -53,6 +53,8 @@ from .errors import (
 from .registry import (
     LEGACY_REGISTRY_FILE_NAME,
     REGISTRY_FILE_NAME,
+    REGISTRY_SCHEMA_VERSION_V3,
+    REGISTRY_SCHEMA_VERSION_V4,
     ActivationRecord,
     ActivationRegistry,
     EntrypointActivation,
@@ -62,6 +64,7 @@ from .registry import (
 
 LEGACY_RECEIPT_SCHEMA_VERSION = 2
 RECEIPT_SCHEMA_VERSION = 3
+MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION = 4
 HISTORY_SCHEMA_VERSION = 2
 STATE_TRANSACTION_SCHEMA_VERSION = 1
 MAX_STATE_JSON_BYTES = 4 * 1024 * 1024
@@ -387,7 +390,7 @@ class InstallationReceipt:
     created_at: str
     wheels: tuple[dict[str, Any], ...]
     probe: dict[str, Any]
-    runtime_providers: tuple[dict[str, str], ...] = ()
+    runtime_providers: tuple[dict[str, Any], ...] = ()
     schema_version: int = RECEIPT_SCHEMA_VERSION
 
     @classmethod
@@ -396,7 +399,7 @@ class InstallationReceipt:
         bundle: VerifiedPlatformBundle,
         *,
         probe: Mapping[str, Any],
-        runtime_providers: Sequence[Mapping[str, str]] | None = None,
+        runtime_providers: Sequence[Mapping[str, Any]] | None = None,
     ) -> "InstallationReceipt":
         providers = (
             tuple(dict(item) for item in runtime_providers)
@@ -418,7 +421,11 @@ class InstallationReceipt:
             probe=dict(probe),
             runtime_providers=providers,
             schema_version=(
-                RECEIPT_SCHEMA_VERSION
+                (
+                    MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION
+                    if any("runtimeSupply" in item for item in providers)
+                    else RECEIPT_SCHEMA_VERSION
+                )
                 if runtime_providers is not None
                 else LEGACY_RECEIPT_SCHEMA_VERSION
             ),
@@ -441,7 +448,8 @@ class InstallationReceipt:
             "probe": dict(self.probe),
             **(
                 {"runtimeProviders": [dict(item) for item in self.runtime_providers]}
-                if self.schema_version == RECEIPT_SCHEMA_VERSION
+                if self.schema_version
+                in {RECEIPT_SCHEMA_VERSION, MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION}
                 else {}
             ),
         }
@@ -467,7 +475,8 @@ class InstallationReceipt:
         schema_version = data.get("schemaVersion")
         expected = (
             common | {"runtimeProviders"}
-            if schema_version == RECEIPT_SCHEMA_VERSION
+            if schema_version
+            in {RECEIPT_SCHEMA_VERSION, MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION}
             else common
         )
         if (
@@ -475,6 +484,7 @@ class InstallationReceipt:
             not in {
                 LEGACY_RECEIPT_SCHEMA_VERSION,
                 RECEIPT_SCHEMA_VERSION,
+                MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION,
             }
             or set(data) != expected
         ):
@@ -511,20 +521,63 @@ class InstallationReceipt:
             "providerVersion",
             "runtimeIdentity",
         }
+        managed_provider_keys = provider_keys | {"runtimeSupply"}
+        from app.plugin_core_v2.runtime_providers import RuntimeSupplyBinding
+
+        def provider_valid(item: Any) -> bool:
+            if not isinstance(item, dict):
+                return False
+            expected_keys = (
+                managed_provider_keys if "runtimeSupply" in item else provider_keys
+            )
+            if set(item) != expected_keys:
+                return False
+            if not all(
+                isinstance(item[key], str) and item[key] for key in provider_keys
+            ):
+                return False
+            if (
+                _RUNTIME_KIND.fullmatch(item["runtimeKind"]) is None
+                or _PLUGIN_ID.fullmatch(item["runtimeId"]) is None
+                or _PROVIDER_VERSION.fullmatch(item["providerVersion"]) is None
+                or _SHA256.fullmatch(item["runtimeIdentity"]) is None
+            ):
+                return False
+            if "runtimeSupply" in item:
+                try:
+                    supply = RuntimeSupplyBinding.from_wire(
+                        item["runtimeSupply"],
+                        label="installation receipt runtimeSupply",
+                    )
+                except ValueError:
+                    return False
+                expected_supply_kind = {
+                    "java-jar": "java",
+                    "node-module": "node",
+                    "wasm-component": "wasm",
+                }.get(item["runtimeKind"])
+                if (
+                    expected_supply_kind != supply.runtime_kind
+                    or supply.runtime_id != item["runtimeId"]
+                ):
+                    return False
+            return True
+
         if (
             not isinstance(raw_providers, list)
-            or (schema_version == RECEIPT_SCHEMA_VERSION and not raw_providers)
-            or not all(
-                isinstance(item, dict)
-                and set(item) == provider_keys
-                and all(
-                    isinstance(item[key], str) and item[key] for key in provider_keys
-                )
-                and _RUNTIME_KIND.fullmatch(item["runtimeKind"]) is not None
-                and _PLUGIN_ID.fullmatch(item["runtimeId"]) is not None
-                and _PROVIDER_VERSION.fullmatch(item["providerVersion"]) is not None
-                and _SHA256.fullmatch(item["runtimeIdentity"]) is not None
-                for item in raw_providers
+            or (
+                schema_version
+                in {RECEIPT_SCHEMA_VERSION, MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION}
+                and not raw_providers
+            )
+            or not all(provider_valid(item) for item in raw_providers)
+            or (
+                schema_version == RECEIPT_SCHEMA_VERSION
+                and any("runtimeSupply" in item for item in raw_providers)
+            )
+            or (
+                schema_version == MANAGED_RUNTIME_RECEIPT_SCHEMA_VERSION
+                and not any("runtimeSupply" in item for item in raw_providers)
             )
             or [(item["runtimeKind"], item["runtimeId"]) for item in raw_providers]
             != sorted(
@@ -573,7 +626,7 @@ class InstallationReceipt:
 
     def assert_runtime_providers(
         self,
-        runtime_providers: Sequence[Mapping[str, str]],
+        runtime_providers: Sequence[Mapping[str, Any]],
     ) -> None:
         if self.schema_version == LEGACY_RECEIPT_SCHEMA_VERSION:
             return
@@ -755,6 +808,7 @@ class PlatformPluginInstaller:
         runtime_provider_seam_enabled: bool | None = None,
         native_runtime_enabled: bool | None = None,
         runtime_provider_registry: Any | None = None,
+        managed_runtime_registry: Any | None = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
         self.registry_path = (
@@ -819,6 +873,12 @@ class PlatformPluginInstaller:
         ) or not callable(getattr(runtime_provider_registry, "resolve", None)):
             raise PlatformInstallerError("runtime_provider_registry is invalid")
         self.runtime_provider_registry = runtime_provider_registry
+        if managed_runtime_registry is not None and not all(
+            callable(getattr(managed_runtime_registry, name, None))
+            for name in ("ensure", "public_status", "resolve")
+        ):
+            raise PlatformInstallerError("managed_runtime_registry is invalid")
+        self.managed_runtime_registry = managed_runtime_registry
         if grant_store is not None:
             if audit_log is not None and grant_store.audit_log is not audit_log:
                 raise PlatformInstallerError(
@@ -1340,8 +1400,8 @@ class PlatformPluginInstaller:
         self,
         installation: Path,
         bundle: VerifiedPlatformBundle,
-    ) -> tuple[dict[str, str], ...]:
-        bindings: list[dict[str, str]] = []
+    ) -> tuple[dict[str, Any], ...]:
+        bindings: list[dict[str, Any]] = []
         for provider, request in self._provider_installation_requests(
             installation, bundle
         ):
@@ -1365,8 +1425,8 @@ class PlatformPluginInstaller:
         self,
         installation: Path,
         bundle: VerifiedPlatformBundle,
-    ) -> tuple[dict[str, str], ...]:
-        bindings: list[dict[str, str]] = []
+    ) -> tuple[dict[str, Any], ...]:
+        bindings: list[dict[str, Any]] = []
         for provider, request in self._provider_installation_requests(
             installation, bundle
         ):
@@ -1421,8 +1481,8 @@ class PlatformPluginInstaller:
         self,
         installation: Path,
         bundle: VerifiedPlatformBundle,
-    ) -> tuple[dict[str, str], ...]:
-        bindings: dict[tuple[str, str], dict[str, str]] = {}
+    ) -> tuple[dict[str, Any], ...]:
+        bindings: dict[tuple[str, str], dict[str, Any]] = {}
         for entrypoint in bundle.manifest.normalized_entrypoints:
             try:
                 provider = self.runtime_provider_registry.resolve(entrypoint.runtime)
@@ -1448,6 +1508,11 @@ class PlatformPluginInstaller:
                 "runtimeId": prepared.runtime_id,
                 "providerVersion": prepared.provider_version,
                 "runtimeIdentity": prepared.runtime_identity,
+                **(
+                    {"runtimeSupply": prepared.runtime_supply.to_wire()}
+                    if prepared.runtime_supply is not None
+                    else {}
+                ),
             }
             bindings[(prepared.runtime_kind, prepared.runtime_id)] = binding
         return tuple(bindings[key] for key in sorted(bindings))
@@ -1988,6 +2053,9 @@ class PlatformPluginInstaller:
                             "Python Provider returned an invalid activation target",
                             plugin_id=bundle.manifest.plugin.id,
                         )
+                    main_class = None
+                    export_name = None
+                    wasi_profile = None
                 elif prepared.runtime_kind == "native-executable":
                     if (
                         prepared.module is not None
@@ -1996,6 +2064,57 @@ class PlatformPluginInstaller:
                     ):
                         raise PlatformInstallerError(
                             "Native Provider returned an invalid activation target",
+                            plugin_id=bundle.manifest.plugin.id,
+                        )
+                    main_class = None
+                    export_name = None
+                    wasi_profile = None
+                elif prepared.runtime_kind == "java-jar":
+                    main_class = getattr(item.runtime, "main_class", None)
+                    export_name = None
+                    wasi_profile = None
+                    if (
+                        prepared.module is not None
+                        or prepared.artifact is None
+                        or not isinstance(main_class, str)
+                        or not main_class
+                        or prepared.runtime_supply is None
+                        or prepared.runtime_supply.runtime_kind != "java"
+                    ):
+                        raise PlatformInstallerError(
+                            "Java Provider returned an invalid managed activation target",
+                            plugin_id=bundle.manifest.plugin.id,
+                        )
+                elif prepared.runtime_kind == "node-module":
+                    main_class = None
+                    export_name = None
+                    wasi_profile = None
+                    if (
+                        prepared.module is not None
+                        or prepared.artifact is None
+                        or prepared.runtime_supply is None
+                        or prepared.runtime_supply.runtime_kind != "node"
+                    ):
+                        raise PlatformInstallerError(
+                            "Node Provider returned an invalid managed activation target",
+                            plugin_id=bundle.manifest.plugin.id,
+                        )
+                elif prepared.runtime_kind == "wasm-component":
+                    main_class = None
+                    export_name = getattr(item.runtime, "export", None)
+                    wasi_profile = getattr(item.runtime, "wasi_profile", None)
+                    if (
+                        prepared.module is not None
+                        or prepared.artifact is None
+                        or not isinstance(export_name, str)
+                        or not export_name
+                        or not isinstance(wasi_profile, str)
+                        or not wasi_profile
+                        or prepared.runtime_supply is None
+                        or prepared.runtime_supply.runtime_kind != "wasm"
+                    ):
+                        raise PlatformInstallerError(
+                            "WASM Provider returned an invalid managed activation target",
                             plugin_id=bundle.manifest.plugin.id,
                         )
                 else:
@@ -2010,6 +2129,7 @@ class PlatformPluginInstaller:
                 artifact = prepared.artifact
                 activation_sha256 = prepared.artifact_sha256
                 executable = prepared.executable
+                runtime_supply = prepared.runtime_supply
             else:
                 if not isinstance(item.runtime, PythonModuleRuntime):
                     raise RuntimeProviderUnavailableError(
@@ -2023,6 +2143,10 @@ class PlatformPluginInstaller:
                 artifact = None
                 activation_sha256 = bundle.sha256
                 executable = self._venv_python(installation).resolve(strict=False)
+                runtime_supply = None
+                main_class = None
+                export_name = None
+                wasi_profile = None
             activations.append(
                 EntrypointActivation(
                     item.id,
@@ -2034,6 +2158,10 @@ class PlatformPluginInstaller:
                     artifact_sha256=activation_sha256,
                     artifact=artifact,
                     arguments=arguments,
+                    main_class=main_class,
+                    export_name=export_name,
+                    wasi_profile=wasi_profile,
+                    runtime_supply=runtime_supply,
                 )
             )
         return tuple(activations)
@@ -2093,6 +2221,7 @@ class PlatformPluginInstaller:
             if force_staged or not activation_ready
             else ("active" if enabled else "disabled")
         )
+        entrypoints = self._entrypoint_activations(bundle, installation)
         return ActivationRecord(
             plugin_id=bundle.manifest.plugin.id,
             name=bundle.manifest.plugin.name,
@@ -2107,7 +2236,12 @@ class PlatformPluginInstaller:
             enabled=state == "active",
             restart_required=True,
             required_permissions=required,
-            entrypoints=self._entrypoint_activations(bundle, installation),
+            entrypoints=entrypoints,
+            schema_version=(
+                REGISTRY_SCHEMA_VERSION_V4
+                if any(item.runtime_supply is not None for item in entrypoints)
+                else REGISTRY_SCHEMA_VERSION_V3
+            ),
         )
 
     @staticmethod

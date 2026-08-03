@@ -1,6 +1,6 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～3 已完成；Phase 4～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～4 已完成；Phase 5～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
@@ -728,6 +728,15 @@ OS/arch 检查、Windows 原子 Job Object 启动、trusted-local 与真实 AppC
 
 回滚 Registry revision；已有已验证 runtime cache 保留只读，不删除仍被 activation 引用的版本。
 
+**完成证据**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE4_zh.md`。Phase 4 已交付签名
+Managed Runtime Registry、固定 Temurin 21.0.12+8 JRE、内容寻址 archive/evidence/cache、
+fresh-process probe、quick repeat、离线命中、损坏隔离恢复、revision/撤销/回滚/跨 key 轮换、
+共享引用计数、schema 4 runtimeSupply 收据、developer-local system runtime 显式入口和
+Plugin Manager 投影。真实干净目录 JRE gate 与完整回归通过；Registry 和网络更新开关仍
+默认关闭，Java、Node、WASM Provider 数量仍为 `0`。
+
 ---
 
 ### Phase 5：`java-jar` Provider、Java SDK 与 ta4j 参考插件
@@ -1161,7 +1170,7 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 - [ ] v2 Python 原样兼容；
 - [ ] Python、native、Java 至少三个 Provider 进入稳定路径；
 - [ ] Node/WASM 按真实门禁决定 stable 或 preview，不虚报；
-- [ ] Managed Runtime Registry 可固定、缓存、校验、撤销和回滚；
+- [x] Managed Runtime Registry 可固定、缓存、校验、撤销和回滚；
 - [ ] 本地信任选择清楚、可撤销、可审计；
 - [ ] Marketplace 仍 fail closed；
 - [ ] language-neutral conformance suite 被各 SDK 共用；

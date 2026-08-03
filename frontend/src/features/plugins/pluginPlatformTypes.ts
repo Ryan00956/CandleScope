@@ -228,6 +228,87 @@ export type PluginCatalogContribution =
   | PluginProviderContribution
   | PluginPaperContribution;
 
+export type PluginRuntimeSupply =
+  | {
+      source: "host-managed";
+      runtimeId: string;
+      runtimeKind: "java" | "node" | "wasm";
+      version: string;
+      executable: string;
+      artifactSha256: string;
+      artifactSize: number;
+      probeSha256: string;
+      verificationStatus: "verified";
+      reproducible: true;
+      licenseSpdx: string;
+      registryId: string;
+      registryRevision: number;
+      registrySha256: string;
+      sourceUrl: string;
+    }
+  | {
+      source: "system";
+      runtimeId: string;
+      runtimeKind: "java" | "node" | "wasm";
+      version: string;
+      executable: string;
+      artifactSha256: string;
+      artifactSize: number;
+      probeSha256: string;
+      verificationStatus: "probed";
+      reproducible: false;
+      licenseSpdx: "NOASSERTION";
+    };
+
+export interface PluginRuntimeRegistryStatus {
+  schemaVersion: "candlescope.runtime-registry-status/1";
+  enabled: true;
+  networkUpdatesEnabled: boolean;
+  automaticUpdates: false;
+  active: {
+    registryId: string;
+    revision: number;
+    registrySha256: string;
+    issuedAt: string;
+    rollbackAvailable: boolean;
+    revokedArtifactCount: number;
+  };
+  runtimes: Array<{
+    runtimeId: string;
+    kind: "java" | "node" | "wasm";
+    version: string;
+    os: string;
+    arch: string;
+    sourceUrl: string;
+    sha256: string;
+    size: number;
+    license: string;
+    upstreamReleaseUrl: string;
+    source: "host-managed";
+    registryId: string;
+    registryRevision: number;
+    registrySha256: string;
+    verificationStatus: "verified" | "missing" | "corrupt" | "revoked";
+    cached: boolean;
+    probeSha256: string | null;
+    referenceCount: number;
+    reproducible: true;
+  }>;
+  systemRuntimes: Array<{
+    runtimeId: string;
+    kind: "java" | "node" | "wasm";
+    version: string;
+    source: "system";
+    executable: string;
+    artifactSha256: string;
+    artifactSize: number;
+    probeSha256: string;
+    verificationStatus: "probed";
+    reproducible: false;
+    license: "NOASSERTION";
+  }>;
+}
+
 export interface PluginCatalogPlugin {
   id: string;
   name: string;
@@ -256,7 +337,12 @@ export interface PluginCatalogPlugin {
   };
   contributions: PluginCatalogContribution[];
   runtime: {
-    entrypoints: Array<{ entrypointId: string; state: string; generation: number }>;
+    entrypoints: Array<{
+      entrypointId: string;
+      state: string;
+      generation: number;
+      runtimeSupply?: PluginRuntimeSupply;
+    }>;
   };
 }
 
@@ -335,6 +421,7 @@ export interface PluginCatalog {
   };
   plugins: PluginCatalogPlugin[];
   compatibility: PluginV1CompatibilityCatalog;
+  runtimeRegistry?: PluginRuntimeRegistryStatus;
 }
 
 export interface PluginMarketplaceRelease {
@@ -625,7 +712,12 @@ export interface PluginManagementDetail {
   health: {
     available: boolean;
     unavailableReason?: string | null;
-    entrypoints: Array<{ entrypointId: string; state: string; generation: number }>;
+    entrypoints: Array<{
+      entrypointId: string;
+      state: string;
+      generation: number;
+      runtimeSupply?: PluginRuntimeSupply;
+    }>;
   };
   update: PluginMarketplaceUpdate;
   rollback: {

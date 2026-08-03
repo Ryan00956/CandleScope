@@ -42,6 +42,10 @@ from app.plugin_platform import PluginManager
 from app.plugin_market_v2.runtime import PluginMarketRuntime
 from app.plugin_paper_v2 import PaperQuote, PluginPaperRuntime
 from app.plugin_provider_v2 import PluginProviderRuntime
+from app.plugin_runtime_registry_v3 import (
+    ManagedRuntimeRegistryService,
+    build_official_runtime_registry,
+)
 from app.plugin_security_v2 import (
     AuditLog,
     CapabilityBroker,
@@ -161,6 +165,9 @@ class CorePluginPlatform:
         runtime_provider_seam_enabled: bool | None = None,
         native_runtime_enabled: bool | None = None,
         runtime_provider_registry: RuntimeProviderRegistry | None = None,
+        runtime_registry_enabled: bool | None = None,
+        runtime_registry_network_updates_enabled: bool | None = None,
+        managed_runtime_registry: ManagedRuntimeRegistryService | None = None,
     ) -> None:
         if trust_level not in TRUST_LEVELS:
             raise ValueError("plugin platform trust level is invalid")
@@ -231,6 +238,16 @@ class CorePluginPlatform:
         self.live_testnet_execution_enabled = live_testnet_execution_enabled
         self.marketplace_enabled = marketplace_enabled
         self._pinned_python_runtime: PinnedPythonRuntime | None = None
+        if managed_runtime_registry is None:
+            managed_runtime_registry = build_official_runtime_registry(
+                root=self.root / "managed-runtimes-v1",
+                enabled=runtime_registry_enabled,
+                network_updates_enabled=runtime_registry_network_updates_enabled,
+            )
+        elif not isinstance(managed_runtime_registry, ManagedRuntimeRegistryService):
+            raise ValueError("managed_runtime_registry is invalid")
+        self.managed_runtime_registry = managed_runtime_registry
+        self.runtime_registry_enabled = managed_runtime_registry.enabled
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
@@ -267,6 +284,7 @@ class CorePluginPlatform:
             runtime_provider_seam_enabled=runtime_provider_seam_enabled,
             native_runtime_enabled=native_runtime_enabled,
             runtime_provider_registry=runtime_provider_registry,
+            managed_runtime_registry=managed_runtime_registry,
         )
         self.runtime_provider_registry = self.installer.runtime_provider_registry
         self.runtime_provider_seam_enabled = (
@@ -863,6 +881,23 @@ class CorePluginPlatform:
                 working_directory=activation.working_directory,
                 artifact_sha256=activation.artifact_sha256,
             )
+            expected_supply = (
+                activation.runtime_supply.to_wire()
+                if activation.runtime_supply is not None
+                else None
+            )
+            actual_supply = (
+                prepared.runtime_supply.to_wire()
+                if prepared.runtime_supply is not None
+                else None
+            )
+            if expected_supply != actual_supply:
+                raise core_error(
+                    "PLUGIN_RUNTIME_PROVIDER_ACTIVATION_MISMATCH",
+                    "prepared language runtime supply does not match the frozen activation",
+                    plugin_id=record.plugin_id,
+                    details={"entrypointId": entrypoint_id},
+                )
             sandbox_runtime = None
             if (
                 activation.runtime_kind == "python-module"
@@ -1842,17 +1877,40 @@ class CorePluginPlatform:
             elif plugin_id not in live_plugin_ids:
                 unavailable_reason = "PLUGIN_RUNTIME_UNAVAILABLE"
             runtime_entrypoints: list[dict[str, Any]] = []
+            activation_by_id = {item.id: item for item in record.entrypoints}
             for owner in self.manager.owner_keys():
                 if owner[0] != plugin_id:
                     continue
                 supervisor = self.manager.supervisor(*owner)
+                activation = activation_by_id.get(owner[1])
                 runtime_entrypoints.append(
                     {
                         "entrypointId": owner[1],
                         "state": supervisor.state,
                         "generation": supervisor.generation,
+                        **(
+                            {"runtimeSupply": activation.runtime_supply.to_wire()}
+                            if activation is not None
+                            and activation.runtime_supply is not None
+                            else {}
+                        ),
                     }
                 )
+            visible_entrypoint_ids = {
+                item["entrypointId"] for item in runtime_entrypoints
+            }
+            runtime_entrypoints.extend(
+                {
+                    "entrypointId": activation.id,
+                    "state": "unavailable",
+                    "generation": 0,
+                    "runtimeSupply": activation.runtime_supply.to_wire(),
+                }
+                for activation in record.entrypoints
+                if activation.runtime_supply is not None
+                and activation.id not in visible_entrypoint_ids
+            )
+            runtime_entrypoints.sort(key=lambda item: item["entrypointId"])
             unsupported = []
             if bundle is not None:
                 unsupported = [
@@ -1902,7 +1960,7 @@ class CorePluginPlatform:
                     "runtime": {"entrypoints": runtime_entrypoints},
                 }
             )
-        return {
+        result = {
             "schemaVersion": CATALOG_SCHEMA_VERSION,
             "platform": {
                 "enabled": True,
@@ -1917,6 +1975,12 @@ class CorePluginPlatform:
                 else _empty_v1_compatibility_catalog()
             ),
         }
+        if self.runtime_registry_enabled:
+            result["runtimeRegistry"] = self.managed_runtime_registry.public_status(
+                activation_registry=self.installer.registry_path,
+                history_directory=self.installer.history_directory,
+            )
+        return result
 
     @staticmethod
     def _ui_scalar(value: Any) -> str | int | float | bool | None:

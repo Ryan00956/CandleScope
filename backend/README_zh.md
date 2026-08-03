@@ -32,7 +32,14 @@ Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8
 ```
 
 Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
-无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
+无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。后端开发可改用监视模式：
+
+```powershell
+.\dev-server.ps1 -Watch
+```
+
+它会监视 `app` 下的 Python 文件；每次改动后先优雅关闭当前服务（包括 sidecar），
+再启动新的单进程服务。
 
 默认 API base：
 

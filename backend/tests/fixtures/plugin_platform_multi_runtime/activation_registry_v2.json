@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "revision": 7,
+  "plugins": [
+    {
+      "pluginId": "candlescope.legacy-python",
+      "name": "Legacy Python",
+      "version": "0.1.0",
+      "publisher": "candlescope",
+      "installationId": "1111111111111111111111111111111111111111111111111111111111111111",
+      "bundleSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "manifestSha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "activationId": "activation-legacy-python",
+      "activatedAt": "2026-08-01T00:00:00Z",
+      "state": "active",
+      "enabled": true,
+      "restartRequired": false,
+      "requiredPermissions": [],
+      "entrypoints": [
+        {
+          "id": "main",
+          "executable": "$PYTHON",
+          "module": "legacy_plugin.runtime",
+          "workingDirectory": "$WORKING"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "plugin": {
+    "id": "candlescope.fixture-native",
+    "name": "Native v3 Fixture",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "MIT",
+    "engines": {"candlescope": ">=0.4.0"}
+  },
+  "backend": {
+    "entrypoints": [{
+      "id": "main",
+      "runtime": {
+        "kind": "native-executable",
+        "artifact": "runtime/fixture-native.exe",
+        "operatingSystems": ["linux", "macos", "windows"],
+        "architectures": ["arm64", "x86_64"],
+        "args": ["--jsonl"]
+      },
+      "transport": "jsonl/1",
+      "resourceProfile": "standard",
+      "activationEvents": ["onCommand"]
+    }]
+  },
+  "contributions": [],
+  "permissions": {"required": [], "optional": []},
+  "probes": []
+}

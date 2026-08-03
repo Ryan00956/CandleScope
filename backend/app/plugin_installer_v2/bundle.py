@@ -1,9 +1,9 @@
-"""Strict and deterministic ``.cspkg`` schema v2.
+"""Strict deterministic ``.cspkg`` schema v2 plus inspect-only schema v3.
 
 ``manifest.json`` is the frozen public SDK manifest.  ``bundle.json`` is a
 package envelope that pins every other archive member.  Keeping those two
-contracts separate lets schema v1 and schema v2 remain fail-closed without an
-implicit migration path.
+contracts separate lets schema v1, schema v2, and schema v3 remain fail-closed
+without an implicit execution migration path.
 """
 
 from __future__ import annotations
@@ -24,9 +24,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 from candlescope_plugin_sdk.platform_v2 import (
+    JavaJarRuntime,
     JsonLimits,
+    MANIFEST_SCHEMA_VERSION_V2,
+    MANIFEST_SCHEMA_VERSION_V3,
+    NativeExecutableRuntime,
+    NodeModuleRuntime,
     PlatformContractError,
     PluginManifest,
+    PythonModuleRuntime,
+    WasmComponentRuntime,
     canonical_dumps,
     loads_strict,
 )
@@ -34,8 +41,13 @@ from candlescope_plugin_sdk.platform_v2 import (
 from .errors import PlatformBundleError
 
 
-BUNDLE_FORMAT = "candlescope.plugin-bundle/2"
-BUNDLE_SCHEMA_VERSION = 2
+BUNDLE_FORMAT_V2 = "candlescope.plugin-bundle/2"
+BUNDLE_FORMAT_V3 = "candlescope.plugin-bundle/3"
+BUNDLE_SCHEMA_VERSION_V2 = 2
+BUNDLE_SCHEMA_VERSION_V3 = 3
+# Backward-compatible aliases used by the established v2 CLI and tests.
+BUNDLE_FORMAT = BUNDLE_FORMAT_V2
+BUNDLE_SCHEMA_VERSION = BUNDLE_SCHEMA_VERSION_V2
 BUNDLE_EXTENSION = ".cspkg"
 BUNDLE_DESCRIPTOR_PATH = "bundle.json"
 MANIFEST_PATH = "manifest.json"
@@ -80,11 +92,44 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"lpt{index}" for index in range(1, 10)),
 }
 _CONTENT_PREFIXES = {
+    "license": "licenses/",
+    "runtime": "runtime/",
+    "source-map": "source-maps/",
     "wheel": "wheels/",
     "web": "web/",
     "schema": "schemas/",
     "probe": "probes/",
     "sbom": "sbom/",
+}
+ARTIFACT_ROLES = frozenset(
+    {
+        "java-jar",
+        "license-notice",
+        "native-executable",
+        "node-bundle",
+        "probe",
+        "python-wheel",
+        "sbom",
+        "schema",
+        "source-map",
+        "wasm-component",
+        "web-asset",
+    }
+)
+_CONTENT_ARTIFACT_ROLES = {
+    "license": "license-notice",
+    "probe": "probe",
+    "sbom": "sbom",
+    "schema": "schema",
+    "source-map": "source-map",
+    "web": "web-asset",
+    "wheel": "python-wheel",
+}
+_RUNTIME_ARTIFACT_ROLES = {
+    "java-jar": "java-jar",
+    "native-executable": "native-executable",
+    "node-module": "node-bundle",
+    "wasm-component": "wasm-component",
 }
 _ALLOWED_OS = frozenset({"windows", "linux", "macos"})
 _ALLOWED_ARCH = frozenset({"x86_64", "arm64"})
@@ -340,20 +385,20 @@ def _string_set(value: Any, label: str, allowed: frozenset[str]) -> tuple[str, .
 
 @dataclass(frozen=True, slots=True)
 class Compatibility:
-    python: PythonRequirement
+    python: PythonRequirement | None
     operating_systems: tuple[str, ...]
     architectures: tuple[str, ...]
 
     def to_wire(self) -> dict[str, Any]:
         return {
-            "python": self.python.raw,
+            **({"python": self.python.raw} if self.python is not None else {}),
             "operatingSystems": list(self.operating_systems),
             "architectures": list(self.architectures),
         }
 
     def assert_current(self) -> None:
         current_python = (os.sys.version_info.major, os.sys.version_info.minor)
-        if not self.python.supports(current_python):
+        if self.python is not None and not self.python.supports(current_python):
             raise PlatformBundleError(
                 "plugin bundle does not support the current Python version",
                 details={
@@ -399,12 +444,33 @@ class ContentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    path: str
+    role: str
+    sha256: str
+    size: int
+    operating_systems: tuple[str, ...]
+    architectures: tuple[str, ...]
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "role": self.role,
+            "sha256": self.sha256,
+            "size": self.size,
+            "os": list(self.operating_systems),
+            "arch": list(self.architectures),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BundleEnvelope:
     compatibility: Compatibility
     contents: tuple[ContentRecord, ...]
     probe_assets: tuple[tuple[str, str], ...]
-    schema_version: int = BUNDLE_SCHEMA_VERSION
-    format: str = BUNDLE_FORMAT
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    schema_version: int = BUNDLE_SCHEMA_VERSION_V2
+    format: str = BUNDLE_FORMAT_V2
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -415,6 +481,11 @@ class BundleEnvelope:
             "probeAssets": [
                 {"id": probe_id, "path": path} for probe_id, path in self.probe_assets
             ],
+            **(
+                {"artifacts": [item.to_wire() for item in self.artifacts]}
+                if self.schema_version == BUNDLE_SCHEMA_VERSION_V3
+                else {}
+            ),
         }
 
 
@@ -464,6 +535,11 @@ class VerifiedPlatformBundle:
             "manifest": self.manifest.to_wire(),
             "compatibility": self.envelope.compatibility.to_wire(),
             "contents": [item.to_wire() for item in self.envelope.contents],
+            **(
+                {"artifacts": [item.to_wire() for item in self.envelope.artifacts]}
+                if self.envelope.schema_version == BUNDLE_SCHEMA_VERSION_V3
+                else {}
+            ),
             "wheels": [item.to_wire() for item in self.wheels],
         }
 
@@ -547,34 +623,98 @@ def _parse_content(value: Any, index: int) -> ContentRecord:
     return ContentRecord(path, kind, digest, size)
 
 
+def _parse_artifact(
+    value: Any,
+    index: int,
+    records: Mapping[str, ContentRecord],
+) -> ArtifactRecord:
+    label = f"bundle.artifacts[{index}]"
+    data = _mapping(value, label)
+    _only_keys(
+        data,
+        required={"path", "role", "sha256", "size", "os", "arch"},
+        label=label,
+    )
+    path = _string(data["path"], f"{label}.path", maximum=512)
+    _safe_archive_path(path, label)
+    role = _string(data["role"], f"{label}.role", maximum=32)
+    if role not in ARTIFACT_ROLES:
+        raise PlatformBundleError(f"{label}.role is not supported")
+    digest = _string(data["sha256"], f"{label}.sha256", maximum=71)
+    if not _SHA256.fullmatch(digest):
+        raise PlatformBundleError(f"{label}.sha256 must be lowercase SHA-256")
+    size = _positive_int(data["size"], f"{label}.size", maximum=MAX_ENTRY_BYTES)
+    operating_systems = _string_set(data["os"], f"{label}.os", _ALLOWED_OS)
+    architectures = _string_set(data["arch"], f"{label}.arch", _ALLOWED_ARCH)
+    content = records.get(path)
+    if content is None or (content.sha256, content.size) != (digest, size):
+        raise PlatformBundleError(
+            f"{label} does not match the content digest table",
+            details={"path": path},
+        )
+    return ArtifactRecord(
+        path,
+        role,
+        digest,
+        size,
+        operating_systems,
+        architectures,
+    )
+
+
 def _parse_envelope(value: Any) -> BundleEnvelope:
     root = _mapping(value, "bundle")
-    _only_keys(
-        root,
-        required={
+    schema_version = root.get("schemaVersion")
+    format_value = root.get("format")
+    if schema_version == BUNDLE_SCHEMA_VERSION_V2:
+        expected_format = BUNDLE_FORMAT_V2
+        required_fields = {
             "schemaVersion",
             "format",
             "compatibility",
             "contents",
             "probeAssets",
-        },
+        }
+    elif schema_version == BUNDLE_SCHEMA_VERSION_V3:
+        expected_format = BUNDLE_FORMAT_V3
+        required_fields = {
+            "schemaVersion",
+            "format",
+            "compatibility",
+            "contents",
+            "probeAssets",
+            "artifacts",
+        }
+    else:
+        raise PlatformBundleError("bundle schemaVersion must explicitly be 2 or 3")
+    _only_keys(
+        root,
+        required=required_fields,
         label="bundle",
     )
-    if (
-        root["schemaVersion"] != BUNDLE_SCHEMA_VERSION
-        or root["format"] != BUNDLE_FORMAT
-    ):
+    if format_value != expected_format:
         raise PlatformBundleError(
-            "bundle is not an explicit CandleScope schema v2 artifact"
+            f"bundle format must be {expected_format} for schema {schema_version}"
         )
     raw_compatibility = _mapping(root["compatibility"], "bundle.compatibility")
     _only_keys(
         raw_compatibility,
-        required={"python", "operatingSystems", "architectures"},
+        required=(
+            {"python", "operatingSystems", "architectures"}
+            if schema_version == BUNDLE_SCHEMA_VERSION_V2
+            else {"operatingSystems", "architectures"}
+        ),
+        optional=(
+            frozenset() if schema_version == BUNDLE_SCHEMA_VERSION_V2 else {"python"}
+        ),
         label="bundle.compatibility",
     )
     compatibility = Compatibility(
-        python=_parse_python_requirement(raw_compatibility["python"]),
+        python=(
+            _parse_python_requirement(raw_compatibility["python"])
+            if "python" in raw_compatibility
+            else None
+        ),
         operating_systems=_string_set(
             raw_compatibility["operatingSystems"],
             "bundle.compatibility.operatingSystems",
@@ -603,12 +743,25 @@ def _parse_envelope(value: Any) -> BundleEnvelope:
         raise PlatformBundleError(
             "bundle.contents contains duplicate or case-conflicting paths"
         )
-    if paths.count(MANIFEST_PATH) != 1 or not any(
+    if paths.count(MANIFEST_PATH) != 1:
+        raise PlatformBundleError("bundle must declare exactly one manifest")
+    if schema_version == BUNDLE_SCHEMA_VERSION_V2 and not any(
         item.kind == "wheel" for item in contents
     ):
         raise PlatformBundleError(
             "bundle must declare one manifest and at least one wheel"
         )
+    if schema_version == BUNDLE_SCHEMA_VERSION_V2:
+        unsupported_v2 = sorted(
+            item.path
+            for item in contents
+            if item.kind in {"license", "runtime", "source-map"}
+        )
+        if unsupported_v2:
+            raise PlatformBundleError(
+                "schema-v2 bundle contains content outside the frozen layout",
+                details={"paths": unsupported_v2},
+            )
     if paths.count(SBOM_PATH) != 1:
         raise PlatformBundleError(f"bundle must declare exactly one {SBOM_PATH}")
     probe_assets: list[tuple[str, str]] = []
@@ -636,7 +789,43 @@ def _parse_envelope(value: Any) -> BundleEnvelope:
         raise PlatformBundleError(
             "bundle.probeAssets must cover every probe content exactly once"
         )
-    return BundleEnvelope(compatibility, contents, tuple(probe_assets))
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    if schema_version == BUNDLE_SCHEMA_VERSION_V3:
+        records = {item.path: item for item in contents}
+        artifacts = tuple(
+            _parse_artifact(item, index, records)
+            for index, item in enumerate(
+                _sequence(root["artifacts"], "bundle.artifacts")
+            )
+        )
+        artifact_paths = [item.path for item in artifacts]
+        expected_artifact_paths = sorted(set(paths) - {MANIFEST_PATH})
+        if artifact_paths != sorted(artifact_paths):
+            raise PlatformBundleError("bundle.artifacts must be path-sorted")
+        if len(set(artifact_paths)) != len(artifact_paths) or len(
+            {path.casefold() for path in artifact_paths}
+        ) != len(artifact_paths):
+            raise PlatformBundleError(
+                "bundle.artifacts contains duplicate or case-conflicting paths"
+            )
+        if artifact_paths != expected_artifact_paths:
+            raise PlatformBundleError(
+                "bundle.artifacts must cover every non-manifest content exactly once",
+                details={
+                    "extra": sorted(set(artifact_paths) - set(expected_artifact_paths)),
+                    "missing": sorted(
+                        set(expected_artifact_paths) - set(artifact_paths)
+                    ),
+                },
+            )
+    return BundleEnvelope(
+        compatibility=compatibility,
+        contents=contents,
+        probe_assets=tuple(probe_assets),
+        artifacts=artifacts,
+        schema_version=schema_version,
+        format=expected_format,
+    )
 
 
 def _parse_semver(value: str, label: str) -> tuple[int, int, int]:
@@ -776,6 +965,119 @@ def _audit_nested_wheel(
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise PlatformBundleError(f"wheel {record.path!r} is invalid: {exc}") from exc
+
+
+def _runtime_artifact_path(runtime: Any) -> str | None:
+    if isinstance(runtime, PythonModuleRuntime):
+        return None
+    if isinstance(
+        runtime,
+        (
+            NativeExecutableRuntime,
+            JavaJarRuntime,
+            NodeModuleRuntime,
+            WasmComponentRuntime,
+        ),
+    ):
+        return runtime.artifact
+    raise AssertionError("manifest runtime normalization produced an unknown type")
+
+
+def _verify_artifact_inventory(
+    envelope: BundleEnvelope,
+    manifest: PluginManifest,
+) -> None:
+    if envelope.schema_version != BUNDLE_SCHEMA_VERSION_V3:
+        if envelope.artifacts:
+            raise AssertionError("schema-v2 envelope unexpectedly has artifacts")
+        return
+    by_path = {item.path: item for item in envelope.artifacts}
+    for content in envelope.contents:
+        if content.path == MANIFEST_PATH or content.kind == "runtime":
+            continue
+        expected_role = _CONTENT_ARTIFACT_ROLES.get(content.kind)
+        artifact = by_path.get(content.path)
+        if expected_role is None or artifact is None or artifact.role != expected_role:
+            raise PlatformBundleError(
+                "bundle artifact role does not match its content path",
+                plugin_id=manifest.plugin.id,
+                details={"path": content.path, "expectedRole": expected_role},
+            )
+
+    referenced_runtime_paths: dict[str, str] = {}
+    has_python = False
+    current_os = _current_os()
+    current_arch = _current_architecture()
+    for entrypoint in manifest.normalized_entrypoints:
+        runtime = entrypoint.runtime
+        path = _runtime_artifact_path(runtime)
+        if path is None:
+            has_python = True
+            continue
+        artifact = by_path.get(path)
+        expected_role = _RUNTIME_ARTIFACT_ROLES[runtime.kind]
+        if artifact is None or artifact.role != expected_role:
+            raise PlatformBundleError(
+                "manifest runtime references a missing or wrongly typed artifact",
+                plugin_id=manifest.plugin.id,
+                details={
+                    "entrypointId": entrypoint.id,
+                    "path": path,
+                    "expectedRole": expected_role,
+                },
+            )
+        if (
+            current_os not in artifact.operating_systems
+            or current_arch not in artifact.architectures
+        ):
+            raise PlatformBundleError(
+                "runtime artifact does not support the current platform",
+                plugin_id=manifest.plugin.id,
+                details={
+                    "entrypointId": entrypoint.id,
+                    "path": path,
+                    "current": {
+                        "operatingSystem": current_os,
+                        "architecture": current_arch,
+                    },
+                },
+            )
+        if isinstance(runtime, NativeExecutableRuntime) and (
+            runtime.operating_systems != artifact.operating_systems
+            or runtime.architectures != artifact.architectures
+        ):
+            raise PlatformBundleError(
+                "native runtime platform declaration does not match its artifact",
+                plugin_id=manifest.plugin.id,
+                details={"entrypointId": entrypoint.id, "path": path},
+            )
+        referenced_runtime_paths[path] = expected_role
+
+    if has_python and not any(
+        item.role == "python-wheel" for item in envelope.artifacts
+    ):
+        raise PlatformBundleError(
+            "python-module runtime requires at least one python-wheel artifact",
+            plugin_id=manifest.plugin.id,
+        )
+    declared_runtime_paths = {
+        item.path
+        for item in envelope.artifacts
+        if item.role in set(_RUNTIME_ARTIFACT_ROLES.values())
+    }
+    if declared_runtime_paths != set(referenced_runtime_paths):
+        raise PlatformBundleError(
+            "runtime artifacts must be referenced by manifest entrypoints",
+            plugin_id=manifest.plugin.id,
+            details={
+                "unreferenced": sorted(
+                    declared_runtime_paths - set(referenced_runtime_paths)
+                ),
+                "missing": sorted(
+                    set(referenced_runtime_paths) - declared_runtime_paths
+                ),
+            },
+        )
 
 
 def _verify_semantic_assets(
@@ -954,6 +1256,11 @@ def verify_platform_bundle(
                     ) from exc
                 if manifest_record.sha256 != _sha256_bytes(manifest_bytes):
                     raise AssertionError("manifest digest was not checked")
+                if manifest.schema_version != envelope.schema_version:
+                    raise PlatformBundleError(
+                        "bundle and manifest schemaVersion values must match",
+                        plugin_id=manifest.plugin.id,
+                    )
                 envelope.compatibility.assert_current()
                 _assert_engine_supports(
                     manifest.plugin.candlescope_engine, host_version
@@ -977,6 +1284,7 @@ def verify_platform_bundle(
                     raise PlatformBundleError(
                         "bundled wheels exceed the installed-size limit"
                     )
+                _verify_artifact_inventory(envelope, manifest)
                 _verify_semantic_assets(
                     archive,
                     envelope,
@@ -1022,8 +1330,26 @@ def _content_kind(path: str) -> str:
         if path.startswith(prefix) and path != prefix:
             return kind
     raise PlatformBundleError(
-        f"bundle source contains an unsupported file outside the v2 layout: {path!r}"
+        f"bundle source contains an unsupported file outside the platform layout: {path!r}"
     )
+
+
+def _artifact_role_by_runtime_path(manifest: PluginManifest) -> dict[str, str]:
+    roles: dict[str, str] = {}
+    for entrypoint in manifest.normalized_entrypoints:
+        path = _runtime_artifact_path(entrypoint.runtime)
+        if path is None:
+            continue
+        role = _RUNTIME_ARTIFACT_ROLES[entrypoint.runtime.kind]
+        existing = roles.get(path)
+        if existing is not None and existing != role:
+            raise PlatformBundleError(
+                "one runtime artifact cannot have multiple roles",
+                plugin_id=manifest.plugin.id,
+                details={"path": path, "roles": sorted({existing, role})},
+            )
+        roles[path] = role
+    return roles
 
 
 def _zip_info(name: str) -> zipfile.ZipInfo:
@@ -1066,7 +1392,7 @@ def build_platform_bundle(
     source_directory: Path | str,
     output_path: Path | str,
     *,
-    python_requires: str = DEFAULT_PYTHON_REQUIRES,
+    python_requires: str | None = DEFAULT_PYTHON_REQUIRES,
     operating_systems: Sequence[str] = ("linux", "macos", "windows"),
     architectures: Sequence[str] = ("arm64", "x86_64"),
     host_version: str = DEFAULT_HOST_VERSION,
@@ -1124,6 +1450,11 @@ def build_platform_bundle(
             "plugin manifest violates the public SDK contract",
             details={"contractCode": exc.code, "path": exc.path},
         ) from exc
+    if (
+        manifest.schema_version == MANIFEST_SCHEMA_VERSION_V2
+        and python_requires is None
+    ):
+        raise PlatformBundleError("schema-v2 bundle requires Python compatibility")
     probe_assets: list[tuple[str, str]] = []
     for probe in manifest.probes:
         path = f"probes/{probe.id}.json"
@@ -1134,18 +1465,73 @@ def build_platform_bundle(
         ContentRecord(path, _content_kind(path), _sha256_bytes(data), len(data))
         for path, data in sorted(raw_files.items())
     )
+    operating_system_values = _string_set(
+        list(operating_systems), "operatingSystems", _ALLOWED_OS
+    )
+    architecture_values = _string_set(
+        list(architectures), "architectures", _ALLOWED_ARCH
+    )
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    envelope_schema_version = BUNDLE_SCHEMA_VERSION_V2
+    envelope_format = BUNDLE_FORMAT_V2
+    if manifest.schema_version == MANIFEST_SCHEMA_VERSION_V3:
+        envelope_schema_version = BUNDLE_SCHEMA_VERSION_V3
+        envelope_format = BUNDLE_FORMAT_V3
+        runtime_roles = _artifact_role_by_runtime_path(manifest)
+        native_platforms = {
+            runtime.artifact: (runtime.operating_systems, runtime.architectures)
+            for runtime in (item.runtime for item in manifest.normalized_entrypoints)
+            if isinstance(runtime, NativeExecutableRuntime)
+        }
+        artifact_values: list[ArtifactRecord] = []
+        for record in records:
+            if record.path == MANIFEST_PATH:
+                continue
+            if record.kind == "runtime":
+                role = runtime_roles.get(record.path)
+                if role is None:
+                    raise PlatformBundleError(
+                        "bundle source contains an unreferenced runtime artifact",
+                        plugin_id=manifest.plugin.id,
+                        details={"path": record.path},
+                    )
+            else:
+                role = _CONTENT_ARTIFACT_ROLES.get(record.kind)
+                if role is None:
+                    raise PlatformBundleError(
+                        "bundle source content has no artifact role",
+                        details={"path": record.path, "kind": record.kind},
+                    )
+            artifact_os, artifact_arch = native_platforms.get(
+                record.path,
+                (operating_system_values, architecture_values),
+            )
+            artifact_values.append(
+                ArtifactRecord(
+                    record.path,
+                    role,
+                    record.sha256,
+                    record.size,
+                    artifact_os,
+                    artifact_arch,
+                )
+            )
+        artifacts = tuple(artifact_values)
     envelope = BundleEnvelope(
         compatibility=Compatibility(
-            python=_parse_python_requirement(python_requires),
-            operating_systems=_string_set(
-                list(operating_systems), "operatingSystems", _ALLOWED_OS
+            python=(
+                _parse_python_requirement(python_requires)
+                if python_requires is not None
+                else None
             ),
-            architectures=_string_set(
-                list(architectures), "architectures", _ALLOWED_ARCH
-            ),
+            operating_systems=operating_system_values,
+            architectures=architecture_values,
         ),
         contents=records,
         probe_assets=tuple(sorted(probe_assets)),
+        artifacts=artifacts,
+        schema_version=envelope_schema_version,
+        format=envelope_format,
     )
     descriptor_bytes = _canonical_json_bytes(envelope.to_wire())
     try:

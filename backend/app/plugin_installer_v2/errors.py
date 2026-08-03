@@ -55,3 +55,26 @@ class PlatformInstallerError(PlatformInstallerBaseError):
             plugin_id,
             details or {},
         )
+
+
+class MultiRuntimeFeatureDisabledError(PlatformInstallerBaseError):
+    def __init__(self, *, plugin_id: str, runtime_kinds: list[str]) -> None:
+        super().__init__(
+            "PLUGIN_MULTI_RUNTIME_FEATURE_DISABLED",
+            "manifest schema v3 installation is disabled; set "
+            "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED=1 only after the required "
+            "Runtime Providers are installed",
+            plugin_id,
+            {"runtimeKinds": runtime_kinds, "feature": "multi-runtime"},
+        )
+
+
+class RuntimeProviderUnavailableError(PlatformInstallerBaseError):
+    def __init__(self, *, plugin_id: str, runtime_kinds: list[str]) -> None:
+        super().__init__(
+            "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+            "manifest schema v3 is inspect-only in Phase 1; no Runtime Provider "
+            "may prepare, probe, or launch this bundle",
+            plugin_id,
+            {"runtimeKinds": runtime_kinds},
+        )

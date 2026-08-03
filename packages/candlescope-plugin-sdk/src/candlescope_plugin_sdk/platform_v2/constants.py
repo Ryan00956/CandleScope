@@ -8,8 +8,30 @@ HOST_API_V1 = "candlescope.host-api/1"
 UI_BRIDGE_V1 = "candlescope.ui-bridge/1"
 CONTROL_TRANSPORT_V1 = "jsonl/1"
 JSONRPC_VERSION = "2.0"
-MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION_V2 = 2
+MANIFEST_SCHEMA_VERSION_V3 = 3
+# Backward-compatible public alias. Existing callers and schema-v2 fixtures
+# intentionally continue to resolve this name to version 2.
+MANIFEST_SCHEMA_VERSION = MANIFEST_SCHEMA_VERSION_V2
 PLATFORM_SDK_API_VERSION = "0.1.0"
+
+RUNTIME_KIND_PYTHON_MODULE = "python-module"
+RUNTIME_KIND_NATIVE_EXECUTABLE = "native-executable"
+RUNTIME_KIND_JAVA_JAR = "java-jar"
+RUNTIME_KIND_NODE_MODULE = "node-module"
+RUNTIME_KIND_WASM_COMPONENT = "wasm-component"
+RUNTIME_KINDS = frozenset(
+    {
+        RUNTIME_KIND_PYTHON_MODULE,
+        RUNTIME_KIND_NATIVE_EXECUTABLE,
+        RUNTIME_KIND_JAVA_JAR,
+        RUNTIME_KIND_NODE_MODULE,
+        RUNTIME_KIND_WASM_COMPONENT,
+    }
+)
+PYTHON_V2_COMPAT_RUNTIME_ID = "python-v2-compat"
+SUPPORTED_OPERATING_SYSTEMS = frozenset({"linux", "macos", "windows"})
+SUPPORTED_ARCHITECTURES = frozenset({"arm64", "x86_64"})
 
 DEFAULT_MAX_CONTROL_MESSAGE_BYTES = 1024 * 1024
 DEFAULT_MAX_JSON_DEPTH = 32

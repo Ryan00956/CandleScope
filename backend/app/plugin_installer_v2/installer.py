@@ -18,7 +18,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import (
+    MANIFEST_SCHEMA_VERSION_V2,
+    MANIFEST_SCHEMA_VERSION_V3,
     PlatformContractError,
+    PythonModuleRuntime,
     canonical_dumps,
     loads_strict,
 )
@@ -44,6 +47,8 @@ from .errors import (
     PlatformBundleError,
     PlatformInstallerBaseError,
     PlatformInstallerError,
+    MultiRuntimeFeatureDisabledError,
+    RuntimeProviderUnavailableError,
 )
 from .registry import (
     LEGACY_REGISTRY_FILE_NAME,
@@ -65,6 +70,7 @@ DEFAULT_COMMAND_OUTPUT_BYTES = 1024 * 1024
 PROBE_RUNNER = Path(__file__).with_name("probe_runner.py").resolve()
 _STATE_TRANSACTION_ID = re.compile(r"^state-[0-9a-f]{32}$")
 _PLUGIN_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$")
+MULTI_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED"
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -90,6 +96,20 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _environment_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise PlatformInstallerError(
+        f"{name} must be one of 1/0, true/false, yes/no, or on/off"
+    )
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -624,7 +644,7 @@ class PermissionChangeResult:
 
 
 class PlatformPluginInstaller:
-    """Own v2 installs without reading or writing the legacy registry."""
+    """Own platform installs without touching the distinct v1 registry."""
 
     def __init__(
         self,
@@ -648,6 +668,7 @@ class PlatformPluginInstaller:
         probe_python_runtime_factory: (
             Callable[[VerifiedPlatformBundle, Path], tuple[Path, Path]] | None
         ) = None,
+        multi_runtime_enabled: bool | None = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
         self.registry_path = (
@@ -670,6 +691,15 @@ class PlatformPluginInstaller:
             raise PlatformInstallerError("installer lock timeout must be positive")
         self.host_version = host_version.strip()
         self.lock_timeout_seconds = float(lock_timeout_seconds)
+        if multi_runtime_enabled is not None and not isinstance(
+            multi_runtime_enabled, bool
+        ):
+            raise PlatformInstallerError("multi_runtime_enabled must be a boolean")
+        self.multi_runtime_enabled = (
+            _environment_bool(MULTI_RUNTIME_ENABLED_ENV, default=False)
+            if multi_runtime_enabled is None
+            else multi_runtime_enabled
+        )
         if grant_store is not None:
             if audit_log is not None and grant_store.audit_log is not audit_log:
                 raise PlatformInstallerError(
@@ -1434,6 +1464,11 @@ class PlatformPluginInstaller:
             bundle = inspect_platform_bundle(
                 self._bundle_path(installation), host_version=self.host_version
             )
+            if bundle.manifest.schema_version != MANIFEST_SCHEMA_VERSION_V2:
+                raise PlatformInstallerError(
+                    "schema-v3 activation cannot be verified before its Runtime Provider exists",
+                    plugin_id=record.plugin_id,
+                )
             receipt = self._load_receipt(installation)
             receipt.assert_bundle(bundle)
             if (
@@ -1484,6 +1519,9 @@ class PlatformPluginInstaller:
                     or entrypoint.working_directory.resolve(strict=False)
                     != installation.resolve(strict=False)
                     or entrypoint.module != declared.python_module
+                    or entrypoint.runtime_kind != "python-module"
+                    or entrypoint.runtime_id != "python-v2-compat"
+                    or entrypoint.artifact_sha256 != bundle.sha256
                 ):
                     raise PlatformInstallerError(
                         "activation launch target does not match its immutable installation",
@@ -1557,14 +1595,41 @@ class PlatformPluginInstaller:
     ) -> tuple[EntrypointActivation, ...]:
         executable = self._venv_python(installation).resolve(strict=False)
         working_directory = installation.resolve(strict=False)
-        return tuple(
-            EntrypointActivation(
-                item.id,
-                executable,
-                item.python_module,
-                working_directory,
+        activations: list[EntrypointActivation] = []
+        for item in bundle.manifest.normalized_entrypoints:
+            if not isinstance(item.runtime, PythonModuleRuntime):
+                raise RuntimeProviderUnavailableError(
+                    plugin_id=bundle.manifest.plugin.id,
+                    runtime_kinds=[item.runtime.kind],
+                )
+            activations.append(
+                EntrypointActivation(
+                    item.id,
+                    executable,
+                    item.runtime.module,
+                    working_directory,
+                    runtime_kind=item.runtime.kind,
+                    runtime_id=item.runtime.runtime_id,
+                    artifact_sha256=bundle.sha256,
+                    arguments=item.runtime.interpreter_args,
+                )
             )
-            for item in bundle.manifest.backend_entrypoints
+        return tuple(activations)
+
+    def _assert_bundle_installable(self, bundle: VerifiedPlatformBundle) -> None:
+        if bundle.manifest.schema_version != MANIFEST_SCHEMA_VERSION_V3:
+            return
+        runtime_kinds = sorted(
+            {item.runtime.kind for item in bundle.manifest.normalized_entrypoints}
+        )
+        if not self.multi_runtime_enabled:
+            raise MultiRuntimeFeatureDisabledError(
+                plugin_id=bundle.manifest.plugin.id,
+                runtime_kinds=runtime_kinds,
+            )
+        raise RuntimeProviderUnavailableError(
+            plugin_id=bundle.manifest.plugin.id,
+            runtime_kinds=runtime_kinds,
         )
 
     def _new_record(
@@ -1682,6 +1747,7 @@ class PlatformPluginInstaller:
             expected_sha256=expected_sha256,
             host_version=self.host_version,
         )
+        self._assert_bundle_installable(bundle)
         plugin_id = bundle.manifest.plugin.id
         final_path = self._installation_path(plugin_id, bundle.installation_id)
         with _installation_lock(self.lock_path, self.lock_timeout_seconds):

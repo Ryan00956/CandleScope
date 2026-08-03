@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from .constants import (
@@ -13,9 +14,19 @@ from .constants import (
     FRONTEND_SURFACE_TYPES,
     HOST_API_V1,
     MANIFEST_SCHEMA_VERSION,
+    MANIFEST_SCHEMA_VERSION_V2,
+    MANIFEST_SCHEMA_VERSION_V3,
     PLUGIN_PROTOCOL_V2,
     PROBE_KINDS,
+    PYTHON_V2_COMPAT_RUNTIME_ID,
     RESOURCE_PROFILES,
+    RUNTIME_KIND_JAVA_JAR,
+    RUNTIME_KIND_NATIVE_EXECUTABLE,
+    RUNTIME_KIND_NODE_MODULE,
+    RUNTIME_KIND_PYTHON_MODULE,
+    RUNTIME_KIND_WASM_COMPONENT,
+    SUPPORTED_ARCHITECTURES,
+    SUPPORTED_OPERATING_SYSTEMS,
 )
 from .errors import PlatformContractError, contract_error
 from .json_codec import canonical_sha256, normalize_json
@@ -36,6 +47,25 @@ _SEMVER_RE = re.compile(
 )
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_JAVA_CLASS_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+$")
+_WASM_EXPORT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
+_SHELL_ARTIFACT_NAMES = frozenset(
+    {
+        "bash",
+        "bash.exe",
+        "cmd.exe",
+        "command.com",
+        "powershell.exe",
+        "pwsh",
+        "pwsh.exe",
+        "sh",
+        "sh.exe",
+        "zsh",
+        "zsh.exe",
+    }
+)
+_SHELL_ARTIFACT_SUFFIXES = frozenset({".bat", ".cmd", ".ps1"})
+_WASI_PROFILES = frozenset({"none", "wasi-preview1", "wasi-preview2"})
 
 
 def _mapping(
@@ -152,6 +182,47 @@ def _optional_string(value: Any, path: str, *, max_length: int = 256) -> str | N
     if value is None:
         return None
     return _string(value, path, max_length=max_length)
+
+
+def _safe_artifact_path(value: Any, path: str) -> str:
+    item = _string(value, path, max_length=512)
+    if "\\" in item or "\0" in item or ":" in item:
+        raise contract_error(f"{path} must be a canonical bundle-relative path", path=path)
+    parts = item.split("/")
+    candidate = PurePosixPath(item)
+    if candidate.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        raise contract_error(f"{path} must be a canonical bundle-relative path", path=path)
+    return candidate.as_posix()
+
+
+def _runtime_args(value: Any, path: str) -> tuple[str, ...]:
+    items = tuple(
+        _string(item, f"{path}[{index}]", allow_empty=True, max_length=1024)
+        for index, item in enumerate(_sequence(value, path))
+    )
+    if len(items) > 64:
+        raise contract_error(f"{path} must not contain more than 64 items", path=path)
+    if any("\0" in item or "\r" in item or "\n" in item for item in items):
+        raise contract_error(f"{path} contains an unsafe control character", path=path)
+    return items
+
+
+def _runtime_platforms(
+    value: Any,
+    path: str,
+    *,
+    allowed: frozenset[str],
+) -> tuple[str, ...]:
+    items = _string_tuple(value, path, allow_empty=False, max_length=32)
+    if tuple(sorted(items)) != items:
+        raise contract_error(f"{path} must be sorted", path=path)
+    unknown = sorted(set(items) - allowed)
+    if unknown:
+        raise contract_error(
+            f"{path} contains unsupported values: {', '.join(unknown)}",
+            path=path,
+        )
+    return items
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +362,473 @@ class BackendEntrypoint:
                 allow_empty=False,
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PythonModuleRuntime:
+    module: str
+    runtime_id: str
+    interpreter_args: tuple[str, ...] = ()
+    kind: str = field(default=RUNTIME_KIND_PYTHON_MODULE, init=False)
+
+    def __post_init__(self) -> None:
+        module = _string(self.module, "runtime.module", max_length=256)
+        if not _PYTHON_MODULE_RE.fullmatch(module):
+            raise contract_error(
+                "runtime.module must be an importable module name",
+                path="runtime.module",
+            )
+        object.__setattr__(self, "module", module)
+        object.__setattr__(
+            self,
+            "runtime_id",
+            _local_id(self.runtime_id, "runtime.runtimeId"),
+        )
+        object.__setattr__(
+            self,
+            "interpreter_args",
+            _runtime_args(self.interpreter_args, "runtime.interpreterArgs"),
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "runtimeId": self.runtime_id,
+            "module": self.module,
+            **({"interpreterArgs": list(self.interpreter_args)} if self.interpreter_args else {}),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "PythonModuleRuntime":
+        data = _mapping(
+            value,
+            "runtime",
+            required=frozenset({"kind", "runtimeId", "module"}),
+            optional=frozenset({"interpreterArgs"}),
+        )
+        if data["kind"] != RUNTIME_KIND_PYTHON_MODULE:
+            raise contract_error("runtime.kind is not python-module", path="runtime.kind")
+        return cls(
+            module=data["module"],
+            runtime_id=data["runtimeId"],
+            interpreter_args=_runtime_args(
+                data.get("interpreterArgs", ()),
+                "runtime.interpreterArgs",
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NativeExecutableRuntime:
+    artifact: str
+    operating_systems: tuple[str, ...]
+    architectures: tuple[str, ...]
+    args: tuple[str, ...] = ()
+    kind: str = field(default=RUNTIME_KIND_NATIVE_EXECUTABLE, init=False)
+    runtime_id: str = field(default="native-host", init=False)
+
+    def __post_init__(self) -> None:
+        artifact = _safe_artifact_path(self.artifact, "runtime.artifact")
+        name = PurePosixPath(artifact).name.casefold()
+        suffix = PurePosixPath(artifact).suffix.casefold()
+        if name in _SHELL_ARTIFACT_NAMES or suffix in _SHELL_ARTIFACT_SUFFIXES:
+            raise contract_error(
+                "runtime.artifact must not reference a shell or shell script",
+                path="runtime.artifact",
+            )
+        object.__setattr__(self, "artifact", artifact)
+        object.__setattr__(
+            self,
+            "operating_systems",
+            _runtime_platforms(
+                self.operating_systems,
+                "runtime.operatingSystems",
+                allowed=SUPPORTED_OPERATING_SYSTEMS,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "architectures",
+            _runtime_platforms(
+                self.architectures,
+                "runtime.architectures",
+                allowed=SUPPORTED_ARCHITECTURES,
+            ),
+        )
+        object.__setattr__(self, "args", _runtime_args(self.args, "runtime.args"))
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "artifact": self.artifact,
+            "operatingSystems": list(self.operating_systems),
+            "architectures": list(self.architectures),
+            **({"args": list(self.args)} if self.args else {}),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "NativeExecutableRuntime":
+        data = _mapping(
+            value,
+            "runtime",
+            required=frozenset({"kind", "artifact", "operatingSystems", "architectures"}),
+            optional=frozenset({"args"}),
+        )
+        if data["kind"] != RUNTIME_KIND_NATIVE_EXECUTABLE:
+            raise contract_error(
+                "runtime.kind is not native-executable",
+                path="runtime.kind",
+            )
+        return cls(
+            artifact=data["artifact"],
+            operating_systems=_runtime_platforms(
+                data["operatingSystems"],
+                "runtime.operatingSystems",
+                allowed=SUPPORTED_OPERATING_SYSTEMS,
+            ),
+            architectures=_runtime_platforms(
+                data["architectures"],
+                "runtime.architectures",
+                allowed=SUPPORTED_ARCHITECTURES,
+            ),
+            args=_runtime_args(data.get("args", ()), "runtime.args"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class JavaJarRuntime:
+    artifact: str
+    runtime_id: str
+    main_class: str
+    jvm_args: tuple[str, ...] = ()
+    kind: str = field(default=RUNTIME_KIND_JAVA_JAR, init=False)
+
+    def __post_init__(self) -> None:
+        artifact = _safe_artifact_path(self.artifact, "runtime.artifact")
+        if not artifact.casefold().endswith(".jar"):
+            raise contract_error("runtime.artifact must be a .jar", path="runtime.artifact")
+        object.__setattr__(self, "artifact", artifact)
+        object.__setattr__(
+            self,
+            "runtime_id",
+            _local_id(self.runtime_id, "runtime.runtimeId"),
+        )
+        main_class = _string(self.main_class, "runtime.mainClass", max_length=256)
+        if not _JAVA_CLASS_RE.fullmatch(main_class):
+            raise contract_error(
+                "runtime.mainClass must be a qualified Java class",
+                path="runtime.mainClass",
+            )
+        object.__setattr__(self, "main_class", main_class)
+        object.__setattr__(
+            self,
+            "jvm_args",
+            _runtime_args(self.jvm_args, "runtime.jvmArgs"),
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "artifact": self.artifact,
+            "runtimeId": self.runtime_id,
+            "mainClass": self.main_class,
+            **({"jvmArgs": list(self.jvm_args)} if self.jvm_args else {}),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "JavaJarRuntime":
+        data = _mapping(
+            value,
+            "runtime",
+            required=frozenset({"kind", "artifact", "runtimeId", "mainClass"}),
+            optional=frozenset({"jvmArgs"}),
+        )
+        if data["kind"] != RUNTIME_KIND_JAVA_JAR:
+            raise contract_error("runtime.kind is not java-jar", path="runtime.kind")
+        return cls(
+            artifact=data["artifact"],
+            runtime_id=data["runtimeId"],
+            main_class=data["mainClass"],
+            jvm_args=_runtime_args(data.get("jvmArgs", ()), "runtime.jvmArgs"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModuleRuntime:
+    artifact: str
+    runtime_id: str
+    node_args: tuple[str, ...] = ()
+    kind: str = field(default=RUNTIME_KIND_NODE_MODULE, init=False)
+
+    def __post_init__(self) -> None:
+        artifact = _safe_artifact_path(self.artifact, "runtime.artifact")
+        if PurePosixPath(artifact).suffix.casefold() not in {".cjs", ".js", ".mjs"}:
+            raise contract_error(
+                "runtime.artifact must be a .js, .mjs, or .cjs module",
+                path="runtime.artifact",
+            )
+        object.__setattr__(self, "artifact", artifact)
+        object.__setattr__(
+            self,
+            "runtime_id",
+            _local_id(self.runtime_id, "runtime.runtimeId"),
+        )
+        object.__setattr__(
+            self,
+            "node_args",
+            _runtime_args(self.node_args, "runtime.nodeArgs"),
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "artifact": self.artifact,
+            "runtimeId": self.runtime_id,
+            **({"nodeArgs": list(self.node_args)} if self.node_args else {}),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "NodeModuleRuntime":
+        data = _mapping(
+            value,
+            "runtime",
+            required=frozenset({"kind", "artifact", "runtimeId"}),
+            optional=frozenset({"nodeArgs"}),
+        )
+        if data["kind"] != RUNTIME_KIND_NODE_MODULE:
+            raise contract_error("runtime.kind is not node-module", path="runtime.kind")
+        return cls(
+            artifact=data["artifact"],
+            runtime_id=data["runtimeId"],
+            node_args=_runtime_args(data.get("nodeArgs", ()), "runtime.nodeArgs"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WasmComponentRuntime:
+    artifact: str
+    runtime_id: str
+    export: str
+    wasi_profile: str = "none"
+    args: tuple[str, ...] = ()
+    kind: str = field(default=RUNTIME_KIND_WASM_COMPONENT, init=False)
+
+    def __post_init__(self) -> None:
+        artifact = _safe_artifact_path(self.artifact, "runtime.artifact")
+        if not artifact.casefold().endswith(".wasm"):
+            raise contract_error("runtime.artifact must be a .wasm", path="runtime.artifact")
+        object.__setattr__(self, "artifact", artifact)
+        object.__setattr__(
+            self,
+            "runtime_id",
+            _local_id(self.runtime_id, "runtime.runtimeId"),
+        )
+        export = _string(self.export, "runtime.export", max_length=256)
+        if not _WASM_EXPORT_RE.fullmatch(export):
+            raise contract_error("runtime.export is invalid", path="runtime.export")
+        object.__setattr__(self, "export", export)
+        profile = _string(self.wasi_profile, "runtime.wasiProfile", max_length=32)
+        if profile not in _WASI_PROFILES:
+            raise contract_error(
+                "runtime.wasiProfile is not supported",
+                path="runtime.wasiProfile",
+            )
+        object.__setattr__(self, "wasi_profile", profile)
+        object.__setattr__(self, "args", _runtime_args(self.args, "runtime.args"))
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "artifact": self.artifact,
+            "runtimeId": self.runtime_id,
+            "export": self.export,
+            **({"wasiProfile": self.wasi_profile} if self.wasi_profile != "none" else {}),
+            **({"args": list(self.args)} if self.args else {}),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "WasmComponentRuntime":
+        data = _mapping(
+            value,
+            "runtime",
+            required=frozenset({"kind", "artifact", "runtimeId", "export"}),
+            optional=frozenset({"wasiProfile", "args"}),
+        )
+        if data["kind"] != RUNTIME_KIND_WASM_COMPONENT:
+            raise contract_error(
+                "runtime.kind is not wasm-component",
+                path="runtime.kind",
+            )
+        return cls(
+            artifact=data["artifact"],
+            runtime_id=data["runtimeId"],
+            export=data["export"],
+            wasi_profile=data.get("wasiProfile", "none"),
+            args=_runtime_args(data.get("args", ()), "runtime.args"),
+        )
+
+
+RuntimeEntrypointDescriptor = (
+    PythonModuleRuntime
+    | NativeExecutableRuntime
+    | JavaJarRuntime
+    | NodeModuleRuntime
+    | WasmComponentRuntime
+)
+
+
+def runtime_entrypoint_descriptor_from_wire(value: Any) -> RuntimeEntrypointDescriptor:
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise contract_error("runtime must be an object", path="runtime")
+    data = value
+    if "kind" not in data:
+        raise contract_error("runtime is missing required fields: kind", path="runtime")
+    kind = _string(data["kind"], "runtime.kind", max_length=32)
+    parser = {
+        RUNTIME_KIND_PYTHON_MODULE: PythonModuleRuntime.from_wire,
+        RUNTIME_KIND_NATIVE_EXECUTABLE: NativeExecutableRuntime.from_wire,
+        RUNTIME_KIND_JAVA_JAR: JavaJarRuntime.from_wire,
+        RUNTIME_KIND_NODE_MODULE: NodeModuleRuntime.from_wire,
+        RUNTIME_KIND_WASM_COMPONENT: WasmComponentRuntime.from_wire,
+    }.get(kind)
+    if parser is None:
+        raise contract_error(
+            "runtime.kind is not supported: " + kind,
+            path="runtime.kind",
+        )
+    return parser(value)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEntrypoint:
+    id: str
+    runtime: RuntimeEntrypointDescriptor
+    transport: str
+    resource_profile: str
+    activation_events: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _local_id(self.id, "entrypoint.id"))
+        if not isinstance(
+            self.runtime,
+            (
+                PythonModuleRuntime,
+                NativeExecutableRuntime,
+                JavaJarRuntime,
+                NodeModuleRuntime,
+                WasmComponentRuntime,
+            ),
+        ):
+            raise contract_error("entrypoint.runtime is invalid", path="entrypoint.runtime")
+        transport = _string(self.transport, "entrypoint.transport", max_length=32)
+        if transport != CONTROL_TRANSPORT_V1:
+            raise contract_error(
+                f"entrypoint.transport must be {CONTROL_TRANSPORT_V1}",
+                path="entrypoint.transport",
+            )
+        object.__setattr__(self, "transport", transport)
+        profile = _string(self.resource_profile, "entrypoint.resourceProfile")
+        if profile not in RESOURCE_PROFILES:
+            raise contract_error(
+                "entrypoint.resourceProfile is not supported",
+                path="entrypoint.resourceProfile",
+            )
+        object.__setattr__(self, "resource_profile", profile)
+        events = _string_tuple(
+            self.activation_events,
+            "entrypoint.activationEvents",
+            allow_empty=False,
+        )
+        unknown = sorted(set(events) - ACTIVATION_EVENTS)
+        if unknown:
+            raise contract_error(
+                "entrypoint.activationEvents contains unsupported events: " + ", ".join(unknown),
+                path="entrypoint.activationEvents",
+            )
+        object.__setattr__(self, "activation_events", events)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "runtime": self.runtime.to_wire(),
+            "transport": self.transport,
+            "resourceProfile": self.resource_profile,
+            "activationEvents": list(self.activation_events),
+        }
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "RuntimeEntrypoint":
+        data = _mapping(
+            value,
+            "entrypoint",
+            required=frozenset(
+                {"id", "runtime", "transport", "resourceProfile", "activationEvents"}
+            ),
+        )
+        return cls(
+            id=data["id"],
+            runtime=runtime_entrypoint_descriptor_from_wire(data["runtime"]),
+            transport=data["transport"],
+            resource_profile=data["resourceProfile"],
+            activation_events=_string_tuple(
+                data["activationEvents"],
+                "entrypoint.activationEvents",
+                allow_empty=False,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedEntrypoint:
+    id: str
+    runtime: RuntimeEntrypointDescriptor
+    transport: str
+    resource_profile: str
+    activation_events: tuple[str, ...]
+    source_manifest_version: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "runtime": self.runtime.to_wire(),
+            "transport": self.transport,
+            "resourceProfile": self.resource_profile,
+            "activationEvents": list(self.activation_events),
+            "sourceManifestVersion": self.source_manifest_version,
+        }
+
+
+def normalize_entrypoint(
+    entrypoint: BackendEntrypoint | RuntimeEntrypoint,
+    *,
+    source_manifest_version: int,
+) -> NormalizedEntrypoint:
+    if source_manifest_version == MANIFEST_SCHEMA_VERSION_V2 and isinstance(
+        entrypoint, BackendEntrypoint
+    ):
+        runtime: RuntimeEntrypointDescriptor = PythonModuleRuntime(
+            module=entrypoint.python_module,
+            runtime_id=PYTHON_V2_COMPAT_RUNTIME_ID,
+        )
+        transport = CONTROL_TRANSPORT_V1
+    elif source_manifest_version == MANIFEST_SCHEMA_VERSION_V3 and isinstance(
+        entrypoint, RuntimeEntrypoint
+    ):
+        runtime = entrypoint.runtime
+        transport = entrypoint.transport
+    else:
+        raise contract_error(
+            "entrypoint type does not match manifest schemaVersion",
+            path="backend.entrypoints",
+        )
+    return NormalizedEntrypoint(
+        id=entrypoint.id,
+        runtime=runtime,
+        transport=transport,
+        resource_profile=entrypoint.resource_profile,
+        activation_events=entrypoint.activation_events,
+        source_manifest_version=source_manifest_version,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,7 +1118,7 @@ class Probe:
 @dataclass(frozen=True, slots=True)
 class PluginManifest:
     plugin: PluginIdentity
-    backend_entrypoints: tuple[BackendEntrypoint, ...]
+    backend_entrypoints: tuple[BackendEntrypoint | RuntimeEntrypoint, ...]
     contributions: tuple[Contribution, ...]
     permissions: PermissionSet
     probes: tuple[Probe, ...]
@@ -588,21 +1126,31 @@ class PluginManifest:
     schema_version: int = MANIFEST_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != MANIFEST_SCHEMA_VERSION:
+        if self.schema_version not in {
+            MANIFEST_SCHEMA_VERSION_V2,
+            MANIFEST_SCHEMA_VERSION_V3,
+        }:
             raise contract_error(
-                f"schemaVersion must be {MANIFEST_SCHEMA_VERSION}",
+                "schemaVersion must be 2 or 3",
                 path="schemaVersion",
             )
         if not isinstance(self.plugin, PluginIdentity):
             raise contract_error("plugin is invalid", path="plugin")
         entrypoints = tuple(self.backend_entrypoints)
-        if not entrypoints or not all(isinstance(item, BackendEntrypoint) for item in entrypoints):
+        entrypoint_type = (
+            BackendEntrypoint
+            if self.schema_version == MANIFEST_SCHEMA_VERSION_V2
+            else RuntimeEntrypoint
+        )
+        if not entrypoints or not all(isinstance(item, entrypoint_type) for item in entrypoints):
             raise contract_error("backend.entrypoints must contain at least one entrypoint")
         entrypoint_ids = {item.id for item in entrypoints}
         if len(entrypoint_ids) != len(entrypoints):
             raise contract_error("backend.entrypoints ids must be unique")
         contributions = tuple(self.contributions)
-        if not contributions or not all(isinstance(item, Contribution) for item in contributions):
+        if not all(isinstance(item, Contribution) for item in contributions):
+            raise contract_error("contributions contain invalid values")
+        if self.schema_version == MANIFEST_SCHEMA_VERSION_V2 and not contributions:
             raise contract_error("contributions must contain at least one contribution")
         if len({item.id for item in contributions}) != len(contributions):
             raise contract_error("contribution ids must be unique")
@@ -655,11 +1203,21 @@ class PluginManifest:
             "backend",
             required=frozenset({"entrypoints"}),
         )
+        schema_version = _integer(data["schemaVersion"], "schemaVersion", minimum=0)
+        if schema_version == MANIFEST_SCHEMA_VERSION_V2:
+            entrypoint_parser = BackendEntrypoint.from_wire
+        elif schema_version == MANIFEST_SCHEMA_VERSION_V3:
+            entrypoint_parser = RuntimeEntrypoint.from_wire
+        else:
+            raise contract_error(
+                "schemaVersion must be 2 or 3",
+                path="schemaVersion",
+            )
         return cls(
-            schema_version=_integer(data["schemaVersion"], "schemaVersion", minimum=0),
+            schema_version=schema_version,
             plugin=PluginIdentity.from_wire(data["plugin"]),
             backend_entrypoints=tuple(
-                BackendEntrypoint.from_wire(item)
+                entrypoint_parser(item)
                 for item in _sequence(backend["entrypoints"], "backend.entrypoints")
             ),
             frontend=(
@@ -676,6 +1234,16 @@ class PluginManifest:
     @property
     def canonical_sha256(self) -> str:
         return canonical_sha256(self.to_wire())
+
+    @property
+    def normalized_entrypoints(self) -> tuple[NormalizedEntrypoint, ...]:
+        return tuple(
+            normalize_entrypoint(
+                item,
+                source_manifest_version=self.schema_version,
+            )
+            for item in self.backend_entrypoints
+        )
 
     def validate_descriptor(self, descriptor: "RuntimeDescriptor") -> None:
         if not isinstance(descriptor, RuntimeDescriptor):

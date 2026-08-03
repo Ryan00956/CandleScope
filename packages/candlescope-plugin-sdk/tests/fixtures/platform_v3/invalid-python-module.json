@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 3,
+  "plugin": {"id": "candlescope.invalid-python", "name": "Invalid", "version": "0.1.0", "publisher": "candlescope", "license": "MIT", "engines": {"candlescope": ">=0.4.0"}},
+  "backend": {"entrypoints": [{"id": "main", "runtime": {"kind": "python-module", "runtimeId": "python-3-13", "module": "not-a-module"}, "transport": "jsonl/1", "resourceProfile": "minimal", "activationEvents": ["onCommand"]}]},
+  "contributions": [],
+  "permissions": {"required": [], "optional": []},
+  "probes": []
+}

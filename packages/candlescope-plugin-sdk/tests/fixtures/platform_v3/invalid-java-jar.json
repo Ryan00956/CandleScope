@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 3,
+  "plugin": {"id": "candlescope.invalid-java", "name": "Invalid", "version": "0.1.0", "publisher": "candlescope", "license": "MIT", "engines": {"candlescope": ">=0.4.0"}},
+  "backend": {"entrypoints": [{"id": "main", "runtime": {"kind": "java-jar", "artifact": "runtime/invalid.jar", "runtimeId": "temurin-25"}, "transport": "jsonl/1", "resourceProfile": "minimal", "activationEvents": ["onCommand"]}]},
+  "contributions": [],
+  "permissions": {"required": [], "optional": []},
+  "probes": []
+}

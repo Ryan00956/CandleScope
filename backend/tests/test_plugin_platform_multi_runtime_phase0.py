@@ -69,20 +69,10 @@ def test_phase0_contract_matches_current_v2_and_freezes_future_names() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", ta4j["peeledCommit"])
 
 
-def test_phase0_flags_are_contract_only_and_production_remains_unchanged() -> None:
+def test_phase0_flags_were_not_wired_into_the_phase0_composition_root() -> None:
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     for name in phase0.FEATURE_FLAGS:
         assert name not in bootstrap
-    assert not (
-        phase0.REPOSITORY_ROOT
-        / "packages"
-        / "candlescope-plugin-sdk"
-        / "src"
-        / "candlescope_plugin_sdk"
-        / "platform_v2"
-        / "schemas"
-        / "manifest-v3.schema.json"
-    ).exists()
 
 
 def test_phase0_contract_drift_fails_closed(

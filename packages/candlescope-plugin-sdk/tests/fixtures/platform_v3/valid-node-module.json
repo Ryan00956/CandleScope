@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 3,
+  "plugin": {
+    "id": "candlescope.fixture-node",
+    "name": "Node v3 Fixture",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "MIT",
+    "engines": {"candlescope": ">=0.4.0"}
+  },
+  "backend": {
+    "entrypoints": [{
+      "id": "main",
+      "runtime": {
+        "kind": "node-module",
+        "artifact": "runtime/fixture-node.mjs",
+        "runtimeId": "node-24",
+        "nodeArgs": ["--enable-source-maps"]
+      },
+      "transport": "jsonl/1",
+      "resourceProfile": "standard",
+      "activationEvents": ["onCommand"]
+    }]
+  },
+  "contributions": [],
+  "permissions": {"required": [], "optional": []},
+  "probes": []
+}

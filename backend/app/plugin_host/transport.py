@@ -353,6 +353,24 @@ class PlatformV2Transport:
         except JsonLineError as exc:
             if self._closing or (exc.code == "EOF" and self._expect_eof):
                 return
+            if exc.code == "EOF":
+                await self._process.settle_stderr()
+                if self._process.stderr_overflow:
+                    self._fail(
+                        PlatformHostTransportError(
+                            code="PLUGIN_PLATFORM_STDERR_LIMIT_EXCEEDED",
+                            message=(
+                                "plugin process exceeded its bounded stderr budget"
+                            ),
+                            plugin_id=self.plugin_id,
+                            entrypoint_id=self.entrypoint_id,
+                            details={
+                                "maxStderrBytes": self.process_spec.max_stderr_bytes
+                            },
+                            fatal=True,
+                        )
+                    )
+                    return
             code = {
                 "MESSAGE_TOO_LARGE": "PLUGIN_PLATFORM_RESPONSE_TOO_LARGE",
                 "INVALID_JSON": "PLUGIN_PLATFORM_RESPONSE_INVALID_JSON",
@@ -698,6 +716,7 @@ class PlatformV2Transport:
             "requests": self._request_count,
             "hostCalls": self._host_call_count,
             "lateResponses": self._late_response_count,
+            "processTreeControl": self._process.process_tree_control_active,
             "fatalError": self._fatal_error.to_dict() if self._fatal_error else None,
             **({"stderrTail": self.stderr_tail} if include_stderr else {}),
         }

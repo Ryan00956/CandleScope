@@ -14,6 +14,7 @@ from typing import Any
 from app.plugin_security_v2.sandbox import SandboxPolicy, prepare_sandbox_launch
 
 from .framing import AsyncJsonLineConnection
+from .windows_job import CREATE_SUSPENDED, WindowsJobController
 
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
@@ -37,9 +38,23 @@ _SAFE_ENVIRONMENT_KEYS = frozenset(
     }
 )
 _TRUST_LEVELS = frozenset({"first-party-pinned", "local-trusted", "untrusted"})
+_WINDOWS_JOBS: dict[int, WindowsJobController] = {}
 
 
-def plugin_environment(executable_directory: str) -> dict[str, str]:
+def _windows_extended_path(path: Path) -> str:
+    value = str(path)
+    if os.name != "nt" or len(value) < 248 or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value.lstrip("\\")
+    return "\\\\?\\" + value
+
+
+def plugin_environment(
+    executable_directory: str,
+    *,
+    isolated_search_path: bool = False,
+) -> dict[str, str]:
     """Return the minimal inherited environment shared by all sidecars."""
 
     environment = {
@@ -50,7 +65,7 @@ def plugin_environment(executable_directory: str) -> dict[str, str]:
     inherited_path = environment.get("PATH", "")
     environment["PATH"] = (
         executable_directory
-        if not inherited_path
+        if isolated_search_path or not inherited_path
         else executable_directory + os.pathsep + inherited_path
     )
     environment["PYTHONIOENCODING"] = "utf-8"
@@ -70,6 +85,9 @@ class SidecarProcessSpec:
     max_stderr_bytes: int = 64 * 1024
     sandbox_policy: SandboxPolicy | None = None
     trust_level: str = "local-trusted"
+    manage_process_tree: bool = False
+    isolated_search_path: bool = False
+    max_processes: int = 1
 
     def __post_init__(self) -> None:
         if (
@@ -114,6 +132,16 @@ class SidecarProcessSpec:
             raise ValueError("trust_level is unsupported")
         if self.trust_level == "untrusted" and self.sandbox_policy is None:
             raise ValueError("untrusted sidecars require an OS sandbox policy")
+        if not isinstance(self.manage_process_tree, bool):
+            raise ValueError("manage_process_tree must be a boolean")
+        if not isinstance(self.isolated_search_path, bool):
+            raise ValueError("isolated_search_path must be a boolean")
+        if (
+            isinstance(self.max_processes, bool)
+            or not isinstance(self.max_processes, int)
+            or not 1 <= self.max_processes <= 32
+        ):
+            raise ValueError("max_processes is outside the supported range")
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -136,7 +164,10 @@ async def launch_sidecar_process(
     validate_launch_target(spec)
     command = spec.command
     working_directory = spec.working_directory or spec.executable.parent
-    environment = plugin_environment(str(spec.executable.parent))
+    environment = plugin_environment(
+        str(spec.executable.parent),
+        isolated_search_path=spec.isolated_search_path,
+    )
     if spec.sandbox_policy is not None:
         prepared = prepare_sandbox_launch(
             spec.sandbox_policy,
@@ -146,19 +177,44 @@ async def launch_sidecar_process(
         command = prepared.command
         working_directory = prepared.working_directory
         environment = prepared.environment
+    if os.name == "nt":
+        command = (
+            _windows_extended_path(Path(command[0]).resolve(strict=False)),
+            *command[1:],
+        )
     process_kwargs: dict[str, Any] = {
         "stdin": asyncio.subprocess.PIPE,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
-        "cwd": str(working_directory),
+        "cwd": _windows_extended_path(working_directory),
         "env": environment,
         "limit": spec.max_message_bytes + 1,
     }
     if os.name == "nt":
         process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # Passing lpApplicationName explicitly is required for executable paths
+        # beyond MAX_PATH; otherwise CreateProcessW reparses argv[0] and fails
+        # with WinError 206 even when the path uses the extended-length prefix.
+        process_kwargs["executable"] = command[0]
+        if spec.manage_process_tree and spec.sandbox_policy is None:
+            process_kwargs["creationflags"] |= CREATE_SUSPENDED
     else:
         process_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*command, **process_kwargs)
+    process = await asyncio.create_subprocess_exec(*command, **process_kwargs)
+    if os.name == "nt" and spec.manage_process_tree and spec.sandbox_policy is None:
+        try:
+            controller = WindowsJobController.attach_and_resume(
+                process.pid,
+                max_processes=spec.max_processes,
+            )
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                process.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            raise
+        _WINDOWS_JOBS[process.pid] = controller
+    return process
 
 
 def signal_process(process: asyncio.subprocess.Process, *, force: bool) -> None:
@@ -168,9 +224,20 @@ def signal_process(process: asyncio.subprocess.Process, *, force: bool) -> None:
         if os.name != "nt":
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         elif force:
-            process.kill()
+            controller = _WINDOWS_JOBS.get(process.pid)
+            if controller is not None:
+                controller.terminate()
+            else:
+                process.kill()
         else:
             process.terminate()
+
+
+def _release_windows_job(process: asyncio.subprocess.Process) -> None:
+    controller = _WINDOWS_JOBS.pop(process.pid, None)
+    if controller is not None:
+        with contextlib.suppress(OSError):
+            controller.close()
 
 
 class ManagedSidecarProcess:
@@ -194,6 +261,26 @@ class ManagedSidecarProcess:
     def stderr_overflow(self) -> bool:
         return self._stderr_overflow
 
+    @property
+    def process_tree_control_active(self) -> bool:
+        process = self.process
+        if process is None:
+            return False
+        return (
+            self.spec.sandbox_policy is not None
+            or process.pid in _WINDOWS_JOBS
+            or os.name != "nt"
+        )
+
+    async def settle_stderr(self, *, timeout_seconds: float = 0.1) -> None:
+        """Let a terminating pipe drainer publish overflow before EOF is classified."""
+
+        task = self._stderr_task
+        if task is None or task.done():
+            return
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+
     async def start(self) -> asyncio.subprocess.Process:
         if self.process is not None and self.process.returncode is None:
             raise RuntimeError("sidecar process is already running")
@@ -203,6 +290,7 @@ class ManagedSidecarProcess:
         process = await launch_sidecar_process(self.spec)
         if process.stdin is None or process.stdout is None:
             signal_process(process, force=True)
+            _release_windows_job(process)
             raise RuntimeError("sidecar process did not expose control pipes")
         self.process = process
         self.connection = AsyncJsonLineConnection(
@@ -255,5 +343,6 @@ class ManagedSidecarProcess:
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                     await asyncio.wait_for(task, timeout=0.5)
+            _release_windows_job(process)
             self.connection = None
             self.process = None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 
@@ -51,12 +51,58 @@ class InstallCommandRunner(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeArtifact:
+    relative_path: str
+    path: Path
+    role: str
+    sha256: str
+    size: int
+    operating_systems: tuple[str, ...]
+    architectures: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        relative = PurePosixPath(self.relative_path)
+        if (
+            not self.relative_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != self.relative_path
+        ):
+            raise ValueError("runtime artifact relative_path is invalid")
+        if not isinstance(self.role, str) or not self.role:
+            raise ValueError("runtime artifact role is invalid")
+        if not _SHA256.fullmatch(self.sha256):
+            raise ValueError("runtime artifact sha256 is invalid")
+        if (
+            isinstance(self.size, bool)
+            or not isinstance(self.size, int)
+            or self.size <= 0
+        ):
+            raise ValueError("runtime artifact size is invalid")
+        operating_systems = tuple(self.operating_systems)
+        architectures = tuple(self.architectures)
+        if (
+            not operating_systems
+            or len(set(operating_systems)) != len(operating_systems)
+            or not architectures
+            or len(set(architectures)) != len(architectures)
+            or not all(isinstance(item, str) and item for item in operating_systems)
+            or not all(isinstance(item, str) and item for item in architectures)
+        ):
+            raise ValueError("runtime artifact platform declarations are invalid")
+        object.__setattr__(self, "path", Path(self.path).resolve(strict=False))
+        object.__setattr__(self, "operating_systems", operating_systems)
+        object.__setattr__(self, "architectures", architectures)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeInstallationRequest:
     installation: Path
     host_executable: Path
     wheel_paths: tuple[Path, ...]
     distributions: tuple[tuple[str, str], ...]
     runtime_ids: tuple[str, ...]
+    artifacts: tuple[RuntimeArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         installation = Path(self.installation).resolve(strict=False)
@@ -91,11 +137,26 @@ class RuntimeInstallationRequest:
             distribution_names
         ):
             raise ValueError("distributions must contain unique name/version pairs")
+        artifacts = tuple(self.artifacts)
+        if not all(isinstance(item, RuntimeArtifact) for item in artifacts):
+            raise ValueError("artifacts must contain RuntimeArtifact values")
+        if len({item.relative_path.casefold() for item in artifacts}) != len(artifacts):
+            raise ValueError("artifacts must have unique case-insensitive paths")
+        if any(
+            installation not in item.path.parents
+            or not item.path.is_file()
+            or item.path.is_symlink()
+            for item in artifacts
+        ):
+            raise ValueError(
+                "runtime artifacts must be real files inside the installation"
+            )
         object.__setattr__(self, "installation", installation)
         object.__setattr__(self, "host_executable", host_executable)
         object.__setattr__(self, "wheel_paths", wheel_paths)
         object.__setattr__(self, "runtime_ids", tuple(self.runtime_ids))
         object.__setattr__(self, "distributions", tuple(self.distributions))
+        object.__setattr__(self, "artifacts", artifacts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +194,7 @@ class PreparedRuntime:
     executable: Path
     working_directory: Path
     module: str | None = None
+    artifact: Path | None = None
     arguments: tuple[str, ...] = ()
     artifact_sha256: str | None = None
 
@@ -165,6 +227,13 @@ class PreparedRuntime:
             "working_directory",
             Path(self.working_directory).resolve(strict=False),
         )
+        object.__setattr__(
+            self,
+            "artifact",
+            Path(self.artifact).resolve(strict=False)
+            if self.artifact is not None
+            else None,
+        )
         object.__setattr__(self, "arguments", arguments)
 
 
@@ -196,6 +265,9 @@ class PreparedLaunch:
     executable: Path
     arguments: tuple[str, ...]
     working_directory: Path
+    manage_process_tree: bool = False
+    isolated_search_path: bool = False
+    max_processes: int = 1
 
     def __post_init__(self) -> None:
         RuntimeProviderBinding(
@@ -216,6 +288,16 @@ class PreparedLaunch:
         object.__setattr__(self, "executable", prepared.executable)
         object.__setattr__(self, "arguments", prepared.arguments)
         object.__setattr__(self, "working_directory", prepared.working_directory)
+        if not isinstance(self.manage_process_tree, bool):
+            raise ValueError("manage_process_tree must be a boolean")
+        if not isinstance(self.isolated_search_path, bool):
+            raise ValueError("isolated_search_path must be a boolean")
+        if (
+            isinstance(self.max_processes, bool)
+            or not isinstance(self.max_processes, int)
+            or not 1 <= self.max_processes <= 32
+        ):
+            raise ValueError("max_processes is outside the supported range")
 
 
 class RuntimeProvider(Protocol):

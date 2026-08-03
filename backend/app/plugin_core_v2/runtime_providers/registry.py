@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 
 from .base import RUNTIME_PROVIDER_API_VERSION, RuntimeProvider, RuntimeProviderError
+from .native import NativeExecutableProvider
 from .python import PythonModuleProvider
 
 
 _KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+NATIVE_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED"
 
 
 class RuntimeProviderRegistry:
@@ -92,5 +95,32 @@ class RuntimeProviderRegistry:
         return provider
 
 
-def default_runtime_provider_registry() -> RuntimeProviderRegistry:
-    return RuntimeProviderRegistry((PythonModuleProvider(),))
+def _native_enabled(value: bool | None) -> bool:
+    if value is not None:
+        if not isinstance(value, bool):
+            raise RuntimeProviderError(
+                "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
+                "native Runtime Provider enablement must be a boolean",
+            )
+        return value
+    raw = os.environ.get(NATIVE_RUNTIME_ENABLED_ENV)
+    if raw is None:
+        return False
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeProviderError(
+        "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
+        f"{NATIVE_RUNTIME_ENABLED_ENV} must be one of 0/1/false/true/no/yes/off/on",
+    )
+
+
+def default_runtime_provider_registry(
+    *, native_enabled: bool | None = None
+) -> RuntimeProviderRegistry:
+    providers: list[RuntimeProvider] = [PythonModuleProvider()]
+    if _native_enabled(native_enabled):
+        providers.append(NativeExecutableProvider())
+    return RuntimeProviderRegistry(providers)

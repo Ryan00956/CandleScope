@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase3-performance/1",
+  "capturedAt": "2026-08-03T15:53:45.3916506+08:00",
+  "baseHead": "420d4507f7169a9728cc1ccc96a96c87af73ca2f",
+  "environment": {
+    "system": "Windows",
+    "machine": "AMD64",
+    "python": "3.12.7",
+    "pythonImplementation": "CPython",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)"
+  },
+  "method": {
+    "script": "backend/scripts/plugin_platform_multi_runtime_phase3.py",
+    "samples": 3,
+    "build": "cargo build --release --locked --offline",
+    "buildTimeExcludedFromInstall": true,
+    "startupDefinition": "Core invoke from a stopped native entrypoint through Job attachment, handshake, describe, activate, and command response",
+    "memoryDefinition": "Windows process WorkingSetSize after each successful command and before Supervisor stop",
+    "trustedDefinition": "direct declared PE artifact in an atomic kill-on-close Job Object",
+    "restrictedDefinition": "declared PE artifact inside a real Windows AppContainer and inner Job Object",
+    "transcriptSha256": "sha256:a3da7d49d645be03a6d33962c0a6c5f6664c4398fda5c260ddea47bb92e003d5"
+  },
+  "references": {
+    "phase0FirstInstallMs": 9724.601,
+    "phase2PythonProviderStartupMedianMs": 156.89,
+    "phase2PythonProviderWorkingSetMedianBytes": 4231168,
+    "phase2Path": "docs/perf-baselines/plugin-platform-v2/multi-runtime-phase2-2026-08-03-windows-amd64.json"
+  },
+  "budgets": {
+    "firstInstallMaximumFactorVsPhase0": 1.25,
+    "firstInstallMaximumMs": 12155.751,
+    "startupMaximumFactorVsPhase2Python": 1.2,
+    "startupMaximumAdditiveMsVsPhase2Python": 25.0,
+    "startupMaximumMs": 188.268,
+    "memoryMaximumFactorVsPhase2Python": 1.1,
+    "memoryMaximumAdditiveBytesVsPhase2Python": 8388608,
+    "memoryMaximumBytes": 12619776
+  },
+  "nativeProvider": {
+    "firstInstallMs": 1376.936,
+    "startupMedianMs": 13.517,
+    "startupSamplesMs": [
+      13.517,
+      13.572,
+      13.401
+    ],
+    "workingSetMedianBytes": 3895296,
+    "workingSetSamplesBytes": [
+      3899392,
+      3895296,
+      3895296
+    ],
+    "processSamples": 3,
+    "processTreeControl": true,
+    "residualProcesses": 0,
+    "residualSupervisors": 0
+  },
+  "restrictedWindows": {
+    "appContainerSidVerified": true,
+    "activeProcesses": 1,
+    "declaredArtifactOnly": true,
+    "outsideExecutableStarted": false,
+    "outsideFileRead": false,
+    "processTreeControl": true,
+    "residualProcesses": 0,
+    "residualSupervisors": 0
+  },
+  "result": "pass"
+}

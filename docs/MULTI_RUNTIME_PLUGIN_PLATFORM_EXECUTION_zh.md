@@ -1,14 +1,15 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～2 已完成；Phase 3～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～3 已完成；Phase 4～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
 当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md`、
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE1_zh.md` 和
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md`。只有明确标记完成并独立提交的阶段才
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE1_zh.md`、
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md` 和
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE3_zh.md`。只有明确标记完成并独立提交的阶段才
 视为已交付；后续章节仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
@@ -681,6 +682,13 @@ Node 或 WASM 已可安装运行。
 **回滚**
 
 关闭 `CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED`；已有 native activation 显示“runtime disabled”，不得自动改用别的 executable。
+
+**完成证据**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE3_zh.md`。Phase 3 已交付
+`NativeExecutableProvider 1.0.0`、Rust reference plugin、冻结 transcript、严格 PE/摘要/
+OS/arch 检查、Windows 原子 Job Object 启动、trusted-local 与真实 AppContainer 门禁；native
+开关和多运行时总开关仍默认关闭，Java、Node、WASM Provider 数量仍为 `0`。
 
 ---
 

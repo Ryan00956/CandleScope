@@ -1,0 +1,138 @@
+{
+  "schemaVersion": "candlescope.plugin-v2-transcript.v1",
+  "protocol": "candlescope.plugin/2",
+  "transport": "jsonl/1",
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": "handshake-1",
+      "method": "handshake",
+      "params": {
+        "protocols": [
+          "candlescope.plugin/2"
+        ],
+        "host": {
+          "name": "CandleScope",
+          "version": "0.4.0"
+        },
+        "entrypointId": "main",
+        "hostApis": [
+          "candlescope.host-api/1"
+        ],
+        "transports": [
+          "jsonl/1"
+        ]
+      },
+      "generation": 0
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "describe-1",
+      "method": "describe",
+      "params": {},
+      "generation": 0
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "activate-1",
+      "method": "activate",
+      "params": {
+        "instanceId": "hello-instance-1",
+        "generation": 1,
+        "capabilities": []
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "invoke-1",
+      "method": "invoke",
+      "params": {
+        "contributionId": "hello",
+        "input": {
+          "name": "CandleScope"
+        },
+        "requestContext": {
+          "contributionId": "hello",
+          "userAction": true,
+          "generation": 1,
+          "traceId": "trace-hello-1"
+        }
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "invoke-deferred-1",
+      "method": "invoke",
+      "params": {
+        "contributionId": "hello",
+        "input": {
+          "name": "later",
+          "defer": true
+        },
+        "requestContext": {
+          "contributionId": "hello",
+          "userAction": true,
+          "generation": 1,
+          "traceId": "trace-deferred-1"
+        }
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "health-pending-1",
+      "method": "healthCheck",
+      "params": {},
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "cancel-1",
+      "method": "cancel",
+      "params": {
+        "requestId": "invoke-deferred-1"
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "health-clear-1",
+      "method": "healthCheck",
+      "params": {},
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "deactivate-1",
+      "method": "deactivate",
+      "params": {
+        "reason": "transcript complete"
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "shutdown-1",
+      "method": "shutdown",
+      "params": {},
+      "generation": 0
+    }
+  ],
+  "expected": {
+    "responseSha256": [
+      "sha256:4a3aa6cd44e37284b0339d26e9d8730841336ea313ce133e23772545412ba228",
+      "sha256:b0a678677c24c267332348c5eb76b511487dce9614ab7d8177fa77012b796748",
+      "sha256:0dd53894a37ff7116098135f3f99cd6234b64055e97333e7bda0fe51e09a0b65",
+      "sha256:18febeb28e87226805a9632a18bf9279ffe8bfd501309b3b5e36b16148af5739",
+      "sha256:557fd85656ac284bdf7a9f9c901c50ea1691ee4caa19c583c7e0ff40348c0d4b",
+      "sha256:a400386a498f79935a19e33fbfa57e0146df89dc196496703091604a2cf7ca76",
+      "sha256:74b060d03e7a860e018662a9a098da3c3ab64278a60c897d1d8378a67c4b1a5f",
+      "sha256:33779097b4b9872e3e891d6cb0986e7fb182b2079e1a937376b3c90e28cb939f",
+      "sha256:783b75eb948d22dc06496546a20fa83645c71b37e19e514bf3cb951301f2e864",
+      "sha256:4e82727a9b2c136956d261062a9a7a9c9706cddc7b934517f2927e407bd9de36"
+    ],
+    "transcriptSha256": "sha256:a3da7d49d645be03a6d33962c0a6c5f6664c4398fda5c260ddea47bb92e003d5"
+  }
+}

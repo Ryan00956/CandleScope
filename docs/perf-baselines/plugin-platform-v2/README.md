@@ -25,6 +25,19 @@
 - 完整契约、适用范围和限制见
   `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md`。
 
+多运行时 Phase 3 Native Provider 基线：
+
+- `multi-runtime-phase3-2026-08-03-windows-amd64.json`：对锁定 Rust reference
+  executable 做真实 install/check/quick-repeat、3 次冷启动、Windows working set、
+  trusted-local Job Object 与 AppContainer 进程证据；
+- Rust release 编译时间只作信息记录，不计入预编译 `.cspkg` 的安装耗时；
+- first install 对照 Phase 0，启动与内存对照 Phase 2 Python Provider；受限门另外要求
+  包外文件不可读、包外 executable 无法启动、Host stop 后无残留；
+- 采集器及 fail-closed gate：
+  `backend/scripts/plugin_platform_multi_runtime_phase3.py`；
+- 完整契约、适用范围和限制见
+  `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE3_zh.md`。
+
 WP-B Broker foundation 基线：
 
 - `phase11b-wpb-2026-07-23-windows-amd64.json`：10 次独立 worker 冷启动和

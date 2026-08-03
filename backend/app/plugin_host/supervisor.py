@@ -108,6 +108,9 @@ class EntrypointProcessSpec:
     restart_window_seconds: float = 60.0
     sandbox_policy: SandboxPolicy | None = None
     trust_level: str = "local-trusted"
+    manage_process_tree: bool = False
+    isolated_search_path: bool = False
+    max_processes: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.plugin_id, str) or not self.plugin_id:
@@ -149,6 +152,9 @@ class EntrypointProcessSpec:
             max_stderr_bytes=self.max_stderr_bytes,
             sandbox_policy=self.sandbox_policy,
             trust_level=self.trust_level,
+            manage_process_tree=self.manage_process_tree,
+            isolated_search_path=self.isolated_search_path,
+            max_processes=self.max_processes,
         )
         if (
             isinstance(self.max_in_flight, bool)
@@ -173,6 +179,9 @@ class EntrypointProcessSpec:
             max_stderr_bytes=self.max_stderr_bytes,
             sandbox_policy=self.sandbox_policy,
             trust_level=self.trust_level,
+            manage_process_tree=self.manage_process_tree,
+            isolated_search_path=self.isolated_search_path,
+            max_processes=self.max_processes,
         )
 
 

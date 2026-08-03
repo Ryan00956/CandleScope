@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -63,7 +65,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox-python", type=Path)
     parser.add_argument("--sandbox-site-packages", type=Path)
     parser.add_argument("--provider-seam", action="store_true")
+    parser.add_argument("--native-provider", action="store_true")
     return parser
+
+
+@dataclass(frozen=True, slots=True)
+class _EntrypointLaunch:
+    executable: Path
+    arguments: tuple[str, ...]
+    manage_process_tree: bool = False
+    isolated_search_path: bool = False
+    max_processes: int = 1
 
 
 def _sandbox_policies(
@@ -77,7 +89,12 @@ def _sandbox_policies(
                 "sandbox Python requires sandbox policies",
             )
         return {}
-    if args.sandbox_python is None or args.sandbox_site_packages is None:
+    has_python_runtime = any(
+        item.runtime.kind == "python-module" for item in manifest.normalized_entrypoints
+    )
+    if has_python_runtime and (
+        args.sandbox_python is None or args.sandbox_site_packages is None
+    ):
         raise PlatformContractError(
             "INVALID_CONTRACT",
             "sandbox policies require a pinned Python runtime",
@@ -112,9 +129,12 @@ def _entrypoint_command(
     *,
     module: str,
     sandbox_policy: SandboxPolicy | None,
-) -> tuple[Path, tuple[str, ...]]:
+) -> _EntrypointLaunch:
     if sandbox_policy is None:
-        return args.python_executable, ("-I", "-u", "-m", module)
+        return _EntrypointLaunch(
+            args.python_executable,
+            ("-I", "-u", "-m", module),
+        )
     runtime = args.sandbox_python.resolve(strict=True)
     site_packages = args.sandbox_site_packages.resolve(strict=True)
     working = args.working_directory.resolve(strict=True)
@@ -129,7 +149,7 @@ def _entrypoint_command(
             "INVALID_CONTRACT",
             "sandbox Python runtime paths are invalid",
         )
-    return (
+    return _EntrypointLaunch(
         runtime,
         (
             "-I",
@@ -147,28 +167,66 @@ def _provider_entrypoint_launch(
     *,
     runtime: object,
     sandbox_policy: SandboxPolicy | None,
-) -> tuple[Path, tuple[str, ...]]:
-    registry = default_runtime_provider_registry()
+) -> _EntrypointLaunch:
+    registry = default_runtime_provider_registry(native_enabled=args.native_provider)
     provider = registry.resolve(runtime)
+    artifact_path = getattr(runtime, "artifact", None)
+    executable = args.python_executable
+    artifact_sha256 = None
+    if isinstance(artifact_path, str):
+        descriptor = loads_strict(args.bundle_descriptor.read_bytes())
+        artifacts = (
+            descriptor.get("artifacts") if isinstance(descriptor, dict) else None
+        )
+        matches = (
+            [
+                item
+                for item in artifacts
+                if isinstance(item, dict) and item.get("path") == artifact_path
+            ]
+            if isinstance(artifacts, list)
+            else []
+        )
+        if len(matches) != 1 or not isinstance(matches[0].get("sha256"), str):
+            raise PlatformContractError(
+                "INVALID_CONTRACT",
+                "runtime artifact is missing from the bundle inventory",
+            )
+        content_root = args.bundle_descriptor.parent.resolve(strict=True)
+        executable = content_root.joinpath(*PurePosixPath(artifact_path).parts).resolve(
+            strict=True
+        )
+        if content_root not in executable.parents or not executable.is_file():
+            raise PlatformContractError(
+                "INVALID_CONTRACT",
+                "runtime artifact path is unsafe or missing",
+            )
+        artifact_sha256 = matches[0]["sha256"]
     prepared = provider.prepare_runtime(
         runtime=runtime,
-        executable=args.python_executable,
+        executable=executable,
         working_directory=args.working_directory,
-        artifact_sha256=None,
+        artifact_sha256=artifact_sha256,
     )
     sandbox_runtime = (
         SandboxRuntime(
             executable=args.sandbox_python,
             site_packages=args.sandbox_site_packages,
         )
-        if sandbox_policy is not None
+        if sandbox_policy is not None and prepared.runtime_kind == "python-module"
         else None
     )
     launch = provider.build_probe_launch(
         prepared,
         sandbox_runtime=sandbox_runtime,
     )
-    return launch.executable, launch.arguments
+    return _EntrypointLaunch(
+        launch.executable,
+        launch.arguments,
+        manage_process_tree=launch.manage_process_tree,
+        isolated_search_path=launch.isolated_search_path,
+        max_processes=launch.max_processes,
+    )
 
 
 def _entrypoint_launch(
@@ -177,7 +235,7 @@ def _entrypoint_launch(
     *,
     entrypoint_id: str,
     sandbox_policy: SandboxPolicy | None,
-) -> tuple[Path, tuple[str, ...]]:
+) -> _EntrypointLaunch:
     normalized = {item.id: item for item in manifest.normalized_entrypoints}[
         entrypoint_id
     ]
@@ -263,7 +321,7 @@ async def _replay_control_transcript(
         raise PlatformContractError(
             "INVALID_CONTRACT", "control transcript response hashes are invalid"
         )
-    executable, arguments = _entrypoint_launch(
+    launch = _entrypoint_launch(
         args,
         manifest,
         entrypoint_id=entrypoint_id,
@@ -272,12 +330,15 @@ async def _replay_control_transcript(
     process = ManagedSidecarProcess(
         SidecarProcessSpec(
             identity=f"semantic-probe:{manifest.plugin.id}:{entrypoint_id}",
-            executable=executable,
-            arguments=arguments,
+            executable=launch.executable,
+            arguments=launch.arguments,
             working_directory=args.working_directory,
             max_message_bytes=MAX_PROBE_MESSAGE_BYTES,
             trust_level="untrusted" if sandbox_policy is not None else "local-trusted",
             sandbox_policy=sandbox_policy,
+            manage_process_tree=launch.manage_process_tree,
+            isolated_search_path=launch.isolated_search_path,
+            max_processes=launch.max_processes,
         )
     )
     responses: list[Any] = []
@@ -383,7 +444,7 @@ async def _probe(args: argparse.Namespace) -> dict[str, Any]:
     activate = not manifest.permissions.required
     for entrypoint in manifest.backend_entrypoints:
         sandbox_policy = sandbox_policies.get(entrypoint.id)
-        executable, arguments = _entrypoint_launch(
+        launch = _entrypoint_launch(
             args,
             manifest,
             entrypoint_id=entrypoint.id,
@@ -392,8 +453,8 @@ async def _probe(args: argparse.Namespace) -> dict[str, Any]:
         spec = EntrypointProcessSpec(
             plugin_id=manifest.plugin.id,
             entrypoint_id=entrypoint.id,
-            executable=executable,
-            arguments=arguments,
+            executable=launch.executable,
+            arguments=launch.arguments,
             working_directory=args.working_directory,
             enabled=True,
             max_restart_attempts=0,
@@ -402,6 +463,9 @@ async def _probe(args: argparse.Namespace) -> dict[str, Any]:
             shutdown_timeout_seconds=3.0,
             trust_level="untrusted" if sandbox_policy is not None else "local-trusted",
             sandbox_policy=sandbox_policy,
+            manage_process_tree=launch.manage_process_tree,
+            isolated_search_path=launch.isolated_search_path,
+            max_processes=launch.max_processes,
         )
         supervisor = EntrypointSupervisor(
             spec,

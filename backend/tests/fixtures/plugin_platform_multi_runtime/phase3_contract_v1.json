@@ -1,0 +1,137 @@
+{
+  "artifactPolicy": {
+    "declaredArtifactOnly": true,
+    "inventoryDigestAndSizeRequired": true,
+    "operatingSystemAndArchitectureRequired": true,
+    "postInstallBinaryInspection": [
+      "elf64-executable",
+      "macho64-executable",
+      "pe32+-executable"
+    ],
+    "role": "native-executable",
+    "runtimeId": "native-host",
+    "scriptAndShellRejected": true
+  },
+  "failClosedErrors": [
+    "PLUGIN_MULTI_RUNTIME_FEATURE_DISABLED",
+    "PLUGIN_RUNTIME_PROVIDER_ARTIFACT_INVALID",
+    "PLUGIN_RUNTIME_PROVIDER_ARTIFACT_MISMATCH",
+    "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
+    "PLUGIN_RUNTIME_PROVIDER_LAUNCH_INVALID",
+    "PLUGIN_RUNTIME_PROVIDER_PLATFORM_MISMATCH",
+    "PLUGIN_RUNTIME_PROVIDER_RECEIPT_MISMATCH",
+    "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+    "PLUGIN_RUNTIME_PROVIDER_VERSION_INCOMPATIBLE"
+  ],
+  "implementedOn": "2026-08-03",
+  "launchPolicy": {
+    "argumentArrayOnly": true,
+    "isolatedSearchPath": true,
+    "maxProcesses": 1,
+    "supervisorFields": [
+      "executable",
+      "arguments",
+      "working_directory",
+      "manage_process_tree",
+      "isolated_search_path",
+      "max_processes"
+    ],
+    "wholeTreeControl": true,
+    "windowsActiveProcessLimit": true,
+    "windowsAtomicResume": true,
+    "windowsCreateSuspended": true,
+    "windowsExplicitApplicationName": true,
+    "windowsKillOnJobClose": true
+  },
+  "phase2ContractSha256": "sha256:829f42f409c2689a58c9917d169897e8bc00926850f58214cb0d3712f1e2fe80",
+  "phase2PerformanceReference": {
+    "installRegressionFactor": 1.25,
+    "memoryAdditiveBudgetBytes": 8388608,
+    "memoryRelativeFactor": 1.1,
+    "path": "docs/perf-baselines/plugin-platform-v2/multi-runtime-phase2-2026-08-03-windows-amd64.json",
+    "phase0FirstInstallMs": 9724.601,
+    "pythonProviderStartupMs": 156.89,
+    "pythonProviderWorkingSetBytes": 4231168,
+    "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase2-performance/1",
+    "startupAdditiveBudgetMs": 25.0,
+    "startupRelativeFactor": 1.2
+  },
+  "providerApi": {
+    "apiVersion": 1,
+    "nativeProviderVersion": "1.0.0",
+    "preparedLaunchFields": [
+      "runtime_kind",
+      "runtime_id",
+      "provider_version",
+      "runtime_identity",
+      "executable",
+      "arguments",
+      "working_directory",
+      "manage_process_tree",
+      "isolated_search_path",
+      "max_processes"
+    ],
+    "registeredKindsWhenDisabled": [
+      "python-module"
+    ],
+    "registeredKindsWhenEnabled": [
+      "native-executable",
+      "python-module"
+    ],
+    "runtimeArtifactFields": [
+      "relative_path",
+      "path",
+      "role",
+      "sha256",
+      "size",
+      "operating_systems",
+      "architectures"
+    ]
+  },
+  "referencePlugin": {
+    "cargoLockSha256": "sha256:b460da2d2c6beb095fee5750bf4caff94d69397662aa03c1b1978f8f64e70603",
+    "controlMethods": [
+      "activate",
+      "cancel",
+      "deactivate",
+      "describe",
+      "handshake",
+      "healthCheck",
+      "invoke",
+      "shutdown"
+    ],
+    "faultModes": [
+      "crash-invoke",
+      "crash-start",
+      "hang-invoke",
+      "hang-start",
+      "invalid-utf8",
+      "sandbox-probe",
+      "spawn-child",
+      "stderr-flood",
+      "stdout-pollution"
+    ],
+    "language": "rust",
+    "package": "candlescope-native-reference",
+    "pluginId": "candlescope.native-reference",
+    "protocol": "candlescope.plugin/2",
+    "responseCount": 10,
+    "sourceSha256": "sha256:f1f14325b0c26582b749706193860ade7c04f547c7b804716fea705e78b8c93e",
+    "transcriptPath": "backend/tests/fixtures/plugin_platform_multi_runtime/native_reference_transcript_v1.json",
+    "transcriptSha256": "sha256:a3da7d49d645be03a6d33962c0a6c5f6664c4398fda5c260ddea47bb92e003d5",
+    "transport": "jsonl/1",
+    "version": "0.1.0"
+  },
+  "rollout": {
+    "automaticExecutableFallback": false,
+    "disabledActivationReason": "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+    "multiRuntimeDefault": false,
+    "multiRuntimeFlag": "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED",
+    "nativeDefault": false,
+    "nativeFlag": "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED",
+    "providerSeamDefault": true,
+    "providerSeamFlag": "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_ENABLED",
+    "rollbackValue": false
+  },
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase3-contract/1"
+}

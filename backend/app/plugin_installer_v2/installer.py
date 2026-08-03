@@ -76,6 +76,7 @@ _PROVIDER_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 MULTI_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED"
 RUNTIME_PROVIDER_SEAM_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_ENABLED"
+NATIVE_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED"
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -752,6 +753,7 @@ class PlatformPluginInstaller:
         ) = None,
         multi_runtime_enabled: bool | None = None,
         runtime_provider_seam_enabled: bool | None = None,
+        native_runtime_enabled: bool | None = None,
         runtime_provider_registry: Any | None = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
@@ -795,12 +797,23 @@ class PlatformPluginInstaller:
             if runtime_provider_seam_enabled is None
             else runtime_provider_seam_enabled
         )
+        if native_runtime_enabled is not None and not isinstance(
+            native_runtime_enabled, bool
+        ):
+            raise PlatformInstallerError("native_runtime_enabled must be a boolean")
+        self.native_runtime_enabled = (
+            _environment_bool(NATIVE_RUNTIME_ENABLED_ENV, default=False)
+            if native_runtime_enabled is None
+            else native_runtime_enabled
+        )
         if runtime_provider_registry is None:
             from app.plugin_core_v2.runtime_providers import (
                 default_runtime_provider_registry,
             )
 
-            runtime_provider_registry = default_runtime_provider_registry()
+            runtime_provider_registry = default_runtime_provider_registry(
+                native_enabled=self.native_runtime_enabled
+            )
         if not callable(
             getattr(runtime_provider_registry, "get", None)
         ) or not callable(getattr(runtime_provider_registry, "resolve", None)):
@@ -1261,9 +1274,13 @@ class PlatformPluginInstaller:
         installation: Path,
         bundle: VerifiedPlatformBundle,
     ) -> tuple[tuple[Any, Any], ...]:
-        from app.plugin_core_v2.runtime_providers import RuntimeInstallationRequest
+        from app.plugin_core_v2.runtime_providers import (
+            RuntimeArtifact,
+            RuntimeInstallationRequest,
+        )
 
         runtime_ids: dict[str, set[str]] = {}
+        runtime_artifact_paths: dict[str, set[str]] = {}
         providers: dict[str, Any] = {}
         for entrypoint in bundle.manifest.normalized_entrypoints:
             try:
@@ -1278,6 +1295,12 @@ class PlatformPluginInstaller:
             runtime_ids.setdefault(entrypoint.runtime.kind, set()).add(
                 entrypoint.runtime.runtime_id
             )
+            artifact_path = getattr(entrypoint.runtime, "artifact", None)
+            if isinstance(artifact_path, str):
+                runtime_artifact_paths.setdefault(entrypoint.runtime.kind, set()).add(
+                    artifact_path
+                )
+        artifact_records = {item.path: item for item in bundle.envelope.artifacts}
         wheel_paths = tuple(
             self._content_directory(installation).joinpath(
                 *PurePosixPath(item.path).parts
@@ -1291,9 +1314,23 @@ class PlatformPluginInstaller:
                 RuntimeInstallationRequest(
                     installation=installation,
                     host_executable=self.python_executable,
-                    wheel_paths=wheel_paths,
-                    distributions=distributions,
+                    wheel_paths=wheel_paths if kind == "python-module" else (),
+                    distributions=(distributions if kind == "python-module" else ()),
                     runtime_ids=tuple(sorted(runtime_ids[kind])),
+                    artifacts=tuple(
+                        RuntimeArtifact(
+                            relative_path=path,
+                            path=self._content_directory(installation).joinpath(
+                                *PurePosixPath(path).parts
+                            ),
+                            role=artifact_records[path].role,
+                            sha256=artifact_records[path].sha256,
+                            size=artifact_records[path].size,
+                            operating_systems=artifact_records[path].operating_systems,
+                            architectures=artifact_records[path].architectures,
+                        )
+                        for path in sorted(runtime_artifact_paths.get(kind, ()))
+                    ),
                 ),
             )
             for kind in sorted(providers)
@@ -1349,21 +1386,56 @@ class PlatformPluginInstaller:
             )
         )
 
+    def _runtime_launch_target(
+        self,
+        installation: Path,
+        bundle: VerifiedPlatformBundle,
+        runtime: object,
+    ) -> tuple[Path, str]:
+        artifact_path = getattr(runtime, "artifact", None)
+        if artifact_path is None:
+            return self._venv_python(installation).resolve(strict=False), bundle.sha256
+        if not isinstance(artifact_path, str):
+            raise PlatformInstallerError(
+                "runtime artifact descriptor is invalid",
+                plugin_id=bundle.manifest.plugin.id,
+            )
+        artifact = next(
+            (item for item in bundle.envelope.artifacts if item.path == artifact_path),
+            None,
+        )
+        if artifact is None:
+            raise PlatformInstallerError(
+                "runtime artifact is missing from the immutable inventory",
+                plugin_id=bundle.manifest.plugin.id,
+                details={"artifact": artifact_path},
+            )
+        return (
+            self._content_directory(installation)
+            .joinpath(*PurePosixPath(artifact_path).parts)
+            .resolve(strict=False),
+            artifact.sha256,
+        )
+
     def _static_runtime_provider_bindings(
         self,
         installation: Path,
         bundle: VerifiedPlatformBundle,
     ) -> tuple[dict[str, str], ...]:
-        executable = self._venv_python(installation).resolve(strict=False)
         bindings: dict[tuple[str, str], dict[str, str]] = {}
         for entrypoint in bundle.manifest.normalized_entrypoints:
             try:
                 provider = self.runtime_provider_registry.resolve(entrypoint.runtime)
+                executable, artifact_sha256 = self._runtime_launch_target(
+                    installation,
+                    bundle,
+                    entrypoint.runtime,
+                )
                 prepared = provider.prepare_runtime(
                     runtime=entrypoint.runtime,
                     executable=executable,
                     working_directory=installation,
-                    artifact_sha256=bundle.sha256,
+                    artifact_sha256=artifact_sha256,
                 )
             except Exception as exc:
                 self._raise_provider_failure(
@@ -1488,6 +1560,14 @@ class PlatformPluginInstaller:
             "untrusted",
         }:
             raise PlatformInstallerError("resolved execution trust level is invalid")
+        has_python_runtime = any(
+            isinstance(item.runtime, PythonModuleRuntime)
+            for item in bundle.manifest.normalized_entrypoints
+        )
+        managed_python = self._venv_python(installation)
+        probe_python = (
+            managed_python if managed_python.is_file() else self.python_executable
+        )
         sandbox_path: Path | None = None
         command = [
             str(self.python_executable),
@@ -1498,7 +1578,7 @@ class PlatformPluginInstaller:
             "--bundle-descriptor",
             str(self._content_directory(installation) / "bundle.json"),
             "--python",
-            str(self._venv_python(installation)),
+            str(probe_python),
             "--working-directory",
             str(installation),
             "--host-version",
@@ -1506,13 +1586,12 @@ class PlatformPluginInstaller:
         ]
         if self.runtime_provider_seam_enabled:
             command.append("--provider-seam")
+        if self.native_runtime_enabled:
+            command.append("--native-provider")
         if trust_level == "untrusted":
-            if (
-                self.probe_sandbox_factory is None
-                or self.probe_python_runtime_factory is None
-            ):
+            if self.probe_sandbox_factory is None:
                 raise PlatformInstallerError(
-                    "verified publisher probe requires an explicit OS sandbox and pinned Python runtime",
+                    "verified publisher probe requires an explicit OS sandbox",
                     plugin_id=bundle.manifest.plugin.id,
                 )
             policies = {
@@ -1524,31 +1603,36 @@ class PlatformPluginInstaller:
                 for item in bundle.manifest.backend_entrypoints
             }
             sandbox_path = installation / f".probe-sandbox-{uuid.uuid4().hex}.json"
-            runtime_executable, site_packages = self.probe_python_runtime_factory(
-                bundle,
-                installation,
-            )
-            if not isinstance(runtime_executable, Path) or not isinstance(
-                site_packages, Path
-            ):
-                raise PlatformInstallerError(
-                    "probe Python runtime factory returned an invalid result",
-                    plugin_id=bundle.manifest.plugin.id,
-                )
             _atomic_write_json(
                 sandbox_path,
                 {"schemaVersion": 1, "entrypoints": policies},
                 replace_existing=False,
             )
             command.extend(("--sandbox-policies", str(sandbox_path)))
-            command.extend(
-                (
-                    "--sandbox-python",
-                    str(runtime_executable),
-                    "--sandbox-site-packages",
-                    str(site_packages),
+            if has_python_runtime:
+                if self.probe_python_runtime_factory is None:
+                    raise PlatformInstallerError(
+                        "verified publisher Python probe requires a pinned Python runtime",
+                        plugin_id=bundle.manifest.plugin.id,
+                    )
+                runtime_executable, site_packages = self.probe_python_runtime_factory(
+                    bundle, installation
                 )
-            )
+                if not isinstance(runtime_executable, Path) or not isinstance(
+                    site_packages, Path
+                ):
+                    raise PlatformInstallerError(
+                        "probe Python runtime factory returned an invalid result",
+                        plugin_id=bundle.manifest.plugin.id,
+                    )
+                command.extend(
+                    (
+                        "--sandbox-python",
+                        str(runtime_executable),
+                        "--sandbox-site-packages",
+                        str(site_packages),
+                    )
+                )
         try:
             output = _run_command(
                 tuple(command),
@@ -1754,7 +1838,11 @@ class PlatformPluginInstaller:
                 installation, bundle.envelope.contents, bundle.envelope_sha256
             )
             expected_python = self._venv_python(installation).resolve(strict=False)
-            if not expected_python.is_file():
+            requires_python = not self.runtime_provider_seam_enabled or any(
+                isinstance(item.runtime, PythonModuleRuntime)
+                for item in bundle.manifest.normalized_entrypoints
+            )
+            if requires_python and not expected_python.is_file():
                 raise PlatformInstallerError(
                     "managed virtual environment Python is missing",
                     plugin_id=record.plugin_id,
@@ -1871,18 +1959,22 @@ class PlatformPluginInstaller:
     def _entrypoint_activations(
         self, bundle: VerifiedPlatformBundle, installation: Path
     ) -> tuple[EntrypointActivation, ...]:
-        executable = self._venv_python(installation).resolve(strict=False)
         working_directory = installation.resolve(strict=False)
         activations: list[EntrypointActivation] = []
         for item in bundle.manifest.normalized_entrypoints:
             if self.runtime_provider_seam_enabled:
                 try:
                     provider = self.runtime_provider_registry.resolve(item.runtime)
+                    executable, artifact_sha256 = self._runtime_launch_target(
+                        installation,
+                        bundle,
+                        item.runtime,
+                    )
                     prepared = provider.prepare_runtime(
                         runtime=item.runtime,
                         executable=executable,
                         working_directory=working_directory,
-                        artifact_sha256=bundle.sha256,
+                        artifact_sha256=artifact_sha256,
                     )
                 except Exception as exc:
                     self._raise_provider_failure(
@@ -1890,7 +1982,23 @@ class PlatformPluginInstaller:
                         plugin_id=bundle.manifest.plugin.id,
                     )
                     raise AssertionError("unreachable") from exc
-                if prepared.runtime_kind != "python-module" or prepared.module is None:
+                if prepared.runtime_kind == "python-module":
+                    if prepared.module is None or prepared.artifact is not None:
+                        raise PlatformInstallerError(
+                            "Python Provider returned an invalid activation target",
+                            plugin_id=bundle.manifest.plugin.id,
+                        )
+                elif prepared.runtime_kind == "native-executable":
+                    if (
+                        prepared.module is not None
+                        or prepared.artifact is None
+                        or prepared.artifact != prepared.executable
+                    ):
+                        raise PlatformInstallerError(
+                            "Native Provider returned an invalid activation target",
+                            plugin_id=bundle.manifest.plugin.id,
+                        )
+                else:
                     raise RuntimeProviderUnavailableError(
                         plugin_id=bundle.manifest.plugin.id,
                         runtime_kinds=[prepared.runtime_kind],
@@ -1899,6 +2007,9 @@ class PlatformPluginInstaller:
                 runtime_kind = prepared.runtime_kind
                 runtime_id = prepared.runtime_id
                 arguments = prepared.arguments
+                artifact = prepared.artifact
+                activation_sha256 = prepared.artifact_sha256
+                executable = prepared.executable
             else:
                 if not isinstance(item.runtime, PythonModuleRuntime):
                     raise RuntimeProviderUnavailableError(
@@ -1909,6 +2020,9 @@ class PlatformPluginInstaller:
                 runtime_kind = item.runtime.kind
                 runtime_id = item.runtime.runtime_id
                 arguments = item.runtime.interpreter_args
+                artifact = None
+                activation_sha256 = bundle.sha256
+                executable = self._venv_python(installation).resolve(strict=False)
             activations.append(
                 EntrypointActivation(
                     item.id,
@@ -1917,7 +2031,8 @@ class PlatformPluginInstaller:
                     working_directory,
                     runtime_kind=runtime_kind,
                     runtime_id=runtime_id,
-                    artifact_sha256=bundle.sha256,
+                    artifact_sha256=activation_sha256,
+                    artifact=artifact,
                     arguments=arguments,
                 )
             )
@@ -1938,6 +2053,11 @@ class PlatformPluginInstaller:
             raise RuntimeProviderUnavailableError(
                 plugin_id=bundle.manifest.plugin.id,
                 runtime_kinds=runtime_kinds,
+            )
+        if "native-executable" in runtime_kinds and not self.native_runtime_enabled:
+            raise RuntimeProviderUnavailableError(
+                plugin_id=bundle.manifest.plugin.id,
+                runtime_kinds=["native-executable"],
             )
         unavailable: list[str] = []
         for entrypoint in bundle.manifest.normalized_entrypoints:

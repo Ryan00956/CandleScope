@@ -80,7 +80,6 @@ from .services import NotificationCenter, PluginSettingsStore
 from .runtime_providers import (
     RuntimeProviderRegistry,
     SandboxRuntime,
-    default_runtime_provider_registry,
 )
 
 
@@ -160,6 +159,7 @@ class CorePluginPlatform:
         network_transport: Any | None = None,
         multi_runtime_enabled: bool | None = None,
         runtime_provider_seam_enabled: bool | None = None,
+        native_runtime_enabled: bool | None = None,
         runtime_provider_registry: RuntimeProviderRegistry | None = None,
     ) -> None:
         if trust_level not in TRUST_LEVELS:
@@ -231,9 +231,6 @@ class CorePluginPlatform:
         self.live_testnet_execution_enabled = live_testnet_execution_enabled
         self.marketplace_enabled = marketplace_enabled
         self._pinned_python_runtime: PinnedPythonRuntime | None = None
-        self.runtime_provider_registry = (
-            runtime_provider_registry or default_runtime_provider_registry()
-        )
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
@@ -268,11 +265,14 @@ class CorePluginPlatform:
             ),
             multi_runtime_enabled=multi_runtime_enabled,
             runtime_provider_seam_enabled=runtime_provider_seam_enabled,
-            runtime_provider_registry=self.runtime_provider_registry,
+            native_runtime_enabled=native_runtime_enabled,
+            runtime_provider_registry=runtime_provider_registry,
         )
+        self.runtime_provider_registry = self.installer.runtime_provider_registry
         self.runtime_provider_seam_enabled = (
             self.installer.runtime_provider_seam_enabled
         )
+        self.native_runtime_enabled = self.installer.native_runtime_enabled
         self.marketplace = PluginMarketplaceService(
             root=self.root,
             installer=self.installer,
@@ -505,7 +505,16 @@ class CorePluginPlatform:
         key = self._sandbox_key(bundle, trust.publisher_identity)
         installation_token = bundle.installation_id[:20]
         entrypoint_token = self._sandbox_path_token(entrypoint_id)
-        runtime = self._marketplace_python_runtime()
+        declared = next(
+            item
+            for item in bundle.manifest.normalized_entrypoints
+            if item.id == entrypoint_id
+        )
+        additional_read_only_paths = (
+            (self._marketplace_python_runtime().root,)
+            if declared.runtime.kind == "python-module"
+            else ()
+        )
         return SandboxPolicy(
             profile_name=sandbox_profile_name(
                 bundle.manifest.plugin.id,
@@ -529,7 +538,7 @@ class CorePluginPlatform:
                 / installation_token
                 / entrypoint_token
             ),
-            additional_read_only_paths=(runtime.root,),
+            additional_read_only_paths=additional_read_only_paths,
             memory_limit_bytes=256 * 1024 * 1024,
             cpu_rate_percent=25,
             cpu_time_seconds=60,
@@ -553,7 +562,16 @@ class CorePluginPlatform:
         key = self._sandbox_key(bundle, trust.publisher_identity)
         installation_token = bundle.installation_id[:20]
         entrypoint_token = self._sandbox_path_token(entrypoint_id)
-        runtime = self._marketplace_python_runtime()
+        declared = next(
+            item
+            for item in bundle.manifest.normalized_entrypoints
+            if item.id == entrypoint_id
+        )
+        additional_read_only_paths = (
+            (self._marketplace_python_runtime().root,)
+            if declared.runtime.kind == "python-module"
+            else ()
+        )
         installation = next(
             item.working_directory
             for item in record.entrypoints
@@ -575,7 +593,7 @@ class CorePluginPlatform:
                 / installation_token
                 / entrypoint_token
             ),
-            additional_read_only_paths=(runtime.root,),
+            additional_read_only_paths=additional_read_only_paths,
             memory_limit_bytes=256 * 1024 * 1024,
             cpu_rate_percent=25,
             cpu_time_seconds=300,
@@ -846,7 +864,10 @@ class CorePluginPlatform:
                 artifact_sha256=activation.artifact_sha256,
             )
             sandbox_runtime = None
-            if self._bundle_trust(bundle).trust_level == "verified-publisher":
+            if (
+                activation.runtime_kind == "python-module"
+                and self._bundle_trust(bundle).trust_level == "verified-publisher"
+            ):
                 runtime = self._marketplace_python_runtime()
                 sandbox_runtime = SandboxRuntime(
                     executable=runtime.executable,
@@ -862,6 +883,9 @@ class CorePluginPlatform:
             executable = launch.executable
             arguments = launch.arguments
             working_directory = launch.working_directory
+            manage_process_tree = launch.manage_process_tree
+            isolated_search_path = launch.isolated_search_path
+            max_processes = launch.max_processes
         else:
             if not isinstance(declared.runtime, PythonModuleRuntime):
                 raise core_error(
@@ -872,6 +896,9 @@ class CorePluginPlatform:
                 )
             executable = activation.executable
             arguments = ("-I", "-u", "-m", activation.module)
+            manage_process_tree = False
+            isolated_search_path = False
+            max_processes = 1
             if self._bundle_trust(bundle).trust_level == "verified-publisher":
                 runtime = self._marketplace_python_runtime()
                 executable, arguments = runtime.command(
@@ -891,6 +918,9 @@ class CorePluginPlatform:
             required=False,
             sandbox_policy=sandbox,
             trust_level=execution_trust,
+            manage_process_tree=manage_process_tree,
+            isolated_search_path=isolated_search_path,
+            max_processes=max_processes,
             **limits,
         )
         return EntrypointSupervisor(

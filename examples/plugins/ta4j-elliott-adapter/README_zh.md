@@ -23,9 +23,31 @@ python scripts/build_release.py `
 脚本不访问网络；它先验证每个依赖的大小和 SHA-256，再以固定时间戳、排序路径
 和固定压缩级别生成 fat JAR。MIT、Apache-2.0、Commons Math 完整原始
 LICENSE/NOTICE、SLF4J 原始 LICENSE、第三方 attribution 和 Adapter GPL 正文都随
-JAR / bundle 分发；独立检查会逐字节核对这些法律文件。`0.1.1` 是只迁移运行时供应链、
-不改变 Adapter JAR 的打包修订：编译仍由冻结的 JDK 25 完成，运行时只接受 Runtime Registry
-管理、已通过 Windows AppContainer 门禁的 `temurin-26.0.2.10`。Java Provider 默认由
+JAR / bundle 分发；独立检查会逐字节核对这些法律文件。Phase 5 的 `0.1.0` 源码、JAR、
+lock、golden corpus 和真实证据继续冻结不改。Phase 10 的发布者构建会在临时目录复制这份
+已审核源码，只允许把唯一的 `ADAPTER_VERSION = "0.1.0"` 常量替换为显式稳定 SemVer，
+再完整编译；缺失或出现多个版本戳都会 fail closed。因此它不会改写冻结基线，也不会产生
+manifest、运行时 descriptor 与 Marketplace release 版本不一致的包。
+
+`0.1.1` / `0.1.2` 候选均由冻结的 JDK 25、同一依赖和固定压缩规则构建；运行时只接受
+Runtime Registry 管理、已通过 Windows AppContainer 门禁的 `temurin-26.0.2.10`。
+Phase 10 的发布者侧命令如下（初始 `0.1.1` 只需替换版本参数）：
+
+```powershell
+python scripts/build_release.py `
+  --jdk-home C:\path\to\jdk-25.0.4+7 `
+  --dependency-cache C:\path\to\maven-cache `
+  --candidate-version 0.1.2 `
+  --output C:\publisher-staging\ta4j-elliott-adapter-0.1.2.jar `
+  --report C:\publisher-staging\build-report-0.1.2.json
+```
+
+候选构建只能写到锁定 `runtime/` 之外；`evidence/build-report-0.1.1.json` 与
+`evidence/build-report-0.1.2.json` 分别固定摘要
+`sha256:1143e70ad368445b8e7eaec1c2f1fdc40ca7127bd453932f5c51fe03c6930c56` 和
+`sha256:a8ba1e917f8fee9c2e5be10407ebcd97c3f0b4347a74b1a8251c830b86b122ab`。
+它在发布者/CI 侧先构建并签名，Marketplace 用户机器只下载预构建 `.cspkg`，绝不执行
+源码编译或系统 runtime fallback。Java Provider 默认由
 `CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED=0` 关闭。
 
 ## 数据契约

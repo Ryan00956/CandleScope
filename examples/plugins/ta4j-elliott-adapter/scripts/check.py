@@ -76,6 +76,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--jdk-home", type=Path, required=True)
     parser.add_argument("--dependency-cache", type=Path, required=True)
+    parser.add_argument("--actual-output", type=Path)
     arguments = parser.parse_args()
 
     lock = json.loads(
@@ -125,13 +126,29 @@ def main() -> int:
     if len(completed.stdout.encode("utf-8")) > 256 * 1024:
         raise SystemExit("adapter self-test stdout exceeds its evidence limit")
     report = json.loads(completed.stdout)
+    if arguments.actual_output is not None:
+        arguments.actual_output.write_text(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
     golden = json.loads(
         (ADAPTER_ROOT / "evidence" / "golden-corpus.json").read_text(encoding="utf-8")
     )
     if report.get("schemaVersion") != "candlescope.ta4j-adapter-self-test/1":
         raise SystemExit("adapter self-test returned another schema")
     if report.get("casesSha256") != golden.get("casesSha256"):
-        raise SystemExit("adapter golden corpus digest changed")
+        raise SystemExit(
+            "adapter golden corpus digest changed: "
+            f"expected={golden.get('casesSha256')}, "
+            f"actual={report.get('casesSha256')}"
+        )
     actual_cases = report.get("cases")
     expected_cases = golden.get("cases")
     if not isinstance(actual_cases, list) or not isinstance(expected_cases, list):

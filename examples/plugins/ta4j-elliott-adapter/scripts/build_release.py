@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -154,6 +156,8 @@ def build_jar(
     classes: Path,
     dependencies: list[Path],
     lock: dict[str, object],
+    *,
+    adapter_version: str,
 ) -> tuple[str, int]:
     entries: dict[str, bytes] = {}
     origins: dict[str, str] = {}
@@ -175,7 +179,7 @@ def build_jar(
         "Manifest-Version: 1.0\r\n"
         f"Main-Class: {main_class}\r\n"
         "Implementation-Title: CandleScope ta4j Elliott Adapter\r\n"
-        f"Implementation-Version: {dict(lock['adapter'])['version']}\r\n"
+        f"Implementation-Version: {adapter_version}\r\n"
         "Multi-Release: true\r\n"
         "\r\n"
     ).encode("utf-8")
@@ -232,40 +236,109 @@ def build_jar(
     return digest(output)
 
 
+def versioned_adapter_source(destination: Path, version: str) -> Path:
+    """Create a publisher-side source projection with one reviewed version stamp."""
+
+    source = ADAPTER_ROOT / "src" / "main" / "java"
+    shutil.copytree(source, destination)
+    plugin = (
+        destination
+        / "io"
+        / "candlescope"
+        / "plugins"
+        / "ta4j"
+        / "elliott"
+        / "Ta4jElliottPlugin.java"
+    )
+    old = 'public static final String ADAPTER_VERSION = "0.1.0";'
+    new = f'public static final String ADAPTER_VERSION = "{version}";'
+    value = plugin.read_text(encoding="utf-8")
+    if value.count(old) != 1:
+        raise SystemExit("reviewed Adapter version stamp is missing or ambiguous")
+    plugin.write_text(
+        value.replace(old, new),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return destination
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--jdk-home", type=Path, required=True)
     parser.add_argument("--dependency-cache", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--output",
-        type=Path,
-        default=ADAPTER_ROOT / "runtime" / "ta4j-elliott-adapter-0.1.0.jar",
+        "--candidate-version",
+        help="build a publisher-side candidate without treating it as the locked release",
     )
     parser.add_argument("--report", type=Path)
     arguments = parser.parse_args()
     lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+    adapter_lock = dict(lock["adapter"])
+    adapter_version = arguments.candidate_version or str(adapter_lock["version"])
+    if (
+        re.fullmatch(
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+            adapter_version,
+        )
+        is None
+    ):
+        raise SystemExit("Adapter version must be a stable SemVer core")
+    if arguments.candidate_version is not None and arguments.output is None:
+        raise SystemExit("--candidate-version requires an explicit --output")
+    output = (
+        arguments.output.resolve()
+        if arguments.output is not None
+        else (ADAPTER_ROOT / str(adapter_lock["releaseJar"])).resolve()
+    )
+    if (
+        arguments.candidate_version is not None
+        and ADAPTER_ROOT / "runtime" in output.parents
+    ):
+        raise SystemExit(
+            "candidate output must stay outside the locked runtime directory"
+        )
     dependencies = checked_dependencies(arguments.dependency_cache.resolve(), lock)
     javac = java_tool(arguments.jdk_home.resolve(), "javac")
     with tempfile.TemporaryDirectory(prefix="candlescope-ta4j-build-") as value:
-        classes = Path(value) / "classes"
+        temporary_root = Path(value)
+        classes = temporary_root / "classes"
+        adapter_sources = ADAPTER_ROOT / "src" / "main" / "java"
+        if arguments.candidate_version is not None:
+            adapter_sources = versioned_adapter_source(
+                temporary_root / "versioned-adapter-source",
+                adapter_version,
+            )
         compile_sources(
             javac,
             classes,
             [
                 SDK_ROOT / "src" / "main" / "java",
-                ADAPTER_ROOT / "src" / "main" / "java",
+                adapter_sources,
             ],
             classpath=dependencies,
             release=25,
         )
-        output = arguments.output.resolve()
-        output_sha256, output_size = build_jar(output, classes, dependencies, lock)
-    adapter_lock = dict(lock["adapter"])
+        output_sha256, output_size = build_jar(
+            output,
+            classes,
+            dependencies,
+            lock,
+            adapter_version=adapter_version,
+        )
     expected_output = (
         str(adapter_lock["releaseJarSha256"]),
         int(adapter_lock["releaseJarSize"]),
     )
-    if (output_sha256, output_size) != expected_output:
+    if (
+        arguments.candidate_version is None
+        and (
+            output_sha256,
+            output_size,
+        )
+        != expected_output
+    ):
         output.unlink(missing_ok=True)
         raise SystemExit(
             "release JAR is not reproducible: "
@@ -282,6 +355,8 @@ def main() -> int:
             "size": output_size,
         },
     }
+    if arguments.candidate_version is not None:
+        report["adapterVersion"] = adapter_version
     text = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if arguments.report:
         arguments.report.parent.mkdir(parents=True, exist_ok=True)

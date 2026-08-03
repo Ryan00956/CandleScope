@@ -157,6 +157,10 @@ def main() -> int:
     first = True
     if MODE == "stdout-pollution":
         print("plugin wrote a log to stdout", flush=True)
+    if MODE == "invalid-utf8":
+        sys.stdout.buffer.write(b"\xff\n")
+        sys.stdout.buffer.flush()
+        return 0
     if MODE in {"stderr-flood", "stderr-crash-start"}:
         sys.stderr.write("S" * 200_000)
         sys.stderr.flush()

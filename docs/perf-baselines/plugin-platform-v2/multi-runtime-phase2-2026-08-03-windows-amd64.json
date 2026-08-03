@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase2-performance/1",
+  "capturedAt": "2026-08-03T14:34:02.0709156+08:00",
+  "baseHead": "2db64b67dd680e1fdb3aedb6b909d1a79936aa13",
+  "environment": {
+    "system": "Windows",
+    "machine": "AMD64",
+    "python": "3.12.7",
+    "pythonImplementation": "CPython"
+  },
+  "method": {
+    "script": "backend/scripts/plugin_platform_multi_runtime_phase2.py",
+    "samplesPerPath": 3,
+    "startupDefinition": "Core invoke from a stopped entrypoint through handshake, describe, activate, and command response",
+    "memoryDefinition": "Windows process WorkingSetSize after each successful command and before Host stop",
+    "processSpecificationRequirement": "provider and rollback executable name plus argv must be exactly equal",
+    "gateArtifactSha256": "sha256:7ffad5358e04469f45bcb6c7d87606a91e0caf76fd1a97499b5e472dbedb559b"
+  },
+  "phase0Reference": {
+    "path": "docs/perf-baselines/plugin-platform-v2/phase0-2026-07-22-windows-amd64.json",
+    "firstInstallMs": 9724.601,
+    "runtimeStartupMs": 104.346,
+    "startupComparability": "informational-only-different-runtime-host-path",
+    "pluginProcessWorkingSet": "not-recorded"
+  },
+  "budgets": {
+    "firstInstallMaximumFactorVsPhase0": 1.25,
+    "startupMaximumFactorVsRollback": 1.2,
+    "startupMaximumAdditiveMsVsRollback": 25.0,
+    "memoryMaximumFactorVsRollback": 1.1,
+    "memoryMaximumAdditiveBytesVsRollback": 8388608
+  },
+  "providerPath": {
+    "firstInstallMs": 7639.808,
+    "startupMedianMs": 156.89,
+    "startupSamplesMs": [156.89, 148.791, 162.112],
+    "workingSetMedianBytes": 4231168,
+    "workingSetSamplesBytes": [4231168, 4222976, 4276224],
+    "residualSupervisors": 0
+  },
+  "rollbackPath": {
+    "firstInstallMs": 7509.23,
+    "startupMedianMs": 156.938,
+    "startupSamplesMs": [156.938, 151.475, 159.445],
+    "workingSetMedianBytes": 4222976,
+    "workingSetSamplesBytes": [4222976, 4222976, 4276224],
+    "residualSupervisors": 0
+  },
+  "processSpecification": {
+    "executableName": "python.exe",
+    "arguments": [
+      "-I",
+      "-u",
+      "-m",
+      "candlescope_plugin_sdk.platform_v2.examples.hello_command"
+    ],
+    "exactlyEquivalent": true
+  },
+  "result": "pass"
+}

@@ -1,0 +1,84 @@
+{
+  "failClosedErrors": [
+    "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
+    "PLUGIN_RUNTIME_PROVIDER_DUPLICATE",
+    "PLUGIN_RUNTIME_PROVIDER_RECEIPT_MISMATCH",
+    "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+    "PLUGIN_RUNTIME_PROVIDER_VERSION_INCOMPATIBLE"
+  ],
+  "implementedOn": "2026-08-03",
+  "phase0PerformanceReference": {
+    "firstInstallMs": 9724.601,
+    "installRegressionFactor": 1.25,
+    "memoryAdditiveBudgetBytes": 8388608,
+    "memoryRelativeFactor": 1.1,
+    "path": "docs/perf-baselines/plugin-platform-v2/phase0-2026-07-22-windows-amd64.json",
+    "runtimeStartupMs": 104.346,
+    "schemaVersion": "candlescope.plugin-platform.phase0-baseline.v1",
+    "startupAdditiveBudgetMs": 25.0,
+    "startupRelativeFactor": 1.2
+  },
+  "phase1ContractSha256": "sha256:f790fb0a16e2c5a49cf49ef636319867abc0deee9a194c121cb31bf4c193b754",
+  "providerApi": {
+    "apiVersion": 1,
+    "contracts": [
+      "PreparedRuntime",
+      "PreparedLaunch",
+      "RuntimeProviderBinding"
+    ],
+    "methods": [
+      "validate_runtime",
+      "prepare_installation",
+      "verify_installation",
+      "prepare_runtime",
+      "build_probe_launch",
+      "build_runtime_launch"
+    ],
+    "pythonProviderVersion": "1.0.0",
+    "registeredKinds": [
+      "python-module"
+    ]
+  },
+  "pythonV2Launch": {
+    "arguments": [
+      "-I",
+      "-u",
+      "-m",
+      "candlescope_plugin_sdk.platform_v2.examples.hello_command"
+    ],
+    "executableRole": "managed-python",
+    "runtimeId": "python-v2-compat",
+    "runtimeKind": "python-module",
+    "workingDirectoryRole": "immutable-installation"
+  },
+  "receipt": {
+    "providerBindingFields": [
+      "providerVersion",
+      "runtimeId",
+      "runtimeIdentity",
+      "runtimeKind"
+    ],
+    "readSchemaVersions": [
+      2,
+      3
+    ],
+    "writeSchemaVersion": 3
+  },
+  "rollout": {
+    "multiRuntimeDefault": false,
+    "multiRuntimeFlag": "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED",
+    "providerSeamDefault": true,
+    "providerSeamFlag": "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_ENABLED",
+    "rollbackValue": false
+  },
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase2-contract/1",
+  "supervisorBoundary": {
+    "consumes": [
+      "arguments",
+      "executable",
+      "working_directory"
+    ],
+    "importsPythonProvider": false,
+    "importsRuntimeProvider": false
+  }
+}

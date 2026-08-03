@@ -1,13 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～1 已完成；Phase 2～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～2 已完成；Phase 3～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
-当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 和
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE1_zh.md`。只有明确标记完成并独立提交的阶段才
+当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md`、
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE1_zh.md` 和
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md`。只有明确标记完成并独立提交的阶段才
 视为已交付；后续章节仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
@@ -591,7 +592,7 @@ Node 或 WASM 已可安装运行。
 
 ---
 
-### Phase 2：Runtime Provider seam 与 Python 等价迁移
+### Phase 2：Runtime Provider seam 与 Python 等价迁移（已完成）
 
 **目标**
 
@@ -636,6 +637,12 @@ Node 或 WASM 已可安装运行。
 **回滚**
 
 用内部 rollback flag 切回旧 Python launch path；不修改 manifest、bundle 或用户授权。
+
+**完成证据**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md`。Phase 2 已交付 Provider API、
+`PythonModuleProvider 1.0.0`、receipt runtime binding、v2 双路径等价门和 v3 Python 完整
+生命周期；多运行时总开关仍默认关闭，native、Java、Node 和 WASM Provider 数量仍为 `0`。
 
 ---
 

@@ -18,7 +18,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from candlescope_plugin_sdk.platform_v2 import (
-    MANIFEST_SCHEMA_VERSION_V2,
     MANIFEST_SCHEMA_VERSION_V3,
     PlatformContractError,
     PythonModuleRuntime,
@@ -48,6 +47,7 @@ from .errors import (
     PlatformInstallerBaseError,
     PlatformInstallerError,
     MultiRuntimeFeatureDisabledError,
+    RuntimeProviderReceiptMismatchError,
     RuntimeProviderUnavailableError,
 )
 from .registry import (
@@ -60,7 +60,8 @@ from .registry import (
 )
 
 
-RECEIPT_SCHEMA_VERSION = 2
+LEGACY_RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 HISTORY_SCHEMA_VERSION = 2
 STATE_TRANSACTION_SCHEMA_VERSION = 1
 MAX_STATE_JSON_BYTES = 4 * 1024 * 1024
@@ -70,7 +71,11 @@ DEFAULT_COMMAND_OUTPUT_BYTES = 1024 * 1024
 PROBE_RUNNER = Path(__file__).with_name("probe_runner.py").resolve()
 _STATE_TRANSACTION_ID = re.compile(r"^state-[0-9a-f]{32}$")
 _PLUGIN_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$")
+_RUNTIME_KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_PROVIDER_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 MULTI_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED"
+RUNTIME_PROVIDER_SEAM_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_ENABLED"
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -381,11 +386,22 @@ class InstallationReceipt:
     created_at: str
     wheels: tuple[dict[str, Any], ...]
     probe: dict[str, Any]
+    runtime_providers: tuple[dict[str, str], ...] = ()
+    schema_version: int = RECEIPT_SCHEMA_VERSION
 
     @classmethod
     def from_bundle(
-        cls, bundle: VerifiedPlatformBundle, *, probe: Mapping[str, Any]
+        cls,
+        bundle: VerifiedPlatformBundle,
+        *,
+        probe: Mapping[str, Any],
+        runtime_providers: Sequence[Mapping[str, str]] | None = None,
     ) -> "InstallationReceipt":
+        providers = (
+            tuple(dict(item) for item in runtime_providers)
+            if runtime_providers is not None
+            else ()
+        )
         return cls(
             installation_id=bundle.installation_id,
             bundle_sha256=bundle.sha256,
@@ -399,11 +415,17 @@ class InstallationReceipt:
             created_at=_utc_now(),
             wheels=tuple(item.to_wire() for item in bundle.wheels),
             probe=dict(probe),
+            runtime_providers=providers,
+            schema_version=(
+                RECEIPT_SCHEMA_VERSION
+                if runtime_providers is not None
+                else LEGACY_RECEIPT_SCHEMA_VERSION
+            ),
         )
 
     def to_wire(self) -> dict[str, Any]:
         return {
-            "schemaVersion": RECEIPT_SCHEMA_VERSION,
+            "schemaVersion": self.schema_version,
             "installationId": self.installation_id,
             "bundleSha256": self.bundle_sha256,
             "bundleSize": self.bundle_size,
@@ -416,12 +438,17 @@ class InstallationReceipt:
             "createdAt": self.created_at,
             "wheels": list(self.wheels),
             "probe": dict(self.probe),
+            **(
+                {"runtimeProviders": [dict(item) for item in self.runtime_providers]}
+                if self.schema_version == RECEIPT_SCHEMA_VERSION
+                else {}
+            ),
         }
 
     @classmethod
     def from_wire(cls, value: Any) -> "InstallationReceipt":
         data = _mapping(value, "installation receipt")
-        expected = {
+        common = {
             "schemaVersion",
             "installationId",
             "bundleSha256",
@@ -436,7 +463,20 @@ class InstallationReceipt:
             "wheels",
             "probe",
         }
-        if set(data) != expected or data.get("schemaVersion") != RECEIPT_SCHEMA_VERSION:
+        schema_version = data.get("schemaVersion")
+        expected = (
+            common | {"runtimeProviders"}
+            if schema_version == RECEIPT_SCHEMA_VERSION
+            else common
+        )
+        if (
+            schema_version
+            not in {
+                LEGACY_RECEIPT_SCHEMA_VERSION,
+                RECEIPT_SCHEMA_VERSION,
+            }
+            or set(data) != expected
+        ):
             raise PlatformInstallerError("installation receipt schema is invalid")
         scalar_strings = [
             "installationId",
@@ -463,6 +503,36 @@ class InstallationReceipt:
             isinstance(item, dict) for item in data["wheels"]
         ):
             raise PlatformInstallerError("installation receipt wheels are invalid")
+        raw_providers = data.get("runtimeProviders", [])
+        provider_keys = {
+            "runtimeKind",
+            "runtimeId",
+            "providerVersion",
+            "runtimeIdentity",
+        }
+        if (
+            not isinstance(raw_providers, list)
+            or (schema_version == RECEIPT_SCHEMA_VERSION and not raw_providers)
+            or not all(
+                isinstance(item, dict)
+                and set(item) == provider_keys
+                and all(
+                    isinstance(item[key], str) and item[key] for key in provider_keys
+                )
+                and _RUNTIME_KIND.fullmatch(item["runtimeKind"]) is not None
+                and _PLUGIN_ID.fullmatch(item["runtimeId"]) is not None
+                and _PROVIDER_VERSION.fullmatch(item["providerVersion"]) is not None
+                and _SHA256.fullmatch(item["runtimeIdentity"]) is not None
+                for item in raw_providers
+            )
+            or [(item["runtimeKind"], item["runtimeId"]) for item in raw_providers]
+            != sorted(
+                {(item["runtimeKind"], item["runtimeId"]) for item in raw_providers}
+            )
+        ):
+            raise PlatformInstallerError(
+                "installation receipt runtimeProviders are invalid"
+            )
         return cls(
             installation_id=data["installationId"],
             bundle_sha256=data["bundleSha256"],
@@ -476,6 +546,8 @@ class InstallationReceipt:
             created_at=data["createdAt"],
             wheels=tuple(dict(item) for item in data["wheels"]),
             probe=dict(_mapping(data["probe"], "installation receipt probe")),
+            runtime_providers=tuple(dict(item) for item in raw_providers),
+            schema_version=schema_version,
         )
 
     def assert_bundle(self, bundle: VerifiedPlatformBundle) -> None:
@@ -497,6 +569,16 @@ class InstallationReceipt:
                 "immutable installation receipt does not match its stored bundle",
                 plugin_id=self.plugin_id,
             )
+
+    def assert_runtime_providers(
+        self,
+        runtime_providers: Sequence[Mapping[str, str]],
+    ) -> None:
+        if self.schema_version == LEGACY_RECEIPT_SCHEMA_VERSION:
+            return
+        actual = tuple(dict(item) for item in runtime_providers)
+        if self.runtime_providers != actual:
+            raise RuntimeProviderReceiptMismatchError(plugin_id=self.plugin_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +751,8 @@ class PlatformPluginInstaller:
             Callable[[VerifiedPlatformBundle, Path], tuple[Path, Path]] | None
         ) = None,
         multi_runtime_enabled: bool | None = None,
+        runtime_provider_seam_enabled: bool | None = None,
+        runtime_provider_registry: Any | None = None,
     ) -> None:
         self.root = Path(root or _default_root()).expanduser().resolve(strict=False)
         self.registry_path = (
@@ -700,6 +784,28 @@ class PlatformPluginInstaller:
             if multi_runtime_enabled is None
             else multi_runtime_enabled
         )
+        if runtime_provider_seam_enabled is not None and not isinstance(
+            runtime_provider_seam_enabled, bool
+        ):
+            raise PlatformInstallerError(
+                "runtime_provider_seam_enabled must be a boolean"
+            )
+        self.runtime_provider_seam_enabled = (
+            _environment_bool(RUNTIME_PROVIDER_SEAM_ENABLED_ENV, default=True)
+            if runtime_provider_seam_enabled is None
+            else runtime_provider_seam_enabled
+        )
+        if runtime_provider_registry is None:
+            from app.plugin_core_v2.runtime_providers import (
+                default_runtime_provider_registry,
+            )
+
+            runtime_provider_registry = default_runtime_provider_registry()
+        if not callable(
+            getattr(runtime_provider_registry, "get", None)
+        ) or not callable(getattr(runtime_provider_registry, "resolve", None)):
+            raise PlatformInstallerError("runtime_provider_registry is invalid")
+        self.runtime_provider_registry = runtime_provider_registry
         if grant_store is not None:
             if audit_log is not None and grant_store.audit_log is not audit_log:
                 raise PlatformInstallerError(
@@ -1128,6 +1234,152 @@ class PlatformPluginInstaller:
                 "bundle changed while copying into installation store"
             )
 
+    @staticmethod
+    def _raise_provider_failure(
+        exc: Exception,
+        *,
+        plugin_id: str,
+    ) -> None:
+        code = getattr(exc, "code", None)
+        message = getattr(exc, "message", None)
+        details = getattr(exc, "details", None)
+        if (
+            isinstance(code, str)
+            and code.startswith("PLUGIN_RUNTIME_PROVIDER_")
+            and isinstance(message, str)
+        ):
+            raise PlatformInstallerBaseError(
+                code,
+                message,
+                plugin_id,
+                dict(details) if isinstance(details, Mapping) else {},
+            ) from exc
+        raise exc
+
+    def _provider_installation_requests(
+        self,
+        installation: Path,
+        bundle: VerifiedPlatformBundle,
+    ) -> tuple[tuple[Any, Any], ...]:
+        from app.plugin_core_v2.runtime_providers import RuntimeInstallationRequest
+
+        runtime_ids: dict[str, set[str]] = {}
+        providers: dict[str, Any] = {}
+        for entrypoint in bundle.manifest.normalized_entrypoints:
+            try:
+                provider = self.runtime_provider_registry.resolve(entrypoint.runtime)
+            except Exception as exc:
+                self._raise_provider_failure(
+                    exc,
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+                raise AssertionError("unreachable") from exc
+            providers[entrypoint.runtime.kind] = provider
+            runtime_ids.setdefault(entrypoint.runtime.kind, set()).add(
+                entrypoint.runtime.runtime_id
+            )
+        wheel_paths = tuple(
+            self._content_directory(installation).joinpath(
+                *PurePosixPath(item.path).parts
+            )
+            for item in bundle.wheels
+        )
+        distributions = tuple((item.package, item.version) for item in bundle.wheels)
+        return tuple(
+            (
+                providers[kind],
+                RuntimeInstallationRequest(
+                    installation=installation,
+                    host_executable=self.python_executable,
+                    wheel_paths=wheel_paths,
+                    distributions=distributions,
+                    runtime_ids=tuple(sorted(runtime_ids[kind])),
+                ),
+            )
+            for kind in sorted(providers)
+        )
+
+    def _prepare_runtime_providers(
+        self,
+        installation: Path,
+        bundle: VerifiedPlatformBundle,
+    ) -> tuple[dict[str, str], ...]:
+        bindings: list[dict[str, str]] = []
+        for provider, request in self._provider_installation_requests(
+            installation, bundle
+        ):
+            try:
+                prepared = provider.prepare_installation(request, _run_command)
+            except Exception as exc:
+                self._raise_provider_failure(
+                    exc,
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+                raise AssertionError("unreachable") from exc
+            bindings.extend(item.to_wire() for item in prepared)
+        return tuple(
+            sorted(
+                bindings,
+                key=lambda item: (item["runtimeKind"], item["runtimeId"]),
+            )
+        )
+
+    def _verify_runtime_providers(
+        self,
+        installation: Path,
+        bundle: VerifiedPlatformBundle,
+    ) -> tuple[dict[str, str], ...]:
+        bindings: list[dict[str, str]] = []
+        for provider, request in self._provider_installation_requests(
+            installation, bundle
+        ):
+            try:
+                verified = provider.verify_installation(request, _run_command)
+            except Exception as exc:
+                self._raise_provider_failure(
+                    exc,
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+                raise AssertionError("unreachable") from exc
+            bindings.extend(item.to_wire() for item in verified)
+        return tuple(
+            sorted(
+                bindings,
+                key=lambda item: (item["runtimeKind"], item["runtimeId"]),
+            )
+        )
+
+    def _static_runtime_provider_bindings(
+        self,
+        installation: Path,
+        bundle: VerifiedPlatformBundle,
+    ) -> tuple[dict[str, str], ...]:
+        executable = self._venv_python(installation).resolve(strict=False)
+        bindings: dict[tuple[str, str], dict[str, str]] = {}
+        for entrypoint in bundle.manifest.normalized_entrypoints:
+            try:
+                provider = self.runtime_provider_registry.resolve(entrypoint.runtime)
+                prepared = provider.prepare_runtime(
+                    runtime=entrypoint.runtime,
+                    executable=executable,
+                    working_directory=installation,
+                    artifact_sha256=bundle.sha256,
+                )
+            except Exception as exc:
+                self._raise_provider_failure(
+                    exc,
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+                raise AssertionError("unreachable") from exc
+            binding = {
+                "runtimeKind": prepared.runtime_kind,
+                "runtimeId": prepared.runtime_id,
+                "providerVersion": prepared.provider_version,
+                "runtimeIdentity": prepared.runtime_identity,
+            }
+            bindings[(prepared.runtime_kind, prepared.runtime_id)] = binding
+        return tuple(bindings[key] for key in sorted(bindings))
+
     def _create_venv(self, installation: Path) -> None:
         _run_command(
             (
@@ -1252,6 +1504,8 @@ class PlatformPluginInstaller:
             "--host-version",
             self.host_version,
         ]
+        if self.runtime_provider_seam_enabled:
+            command.append("--provider-seam")
         if trust_level == "untrusted":
             if (
                 self.probe_sandbox_factory is None
@@ -1403,6 +1657,7 @@ class PlatformPluginInstaller:
         bundle = inspect_platform_bundle(
             self._bundle_path(installation), host_version=self.host_version
         )
+        self._assert_bundle_installable(bundle)
         receipt = self._load_receipt(installation)
         receipt.assert_bundle(bundle)
         if (
@@ -1432,12 +1687,16 @@ class PlatformPluginInstaller:
         self._verify_content(
             installation, bundle.envelope.contents, bundle.envelope_sha256
         )
-        if not self._venv_python(installation).is_file():
-            raise PlatformInstallerError(
-                "managed virtual environment Python is missing"
-            )
-        self._verify_distributions(installation, bundle)
-        self._pip_check(installation)
+        if self.runtime_provider_seam_enabled:
+            bindings = self._verify_runtime_providers(installation, bundle)
+            receipt.assert_runtime_providers(bindings)
+        else:
+            if not self._venv_python(installation).is_file():
+                raise PlatformInstallerError(
+                    "managed virtual environment Python is missing"
+                )
+            self._verify_distributions(installation, bundle)
+            self._pip_check(installation)
         probe = self._run_probe(installation, bundle)
         return bundle, receipt, probe
 
@@ -1464,11 +1723,7 @@ class PlatformPluginInstaller:
             bundle = inspect_platform_bundle(
                 self._bundle_path(installation), host_version=self.host_version
             )
-            if bundle.manifest.schema_version != MANIFEST_SCHEMA_VERSION_V2:
-                raise PlatformInstallerError(
-                    "schema-v3 activation cannot be verified before its Runtime Provider exists",
-                    plugin_id=record.plugin_id,
-                )
+            self._assert_bundle_installable(bundle)
             receipt = self._load_receipt(installation)
             receipt.assert_bundle(bundle)
             if (
@@ -1504,29 +1759,44 @@ class PlatformPluginInstaller:
                     "managed virtual environment Python is missing",
                     plugin_id=record.plugin_id,
                 )
-            manifest_entrypoints = {
-                item.id: item for item in bundle.manifest.backend_entrypoints
-            }
-            if set(manifest_entrypoints) != {item.id for item in record.entrypoints}:
-                raise PlatformInstallerError(
-                    "activation entrypoints do not match the manifest",
-                    plugin_id=record.plugin_id,
+            if self.runtime_provider_seam_enabled:
+                expected_entrypoints = self._entrypoint_activations(
+                    bundle, installation
                 )
-            for entrypoint in record.entrypoints:
-                declared = manifest_entrypoints[entrypoint.id]
-                if (
-                    entrypoint.executable.resolve(strict=False) != expected_python
-                    or entrypoint.working_directory.resolve(strict=False)
-                    != installation.resolve(strict=False)
-                    or entrypoint.module != declared.python_module
-                    or entrypoint.runtime_kind != "python-module"
-                    or entrypoint.runtime_id != "python-v2-compat"
-                    or entrypoint.artifact_sha256 != bundle.sha256
-                ):
+                if record.entrypoints != expected_entrypoints:
                     raise PlatformInstallerError(
                         "activation launch target does not match its immutable installation",
                         plugin_id=record.plugin_id,
                     )
+                receipt.assert_runtime_providers(
+                    self._static_runtime_provider_bindings(installation, bundle)
+                )
+            else:
+                manifest_entrypoints = {
+                    item.id: item for item in bundle.manifest.backend_entrypoints
+                }
+                if set(manifest_entrypoints) != {
+                    item.id for item in record.entrypoints
+                }:
+                    raise PlatformInstallerError(
+                        "activation entrypoints do not match the manifest",
+                        plugin_id=record.plugin_id,
+                    )
+                for entrypoint in record.entrypoints:
+                    declared = manifest_entrypoints[entrypoint.id]
+                    if (
+                        entrypoint.executable.resolve(strict=False) != expected_python
+                        or entrypoint.working_directory.resolve(strict=False)
+                        != installation.resolve(strict=False)
+                        or entrypoint.module != declared.python_module
+                        or entrypoint.runtime_kind != "python-module"
+                        or entrypoint.runtime_id != "python-v2-compat"
+                        or entrypoint.artifact_sha256 != bundle.sha256
+                    ):
+                        raise PlatformInstallerError(
+                            "activation launch target does not match its immutable installation",
+                            plugin_id=record.plugin_id,
+                        )
             if self.execution_trust_resolver is not None:
                 self.execution_trust_resolver(bundle)
             if self.publisher_identity_resolver is not None:
@@ -1562,11 +1832,19 @@ class PlatformPluginInstaller:
             staging.mkdir()
             bundle.extract_to(self._content_directory(staging))
             self._copy_bundle(bundle, self._bundle_path(staging))
-            self._create_venv(staging)
-            self._install_wheels(staging, bundle)
-            self._verify_distributions(staging, bundle)
+            if self.runtime_provider_seam_enabled:
+                runtime_providers = self._prepare_runtime_providers(staging, bundle)
+            else:
+                self._create_venv(staging)
+                self._install_wheels(staging, bundle)
+                self._verify_distributions(staging, bundle)
+                runtime_providers = None
             probe = self._run_probe(staging, bundle)
-            receipt = InstallationReceipt.from_bundle(bundle, probe=probe)
+            receipt = InstallationReceipt.from_bundle(
+                bundle,
+                probe=probe,
+                runtime_providers=runtime_providers,
+            )
             _atomic_write_json(self._receipt_path(staging), receipt.to_wire())
             final_path.parent.mkdir(parents=True, exist_ok=True)
             if final_path.parent.is_symlink() or final_path.exists():
@@ -1577,10 +1855,10 @@ class PlatformPluginInstaller:
             moved = True
             _fsync_directory(final_path.parent)
             self._verify_installation(final_path)
-        except (OSError, PlatformBundleError, PlatformInstallerError) as exc:
+        except (OSError, PlatformBundleError, PlatformInstallerBaseError) as exc:
             if moved:
                 self._quarantine(final_path, bundle.manifest.plugin.id)
-            if isinstance(exc, (PlatformBundleError, PlatformInstallerError)):
+            if isinstance(exc, PlatformInstallerBaseError):
                 raise
             raise PlatformInstallerError(
                 f"unable to create immutable installation: {exc}",
@@ -1597,21 +1875,50 @@ class PlatformPluginInstaller:
         working_directory = installation.resolve(strict=False)
         activations: list[EntrypointActivation] = []
         for item in bundle.manifest.normalized_entrypoints:
-            if not isinstance(item.runtime, PythonModuleRuntime):
-                raise RuntimeProviderUnavailableError(
-                    plugin_id=bundle.manifest.plugin.id,
-                    runtime_kinds=[item.runtime.kind],
-                )
+            if self.runtime_provider_seam_enabled:
+                try:
+                    provider = self.runtime_provider_registry.resolve(item.runtime)
+                    prepared = provider.prepare_runtime(
+                        runtime=item.runtime,
+                        executable=executable,
+                        working_directory=working_directory,
+                        artifact_sha256=bundle.sha256,
+                    )
+                except Exception as exc:
+                    self._raise_provider_failure(
+                        exc,
+                        plugin_id=bundle.manifest.plugin.id,
+                    )
+                    raise AssertionError("unreachable") from exc
+                if prepared.runtime_kind != "python-module" or prepared.module is None:
+                    raise RuntimeProviderUnavailableError(
+                        plugin_id=bundle.manifest.plugin.id,
+                        runtime_kinds=[prepared.runtime_kind],
+                    )
+                module = prepared.module
+                runtime_kind = prepared.runtime_kind
+                runtime_id = prepared.runtime_id
+                arguments = prepared.arguments
+            else:
+                if not isinstance(item.runtime, PythonModuleRuntime):
+                    raise RuntimeProviderUnavailableError(
+                        plugin_id=bundle.manifest.plugin.id,
+                        runtime_kinds=[item.runtime.kind],
+                    )
+                module = item.runtime.module
+                runtime_kind = item.runtime.kind
+                runtime_id = item.runtime.runtime_id
+                arguments = item.runtime.interpreter_args
             activations.append(
                 EntrypointActivation(
                     item.id,
                     executable,
-                    item.runtime.module,
+                    module,
                     working_directory,
-                    runtime_kind=item.runtime.kind,
-                    runtime_id=item.runtime.runtime_id,
+                    runtime_kind=runtime_kind,
+                    runtime_id=runtime_id,
                     artifact_sha256=bundle.sha256,
-                    arguments=item.runtime.interpreter_args,
+                    arguments=arguments,
                 )
             )
         return tuple(activations)
@@ -1627,10 +1934,29 @@ class PlatformPluginInstaller:
                 plugin_id=bundle.manifest.plugin.id,
                 runtime_kinds=runtime_kinds,
             )
-        raise RuntimeProviderUnavailableError(
-            plugin_id=bundle.manifest.plugin.id,
-            runtime_kinds=runtime_kinds,
-        )
+        if not self.runtime_provider_seam_enabled:
+            raise RuntimeProviderUnavailableError(
+                plugin_id=bundle.manifest.plugin.id,
+                runtime_kinds=runtime_kinds,
+            )
+        unavailable: list[str] = []
+        for entrypoint in bundle.manifest.normalized_entrypoints:
+            try:
+                self.runtime_provider_registry.resolve(entrypoint.runtime)
+            except Exception as exc:
+                if getattr(exc, "code", None) == "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE":
+                    unavailable.append(entrypoint.runtime.kind)
+                    continue
+                self._raise_provider_failure(
+                    exc,
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+                raise AssertionError("unreachable") from exc
+        if unavailable:
+            raise RuntimeProviderUnavailableError(
+                plugin_id=bundle.manifest.plugin.id,
+                runtime_kinds=sorted(set(unavailable)),
+            )
 
     def _new_record(
         self,

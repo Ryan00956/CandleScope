@@ -125,6 +125,7 @@ def test_untrusted_entrypoint_requires_an_os_sandbox_policy() -> None:
     [
         ("crash-start", "PLUGIN_PLATFORM_EXITED"),
         ("stdout-pollution", "PLUGIN_PLATFORM_RESPONSE_INVALID_JSON"),
+        ("invalid-utf8", "PLUGIN_PLATFORM_RESPONSE_INVALID_JSON"),
         ("oversize", "PLUGIN_PLATFORM_RESPONSE_TOO_LARGE"),
         ("duplicate-key", "PLUGIN_PLATFORM_RESPONSE_INVALID_JSON"),
         ("wrong-id", "PLUGIN_PLATFORM_PROTOCOL_VIOLATION"),
@@ -992,8 +993,9 @@ async def test_stderr_is_bounded_and_ambient_secrets_do_not_cross_process_bounda
 
     stderr_probe = _supervisor("stderr-flood", max_stderr_bytes=1024)
     try:
-        with pytest.raises(PlatformHostTransportError):
+        with pytest.raises(PlatformHostTransportError) as overflow:
             await stderr_probe.activate()
+        assert overflow.value.code == "PLUGIN_PLATFORM_STDERR_LIMIT_EXCEEDED"
         snapshot = stderr_probe.snapshot(include_stderr=True)
         stderr_tail = snapshot["stderrTail"]
         assert len(stderr_tail.encode("utf-8")) <= 1024

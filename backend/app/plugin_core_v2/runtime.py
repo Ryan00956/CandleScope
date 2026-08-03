@@ -16,6 +16,7 @@ from typing import Any
 from candlescope_plugin_sdk.platform_v2 import (
     CHART_CONTEXT_CHANGED_EVENT_V1,
     HOST_API_V1,
+    PythonModuleRuntime,
     UI_BRIDGE_V1,
     RequestContext,
     normalize_json,
@@ -76,6 +77,11 @@ from .events import PublicEventHub
 from .jobs import PluginJobScheduler
 from .private_storage import PluginPrivateStorage, StorageNamespace
 from .services import NotificationCenter, PluginSettingsStore
+from .runtime_providers import (
+    RuntimeProviderRegistry,
+    SandboxRuntime,
+    default_runtime_provider_registry,
+)
 
 
 CATALOG_SCHEMA_VERSION = "candlescope.plugin-catalog/2"
@@ -152,6 +158,9 @@ class CorePluginPlatform:
         marketplace_fetcher: MarketplaceFetcher | None = None,
         network_resolver: Any | None = None,
         network_transport: Any | None = None,
+        multi_runtime_enabled: bool | None = None,
+        runtime_provider_seam_enabled: bool | None = None,
+        runtime_provider_registry: RuntimeProviderRegistry | None = None,
     ) -> None:
         if trust_level not in TRUST_LEVELS:
             raise ValueError("plugin platform trust level is invalid")
@@ -222,6 +231,9 @@ class CorePluginPlatform:
         self.live_testnet_execution_enabled = live_testnet_execution_enabled
         self.marketplace_enabled = marketplace_enabled
         self._pinned_python_runtime: PinnedPythonRuntime | None = None
+        self.runtime_provider_registry = (
+            runtime_provider_registry or default_runtime_provider_registry()
+        )
         self.live_broker = LiveBrokerController(
             enabled=live_broker_foundation_enabled,
             root=self.root / "live-broker-v1",
@@ -254,6 +266,12 @@ class CorePluginPlatform:
             probe_python_runtime_factory=(
                 self._marketplace_probe_python_runtime if os.name == "nt" else None
             ),
+            multi_runtime_enabled=multi_runtime_enabled,
+            runtime_provider_seam_enabled=runtime_provider_seam_enabled,
+            runtime_provider_registry=self.runtime_provider_registry,
+        )
+        self.runtime_provider_seam_enabled = (
+            self.installer.runtime_provider_seam_enabled
         )
         self.marketplace = PluginMarketplaceService(
             root=self.root,
@@ -800,7 +818,7 @@ class CorePluginPlatform:
         )
         declared = next(
             item
-            for item in bundle.manifest.backend_entrypoints
+            for item in bundle.manifest.normalized_entrypoints
             if item.id == entrypoint_id
         )
         limits = _RESOURCE_LIMITS[declared.resource_profile]
@@ -810,20 +828,64 @@ class CorePluginPlatform:
             entrypoint_id,
         )
         execution_trust = self._bundle_execution_trust(bundle)
-        executable = activation.executable
-        arguments = ("-I", "-u", "-m", activation.module)
-        if self._bundle_trust(bundle).trust_level == "verified-publisher":
-            runtime = self._marketplace_python_runtime()
-            executable, arguments = runtime.command(
-                site_packages=self._sandbox_site_packages(activation.working_directory),
-                module=activation.module,
+        working_directory = activation.working_directory
+        if self.runtime_provider_seam_enabled:
+            if declared.runtime.kind != activation.runtime_kind:
+                raise core_error(
+                    "PLUGIN_RUNTIME_PROVIDER_ACTIVATION_MISMATCH",
+                    "activation runtime kind does not match the immutable manifest",
+                    plugin_id=record.plugin_id,
+                    details={"entrypointId": entrypoint_id},
+                )
+            provider = self.runtime_provider_registry.get(activation.runtime_kind)
+            provider.validate_runtime(declared.runtime)
+            prepared = provider.prepare_runtime(
+                runtime=declared.runtime,
+                executable=activation.executable,
+                working_directory=activation.working_directory,
+                artifact_sha256=activation.artifact_sha256,
             )
+            sandbox_runtime = None
+            if self._bundle_trust(bundle).trust_level == "verified-publisher":
+                runtime = self._marketplace_python_runtime()
+                sandbox_runtime = SandboxRuntime(
+                    executable=runtime.executable,
+                    site_packages=self._sandbox_site_packages(
+                        activation.working_directory
+                    ),
+                    runtime_identity=runtime.identity_sha256,
+                )
+            launch = provider.build_runtime_launch(
+                prepared,
+                sandbox_runtime=sandbox_runtime,
+            )
+            executable = launch.executable
+            arguments = launch.arguments
+            working_directory = launch.working_directory
+        else:
+            if not isinstance(declared.runtime, PythonModuleRuntime):
+                raise core_error(
+                    "PLUGIN_RUNTIME_PROVIDER_UNAVAILABLE",
+                    "the rollback launch path only supports Python modules",
+                    plugin_id=record.plugin_id,
+                    details={"runtimeKinds": [declared.runtime.kind]},
+                )
+            executable = activation.executable
+            arguments = ("-I", "-u", "-m", activation.module)
+            if self._bundle_trust(bundle).trust_level == "verified-publisher":
+                runtime = self._marketplace_python_runtime()
+                executable, arguments = runtime.command(
+                    site_packages=self._sandbox_site_packages(
+                        activation.working_directory
+                    ),
+                    module=activation.module,
+                )
         spec = EntrypointProcessSpec(
             plugin_id=record.plugin_id,
             entrypoint_id=entrypoint_id,
             executable=executable,
             arguments=arguments,
-            working_directory=activation.working_directory,
+            working_directory=working_directory,
             enabled=True,
             auto_start=False,
             required=False,

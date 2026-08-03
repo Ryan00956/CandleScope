@@ -33,6 +33,10 @@ from app.plugin_host import (  # noqa: E402
     ManagedSidecarProcess,
     SidecarProcessSpec,
 )
+from app.plugin_core_v2.runtime_providers import (  # noqa: E402
+    SandboxRuntime,
+    default_runtime_provider_registry,
+)
 from app.plugin_security_v2.sandbox import SandboxPolicy  # noqa: E402
 from app.plugin_security_v2.python_runtime import (  # noqa: E402
     SANDBOX_PYTHON_BOOTSTRAP,
@@ -58,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox-policies", type=Path)
     parser.add_argument("--sandbox-python", type=Path)
     parser.add_argument("--sandbox-site-packages", type=Path)
+    parser.add_argument("--provider-seam", action="store_true")
     return parser
 
 
@@ -137,6 +142,65 @@ def _entrypoint_command(
     )
 
 
+def _provider_entrypoint_launch(
+    args: argparse.Namespace,
+    *,
+    runtime: object,
+    sandbox_policy: SandboxPolicy | None,
+) -> tuple[Path, tuple[str, ...]]:
+    registry = default_runtime_provider_registry()
+    provider = registry.resolve(runtime)
+    prepared = provider.prepare_runtime(
+        runtime=runtime,
+        executable=args.python_executable,
+        working_directory=args.working_directory,
+        artifact_sha256=None,
+    )
+    sandbox_runtime = (
+        SandboxRuntime(
+            executable=args.sandbox_python,
+            site_packages=args.sandbox_site_packages,
+        )
+        if sandbox_policy is not None
+        else None
+    )
+    launch = provider.build_probe_launch(
+        prepared,
+        sandbox_runtime=sandbox_runtime,
+    )
+    return launch.executable, launch.arguments
+
+
+def _entrypoint_launch(
+    args: argparse.Namespace,
+    manifest: PluginManifest,
+    *,
+    entrypoint_id: str,
+    sandbox_policy: SandboxPolicy | None,
+) -> tuple[Path, tuple[str, ...]]:
+    normalized = {item.id: item for item in manifest.normalized_entrypoints}[
+        entrypoint_id
+    ]
+    if args.provider_seam:
+        return _provider_entrypoint_launch(
+            args,
+            runtime=normalized.runtime,
+            sandbox_policy=sandbox_policy,
+        )
+    declared = {item.id: item for item in manifest.backend_entrypoints}[entrypoint_id]
+    module = getattr(declared, "python_module", None)
+    if not isinstance(module, str):
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "schema-v3 probing requires the Runtime Provider seam",
+        )
+    return _entrypoint_command(
+        args,
+        module=module,
+        sandbox_policy=sandbox_policy,
+    )
+
+
 def _probe_assets(args: argparse.Namespace) -> dict[str, Path]:
     descriptor = loads_strict(args.bundle_descriptor.read_bytes())
     if not isinstance(descriptor, dict) or not isinstance(
@@ -199,11 +263,10 @@ async def _replay_control_transcript(
         raise PlatformContractError(
             "INVALID_CONTRACT", "control transcript response hashes are invalid"
         )
-    entrypoints = {item.id: item for item in manifest.backend_entrypoints}
-    entrypoint = entrypoints[entrypoint_id]
-    executable, arguments = _entrypoint_command(
+    executable, arguments = _entrypoint_launch(
         args,
-        module=entrypoint.python_module,
+        manifest,
+        entrypoint_id=entrypoint_id,
         sandbox_policy=sandbox_policy,
     )
     process = ManagedSidecarProcess(
@@ -320,9 +383,10 @@ async def _probe(args: argparse.Namespace) -> dict[str, Any]:
     activate = not manifest.permissions.required
     for entrypoint in manifest.backend_entrypoints:
         sandbox_policy = sandbox_policies.get(entrypoint.id)
-        executable, arguments = _entrypoint_command(
+        executable, arguments = _entrypoint_launch(
             args,
-            module=entrypoint.python_module,
+            manifest,
+            entrypoint_id=entrypoint.id,
             sandbox_policy=sandbox_policy,
         )
         spec = EntrypointProcessSpec(

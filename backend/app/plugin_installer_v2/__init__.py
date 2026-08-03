@@ -23,6 +23,7 @@ from .errors import (
     MultiRuntimeFeatureDisabledError,
     PlatformBundleError,
     PlatformInstallerError,
+    RuntimeProviderReceiptMismatchError,
     RuntimeProviderUnavailableError,
 )
 from .installer import PlatformPluginInstaller
@@ -40,6 +41,7 @@ __all__ = [
     "PlatformInstallerError",
     "MultiRuntimeFeatureDisabledError",
     "RuntimeProviderUnavailableError",
+    "RuntimeProviderReceiptMismatchError",
     "PlatformPluginInstaller",
     "VerifiedPlatformBundle",
     "build_platform_bundle",

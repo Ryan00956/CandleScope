@@ -13,6 +13,18 @@
 - 采集器：`backend/scripts/plugin_platform_phase0_baseline.py`；
 - 方法、限制、威胁模型和门禁结果见 `docs/PLUGIN_PLATFORM_V2_PHASE0_zh.md`。
 
+多运行时 Phase 2 Python Provider 等价基线：
+
+- `multi-runtime-phase2-2026-08-03-windows-amd64.json`：同一 v2 bundle 分别走
+  Provider 默认路径与内部 rollback 路径，各做 3 次真实冷启动、Windows working set
+  采样和 Host stop 残留检查；
+- Provider 与 rollback 的 executable/argv 必须精确一致；安装耗时对照 Phase 0，启动与
+  内存对照同次 rollback 样本；
+- 采集器及 fail-closed gate：
+  `backend/scripts/plugin_platform_multi_runtime_phase2.py`；
+- 完整契约、适用范围和限制见
+  `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE2_zh.md`。
+
 WP-B Broker foundation 基线：
 
 - `phase11b-wpb-2026-07-23-windows-amd64.json`：10 次独立 worker 冷启动和

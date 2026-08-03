@@ -202,7 +202,27 @@ class PlatformV2Transport:
                 removed.future.cancel()
             raise
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+            # The stderr drainer and stdout reader are independent tasks. A
+            # sidecar can fill stderr before reading the request yet race a
+            # successful stdout response ahead of the drainer on a busy loop.
+            # Yield once so an already-buffered overflow is observed before a
+            # business result crosses the Host boundary.
+            await asyncio.sleep(0)
+            if self._process.stderr_overflow:
+                error = PlatformHostTransportError(
+                    code="PLUGIN_PLATFORM_STDERR_LIMIT_EXCEEDED",
+                    message="plugin process exceeded its bounded stderr budget",
+                    plugin_id=self.plugin_id,
+                    entrypoint_id=self.entrypoint_id,
+                    details={"maxStderrBytes": self.process_spec.max_stderr_bytes},
+                    fatal=True,
+                )
+                self._fail(error)
+                raise error
+            if self._fatal_error is not None:
+                raise self._fatal_error
+            return result
         except asyncio.CancelledError:
             self._cancel_pending_request(
                 request_id,

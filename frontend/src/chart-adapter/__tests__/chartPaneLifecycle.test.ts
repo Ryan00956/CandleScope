@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildLocalizationOptions } from "../chartPaneLifecycle.js";
+import {
+  buildChartPaneOptions,
+  buildLocalizationOptions,
+} from "../chartPaneLifecycle.js";
 import { structuralMock } from "../../test/testHelpers.js";
 
 test("localization formatters resolve public and internal ordinal source time", () => {
@@ -26,4 +29,16 @@ test("localization formatters resolve public and internal ordinal source time", 
     formatters.timeScale.tickMarkFormatter(publicOrdinal, 3),
     formatters.timeScale.tickMarkFormatter(sourceTime, 3),
   );
+});
+
+test("chart pane forwards the custom tick-label width budget", () => {
+  const options = buildChartPaneOptions({
+    container: structuralMock<HTMLElement>({
+      clientWidth: 900,
+      clientHeight: 500,
+    }),
+    tickMarkMaxCharacterLength: 12,
+  });
+
+  assert.equal(options.timeScale?.tickMarkMaxCharacterLength, 12);
 });

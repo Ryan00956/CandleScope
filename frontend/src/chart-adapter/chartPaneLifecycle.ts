@@ -30,6 +30,7 @@ interface PaneAppearanceOptions {
   interval?: string;
   timeFormatter?: (timeSeconds: number) => string;
   tickMarkFormatter?: (timeSeconds: number, tickMarkType: TickMarkType) => string;
+  tickMarkMaxCharacterLength?: number;
 }
 
 function hasProperty<K extends PropertyKey>(
@@ -167,6 +168,7 @@ export function buildChartPaneOptions({
   showTimeScale,
   timeFormatter,
   tickMarkFormatter,
+  tickMarkMaxCharacterLength,
 }: PaneAppearanceOptions & {
   container: HTMLElement;
   showTimeScale?: boolean;
@@ -211,6 +213,9 @@ export function buildChartPaneOptions({
       rightOffset: 5,
       barSpacing: 8,
       ...(showTimeScale !== undefined ? { visible: showTimeScale } : {}),
+      ...(tickMarkMaxCharacterLength !== undefined
+        ? { tickMarkMaxCharacterLength }
+        : {}),
       ...(tickMarkFormatter
         ? { tickMarkFormatter: (time: ChartTime, type: TickMarkType) => tickMarkFormatter(formatterSourceTime(time), type) }
         : loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
@@ -221,7 +226,15 @@ export function buildChartPaneOptions({
 
 export function applyChartPaneAppearance(
   chart: IChartApiBase<ChartTime>,
-  { theme, customBg, timezone, interval, timeFormatter, tickMarkFormatter }: PaneAppearanceOptions,
+  {
+    theme,
+    customBg,
+    timezone,
+    interval,
+    timeFormatter,
+    tickMarkFormatter,
+    tickMarkMaxCharacterLength,
+  }: PaneAppearanceOptions,
 ): void {
   const loc = buildLocalizationOptions(timezone, interval);
   const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({
@@ -232,13 +245,18 @@ export function applyChartPaneAppearance(
     layout: { background: { color: bgColor }, textColor },
     grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
     rightPriceScale: { borderColor },
-    timeScale: { borderColor },
+    timeScale: {
+      borderColor,
+      ...(tickMarkMaxCharacterLength !== undefined
+        ? { tickMarkMaxCharacterLength }
+        : {}),
+      ...(tickMarkFormatter
+        ? { tickMarkFormatter: (time: ChartTime, type: TickMarkType) => tickMarkFormatter(formatterSourceTime(time), type) }
+        : loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
+    },
     ...(timeFormatter
       ? { localization: { timeFormatter: (time: ChartTime) => timeFormatter(formatterSourceTime(time)) } }
       : loc.localization ? { localization: loc.localization } : {}),
-    ...(tickMarkFormatter
-      ? { timeScale: { tickMarkFormatter: (time: ChartTime, type: TickMarkType) => tickMarkFormatter(formatterSourceTime(time), type) } }
-      : loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
   };
   chart.applyOptions(appearanceOptions);
 }

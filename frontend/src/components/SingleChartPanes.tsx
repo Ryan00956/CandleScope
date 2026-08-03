@@ -11,6 +11,7 @@ import type {
   MutableRefObject,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import type { TickMarkType } from "lightweight-charts";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import {
   createDrawingFrameSnapshotFactory,
@@ -276,7 +277,8 @@ export interface SingleChartPanesProps {
   customBg: string;
   timezone?: string;
   timeFormatter?: ((timeSeconds: number) => string) | undefined;
-  tickMarkFormatter?: ((timeSeconds: number, tickMarkType: number) => string) | undefined;
+  tickMarkFormatter?: ((timeSeconds: number, tickMarkType: TickMarkType) => string) | undefined;
+  tickMarkMaxCharacterLength?: number | undefined;
   savedVisibleRange?: SavedVisibleRangeSnapshot | null;
   datasetViewportTransfer?: SurfaceViewportSnapshot | null;
   onDatasetViewportTransferSettled?: ((
@@ -1242,6 +1244,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   timezone = "Local",
   timeFormatter,
   tickMarkFormatter,
+  tickMarkMaxCharacterLength,
   savedVisibleRange = null,
   datasetViewportTransfer = null,
   onDatasetViewportTransferSettled = null,
@@ -1361,6 +1364,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   // the in-place appearance update below, not to the chart surface lifetime.
   const timeFormatterRef = useRef(timeFormatter);
   const tickMarkFormatterRef = useRef(tickMarkFormatter);
+  const tickMarkMaxCharacterLengthRef = useRef(tickMarkMaxCharacterLength);
   const surfaceViewportCacheRef = useRef<Map<string, SurfaceViewportSnapshot>>(new Map());
   const activeSurfaceOwnerRef = useRef<ActiveSurfaceOwner>({
     chart: null,
@@ -1733,6 +1737,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   latestBarPositionRef.current = latestBarPosition;
   timeFormatterRef.current = timeFormatter;
   tickMarkFormatterRef.current = tickMarkFormatter;
+  tickMarkMaxCharacterLengthRef.current = tickMarkMaxCharacterLength;
   surfaceConfigKeyRef.current = surfaceConfigKey;
   const indicatorBarColorMap = useMemo(
     () => indicatorBarcolors.length === 0
@@ -2502,6 +2507,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const initialPaneHeightStorageKey = paneHeightStorageKeyRef.current;
     const initialTimeFormatter = timeFormatterRef.current;
     const initialTickMarkFormatter = tickMarkFormatterRef.current;
+    const initialTickMarkMaxCharacterLength = tickMarkMaxCharacterLengthRef.current;
 
     const options = buildChartPaneOptions({
       container,
@@ -2512,6 +2518,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       showTimeScale: true,
       ...(initialTimeFormatter ? { timeFormatter: initialTimeFormatter } : {}),
       ...(initialTickMarkFormatter ? { tickMarkFormatter: initialTickMarkFormatter } : {}),
+      ...(initialTickMarkMaxCharacterLength !== undefined
+        ? { tickMarkMaxCharacterLength: initialTickMarkMaxCharacterLength }
+        : {}),
     });
     options.layout = {
       ...options.layout,
@@ -3044,6 +3053,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         interval,
         ...(timeFormatter ? { timeFormatter } : {}),
         ...(tickMarkFormatter ? { tickMarkFormatter } : {}),
+        ...(tickMarkMaxCharacterLength !== undefined
+          ? { tickMarkMaxCharacterLength }
+          : {}),
       });
       chart.applyOptions({ layout: buildPaneLayoutOptions() });
       appliedAppearanceIntervalRef.current = interval;
@@ -3138,7 +3150,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [chartAdapter, customBg, dataMeta?.optimistic, dataMeta?.targetSeriesKey, interval, notifyDrawingFrameInvalidation, theme, tickMarkFormatter, timeFormatter, timezone]);
+  }, [chartAdapter, customBg, dataMeta?.optimistic, dataMeta?.targetSeriesKey, interval, notifyDrawingFrameInvalidation, theme, tickMarkFormatter, tickMarkMaxCharacterLength, timeFormatter, timezone]);
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;

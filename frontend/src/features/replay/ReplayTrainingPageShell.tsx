@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { TickMarkType } from "lightweight-charts";
 import MarketChartWorkspace from "../../app/MarketChartWorkspace.js";
 import MarketPageFrame from "../../app/MarketPageFrame.js";
 import MarketStatusBar from "../../app/MarketStatusBar.js";
@@ -48,6 +49,10 @@ import {
   rebuildReplayViewerSeries,
 } from "./replayViewerProjection.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
+import {
+  formatReplayTimeAxisLabel,
+  replayTimeAxisMaxCharacterLength,
+} from "./replayPublicTimeModel.js";
 import { returnToTrainingHub } from "./trainingHubNavigation.js";
 import { replayEffectiveTrainingState, replayOwnsController } from "./replayUiModel.js";
 import { useReplayHistoryRuntime } from "./useReplayHistoryRuntime.js";
@@ -303,6 +308,14 @@ export default function ReplayTrainingPageShell({
   const formatChartTime = useCallback(
     (timeSeconds: number) => formatPublicTime(timeSeconds * 1_000),
     [formatPublicTime],
+  );
+  const formatChartTick = useCallback(
+    (timeSeconds: number, tickMarkType: TickMarkType) => formatReplayTimeAxisLabel(
+      publicTimePolicy,
+      formatPublicTime(timeSeconds * 1_000),
+      tickMarkType,
+    ),
+    [formatPublicTime, publicTimePolicy],
   );
   const returnToHub = useCallback(async () => {
     const sessionId = runtime.store.sessionId;
@@ -814,7 +827,8 @@ export default function ReplayTrainingPageShell({
       customBg={settings.customBg}
       timezone={settings.timezone ?? "UTC"}
       timeFormatter={formatChartTime}
-      tickMarkFormatter={formatChartTime}
+      tickMarkFormatter={formatChartTick}
+      tickMarkMaxCharacterLength={replayTimeAxisMaxCharacterLength(publicTimePolicy)}
       dataMeta={viewerDataMeta}
       onVisibleRangeChange={handleVisibleRangeChange}
       drawingTool={review === null ? drawings.view.drawingTool : null}

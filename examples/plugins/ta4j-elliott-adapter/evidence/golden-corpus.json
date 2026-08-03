@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "candlescope.ta4j-adapter-golden-corpus/1",
+  "adapterVersion": "0.1.0",
+  "ta4jVersion": "0.23.0",
+  "settings": {
+    "degree": "MINUTE",
+    "logicProfile": "ORTHODOX_CLASSICAL",
+    "higherDegrees": 0,
+    "lowerDegrees": 0,
+    "minConfidence": 0,
+    "maxScenarios": 5,
+    "scenarioSwingWindow": 0
+  },
+  "cases": [
+    {
+      "id": "empty",
+      "barCount": 0,
+      "inputSha256": "sha256:0b6e7521cf532d6fa9954cf2cf0b3862c0ca986769d3ea21448e4403dbc76808",
+      "outputSha256": "sha256:65c7deb2558b8b95e2a7e0227b97cb39da056733a98f5ceb98b0454ce8b0f1a7",
+      "scenarioCount": 0,
+      "renderItemCount": 0
+    },
+    {
+      "id": "sine-trend-120",
+      "barCount": 120,
+      "inputSha256": "sha256:6a9badd2d5bb0b5be2ae80a95ad205b9206f32365df01c3d883b1ca6bbff9ab1",
+      "outputSha256": "sha256:022cf743415456c0f8e88991990f4be1b59343e17933f5b97e29d88df6aec0e9",
+      "scenarioCount": 5,
+      "renderItemCount": 27
+    },
+    {
+      "id": "sine-trend-240-prefix",
+      "barCount": 240,
+      "inputSha256": "sha256:8e0c9043886f5542a328c8261bfec2aa05e955513cc7ea87efdc62aa682f7a4f",
+      "outputSha256": "sha256:a6f1321554d147bf6f265a9aa7f03699ad5b787338b1647408aff5eee0a99514",
+      "scenarioCount": 5,
+      "renderItemCount": 27
+    },
+    {
+      "id": "impulse-profile-180",
+      "barCount": 180,
+      "inputSha256": "sha256:f6eead5069a195f053e560d35680f9ce2066ed95de69887ca7634a503dc0d77b",
+      "outputSha256": "sha256:b9911266596002d969a09ad8a924bc44997620df6bf8389004cfe059245a2a63",
+      "scenarioCount": 5,
+      "renderItemCount": 33
+    },
+    {
+      "id": "non-final-last-120",
+      "barCount": 120,
+      "inputSha256": "sha256:c9db32e6b79c352a30c67d3094787c493152ca050c2ac0b417b67c21d9eb4cba",
+      "outputSha256": "sha256:bbcabe3ed4eb5959924241f41e2d783b3cf97e64063c5d0ba90093bb8e023c20",
+      "scenarioCount": 5,
+      "renderItemCount": 27
+    }
+  ],
+  "casesSha256": "sha256:1c5119a4f990e0c246cff94e23e7b1569e39d4ccdfdac522425531ee7299e17b"
+}

@@ -20,8 +20,8 @@ from app.plugin_installer_v2.registry import (
 )
 from app.plugin_runtime_registry_v3 import (
     EVIDENCE_ROLES,
-    OFFICIAL_REGISTRY_PATH,
-    OFFICIAL_ROOTS_PATH,
+    OFFICIAL_REGISTRY_V1_PATH,
+    OFFICIAL_ROOTS_V1_PATH,
     RUNTIME_REGISTRY_ENABLED_ENV,
     RUNTIME_REGISTRY_NETWORK_UPDATES_ENV,
     ManagedRuntimeRegistryService,
@@ -106,8 +106,10 @@ def _activation_record(
 
 
 def test_official_registry_is_signed_and_pins_complete_temurin_supply_chain() -> None:
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
-    registry = verify_runtime_registry_bytes(OFFICIAL_REGISTRY_PATH.read_bytes(), roots)
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V1_PATH.read_bytes())
+    registry = verify_runtime_registry_bytes(
+        OFFICIAL_REGISTRY_V1_PATH.read_bytes(), roots
+    )
 
     assert len(roots) == 1
     assert roots[0].registry_id == "candlescope.reference-runtime"
@@ -131,7 +133,7 @@ def test_official_registry_is_signed_and_pins_complete_temurin_supply_chain() ->
     assert len(release.license_files) == 4
     assert release.probe.argv == ("bin/java.exe", "-version")
 
-    tampered = OFFICIAL_REGISTRY_PATH.read_bytes().replace(
+    tampered = OFFICIAL_REGISTRY_V1_PATH.read_bytes().replace(
         b"21.0.12+8-LTS", b"21.0.13+8-LTS", 1
     )
     with pytest.raises(RuntimeRegistryError) as failure:

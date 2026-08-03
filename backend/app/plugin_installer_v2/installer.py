@@ -80,6 +80,7 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 MULTI_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED"
 RUNTIME_PROVIDER_SEAM_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_ENABLED"
 NATIVE_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED"
+JAVA_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED"
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -807,6 +808,7 @@ class PlatformPluginInstaller:
         multi_runtime_enabled: bool | None = None,
         runtime_provider_seam_enabled: bool | None = None,
         native_runtime_enabled: bool | None = None,
+        java_runtime_enabled: bool | None = None,
         runtime_provider_registry: Any | None = None,
         managed_runtime_registry: Any | None = None,
     ) -> None:
@@ -860,25 +862,36 @@ class PlatformPluginInstaller:
             if native_runtime_enabled is None
             else native_runtime_enabled
         )
-        if runtime_provider_registry is None:
-            from app.plugin_core_v2.runtime_providers import (
-                default_runtime_provider_registry,
-            )
-
-            runtime_provider_registry = default_runtime_provider_registry(
-                native_enabled=self.native_runtime_enabled
-            )
-        if not callable(
-            getattr(runtime_provider_registry, "get", None)
-        ) or not callable(getattr(runtime_provider_registry, "resolve", None)):
-            raise PlatformInstallerError("runtime_provider_registry is invalid")
-        self.runtime_provider_registry = runtime_provider_registry
+        if java_runtime_enabled is not None and not isinstance(
+            java_runtime_enabled, bool
+        ):
+            raise PlatformInstallerError("java_runtime_enabled must be a boolean")
+        self.java_runtime_enabled = (
+            _environment_bool(JAVA_RUNTIME_ENABLED_ENV, default=False)
+            if java_runtime_enabled is None
+            else java_runtime_enabled
+        )
         if managed_runtime_registry is not None and not all(
             callable(getattr(managed_runtime_registry, name, None))
             for name in ("ensure", "public_status", "resolve")
         ):
             raise PlatformInstallerError("managed_runtime_registry is invalid")
         self.managed_runtime_registry = managed_runtime_registry
+        if runtime_provider_registry is None:
+            from app.plugin_core_v2.runtime_providers import (
+                default_runtime_provider_registry,
+            )
+
+            runtime_provider_registry = default_runtime_provider_registry(
+                native_enabled=self.native_runtime_enabled,
+                java_enabled=self.java_runtime_enabled,
+                managed_runtime_registry=self.managed_runtime_registry,
+            )
+        if not callable(
+            getattr(runtime_provider_registry, "get", None)
+        ) or not callable(getattr(runtime_provider_registry, "resolve", None)):
+            raise PlatformInstallerError("runtime_provider_registry is invalid")
+        self.runtime_provider_registry = runtime_provider_registry
         if grant_store is not None:
             if audit_log is not None and grant_store.audit_log is not audit_log:
                 raise PlatformInstallerError(
@@ -1653,6 +1666,16 @@ class PlatformPluginInstaller:
             command.append("--provider-seam")
         if self.native_runtime_enabled:
             command.append("--native-provider")
+        if self.java_runtime_enabled:
+            runtime_root = getattr(self.managed_runtime_registry, "root", None)
+            if not isinstance(runtime_root, Path) or not runtime_root.is_dir():
+                raise PlatformInstallerError(
+                    "Java semantic probe requires an initialized managed Runtime Registry",
+                    plugin_id=bundle.manifest.plugin.id,
+                )
+            command.extend(
+                ("--java-provider", "--managed-runtime-root", str(runtime_root))
+            )
         if trust_level == "untrusted":
             if self.probe_sandbox_factory is None:
                 raise PlatformInstallerError(

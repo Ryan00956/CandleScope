@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 3,
+  "plugin": {
+    "id": "candlescope.ta4j-elliott",
+    "name": "ta4j Elliott Wave Reference",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "runtime": {
+          "kind": "java-jar",
+          "artifact": "runtime/ta4j-elliott-adapter-0.1.0.jar",
+          "runtimeId": "temurin-25.0.4.7",
+          "mainClass": "io.candlescope.plugins.ta4j.elliott.Main",
+          "jvmArgs": [
+            "-Xms32m",
+            "-Xmx256m",
+            "-XX:+UseSerialGC"
+          ]
+        },
+        "transport": "jsonl/1",
+        "resourceProfile": "standard",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "analyze-ta4j-elliott",
+      "kind": "command/1",
+      "title": "Analyze Elliott waves with ta4j",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette"]
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "market.bars.read",
+        "scope": {
+          "contexts": ["live"],
+          "exchanges": ["binance"],
+          "marketTypes": ["spot"],
+          "symbols": ["BTCUSDT"],
+          "intervals": ["1h"],
+          "maxHistoryBars": 5000,
+          "maxConcurrent": 1,
+          "pointInTimeRequired": true
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": [
+    {
+      "id": "ta4j-control",
+      "kind": "controlTranscript",
+      "sha256": "sha256:0b84757fc0dba6b3e7dc8a60881dc74b8b260fff8cb00285b01db8d63323b021",
+      "entrypoint": "main"
+    }
+  ]
+}

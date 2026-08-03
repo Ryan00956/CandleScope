@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "candlescope.plugin-v2-transcript.v1",
+  "protocol": "candlescope.plugin/2",
+  "transport": "jsonl/1",
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": "handshake-1",
+      "method": "handshake",
+      "params": {
+        "protocols": ["candlescope.plugin/2"],
+        "host": {"name": "CandleScope", "version": "0.4.0"},
+        "entrypointId": "main",
+        "hostApis": ["candlescope.host-api/1"],
+        "transports": ["jsonl/1"]
+      },
+      "generation": 0
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "describe-1",
+      "method": "describe",
+      "params": {},
+      "generation": 0
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "activate-1",
+      "method": "activate",
+      "params": {
+        "instanceId": "ta4j-reference-instance-1",
+        "generation": 1,
+        "capabilities": [
+          {
+            "handle": "opaque-market-bars-handle",
+            "permissionId": "market.bars.read",
+            "scope": {"maxBars": 5000, "pointInTimeRequired": true}
+          }
+        ]
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "invoke-empty-1",
+      "method": "invoke",
+      "params": {
+        "contributionId": "analyze-ta4j-elliott",
+        "input": {
+          "market": {
+            "context": {"mode": "replay", "exchange": "binance", "marketType": "spot"},
+            "series": {"symbol": "BTCUSDT", "interval": "1h"},
+            "endMs": 1785715200000,
+            "limit": 120
+          },
+          "settings": {
+            "degree": "MINUTE",
+            "logicProfile": "ORTHODOX_CLASSICAL",
+            "minConfidence": 0.15,
+            "maxScenarios": 3,
+            "scenarioSwingWindow": 0
+          }
+        },
+        "requestContext": {
+          "contributionId": "analyze-ta4j-elliott",
+          "userAction": true,
+          "generation": 1,
+          "traceId": "trace-ta4j-empty-1"
+        }
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "plugin:1:1",
+      "result": {
+        "schemaVersion": "candlescope.market-bars-page/1",
+        "context": {"mode": "replay", "exchange": "binance", "marketType": "spot"},
+        "series": {"symbol": "BTCUSDT", "interval": "1h"},
+        "data": [],
+        "coverage": {"verifiedContiguous": true, "allRowsFinal": true, "asOfMs": 1785715200000},
+        "sourceQuality": {"status": "verified", "source": "frozen-probe"},
+        "pagination": {"complete": true, "nextCursor": null}
+      },
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "health-1",
+      "method": "healthCheck",
+      "params": {},
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "deactivate-1",
+      "method": "deactivate",
+      "params": {"reason": "semantic probe complete"},
+      "generation": 1
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "shutdown-1",
+      "method": "shutdown",
+      "params": {},
+      "generation": 0
+    }
+  ],
+  "expected": {
+    "responseSha256": [
+      "sha256:2e1b9a59c851dc87de092dfd8821cab6c9034642dd6bd1cdc019696e538ff85f",
+      "sha256:a982bd6c773640f9bd54214c5e39a5c666877c96d51c25cb132dfa61e321d1ef",
+      "sha256:5c21d2cf3a215ee1615bfff85c491ac37b8359cbe670d45a484f48a8a7f05396",
+      "sha256:d66dc33b6b1416df57a006ead301fc10eb74cc9dda30f3630aebe363dd3626d8",
+      "sha256:1471c218cb5a9b202edfcbde50caff81bb49c36f731500e3dcc8fc4a2519b892",
+      "sha256:e6ae501bdc0e534e474ee50b56d087134d55ed7761f139fbc7537246971f2155",
+      "sha256:783b75eb948d22dc06496546a20fa83645c71b37e19e514bf3cb951301f2e864",
+      "sha256:4e82727a9b2c136956d261062a9a7a9c9706cddc7b934517f2927e407bd9de36"
+    ],
+    "transcriptSha256": "sha256:0b84757fc0dba6b3e7dc8a60881dc74b8b260fff8cb00285b01db8d63323b021"
+  }
+}

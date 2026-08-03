@@ -42,7 +42,10 @@ from .service import (
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 OFFICIAL_ROOTS_PATH = PACKAGE_ROOT / "official-runtime-registry-roots.json"
-OFFICIAL_REGISTRY_PATH = PACKAGE_ROOT / "official-runtime-registry-v1.json"
+OFFICIAL_ROOTS_V1_PATH = PACKAGE_ROOT / "official-runtime-registry-roots-v1.json"
+OFFICIAL_REGISTRY_V1_PATH = PACKAGE_ROOT / "official-runtime-registry-v1.json"
+OFFICIAL_REGISTRY_V2_PATH = PACKAGE_ROOT / "official-runtime-registry-v2.json"
+OFFICIAL_REGISTRY_PATH = OFFICIAL_REGISTRY_V2_PATH
 
 
 def build_official_runtime_registry(
@@ -52,10 +55,21 @@ def build_official_runtime_registry(
     network_updates_enabled: bool | None = None,
     fetcher: RuntimeArtifactFetcher | None = None,
 ) -> ManagedRuntimeRegistryService:
-    return ManagedRuntimeRegistryService.from_files(
+    try:
+        roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+        revision_1 = OFFICIAL_REGISTRY_V1_PATH.read_bytes()
+        revision_2 = OFFICIAL_REGISTRY_V2_PATH.read_bytes()
+    except OSError as exc:
+        raise registry_error(
+            "PLUGIN_RUNTIME_REGISTRY_CONFIGURATION_INVALID",
+            "build-pinned Runtime Registry assets could not be read",
+            details={"errorType": type(exc).__name__},
+        ) from exc
+    return ManagedRuntimeRegistryService(
         root=root,
-        roots_path=OFFICIAL_ROOTS_PATH,
-        registry_path=OFFICIAL_REGISTRY_PATH,
+        roots=roots,
+        bootstrap_registry=revision_2,
+        bootstrap_history=(revision_1,),
         enabled=enabled,
         network_updates_enabled=network_updates_enabled,
         fetcher=fetcher,
@@ -70,7 +84,10 @@ __all__ = [
     "HttpsRuntimeArtifactFetcher",
     "ManagedRuntimeRegistryService",
     "OFFICIAL_REGISTRY_PATH",
+    "OFFICIAL_REGISTRY_V1_PATH",
+    "OFFICIAL_REGISTRY_V2_PATH",
     "OFFICIAL_ROOTS_PATH",
+    "OFFICIAL_ROOTS_V1_PATH",
     "ProbeResult",
     "REGISTRY_SCHEMA_ID",
     "REGISTRY_SCHEMA_VERSION",

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "candlescope.ta4j-elliott-supply-chain/1",
+  "adapter": {
+    "version": "0.1.0",
+    "mainClass": "io.candlescope.plugins.ta4j.elliott.Main",
+    "releaseJar": "runtime/ta4j-elliott-adapter-0.1.0.jar",
+    "releaseJarSize": 4435729,
+    "releaseJarSha256": "sha256:19c60a36d178d9e9340c4133ed0d60f4d80e4c19c3e17e01aaca6231bdcd6060"
+  },
+  "compiler": {
+    "distribution": "Eclipse Temurin",
+    "version": "25.0.4+7-LTS",
+    "archive": "OpenJDK25U-jdk_x64_windows_hotspot_25.0.4_7.zip",
+    "size": 141164204,
+    "sha256": "sha256:7caab7db43bf4b94a2e6252c699e70d90084f9aa7c943cd3414761fd540937ae",
+    "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jdk_x64_windows_hotspot_25.0.4_7.zip"
+  },
+  "runtime": {
+    "runtimeId": "temurin-25.0.4.7",
+    "version": "25.0.4+7-LTS",
+    "archive": "OpenJDK25U-jre_x64_windows_hotspot_25.0.4_7.zip",
+    "size": 58474646,
+    "sha256": "sha256:5b0d58f043f762fa3ee6cc12b6774b59b245cafdcb357e45ce61f822aa9a56cb",
+    "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jre_x64_windows_hotspot_25.0.4_7.zip"
+  },
+  "upstream": {
+    "repository": "https://github.com/ta4j/ta4j",
+    "release": "https://github.com/ta4j/ta4j/releases/tag/0.23.0",
+    "tag": "0.23.0",
+    "tagObject": "0f3a70324477e3bd7f0c943236a2bb6eeb897e29",
+    "commit": "896d7138a9d1818fe6725b89b433ba7860b8f654"
+  },
+  "dependencies": [
+    {
+      "name": "ta4j-core",
+      "version": "0.23.0",
+      "file": "ta4j-core-0.23.0.jar",
+      "size": 1823748,
+      "sha256": "sha256:5cd1765cd309f7f99a458d7078fa65e1bec9db2fd51fb2a82496e3b033d26169",
+      "url": "https://repo.maven.apache.org/maven2/org/ta4j/ta4j-core/0.23.0/ta4j-core-0.23.0.jar",
+      "purl": "pkg:maven/org.ta4j/ta4j-core@0.23.0",
+      "license": "MIT"
+    },
+    {
+      "name": "slf4j-api",
+      "version": "2.0.18",
+      "file": "slf4j-api-2.0.18.jar",
+      "size": 69982,
+      "sha256": "sha256:44508fd1576500688c790b190acdd16fec4f8c79a3e0b900afd70503cf055f55",
+      "url": "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.18/slf4j-api-2.0.18.jar",
+      "purl": "pkg:maven/org.slf4j/slf4j-api@2.0.18",
+      "license": "MIT"
+    },
+    {
+      "name": "commons-math3",
+      "version": "3.6.1",
+      "file": "commons-math3-3.6.1.jar",
+      "size": 2213560,
+      "sha256": "sha256:1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308",
+      "url": "https://repo.maven.apache.org/maven2/org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar",
+      "purl": "pkg:maven/org.apache.commons/commons-math3@3.6.1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "gson",
+      "version": "2.14.0",
+      "file": "gson-2.14.0.jar",
+      "size": 313604,
+      "sha256": "sha256:2cbd119bf1961c28788310963dc80ba65f58cdeec1dd139c8bdb1240faa2c36f",
+      "url": "https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.14.0/gson-2.14.0.jar",
+      "purl": "pkg:maven/com.google.code.gson/gson@2.14.0",
+      "license": "Apache-2.0"
+    }
+  ]
+}

@@ -164,6 +164,7 @@ class CorePluginPlatform:
         multi_runtime_enabled: bool | None = None,
         runtime_provider_seam_enabled: bool | None = None,
         native_runtime_enabled: bool | None = None,
+        java_runtime_enabled: bool | None = None,
         runtime_provider_registry: RuntimeProviderRegistry | None = None,
         runtime_registry_enabled: bool | None = None,
         runtime_registry_network_updates_enabled: bool | None = None,
@@ -283,6 +284,7 @@ class CorePluginPlatform:
             multi_runtime_enabled=multi_runtime_enabled,
             runtime_provider_seam_enabled=runtime_provider_seam_enabled,
             native_runtime_enabled=native_runtime_enabled,
+            java_runtime_enabled=java_runtime_enabled,
             runtime_provider_registry=runtime_provider_registry,
             managed_runtime_registry=managed_runtime_registry,
         )
@@ -291,6 +293,7 @@ class CorePluginPlatform:
             self.installer.runtime_provider_seam_enabled
         )
         self.native_runtime_enabled = self.installer.native_runtime_enabled
+        self.java_runtime_enabled = self.installer.java_runtime_enabled
         self.marketplace = PluginMarketplaceService(
             root=self.root,
             installer=self.installer,
@@ -875,9 +878,13 @@ class CorePluginPlatform:
                 )
             provider = self.runtime_provider_registry.get(activation.runtime_kind)
             provider.validate_runtime(declared.runtime)
+            # Managed-language activations store the Host runtime executable and
+            # the immutable plugin artifact separately.  Providers validate the
+            # declared artifact first, then resolve the exact managed runtime.
+            provider_target = activation.artifact or activation.executable
             prepared = provider.prepare_runtime(
                 runtime=declared.runtime,
-                executable=activation.executable,
+                executable=provider_target,
                 working_directory=activation.working_directory,
                 artifact_sha256=activation.artifact_sha256,
             )
@@ -1889,6 +1896,15 @@ class CorePluginPlatform:
                         "state": supervisor.state,
                         "generation": supervisor.generation,
                         **(
+                            {
+                                "runtimeKind": activation.runtime_kind,
+                                "runtimeId": activation.runtime_id,
+                                "artifactSha256": activation.artifact_sha256,
+                            }
+                            if activation is not None
+                            else {}
+                        ),
+                        **(
                             {"runtimeSupply": activation.runtime_supply.to_wire()}
                             if activation is not None
                             and activation.runtime_supply is not None
@@ -1904,6 +1920,9 @@ class CorePluginPlatform:
                     "entrypointId": activation.id,
                     "state": "unavailable",
                     "generation": 0,
+                    "runtimeKind": activation.runtime_kind,
+                    "runtimeId": activation.runtime_id,
+                    "artifactSha256": activation.artifact_sha256,
                     "runtimeSupply": activation.runtime_supply.to_wire(),
                 }
                 for activation in record.entrypoints

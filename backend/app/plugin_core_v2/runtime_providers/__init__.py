@@ -16,6 +16,11 @@ from .native import (
     NATIVE_EXECUTABLE_PROVIDER_VERSION,
     NativeExecutableProvider,
 )
+from .java import (
+    JAVA_JAR_PROVIDER_VERSION,
+    JAVA_RUNTIME_ENABLED_ENV,
+    JavaJarProvider,
+)
 from .python import PYTHON_MODULE_PROVIDER_VERSION, PythonModuleProvider
 from .registry import (
     NATIVE_RUNTIME_ENABLED_ENV,
@@ -26,9 +31,12 @@ from .registry import (
 __all__ = [
     "NATIVE_EXECUTABLE_PROVIDER_VERSION",
     "NATIVE_RUNTIME_ENABLED_ENV",
+    "JAVA_JAR_PROVIDER_VERSION",
+    "JAVA_RUNTIME_ENABLED_ENV",
     "PYTHON_MODULE_PROVIDER_VERSION",
     "RUNTIME_PROVIDER_API_VERSION",
     "NativeExecutableProvider",
+    "JavaJarProvider",
     "PreparedLaunch",
     "PreparedRuntime",
     "PythonModuleProvider",

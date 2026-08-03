@@ -23,4 +23,8 @@ def test_v2_installer_does_not_depend_on_legacy_or_business_modules() -> None:
                 imports.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imports.append(node.module)
-    assert not [name for name in imports if name.startswith(forbidden)]
+    assert not [
+        name
+        for name in imports
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+    ]

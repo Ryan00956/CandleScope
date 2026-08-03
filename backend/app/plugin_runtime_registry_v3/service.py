@@ -839,6 +839,7 @@ class ManagedRuntimeRegistryService:
         root: Path | str,
         roots: Iterable[RuntimeRegistryRoot],
         bootstrap_registry: bytes | None = None,
+        bootstrap_history: Iterable[bytes] = (),
         enabled: bool | None = None,
         network_updates_enabled: bool | None = None,
         fetcher: RuntimeArtifactFetcher | None = None,
@@ -863,6 +864,7 @@ class ManagedRuntimeRegistryService:
         if not callable(getattr(self.fetcher, "fetch", None)):
             raise ValueError("runtime registry fetcher is invalid")
         self.bootstrap_registry = bootstrap_registry
+        self.bootstrap_history = tuple(bootstrap_history)
         if self.enabled:
             if not self.roots:
                 raise registry_error(
@@ -877,24 +879,50 @@ class ManagedRuntimeRegistryService:
                             "PLUGIN_RUNTIME_REGISTRY_STATE_INVALID",
                             "enabled managed runtime registry has no bootstrap revision",
                         )
-                    verified = verify_runtime_registry_bytes(
-                        bootstrap_registry, self.roots
-                    )
-                    if verified.revision != 1:
+                    documents = (*self.bootstrap_history, bootstrap_registry)
+                    verified_chain = [
+                        verify_runtime_registry_bytes(document, self.roots)
+                        for document in documents
+                    ]
+                    first = verified_chain[0]
+                    if (
+                        first.revision != 1
+                        or first.previous_registry_sha256 is not None
+                    ):
                         raise registry_error(
                             "PLUGIN_RUNTIME_REGISTRY_CHAIN_INVALID",
-                            "bootstrap runtime registry must be revision 1",
+                            "bootstrap runtime registry chain must start at revision 1",
                         )
-                    self._store_registry(verified)
+                    for previous, candidate in zip(
+                        verified_chain, verified_chain[1:], strict=False
+                    ):
+                        if (
+                            candidate.registry_id != previous.registry_id
+                            or candidate.revision != previous.revision + 1
+                            or candidate.previous_registry_sha256 != previous.sha256
+                        ):
+                            raise registry_error(
+                                "PLUGIN_RUNTIME_REGISTRY_CHAIN_INVALID",
+                                "bootstrap runtime registry history is not a continuous signed chain",
+                            )
+                    verified = verified_chain[-1]
+                    for item in verified_chain:
+                        self._store_registry(item)
                     self._write_state(
                         {
                             "schemaVersion": STATE_SCHEMA_VERSION,
                             "activeRegistrySha256": verified.sha256,
-                            "history": [],
-                            "acceptedRegistrySha256": [verified.sha256],
-                            "revokedArtifactSha256": [
-                                item.sha256 for item in verified.revocations
+                            "history": [item.sha256 for item in verified_chain[:-1]],
+                            "acceptedRegistrySha256": [
+                                item.sha256 for item in verified_chain
                             ],
+                            "revokedArtifactSha256": sorted(
+                                {
+                                    revocation.sha256
+                                    for registry in verified_chain
+                                    for revocation in registry.revocations
+                                }
+                            ),
                         }
                     )
                 self._active_registry_locked()

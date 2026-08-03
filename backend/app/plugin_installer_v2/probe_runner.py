@@ -66,6 +66,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandbox-site-packages", type=Path)
     parser.add_argument("--provider-seam", action="store_true")
     parser.add_argument("--native-provider", action="store_true")
+    parser.add_argument("--java-provider", action="store_true")
+    parser.add_argument("--managed-runtime-root", type=Path)
     return parser
 
 
@@ -168,7 +170,30 @@ def _provider_entrypoint_launch(
     runtime: object,
     sandbox_policy: SandboxPolicy | None,
 ) -> _EntrypointLaunch:
-    registry = default_runtime_provider_registry(native_enabled=args.native_provider)
+    managed_registry = None
+    if args.java_provider:
+        if args.managed_runtime_root is None:
+            raise PlatformContractError(
+                "INVALID_CONTRACT",
+                "Java probing requires the exact managed Runtime Registry root",
+            )
+        from app.plugin_runtime_registry_v3 import build_official_runtime_registry
+
+        managed_registry = build_official_runtime_registry(
+            root=args.managed_runtime_root,
+            enabled=True,
+            network_updates_enabled=False,
+        )
+    elif args.managed_runtime_root is not None:
+        raise PlatformContractError(
+            "INVALID_CONTRACT",
+            "managed Runtime Registry root requires the Java Provider",
+        )
+    registry = default_runtime_provider_registry(
+        native_enabled=args.native_provider,
+        java_enabled=args.java_provider,
+        managed_runtime_registry=managed_registry,
+    )
     provider = registry.resolve(runtime)
     artifact_path = getattr(runtime, "artifact", None)
     executable = args.python_executable

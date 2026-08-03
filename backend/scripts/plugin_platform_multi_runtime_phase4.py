@@ -122,8 +122,8 @@ def capture_contract() -> dict[str, Any]:
     )
     from app.plugin_runtime_registry_v3 import (
         EVIDENCE_ROLES,
-        OFFICIAL_REGISTRY_PATH,
-        OFFICIAL_ROOTS_PATH,
+        OFFICIAL_REGISTRY_V1_PATH,
+        OFFICIAL_ROOTS_V1_PATH,
         RUNTIME_CACHE_RECEIPT_SCHEMA,
         RUNTIME_REGISTRY_ENABLED_ENV,
         RUNTIME_REGISTRY_NETWORK_UPDATES_ENV,
@@ -136,8 +136,10 @@ def capture_contract() -> dict[str, Any]:
     from scripts import plugin_platform_multi_runtime_phase3 as phase3
 
     phase3_contract = phase3.validate_contract()
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
-    registry = verify_runtime_registry_bytes(OFFICIAL_REGISTRY_PATH.read_bytes(), roots)
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V1_PATH.read_bytes())
+    registry = verify_runtime_registry_bytes(
+        OFFICIAL_REGISTRY_V1_PATH.read_bytes(), roots
+    )
     release = registry.runtimes[0]
     sources = {
         path.name: path.read_text(encoding="utf-8")
@@ -171,7 +173,7 @@ def capture_contract() -> dict[str, Any]:
             )
         ),
         "signedRegistry": {
-            "rootsSha256": _sha256_path(OFFICIAL_ROOTS_PATH),
+            "rootsSha256": _sha256_path(OFFICIAL_ROOTS_V1_PATH),
             "registrySha256": registry.sha256,
             "registryId": registry.registry_id,
             "revision": registry.revision,

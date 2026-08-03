@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterable
 
 from .base import RUNTIME_PROVIDER_API_VERSION, RuntimeProvider, RuntimeProviderError
+from .java import JAVA_RUNTIME_ENABLED_ENV, JavaJarProvider
 from .native import NativeExecutableProvider
 from .python import PythonModuleProvider
 
@@ -95,15 +96,15 @@ class RuntimeProviderRegistry:
         return provider
 
 
-def _native_enabled(value: bool | None) -> bool:
+def _provider_enabled(value: bool | None, *, environment_name: str, label: str) -> bool:
     if value is not None:
         if not isinstance(value, bool):
             raise RuntimeProviderError(
                 "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
-                "native Runtime Provider enablement must be a boolean",
+                f"{label} Runtime Provider enablement must be a boolean",
             )
         return value
-    raw = os.environ.get(NATIVE_RUNTIME_ENABLED_ENV)
+    raw = os.environ.get(environment_name)
     if raw is None:
         return False
     normalized = raw.strip().casefold()
@@ -113,14 +114,27 @@ def _native_enabled(value: bool | None) -> bool:
         return False
     raise RuntimeProviderError(
         "PLUGIN_RUNTIME_PROVIDER_DESCRIPTOR_INVALID",
-        f"{NATIVE_RUNTIME_ENABLED_ENV} must be one of 0/1/false/true/no/yes/off/on",
+        f"{environment_name} must be one of 0/1/false/true/no/yes/off/on",
     )
 
 
 def default_runtime_provider_registry(
-    *, native_enabled: bool | None = None
+    *,
+    native_enabled: bool | None = None,
+    java_enabled: bool | None = None,
+    managed_runtime_registry: object | None = None,
 ) -> RuntimeProviderRegistry:
     providers: list[RuntimeProvider] = [PythonModuleProvider()]
-    if _native_enabled(native_enabled):
+    if _provider_enabled(
+        native_enabled,
+        environment_name=NATIVE_RUNTIME_ENABLED_ENV,
+        label="native",
+    ):
         providers.append(NativeExecutableProvider())
+    if _provider_enabled(
+        java_enabled,
+        environment_name=JAVA_RUNTIME_ENABLED_ENV,
+        label="Java",
+    ):
+        providers.append(JavaJarProvider(managed_runtime_registry))
     return RuntimeProviderRegistry(providers)

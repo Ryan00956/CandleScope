@@ -1,0 +1,75 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:8b2d880a-5eb2-4b4c-8d95-63d191965501",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-03T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "candlescope-ta4j-elliott-adapter",
+      "version": "0.1.0",
+      "licenses": [{"license": {"id": "GPL-3.0-only"}}],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "19c60a36d178d9e9340c4133ed0d60f4d80e4c19c3e17e01aaca6231bdcd6060"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "group": "org.ta4j",
+      "name": "ta4j-core",
+      "version": "0.23.0",
+      "purl": "pkg:maven/org.ta4j/ta4j-core@0.23.0",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "hashes": [{"alg": "SHA-256", "content": "5cd1765cd309f7f99a458d7078fa65e1bec9db2fd51fb2a82496e3b033d26169"}]
+    },
+    {
+      "type": "library",
+      "group": "org.slf4j",
+      "name": "slf4j-api",
+      "version": "2.0.18",
+      "purl": "pkg:maven/org.slf4j/slf4j-api@2.0.18",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "hashes": [{"alg": "SHA-256", "content": "44508fd1576500688c790b190acdd16fec4f8c79a3e0b900afd70503cf055f55"}]
+    },
+    {
+      "type": "library",
+      "group": "org.apache.commons",
+      "name": "commons-math3",
+      "version": "3.6.1",
+      "purl": "pkg:maven/org.apache.commons/commons-math3@3.6.1",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "hashes": [{"alg": "SHA-256", "content": "1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308"}]
+    },
+    {
+      "type": "library",
+      "group": "com.google.code.gson",
+      "name": "gson",
+      "version": "2.14.0",
+      "purl": "pkg:maven/com.google.code.gson/gson@2.14.0",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "hashes": [{"alg": "SHA-256", "content": "2cbd119bf1961c28788310963dc80ba65f58cdeec1dd139c8bdb1240faa2c36f"}]
+    },
+    {
+      "type": "library",
+      "name": "candlescope-plugin-sdk-java",
+      "version": "0.1.0",
+      "licenses": [{"license": {"id": "GPL-3.0-only"}}]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:maven/org.ta4j/ta4j-core@0.23.0",
+      "dependsOn": [
+        "pkg:maven/org.slf4j/slf4j-api@2.0.18",
+        "pkg:maven/org.apache.commons/commons-math3@3.6.1",
+        "pkg:maven/com.google.code.gson/gson@2.14.0"
+      ]
+    }
+  ]
+}

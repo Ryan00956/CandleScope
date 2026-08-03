@@ -1,0 +1,25 @@
+CandleScope ta4j Elliott Adapter 0.1.0
+
+The adapter and the CandleScope Java SDK are distributed under
+GPL-3.0-only. The complete license text is the repository root LICENSE and is
+embedded in the release JAR as META-INF/licenses/GPL-3.0-only.txt.
+
+This adapter links the following unmodified upstream Release artifacts:
+
+* ta4j-core 0.23.0, Copyright ta4j contributors, MIT License.
+  https://github.com/ta4j/ta4j/releases/tag/0.23.0
+* SLF4J API 2.0.18, Copyright QOS.ch, MIT License.
+  https://www.slf4j.org/license.html
+* Apache Commons Math 3.6.1, Copyright The Apache Software Foundation,
+  Apache License 2.0.
+  https://www.apache.org/licenses/LICENSE-2.0
+* Gson 2.14.0, Copyright Google LLC, Apache License 2.0.
+  https://github.com/google/gson/blob/main/LICENSE
+
+Exact Maven coordinates, URLs, sizes and SHA-256 values are recorded in
+supply-chain.lock.json and sbom/cyclonedx.json. No ta4j Elliott implementation
+is copied into the adapter; the adapter calls ElliottWaveAnalysisRunner from
+the pinned ta4j-core JAR. Full MIT and Apache-2.0 texts, plus the Apache Commons
+Math NOTICE, are distributed beside this file and embedded in the release JAR.
+The original LICENSE/NOTICE entries present in the locked Commons Math and
+SLF4J JARs are preserved byte-for-byte under META-INF/licenses/upstream/.

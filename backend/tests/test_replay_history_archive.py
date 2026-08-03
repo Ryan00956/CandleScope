@@ -330,6 +330,125 @@ def test_remote_catalog_random_selection_is_independent_of_local_object_cache(
     assert selections[0] == selections[1] == selections[2]
 
 
+def test_remote_unchanged_index_refresh_does_not_reload_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-unchanged-index",
+                digest_character="a",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    repository = RemoteReplayHistoryRepository(
+        tmp_path / "cache",
+        origin,
+        refresh_seconds=0,
+    )
+    calls: list[str] = []
+    original_read_json = repository.origin.read_json
+
+    def read_json(relative_path: str, *, max_bytes: int):
+        calls.append(relative_path)
+        return original_read_json(relative_path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(repository.origin, "read_json", read_json)
+
+    assert repository.list_all_series()
+    assert repository.list_all_series()
+
+    assert calls == ["index.json", "index.json"]
+    diagnostics = repository.diagnostics()
+    # ``diagnostics()`` asks the base repository for a current snapshot and
+    # therefore performs one additional zero-interval index-only refresh.
+    assert diagnostics["remote_index_unchanged_refreshes"] == 3
+    assert diagnostics["remote_manifests_loaded"] == 1
+    assert diagnostics["remote_manifests_reused"] == 0
+
+
+def test_remote_changed_index_loads_only_changed_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    writer = ReplayHistoryArchiveWriter(origin, now_ms=lambda: NOW_MS)
+    eth_identity = ReplaySeriesIdentity("binance", "spot", "ETHUSDT")
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=100,
+                source_key="fixture-incremental-btc-a",
+                digest_character="b",
+            )
+        ],
+    )
+    writer.import_batches(
+        eth_identity,
+        "1m",
+        [
+            _batch(
+                list(range(10)),
+                price_base=200,
+                source_key="fixture-incremental-eth",
+                digest_character="c",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS)
+    repository = RemoteReplayHistoryRepository(
+        tmp_path / "cache",
+        origin,
+        refresh_seconds=0,
+    )
+    calls: list[str] = []
+    original_read_json = repository.origin.read_json
+
+    def read_json(relative_path: str, *, max_bytes: int):
+        calls.append(relative_path)
+        return original_read_json(relative_path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(repository.origin, "read_json", read_json)
+    changed = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(10, 20)),
+                price_base=100,
+                source_key="fixture-incremental-btc-b",
+                digest_character="d",
+            )
+        ],
+    )
+    publish_remote_history_index(origin, now_ms=NOW_MS + 1)
+
+    series = repository.list_all_series()
+
+    manifest_calls = [item for item in calls if item != "index.json"]
+    assert len(manifest_calls) == 1
+    assert manifest_calls[0].endswith(f"{changed.catalog_epoch[7:]}.json")
+    assert all("ETHUSDT" not in item for item in manifest_calls)
+    assert {(item["symbol"], item["total_count"]) for item in series} == {
+        ("BTCUSDT", 20),
+        ("ETHUSDT", 10),
+    }
+    diagnostics = repository.diagnostics()
+    assert diagnostics["remote_manifests_loaded"] == 3
+    assert diagnostics["remote_manifests_reused"] == 1
+
+
 def test_remote_repository_materializes_only_objects_overlapping_selected_range(
     tmp_path: Path,
 ) -> None:
@@ -1733,6 +1852,16 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
         training = service.training
         assert training is not None
         await training.create_run(request)
+        repository = service.history_repository
+        original_scan_gaps = repository.scan_gaps_at_revision
+        continuity_scans = 0
+
+        def counted_scan_gaps(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal continuity_scans
+            continuity_scans += 1
+            return original_scan_gaps(*args, **kwargs)
+
+        repository.scan_gaps_at_revision = counted_scan_gaps  # type: ignore[method-assign]
         session = await service.get_session("native-session-1")
         snapshot = session["snapshot"]
         public_replay_start_ms = int(
@@ -1759,6 +1888,8 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
             "1015",
         ]
         assert page["excluded_ranges"] == []
+        proof_scan_count = continuity_scans
+        assert proof_scan_count >= 1
 
         replacement_manifest = writer.import_batches(
             IDENTITY,
@@ -1789,6 +1920,7 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
         )
         assert repeated["history_epoch"] == page["history_epoch"]
         assert repeated["bars"] == page["bars"]
+        assert continuity_scans == proof_scan_count
 
         connection = sqlite3.connect(database)
         try:

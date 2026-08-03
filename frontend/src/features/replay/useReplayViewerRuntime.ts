@@ -85,6 +85,40 @@ export function createReplayViewerProjectionScheduler(
   };
 }
 
+interface ReplayRevisionStore {
+  readonly getAuthoritySnapshot: () => { readonly revision: number };
+  readonly subscribe: (listener: () => void) => () => void;
+}
+
+export function waitForReplayStoreRevision(
+  store: ReplayRevisionStore,
+  targetRevision: number,
+  timeoutMs = 250,
+): Promise<boolean> {
+  if (store.getAuthoritySnapshot().revision >= targetRevision) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe: (() => void) | null = null;
+    let unsubscribeWhenReady = false;
+    const finish = (converged: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (unsubscribe === null) unsubscribeWhenReady = true;
+      else unsubscribe();
+      resolve(converged);
+    };
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    unsubscribe = store.subscribe(() => {
+      if (store.getAuthoritySnapshot().revision >= targetRevision) finish(true);
+    });
+    if (unsubscribeWhenReady) unsubscribe();
+    if (store.getAuthoritySnapshot().revision >= targetRevision) finish(true);
+  });
+}
+
 export function coalesceReplayViewerSourceDeltas(
   deltas: readonly WindowDelta[],
 ): WindowDelta | null {
@@ -221,6 +255,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const controlRef = useRef(controlPending);
   controlRef.current = controlPending;
   const viewerCommandRef = useRef<string | null>(null);
+  const marketTracksRequestRef = useRef(0);
   const sourceStore = runtime.replayStore.seriesStore;
   const sessionId = runtime.store.sessionId;
   const config = runtime.store.sessionConfig;
@@ -366,7 +401,10 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const refreshMarketTracks = useCallback(async (
     runId: string,
   ): Promise<ReplayMarketTracksResponse> => {
+    const requestSequence = marketTracksRequestRef.current + 1;
+    marketTracksRequestRef.current = requestSequence;
     const response = await defaultReplayV2Api.tracksRun(runId);
+    if (requestSequence !== marketTracksRequestRef.current) return response;
     if (!publishViewerState(response.viewer_state)) {
       throw new Error("authoritative replay viewer projection could not be prepared");
     }
@@ -643,7 +681,21 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       const result = await defaultReplayV2Api.commandRun(command.run_id, command);
       publishViewerState(result.viewer_state);
       setProgress(progressFromResult(result));
-      await refreshMarketTracks(command.run_id);
+      const displayAdvance = type === "advance"
+        && boundPayload.basis === "DISPLAY_BAR";
+      if (displayAdvance) {
+        const converged = await waitForReplayStoreRevision(
+          runtime.replayStore,
+          result.revision,
+        );
+        if (!converged) runtime.actions.requestResync("v2-display-advance-ack-timeout");
+        void refreshMarketTracks(command.run_id).catch((cause: unknown) => {
+          setMarketTracks(null);
+          setError(cause instanceof Error ? cause.message : "市场轨道状态刷新失败");
+        });
+      } else {
+        await refreshMarketTracks(command.run_id);
+      }
       return result;
     } catch (cause) {
       await failClosedAndRefreshMarketTracks(command.run_id);
@@ -652,7 +704,14 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     } finally {
       setControlPending((current) => current?.command_id === command.command_id ? null : current);
     }
-  }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState, refreshMarketTracks]);
+  }, [
+    buildCommand,
+    failClosedAndRefreshMarketTracks,
+    publishViewerState,
+    refreshMarketTracks,
+    runtime.actions,
+    runtime.replayStore,
+  ]);
 
   const setDisplayInterval = useCallback(async (
     interval: string,

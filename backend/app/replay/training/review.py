@@ -761,6 +761,11 @@ class ReviewRecorder:
 
     @staticmethod
     def _internal_adapter_command(context: Mapping[str, object]) -> bool:
+        if context.get("kind") == "STATE":
+            # Controller expiry is transport ownership housekeeping.  It does
+            # not change the deterministic market/account state and must not
+            # consume a review event plus a full actor anchor every TTL cycle.
+            return context.get("state_kind") == "controller_expired"
         if context.get("kind") != "COMMAND":
             return False
         command = context.get("command")
@@ -768,16 +773,20 @@ class ReviewRecorder:
             return False
         command_id = command.get("command_id")
         command_type = command.get("type")
-        return (
-            isinstance(command_id, str)
-            and command_id.startswith("v2multi-")
-            and command_type
-            in {
+        if not isinstance(command_id, str):
+            return False
+        if command_id.startswith("v2multi-"):
+            return command_type in {
                 "acquire_controller",
                 "step",
                 "advance_by",
             }
-        )
+        return command_id.startswith("v2part-") and command_type in {
+            "_training_fast_forward_empty_account",
+            "_training_fast_forward_final_state",
+            "step",
+            "advance_by",
+        }
 
     @staticmethod
     def _position_descriptor(position: object) -> dict[str, object]:

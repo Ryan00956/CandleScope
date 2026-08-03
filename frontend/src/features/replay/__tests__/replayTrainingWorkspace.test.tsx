@@ -13,7 +13,10 @@ import {
   loadReplayWorkspacePreferences,
   saveReplayWorkspacePreferences,
 } from "../replayWorkspacePreferences.js";
-import { createReplayViewerProjectionScheduler } from "../useReplayViewerRuntime.js";
+import {
+  createReplayViewerProjectionScheduler,
+  waitForReplayStoreRevision,
+} from "../useReplayViewerRuntime.js";
 
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -308,6 +311,26 @@ test("viewer projection coalesces source bursts to one rebuild per browser frame
   assert.equal(callbacks.size, 0);
   scheduler.cancel();
   assert.deepEqual(canceled, [2]);
+});
+
+test("display advance acknowledgement waits for the authoritative stream revision", async () => {
+  let revision = 3;
+  const listeners = new Set<() => void>();
+  const store = {
+    getAuthoritySnapshot: () => ({ revision }),
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+
+  const pending = waitForReplayStoreRevision(store, 4, 100);
+  assert.equal(listeners.size, 1);
+  revision = 4;
+  for (const listener of listeners) listener();
+  assert.equal(await pending, true);
+  assert.equal(listeners.size, 0);
+  assert.equal(await waitForReplayStoreRevision(store, 4), true);
 });
 
 test("workspace preferences inherit live layout once and then persist only inside the run scope", () => {

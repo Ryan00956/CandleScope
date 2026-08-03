@@ -12,6 +12,36 @@ from typing import Mapping
 from .models import normalize_decimal_string
 
 
+def _is_native_canonical_json(value: object) -> bool:
+    """Return whether ``json.dumps`` can encode the value without coercion.
+
+    Replay snapshots are overwhelmingly composed of exact JSON primitives.
+    Rebuilding those large trees merely to prove that fact made every nested
+    state hash walk the retained candle window twice and allocate another full
+    object graph.  Keep the strict fallback for Decimal, Enum, dataclass,
+    generic Mapping, floats, and malformed keys, but let already-canonical
+    dict/list/tuple trees go directly to the deterministic JSON encoder.
+    """
+
+    pending = [value]
+    while pending:
+        candidate = pending.pop()
+        candidate_type = type(candidate)
+        if candidate is None or candidate_type in {str, bool, int}:
+            continue
+        if candidate_type is dict:
+            for key, child in candidate.items():
+                if type(key) is not str:
+                    return False
+                pending.append(child)
+            continue
+        if candidate_type in {list, tuple}:
+            pending.extend(candidate)
+            continue
+        return False
+    return True
+
+
 def _canonical_value(value: object, *, path: str = "$") -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -47,8 +77,9 @@ def _canonical_value(value: object, *, path: str = "$") -> object:
 
 
 def canonical_json(value: object) -> str:
+    normalized = value if _is_native_canonical_json(value) else _canonical_value(value)
     return json.dumps(
-        _canonical_value(value),
+        normalized,
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,

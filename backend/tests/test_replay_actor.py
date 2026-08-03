@@ -87,6 +87,29 @@ def _actor(**kwargs) -> ReplaySessionActor:
     )
 
 
+def test_public_snapshot_reuses_current_actor_state_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _actor()
+    original = actor_module.canonical_sha256
+    hash_calls = 0
+
+    def counted_hash(value: object) -> str:
+        nonlocal hash_calls
+        hash_calls += 1
+        return original(value)
+
+    monkeypatch.setattr(actor_module, "canonical_sha256", counted_hash)
+    actor._state_hash_cache_key = None  # noqa: SLF001
+    actor._state_hash_cache = None  # noqa: SLF001
+
+    first = actor._public_snapshot_value()  # noqa: SLF001
+    second = actor._public_snapshot_value()  # noqa: SLF001
+
+    assert first["state_hash"] == second["state_hash"]
+    assert hash_calls == 1
+
+
 def test_projection_buffer_is_bounded_by_domain_events_and_drops_oversize_batch() -> (
     None
 ):

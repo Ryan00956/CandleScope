@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,13 @@ from app.replay.constants import REPLAY_PROTOCOL, CommandType, SessionState
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService
+from app.replay import service as replay_service_module
 from app.replay.storage import ReplaySQLiteStore
+from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
+    INTERVAL_MS,
     NOW_MS,
+    START_MS,
     SessionIdFactory,
     replay_config,
     replay_repository,
@@ -103,6 +108,74 @@ async def test_restart_recovers_paused_without_autoplay_and_matches_durable_hash
     cursor_after = (await service.get_session(session_id))["snapshot"]["cursor"]
     assert cursor_after == cursor_before
     await service.shutdown(step_timeout=1.0)
+
+
+async def test_restart_preserves_legacy_full_dataset_bar_retention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "legacy-retention.db"
+    row_count = 2_600
+    now_ms = START_MS + (row_count + 2) * INTERVAL_MS
+    repository = FakeKlinesRepo()
+    repository.add_rows(
+        FixtureIdentity("binance", "spot", "BTCUSDT"),
+        "1m",
+        [
+            make_bar(START_MS + index * INTERVAL_MS, price=str(100 + index))
+            for index in range(row_count)
+        ],
+    )
+    settings = replace(
+        replay_settings(path),
+        max_bar_dataset_rows=3_000,
+        max_warmup_bars=100,
+    )
+
+    def build_service() -> ReplayService:
+        return ReplayService(
+            settings=settings,
+            store=ReplaySQLiteStore(path, now_ms=lambda: now_ms),
+            repository=repository,
+            now_ms=lambda: now_ms,
+            session_id_factory=SessionIdFactory("legacy-retention"),
+            native_intervals=lambda _identity: ("1m",),
+        )
+
+    monkeypatch.setattr(
+        replay_service_module,
+        "BAR_REPLAY_RETAINED_TAIL_BARS",
+        10_000,
+    )
+    original = build_service()
+    await original.start()
+    created = await original.create_session(
+        replace(
+            replay_config(),
+            requested_start_ms=START_MS + 2 * INTERVAL_MS,
+            horizon_ms=2_200 * INTERVAL_MS,
+        )
+    )
+    session_id = str(created["session_id"])
+    old_snapshot = (await original.get_session(session_id))["snapshot"]
+    old_limit = old_snapshot["components"]["bar_builder"]["max_closed_bars"]
+    assert int(old_limit) > 2_048
+    await original.shutdown(step_timeout=1.0)
+
+    monkeypatch.setattr(
+        replay_service_module,
+        "BAR_REPLAY_RETAINED_TAIL_BARS",
+        2_048,
+    )
+    recovered_service = build_service()
+    await recovered_service.start()
+    recovered = (await recovered_service.get_session(session_id))["snapshot"]
+
+    assert recovered["components"]["bar_builder"]["max_closed_bars"] == old_limit
+    assert recovered["state_hash"] == (
+        await recovered_service.store.get_session(session_id)
+    )["state_hash"]
+    await recovered_service.shutdown(step_timeout=1.0)
 
 
 async def test_corrupt_recent_checkpoints_fall_back_and_replay_command_tail(

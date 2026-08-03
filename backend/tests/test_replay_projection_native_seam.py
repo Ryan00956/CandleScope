@@ -26,6 +26,7 @@ from app.replay.history_archive import (
 from app.replay.market_halts import DEFAULT_VERIFIED_MARKET_HALTS
 from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.training.history import build_display_projection, build_history_page
+from app.replay.training import history as history_module
 from tests.fixtures.replay.fakes import make_bar
 from tests.fixtures.replay.service_fakes import replay_config
 
@@ -255,6 +256,30 @@ def _persisted(
             }
         }
     return payload
+
+
+def test_persisted_bar_snapshot_decode_is_reused_across_projection_reads() -> None:
+    history_module._decode_bar_snapshot_blob.cache_clear()
+    history_module._decode_blind_bar_snapshot_blob.cache_clear()
+    snapshot = _snapshot(
+        source_revision="sha256:" + "1" * 64,
+        replay_start_ms=ANCHOR_MS + 10 * MINUTE_MS,
+    )
+    persisted = _persisted(
+        snapshot,
+        actual_replay_start_ms=snapshot.replay_start_ms,
+    )
+    config = replace(
+        replay_config(),
+        requested_start_ms=snapshot.replay_start_ms,
+    )
+
+    first = history_module._decode_bar_snapshot(persisted, config=config)
+    second = history_module._decode_bar_snapshot(persisted, config=config)
+
+    assert first is second
+    assert history_module._decode_bar_snapshot_blob.cache_info().misses == 1
+    assert history_module._decode_bar_snapshot_blob.cache_info().hits == 1
 
 
 def test_projection_uses_pinned_native_bar_only_after_gap_bucket_is_closed(

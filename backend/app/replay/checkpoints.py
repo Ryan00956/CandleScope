@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import zlib
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Mapping
@@ -13,6 +15,16 @@ from .models import validate_counter, validate_timestamp_ms
 
 
 CHECKPOINT_SCHEMA_VERSION = "replay-checkpoint.v1"
+
+# Checkpoints are written on every accepted replay command.  The component
+# payload can contain thousands of retained bars, so storing the canonical JSON
+# verbatim makes a single DISPLAY_BAR step large enough to force a SQLite WAL
+# checkpoint.  Keep the logical v1 envelope unchanged and wrap only its wire
+# bytes.  decode() continues to accept every pre-existing plain-JSON checkpoint.
+CHECKPOINT_ZLIB_MAGIC = b"CSRP-ZLIB-V1\x00"
+CHECKPOINT_COMPRESSION_MIN_BYTES = 32 * 1024
+CHECKPOINT_MAX_RAW_BYTES = 512 * 1024 * 1024
+CHECKPOINT_ZLIB_LEVEL = 1
 
 
 class CheckpointError(ValueError):
@@ -38,25 +50,39 @@ class CheckpointCodec:
         if not isinstance(payload, Mapping):
             raise TypeError("checkpoint payload must be an object")
         normalized_payload = dict(payload)
-        checksum = canonical_sha256(
-            {
-                "schema_version": self.schema_version,
-                "payload": normalized_payload,
-            }
+        payload_bytes = canonical_json_bytes(normalized_payload)
+        schema_bytes = canonical_json_bytes(self.schema_version)
+        checksum_material = (
+            b'{"payload":'
+            + payload_bytes
+            + b',"schema_version":'
+            + schema_bytes
+            + b"}"
         )
-        return canonical_json_bytes(
-            {
-                "schema_version": self.schema_version,
-                "checksum": checksum,
-                "payload": normalized_payload,
-            }
+        checksum = f"sha256:{hashlib.sha256(checksum_material).hexdigest()}"
+        encoded = (
+            b'{"checksum":'
+            + canonical_json_bytes(checksum)
+            + b',"payload":'
+            + payload_bytes
+            + b',"schema_version":'
+            + schema_bytes
+            + b"}"
         )
+        if len(encoded) > CHECKPOINT_MAX_RAW_BYTES:
+            raise CheckpointError("checkpoint exceeds the raw byte budget")
+        if len(encoded) < CHECKPOINT_COMPRESSION_MIN_BYTES:
+            return encoded
+        compressed = zlib.compress(encoded, level=CHECKPOINT_ZLIB_LEVEL)
+        framed = CHECKPOINT_ZLIB_MAGIC + compressed
+        return framed if len(framed) < len(encoded) else encoded
 
     def decode(self, encoded: bytes) -> dict[str, object]:
         if not isinstance(encoded, bytes) or not encoded:
             raise CheckpointError("checkpoint must be non-empty bytes")
+        wire = self._decode_wire(encoded)
         try:
-            decoded = json.loads(encoded, object_pairs_hook=_strict_object)
+            decoded = json.loads(wire, object_pairs_hook=_strict_object)
         except CheckpointError:
             raise
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -69,7 +95,7 @@ class CheckpointCodec:
             raise CheckpointError(
                 f"checkpoint schema is incompatible: {decoded['schema_version']}"
             )
-        if canonical_json_bytes(decoded) != encoded:
+        if canonical_json_bytes(decoded) != wire:
             raise CheckpointError("checkpoint wire encoding is not canonical")
         payload = decoded["payload"]
         if not isinstance(payload, dict):
@@ -83,6 +109,42 @@ class CheckpointCodec:
         if decoded["checksum"] != expected_checksum:
             raise CheckpointError("checkpoint checksum mismatch")
         return payload
+
+    @staticmethod
+    def _decode_wire(encoded: bytes) -> bytes:
+        if not encoded.startswith(CHECKPOINT_ZLIB_MAGIC):
+            if len(encoded) > CHECKPOINT_MAX_RAW_BYTES:
+                raise CheckpointError("checkpoint exceeds the raw byte budget")
+            return encoded
+        compressed = encoded[len(CHECKPOINT_ZLIB_MAGIC) :]
+        if not compressed:
+            raise CheckpointError("compressed checkpoint is empty")
+        try:
+            decoder = zlib.decompressobj()
+            output = bytearray()
+            pending = compressed
+            while pending:
+                remaining = CHECKPOINT_MAX_RAW_BYTES + 1 - len(output)
+                if remaining <= 0:
+                    raise CheckpointError("checkpoint exceeds the raw byte budget")
+                output.extend(decoder.decompress(pending, remaining))
+                pending = decoder.unconsumed_tail
+                if not pending:
+                    break
+            remaining = CHECKPOINT_MAX_RAW_BYTES + 1 - len(output)
+            if remaining <= 0:
+                raise CheckpointError("checkpoint exceeds the raw byte budget")
+            output.extend(decoder.flush(remaining))
+        except zlib.error as exc:
+            raise CheckpointError("compressed checkpoint is invalid") from exc
+        if (
+            not decoder.eof
+            or decoder.unused_data
+            or decoder.unconsumed_tail
+            or len(output) > CHECKPOINT_MAX_RAW_BYTES
+        ):
+            raise CheckpointError("compressed checkpoint is invalid")
+        return bytes(output)
 
 
 @dataclass(frozen=True, slots=True)

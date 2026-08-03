@@ -752,19 +752,21 @@ class ConservativeBarBroker:
             self._bar_builder.apply_trades_final_state(trades)
             final_mark = trades[-1].price
         else:
+            if not isinstance(self._bar_builder, ReplayBarBuilder):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "BAR event cannot be applied to a trade broker",
+                )
+            bars: list[ReplayBar] = []
             for event in events:
                 if not isinstance(event, ReplayBar):
                     raise ReplayDomainError(
                         ReplayErrorCode.DATASET_MISMATCH,
                         "broker final-state batch cannot mix source event kinds",
                     )
-                if not isinstance(self._bar_builder, ReplayBarBuilder):
-                    raise ReplayDomainError(
-                        ReplayErrorCode.DATASET_MISMATCH,
-                        "BAR event cannot be applied to a trade broker",
-                    )
-                self._bar_builder.apply_bar(event)
-                final_mark = event.close
+                bars.append(event)
+            self._bar_builder.apply_bars_final_state(bars)
+            final_mark = bars[-1].close
         if self._position.quantity == "0":
             if final_mark is None:
                 return {}
@@ -1084,8 +1086,14 @@ class ConservativeBarBroker:
         ).to_dict()
 
     def build_report(self):
+        return self.build_report_from_snapshot(self.snapshot())
+
+    def build_report_from_snapshot(self, snapshot: Mapping[str, object]):
         from .report import build_broker_report
 
+        state_hash = snapshot.get("state_hash")
+        if not isinstance(state_hash, str):
+            raise TypeError("broker report snapshot is missing state_hash")
         return build_broker_report(
             config_hash=self._config_hash,
             initial_equity=self.config.initial_equity,
@@ -1098,7 +1106,7 @@ class ConservativeBarBroker:
             ledger_tail_hash=self._ledger.tail_hash,
             max_drawdown=self._max_drawdown,
             ended=self._ended,
-            state_hash=self.state_hash,
+            state_hash=state_hash,
             model_version=self._model_version,
         )
 

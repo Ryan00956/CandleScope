@@ -119,6 +119,7 @@ PAGED_BAR_SESSION_DATASET_SCHEMA_VERSION = "replay-paged-bar-session-dataset.v1"
 PAGED_BAR_SESSION_REF_SCHEMA_VERSION = "replay-paged-bar-session-ref.v1"
 PAGED_BAR_MANIFEST_SCHEMA_VERSION = "replay-paged-bar-manifest.v1"
 PAGED_BAR_MANIFEST_SCHEMA_VERSION_V2 = "replay-paged-bar-manifest.v2"
+BAR_REPLAY_RETAINED_TAIL_BARS = 2_048
 _TaskResult = TypeVar("_TaskResult")
 
 
@@ -1313,6 +1314,9 @@ class ReplayService:
                 trade_dataset_ref=handle.trade_dataset_ref,
                 bar_paging_manifest=handle.bar_paging_manifest,
                 actual_dataset=handle.actual_dataset,
+                max_closed_bars_override=self._component_max_closed_bars(
+                    component_state
+                ),
             )
             try:
                 reducer.restore(component_state)
@@ -2182,6 +2186,11 @@ class ReplayService:
             bar_paging_manifest=bar_paging_manifest,
             actual_dataset=actual_dataset,
             execution_mode=execution_mode,
+            max_closed_bars_override=(
+                None
+                if restore_checkpoint is None
+                else self._checkpoint_max_closed_bars(restore_checkpoint)
+            ),
         )
         self._datasets.pin(session_id, actor_dataset)
         trade_pin_token: str | None = None
@@ -2514,6 +2523,9 @@ class ReplayService:
                     trade_dataset_ref=trade_dataset_ref,
                     bar_paging_manifest=bar_paging_manifest,
                     actual_dataset=actual_dataset,
+                    max_closed_bars_override=self._checkpoint_max_closed_bars(
+                        checkpoint.payload
+                    ),
                 )
                 candidate = self._actor(
                     session_id=session_id,
@@ -3429,8 +3441,28 @@ class ReplayService:
         bar_paging_manifest: Mapping[str, object] | None = None,
         actual_dataset: BarDatasetSnapshot | None = None,
         execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
+        max_closed_bars_override: int | None = None,
     ) -> ConservativeBarBroker:
-        max_closed_bars = min(10_000, max(1, dataset.row_count))
+        dataset_retention_bound = min(10_000, max(1, dataset.row_count))
+        if max_closed_bars_override is not None:
+            if (
+                isinstance(max_closed_bars_override, bool)
+                or not isinstance(max_closed_bars_override, int)
+                or max_closed_bars_override < 1
+                or max_closed_bars_override > dataset_retention_bound
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "checkpoint closed-bar retention is incompatible",
+                )
+            max_closed_bars = max_closed_bars_override
+        elif config.source_kind is SourceKind.BAR:
+            max_closed_bars = min(
+                dataset_retention_bound,
+                max(BAR_REPLAY_RETAINED_TAIL_BARS, config.warmup_bars),
+            )
+        else:
+            max_closed_bars = dataset_retention_bound
         if config.source_kind is SourceKind.AGG_TRADE:
             if trade_dataset_ref is None:
                 raise ReplayDomainError(
@@ -3464,6 +3496,29 @@ class ReplayService:
             bar_builder=builder,
             execution_mode=execution_mode,
         )
+
+    @staticmethod
+    def _component_max_closed_bars(
+        component_state: Mapping[str, object],
+    ) -> int | None:
+        builder = component_state.get("bar_builder")
+        if not isinstance(builder, Mapping):
+            return None
+        value = builder.get("max_closed_bars")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return None
+        return value
+
+    @classmethod
+    def _checkpoint_max_closed_bars(cls, checkpoint: bytes) -> int | None:
+        try:
+            payload = CheckpointCodec().decode(checkpoint)
+        except (CheckpointError, TypeError, ValueError):
+            return None
+        component_state = payload.get("component_state")
+        if not isinstance(component_state, Mapping):
+            return None
+        return cls._component_max_closed_bars(component_state)
 
     @staticmethod
     def _broker_config(

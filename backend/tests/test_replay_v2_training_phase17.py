@@ -93,6 +93,18 @@ async def test_review_checkpoint_classifier_ignores_market_only_changes() -> Non
             },
         }
     )
+    assert review_module.ReviewRecorder._internal_adapter_command(  # noqa: SLF001
+        {
+            "kind": "COMMAND",
+            "command": {
+                "command_id": f"v2part-{'b' * 40}",
+                "type": "_training_fast_forward_final_state",
+            },
+        }
+    )
+    assert review_module.ReviewRecorder._internal_adapter_command(  # noqa: SLF001
+        {"kind": "STATE", "state_kind": "controller_expired"}
+    )
     assert ReplaySessionActor._review_checkpoint_required(  # noqa: SLF001
         before,
         {

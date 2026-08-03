@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
@@ -475,6 +475,52 @@ class ReplayBarBuilder:
         if update is None:
             raise RuntimeError("a revealed replay bar must produce a projection update")
         return update
+
+    def apply_bars_final_state(self, bars: Sequence[ReplayBar]) -> None:
+        """Apply a projection-free BAR block with exact snapshot equivalence.
+
+        Replay actors use this only after proving that no order can interact
+        with the source block.  The common adapter configuration projects one
+        base bar to one retained display bar.  Avoiding bucket discovery, an
+        intermediate forming object, and a second frozen object per source bar
+        materially reduces large DISPLAY_BAR steps while retaining all source
+        validation and the exact closed-bar hash chain.
+        """
+
+        if not bars:
+            return
+        if self._base_interval != self._display_interval or self._active_bar is not None:
+            for bar in bars:
+                self.apply_bar(bar)
+            return
+        for bar in bars:
+            normalized = self._validate_base_bar(bar, warmup=False)
+            candidate = ReplayDisplayBar(
+                open_time_ms=bar.open_time_ms,
+                close_time_ms=bar.close_time_ms,
+                open=_required_string(normalized["open"]),
+                high=_required_string(normalized["high"]),
+                low=_required_string(normalized["low"]),
+                close=_required_string(normalized["close"]),
+                volume=_required_string(normalized["volume"]),
+                quote_volume=_optional_required_string(normalized["quote_volume"]),
+                trades=_optional_required_int(normalized["trades"]),
+                taker_buy_base=_optional_required_string(
+                    normalized["taker_buy_base"]
+                ),
+                taker_buy_quote=_optional_required_string(
+                    normalized["taker_buy_quote"]
+                ),
+                first_base_open_ms=bar.open_time_ms,
+                last_base_open_ms=bar.open_time_ms,
+                component_count=1,
+                expected_components=1,
+                is_closed=True,
+                synthetic=bool(normalized["synthetic"]),
+            )
+            self._append_closed(candidate)
+            self._last_base_open_ms = bar.open_time_ms
+            self._replay_events_applied += 1
 
     def apply_source_event(self, event: object) -> Mapping[str, object]:
         if isinstance(event, Mapping) and event.get("is_closed") is False:

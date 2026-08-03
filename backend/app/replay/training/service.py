@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import sqlite3
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
@@ -92,6 +93,7 @@ from .models import (
     TrainingRunCreateRequest,
     validate_v2_counter,
 )
+
 from .multitrack import (
     GLOBAL_ORDERING_VERSION,
     MARKET_EVENT_PHASE,
@@ -116,6 +118,9 @@ FINAL_STATE_PROJECTION_DELIVERY = "FINAL_STATE"
 FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS = 10_000
 ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
 ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
+_NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
+_NativeDisplayPinProofKey = tuple[str, str, str, str, str, int, int, int, str]
+_NativeDisplayPinProof = tuple[int, str, int]
 
 
 def _stored_counter(value: object, *, field_name: str) -> int:
@@ -194,6 +199,23 @@ class TrainingRunService:
         self._display_source_grid_anchors: dict[
             tuple[str, str, str, str], int
         ] = {}
+        self._native_display_pin_proofs: OrderedDict[
+            _NativeDisplayPinProofKey,
+            _NativeDisplayPinProof,
+        ] = OrderedDict()
+
+    def _remember_native_display_pin_proof(
+        self,
+        key: _NativeDisplayPinProofKey,
+        proof: _NativeDisplayPinProof,
+    ) -> None:
+        self._native_display_pin_proofs[key] = proof
+        self._native_display_pin_proofs.move_to_end(key)
+        if (
+            len(self._native_display_pin_proofs)
+            > _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE
+        ):
+            self._native_display_pin_proofs.popitem(last=False)
 
     async def start(self) -> None:
         await self.store.start()
@@ -2087,6 +2109,14 @@ class TrainingRunService:
             track_id=track_id,
             interval=requested_interval,
         )
+        candidate_proof: tuple[
+            str,
+            int,
+            int,
+            int,
+            str,
+            int,
+        ] | None = None
         if display_pin is None:
             repository = self.replay_service.history_repository
             get_bounds = getattr(repository, "get_bounds", None)
@@ -2198,6 +2228,14 @@ class TrainingRunService:
                 range_start_ms=range_start_ms,
                 last_complete_open_ms=candidate_last_complete_open_ms,
             )
+            candidate_proof = (
+                source_revision,
+                range_start_ms,
+                range_end_ms,
+                candidate_source_bucket_anchor_ms,
+                candidate_alignment_policy,
+                candidate_last_complete_open_ms,
+            )
             display_pin = await self.store.pin_history_archive_interval(
                 run_id=run_id,
                 track_id=track_id,
@@ -2211,72 +2249,112 @@ class TrainingRunService:
             )
         assert_pin_identity(display_pin, interval=requested_interval)
         repository = self.replay_service.history_repository
-        get_bounds_at_revision = getattr(repository, "get_bounds_at_revision", None)
-        if not callable(get_bounds_at_revision):
-            raise TrainingRunError(
-                "HISTORY_SOURCE_INCOMPLETE",
-                "pinned native display history has no immutable bounds proof",
-                status_code=503,
-            )
         try:
             pinned_start_ms = int(display_pin["range_start_ms"])
             pinned_end_ms = int(display_pin["range_end_ms"])
             pinned_source_revision = str(display_pin["source_revision"])
-            pinned_bounds = await asyncio.to_thread(
-                get_bounds_at_revision,
-                pinned_source_revision,
-                str(binding["symbol"]),
-                requested_interval,
-                exchange=str(binding["exchange"]),
-                market_type=str(binding["market_type"]),
-            )
-            exact_source_revision = str(pinned_bounds["source_revision"])
-            exact_start_ms = int(pinned_bounds["earliest_open_time"])
-            exact_end_ms = int(pinned_bounds["latest_open_time"])
-            (
-                display_source_bucket_anchor_ms,
-                display_alignment_policy,
-                last_complete_open_ms,
-            ) = resolve_source_grid(pinned_bounds)
-        except TrainingRunError:
-            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise TrainingRunError(
                 "HISTORY_SOURCE_INCOMPLETE",
                 "native display archive pin range is invalid",
                 status_code=503,
             ) from exc
-        except Exception as exc:
-            raise TrainingRunError(
-                "HISTORY_SOURCE_UNAVAILABLE",
-                "pinned native display history is unavailable",
-                status_code=503,
-            ) from exc
-        if (
-            exact_source_revision != pinned_source_revision
-            or exact_start_ms != pinned_start_ms
-            or exact_end_ms != pinned_end_ms
-        ):
-            raise TrainingRunError(
-                "HISTORY_SOURCE_IDENTITY_DRIFT",
-                "pinned native display archive bounds changed",
-                status_code=503,
-            )
-        if (
-            pinned_start_ms < 0
-            or pinned_start_ms > last_complete_open_ms
-            or pinned_end_ms < last_complete_open_ms
-        ):
-            raise TrainingRunError(
-                "HISTORY_SOURCE_INCOMPLETE",
-                "pinned native display archive does not cover the replay seam",
-                status_code=503,
-            )
-        await assert_native_continuity(
-            source_revision=pinned_source_revision,
-            range_start_ms=pinned_start_ms,
-            last_complete_open_ms=last_complete_open_ms,
+        proof_key = (
+            pinned_source_revision,
+            str(binding["exchange"]),
+            str(binding["market_type"]),
+            str(binding["symbol"]),
+            requested_interval,
+            pinned_start_ms,
+            pinned_end_ms,
+            actual_replay_start_ms,
+            str(binding["track_dataset_epoch"]),
         )
+        if candidate_proof is not None and candidate_proof[:3] == (
+            pinned_source_revision,
+            pinned_start_ms,
+            pinned_end_ms,
+        ):
+            self._remember_native_display_pin_proof(proof_key, candidate_proof[3:])
+        cached_proof = self._native_display_pin_proofs.get(proof_key)
+        if cached_proof is not None:
+            self._native_display_pin_proofs.move_to_end(proof_key)
+        if cached_proof is None:
+            get_bounds_at_revision = getattr(
+                repository,
+                "get_bounds_at_revision",
+                None,
+            )
+            if not callable(get_bounds_at_revision):
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_INCOMPLETE",
+                    "pinned native display history has no immutable bounds proof",
+                    status_code=503,
+                )
+            try:
+                pinned_bounds = await asyncio.to_thread(
+                    get_bounds_at_revision,
+                    pinned_source_revision,
+                    str(binding["symbol"]),
+                    requested_interval,
+                    exchange=str(binding["exchange"]),
+                    market_type=str(binding["market_type"]),
+                )
+                exact_source_revision = str(pinned_bounds["source_revision"])
+                exact_start_ms = int(pinned_bounds["earliest_open_time"])
+                exact_end_ms = int(pinned_bounds["latest_open_time"])
+                cached_proof = resolve_source_grid(pinned_bounds)
+            except TrainingRunError:
+                raise
+            except (KeyError, TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_INCOMPLETE",
+                    "native display archive pin range is invalid",
+                    status_code=503,
+                ) from exc
+            except Exception as exc:
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_UNAVAILABLE",
+                    "pinned native display history is unavailable",
+                    status_code=503,
+                ) from exc
+            if (
+                exact_source_revision != pinned_source_revision
+                or exact_start_ms != pinned_start_ms
+                or exact_end_ms != pinned_end_ms
+            ):
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_IDENTITY_DRIFT",
+                    "pinned native display archive bounds changed",
+                    status_code=503,
+                )
+            (
+                display_source_bucket_anchor_ms,
+                display_alignment_policy,
+                last_complete_open_ms,
+            ) = cached_proof
+            if (
+                pinned_start_ms < 0
+                or pinned_start_ms > last_complete_open_ms
+                or pinned_end_ms < last_complete_open_ms
+            ):
+                raise TrainingRunError(
+                    "HISTORY_SOURCE_INCOMPLETE",
+                    "pinned native display archive does not cover the replay seam",
+                    status_code=503,
+                )
+            await assert_native_continuity(
+                source_revision=pinned_source_revision,
+                range_start_ms=pinned_start_ms,
+                last_complete_open_ms=last_complete_open_ms,
+            )
+            self._remember_native_display_pin_proof(proof_key, cached_proof)
+        else:
+            (
+                display_source_bucket_anchor_ms,
+                display_alignment_policy,
+                last_complete_open_ms,
+            ) = cached_proof
         display_grid_commitment = canonical_sha256(
             {
                 "schema_version": "replay.display-source-grid.v1",

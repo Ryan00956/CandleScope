@@ -154,3 +154,28 @@ def test_failed_source_event_rolls_back_broker_builder_and_ledger() -> None:
     assert failure.value.code is ReplayErrorCode.DATASET_INCOMPLETE
     assert broker.state_hash == before
     assert broker.fills == ()
+
+
+@pytest.mark.parametrize(
+    ("display_interval", "count"),
+    (("1m", 1_440), ("15m", 90)),
+)
+def test_empty_account_final_state_bar_batch_matches_per_bar_state(
+    display_interval: str,
+    count: int,
+) -> None:
+    bars = tuple(bar(index, 100 + (index % 17)) for index in range(count))
+    batched = make_broker(
+        display_interval=display_interval,
+        max_closed_bars=count,
+    )
+    reference = make_broker(
+        display_interval=display_interval,
+        max_closed_bars=count,
+    )
+
+    assert batched.apply_source_events_final_state(bars) == {}
+    for source_bar in bars:
+        reference.apply_bar(source_bar)
+
+    assert batched.snapshot() == reference.snapshot()

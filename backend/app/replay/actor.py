@@ -1587,7 +1587,7 @@ class ReplaySessionActor:
                     ReplayErrorCode.DATASET_MISMATCH,
                     "period summary restored component state changed",
                 )
-            state_hash = self._compute_state_hash(component_state=component_state)
+            state_hash = self._compute_state_hash()
             checkpoint = self._checkpoint_codec.encode(
                 self._checkpoint_payload(
                     component_state=component_state,
@@ -1665,9 +1665,7 @@ class ReplaySessionActor:
             "domain_command_position": self._domain_command_position,
             "has_active_trading_path": self._has_active_trading_path(),
             "has_trading_state": self._reducer.has_trading_state(),
-            "state_hash": self._compute_state_hash(
-                component_state=component_state,
-            ),
+            "state_hash": self._compute_state_hash(),
             "revision": self._revision,
         }
 
@@ -1743,8 +1741,16 @@ class ReplaySessionActor:
                 return
             self._command_log_offset += 1
             component_state = self._component_state()
+            # _execute_command has already produced the authoritative final
+            # state hash for its CommandResult.  Reuse it for the checkpoint
+            # and durable row instead of hashing the same retained bar window
+            # again through two explicit component-state call sites.
+            state_hash = result.state_hash
             checkpoint = self._checkpoint_codec.encode(
-                self._checkpoint_payload(component_state=component_state)
+                self._checkpoint_payload(
+                    component_state=component_state,
+                    state_hash=state_hash,
+                )
             )
             try:
                 await self._commit_mutation(
@@ -1754,6 +1760,7 @@ class ReplaySessionActor:
                     error=None,
                     checkpoint=checkpoint,
                     component_state=component_state,
+                    state_hash=state_hash,
                 )
             except asyncio.CancelledError:
                 assert rollback is not None
@@ -4225,10 +4232,11 @@ class ReplaySessionActor:
 
     def _public_snapshot_value(self) -> dict[str, object]:
         component_state = self._component_state()
-        snapshot = self._snapshot_value(
-            materialize=False,
-            component_state=component_state,
-        )
+        # The component cache and state-hash cache share the same mutation
+        # revision.  Passing a copied component mapping here deliberately
+        # bypassed that cache and re-hashed the complete candle window for
+        # every HTTP/WS snapshot request.
+        snapshot = self._snapshot_value(materialize=False)
         public_config = self.config.to_dict()
         if self.config.blind_mode and not self._revealed:
             # The authoritative seed selects the hidden catalog window and is
@@ -4251,7 +4259,16 @@ class ReplaySessionActor:
         build_report = getattr(self._reducer, "build_report", None)
         if not callable(build_report):
             return MappingProxyType({})
-        report = build_report()
+        build_from_snapshot = getattr(
+            self._reducer,
+            "build_report_from_snapshot",
+            None,
+        )
+        report = (
+            build_from_snapshot(self._component_state())
+            if callable(build_from_snapshot)
+            else build_report()
+        )
         to_dict = getattr(report, "to_dict", None)
         if not callable(to_dict):
             raise TypeError("replay reducer report must provide to_dict()")

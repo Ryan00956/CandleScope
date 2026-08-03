@@ -5,7 +5,9 @@ import json
 import pytest
 
 from app.replay.checkpoints import (
+    CHECKPOINT_COMPRESSION_MIN_BYTES,
     CHECKPOINT_SCHEMA_VERSION,
+    CHECKPOINT_ZLIB_MAGIC,
     CheckpointCodec,
     CheckpointError,
     CheckpointRing,
@@ -62,6 +64,40 @@ def test_checkpoint_codec_rejects_incompatible_schema_and_noncanonical_wire() ->
     encoded = stable.encode(_payload(1))
     with pytest.raises(CheckpointError, match="canonical"):
         stable.decode(b"  " + encoded)
+
+
+def test_checkpoint_codec_compresses_large_payload_and_reads_legacy_json() -> None:
+    codec = CheckpointCodec()
+    payload = {
+        **_payload(7),
+        "state": {
+            "event_chain_hash": DIGEST_B,
+            "components": {
+                "closed_bars": [
+                    {"open_time_ms": index, "close": "100"}
+                    for index in range(CHECKPOINT_COMPRESSION_MIN_BYTES // 8)
+                ]
+            },
+        },
+    }
+    compressed = codec.encode(payload)
+    assert compressed.startswith(CHECKPOINT_ZLIB_MAGIC)
+    assert codec.decode(compressed) == payload
+
+    # The logical v1 envelope is unchanged, so checkpoints written by earlier
+    # versions remain recoverable after the storage optimization ships.
+    checksum = codec.encode(_payload(8))
+    assert not checksum.startswith(CHECKPOINT_ZLIB_MAGIC)
+    assert codec.decode(checksum) == _payload(8)
+
+
+def test_checkpoint_codec_rejects_truncated_compressed_wire() -> None:
+    codec = CheckpointCodec()
+    payload = {**_payload(9), "padding": "x" * CHECKPOINT_COMPRESSION_MIN_BYTES}
+    encoded = codec.encode(payload)
+    assert encoded.startswith(CHECKPOINT_ZLIB_MAGIC)
+    with pytest.raises(CheckpointError, match="compressed checkpoint"):
+        codec.decode(encoded[:-3])
 
 
 def test_checkpoint_ring_falls_back_from_corrupt_or_mismatched_newest_record() -> None:

@@ -466,10 +466,14 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
         self._remote_index_epoch: str | None = None
         self._remote_generated_at_ms: int | None = None
         self._remote_metadata_fallback = False
+        self._refresh_lock = threading.Lock()
         self._object_locks_guard = threading.Lock()
         self._object_locks: dict[str, threading.Lock] = {}
         self._remote_metrics = {
             "remote_index_refreshes": 0,
+            "remote_index_unchanged_refreshes": 0,
+            "remote_manifests_loaded": 0,
+            "remote_manifests_reused": 0,
             "remote_metadata_cache_fallbacks": 0,
             "object_cache_hits": 0,
             "object_downloads": 0,
@@ -480,53 +484,118 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
 
     def _refresh(self) -> None:
         now = time.monotonic()
-        if self._current and now < self._next_remote_refresh:
-            return
-        try:
-            index, manifests = self._load_origin_snapshot()
-            self._cache_remote_snapshot(index, manifests)
-            fallback = False
-        except ReplayHistoryOriginUnavailable:
-            index, manifests = self._load_cached_snapshot()
-            fallback = True
-        current: dict[tuple[str, str, str, str], ReplayHistoryCatalogManifest] = {}
-        for manifest in manifests:
-            key = _manifest_key(manifest)
-            if key in current:
-                raise ReplayHistoryArchiveError(
-                    "remote replay-history index contains duplicate current catalogs"
-                )
-            self._validate_manifest_objects_shallow(manifest)
-            current[key] = manifest
         with self._lock:
-            self._current = current
-            for key, manifest in current.items():
-                self._revision_cache[(*key, manifest.catalog_epoch)] = manifest
-            self._series_errors = {}
-            self._remote_index_epoch = index.index_epoch
-            self._remote_generated_at_ms = index.generated_at_ms
-            self._remote_metadata_fallback = fallback
-            self._next_remote_refresh = now + self._refresh_seconds
-            self._metrics["refreshes"] += 1
-            self._remote_metrics["remote_index_refreshes"] += 1
-            if fallback:
-                self._remote_metrics["remote_metadata_cache_fallbacks"] += 1
+            if self._current and now < self._next_remote_refresh:
+                return
+        # Multiple concurrent projection/history calls can cross the refresh
+        # deadline together.  Only one of them may touch remote metadata; the
+        # rest reuse the committed immutable snapshot after this short lock.
+        with self._refresh_lock:
+            now = time.monotonic()
+            with self._lock:
+                if self._current and now < self._next_remote_refresh:
+                    return
+                reusable = dict(self._current)
+                committed_epoch = self._remote_index_epoch
+            try:
+                index = self._load_origin_index()
+                if reusable and index.index_epoch == committed_epoch:
+                    with self._lock:
+                        self._remote_generated_at_ms = index.generated_at_ms
+                        self._remote_metadata_fallback = False
+                        self._next_remote_refresh = now + self._refresh_seconds
+                        self._metrics["refreshes"] += 1
+                        self._remote_metrics["remote_index_refreshes"] += 1
+                        self._remote_metrics[
+                            "remote_index_unchanged_refreshes"
+                        ] += 1
+                    return
+                manifests, changed = self._load_origin_manifests(
+                    index,
+                    reusable=reusable,
+                )
+                self._cache_remote_snapshot(index, changed)
+                fallback = False
+            except ReplayHistoryOriginUnavailable:
+                if reusable:
+                    # ``reusable`` is already checksum-bound and validated in
+                    # memory.  Reloading every cached manifest here only turns
+                    # a control-plane outage into latency on the chart path.
+                    with self._lock:
+                        self._remote_metadata_fallback = True
+                        self._next_remote_refresh = now + self._refresh_seconds
+                        self._metrics["refreshes"] += 1
+                        self._remote_metrics["remote_index_refreshes"] += 1
+                        self._remote_metrics[
+                            "remote_metadata_cache_fallbacks"
+                        ] += 1
+                    return
+                index, manifests = self._load_cached_snapshot()
+                changed = manifests
+                fallback = True
+            current: dict[
+                tuple[str, str, str, str], ReplayHistoryCatalogManifest
+            ] = {}
+            changed_keys = {_manifest_key(manifest) for manifest in changed}
+            for manifest in manifests:
+                key = _manifest_key(manifest)
+                if key in current:
+                    raise ReplayHistoryArchiveError(
+                        "remote replay-history index contains duplicate current catalogs"
+                    )
+                if key in changed_keys:
+                    self._validate_manifest_objects_shallow(manifest)
+                current[key] = manifest
+            with self._lock:
+                self._current = current
+                for key, manifest in current.items():
+                    self._revision_cache[(*key, manifest.catalog_epoch)] = manifest
+                self._series_errors = {}
+                self._remote_index_epoch = index.index_epoch
+                self._remote_generated_at_ms = index.generated_at_ms
+                self._remote_metadata_fallback = fallback
+                self._next_remote_refresh = now + self._refresh_seconds
+                self._metrics["refreshes"] += 1
+                self._remote_metrics["remote_index_refreshes"] += 1
+                self._remote_metrics["remote_manifests_loaded"] += len(changed)
+                self._remote_metrics["remote_manifests_reused"] += (
+                    len(manifests) - len(changed)
+                )
+                if fallback:
+                    self._remote_metrics["remote_metadata_cache_fallbacks"] += 1
 
-    def _load_origin_snapshot(
-        self,
-    ) -> tuple[ReplayRemoteCatalogIndex, tuple[ReplayHistoryCatalogManifest, ...]]:
-        index = ReplayRemoteCatalogIndex.from_dict(
+    def _load_origin_index(self) -> ReplayRemoteCatalogIndex:
+        return ReplayRemoteCatalogIndex.from_dict(
             self.origin.read_json("index.json", max_bytes=_MAX_REMOTE_INDEX_BYTES)
         )
+
+    def _load_origin_manifests(
+        self,
+        index: ReplayRemoteCatalogIndex,
+        *,
+        reusable: Mapping[
+            tuple[str, str, str, str], ReplayHistoryCatalogManifest
+        ] | None = None,
+    ) -> tuple[
+        tuple[ReplayHistoryCatalogManifest, ...],
+        tuple[ReplayHistoryCatalogManifest, ...],
+    ]:
+        reusable = {} if reusable is None else reusable
         manifests: list[ReplayHistoryCatalogManifest] = []
+        changed: list[ReplayHistoryCatalogManifest] = []
         for entry in index.catalogs:
+            key = _remote_entry_key(entry)
+            existing = reusable.get(key)
+            if existing is not None and existing.catalog_epoch == entry.catalog_epoch:
+                manifests.append(existing)
+                continue
             manifest = ReplayHistoryCatalogManifest.from_dict(
                 self.origin.read_json(
                     entry.manifest_path,
                     max_bytes=_MAX_REMOTE_MANIFEST_BYTES,
                 )
             )
-            if _manifest_key(manifest) != _remote_entry_key(entry):
+            if _manifest_key(manifest) != key:
                 raise ReplayHistoryArchiveError(
                     "remote replay-history manifest identity does not match its index"
                 )
@@ -535,7 +604,15 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
                     "remote replay-history manifest revision does not match its index"
                 )
             manifests.append(manifest)
-        return index, tuple(manifests)
+            changed.append(manifest)
+        return tuple(manifests), tuple(changed)
+
+    def _load_origin_snapshot(
+        self,
+    ) -> tuple[ReplayRemoteCatalogIndex, tuple[ReplayHistoryCatalogManifest, ...]]:
+        index = self._load_origin_index()
+        manifests, _changed = self._load_origin_manifests(index)
+        return index, manifests
 
     def _cache_remote_snapshot(
         self,
@@ -597,13 +674,9 @@ class RemoteReplayHistoryRepository(ReplayHistoryRepository):
         manifest: ReplayHistoryCatalogManifest,
     ) -> None:
         for item in manifest.objects:
-            candidate = (self.root / item.relative_path).resolve()
-            expected = (
-                self.objects_dir
-                / _digest_token(item.object_sha256)[:2]
-                / f"{_digest_token(item.object_sha256)}.parquet"
-            ).resolve()
-            if candidate != expected:
+            token = _digest_token(item.object_sha256)
+            expected = f"objects/sha256/{token[:2]}/{token}.parquet"
+            if item.relative_path != expected:
                 raise ReplayHistoryArchiveError(
                     "remote replay-history object path is not content-addressed"
                 )

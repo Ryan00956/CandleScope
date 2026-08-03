@@ -123,8 +123,8 @@ def capture_contract() -> dict[str, Any]:
     from app.plugin_runtime_registry_v3 import (
         OFFICIAL_REGISTRY_V3_PATH,
         OFFICIAL_REGISTRY_V4_PATH,
-        OFFICIAL_ROOTS_PATH,
         OFFICIAL_ROOTS_V3_PATH,
+        OFFICIAL_ROOTS_V4_PATH,
         load_runtime_registry_roots_bytes,
         verify_runtime_registry_bytes,
     )
@@ -132,7 +132,7 @@ def capture_contract() -> dict[str, Any]:
     from scripts import plugin_platform_multi_runtime_phase6 as phase6
 
     roots3 = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V3_PATH.read_bytes())
-    roots4 = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots4 = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V4_PATH.read_bytes())
     revision3 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V3_PATH.read_bytes(), roots3
     )

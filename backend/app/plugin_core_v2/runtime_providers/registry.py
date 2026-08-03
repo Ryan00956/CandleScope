@@ -11,6 +11,7 @@ from .java import JAVA_RUNTIME_ENABLED_ENV, JavaJarProvider
 from .native import NativeExecutableProvider
 from .node import NODE_RUNTIME_ENABLED_ENV, NodeModuleProvider
 from .python import PythonModuleProvider
+from .wasm import WASM_RUNTIME_ENABLED_ENV, WasmComponentProvider
 
 
 _KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -124,6 +125,7 @@ def default_runtime_provider_registry(
     native_enabled: bool | None = None,
     java_enabled: bool | None = None,
     node_enabled: bool | None = None,
+    wasm_enabled: bool | None = None,
     managed_runtime_registry: object | None = None,
 ) -> RuntimeProviderRegistry:
     providers: list[RuntimeProvider] = [PythonModuleProvider()]
@@ -145,4 +147,10 @@ def default_runtime_provider_registry(
         label="Node.js",
     ):
         providers.append(NodeModuleProvider(managed_runtime_registry))
+    if _provider_enabled(
+        wasm_enabled,
+        environment_name=WASM_RUNTIME_ENABLED_ENV,
+        label="WASM",
+    ):
+        providers.append(WasmComponentProvider(managed_runtime_registry))
     return RuntimeProviderRegistry(providers)

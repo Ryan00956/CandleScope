@@ -1,0 +1,13 @@
+[package]
+name = "candlescope-plugin-sdk-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "GPL-3.0-only"
+description = "Dependency-free Rust SDK for CandleScope WASI Preview 2 command components"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

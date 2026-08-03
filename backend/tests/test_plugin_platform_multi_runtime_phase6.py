@@ -149,7 +149,10 @@ def test_phase6_registry_migrates_java_to_appcontainer_compatible_jre(
     assert release.legal_size == 230_270
 
     service = build_official_runtime_registry(root=tmp_path / "registry", enabled=True)
-    assert service.public_status()["active"]["revision"] == 4
+    assert service.public_status()["active"]["revision"] == 5
+    wasm_rolled = service.rollback_registry()
+    assert wasm_rolled["fromRevision"] == 5
+    assert wasm_rolled["toRevision"] == 4
     migrated = service.rollback_registry()
     assert migrated["fromRevision"] == 4
     assert migrated["toRevision"] == 3

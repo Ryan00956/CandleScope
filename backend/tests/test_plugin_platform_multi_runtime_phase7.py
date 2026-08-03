@@ -21,8 +21,8 @@ from app.plugin_core_v2.runtime_providers import (
 from app.plugin_runtime_registry_v3 import (
     OFFICIAL_REGISTRY_V3_PATH,
     OFFICIAL_REGISTRY_V4_PATH,
-    OFFICIAL_ROOTS_PATH,
     OFFICIAL_ROOTS_V3_PATH,
+    OFFICIAL_ROOTS_V4_PATH,
     load_runtime_registry_roots_bytes,
     verify_runtime_registry_bytes,
 )
@@ -99,7 +99,7 @@ def _fixture(
 
 
 def test_revision4_adds_exact_signed_node_lts_release() -> None:
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V4_PATH.read_bytes())
     old_roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V3_PATH.read_bytes())
     revision3 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V3_PATH.read_bytes(), old_roots

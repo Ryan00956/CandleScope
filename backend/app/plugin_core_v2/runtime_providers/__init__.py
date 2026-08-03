@@ -27,6 +27,15 @@ from .java import (
     JavaJarProvider,
 )
 from .python import PYTHON_MODULE_PROVIDER_VERSION, PythonModuleProvider
+from .wasm import (
+    WASM_COMPONENT_PROVIDER_VERSION,
+    WASM_LINEAR_MEMORY_BYTES,
+    WASM_PROCESS_FUEL,
+    WASM_RUNTIME_ENABLED_ENV,
+    WASMTIME_FIXED_ARGUMENTS,
+    WASMTIME_RUNTIME_ID,
+    WasmComponentProvider,
+)
 from .registry import (
     NATIVE_RUNTIME_ENABLED_ENV,
     RuntimeProviderRegistry,
@@ -41,6 +50,12 @@ __all__ = [
     "JAVA_JAR_PROVIDER_VERSION",
     "JAVA_RUNTIME_ENABLED_ENV",
     "PYTHON_MODULE_PROVIDER_VERSION",
+    "WASM_COMPONENT_PROVIDER_VERSION",
+    "WASM_LINEAR_MEMORY_BYTES",
+    "WASM_PROCESS_FUEL",
+    "WASM_RUNTIME_ENABLED_ENV",
+    "WASMTIME_FIXED_ARGUMENTS",
+    "WASMTIME_RUNTIME_ID",
     "RUNTIME_PROVIDER_API_VERSION",
     "NativeExecutableProvider",
     "NodeModuleProvider",
@@ -48,6 +63,7 @@ __all__ = [
     "PreparedLaunch",
     "PreparedRuntime",
     "PythonModuleProvider",
+    "WasmComponentProvider",
     "RuntimeInstallationRequest",
     "RuntimeArtifact",
     "RuntimeProvider",

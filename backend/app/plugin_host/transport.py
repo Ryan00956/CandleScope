@@ -46,6 +46,34 @@ from .process import ManagedSidecarProcess, SidecarProcessSpec
 HostCallHandler = Callable[[HostCallRequest], Awaitable[dict[str, Any]]]
 
 
+def _wasmtime_exit_failure(stderr: str) -> tuple[str, str] | None:
+    normalized = stderr.casefold()
+    if "all fuel consumed by webassembly" in normalized:
+        return (
+            "PLUGIN_WASM_FUEL_EXHAUSTED",
+            "WASM component exhausted its Host-owned process fuel budget",
+        )
+    if any(
+        marker in normalized
+        for marker in (
+            "forcing trap when growing memory",
+            "failed to grow memory",
+            "memory allocation of",
+            "cannot grow memory",
+        )
+    ):
+        return (
+            "PLUGIN_WASM_MEMORY_LIMIT_EXCEEDED",
+            "WASM component exceeded its Host-owned linear-memory budget",
+        )
+    if "wasm trap:" in normalized or "failed to invoke `run` function" in normalized:
+        return (
+            "PLUGIN_WASM_TRAP",
+            "WASM component trapped while executing wasi:cli/run",
+        )
+    return None
+
+
 @dataclass(slots=True)
 class _PendingRequest:
     request_id: str
@@ -262,6 +290,18 @@ class PlatformV2Transport:
         if not pending.future.done():
             pending.future.cancel()
         self._remember_tombstone(request_id)
+        if self.process_spec.terminate_on_cancel and method != METHOD_CANCEL:
+            self._fail(
+                PlatformHostTransportError(
+                    code="PLUGIN_WASM_CANCELLED",
+                    message="WASM invocation was cancelled by terminating its isolated process",
+                    plugin_id=self.plugin_id,
+                    entrypoint_id=self.entrypoint_id,
+                    details={"method": method, "requestId": request_id},
+                    fatal=True,
+                )
+            )
+            return
         if not send_cancel or generation < 1 or method == METHOD_CANCEL:
             return
         task = asyncio.create_task(
@@ -371,6 +411,28 @@ class PlatformV2Transport:
                         )
                     )
                     return
+                if self.process_spec.failure_classifier == "wasmtime-v1":
+                    classified = _wasmtime_exit_failure(self._process.stderr_tail)
+                    if classified is not None:
+                        process = self._process.process
+                        self._fail(
+                            PlatformHostTransportError(
+                                code=classified[0],
+                                message=classified[1],
+                                plugin_id=self.plugin_id,
+                                entrypoint_id=self.entrypoint_id,
+                                details={
+                                    "classifier": "wasmtime-v1",
+                                    "returnCode": (
+                                        process.returncode
+                                        if process is not None
+                                        else None
+                                    ),
+                                },
+                                fatal=True,
+                            )
+                        )
+                        return
             code = {
                 "MESSAGE_TOO_LARGE": "PLUGIN_PLATFORM_RESPONSE_TOO_LARGE",
                 "INVALID_JSON": "PLUGIN_PLATFORM_RESPONSE_INVALID_JSON",

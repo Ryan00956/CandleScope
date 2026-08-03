@@ -1,14 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～7 已完成；Phase 8～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～8 已完成；Phase 9～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
 当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE7_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；Phase 8～11 仍是计划，不是当前能力声明。
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE8_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；Phase 9～11 仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
 
@@ -941,6 +941,15 @@ Node，也不删除已安装 bundle 或共享 runtime cache。
 
 关闭 `CANDLESCOPE_PLUGIN_RUNTIME_WASM_ENABLED`。
 
+**完成状态：已完成（2026-08-03）**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE8_zh.md`。Phase 8 已交付固定 Wasmtime 47.0.3
+的签名 Runtime Registry revision 5、`WasmComponentProvider 1.0.0`、dependency-free
+Rust/WASM SDK、确定性 `wasm32-wasip2` reference component，以及 Windows +
+Ubuntu-22.04/WSL2 的真实跨主机门禁。Windows signed Marketplace 使用 WASI + AppContainer；
+Linux 只声明 WASI boundary，不虚报 OS sandbox。Provider、多运行时和 Registry 网络更新开关仍
+默认关闭，关闭 Provider 后不回退系统 Wasmtime，也不删除已安装 bundle 或共享 runtime cache。
+
 ---
 
 ### Phase 9：GitHub 接入助手与 Adapter 模板
@@ -1191,7 +1200,7 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 - [x] manifest v3 与五种 runtime kind 有冻结契约；
 - [x] v2 Python 原样兼容；
 - [x] Python、native、Java 至少三个 Provider 进入稳定路径；
-- [ ] Node/WASM 按真实门禁决定 stable 或 preview，不虚报；
+- [x] Node/WASM 按真实门禁决定 stable 或 preview，不虚报；
 - [x] Managed Runtime Registry 可固定、缓存、校验、撤销和回滚；
 - [x] 本地信任选择清楚、可撤销、可审计；
 - [x] Marketplace 仍 fail closed；
@@ -1205,12 +1214,12 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 
 ## 16. 推荐的立即下一步
 
-下一阶段只实施 Phase 8，不提前混入 GitHub scaffold 或 Marketplace GA：
+下一阶段只实施 Phase 9，不提前混入 Marketplace GA：
 
-1. 审计当前 `wasm-component` schema、Provider 扩展位与 `restricted-wasm` 缺口；
-2. 选择并固定一个可再分发、可签名、可离线缓存的 WASM runtime；
-3. 冻结首发 component model、WASI profile、imports/exports 与 capability 边界；
-4. 先建立 Rust-to-WASM reference、确定性 build 和 canonical output；
-5. 再接入 Provider、fuel、memory、wall time、cancel 和 trap 诊断；
-6. 在 Windows 与至少一个非 Windows 平台运行真实门禁；
-7. 保持所有新开关默认关闭，完成独立 Phase 8 提交后再进入 Phase 9。
+1. 冻结 GitHub assessment 的输入、输出、网络和不执行边界；
+2. 只读取用户明确给出的仓库、tag/commit 和 Release metadata；
+3. 不 clone 后自动运行 workflow、install script 或二进制；
+4. 实现 Java library、native CLI、Python package、Node 和 WASM Adapter 模板；
+5. scaffold 默认只生成源文件、manifest、SBOM/许可证占位和待人工完成的 lock；
+6. 实现显式 build/package 命令，不把 assessment 结果当可信 Release；
+7. 用第二个真实 GitHub 项目验证文档可执行性，完成独立 Phase 9 提交后再进入 Phase 10。

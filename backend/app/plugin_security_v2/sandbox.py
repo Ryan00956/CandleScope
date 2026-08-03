@@ -51,6 +51,7 @@ class RestrictedRuntimeProfile:
             "python-module",
             "java-jar",
             "node-module",
+            "wasm-component",
             "native-executable",
         }:
             raise ValueError("restricted runtime profile kind is invalid")
@@ -58,7 +59,7 @@ class RestrictedRuntimeProfile:
             raise ValueError("restricted runtime profile id is invalid")
         if self.max_processes != 1:
             raise ValueError(
-                "Phase 6 profiles must remain single-process until a declared process model ships"
+                "restricted runtime profiles must remain single-process until a declared process model ships"
             )
 
     def supported(self, platform_name: str | None = None) -> bool:
@@ -141,8 +142,23 @@ _RESTRICTED_RUNTIME_PROFILES = {
     ),
 }
 
+_WASM_RUNTIME_PROFILE = RestrictedRuntimeProfile(
+    "wasm-component",
+    "restricted-wasm-v1",
+    256 * 1024 * 1024,
+    25,
+    60,
+    300,
+    64 * 1024 * 1024,
+    1,
+    90,
+    86_400,
+)
+
 
 def restricted_runtime_profile(runtime_kind: str) -> RestrictedRuntimeProfile:
+    if runtime_kind == "wasm-component":
+        return _WASM_RUNTIME_PROFILE
     try:
         return _RESTRICTED_RUNTIME_PROFILES[runtime_kind]
     except KeyError as exc:
@@ -154,11 +170,13 @@ def restricted_runtime_profile(runtime_kind: str) -> RestrictedRuntimeProfile:
 
 
 def restricted_runtime_profiles_status(
-    *, platform_name: str | None = None
+    *, platform_name: str | None = None, include_wasm: bool = False
 ) -> tuple[dict[str, Any], ...]:
+    profiles = dict(_RESTRICTED_RUNTIME_PROFILES)
+    if include_wasm:
+        profiles["wasm-component"] = _WASM_RUNTIME_PROFILE
     return tuple(
-        _RESTRICTED_RUNTIME_PROFILES[key].to_wire(platform_name=platform_name)
-        for key in sorted(_RESTRICTED_RUNTIME_PROFILES)
+        profiles[key].to_wire(platform_name=platform_name) for key in sorted(profiles)
     )
 
 

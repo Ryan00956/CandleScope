@@ -30,9 +30,12 @@ REGISTRY_SCHEMA_ID = "candlescope.runtime-registry/1"
 STATE_SCHEMA_VERSION = 1
 SYSTEM_REGISTRY_SCHEMA_VERSION = 1
 RUNTIME_KINDS = frozenset({"java", "node", "wasm"})
-ARCHIVE_FORMATS = frozenset({"tar.gz", "zip"})
+ARCHIVE_FORMATS = frozenset({"tar.gz", "tar.xz", "zip"})
 EVIDENCE_ROLES = frozenset(
     {"vendor-checksum", "vendor-metadata", "vendor-sbom", "vendor-signature"}
+)
+EVIDENCE_PROJECTIONS = frozenset(
+    {"raw", "github-release-asset-v1", "github-git-commit-v1"}
 )
 MAX_ROOTS_BYTES = 128 * 1024
 MAX_REGISTRY_BYTES = 4 * 1024 * 1024
@@ -281,15 +284,19 @@ class RuntimeEvidence:
     sha256: str
     size: int
     file_name: str
+    projection: str = "raw"
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire = {
             "role": self.role,
             "url": self.url,
             "sha256": self.sha256,
             "size": self.size,
             "fileName": self.file_name,
         }
+        if self.projection != "raw":
+            wire["projection"] = self.projection
+        return wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,7 +513,12 @@ def _parse_evidence(
     allowed_origins: frozenset[str],
 ) -> RuntimeEvidence:
     item = _mapping(value, label)
-    _only_keys(item, {"role", "url", "sha256", "size", "fileName"}, label)
+    _only_keys(
+        item,
+        {"role", "url", "sha256", "size", "fileName"},
+        label,
+        optional={"projection"},
+    )
     role = _string(item["role"], f"{label}.role", maximum=32)
     if role not in EVIDENCE_ROLES:
         raise registry_error(
@@ -519,12 +531,50 @@ def _parse_evidence(
             "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
             f"{label}.fileName is invalid",
         )
+    projection = _string(
+        item.get("projection", "raw"), f"{label}.projection", maximum=64
+    )
+    if projection not in EVIDENCE_PROJECTIONS:
+        raise registry_error(
+            "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
+            f"{label}.projection is unsupported",
+        )
+    if projection == "github-release-asset-v1" and role != "vendor-checksum":
+        raise registry_error(
+            "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
+            f"{label}.projection is only valid for vendor-checksum evidence",
+        )
+    if projection == "github-git-commit-v1" and role != "vendor-signature":
+        raise registry_error(
+            "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
+            f"{label}.projection is only valid for vendor-signature evidence",
+        )
+    url = _https_url(item["url"], f"{label}.url", allowed_origins)
+    if projection != "raw":
+        parsed = urlsplit(url)
+        expected = (
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/assets/[1-9][0-9]*$"
+            if projection == "github-release-asset-v1"
+            else r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/commits/[0-9a-f]{40}$"
+        )
+        if (
+            parsed.hostname != "api.github.com"
+            or parsed.port is not None
+            or parsed.query
+            or parsed.fragment
+            or re.fullmatch(expected, parsed.path) is None
+        ):
+            raise registry_error(
+                "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
+                f"{label}.projection requires an exact GitHub API resource URL",
+            )
     return RuntimeEvidence(
         role,
-        _https_url(item["url"], f"{label}.url", allowed_origins),
+        url,
         _sha256(item["sha256"], f"{label}.sha256"),
         _positive_int(item["size"], f"{label}.size", maximum=MAX_EVIDENCE_BYTES),
         file_name,
+        projection,
     )
 
 
@@ -660,8 +710,11 @@ def _parse_release(
             "PLUGIN_RUNTIME_REGISTRY_SCHEMA_INVALID",
             f"{label}.license.spdx is invalid",
         )
-    legal_directory = _relative_path(
-        license_value["legalDirectory"], f"{label}.license.legalDirectory"
+    legal_directory_value = license_value["legalDirectory"]
+    legal_directory = (
+        "."
+        if legal_directory_value == "."
+        else _relative_path(legal_directory_value, f"{label}.license.legalDirectory")
     )
     license_files = tuple(
         _parse_license_file(raw, f"{label}.licenseFiles[{index}]")
@@ -968,6 +1021,7 @@ def runtime_release_to_wire(release: RuntimeRelease) -> dict[str, Any]:
 
 __all__ = [
     "ARCHIVE_FORMATS",
+    "EVIDENCE_PROJECTIONS",
     "EVIDENCE_ROLES",
     "MAX_ARCHIVE_FILES",
     "MAX_EXTRACTED_BYTES",

@@ -68,6 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--native-provider", action="store_true")
     parser.add_argument("--java-provider", action="store_true")
     parser.add_argument("--node-provider", action="store_true")
+    parser.add_argument("--wasm-provider", action="store_true")
     parser.add_argument("--managed-runtime-root", type=Path)
     return parser
 
@@ -79,6 +80,8 @@ class _EntrypointLaunch:
     manage_process_tree: bool = False
     isolated_search_path: bool = False
     max_processes: int = 1
+    failure_classifier: str = "generic"
+    terminate_on_cancel: bool = False
 
 
 def _sandbox_policies(
@@ -172,7 +175,7 @@ def _provider_entrypoint_launch(
     sandbox_policy: SandboxPolicy | None,
 ) -> _EntrypointLaunch:
     managed_registry = None
-    if args.java_provider or args.node_provider:
+    if args.java_provider or args.node_provider or args.wasm_provider:
         if args.managed_runtime_root is None:
             raise PlatformContractError(
                 "INVALID_CONTRACT",
@@ -188,12 +191,13 @@ def _provider_entrypoint_launch(
     elif args.managed_runtime_root is not None:
         raise PlatformContractError(
             "INVALID_CONTRACT",
-            "managed Runtime Registry root requires Java or Node Provider",
+            "managed Runtime Registry root requires Java, Node, or WASM Provider",
         )
     registry = default_runtime_provider_registry(
         native_enabled=args.native_provider,
         java_enabled=args.java_provider,
         node_enabled=args.node_provider,
+        wasm_enabled=args.wasm_provider,
         managed_runtime_registry=managed_registry,
     )
     provider = registry.resolve(runtime)
@@ -253,6 +257,8 @@ def _provider_entrypoint_launch(
         manage_process_tree=launch.manage_process_tree,
         isolated_search_path=launch.isolated_search_path,
         max_processes=launch.max_processes,
+        failure_classifier=getattr(launch, "failure_classifier", "generic"),
+        terminate_on_cancel=getattr(launch, "terminate_on_cancel", False),
     )
 
 
@@ -366,6 +372,8 @@ async def _replay_control_transcript(
             manage_process_tree=launch.manage_process_tree,
             isolated_search_path=launch.isolated_search_path,
             max_processes=launch.max_processes,
+            failure_classifier=getattr(launch, "failure_classifier", "generic"),
+            terminate_on_cancel=getattr(launch, "terminate_on_cancel", False),
         )
     )
     responses: list[Any] = []

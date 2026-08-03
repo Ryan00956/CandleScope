@@ -1,0 +1,5 @@
+CandleScope Rust/WASM reference plugin
+
+The plugin and CandleScope Rust/WASM SDK are GPL-3.0-only.
+The produced component contains Rust standard-library code distributed under
+Apache-2.0 OR MIT. No third-party Cargo package is used.

@@ -33,6 +33,7 @@ from app.plugin_security_v2.storage import security_lock
 
 from .errors import RuntimeRegistryError, registry_error
 from .models import (
+    MAX_EVIDENCE_BYTES,
     MAX_REGISTRY_BYTES,
     MAX_RUNTIME_ARCHIVE_BYTES,
     STATE_SCHEMA_VERSION,
@@ -81,6 +82,12 @@ _REFERENCE_JSON_LIMITS = JsonLimits(
     max_depth=32,
     max_container_items=500_000,
     max_string_bytes=2 * 1024 * 1024,
+)
+_EVIDENCE_SOURCE_JSON_LIMITS = JsonLimits(
+    max_message_bytes=MAX_EVIDENCE_BYTES,
+    max_depth=32,
+    max_container_items=500_000,
+    max_string_bytes=4 * 1024 * 1024,
 )
 
 
@@ -276,6 +283,231 @@ def host_platform() -> tuple[str, str]:
             details={"system": platform.system(), "machine": platform.machine()},
         )
     return operating_system, architecture
+
+
+def _evidence_invalid(
+    message: str, *, details: Mapping[str, Any] | None = None
+) -> RuntimeRegistryError:
+    return registry_error(
+        "PLUGIN_RUNTIME_REGISTRY_EVIDENCE_INVALID",
+        message,
+        details=details,
+    )
+
+
+def _projection_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _evidence_invalid(f"{label} must be a JSON object")
+    return value
+
+
+def _projection_string(value: Any, label: str, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > maximum
+        or "\x00" in value
+    ):
+        raise _evidence_invalid(f"{label} must be a bounded string")
+    return value
+
+
+def _projection_sha(value: Any, label: str) -> str:
+    raw = _projection_string(value, label, maximum=71)
+    if re.fullmatch(r"[0-9a-f]{40}", raw) is None:
+        raise _evidence_invalid(f"{label} must be a lowercase Git SHA-1")
+    return raw
+
+
+def _projection_timestamp(value: Any, label: str) -> str:
+    raw = _projection_string(value, label, maximum=64)
+    if not _is_canonical_utc_timestamp(raw):
+        raise _evidence_invalid(f"{label} must be a canonical UTC timestamp")
+    return raw
+
+
+def _github_release_asset_projection(value: Any, *, source_url: str) -> dict[str, Any]:
+    item = _projection_mapping(value, "GitHub release asset evidence")
+    asset_id = item.get("id")
+    size = item.get("size")
+    if (
+        isinstance(asset_id, bool)
+        or not isinstance(asset_id, int)
+        or not 0 < asset_id <= 2**63 - 1
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or not 0 < size <= MAX_RUNTIME_ARCHIVE_BYTES
+    ):
+        raise _evidence_invalid("GitHub release asset id or size is invalid")
+    name = _projection_string(
+        item.get("name"), "GitHub release asset name", maximum=256
+    )
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise _evidence_invalid("GitHub release asset name is unsafe")
+    digest = _projection_string(
+        item.get("digest"), "GitHub release asset digest", maximum=71
+    )
+    if _SHA256.fullmatch(digest) is None:
+        raise _evidence_invalid("GitHub release asset digest must be SHA-256")
+    api_url = _projection_string(
+        item.get("url"), "GitHub release asset API URL", maximum=2048
+    )
+    browser_url = _projection_string(
+        item.get("browser_download_url"),
+        "GitHub release asset download URL",
+        maximum=2048,
+    )
+    if api_url != source_url:
+        raise _evidence_invalid(
+            "GitHub release asset response does not match its requested URL"
+        )
+    browser = urlsplit(browser_url)
+    if (
+        browser.scheme != "https"
+        or browser.hostname != "github.com"
+        or browser.port is not None
+        or browser.username is not None
+        or browser.password is not None
+        or browser.query
+        or browser.fragment
+    ):
+        raise _evidence_invalid("GitHub release asset download URL is invalid")
+    state = _projection_string(
+        item.get("state"), "GitHub release asset state", maximum=32
+    )
+    if state != "uploaded":
+        raise _evidence_invalid("GitHub release asset is not in the uploaded state")
+    return {
+        "schemaVersion": "candlescope.github-release-asset-evidence/1",
+        "browserDownloadUrl": browser_url,
+        "contentType": _projection_string(
+            item.get("content_type"), "GitHub release asset content type", maximum=128
+        ),
+        "createdAt": _projection_timestamp(
+            item.get("created_at"), "GitHub release asset created_at"
+        ),
+        "digest": digest,
+        "id": asset_id,
+        "name": name,
+        "size": size,
+        "state": state,
+        "updatedAt": _projection_timestamp(
+            item.get("updated_at"), "GitHub release asset updated_at"
+        ),
+        "url": api_url,
+    }
+
+
+def _github_identity_projection(value: Any, label: str) -> dict[str, str]:
+    item = _projection_mapping(value, label)
+    return {
+        "date": _projection_timestamp(item.get("date"), f"{label}.date"),
+        "email": _projection_string(item.get("email"), f"{label}.email", maximum=512),
+        "name": _projection_string(item.get("name"), f"{label}.name", maximum=512),
+    }
+
+
+def _github_git_commit_projection(value: Any, *, source_url: str) -> dict[str, Any]:
+    item = _projection_mapping(value, "GitHub git commit evidence")
+    requested_sha = source_url.rsplit("/", 1)[-1]
+    sha = _projection_sha(item.get("sha"), "GitHub git commit sha")
+    if sha != requested_sha:
+        raise _evidence_invalid(
+            "GitHub git commit response does not match its requested SHA"
+        )
+    tree = _projection_mapping(item.get("tree"), "GitHub git commit tree")
+    parents_value = item.get("parents")
+    if (
+        not isinstance(parents_value, Sequence)
+        or isinstance(parents_value, (str, bytes, bytearray))
+        or len(parents_value) > 64
+    ):
+        raise _evidence_invalid("GitHub git commit parents must be a bounded array")
+    parents = [
+        _projection_sha(
+            _projection_mapping(parent, f"GitHub git commit parents[{index}]").get(
+                "sha"
+            ),
+            f"GitHub git commit parents[{index}].sha",
+        )
+        for index, parent in enumerate(parents_value)
+    ]
+    verification = _projection_mapping(
+        item.get("verification"), "GitHub git commit verification"
+    )
+    if (
+        verification.get("verified") is not True
+        or verification.get("reason") != "valid"
+    ):
+        raise _evidence_invalid("GitHub git commit signature is not verified")
+    signature = _projection_string(
+        verification.get("signature"),
+        "GitHub git commit verification.signature",
+        maximum=256 * 1024,
+    )
+    if not (
+        signature.startswith("-----BEGIN PGP SIGNATURE-----")
+        and signature.rstrip().endswith("-----END PGP SIGNATURE-----")
+    ):
+        raise _evidence_invalid(
+            "GitHub git commit verification is not an armored PGP signature"
+        )
+    return {
+        "schemaVersion": "candlescope.github-git-commit-evidence/1",
+        "author": _github_identity_projection(
+            item.get("author"), "GitHub git commit author"
+        ),
+        "committer": _github_identity_projection(
+            item.get("committer"), "GitHub git commit committer"
+        ),
+        "message": _projection_string(
+            item.get("message"), "GitHub git commit message", maximum=1024 * 1024
+        ),
+        "parents": parents,
+        "sha": sha,
+        "tree": _projection_sha(tree.get("sha"), "GitHub git commit tree.sha"),
+        "verification": {
+            "payload": _projection_string(
+                verification.get("payload"),
+                "GitHub git commit verification.payload",
+                maximum=2 * 1024 * 1024,
+            ),
+            "reason": "valid",
+            "signature": signature,
+            "verified": True,
+            "verifiedAt": _projection_timestamp(
+                verification.get("verified_at"),
+                "GitHub git commit verification.verified_at",
+            ),
+        },
+    }
+
+
+def project_runtime_evidence_bytes(
+    source: bytes,
+    *,
+    projection: str,
+    source_url: str,
+) -> bytes:
+    """Project mutable GitHub API envelopes into a minimal, signed canonical record."""
+
+    try:
+        value = loads_strict(source, limits=_EVIDENCE_SOURCE_JSON_LIMITS)
+    except (PlatformContractError, UnicodeDecodeError) as exc:
+        raise _evidence_invalid(
+            "runtime evidence source is not strict bounded JSON",
+            details={"projection": projection},
+        ) from exc
+    if projection == "github-release-asset-v1":
+        projected = _github_release_asset_projection(value, source_url=source_url)
+    elif projection == "github-git-commit-v1":
+        projected = _github_git_commit_projection(value, source_url=source_url)
+    else:
+        raise _evidence_invalid(
+            "runtime evidence projection is unsupported",
+            details={"projection": projection},
+        )
+    return canonical_bytes(projected)
 
 
 class RuntimeArtifactFetcher(Protocol):
@@ -660,7 +892,8 @@ def _extract_zip(release: RuntimeRelease, archive: Path, destination: Path) -> N
 
 def _extract_tar(release: RuntimeRelease, archive: Path, destination: Path) -> None:
     try:
-        with tarfile.open(archive, "r:gz") as package:
+        mode = "r:gz" if release.archive_format == "tar.gz" else "r:xz"
+        with tarfile.open(archive, mode) as package:
             files: list[tuple[tarfile.TarInfo, str]] = []
             seen: set[str] = set()
             total = 0
@@ -760,17 +993,23 @@ def _inventory(root: Path) -> tuple[list[dict[str, Any]], int]:
 
 
 def _validate_legal_inventory(release: RuntimeRelease, root: Path) -> None:
-    legal = root.joinpath(*PurePosixPath(release.legal_directory).parts)
-    if legal.is_symlink() or not legal.is_dir():
+    if release.legal_directory == ".":
+        legal_files = [
+            root.joinpath(*PurePosixPath(item.path).parts)
+            for item in release.license_files
+        ]
+    else:
+        legal = root.joinpath(*PurePosixPath(release.legal_directory).parts)
+        if legal.is_symlink() or not legal.is_dir():
+            raise registry_error(
+                "PLUGIN_RUNTIME_REGISTRY_LICENSE_INVALID",
+                "managed runtime legal directory is missing",
+            )
+        legal_files = [path for path in legal.rglob("*") if path.is_file()]
+    if any(path.is_symlink() or not path.is_file() for path in legal_files):
         raise registry_error(
             "PLUGIN_RUNTIME_REGISTRY_LICENSE_INVALID",
-            "managed runtime legal directory is missing",
-        )
-    legal_files = [path for path in legal.rglob("*") if path.is_file()]
-    if any(path.is_symlink() for path in legal_files):
-        raise registry_error(
-            "PLUGIN_RUNTIME_REGISTRY_LICENSE_INVALID",
-            "managed runtime legal inventory contains a symbolic link",
+            "managed runtime legal inventory is missing or contains a symbolic link",
         )
     legal_size = sum(path.stat().st_size for path in legal_files)
     if len(legal_files) != release.legal_file_count or legal_size != release.legal_size:
@@ -1046,7 +1285,11 @@ class ManagedRuntimeRegistryService:
         return self.registries_directory / f"{digest.removeprefix('sha256:')}.json"
 
     def _archive_path(self, release: RuntimeRelease) -> Path:
-        suffix = ".tar.gz" if release.archive_format == "tar.gz" else ".zip"
+        suffix = {
+            "tar.gz": ".tar.gz",
+            "tar.xz": ".tar.xz",
+            "zip": ".zip",
+        }[release.archive_format]
         return (
             self.archives_directory
             / f"{release.sha256.removeprefix('sha256:')}{suffix}"
@@ -1316,11 +1559,38 @@ class ManagedRuntimeRegistryService:
         digest: str,
         size: int,
         destination: Path,
+        projection: str = "raw",
     ) -> None:
         self.staging_directory.mkdir(parents=True, exist_ok=True)
         staging = self.staging_directory / f"download-{uuid.uuid4().hex}.part"
+        source_staging = (
+            staging
+            if projection == "raw"
+            else self.staging_directory / f"source-{uuid.uuid4().hex}.part"
+        )
         try:
-            self.fetcher.fetch(url, staging, maximum=size)
+            self.fetcher.fetch(
+                url,
+                source_staging,
+                maximum=size if projection == "raw" else MAX_EVIDENCE_BYTES,
+            )
+            if projection != "raw":
+                try:
+                    projected = project_runtime_evidence_bytes(
+                        source_staging.read_bytes(),
+                        projection=projection,
+                        source_url=url,
+                    )
+                    with staging.open("xb") as stream:
+                        stream.write(projected)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except RuntimeRegistryError:
+                    raise
+                except OSError as exc:
+                    raise _io_error(
+                        exc, "runtime evidence projection could not be staged"
+                    ) from exc
             actual = _hash_file(staging)
             if actual != (digest, size):
                 raise registry_error(
@@ -1353,6 +1623,59 @@ class ManagedRuntimeRegistryService:
             raise _io_error(exc, "runtime download could not be committed") from exc
         finally:
             staging.unlink(missing_ok=True)
+            if source_staging != staging:
+                source_staging.unlink(missing_ok=True)
+
+    def _validate_projected_evidence_bindings(self, release: RuntimeRelease) -> None:
+        for evidence in release.evidence:
+            if evidence.projection == "raw":
+                continue
+            path = self._evidence_path(evidence)
+            try:
+                raw = path.read_bytes()
+                value = loads_strict(raw, limits=_EVIDENCE_SOURCE_JSON_LIMITS)
+            except (OSError, PlatformContractError, UnicodeDecodeError) as exc:
+                raise _evidence_invalid(
+                    "cached projected runtime evidence is unreadable",
+                    details={"role": evidence.role},
+                ) from exc
+            if raw != canonical_bytes(value) or not isinstance(value, Mapping):
+                raise _evidence_invalid(
+                    "cached projected runtime evidence is not canonical JSON",
+                    details={"role": evidence.role},
+                )
+            if evidence.projection == "github-release-asset-v1":
+                if (
+                    value.get("schemaVersion")
+                    != "candlescope.github-release-asset-evidence/1"
+                    or value.get("browserDownloadUrl") != release.url
+                    or value.get("digest") != release.sha256
+                    or value.get("size") != release.size
+                    or value.get("state") != "uploaded"
+                ):
+                    raise _evidence_invalid(
+                        "GitHub release asset evidence does not bind the runtime archive",
+                        details={"runtimeId": release.runtime_id},
+                    )
+            elif evidence.projection == "github-git-commit-v1":
+                sha = value.get("sha")
+                verification = value.get("verification")
+                if (
+                    value.get("schemaVersion")
+                    != "candlescope.github-git-commit-evidence/1"
+                    or not isinstance(sha, str)
+                    or sha not in release.upstream_scm_ref
+                    or not release.upstream_build_ref.endswith(f"/{sha}")
+                    or not isinstance(verification, Mapping)
+                    or verification.get("verified") is not True
+                    or verification.get("reason") != "valid"
+                ):
+                    raise _evidence_invalid(
+                        "GitHub git commit evidence does not bind the runtime SCM reference",
+                        details={"runtimeId": release.runtime_id},
+                    )
+            else:
+                raise AssertionError("signed evidence projection was not validated")
 
     def _quarantine_file(self, path: Path, *, label: str) -> bool:
         if not path.exists():
@@ -1454,8 +1777,10 @@ class ManagedRuntimeRegistryService:
                     digest=evidence.sha256,
                     size=evidence.size,
                     destination=path,
+                    projection=evidence.projection,
                 )
                 downloaded += 1
+        self._validate_projected_evidence_bindings(release)
         return downloaded, quarantined
 
     def _cache_receipt(
@@ -2388,4 +2713,5 @@ __all__ = [
     "RUNTIME_REGISTRY_STATUS_SCHEMA",
     "RuntimeArtifactFetcher",
     "host_platform",
+    "project_runtime_evidence_bytes",
 ]

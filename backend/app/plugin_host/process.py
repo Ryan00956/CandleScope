@@ -88,6 +88,8 @@ class SidecarProcessSpec:
     manage_process_tree: bool = False
     isolated_search_path: bool = False
     max_processes: int = 1
+    failure_classifier: str = "generic"
+    terminate_on_cancel: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -142,6 +144,10 @@ class SidecarProcessSpec:
             or not 1 <= self.max_processes <= 32
         ):
             raise ValueError("max_processes is outside the supported range")
+        if self.failure_classifier not in {"generic", "wasmtime-v1"}:
+            raise ValueError("failure_classifier is unsupported")
+        if not isinstance(self.terminate_on_cancel, bool):
+            raise ValueError("terminate_on_cancel must be a boolean")
 
     @property
     def command(self) -> tuple[str, ...]:

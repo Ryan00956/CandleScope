@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 3,
+  "plugin": {
+    "id": "candlescope.wasm-reference",
+    "name": "Rust WASM Reference",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "runtime": {
+          "kind": "wasm-component",
+          "artifact": "runtime/main.wasm",
+          "runtimeId": "wasmtime-47.0.3",
+          "export": "wasi:cli.run",
+          "wasiProfile": "wasi-preview2"
+        },
+        "transport": "jsonl/1",
+        "resourceProfile": "standard",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "wasm-hello",
+      "kind": "command/1",
+      "title": "Run deterministic Rust/WASM reference",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": [
+          "commandPalette"
+        ]
+      }
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": [
+    {
+      "id": "wasm-control",
+      "kind": "controlTranscript",
+      "sha256": "sha256:447b2b15f8be4d1f5a8232f0af1a400acaa30e78eaace277bc29197fb38f3ed4",
+      "entrypoint": "main"
+    }
+  ]
+}

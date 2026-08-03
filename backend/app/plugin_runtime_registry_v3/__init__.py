@@ -5,6 +5,7 @@ from pathlib import Path
 from .errors import RuntimeRegistryError, registry_error
 from .models import (
     ARCHIVE_FORMATS,
+    EVIDENCE_PROJECTIONS,
     EVIDENCE_ROLES,
     REGISTRY_SCHEMA_ID,
     REGISTRY_SCHEMA_VERSION,
@@ -37,6 +38,7 @@ from .service import (
     ProbeResult,
     RuntimeArtifactFetcher,
     host_platform,
+    project_runtime_evidence_bytes,
 )
 
 
@@ -45,11 +47,13 @@ OFFICIAL_ROOTS_PATH = PACKAGE_ROOT / "official-runtime-registry-roots.json"
 OFFICIAL_ROOTS_V1_PATH = PACKAGE_ROOT / "official-runtime-registry-roots-v1.json"
 OFFICIAL_ROOTS_V2_PATH = PACKAGE_ROOT / "official-runtime-registry-roots-v2.json"
 OFFICIAL_ROOTS_V3_PATH = PACKAGE_ROOT / "official-runtime-registry-roots-v3.json"
+OFFICIAL_ROOTS_V4_PATH = PACKAGE_ROOT / "official-runtime-registry-roots-v4.json"
 OFFICIAL_REGISTRY_V1_PATH = PACKAGE_ROOT / "official-runtime-registry-v1.json"
 OFFICIAL_REGISTRY_V2_PATH = PACKAGE_ROOT / "official-runtime-registry-v2.json"
 OFFICIAL_REGISTRY_V3_PATH = PACKAGE_ROOT / "official-runtime-registry-v3.json"
 OFFICIAL_REGISTRY_V4_PATH = PACKAGE_ROOT / "official-runtime-registry-v4.json"
-OFFICIAL_REGISTRY_PATH = OFFICIAL_REGISTRY_V4_PATH
+OFFICIAL_REGISTRY_V5_PATH = PACKAGE_ROOT / "official-runtime-registry-v5.json"
+OFFICIAL_REGISTRY_PATH = OFFICIAL_REGISTRY_V5_PATH
 
 
 def build_official_runtime_registry(
@@ -65,6 +69,7 @@ def build_official_runtime_registry(
         revision_2 = OFFICIAL_REGISTRY_V2_PATH.read_bytes()
         revision_3 = OFFICIAL_REGISTRY_V3_PATH.read_bytes()
         revision_4 = OFFICIAL_REGISTRY_V4_PATH.read_bytes()
+        revision_5 = OFFICIAL_REGISTRY_V5_PATH.read_bytes()
     except OSError as exc:
         raise registry_error(
             "PLUGIN_RUNTIME_REGISTRY_CONFIGURATION_INVALID",
@@ -74,8 +79,8 @@ def build_official_runtime_registry(
     return ManagedRuntimeRegistryService(
         root=root,
         roots=roots,
-        bootstrap_registry=revision_4,
-        bootstrap_history=(revision_1, revision_2, revision_3),
+        bootstrap_registry=revision_5,
+        bootstrap_history=(revision_1, revision_2, revision_3, revision_4),
         enabled=enabled,
         network_updates_enabled=network_updates_enabled,
         fetcher=fetcher,
@@ -86,6 +91,7 @@ __all__ = [
     "ARCHIVE_FORMATS",
     "DOWNLOAD_TIMEOUT_SECONDS",
     "EVIDENCE_ROLES",
+    "EVIDENCE_PROJECTIONS",
     "EnsuredRuntime",
     "HttpsRuntimeArtifactFetcher",
     "ManagedRuntimeRegistryService",
@@ -94,10 +100,12 @@ __all__ = [
     "OFFICIAL_REGISTRY_V2_PATH",
     "OFFICIAL_REGISTRY_V3_PATH",
     "OFFICIAL_REGISTRY_V4_PATH",
+    "OFFICIAL_REGISTRY_V5_PATH",
     "OFFICIAL_ROOTS_PATH",
     "OFFICIAL_ROOTS_V1_PATH",
     "OFFICIAL_ROOTS_V2_PATH",
     "OFFICIAL_ROOTS_V3_PATH",
+    "OFFICIAL_ROOTS_V4_PATH",
     "ProbeResult",
     "REGISTRY_SCHEMA_ID",
     "REGISTRY_SCHEMA_VERSION",
@@ -122,6 +130,7 @@ __all__ = [
     "host_platform",
     "key_id",
     "load_runtime_registry_roots_bytes",
+    "project_runtime_evidence_bytes",
     "registry_error",
     "runtime_release_to_wire",
     "sha256_bytes",

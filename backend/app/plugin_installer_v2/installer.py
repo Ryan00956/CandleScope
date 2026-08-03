@@ -82,6 +82,7 @@ RUNTIME_PROVIDER_SEAM_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_PROVIDER_SEAM_EN
 NATIVE_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED"
 JAVA_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED"
 NODE_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_NODE_ENABLED"
+WASM_RUNTIME_ENABLED_ENV = "CANDLESCOPE_PLUGIN_RUNTIME_WASM_ENABLED"
 
 _SAFE_ENVIRONMENT_KEYS = frozenset(
     {
@@ -820,6 +821,7 @@ class PlatformPluginInstaller:
         native_runtime_enabled: bool | None = None,
         java_runtime_enabled: bool | None = None,
         node_runtime_enabled: bool | None = None,
+        wasm_runtime_enabled: bool | None = None,
         runtime_provider_registry: Any | None = None,
         managed_runtime_registry: Any | None = None,
     ) -> None:
@@ -891,6 +893,15 @@ class PlatformPluginInstaller:
             if node_runtime_enabled is None
             else node_runtime_enabled
         )
+        if wasm_runtime_enabled is not None and not isinstance(
+            wasm_runtime_enabled, bool
+        ):
+            raise PlatformInstallerError("wasm_runtime_enabled must be a boolean")
+        self.wasm_runtime_enabled = (
+            _environment_bool(WASM_RUNTIME_ENABLED_ENV, default=False)
+            if wasm_runtime_enabled is None
+            else wasm_runtime_enabled
+        )
         if managed_runtime_registry is not None and not all(
             callable(getattr(managed_runtime_registry, name, None))
             for name in ("ensure", "public_status", "resolve")
@@ -906,6 +917,7 @@ class PlatformPluginInstaller:
                 native_enabled=self.native_runtime_enabled,
                 java_enabled=self.java_runtime_enabled,
                 node_enabled=self.node_runtime_enabled,
+                wasm_enabled=self.wasm_runtime_enabled,
                 managed_runtime_registry=self.managed_runtime_registry,
             )
         if not callable(
@@ -1709,7 +1721,11 @@ class PlatformPluginInstaller:
             command.append("--provider-seam")
         if self.native_runtime_enabled:
             command.append("--native-provider")
-        if self.java_runtime_enabled or self.node_runtime_enabled:
+        if (
+            self.java_runtime_enabled
+            or self.node_runtime_enabled
+            or self.wasm_runtime_enabled
+        ):
             runtime_root = getattr(self.managed_runtime_registry, "root", None)
             if not isinstance(runtime_root, Path) or not runtime_root.is_dir():
                 raise PlatformInstallerError(
@@ -1721,6 +1737,8 @@ class PlatformPluginInstaller:
                 command.append("--java-provider")
             if self.node_runtime_enabled:
                 command.append("--node-provider")
+            if self.wasm_runtime_enabled:
+                command.append("--wasm-provider")
         if trust_level == "untrusted":
             if self.probe_sandbox_factory is None:
                 raise PlatformInstallerError(

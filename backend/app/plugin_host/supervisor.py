@@ -111,6 +111,8 @@ class EntrypointProcessSpec:
     manage_process_tree: bool = False
     isolated_search_path: bool = False
     max_processes: int = 1
+    failure_classifier: str = "generic"
+    terminate_on_cancel: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.plugin_id, str) or not self.plugin_id:
@@ -155,6 +157,8 @@ class EntrypointProcessSpec:
             manage_process_tree=self.manage_process_tree,
             isolated_search_path=self.isolated_search_path,
             max_processes=self.max_processes,
+            failure_classifier=self.failure_classifier,
+            terminate_on_cancel=self.terminate_on_cancel,
         )
         if (
             isinstance(self.max_in_flight, bool)
@@ -182,6 +186,8 @@ class EntrypointProcessSpec:
             manage_process_tree=self.manage_process_tree,
             isolated_search_path=self.isolated_search_path,
             max_processes=self.max_processes,
+            failure_classifier=self.failure_classifier,
+            terminate_on_cancel=self.terminate_on_cancel,
         )
 
 

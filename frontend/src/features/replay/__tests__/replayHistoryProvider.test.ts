@@ -18,6 +18,7 @@ import type {
   ReplayHistoryIdentity,
   ReplayHistoryPage,
 } from "../replayHistoryProvider.js";
+import { replayUsesAuthoritativeSourceBucketProjection } from "../replayViewerProjection.js";
 
 
 const DATA_EPOCH = `sha256:${"a".repeat(64)}` as const;
@@ -258,7 +259,13 @@ test("initial display history starts at the replay seam instead of an incomplete
   assert.equal(replayHistoryInitialBeforeMs(946_684_800_000, "invalid"), null);
 });
 
-test("source-bucket first page connects to the authoritative phase across coarse intervals", () => {
+test("non-blind coarse BAR history connects to the authoritative source-bucket seam", () => {
+  const usesSourceBucketProjection = replayUsesAuthoritativeSourceBucketProjection(
+    "bar",
+    "1m",
+    "1d",
+  );
+  assert.equal(usesSourceBucketProjection, true);
   const cases = [
     { interval: "1d", firstOpenMs: 946_598_400_000, calendarSeamMs: 946_684_800_000 },
     { interval: "3d", firstOpenMs: 946_598_400_000, calendarSeamMs: 946_598_400_000 },
@@ -279,7 +286,12 @@ test("source-bucket first page connects to the authoritative phase across coarse
     }]);
 
     assert.equal(
-      replayHistoryFirstPageBeforeMs(store, 946_684_800_000, interval, true),
+      replayHistoryFirstPageBeforeMs(
+        store,
+        946_684_800_000,
+        interval,
+        usesSourceBucketProjection,
+      ),
       firstOpenMs,
     );
     assert.equal(
@@ -459,6 +471,23 @@ test("viewport history uses calendar boundaries for monthly display intervals", 
 test("revealed history repair replaces an elapsed partial left bucket without reading the future", () => {
   const dayMs = 86_400_000;
   const replayStartMs = 946_684_800_000;
+  const initial = new SeriesWindowStore({ intervalSeconds: dayMs / 1_000 });
+  initial.replace([{
+    ...bar(replayStartMs - dayMs, dayMs),
+    time: (replayStartMs - dayMs) / 1_000,
+    replayCloseTimeMs: replayStartMs - 1,
+    replayClosed: false,
+  }]);
+  assert.equal(
+    replayHistoryRevealRepairBeforeMs(
+      initial,
+      replayStartMs,
+      replayStartMs,
+      "1d",
+    ),
+    null,
+  );
+
   const store = new SeriesWindowStore({ intervalSeconds: dayMs / 1_000 });
   store.replace([
     {

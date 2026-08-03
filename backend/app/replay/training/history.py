@@ -193,11 +193,14 @@ def _decode_verified_market_halts(
                 manifest = _decode_bar_snapshot_blob(bytes(blob)).paging_manifest
             except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
                 manifest = None
-    if (
-        manifest is None
-        or manifest.get("schema_version") != "replay-paged-bar-manifest.v2"
-    ):
+    if manifest is None:
         return ()
+    if manifest.get("schema_version") != "replay-paged-bar-manifest.v3":
+        raise _fail(
+            "HISTORY_SNAPSHOT_INVALID",
+            "training paged BAR manifest schema is unsupported",
+            status_code=503,
+        )
 
     interval_ms = parse_interval_ms(config.base_interval)
     if interval_ms is None or interval_ms < 1:
@@ -1399,13 +1402,15 @@ def _replace_closed_projection_buckets_from_native(
     config: ReplaySessionConfig,
     mapper: SourceBucketTimeMapper,
     display_source_revision: str | None,
+    display_source_range_start_ms: int | None,
+    display_source_range_end_ms: int | None,
     actual_end_ms: int,
     actual_replay_start_ms: int,
     limit: int,
     bars: list[ReplayDisplayBar],
     verified_halts: tuple[ReplayBarHalt, ...] = (),
 ) -> list[ReplayDisplayBar]:
-    """Use the immutable native display series for every closed bucket.
+    """Use the immutable native display series for every covered closed bucket.
 
     Base history can contain a declared exchange gap inside an otherwise valid
     coarse bucket.  In that case source-bucket aggregation correctly refuses
@@ -1413,7 +1418,8 @@ def _replace_closed_projection_buckets_from_native(
     chart seam.  Base aggregation can also differ from the exchange's native
     quote precision by a final rounding unit.  Once (and only once) a bucket is
     fully revealed, its pinned native exchange candle is authoritative and safe
-    to project.  The still-forming bucket remains base-derived.
+    to project.  A closed tail newer than that immutable native revision, plus
+    the still-forming bucket, remains derived from the pinned base revision.
     """
 
     if display_source_revision is None or actual_end_ms <= mapper.actual_anchor_ms:
@@ -1452,33 +1458,19 @@ def _replace_closed_projection_buckets_from_native(
         ) from exc
 
     candidate_ordinals = list(range(first_candidate_ordinal, last_closed_ordinal + 1))
-    first_candidate_open_ms = mapper.actual_bucket_open(candidate_ordinals[0])
-    last_candidate_open_ms = mapper.actual_bucket_open(candidate_ordinals[-1])
-    query_limit = len(candidate_ordinals)
-    try:
-        raw_rows = _query_bound_repository(
-            repository,
-            snapshot,
-            config.symbol,
-            config.display_interval,
-            start_ms=first_candidate_open_ms,
-            end_ms=last_candidate_open_ms,
-            limit=query_limit,
-            order="ASC",
-            exchange=config.exchange,
-            market_type=config.market_type,
-            source_revision_override=display_source_revision,
-        )
-    except TrainingRunError:
-        raise
-    except Exception as exc:
-        raise _fail(
-            "HISTORY_SOURCE_UNAVAILABLE",
-            "pinned native display projection source could not be read",
-            status_code=503,
-        ) from exc
-
     candidate_set = set(candidate_ordinals)
+    native_candidate_set = (
+        candidate_set
+        if display_source_range_start_ms is None
+        or display_source_range_end_ms is None
+        else {
+            ordinal
+            for ordinal in candidate_ordinals
+            if display_source_range_start_ms
+            <= mapper.actual_bucket_open(ordinal)
+            <= display_source_range_end_ms
+        }
+    )
     halt_ordinals = {
         ordinal
         for ordinal in candidate_ordinals
@@ -1488,15 +1480,42 @@ def _replace_closed_projection_buckets_from_native(
             verified_halts,
         )
     }
+    try:
+        if native_candidate_set:
+            first_native_open_ms = mapper.actual_bucket_open(min(native_candidate_set))
+            last_native_open_ms = mapper.actual_bucket_open(max(native_candidate_set))
+            native_rows = _query_bound_repository(
+                repository,
+                snapshot,
+                config.symbol,
+                config.display_interval,
+                start_ms=first_native_open_ms,
+                end_ms=last_native_open_ms,
+                limit=len(native_candidate_set),
+                order="ASC",
+                exchange=config.exchange,
+                market_type=config.market_type,
+                source_revision_override=display_source_revision,
+            )
+        else:
+            native_rows = []
+    except TrainingRunError:
+        raise
+    except Exception as exc:
+        raise _fail(
+            "HISTORY_SOURCE_UNAVAILABLE",
+            "pinned native display projection source could not be read",
+            status_code=503,
+        ) from exc
+
     replaced_ordinals: set[int] = set()
     previous_open_ms: int | None = None
     try:
-        for raw in raw_rows:
+        for raw in native_rows:
             raw_open_ms = int(raw["open_time"])
             ordinal = mapper.actual_bucket_ordinal(raw_open_ms)
             if (
-                ordinal < candidate_ordinals[0]
-                or ordinal > candidate_ordinals[-1]
+                ordinal not in native_candidate_set
                 or (previous_open_ms is not None and raw_open_ms <= previous_open_ms)
             ):
                 raise ValueError("native projection ordering is invalid")
@@ -1509,7 +1528,7 @@ def _replace_closed_projection_buckets_from_native(
                 now_ms=actual_end_ms,
                 expected_close_ms=mapper.actual_bucket_end(raw_open_ms) - 1,
             )
-            if ordinal in candidate_set and ordinal not in halt_ordinals:
+            if ordinal not in halt_ordinals:
                 existing_by_ordinal[ordinal] = _native_row_to_display_bar(
                     row,
                     mapper=mapper,
@@ -1542,11 +1561,19 @@ def _replace_closed_projection_buckets_from_native(
             existing_by_ordinal[ordinal] = rebuilt
         replaced_ordinals.add(ordinal)
 
-    omitted_ordinals = candidate_set - replaced_ordinals
+    omitted_native_ordinals = native_candidate_set - replaced_ordinals
+    omitted_base_ordinals = (
+        candidate_set
+        - native_candidate_set
+        - halt_ordinals
+        - set(existing_by_ordinal)
+    )
+    omitted_ordinals = omitted_native_ordinals | omitted_base_ordinals
     if omitted_ordinals:
         # Projection v1 has no excluded-range channel.  Returning a silent
-        # hole would recreate the chart corruption this fallback prevents, so
-        # a real native maintenance gap remains explicit and fail-closed.
+        # hole would recreate the chart corruption this fallback prevents.
+        # Missing native authority inside its pin or missing base authority
+        # after its tail therefore remains explicit and fail-closed.
         raise _fail(
             "HISTORY_SOURCE_INCOMPLETE",
             "pinned native display projection omitted a closed bucket",
@@ -2603,6 +2630,33 @@ def build_display_projection(
         )
     else:
         display_source_revision = raw_display_source_revision
+    raw_display_source_range_start_ms = binding.get(
+        "display_source_range_start_ms"
+    )
+    raw_display_source_range_end_ms = binding.get("display_source_range_end_ms")
+    if display_source_revision is None and (
+        raw_display_source_range_start_ms is None
+        and raw_display_source_range_end_ms is None
+    ):
+        display_source_range_start_ms = None
+        display_source_range_end_ms = None
+    elif (
+        display_source_revision is None
+        or isinstance(raw_display_source_range_start_ms, bool)
+        or not isinstance(raw_display_source_range_start_ms, int)
+        or raw_display_source_range_start_ms < 0
+        or isinstance(raw_display_source_range_end_ms, bool)
+        or not isinstance(raw_display_source_range_end_ms, int)
+        or raw_display_source_range_end_ms < raw_display_source_range_start_ms
+    ):
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "pinned native display range is invalid",
+            status_code=503,
+        )
+    else:
+        display_source_range_start_ms = raw_display_source_range_start_ms
+        display_source_range_end_ms = raw_display_source_range_end_ms
     (
         display_source_bucket_anchor_ms,
         _display_alignment_policy,
@@ -2647,18 +2701,30 @@ def build_display_projection(
             public_replay_start_ms=snapshot.replay_start_ms,
             source_bucket_anchor_ms=display_source_bucket_anchor_ms,
         )
+        if display_source_range_start_ms is not None:
+            assert display_source_range_end_ms is not None
+            mapper.actual_bucket_ordinal(display_source_range_start_ms)
+            mapper.actual_bucket_ordinal(display_source_range_end_ms)
     except ValueError as exc:
         raise _fail(
             "HISTORY_SOURCE_INCOMPLETE",
             "training display projection grid is invalid",
             status_code=503,
         ) from exc
-    actual_end_ms = (
-        actual_replay_start_ms + revealed_boundary_ms + 1 - snapshot.replay_start_ms
+    if revealed_boundary_ms < snapshot.replay_start_ms:
+        raise _fail(
+            "HISTORY_BOUNDARY_INVALID",
+            "training display projection cursor precedes the replay start",
+            status_code=503,
+        )
+    actual_end_ms = actual_replay_start_ms + (
+        0
+        if revealed_boundary_ms == snapshot.replay_start_ms
+        else revealed_boundary_ms + 1 - snapshot.replay_start_ms
     )
-    no_revealed_bars = revealed_boundary_ms == snapshot.replay_start_ms
-    if not no_revealed_bars and (
-        actual_end_ms <= actual_replay_start_ms
+    if (
+        actual_end_ms < actual_replay_start_ms
+        or actual_end_ms < base_interval_ms
         or compute_bucket_start_ms(
             actual_end_ms - 1,
             base_interval_ms,
@@ -2672,79 +2738,100 @@ def build_display_projection(
             status_code=503,
         )
     actual_start_ms = mapper.actual_anchor_ms
-    if no_revealed_bars:
-        bars: list[ReplayDisplayBar] = []
-        has_more = False
-    else:
-        aggregate_start_ms = actual_start_ms
-        aggregate_limit = limit
-        aggregate_required = True
-        if display_source_revision is not None:
-            last_observed_open_ms = mapper.actual_containing_bucket_open(
-                actual_end_ms - 1
-            )
-            if mapper.actual_bucket_end(last_observed_open_ms) <= actual_end_ms:
-                # Every requested bucket is closed and therefore comes from
-                # the pinned native series below; no base aggregation is needed.
-                aggregate_required = False
-            else:
-                # Native candles are forbidden for the still-forming bucket.
-                # Aggregate only that one bucket from the revealed base prefix.
-                aggregate_start_ms = last_observed_open_ms
-                aggregate_limit = 1
-        if aggregate_required:
-            try:
-                aggregated = query_source_buckets(
-                    snapshot.provenance.source_revision,
-                    config.symbol,
-                    config.base_interval,
-                    display_interval,
-                    actual_start_ms=aggregate_start_ms,
-                    actual_end_ms=actual_end_ms,
-                    actual_replay_start_ms=actual_replay_start_ms,
-                    public_replay_start_ms=snapshot.replay_start_ms,
-                    limit=aggregate_limit,
-                    include_partial=True,
-                    source_bucket_anchor_ms=display_source_bucket_anchor_ms,
-                    exchange=config.exchange,
-                    market_type=config.market_type,
-                )
-                raw_bars = aggregated["bars"]
-                has_more = aggregated["has_more"]
-                if not isinstance(raw_bars, list) or not isinstance(has_more, bool):
-                    raise TypeError("source-aligned projection result is invalid")
-                bars = [
-                    ReplayDisplayBar.from_dict(raw)
-                    for raw in raw_bars
-                    if isinstance(raw, Mapping)
-                ]
-                if len(bars) != len(raw_bars):
-                    raise TypeError("source-aligned projection bars are invalid")
-            except Exception as exc:
-                raise _fail(
-                    "HISTORY_SOURCE_UNAVAILABLE",
-                    "training display projection source could not be aggregated",
-                    status_code=503,
-                ) from exc
-        else:
-            bars = []
-            has_more = False
-        bars = _replace_closed_projection_buckets_from_native(
-            repository=repository,
-            snapshot=snapshot,
-            config=projection_config,
-            mapper=mapper,
-            display_source_revision=display_source_revision,
-            actual_end_ms=actual_end_ms,
-            actual_replay_start_ms=actual_replay_start_ms,
-            limit=limit,
-            bars=bars,
-            verified_halts=verified_halts,
+    aggregate_start_ms = actual_start_ms
+    aggregate_limit = limit
+    aggregate_required = True
+    if display_source_revision is not None:
+        last_observed_open_ms = mapper.actual_containing_bucket_open(
+            actual_end_ms - 1
         )
-        if display_source_revision is not None and bars:
-            has_more = (
-                has_more or mapper.public_bucket_ordinal(bars[0].open_time_ms) > 0
+        last_observed_ordinal = mapper.actual_bucket_ordinal(
+            last_observed_open_ms
+        )
+        forming_bucket = (
+            mapper.actual_bucket_end(last_observed_open_ms) > actual_end_ms
+        )
+        last_closed_ordinal = (
+            last_observed_ordinal - 1
+            if forming_bucket
+            else last_observed_ordinal
+        )
+        if (
+            display_source_range_start_ms is None
+            or last_closed_ordinal < 0
+        ):
+            native_covers_closed_tail = True
+        else:
+            assert display_source_range_end_ms is not None
+            native_covers_closed_tail = (
+                display_source_range_start_ms <= actual_start_ms
+                and mapper.actual_bucket_open(last_closed_ordinal)
+                <= display_source_range_end_ms
             )
+        if not forming_bucket and native_covers_closed_tail:
+            # Every requested bucket is both closed and covered by the
+            # pinned native revision; no base aggregation is needed.
+            aggregate_required = False
+        elif forming_bucket and native_covers_closed_tail:
+            # Native candles are forbidden for the still-forming bucket.
+            # Aggregate only that one bucket from the revealed base prefix.
+            aggregate_start_ms = last_observed_open_ms
+            aggregate_limit = 1
+    if aggregate_required:
+        try:
+            aggregated = query_source_buckets(
+                snapshot.provenance.source_revision,
+                config.symbol,
+                config.base_interval,
+                display_interval,
+                actual_start_ms=aggregate_start_ms,
+                actual_end_ms=actual_end_ms,
+                actual_replay_start_ms=actual_replay_start_ms,
+                public_replay_start_ms=snapshot.replay_start_ms,
+                limit=aggregate_limit,
+                include_partial=True,
+                source_bucket_anchor_ms=display_source_bucket_anchor_ms,
+                exchange=config.exchange,
+                market_type=config.market_type,
+            )
+            raw_bars = aggregated["bars"]
+            has_more = aggregated["has_more"]
+            if not isinstance(raw_bars, list) or not isinstance(has_more, bool):
+                raise TypeError("source-aligned projection result is invalid")
+            bars = [
+                ReplayDisplayBar.from_dict(raw)
+                for raw in raw_bars
+                if isinstance(raw, Mapping)
+            ]
+            if len(bars) != len(raw_bars):
+                raise TypeError("source-aligned projection bars are invalid")
+        except Exception as exc:
+            raise _fail(
+                "HISTORY_SOURCE_UNAVAILABLE",
+                "training display projection source could not be aggregated",
+                status_code=503,
+            ) from exc
+    else:
+        bars = []
+        has_more = False
+    bars = _replace_closed_projection_buckets_from_native(
+        repository=repository,
+        snapshot=snapshot,
+        config=projection_config,
+        mapper=mapper,
+        display_source_revision=display_source_revision,
+        display_source_range_start_ms=display_source_range_start_ms,
+        display_source_range_end_ms=display_source_range_end_ms,
+        actual_end_ms=actual_end_ms,
+        actual_replay_start_ms=actual_replay_start_ms,
+        limit=limit,
+        bars=bars,
+        verified_halts=verified_halts,
+    )
+    if display_source_revision is not None and bars:
+        has_more = (
+            has_more or mapper.public_bucket_ordinal(bars[0].open_time_ms) > 0
+        )
     for bar in bars:
         if (
             bar.open_time_ms > revealed_boundary_ms
@@ -2758,7 +2845,7 @@ def build_display_projection(
             )
     projection_epoch = canonical_sha256(
         {
-            "schema_version": "replay.display-projection-epoch.v4",
+            "schema_version": "replay.display-projection-epoch.v5",
             "run_id": binding["run_id"],
             "session_id": binding["session_id"],
             "track_id": binding["track_id"],
@@ -2768,6 +2855,8 @@ def build_display_projection(
             "revealed_boundary_ms": revealed_boundary_ms,
             "source_revision": snapshot.provenance.source_revision,
             "display_source_revision": display_source_revision,
+            "display_source_range_start_ms": display_source_range_start_ms,
+            "display_source_range_end_ms": display_source_range_end_ms,
             "display_grid_commitment": display_grid_commitment,
             "closed_native_authority": "pinned-closed-only.v1",
             "verified_market_halts": [halt.to_dict() for halt in verified_halts],

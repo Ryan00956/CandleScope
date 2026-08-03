@@ -27,6 +27,7 @@ from app.replay.market_halts import DEFAULT_VERIFIED_MARKET_HALTS
 from app.replay.display_time import SourceBucketTimeMapper
 from app.replay.training.history import build_display_projection, build_history_page
 from app.replay.training import history as history_module
+from app.replay.training.errors import TrainingRunError
 from tests.fixtures.replay.fakes import make_bar
 from tests.fixtures.replay.service_fakes import replay_config
 
@@ -199,6 +200,8 @@ def _grid_binding(
     source_bucket_anchor_ms: int,
     alignment_policy: str,
     durable_boundary_ms: int,
+    display_source_range_start_ms: int,
+    display_source_range_end_ms: int,
 ) -> dict[str, object]:
     config_payload = config.to_dict()  # type: ignore[attr-defined]
     commitment = canonical_sha256(
@@ -210,7 +213,7 @@ def _grid_binding(
             "alignment_policy": alignment_policy,
         }
     )
-    return {
+    binding: dict[str, object] = {
         "run_id": "run-1",
         "session_id": "session-1",
         "track_id": "track-1",
@@ -232,6 +235,9 @@ def _grid_binding(
         "display_alignment_policy": alignment_policy,
         "display_grid_commitment": commitment,
     }
+    binding["display_source_range_start_ms"] = display_source_range_start_ms
+    binding["display_source_range_end_ms"] = display_source_range_end_ms
+    return binding
 
 
 def _persisted(
@@ -251,11 +257,42 @@ def _persisted(
     if verified_market_halts is not None:
         payload["snapshot_ref"] = {
             "paging_manifest": {
-                "schema_version": "replay-paged-bar-manifest.v2",
+                "schema_version": "replay-paged-bar-manifest.v3",
                 "verified_market_halts": verified_market_halts,
             }
         }
     return payload
+
+
+def test_retired_v2_paged_manifest_is_rejected_by_training_history() -> None:
+    snapshot = _snapshot(
+        source_revision="sha256:" + "1" * 64,
+        replay_start_ms=ANCHOR_MS + 10 * MINUTE_MS,
+    )
+    persisted = {
+        **_persisted(
+            snapshot,
+            actual_replay_start_ms=snapshot.replay_start_ms,
+        ),
+        "snapshot_ref": {
+            "paging_manifest": {
+                "schema_version": "replay-paged-bar-manifest.v2",
+            }
+        },
+    }
+
+    with pytest.raises(TrainingRunError) as error:
+        history_module._decode_verified_market_halts(
+            persisted,
+            snapshot=snapshot,
+            config=replace(
+                replay_config(),
+                requested_start_ms=snapshot.replay_start_ms,
+            ),
+        )
+
+    assert error.value.code == "HISTORY_SNAPSHOT_INVALID"
+    assert error.value.status_code == 503
 
 
 def test_persisted_bar_snapshot_decode_is_reused_across_projection_reads() -> None:
@@ -392,6 +429,8 @@ def test_projection_uses_pinned_native_bar_only_after_gap_bucket_is_closed(
         "base_interval": "1m",
         "display_interval": DISPLAY_INTERVAL,
         "display_source_revision": native_manifest.catalog_epoch,
+        "display_source_range_start_ms": native_manifest.earliest_open_ms,
+        "display_source_range_end_ms": native_manifest.latest_open_ms,
         "display_source_bucket_anchor_ms": 0,
         "display_alignment_policy": SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
         "display_grid_commitment": display_grid_commitment,
@@ -453,6 +492,156 @@ def test_projection_uses_pinned_native_bar_only_after_gap_bucket_is_closed(
         "is_closed": True,
         "synthetic": False,
     }
+
+
+def test_projection_aggregates_closed_base_tail_after_native_pin_ends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "archive"
+    writer = ReplayHistoryArchiveWriter(
+        root,
+        now_ms=lambda: ANCHOR_MS + 45 * MINUTE_MS,
+    )
+    row_opens = [
+        ANCHOR_MS + offset * MINUTE_MS
+        for offset in range(14, 35)
+    ]
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [
+                    make_bar(
+                        open_ms,
+                        price=str(100 + index),
+                        source="binance_archive_verified",
+                    )
+                    for index, open_ms in enumerate(row_opens)
+                ],
+                source_key="base-1m-newer-than-native-tail",
+                digest_character="3",
+            )
+        ],
+    )
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        DISPLAY_INTERVAL,
+        [
+            _batch(
+                [
+                    {
+                        "exchange": "binance",
+                        "market_type": "spot",
+                        "symbol": "BTCUSDT",
+                        "interval": DISPLAY_INTERVAL,
+                        "open_time": ANCHOR_MS,
+                        "close_time": ANCHOR_MS + DISPLAY_MS - 1,
+                        "open": 900.0,
+                        "high": 950.0,
+                        "low": 850.0,
+                        "close": 925.0,
+                        "volume": 1_234.0,
+                        "quote_volume": 1_111_111.0,
+                        "trades": 987_654,
+                        "taker_buy_base": 600.0,
+                        "taker_buy_quote": 555_555.0,
+                        "source": "binance_archive_verified",
+                    }
+                ],
+                source_key="native-15m-stale-tail",
+                digest_character="4",
+                alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+                source_bucket_anchor_ms=0,
+            )
+        ],
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        source_bucket_anchor_ms=0,
+    )
+    replay_start_ms = ANCHOR_MS + DISPLAY_MS
+    revealed_boundary_ms = replay_start_ms + DISPLAY_MS - 1
+    forming_boundary_ms = ANCHOR_MS + 35 * MINUTE_MS - 1
+    snapshot = _snapshot_for_rows(
+        source_revision=base_manifest.catalog_epoch,
+        base_interval="1m",
+        base_interval_ms=MINUTE_MS,
+        replay_start_ms=replay_start_ms,
+        row_opens=row_opens,
+        source_earliest_open_ms=row_opens[0],
+        source_latest_open_ms=row_opens[-1],
+        gap_count=0,
+    )
+    config = replace(
+        replay_config(),
+        display_interval=DISPLAY_INTERVAL,
+        requested_start_ms=replay_start_ms,
+        warmup_bars=1,
+        horizon_ms=forming_boundary_ms + 1 - replay_start_ms,
+    )
+    binding = _grid_binding(
+        snapshot=snapshot,
+        config=config,
+        display_interval=DISPLAY_INTERVAL,
+        display_source_revision=native_manifest.catalog_epoch,
+        source_bucket_anchor_ms=0,
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        durable_boundary_ms=forming_boundary_ms,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
+    )
+
+    repository = ReplayHistoryRepository(root)
+    projection = build_display_projection(
+        binding=binding,
+        persisted=_persisted(snapshot, actual_replay_start_ms=replay_start_ms),
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=10,
+        data_epoch=snapshot.data_epoch,
+        display_interval=DISPLAY_INTERVAL,
+        repository=repository,
+    )
+
+    assert len(projection["bars"]) == 1
+    tail = projection["bars"][0]
+    assert tail["open_time_ms"] == replay_start_ms
+    assert tail["close_time_ms"] == revealed_boundary_ms
+    assert tail["component_count"] == 15
+    assert tail["expected_components"] == 15
+    assert tail["is_closed"] is True
+    assert tail["high"] != "950"
+    assert tail["trades"] == 15 * 7
+
+    forming = build_display_projection(
+        binding=binding,
+        persisted=_persisted(snapshot, actual_replay_start_ms=replay_start_ms),
+        revealed_boundary_ms=forming_boundary_ms,
+        limit=10,
+        data_epoch=snapshot.data_epoch,
+        display_interval=DISPLAY_INTERVAL,
+        repository=repository,
+    )
+    assert len(forming["bars"]) == 2
+    assert forming["bars"][0]["is_closed"] is True
+    assert forming["bars"][1]["is_closed"] is False
+    assert forming["bars"][1]["component_count"] == 5
+
+    monkeypatch.setattr(
+        repository,
+        "query_source_bucket_bars_at_revision",
+        lambda *_args, **_kwargs: {"bars": [], "has_more": False},
+    )
+    with pytest.raises(TrainingRunError) as missing:
+        build_display_projection(
+            binding=binding,
+            persisted=_persisted(snapshot, actual_replay_start_ms=replay_start_ms),
+            revealed_boundary_ms=revealed_boundary_ms,
+            limit=10,
+            data_epoch=snapshot.data_epoch,
+            display_interval=DISPLAY_INTERVAL,
+            repository=repository,
+        )
+    assert missing.value.code == "HISTORY_SOURCE_INCOMPLETE"
 
 
 @pytest.mark.parametrize(
@@ -618,6 +807,8 @@ def test_fixed_native_grids_fill_seam_and_keep_limit_has_more(
         source_bucket_anchor_ms=source_anchor_ms,
         alignment_policy=alignment_policy,
         durable_boundary_ms=actual_end_ms - 1,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
     )
     persisted = _persisted(
         snapshot,
@@ -796,6 +987,8 @@ def test_calendar_month_seam_is_causal_native_exact_and_history_contiguous(
         source_bucket_anchor_ms=0,
         alignment_policy=SOURCE_BUCKET_ALIGNMENT_CALENDAR_MONTH,
         durable_boundary_ms=closed_boundary_ms,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
     )
     binding["history_policy"] = {
         "schema_version": "replay.data-policy.v1",
@@ -974,12 +1167,32 @@ def test_closed_projection_prefers_native_rounding_over_complete_base_aggregate(
         source_bucket_anchor_ms=0,
         alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
         durable_boundary_ms=actual_end_ms - 1,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
     )
     persisted = _persisted(
         snapshot,
         actual_replay_start_ms=replay_start_ms,
     )
     repository = ReplayHistoryRepository(root)
+
+    initial = build_display_projection(
+        binding=binding,
+        persisted=persisted,
+        revealed_boundary_ms=replay_start_ms,
+        limit=10,
+        data_epoch=snapshot.data_epoch,
+        display_interval=DISPLAY_INTERVAL,
+        repository=repository,
+    )
+    assert len(initial["bars"]) == 1
+    initial_bar = initial["bars"][0]
+    assert initial_bar["open_time_ms"] == anchor_ms
+    assert initial_bar["last_base_open_ms"] == replay_start_ms - MINUTE_MS
+    assert initial_bar["component_count"] == 10
+    assert initial_bar["expected_components"] == 15
+    assert initial_bar["close"] == "109.5"
+    assert initial_bar["is_closed"] is False
 
     forming = build_display_projection(
         binding=binding,
@@ -1146,6 +1359,8 @@ def test_closed_projection_rebuilds_reviewed_halt_buckets_from_traded_minutes(
         source_bucket_anchor_ms=0,
         alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
         durable_boundary_ms=actual_end_ms - 1,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
     )
     halt = DEFAULT_VERIFIED_MARKET_HALTS[0].for_interval(MINUTE_MS)
     assert halt is not None

@@ -144,7 +144,7 @@ export function replayHistoryInitialBeforeMs(
 
 /**
  * Resolve the first history cursor against the projection that currently owns
- * the chart's left edge. Blinded source-bucket projections preserve the
+ * the chart's left edge. Authoritative source-bucket projections preserve the
  * exchange candle phase, so their first bar can differ from the canonical
  * calendar bucket containing replayStartMs. In that mode the authoritative
  * store must exist before history paging starts and its first open is the only
@@ -242,6 +242,11 @@ export function replayHistoryRevealRepairBeforeMs(
     || revealedBoundaryMs < 0
     || displayInterval === null
   ) return null;
+  // At the initial cursor, an authoritative coarse projection can contain a
+  // warmup-only partial bucket ending at the replay seam.  It is chart context,
+  // not an elapsed replay bucket, so repairing it from the seam would skip the
+  // projection's source-aligned left edge and fail continuity validation.
+  if (revealedBoundaryMs === replayStartMs) return null;
   const timeline = createIntervalTimeline(displayInterval);
   const seamSeconds = timeline?.floor(Math.floor(replayStartMs / 1_000));
   if (seamSeconds === null || seamSeconds === undefined) return null;

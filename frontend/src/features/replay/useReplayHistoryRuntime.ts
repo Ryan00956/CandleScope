@@ -20,10 +20,10 @@ import type { ReplayRuntime } from "./useReplayRuntime.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import {
   rebuildReplayViewerSeries,
+  replayUsesAuthoritativeSourceBucketProjection,
   replaceReplayViewerSeriesFromServer,
 } from "./replayViewerProjection.js";
 import type { ReplayViewerRuntime } from "./useReplayViewerRuntime.js";
-import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 
 
 export interface ReplayHistoryRuntime {
@@ -84,16 +84,16 @@ export function useReplayHistoryRuntime(
   const symbol = config?.symbol ?? null;
   const sourceKind = config?.source_kind ?? null;
   const baseInterval = config?.base_interval ?? null;
-  const usesSourceBucketProjection = sourceKind === "bar"
-    && config?.blind_mode === true
-    && baseInterval !== null
-    && displayInterval !== null
-    && !intervalsSemanticallyEquivalent(baseInterval, displayInterval);
-  // Each blinded coarse interval owns a different public ordinal mapping.
-  // A source-lineage anchor from 1D therefore cannot be compared with the
-  // synthetic lineage of 1W without revealing the private source phase.  Let
-  // the authoritative projection restore the latest window, and reserve
-  // targeted viewport paging for timelines with a shared public identity.
+  const usesSourceBucketProjection = replayUsesAuthoritativeSourceBucketProjection(
+    sourceKind,
+    baseInterval,
+    displayInterval,
+  );
+  // Each authoritative coarse interval owns a different source-bucket
+  // mapping. A source-lineage anchor from 1D therefore cannot be compared with
+  // the lineage of 1W. Let the authoritative projection restore the latest
+  // window, and reserve targeted viewport paging for timelines with a shared
+  // identity.
   const historyViewportTransfer = usesSourceBucketProjection
     ? null
     : viewportTransfer;
@@ -187,6 +187,11 @@ export function useReplayHistoryRuntime(
     : null;
   const viewportPagePending = viewportBeforeMs !== null
     && !viewportAttemptsRef.current.has(viewportBeforeMs);
+  const initialContextPagePending = usesSourceBucketProjection
+    && provider?.historyEpoch === null
+    && runtime.store.replayStartMs !== null
+    && runtime.store.virtualTimeMs === runtime.store.replayStartMs
+    && replayHistoryStoreBeforeMs(viewer.seriesStore) !== null;
   const viewportNeedsLatestRestore = replayHistoryViewportTransferNeedsLatestWindow(
     viewer.seriesStore,
     historyViewportTransfer,
@@ -362,13 +367,14 @@ export function useReplayHistoryRuntime(
     if (
       provider === null
       || viewportNeedsLatestRestore
-      || (!viewportPagePending && !revealRepairPending)
+      || (!initialContextPagePending && !viewportPagePending && !revealRepairPending)
       || runtime.store.dataEpoch === null
       || runtime.store.virtualTimeMs === null
     ) return;
     void loadMoreLeft();
   }, [
     loadMoreLeft,
+    initialContextPagePending,
     provider,
     revealRepairBeforeMs,
     revealRepairPending,

@@ -1,0 +1,268 @@
+{
+  "frozenOn": "2026-08-03",
+  "frozenV2": {
+    "manifestV2": {
+      "canonicalSha256": "sha256:16bc9cb9f51b66ad2e717cd74798cd5c2e0b6a7d6d0fc2f442ba60f68cb1b5a5",
+      "entrypointProperties": [
+        "activationEvents",
+        "id",
+        "pythonModule",
+        "resourceProfile"
+      ],
+      "entrypointRequired": [
+        "id",
+        "pythonModule",
+        "resourceProfile",
+        "activationEvents"
+      ],
+      "path": "packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/schemas/manifest-v2.schema.json",
+      "rawSha256": "sha256:9ab38bcbbf260fcadf65269b3a54e2eef02e3b295a1428c979d587fd98633d9b",
+      "schemaVersion": 2
+    },
+    "protocol": {
+      "controlTransport": "jsonl/1",
+      "hostApi": "candlescope.host-api/1",
+      "plugin": "candlescope.plugin/2"
+    },
+    "referencePythonPlugin": {
+      "canonicalSha256": "sha256:9f472a450c48025b2119ff880515898f7bd7748c06e1c99d2a6491754bc0d688",
+      "entrypoint": {
+        "activationEvents": [
+          "onCommand"
+        ],
+        "id": "main",
+        "pythonModule": "candlescope_plugin_sdk.platform_v2.examples.hello_command",
+        "resourceProfile": "minimal"
+      },
+      "normalizationTarget": {
+        "activationEvents": [
+          "onCommand"
+        ],
+        "id": "main",
+        "resourceProfile": "minimal",
+        "runtime": {
+          "kind": "python-module",
+          "module": "candlescope_plugin_sdk.platform_v2.examples.hello_command",
+          "runtimeId": "python-v2-compat"
+        },
+        "sourceManifestVersion": 2,
+        "transport": "jsonl/1"
+      },
+      "path": "packages/candlescope-plugin-sdk/examples/platform-v2/hello-command.manifest.json",
+      "pluginId": "candlescope.hello-command",
+      "rawSha256": "sha256:03e21598303d8782be2f9626c3c40f6c16311b2cc58e084762e52fbb804f66e7",
+      "version": "0.1.0"
+    },
+    "referenceWire": {
+      "canonicalSha256": "sha256:80408fa59e60e46b71e62ca390b2e498fbdbf793b9466878beea19900917f06f",
+      "hostCallRequestSha256": "sha256:222b0607fabda26e6abe34cdfef51c9ca1ab3e46511f53a3da8da595588641f5",
+      "hostCallResponseSha256": "sha256:12aeb5bc661db1b3926ea80574c1ae4ec2a409d06bed146325279af5c6da10b5",
+      "path": "packages/candlescope-plugin-sdk/tests/fixtures/hello_command_transcript_v2.json",
+      "rawSha256": "sha256:a7c35dfdf8a911ddf66c988523a851e3e37f282f8506b3651af7778565428af5",
+      "requestCount": 10,
+      "responseSha256": [
+        "sha256:ed721c9e361503bc534b6a9aee490a0a461730c2fbd7451dd9eb212e956f70e9",
+        "sha256:ee8892da16b5f18fe3d1f8d0b6a78e69a2b0f13ad337227b6a18d56b2c2c0856",
+        "sha256:0dd53894a37ff7116098135f3f99cd6234b64055e97333e7bda0fe51e09a0b65",
+        "sha256:18febeb28e87226805a9632a18bf9279ffe8bfd501309b3b5e36b16148af5739",
+        "sha256:557fd85656ac284bdf7a9f9c901c50ea1691ee4caa19c583c7e0ff40348c0d4b",
+        "sha256:a400386a498f79935a19e33fbfa57e0146df89dc196496703091604a2cf7ca76",
+        "sha256:74b060d03e7a860e018662a9a098da3c3ab64278a60c897d1d8378a67c4b1a5f",
+        "sha256:33779097b4b9872e3e891d6cb0986e7fb182b2079e1a937376b3c90e28cb939f",
+        "sha256:783b75eb948d22dc06496546a20fa83645c71b37e19e514bf3cb951301f2e864",
+        "sha256:4e82727a9b2c136956d261062a9a7a9c9706cddc7b934517f2927e407bd9de36"
+      ],
+      "schemaVersion": "candlescope.plugin-v2-transcript.v1",
+      "transcriptSha256": "sha256:d98ebd2fc9f5b0695925caf47ecf961eae47a56b5e8ec110f28acc9365afdd38"
+    }
+  },
+  "futureContract": {
+    "artifactRoles": [
+      "java-jar",
+      "license-notice",
+      "native-executable",
+      "node-bundle",
+      "probe",
+      "python-wheel",
+      "sbom",
+      "schema",
+      "source-map",
+      "wasm-component",
+      "web-asset"
+    ],
+    "errorNamespaces": [
+      "PLUGIN_MULTI_RUNTIME_",
+      "PLUGIN_RUNTIME_PROVIDER_",
+      "PLUGIN_RUNTIME_REGISTRY_"
+    ],
+    "featureFlags": [
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_MULTI_RUNTIME_ENABLED",
+        "wiredInPhase0": false
+      },
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_RUNTIME_NATIVE_ENABLED",
+        "wiredInPhase0": false
+      },
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_RUNTIME_JAVA_ENABLED",
+        "wiredInPhase0": false
+      },
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_RUNTIME_NODE_ENABLED",
+        "wiredInPhase0": false
+      },
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_RUNTIME_WASM_ENABLED",
+        "wiredInPhase0": false
+      },
+      {
+        "default": false,
+        "name": "CANDLESCOPE_PLUGIN_GITHUB_IMPORT_ENABLED",
+        "wiredInPhase0": false
+      }
+    ],
+    "invariants": [
+      "schema-v2-remains-frozen",
+      "candlescope.plugin/2-remains-the-control-protocol",
+      "v1-script-runtime-compatibility-remains-a-distinct-registry",
+      "unknown-runtime-kinds-fail-closed",
+      "shell-command-strings-are-not-entrypoints",
+      "runtime-or-publisher-changes-do-not-inherit-grants",
+      "trusted-local-does-not-imply-secrets-accounts-or-live-trading"
+    ],
+    "manifestSchemaVersion": 3,
+    "runtimeKinds": [
+      {
+        "firstPhase": 1,
+        "kind": "python-module",
+        "status": "compatibility"
+      },
+      {
+        "firstPhase": 3,
+        "kind": "native-executable",
+        "status": "planned"
+      },
+      {
+        "firstPhase": 5,
+        "kind": "java-jar",
+        "status": "planned"
+      },
+      {
+        "firstPhase": 7,
+        "kind": "node-module",
+        "status": "planned"
+      },
+      {
+        "firstPhase": 8,
+        "kind": "wasm-component",
+        "status": "planned"
+      }
+    ],
+    "trustAliases": {
+      "first-party-pinned": "first-party-pinned",
+      "local-developer": "developer-local",
+      "local-trusted": "trusted-local",
+      "ui-only-untrusted": "ui-only-untrusted",
+      "verified-publisher": "marketplace-sandboxed"
+    }
+  },
+  "referenceLifecycle": {
+    "activation": {
+      "enabled": true,
+      "entrypoints": [
+        {
+          "executableRole": "managed-python",
+          "id": "main",
+          "module": "candlescope_plugin_sdk.platform_v2.examples.hello_command",
+          "workingDirectory": "."
+        }
+      ],
+      "name": "Hello Command",
+      "pluginId": "candlescope.hello-command",
+      "publisher": "candlescope",
+      "requiredPermissions": [],
+      "restartRequired": true,
+      "state": "active",
+      "version": "0.1.0"
+    },
+    "bundle": {
+      "contentKinds": [
+        "manifest",
+        "probe",
+        "sbom",
+        "schema",
+        "wheel"
+      ],
+      "v1ManifestSha256": "sha256:aee90ba2b5b2708f9615c981f061c5a9533e3f9e565ae0f03def62162b372f35",
+      "v1Sha256": "sha256:876120fde99c355c279cca97891e6a1f8a58455125856bd682f6977f167594b2",
+      "v2ManifestSha256": "sha256:ef075f852819aead0885e15523fdc1fd30cc2fbeede318d0c1d66807364944d9",
+      "v2Sha256": "sha256:ccc8492b72de9c5ae8f21e8d493c065123a3f1b683bffbb739b9f367a7f2d7af"
+    },
+    "firstInstall": {
+      "activationReady": true,
+      "changed": true,
+      "enabled": true,
+      "reusedInstallation": false,
+      "state": "active"
+    },
+    "freshProcessProbe": {
+      "entrypointModes": [
+        "activated"
+      ],
+      "semanticProbes": [
+        {
+          "entrypointId": "main",
+          "id": "hello-transcript",
+          "sha256": "sha256:d98ebd2fc9f5b0695925caf47ecf961eae47a56b5e8ec110f28acc9365afdd38"
+        }
+      ],
+      "state": "active"
+    },
+    "quickRepeat": {
+      "changed": false,
+      "reusedInstallation": true,
+      "sameActivation": true
+    },
+    "rollback": {
+      "activationChanged": true,
+      "finalEntrypointModes": [
+        "activated"
+      ],
+      "finalProbeState": "active",
+      "removed": false,
+      "restoredActivationMatchesFirst": true,
+      "restoredExactActivation": true,
+      "restoredVersion": "0.1.0"
+    },
+    "upgrade": {
+      "activationChanged": true,
+      "changed": true,
+      "version": "0.2.0"
+    }
+  },
+  "schemaVersion": "candlescope.plugin-platform.multi-runtime.phase0-contract/1",
+  "ta4j": {
+    "adapterEntrypoint": "org.ta4j.core.indicators.elliott.ElliottWaveAnalysisRunner",
+    "annotatedTagObject": "0f3a703b651864953c78f2e7f1b91a30778b0625",
+    "javaRelease": 25,
+    "license": "MIT",
+    "mavenWrapper": "3.9.16",
+    "peeledCommit": "896d7138a9d1818fe6725b89b433ba7860b8f654",
+    "releasedOn": "2026-07-13",
+    "repository": "https://github.com/ta4j/ta4j",
+    "sourceEvidence": [
+      "git ls-remote refs/tags/0.23.0",
+      "pom.xml@0.23.0",
+      "README.md@0.23.0",
+      "CHANGELOG.md@0.23.0",
+      "license-header.txt@0.23.0"
+    ],
+    "stableTag": "0.23.0"
+  }
+}

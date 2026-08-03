@@ -32,7 +32,7 @@ from .errors import TrainingRunError
 
 
 HISTORY_SCHEMA_VERSION = "replay.history.v3"
-HISTORY_EPOCH_SCHEMA_VERSION = "replay.history-epoch.v5"
+HISTORY_EPOCH_SCHEMA_VERSION = "replay.history-epoch.v6"
 MAX_HISTORY_PAGE_BARS = 1_000
 MAX_HISTORY_QUERY_BASE_ROWS = 100_000
 SNAPSHOT_DECODE_CACHE_SIZE = 8
@@ -387,6 +387,34 @@ def _validated_display_grid_binding(
             status_code=503,
         )
     return raw_anchor, raw_alignment, raw_commitment
+
+
+def _validated_display_source_range_binding(
+    binding: Mapping[str, object],
+    *,
+    source_revision: str | None,
+) -> tuple[int | None, int | None]:
+    """Validate the immutable native-display bounds carried by the run binding."""
+
+    raw_start_ms = binding.get("display_source_range_start_ms")
+    raw_end_ms = binding.get("display_source_range_end_ms")
+    if source_revision is None and raw_start_ms is None and raw_end_ms is None:
+        return None, None
+    if (
+        source_revision is None
+        or isinstance(raw_start_ms, bool)
+        or not isinstance(raw_start_ms, int)
+        or raw_start_ms < 0
+        or isinstance(raw_end_ms, bool)
+        or not isinstance(raw_end_ms, int)
+        or raw_end_ms < raw_start_ms
+    ):
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "pinned native display range is invalid",
+            status_code=503,
+        )
+    return raw_start_ms, raw_end_ms
 
 
 def _query_bound_repository(
@@ -916,6 +944,8 @@ def _resolve_native_display_context(
     snapshot: BarDatasetSnapshot,
     actual_replay_start_ms: int,
     display_source_revision: str | None = None,
+    display_source_range_start_ms: int | None = None,
+    display_source_range_end_ms: int | None = None,
     display_source_bucket_anchor_ms: int | None = None,
     display_alignment_policy: str | None = None,
 ) -> _NativeDisplayHistoryContext | None:
@@ -981,6 +1011,20 @@ def _resolve_native_display_context(
         return None
     earliest_open_ms = _safe_bound(bounds.get("earliest_open_time"))
     latest_open_ms = _safe_bound(bounds.get("latest_open_time"))
+    if (
+        display_source_revision is not None
+        and display_source_range_start_ms is not None
+        and display_source_range_end_ms is not None
+        and (
+            earliest_open_ms != display_source_range_start_ms
+            or latest_open_ms != display_source_range_end_ms
+        )
+    ):
+        raise _fail(
+            "HISTORY_SOURCE_IDENTITY_DRIFT",
+            "pinned native display archive bounds changed",
+            status_code=503,
+        )
     raw_source_bucket_anchor_ms = bounds.get("source_bucket_anchor_ms")
     raw_alignment_policy = bounds.get("alignment_policy")
     source_bucket_anchor_ms = (
@@ -1212,6 +1256,143 @@ def _build_native_display_page(
         tuple(page),
         next_before_ms,
         has_more,
+        excluded_ranges,
+    )
+
+
+def _display_projection_boundary_for_history_cursor(
+    *,
+    mapper: SourceBucketTimeMapper,
+    snapshot: BarDatasetSnapshot,
+    before_ms: int,
+    actual_replay_start_ms: int,
+) -> int:
+    before_ordinal = mapper.public_bucket_ordinal(before_ms)
+    if before_ordinal <= 0:
+        raise ValueError("history cursor does not follow the replay seam")
+    projection_actual_end_ms = mapper.actual_from_public(before_ms)
+    return (
+        snapshot.replay_start_ms
+        + projection_actual_end_ms
+        - actual_replay_start_ms
+        - 1
+    )
+
+
+def _build_revealed_display_projection_page(
+    *,
+    binding: Mapping[str, object],
+    persisted: Mapping[str, object],
+    repository: KlinesReadRepository,
+    config: ReplaySessionConfig,
+    snapshot: BarDatasetSnapshot,
+    context: _NativeDisplayHistoryContext,
+    before_ms: int,
+    revealed_boundary_ms: int,
+    limit: int,
+    data_epoch: str,
+    actual_replay_start_ms: int,
+    interval_ms: int,
+) -> _HistoryPageResult:
+    """Page the evicted revealed prefix through the authoritative projection.
+
+    A bounded display projection retains only its newest ``limit`` buckets.  If
+    the replay has advanced beyond that window, the chart's left edge is later
+    than the replay seam.  Rebuilding through the source-bucket close mapped to
+    ``before_ms`` gives history the same native/base authority, source phase,
+    halt handling, and no-lookahead boundary as the current revealed window.
+    """
+
+    mapper = context.mapper
+    try:
+        projection_boundary_ms = _display_projection_boundary_for_history_cursor(
+            mapper=mapper,
+            snapshot=snapshot,
+            before_ms=before_ms,
+            actual_replay_start_ms=actual_replay_start_ms,
+        )
+    except ValueError as exc:
+        raise _fail(
+            "HISTORY_CURSOR_INVALID",
+            "training display history cursor is not interval aligned",
+        ) from exc
+    if projection_boundary_ms > revealed_boundary_ms:
+        raise _fail(
+            "HISTORY_BOUNDARY_AHEAD",
+            "history cursor is ahead of the requested revealed boundary",
+        )
+
+    projection = build_display_projection(
+        binding=binding,
+        persisted=persisted,
+        revealed_boundary_ms=projection_boundary_ms,
+        limit=limit,
+        data_epoch=data_epoch,
+        display_interval=config.display_interval,
+        repository=repository,
+    )
+    raw_bars = projection.get("bars")
+    raw_has_more = projection.get("has_more")
+    if not isinstance(raw_bars, list) or not isinstance(raw_has_more, bool):
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "authoritative display history projection is invalid",
+            status_code=503,
+        )
+    try:
+        bars = [
+            ReplayDisplayBar.from_dict(raw)
+            for raw in raw_bars
+            if isinstance(raw, Mapping)
+        ]
+    except (TypeError, ValueError, ReplayDomainError) as exc:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "authoritative display history bars are invalid",
+            status_code=503,
+        ) from exc
+    if len(bars) != len(raw_bars) or len(bars) > limit:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "authoritative display history page is invalid",
+            status_code=503,
+        )
+    if any(
+        not bar.is_closed
+        or bar.open_time_ms < mapper.public_anchor_ms
+        or bar.open_time_ms >= before_ms
+        or bar.close_time_ms >= before_ms
+        for bar in bars
+    ):
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "authoritative display history crossed its revealed page boundary",
+            status_code=503,
+        )
+    if raw_has_more and not bars:
+        raise _fail(
+            "HISTORY_SOURCE_INCOMPLETE",
+            "authoritative display history omitted its bounded tail",
+            status_code=503,
+        )
+
+    excluded_ranges = _declared_source_bucket_exclusions(
+        repository=repository,
+        snapshot=snapshot,
+        config=config,
+        bars=bars,
+        connection_before_ms=before_ms,
+        mapper=mapper,
+        source_interval=config.base_interval,
+        source_interval_ms=interval_ms,
+    )
+    has_older_native_history = bool(bars) and (
+        bars[0].open_time_ms > context.public_boundary_ms
+    )
+    return _HistoryPageResult(
+        tuple(bars),
+        bars[0].open_time_ms if bars else before_ms,
+        raw_has_more or has_older_native_history,
         excluded_ranges,
     )
 
@@ -2318,6 +2499,13 @@ def build_history_page(
     else:
         display_source_revision = raw_display_source_revision
     (
+        display_source_range_start_ms,
+        display_source_range_end_ms,
+    ) = _validated_display_source_range_binding(
+        binding,
+        source_revision=display_source_revision,
+    )
+    (
         display_source_bucket_anchor_ms,
         display_alignment_policy,
         display_grid_commitment,
@@ -2333,6 +2521,8 @@ def build_history_page(
             snapshot=snapshot,
             actual_replay_start_ms=actual_replay_start_ms,
             display_source_revision=display_source_revision,
+            display_source_range_start_ms=display_source_range_start_ms,
+            display_source_range_end_ms=display_source_range_end_ms,
             display_source_bucket_anchor_ms=display_source_bucket_anchor_ms,
             display_alignment_policy=display_alignment_policy,
         )
@@ -2361,8 +2551,10 @@ def build_history_page(
             "gap_policy": "DECLARED_SOURCE_GAPS_V1",
             "listing_boundary_source": listing_boundary_source,
             "source_revision": native_context.source_revision,
+            "source_range_start_ms": display_source_range_start_ms,
+            "source_range_end_ms": display_source_range_end_ms,
             "grid_commitment": display_grid_commitment,
-            "seam_policy": "NATIVE_CLOSED_BEFORE_REPLAY_BASE_AT_OR_AFTER_V1",
+            "seam_policy": "AUTHORITATIVE_REVEALED_TAIL_THEN_NATIVE_HISTORY_V2",
         }
     elif source_bucket_mapper is not None:
         assert display_interval_ms is not None
@@ -2432,16 +2624,48 @@ def build_history_page(
                 status_code=503,
             )
         if native_context is not None:
-            page_result = _build_native_display_page(
-                repository=repository,
-                config=history_config,
-                snapshot=snapshot,
-                context=native_context,
-                before_ms=before_ms,
-                revealed_boundary_ms=revealed_boundary_ms,
-                limit=limit,
-                actual_replay_start_ms=actual_replay_start_ms,
-            )
+            use_revealed_projection = before_ms > snapshot.replay_start_ms
+            if before_ms == snapshot.replay_start_ms:
+                try:
+                    projection_boundary_ms = (
+                        _display_projection_boundary_for_history_cursor(
+                            mapper=native_context.mapper,
+                            snapshot=snapshot,
+                            before_ms=before_ms,
+                            actual_replay_start_ms=actual_replay_start_ms,
+                        )
+                    )
+                    use_revealed_projection = (
+                        projection_boundary_ms <= revealed_boundary_ms
+                    )
+                except ValueError:
+                    use_revealed_projection = False
+            if use_revealed_projection:
+                page_result = _build_revealed_display_projection_page(
+                    binding=binding,
+                    persisted=persisted,
+                    repository=repository,
+                    config=history_config,
+                    snapshot=snapshot,
+                    context=native_context,
+                    before_ms=before_ms,
+                    revealed_boundary_ms=revealed_boundary_ms,
+                    limit=limit,
+                    data_epoch=data_epoch,
+                    actual_replay_start_ms=actual_replay_start_ms,
+                    interval_ms=interval_ms,
+                )
+            else:
+                page_result = _build_native_display_page(
+                    repository=repository,
+                    config=history_config,
+                    snapshot=snapshot,
+                    context=native_context,
+                    before_ms=before_ms,
+                    revealed_boundary_ms=revealed_boundary_ms,
+                    limit=limit,
+                    actual_replay_start_ms=actual_replay_start_ms,
+                )
         else:
             page_result = _build_all_available_page(
                 repository=repository,
@@ -2630,33 +2854,13 @@ def build_display_projection(
         )
     else:
         display_source_revision = raw_display_source_revision
-    raw_display_source_range_start_ms = binding.get(
-        "display_source_range_start_ms"
+    (
+        display_source_range_start_ms,
+        display_source_range_end_ms,
+    ) = _validated_display_source_range_binding(
+        binding,
+        source_revision=display_source_revision,
     )
-    raw_display_source_range_end_ms = binding.get("display_source_range_end_ms")
-    if display_source_revision is None and (
-        raw_display_source_range_start_ms is None
-        and raw_display_source_range_end_ms is None
-    ):
-        display_source_range_start_ms = None
-        display_source_range_end_ms = None
-    elif (
-        display_source_revision is None
-        or isinstance(raw_display_source_range_start_ms, bool)
-        or not isinstance(raw_display_source_range_start_ms, int)
-        or raw_display_source_range_start_ms < 0
-        or isinstance(raw_display_source_range_end_ms, bool)
-        or not isinstance(raw_display_source_range_end_ms, int)
-        or raw_display_source_range_end_ms < raw_display_source_range_start_ms
-    ):
-        raise _fail(
-            "HISTORY_SOURCE_INCOMPLETE",
-            "pinned native display range is invalid",
-            status_code=503,
-        )
-    else:
-        display_source_range_start_ms = raw_display_source_range_start_ms
-        display_source_range_end_ms = raw_display_source_range_end_ms
     (
         display_source_bucket_anchor_ms,
         _display_alignment_policy,

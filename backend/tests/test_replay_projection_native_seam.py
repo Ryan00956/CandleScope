@@ -859,6 +859,226 @@ def test_fixed_native_grids_fill_seam_and_keep_limit_has_more(
     assert tail["has_more"] is True
 
 
+def test_history_pages_through_evicted_replay_projection_before_native_seam(
+    tmp_path: Path,
+) -> None:
+    display_interval = "2h"
+    display_ms = 2 * HOUR_MS
+    replay_bucket_count = 1_002
+    actual_replay_start_ms = ANCHOR_MS + HOUR_MS
+    public_replay_start_ms = _ms("2000-01-01T00:00:00")
+    actual_history_start_ms = ANCHOR_MS - display_ms
+    actual_end_ms = ANCHOR_MS + replay_bucket_count * display_ms
+
+    root = tmp_path / "archive"
+    writer = ReplayHistoryArchiveWriter(
+        root,
+        now_ms=lambda: actual_end_ms + HOUR_MS,
+    )
+    base_opens = list(range(actual_history_start_ms, actual_end_ms, HOUR_MS))
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1h",
+        [
+            _batch(
+                [
+                    {
+                        **make_bar(
+                            open_time_ms,
+                            interval_ms=HOUR_MS,
+                            price=str(200 + index),
+                            source="binance_archive_verified",
+                        ),
+                        "interval": "1h",
+                    }
+                    for index, open_time_ms in enumerate(base_opens)
+                ],
+                source_key="base-1h-long-replay-history",
+                digest_character="5",
+            )
+        ],
+    )
+    native_manifest = writer.import_batches(
+        IDENTITY,
+        display_interval,
+        [
+            _batch(
+                [
+                    {
+                        "exchange": "binance",
+                        "market_type": "spot",
+                        "symbol": "BTCUSDT",
+                        "interval": display_interval,
+                        "open_time": ANCHOR_MS + ordinal * display_ms,
+                        "close_time": ANCHOR_MS + (ordinal + 1) * display_ms - 1,
+                        "open": 10_000.0 + ordinal,
+                        "high": 10_010.0 + ordinal,
+                        "low": 9_990.0 + ordinal,
+                        "close": 10_005.0 + ordinal,
+                        "volume": 1_000.0 + ordinal,
+                        "quote_volume": 10_000_000.0 + ordinal,
+                        "trades": 50_000 + ordinal,
+                        "taker_buy_base": 500.0 + ordinal,
+                        "taker_buy_quote": 5_000_000.0 + ordinal,
+                        "source": "binance_archive_verified",
+                    }
+                    for ordinal in range(-1, replay_bucket_count)
+                ],
+                source_key="native-2h-long-replay-history",
+                digest_character="6",
+                alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+                source_bucket_anchor_ms=0,
+            )
+        ],
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        source_bucket_anchor_ms=0,
+    )
+    snapshot = _snapshot_for_rows(
+        source_revision=base_manifest.catalog_epoch,
+        base_interval="1h",
+        base_interval_ms=HOUR_MS,
+        replay_start_ms=actual_replay_start_ms,
+        row_opens=base_opens,
+        source_earliest_open_ms=actual_history_start_ms,
+        source_latest_open_ms=base_opens[-1],
+        gap_count=0,
+    )
+    config = replace(
+        replay_config(blind_mode=True),
+        base_interval="1h",
+        display_interval=display_interval,
+        requested_start_ms=actual_replay_start_ms,
+        warmup_bars=3,
+        horizon_ms=actual_end_ms - actual_replay_start_ms,
+    )
+    revealed_boundary_ms = (
+        public_replay_start_ms + actual_end_ms - actual_replay_start_ms - 1
+    )
+    binding = _grid_binding(
+        snapshot=snapshot,
+        config=config,
+        display_interval=display_interval,
+        display_source_revision=native_manifest.catalog_epoch,
+        source_bucket_anchor_ms=0,
+        alignment_policy=SOURCE_BUCKET_ALIGNMENT_CATALOG_FIXED,
+        durable_boundary_ms=revealed_boundary_ms,
+        display_source_range_start_ms=native_manifest.earliest_open_ms,
+        display_source_range_end_ms=native_manifest.latest_open_ms,
+    )
+    binding["history_policy"] = {
+        "schema_version": "replay.data-policy.v1",
+        "indicator_warmup_bars": 2,
+        "visible_history_lookback": {
+            "mode": "ALL_AVAILABLE",
+            "duration_ms": None,
+        },
+        "visible_history_rows": len(base_opens),
+        "actual_visible_history_start_ms": actual_history_start_ms,
+        "actual_replay_start_ms": actual_replay_start_ms,
+        "effective_warmup_bars": 3,
+        "forward_cache_ms": actual_end_ms - actual_replay_start_ms,
+        "interval_ms": HOUR_MS,
+        "policy_hash": "sha256:" + "7" * 64,
+    }
+    persisted = _persisted(
+        snapshot,
+        actual_replay_start_ms=actual_replay_start_ms,
+        synthetic_origin_ms=public_replay_start_ms,
+    )
+    repository = ReplayHistoryRepository(root)
+    mapper = SourceBucketTimeMapper.create(
+        interval=display_interval,
+        actual_replay_start_ms=actual_replay_start_ms,
+        public_replay_start_ms=public_replay_start_ms,
+        source_bucket_anchor_ms=0,
+    )
+
+    projection = build_display_projection(
+        binding=binding,
+        persisted=persisted,
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=1_000,
+        data_epoch=snapshot.data_epoch,
+        display_interval=display_interval,
+        repository=repository,
+    )
+
+    assert len(projection["bars"]) == 1_000
+    first_projected_open_ms = mapper.public_bucket_open(2)
+    assert projection["bars"][0]["open_time_ms"] == first_projected_open_ms
+    assert projection["has_more"] is True
+
+    evicted_replay_history = build_history_page(
+        binding=binding,
+        persisted=persisted,
+        before_ms=first_projected_open_ms,
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=500,
+        data_epoch=snapshot.data_epoch,
+        expected_history_epoch=None,
+        display_interval=display_interval,
+        repository=repository,
+    )
+
+    assert [bar["open_time_ms"] for bar in evicted_replay_history["bars"]] == [
+        mapper.public_bucket_open(0),
+        mapper.public_bucket_open(1),
+    ]
+    assert [bar["open"] for bar in evicted_replay_history["bars"]] == [
+        "10000",
+        "10001",
+    ]
+    assert (
+        evicted_replay_history["bars"][-1]["close_time_ms"] + 1
+        == first_projected_open_ms
+    )
+    assert evicted_replay_history["next_before_ms"] == mapper.public_anchor_ms
+    assert evicted_replay_history["has_more"] is True
+
+    replay_seam_history = build_history_page(
+        binding=binding,
+        persisted=persisted,
+        before_ms=mapper.public_bucket_open(1),
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=500,
+        data_epoch=snapshot.data_epoch,
+        expected_history_epoch=evicted_replay_history["history_epoch"],
+        display_interval=display_interval,
+        repository=repository,
+    )
+
+    assert [bar["open_time_ms"] for bar in replay_seam_history["bars"]] == [
+        mapper.public_anchor_ms
+    ]
+    assert (
+        replay_seam_history["bars"][-1]["close_time_ms"] + 1
+        == mapper.public_bucket_open(1)
+    )
+    assert replay_seam_history["next_before_ms"] == mapper.public_anchor_ms
+    assert replay_seam_history["has_more"] is True
+
+    native_history = build_history_page(
+        binding=binding,
+        persisted=persisted,
+        before_ms=evicted_replay_history["next_before_ms"],
+        revealed_boundary_ms=revealed_boundary_ms,
+        limit=500,
+        data_epoch=snapshot.data_epoch,
+        expected_history_epoch=evicted_replay_history["history_epoch"],
+        display_interval=display_interval,
+        repository=repository,
+    )
+
+    assert [bar["open_time_ms"] for bar in native_history["bars"]] == [
+        mapper.public_bucket_open(-1)
+    ]
+    assert (
+        native_history["bars"][-1]["close_time_ms"] + 1
+        == mapper.public_anchor_ms
+    )
+    assert native_history["has_more"] is False
+
+
 def test_calendar_month_seam_is_causal_native_exact_and_history_contiguous(
     tmp_path: Path,
 ) -> None:

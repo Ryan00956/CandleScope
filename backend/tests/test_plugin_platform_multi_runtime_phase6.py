@@ -14,10 +14,9 @@ from candlescope_plugin_sdk.platform_v2 import PluginManifest, canonical_sha256
 from app.plugin_core_v2.runtime import CorePluginPlatform
 from app.plugin_installer_v2.bundle import verify_platform_bundle
 from app.plugin_runtime_registry_v3 import (
-    OFFICIAL_REGISTRY_PATH,
     OFFICIAL_REGISTRY_V2_PATH,
     OFFICIAL_REGISTRY_V3_PATH,
-    OFFICIAL_ROOTS_PATH,
+    OFFICIAL_ROOTS_V3_PATH,
     build_official_runtime_registry,
     load_runtime_registry_roots_bytes,
     verify_runtime_registry_bytes,
@@ -120,7 +119,7 @@ def test_phase6_freezes_aliases_and_runtime_profiles() -> None:
 def test_phase6_registry_migrates_java_to_appcontainer_compatible_jre(
     tmp_path: Path,
 ) -> None:
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V3_PATH.read_bytes())
     revision_2 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V2_PATH.read_bytes(), roots
     )
@@ -129,7 +128,7 @@ def test_phase6_registry_migrates_java_to_appcontainer_compatible_jre(
     )
     releases = {item.runtime_id: item for item in revision_3.runtimes}
 
-    assert OFFICIAL_REGISTRY_PATH == OFFICIAL_REGISTRY_V3_PATH
+    assert OFFICIAL_REGISTRY_V3_PATH.name == "official-runtime-registry-v3.json"
     assert len(roots) == 3
     assert revision_3.revision == 3
     assert revision_3.previous_registry_sha256 == revision_2.sha256
@@ -150,7 +149,10 @@ def test_phase6_registry_migrates_java_to_appcontainer_compatible_jre(
     assert release.legal_size == 230_270
 
     service = build_official_runtime_registry(root=tmp_path / "registry", enabled=True)
-    assert service.public_status()["active"]["revision"] == 3
+    assert service.public_status()["active"]["revision"] == 4
+    migrated = service.rollback_registry()
+    assert migrated["fromRevision"] == 4
+    assert migrated["toRevision"] == 3
     rolled = service.rollback_registry()
     assert rolled["changed"] is True
     assert rolled["fromRevision"] == 3

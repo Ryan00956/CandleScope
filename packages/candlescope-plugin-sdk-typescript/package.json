@@ -1,0 +1,22 @@
+{
+  "name": "@candlescope/plugin-sdk-node",
+  "version": "0.1.0",
+  "description": "Dependency-free Node.js SDK for CandleScope Plugin Platform v2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README_zh.md"
+  ],
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": "24.19.0"
+  }
+}

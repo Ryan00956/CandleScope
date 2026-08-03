@@ -1006,6 +1006,7 @@ def _verify_artifact_inventory(
 
     referenced_runtime_paths: dict[str, str] = {}
     has_python = False
+    has_node = False
     current_os = _current_os()
     current_arch = _current_architecture()
     for entrypoint in manifest.normalized_entrypoints:
@@ -1014,6 +1015,7 @@ def _verify_artifact_inventory(
         if path is None:
             has_python = True
             continue
+        has_node = has_node or isinstance(runtime, NodeModuleRuntime)
         artifact = by_path.get(path)
         expected_role = _RUNTIME_ARTIFACT_ROLES[runtime.kind]
         if artifact is None or artifact.role != expected_role:
@@ -1052,6 +1054,11 @@ def _verify_artifact_inventory(
                 details={"entrypointId": entrypoint.id, "path": path},
             )
         referenced_runtime_paths[path] = expected_role
+
+    if has_node:
+        for artifact in envelope.artifacts:
+            if artifact.role == _RUNTIME_ARTIFACT_ROLES["node-module"]:
+                referenced_runtime_paths[artifact.path] = artifact.role
 
     if has_python and not any(
         item.role == "python-wheel" for item in envelope.artifacts
@@ -1334,7 +1341,10 @@ def _content_kind(path: str) -> str:
     )
 
 
-def _artifact_role_by_runtime_path(manifest: PluginManifest) -> dict[str, str]:
+def _artifact_role_by_runtime_path(
+    manifest: PluginManifest,
+    runtime_paths: Sequence[str] = (),
+) -> dict[str, str]:
     roles: dict[str, str] = {}
     for entrypoint in manifest.normalized_entrypoints:
         path = _runtime_artifact_path(entrypoint.runtime)
@@ -1349,6 +1359,13 @@ def _artifact_role_by_runtime_path(manifest: PluginManifest) -> dict[str, str]:
                 details={"path": path, "roles": sorted({existing, role})},
             )
         roles[path] = role
+    if any(
+        isinstance(entrypoint.runtime, NodeModuleRuntime)
+        for entrypoint in manifest.normalized_entrypoints
+    ):
+        for path in runtime_paths:
+            if path.startswith("runtime/") and path.casefold().endswith(".mjs"):
+                roles[path] = _RUNTIME_ARTIFACT_ROLES["node-module"]
     return roles
 
 
@@ -1477,7 +1494,10 @@ def build_platform_bundle(
     if manifest.schema_version == MANIFEST_SCHEMA_VERSION_V3:
         envelope_schema_version = BUNDLE_SCHEMA_VERSION_V3
         envelope_format = BUNDLE_FORMAT_V3
-        runtime_roles = _artifact_role_by_runtime_path(manifest)
+        runtime_roles = _artifact_role_by_runtime_path(
+            manifest,
+            tuple(record.path for record in records if record.kind == "runtime"),
+        )
         native_platforms = {
             runtime.artifact: (runtime.operating_systems, runtime.architectures)
             for runtime in (item.runtime for item in manifest.normalized_entrypoints)

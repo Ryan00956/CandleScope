@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from .base import RUNTIME_PROVIDER_API_VERSION, RuntimeProvider, RuntimeProviderError
 from .java import JAVA_RUNTIME_ENABLED_ENV, JavaJarProvider
 from .native import NativeExecutableProvider
+from .node import NODE_RUNTIME_ENABLED_ENV, NodeModuleProvider
 from .python import PythonModuleProvider
 
 
@@ -122,6 +123,7 @@ def default_runtime_provider_registry(
     *,
     native_enabled: bool | None = None,
     java_enabled: bool | None = None,
+    node_enabled: bool | None = None,
     managed_runtime_registry: object | None = None,
 ) -> RuntimeProviderRegistry:
     providers: list[RuntimeProvider] = [PythonModuleProvider()]
@@ -137,4 +139,10 @@ def default_runtime_provider_registry(
         label="Java",
     ):
         providers.append(JavaJarProvider(managed_runtime_registry))
+    if _provider_enabled(
+        node_enabled,
+        environment_name=NODE_RUNTIME_ENABLED_ENV,
+        label="Node.js",
+    ):
+        providers.append(NodeModuleProvider(managed_runtime_registry))
     return RuntimeProviderRegistry(providers)

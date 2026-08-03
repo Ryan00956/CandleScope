@@ -869,10 +869,12 @@ class PluginMarketplaceService:
         signed_dependencies = [
             (item.name, item.version) for item in release.dependencies
         ]
-        if wheel_dependencies != signed_dependencies:
+        missing_wheels = sorted(set(wheel_dependencies) - set(signed_dependencies))
+        if missing_wheels:
             raise MarketplaceError(
                 "PLUGIN_MARKETPLACE_SBOM_DEPENDENCY_MISMATCH",
-                "signed dependencies do not cover every bundled wheel exactly",
+                "signed dependencies do not cover every bundled wheel",
+                details={"missingWheels": missing_wheels},
             )
 
     def bundle_trust(

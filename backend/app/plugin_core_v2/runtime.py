@@ -173,6 +173,7 @@ class CorePluginPlatform:
         runtime_provider_seam_enabled: bool | None = None,
         native_runtime_enabled: bool | None = None,
         java_runtime_enabled: bool | None = None,
+        node_runtime_enabled: bool | None = None,
         runtime_provider_registry: RuntimeProviderRegistry | None = None,
         runtime_registry_enabled: bool | None = None,
         runtime_registry_network_updates_enabled: bool | None = None,
@@ -314,6 +315,7 @@ class CorePluginPlatform:
             runtime_provider_seam_enabled=runtime_provider_seam_enabled,
             native_runtime_enabled=native_runtime_enabled,
             java_runtime_enabled=java_runtime_enabled,
+            node_runtime_enabled=node_runtime_enabled,
             runtime_provider_registry=runtime_provider_registry,
             managed_runtime_registry=managed_runtime_registry,
         )
@@ -323,6 +325,7 @@ class CorePluginPlatform:
         )
         self.native_runtime_enabled = self.installer.native_runtime_enabled
         self.java_runtime_enabled = self.installer.java_runtime_enabled
+        self.node_runtime_enabled = self.installer.node_runtime_enabled
         self.marketplace = PluginMarketplaceService(
             root=self.root,
             installer=self.installer,

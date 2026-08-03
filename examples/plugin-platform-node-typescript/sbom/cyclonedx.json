@@ -1,0 +1,50 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:8dfe2f63-e35b-4d80-a91b-a6c128bc0f67",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-03T00:00:00Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:generic/candlescope.node-hello@0.1.0",
+      "name": "candlescope.node-hello",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40candlescope/plugin-sdk-node@0.1.0",
+      "group": "@candlescope",
+      "name": "plugin-sdk-node",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:generic/candlescope.node-hello@0.1.0",
+      "dependsOn": [
+        "pkg:npm/%40candlescope/plugin-sdk-node@0.1.0"
+      ]
+    },
+    {
+      "ref": "pkg:npm/%40candlescope/plugin-sdk-node@0.1.0",
+      "dependsOn": []
+    }
+  ]
+}

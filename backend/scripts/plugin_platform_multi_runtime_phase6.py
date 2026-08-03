@@ -113,10 +113,9 @@ def capture_contract() -> dict[str, Any]:
         RUNTIME_PROVIDER_SEAM_ENABLED_ENV,
     )
     from app.plugin_runtime_registry_v3 import (
-        OFFICIAL_REGISTRY_PATH,
         OFFICIAL_REGISTRY_V2_PATH,
         OFFICIAL_REGISTRY_V3_PATH,
-        OFFICIAL_ROOTS_PATH,
+        OFFICIAL_ROOTS_V3_PATH,
         load_runtime_registry_roots_bytes,
         verify_runtime_registry_bytes,
     )
@@ -138,7 +137,7 @@ def capture_contract() -> dict[str, Any]:
     from scripts import plugin_platform_multi_runtime_phase5 as phase5
 
     phase5_contract = phase5.validate_contract()
-    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_PATH.read_bytes())
+    roots = load_runtime_registry_roots_bytes(OFFICIAL_ROOTS_V3_PATH.read_bytes())
     revision_2 = verify_runtime_registry_bytes(
         OFFICIAL_REGISTRY_V2_PATH.read_bytes(), roots
     )
@@ -216,7 +215,7 @@ def capture_contract() -> dict[str, Any]:
             "unavailableHighRiskPermissions": sorted(UNAVAILABLE_HIGH_RISK_PERMISSIONS),
         },
         "runtimeRegistryMigration": {
-            "activeRegistryPath": OFFICIAL_REGISTRY_PATH.name,
+            "activeRegistryPath": OFFICIAL_REGISTRY_V3_PATH.name,
             "revision": revision_3.revision,
             "previousRevision": revision_2.revision,
             "previousRegistrySha256": revision_3.previous_registry_sha256,

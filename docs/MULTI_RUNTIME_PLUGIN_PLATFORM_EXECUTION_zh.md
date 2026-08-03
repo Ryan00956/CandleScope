@@ -1,14 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～6 已完成；Phase 7～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～7 已完成；Phase 8～11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
 > 本文是实施计划，不代表下述多运行时能力已经交付。
 
 当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE6_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；Phase 7～11 仍是计划，不是当前能力声明。
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE7_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；Phase 8～11 仍是计划，不是当前能力声明。
 
 ## 1. 决策摘要
 
@@ -904,6 +904,15 @@ attack matrix。签名 Runtime Registry revision 3 将 ta4j 包装迁移到 Temu
 
 关闭 `CANDLESCOPE_PLUGIN_RUNTIME_NODE_ENABLED`，不影响其他 kind。
 
+**完成状态：已完成（2026-08-03）**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE7_zh.md`。Phase 7 已交付固定 Node 24.19.0 的
+签名 Runtime Registry revision 4、`NodeModuleProvider 1.0.0`、dependency-free TypeScript
+SDK、确定性 tarball、预构建 ESM reference plugin、闭合静态模块 inventory，以及真实 Windows
+Permission Model + AppContainer + 签名 Marketplace 门禁。Windows amd64 已验证；其他平台不
+宣称支持。Provider、多运行时和 Registry 网络更新开关仍默认关闭，关闭 Provider 后不回退系统
+Node，也不删除已安装 bundle 或共享 runtime cache。
+
 ---
 
 ### Phase 8：`wasm-component` Provider
@@ -1179,31 +1188,29 @@ backend\.venv\Scripts\python.exe backend\scripts\candlescope_plugin.py v3 build 
 
 以下全部完成后，本项目才结束：
 
-- [ ] manifest v3 与五种 runtime kind 有冻结契约；
-- [ ] v2 Python 原样兼容；
-- [ ] Python、native、Java 至少三个 Provider 进入稳定路径；
+- [x] manifest v3 与五种 runtime kind 有冻结契约；
+- [x] v2 Python 原样兼容；
+- [x] Python、native、Java 至少三个 Provider 进入稳定路径；
 - [ ] Node/WASM 按真实门禁决定 stable 或 preview，不虚报；
 - [x] Managed Runtime Registry 可固定、缓存、校验、撤销和回滚；
-- [ ] 本地信任选择清楚、可撤销、可审计；
-- [ ] Marketplace 仍 fail closed；
+- [x] 本地信任选择清楚、可撤销、可审计；
+- [x] Marketplace 仍 fail closed；
 - [ ] language-neutral conformance suite 被各 SDK 共用；
-- [ ] ta4j Adapter 使用固定上游 Release，不重写核心算法；
-- [ ] ta4j 与当前 Python Elliott 插件完成 point-in-time 对照；
+- [x] ta4j Adapter 使用固定上游 Release，不重写核心算法；
+- [x] ta4j 与当前 Python Elliott 插件完成 point-in-time 对照；
 - [ ] install/check/update/rollback/failure injection/soak 全部有原始证据；
 - [ ] 新功能全部关闭时，v1 compatibility 与 v2 Python 回归通过；
 - [ ] 作者可以按文档接入第二个 GitHub 项目；
-- [ ] 用户能在 Plugin Manager 看懂“运行什么、信任谁、开放什么、如何撤销”。
+- [x] 用户能在 Plugin Manager 看懂“运行什么、信任谁、开放什么、如何撤销”。
 
 ## 16. 推荐的立即下一步
 
-下一次实施应只做 Phase 0，不直接写 Java Provider：
+下一阶段只实施 Phase 8，不提前混入 GitHub scaffold 或 Marketplace GA：
 
-1. 为本计划开独立分支；
-2. 新增 Phase 0 RFC 和 v2 frozen fixtures；
-3. 固定 ta4j assessment；
-4. 确认 manifest v3、NormalizedEntrypoint、runtime kinds 与 trust alias；
-5. 跑现有 backend/frontend/SDK 基线；
-6. 提交一个纯契约与证据 PR；
-7. Phase 0 审核通过后再进入 schema v3 实现。
-
-这样可以让“支持 GitHub 生态”成为可持续的平台能力，同时避免为了接入 ta4j 再造一个无法复用的 Java 特例。
+1. 审计当前 `wasm-component` schema、Provider 扩展位与 `restricted-wasm` 缺口；
+2. 选择并固定一个可再分发、可签名、可离线缓存的 WASM runtime；
+3. 冻结首发 component model、WASI profile、imports/exports 与 capability 边界；
+4. 先建立 Rust-to-WASM reference、确定性 build 和 canonical output；
+5. 再接入 Provider、fuel、memory、wall time、cancel 和 trap 诊断；
+6. 在 Windows 与至少一个非 Windows 平台运行真实门禁；
+7. 保持所有新开关默认关闭，完成独立 Phase 8 提交后再进入 Phase 9。

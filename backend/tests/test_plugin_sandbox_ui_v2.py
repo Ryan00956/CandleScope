@@ -102,9 +102,14 @@ async def test_digest_asset_gateway_is_public_bounded_and_fail_closed(
     try:
         plugin = platform.catalog()["plugins"][0]
         assert plugin["id"] == "candlescope.sandbox-view"
-        assert plugin["runtime"]["entrypoints"] == [
-            {"entrypointId": "main", "state": "stopped", "generation": 0}
-        ]
+        runtime = plugin["runtime"]["entrypoints"]
+        assert len(runtime) == 1
+        assert runtime[0]["entrypointId"] == "main"
+        assert runtime[0]["state"] == "stopped"
+        assert runtime[0]["generation"] == 0
+        assert runtime[0]["runtimeKind"] == "python-module"
+        assert runtime[0]["runtimeId"] == "python-v2-compat"
+        assert runtime[0]["artifactSha256"].startswith("sha256:")
         contribution = plugin["contributions"][0]
         assert contribution["configuration"] == {
             "slot": "sidePanel",

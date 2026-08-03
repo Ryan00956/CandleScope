@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from candlescope_plugin_sdk.platform_v2 import canonical_dumps, canonical_sha256
 from cryptography.hazmat.primitives import serialization
@@ -137,6 +137,7 @@ class SignedMarketplaceBuilder:
         *,
         published_at: datetime | None = None,
         dependency_license: str = "Apache-2.0",
+        dependencies: Sequence[Mapping[str, str]] | None = None,
     ) -> dict[str, Any]:
         published = published_at or datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
         file_name = bundle.path.name
@@ -160,14 +161,18 @@ class SignedMarketplaceBuilder:
             "publishedAt": _timestamp(published),
             "licenseExpression": bundle.manifest.plugin.license,
             "dependencies": sorted(
-                [
-                    {
-                        "name": item.package.replace("_", "-").lower(),
-                        "version": item.version,
-                        "licenseExpression": dependency_license,
-                    }
-                    for item in bundle.wheels
-                ],
+                (
+                    [dict(item) for item in dependencies]
+                    if dependencies is not None
+                    else [
+                        {
+                            "name": item.package.replace("_", "-").lower(),
+                            "version": item.version,
+                            "licenseExpression": dependency_license,
+                        }
+                        for item in bundle.wheels
+                    ]
+                ),
                 key=lambda item: (item["name"], item["version"]),
             ),
             "sha256Sums": (f"{bundle.sha256.removeprefix('sha256:')}  {file_name}\n"),

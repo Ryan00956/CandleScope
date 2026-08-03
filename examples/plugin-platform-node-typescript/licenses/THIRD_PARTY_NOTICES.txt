@@ -1,0 +1,3 @@
+CandleScope Node TypeScript Hello embeds @candlescope/plugin-sdk-node 0.1.0.
+Both the reference plugin and SDK are part of CandleScope and are distributed
+under GPL-3.0-only. The complete license text is packaged as GPL-3.0-only.txt.

@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 3,
+  "plugin": {
+    "id": "candlescope.node-hello",
+    "name": "Node TypeScript Hello",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "runtime": {
+          "kind": "node-module",
+          "artifact": "runtime/main.mjs",
+          "runtimeId": "node-24.19.0",
+          "nodeArgs": [
+            "--enable-source-maps",
+            "--max-old-space-size=128"
+          ]
+        },
+        "transport": "jsonl/1",
+        "resourceProfile": "standard",
+        "activationEvents": [
+          "onCommand"
+        ]
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "node-hello",
+      "kind": "command/1",
+      "title": "Say hello from Node.js",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": [
+          "commandPalette"
+        ]
+      }
+    }
+  ],
+  "permissions": {
+    "required": [],
+    "optional": []
+  },
+  "probes": [
+    {
+      "id": "node-control",
+      "kind": "controlTranscript",
+      "sha256": "sha256:755dcac9d779b1a49f82da0e8bbd7da8d1a2543d6e4f38442c150b44a3d32624",
+      "entrypoint": "main"
+    }
+  ]
+}

@@ -67,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-seam", action="store_true")
     parser.add_argument("--native-provider", action="store_true")
     parser.add_argument("--java-provider", action="store_true")
+    parser.add_argument("--node-provider", action="store_true")
     parser.add_argument("--managed-runtime-root", type=Path)
     return parser
 
@@ -171,11 +172,11 @@ def _provider_entrypoint_launch(
     sandbox_policy: SandboxPolicy | None,
 ) -> _EntrypointLaunch:
     managed_registry = None
-    if args.java_provider:
+    if args.java_provider or args.node_provider:
         if args.managed_runtime_root is None:
             raise PlatformContractError(
                 "INVALID_CONTRACT",
-                "Java probing requires the exact managed Runtime Registry root",
+                "managed-language probing requires the exact Runtime Registry root",
             )
         from app.plugin_runtime_registry_v3 import build_official_runtime_registry
 
@@ -187,11 +188,12 @@ def _provider_entrypoint_launch(
     elif args.managed_runtime_root is not None:
         raise PlatformContractError(
             "INVALID_CONTRACT",
-            "managed Runtime Registry root requires the Java Provider",
+            "managed Runtime Registry root requires Java or Node Provider",
         )
     registry = default_runtime_provider_registry(
         native_enabled=args.native_provider,
         java_enabled=args.java_provider,
+        node_enabled=args.node_provider,
         managed_runtime_registry=managed_registry,
     )
     provider = registry.resolve(runtime)

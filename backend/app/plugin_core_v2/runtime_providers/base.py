@@ -112,6 +112,7 @@ class RuntimeInstallationRequest:
     distributions: tuple[tuple[str, str], ...]
     runtime_ids: tuple[str, ...]
     artifacts: tuple[RuntimeArtifact, ...] = ()
+    entry_artifacts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         installation = Path(self.installation).resolve(strict=False)
@@ -160,12 +161,24 @@ class RuntimeInstallationRequest:
             raise ValueError(
                 "runtime artifacts must be real files inside the installation"
             )
+        entry_artifacts = tuple(self.entry_artifacts)
+        if len(set(value.casefold() for value in entry_artifacts)) != len(
+            entry_artifacts
+        ) or any(
+            not isinstance(value, str)
+            or value not in {item.relative_path for item in artifacts}
+            for value in entry_artifacts
+        ):
+            raise ValueError(
+                "entry_artifacts must be unique paths from the runtime artifact inventory"
+            )
         object.__setattr__(self, "installation", installation)
         object.__setattr__(self, "host_executable", host_executable)
         object.__setattr__(self, "wheel_paths", wheel_paths)
         object.__setattr__(self, "runtime_ids", tuple(self.runtime_ids))
         object.__setattr__(self, "distributions", tuple(self.distributions))
         object.__setattr__(self, "artifacts", artifacts)
+        object.__setattr__(self, "entry_artifacts", entry_artifacts)
 
 
 @dataclass(frozen=True, slots=True)

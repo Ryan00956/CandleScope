@@ -130,6 +130,8 @@ test("replay-only root has one v2 composition and no product selector", () => {
   const replayApp = readFileSync(new URL("../ReplayApp.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(replayMain, /replayV2|REPLAY_PRODUCT_V2|VITE_REPLAY_PRODUCT_V2/);
   assert.match(replayApp, /ReplayTrainingHubApp/);
-  assert.match(replayApp, /ReplayTrainingWorkspaceApp/);
+  assert.match(replayApp, /ReplayTrainingRunApp/);
+  assert.match(replayApp, /ReplayInitialMarketPicker/);
+  assert.match(replayApp, /ReplayInitializedRun/);
   assert.doesNotMatch(replayApp, /ReplayV1App|ReplayPageShell|resolveReplayProduct|PRODUCT_V2_ENABLED/);
 });

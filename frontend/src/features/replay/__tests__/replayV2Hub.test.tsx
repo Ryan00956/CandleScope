@@ -9,8 +9,10 @@ import TrainingHubDialog, {
 import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
 import {
   buildTrainingRunCreateRequest,
+  buildTrainingRunPreparationRequest,
   createTrainingRunDraft,
   evaluateTrainingRunDraft,
+  evaluateTrainingRunSetupDraft,
 } from "../trainingHubModel.js";
 import { returnToTrainingHub } from "../trainingHubNavigation.js";
 import {
@@ -24,7 +26,6 @@ import {
   parseTrainingRunReturnResponse,
 } from "../replayV2Types.js";
 import { parseReplaySegmentPreparePlan } from "../replaySegmentTypes.js";
-import type { ReplayDigest } from "../replayTypes.js";
 import { parseReplayCapabilities, parseReplayCatalog } from "../replayParser.js";
 import { enabledCapabilities } from "./fixtures.js";
 
@@ -363,7 +364,7 @@ test("segment plan uses the selected create contract and never opens a dataset e
     parseReplayCapabilities(enabledCapabilities()),
     catalog,
   );
-  const payload = buildTrainingRunCreateRequest(draft, evaluation, catalog);
+  const payload = buildTrainingRunPreparationRequest(draft, evaluation, catalog);
   await client.segmentPlan(payload);
   assert.deepEqual(requests, [{
     url: "/api/v1/replay/runs/data-segments/plan",
@@ -372,7 +373,7 @@ test("segment plan uses the selected create contract and never opens a dataset e
   assert.doesNotMatch(requests[0]?.url ?? "", /sessions|snapshot_blob/);
 });
 
-test("Hub loads a segment plan only after create opens and refreshes it before create", async (context) => {
+test("Hub creates an empty run without planning a market dataset", async (context) => {
   const calls: string[] = [];
   const lifecycle = new TrainingHubLifecycle({
     api: {
@@ -397,19 +398,19 @@ test("Hub loads a segment plan only after create opens and refreshes it before c
         return parseTrainingRunMutationResponse(mutationResponse());
       },
     },
-    navigateToSession: (sessionId) => calls.push(`navigate:${sessionId}`),
+    navigateToRun: (runId) => calls.push(`navigate:${runId}`),
   });
   context.after(() => lifecycle.dispose());
   lifecycle.start();
   await settle();
   assert.deepEqual(calls, ["runs"]);
   await lifecycle.openCreate();
-  assert.deepEqual(calls, ["runs", "capabilities", "catalog", "segment-plan"]);
-  assert.equal(lifecycle.getSnapshot().segmentPlan?.failure_policy, "QUARANTINE_AND_FAIL_CLOSED");
+  assert.deepEqual(calls, ["runs", "capabilities"]);
+  assert.equal(lifecycle.getSnapshot().segmentPlan, null);
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
   await lifecycle.createRun(draft);
-  assert.deepEqual(calls.slice(-4), ["catalog", "segment-plan", "create", "navigate:adapter-1"]);
+  assert.deepEqual(calls.slice(-2), ["create", "navigate:run-1"]);
 });
 
 test("hub bootstrap loads only lightweight saves; create capability work starts on demand", async (context) => {
@@ -433,7 +434,7 @@ test("hub bootstrap loads only lightweight saves; create capability work starts 
         return parseTrainingRunMutationResponse(mutationResponse());
       },
     },
-    navigateToSession: (sessionId) => calls.push(`navigate:${sessionId}`),
+    navigateToRun: (runId) => calls.push(`navigate:${runId}`),
   });
   context.after(() => lifecycle.dispose());
 
@@ -443,21 +444,19 @@ test("hub bootstrap loads only lightweight saves; create capability work starts 
   assert.equal(lifecycle.getSnapshot().phase, "READY");
 
   await lifecycle.openCreate();
-  assert.deepEqual(calls, ["runs", "capabilities", "catalog"]);
+  assert.deepEqual(calls, ["runs", "capabilities"]);
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
   await lifecycle.createRun(draft);
   assert.deepEqual(calls, [
     "runs",
     "capabilities",
-    "catalog",
-    "catalog",
     "create",
-    "navigate:adapter-1",
+    "navigate:run-1",
   ]);
 });
 
-test("catalog drift stays rejected and an explicit revalidation reloads create context", async (context) => {
+test("create errors stay visible and reopening refreshes setup context without losing edits", async (context) => {
   let catalogCalls = 0;
   const lifecycle = new TrainingHubLifecycle({
     api: {
@@ -495,16 +494,15 @@ test("catalog drift stays rejected and an explicit revalidation reloads create c
   await lifecycle.createRun(preservedDraft);
   assert.equal(lifecycle.getSnapshot().error?.code, "CATALOG_EPOCH_MISMATCH");
   await lifecycle.openCreate();
-  assert.equal(catalogCalls, 3);
+  assert.equal(catalogCalls, 0);
   assert.equal(lifecycle.getSnapshot().error, null);
   assert.equal(lifecycle.getSnapshot().draft?.name, "保留这份训练");
   assert.equal(lifecycle.getSnapshot().draft?.indicatorWarmupBars, 300);
 });
 
-test("create refreshes catalog epoch with the edited warmup and horizon before POST", async (context) => {
+test("create posts market-independent setup and defers catalog refresh to the run", async (context) => {
   const catalogQueries: Array<{ warmupBars?: number; horizonMs?: number; blindMode?: boolean }> = [];
-  let submittedEpoch: string | null = null;
-  const refreshedEpoch = `sha256:${"c".repeat(64)}` as ReplayDigest;
+  let submitted: Record<string, unknown> | null = null;
   const lifecycle = new TrainingHubLifecycle({
     api: {
       async listRuns() {
@@ -516,17 +514,10 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
       async catalog(query) {
         catalogQueries.push(query ?? {});
         const catalog = blindCatalog();
-        if (catalogQueries.length === 1) return catalog;
-        return {
-          ...catalog,
-          catalog_epoch: refreshedEpoch,
-          warmup_bars: query?.warmupBars ?? catalog.warmup_bars,
-          horizon_ms: query?.horizonMs ?? catalog.horizon_ms,
-          entries: catalog.entries.map((entry) => ({ ...entry, catalog_epoch: refreshedEpoch })),
-        };
+        return catalog;
       },
       async createRun(payload) {
-        submittedEpoch = payload.catalog_epoch;
+        submitted = { ...payload };
         return parseTrainingRunMutationResponse(mutationResponse());
       },
     },
@@ -544,20 +535,20 @@ test("create refreshes catalog epoch with the edited warmup and horizon before P
   };
   lifecycle.setDraft(edited);
   await lifecycle.createRun(edited);
-  assert.deepEqual(catalogQueries.at(-1), {
-    warmupBars: 300,
-    horizonMs: 43_200_000,
-    qualityMode: "exact",
-    blindMode: true,
-  });
-  assert.equal(submittedEpoch, refreshedEpoch);
+  assert.equal(catalogQueries.length, 0);
+  assert.ok(submitted);
+  const submittedPayload = submitted as unknown as Record<string, unknown>;
+  assert.equal(submittedPayload.indicator_warmup_bars, 300);
+  assert.equal(submittedPayload.forward_cache_ms, 43_200_000);
+  assert.equal(Object.hasOwn(submittedPayload, "catalog_epoch"), false);
+  assert.equal(Object.hasOwn(submittedPayload, "symbol"), false);
 });
 
 test("create model covers Phase 6 account fields and exposes fail-closed boundaries", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const draft = createTrainingRunDraft(catalog);
-  const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
+  const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
     account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
@@ -566,14 +557,14 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
     rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
   });
-  const request = buildTrainingRunCreateRequest(draft, evaluation, catalog);
+  const request = buildTrainingRunCreateRequest(draft, evaluation);
   assert.equal(request.protocol, "replay.v2");
-  assert.equal(request.catalog_epoch, catalog.catalog_epoch);
+  assert.equal(Object.hasOwn(request, "catalog_epoch"), false);
+  assert.equal(Object.hasOwn(request, "symbol"), false);
   assert.equal(request.time_disclosure_policy, "HIDE_ALL");
   assert.equal(request.integrity_mode, "CHALLENGE");
   assert.equal(request.funding_mode, "OFF");
   assert.equal(request.account_data_mode, "APPROX_PROXY");
-  assert.equal(request.account_history_ref, null);
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
@@ -594,9 +585,9 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
     fixedFundingRate: "-0.0001",
     fundingIntervalMs: 28_800_000,
   };
-  const sandboxEvaluation = evaluateTrainingRunDraft(sandbox, capabilities, catalog);
+  const sandboxEvaluation = evaluateTrainingRunSetupDraft(sandbox, capabilities);
   assert.equal(sandboxEvaluation.canSubmit, true);
-  const request = buildTrainingRunCreateRequest(sandbox, sandboxEvaluation, catalog);
+  const request = buildTrainingRunCreateRequest(sandbox, sandboxEvaluation);
   assert.equal(request.margin_mode, "ISOLATED");
   assert.equal(request.funding_mode, "SANDBOX_FIXED");
   assert.equal(request.fixed_funding_rate, "-0.0001");
@@ -643,7 +634,7 @@ test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan"
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog, plan);
   assert.equal(evaluation.canSubmit, true);
   assert.equal(
-    buildTrainingRunCreateRequest(draft, evaluation, catalog).book_mode,
+    buildTrainingRunPreparationRequest(draft, evaluation, catalog).book_mode,
     "BOOK_ASSISTED_REQUIRED",
   );
 });
@@ -726,22 +717,16 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /HIDE_MINUTE/);
   assert.match(html, /Practice 可审计变更白名单/);
   assert.match(html, /历史盘口.*连续、可 pin/);
-  assert.match(html, /Phase 9 历史 L2/);
-  assert.match(html, /Phase 16 精确账户历史/);
-  assert.match(html, /公开 K 线代理.*拒绝/);
-  assert.match(html, /Phase 6 合约账户基础/);
-  assert.match(html, /Phase 14 按需数据策略/);
+  assert.match(html, /商品在 Run 内选择/);
+  assert.match(html, /创建时不固定商品、交易所、市场类型、基础周期或数据集/);
+  assert.match(html, /原子创建首条 MarketTrack/);
+  assert.match(html, /历史 L2、精确账户历史与 funding 仍 fail closed/);
+  assert.match(html, /公开 K 线代理不算 exact/);
   assert.match(html, /指标预热 BAR/);
   assert.match(html, /全部可用（默认，按需加载）/);
   assert.match(html, /像实时行情一样向左按需分页/);
-  assert.match(html, /执行快照预算.*预校验通过/);
-  assert.match(html, /SNAPSHOT_LOCAL_BAR_RANGE/);
-  assert.match(html, /校验失败 quarantine/);
-  assert.match(html, /后台下载.*默认关闭/);
-  assert.match(html, /自动 GC.*默认关闭/);
-  assert.match(html, /TOUCH_OR_TAPE_V2/);
-  assert.match(html, /不含盘口排队/);
-  assert.doesNotMatch(html, /<strong>多商品<\/strong>/);
+  assert.match(html, /创建 Run 并选择商品/);
+  assert.match(html, /不含真实盘口排队/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);
 });
 
@@ -782,10 +767,10 @@ test("Hub parser rejects every retired v1 archive shape", () => {
 test("return-to-hub waits for the server checkpoint before navigation", async () => {
   const calls: string[] = [];
   await returnToTrainingHub(
-    "adapter-1",
+    "run-1",
     {
-      async returnToHub(sessionId) {
-        calls.push(`checkpoint:${sessionId}`);
+      async returnToHub(runId) {
+        calls.push(`checkpoint:${runId}`);
         return {
           protocol: "replay.v2",
           run_id: "run-1",
@@ -797,7 +782,7 @@ test("return-to-hub waits for the server checkpoint before navigation", async ()
     },
     (url) => calls.push(`navigate:${url}`),
   );
-  assert.deepEqual(calls, ["checkpoint:adapter-1", "navigate:/replay.html"]);
+  assert.deepEqual(calls, ["checkpoint:run-1", "navigate:/replay.html"]);
 });
 
 test("return-to-hub preserves terminal durable states and still navigates", async () => {
@@ -811,7 +796,7 @@ test("return-to-hub preserves terminal durable states and still navigates", asyn
     });
     const calls: string[] = [];
     await returnToTrainingHub(
-      "adapter-terminal",
+      parsed.run_id,
       { returnToHub: async () => parsed },
       (url) => calls.push(url),
     );

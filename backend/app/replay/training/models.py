@@ -36,6 +36,7 @@ class _StringEnum(str, Enum):
 
 
 class RunState(_StringEnum):
+    AWAITING_MARKET = "AWAITING_MARKET"
     PAUSED = "PAUSED"
     PLAYING = "PLAYING"
     ADVANCING = "ADVANCING"
@@ -443,7 +444,7 @@ class ViewerState:
     """Mutable semantic view state kept outside the replay domain hash."""
 
     run_id: str
-    selected_track_id: str
+    selected_track_id: str | None
     display_interval: str
     chart_type: str
     visible_range: Mapping[str, object] | None
@@ -452,16 +453,20 @@ class ViewerState:
     semantic_view_revision: int
 
     def __post_init__(self) -> None:
-        for field_name in (
-            "run_id",
-            "selected_track_id",
-            "display_interval",
-            "chart_type",
-        ):
+        for field_name in ("run_id", "display_interval", "chart_type"):
             object.__setattr__(
                 self,
                 field_name,
                 validate_identifier(getattr(self, field_name), field_name=field_name),
+            )
+        if self.selected_track_id is not None:
+            object.__setattr__(
+                self,
+                "selected_track_id",
+                validate_identifier(
+                    self.selected_track_id,
+                    field_name="selected_track_id",
+                ),
             )
         if self.visible_range is not None:
             visible = expect_mapping(self.visible_range, field_name="visible_range")
@@ -1474,6 +1479,216 @@ class TrainingRunCreateRequest:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingRunMarketSelectionRequest:
+    """One product choice made inside an existing training run."""
+
+    catalog_epoch: str
+    exchange: str
+    market_type: str
+    symbol: str
+    base_interval: str
+    display_interval: str
+    account_history_ref: AccountHistoryRef | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.catalog_epoch, str) or not _DIGEST.fullmatch(
+            self.catalog_epoch
+        ):
+            raise ValueError("catalog_epoch must be a sha256 digest")
+        for field_name in ("exchange", "market_type", "symbol"):
+            object.__setattr__(
+                self,
+                field_name,
+                _market_identity_string(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                ),
+            )
+        for field_name in ("base_interval", "display_interval"):
+            object.__setattr__(
+                self,
+                field_name,
+                validate_identifier(getattr(self, field_name), field_name=field_name),
+            )
+        if self.account_history_ref is not None and not isinstance(
+            self.account_history_ref,
+            AccountHistoryRef,
+        ):
+            raise TypeError("account_history_ref must be an AccountHistoryRef or null")
+
+    @classmethod
+    def from_dict(cls, value: object) -> "TrainingRunMarketSelectionRequest":
+        payload = expect_mapping(value, field_name="training run market selection")
+        expect_exact_keys(
+            payload,
+            {
+                "catalog_epoch",
+                "exchange",
+                "market_type",
+                "symbol",
+                "base_interval",
+                "display_interval",
+                "account_history_ref",
+            },
+        )
+        raw_ref = payload["account_history_ref"]
+        return cls(
+            catalog_epoch=payload["catalog_epoch"],  # type: ignore[arg-type]
+            exchange=payload["exchange"],  # type: ignore[arg-type]
+            market_type=payload["market_type"],  # type: ignore[arg-type]
+            symbol=payload["symbol"],  # type: ignore[arg-type]
+            base_interval=payload["base_interval"],  # type: ignore[arg-type]
+            display_interval=payload["display_interval"],  # type: ignore[arg-type]
+            account_history_ref=(
+                None if raw_ref is None else AccountHistoryRef.from_dict(raw_ref)
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "catalog_epoch": self.catalog_epoch,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+            "base_interval": self.base_interval,
+            "display_interval": self.display_interval,
+            "account_history_ref": (
+                None
+                if self.account_history_ref is None
+                else self.account_history_ref.to_dict()
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingRunSetupRequest:
+    """Market-independent rules used to create an empty training run."""
+
+    settings: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        payload = expect_mapping(self.settings, field_name="training run setup")
+        object.__setattr__(
+            self,
+            "settings",
+            freeze_json(payload, field_name="training run setup"),
+        )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "TrainingRunSetupRequest":
+        payload = expect_mapping(value, field_name="training run setup")
+        required = {
+            "protocol",
+            "name",
+            "source_kind",
+            "start_mode",
+            "settlement_asset",
+            "requested_start_ms",
+            "indicator_warmup_bars",
+            "visible_history_lookback",
+            "forward_cache_ms",
+            "random_seed",
+            "initial_equity",
+            "max_leverage",
+            "maker_fee_bps",
+            "taker_fee_bps",
+            "market_slippage_bps",
+            "integrity_mode",
+            "time_disclosure_policy",
+            "book_mode",
+            "margin_mode",
+            "funding_mode",
+            "account_data_mode",
+            "fixed_funding_rate",
+            "funding_interval_ms",
+            "allow_rule_changes",
+            "allowed_mutations",
+            "market_selection_hint",
+        }
+        expect_exact_keys(payload, required)
+        raw_hint = payload["market_selection_hint"]
+        hint = (
+            None
+            if raw_hint is None
+            else ReplayLaunchContext.from_dict(raw_hint)
+        )
+        candidate_payload = {
+            key: item
+            for key, item in payload.items()
+            if key != "market_selection_hint"
+        }
+        candidate_payload.update(
+            {
+                "catalog_epoch": "sha256:" + "0" * 64,
+                "exchange": "UNSELECTED",
+                "market_type": "UNSELECTED",
+                "symbol": "UNSELECTED",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "account_history_ref": None,
+            }
+        )
+        candidate = TrainingRunCreateRequest.from_dict(candidate_payload)
+        setup = cls.from_market_request(candidate).to_dict()
+        setup["market_selection_hint"] = (
+            None if hint is None else hint.to_dict()
+        )
+        return cls(settings=setup)
+
+    @classmethod
+    def from_market_request(
+        cls,
+        request: TrainingRunCreateRequest,
+    ) -> "TrainingRunSetupRequest":
+        if not isinstance(request, TrainingRunCreateRequest):
+            raise TypeError("request must be TrainingRunCreateRequest")
+        settings = request.to_dict(redact_hidden_start=False)
+        for field_name in (
+            "catalog_epoch",
+            "exchange",
+            "market_type",
+            "symbol",
+            "base_interval",
+            "display_interval",
+            "account_history_ref",
+        ):
+            settings.pop(field_name, None)
+        settings["market_selection_hint"] = (
+            None
+            if request.launch_context is None
+            else request.launch_context.to_dict()
+        )
+        return cls(settings=settings)
+
+    def for_market(
+        self,
+        selection: TrainingRunMarketSelectionRequest,
+    ) -> TrainingRunCreateRequest:
+        if not isinstance(selection, TrainingRunMarketSelectionRequest):
+            raise TypeError("selection must be TrainingRunMarketSelectionRequest")
+        payload = self.to_dict()
+        raw_hint = payload.pop("market_selection_hint")
+        payload.update(selection.to_dict())
+        if raw_hint is None:
+            payload["launch_context"] = None
+        else:
+            hint = ReplayLaunchContext.from_dict(raw_hint)
+            payload["launch_context"] = ReplayLaunchContext(
+                schema_version=hint.schema_version,
+                source=hint.source,
+                exchange=selection.exchange,
+                market_type=selection.market_type,
+                symbol=selection.symbol,
+                display_interval=selection.display_interval,
+                watchlist_snapshot=hint.watchlist_snapshot,
+            ).to_dict()
+        return TrainingRunCreateRequest.from_dict(payload)
+
+    def to_dict(self) -> dict[str, object]:
+        return thaw_json(self.settings)  # type: ignore[return-value]
+
+
 __all__ = [
     "AccountDataMode",
     "AccountHistoryRef",
@@ -1511,6 +1726,8 @@ __all__ = [
     "TrainingCursor",
     "TrainingRunCreateRequest",
     "TrainingRunContract",
+    "TrainingRunMarketSelectionRequest",
+    "TrainingRunSetupRequest",
     "VisibleHistoryLookback",
     "VisibleHistoryMode",
     "ViewerState",

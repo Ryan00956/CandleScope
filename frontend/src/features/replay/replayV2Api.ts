@@ -1,6 +1,7 @@
 import { ReplayApiClient } from "./replayApi.js";
 import type { ReplayApiClientOptions, ReplayCatalogQuery } from "./replayApi.js";
 import type { ReplayCapabilities, ReplayCatalog } from "./replayTypes.js";
+import { parseReplayCatalog } from "./replayParser.js";
 import {
   parseReplayTradeFlowPage,
   type ReplayTradeFlowPage,
@@ -31,6 +32,7 @@ import {
 } from "./replayDisplayProjection.js";
 import {
   parseTrainingRunListResponse,
+  parseTrainingRunMarketSelectionResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunDeleteResponse,
   parseTrainingRunReturnResponse,
@@ -83,6 +85,9 @@ import type {
   ReplayV2CommandResult,
   ReplayViewerStateResponse,
   TrainingRunCreatePayload,
+  TrainingRunMarketSelectionPayload,
+  TrainingRunMarketSelectionResponse,
+  TrainingRunPreparationPayload,
   TrainingRunDeleteResponse,
   TrainingRunListResponse,
   TrainingRunMutationResponse,
@@ -243,6 +248,14 @@ export class ReplayV2ApiClient {
     return this.adapterApi.catalog(query, signal);
   }
 
+  marketCatalog(runId: string, signal?: AbortSignal): Promise<ReplayCatalog> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/market-catalog`,
+      parseReplayCatalog,
+      signal ? { signal } : {},
+    );
+  }
+
   listRuns(query: TrainingRunListQuery = {}, signal?: AbortSignal): Promise<TrainingRunListResponse> {
     const params = new URLSearchParams();
     if (query.limit !== undefined) params.set("limit", String(query.limit));
@@ -265,6 +278,38 @@ export class ReplayV2ApiClient {
     });
   }
 
+  selectInitialMarket(
+    runId: string,
+    payload: TrainingRunMarketSelectionPayload,
+    signal?: AbortSignal,
+  ): Promise<TrainingRunMarketSelectionResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/markets`,
+      parseTrainingRunMarketSelectionResponse,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  planInitialMarket(
+    runId: string,
+    payload: TrainingRunMarketSelectionPayload,
+    signal?: AbortSignal,
+  ): Promise<ReplaySegmentPreparePlan> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/markets/plan`,
+      parseReplaySegmentPreparePlan,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
   deleteRun(runId: string, signal?: AbortSignal): Promise<TrainingRunDeleteResponse> {
     return this.request(
       `/runs/${safeSegment(runId, "run id")}`,
@@ -274,7 +319,7 @@ export class ReplayV2ApiClient {
   }
 
   segmentPlan(
-    payload: TrainingRunCreatePayload,
+    payload: TrainingRunPreparationPayload,
     signal?: AbortSignal,
   ): Promise<ReplaySegmentPreparePlan> {
     return this.request("/runs/data-segments/plan", parseReplaySegmentPreparePlan, {
@@ -378,9 +423,9 @@ export class ReplayV2ApiClient {
     );
   }
 
-  returnToHub(sessionId: string, signal?: AbortSignal): Promise<TrainingRunReturnResponse> {
+  returnToHub(runId: string, signal?: AbortSignal): Promise<TrainingRunReturnResponse> {
     return this.request(
-      `/runs/session/${safeSegment(sessionId, "session id")}/return-to-hub`,
+      `/runs/${safeSegment(runId, "run id")}/return-to-hub`,
       parseTrainingRunReturnResponse,
       { method: "POST", ...(signal ? { signal } : {}) },
     );

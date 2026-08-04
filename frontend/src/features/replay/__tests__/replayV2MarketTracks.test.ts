@@ -153,6 +153,7 @@ function marketTracksResponse() {
 
 test("Phase 5 market-track parser keeps tier, public price, and force reasons strict", () => {
   const parsed = parseReplayMarketTracksResponse(marketTracksResponse());
+  assert.ok(parsed.global_clock);
   assert.equal(parsed.tracks[1]?.symbol, "ETHUSDT");
   assert.equal(parsed.tracks[1]?.subscription_tier, "FULL");
   assert.deepEqual(parsed.tracks[1]?.forced_full_reasons, ["VIEWED"]);
@@ -169,10 +170,12 @@ test("Phase 5 market-track parser keeps tier, public price, and force reasons st
 
 test("Phase 13 global clock parser freezes basis, rate, limits, and display binding", () => {
   const parsed = parseReplayMarketTracksResponse(marketTracksResponse());
-  assert.equal(parsed.global_clock.contract, "replay.playback.v1");
-  assert.equal(parsed.global_clock.basis, "BASE_BAR");
-  assert.equal(parsed.global_clock.rate, 1);
-  assert.deepEqual(parsed.global_clock.playback_bases, [
+  assert.ok(parsed.global_clock);
+  const globalClock = parsed.global_clock;
+  assert.equal(globalClock.contract, "replay.playback.v1");
+  assert.equal(globalClock.basis, "BASE_BAR");
+  assert.equal(globalClock.rate, 1);
+  assert.deepEqual(globalClock.playback_bases, [
     "DISPLAY_BAR",
     "BASE_BAR",
     "SOURCE_EVENT",
@@ -362,15 +365,18 @@ test("Phase 5 API reads tracks by replay session without touching live subscript
   assert.deepEqual(requests, ["/api/v1/replay/runs/session/adapter-2/tracks"]);
 });
 
-test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () => {
+test("replay watchlist searches the Run catalog and adds products through track commands", () => {
   const testDirectory = dirname(fileURLToPath(import.meta.url));
   const watchlist = readFileSync(
     resolve(testDirectory, "../components/ReplayWatchlistPanel.tsx"),
     "utf8",
   );
   assert.match(watchlist, /viewer\.marketTracks/);
-  assert.match(watchlist, /launch_context\.watchlist_snapshot\.groups/);
+  assert.match(watchlist, /launch_context\?\.watchlist_snapshot\.groups/);
   assert.match(watchlist, /data-replay-watchlist-source="run-archive"/);
+  assert.match(watchlist, /marketCatalog\(runId/);
+  assert.match(watchlist, /搜索当前 Run 可用商品/);
+  assert.match(watchlist, /Run 不绑定单一商品/);
   assert.match(watchlist, /selectTrack|addAndSelectTrack/);
   assert.match(watchlist, /forced_full_reasons/);
   assert.doesNotMatch(

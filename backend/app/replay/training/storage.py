@@ -60,6 +60,7 @@ from .models import (
     REPLAY_V2_PROTOCOL,
     ReplayLaunchContext,
     TrainingRunCreateRequest,
+    TrainingRunSetupRequest,
     VisibleHistoryMode,
     ViewerState,
     validate_v2_counter,
@@ -101,7 +102,7 @@ _ACCOUNT_RECORD_LIMIT_MAX = 200
 _ACCOUNT_RECORD_TYPES = {"ORDERS", "FILLS", "LEDGER"}
 _ACCOUNT_ORDER_SCOPES = {"ACTIVE", "HISTORY", "ALL"}
 _COMPATIBILITY_FILTERS = {"READY", "UNAVAILABLE"}
-_STATES = {"PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
+_STATES = {"AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
 _VIEW_EVENT_LIMIT = 2_048
 _PUBLIC_TIME_BATCH_LIMIT = 20_000
@@ -119,7 +120,11 @@ WITH cards AS (
         r.run_id AS run_id,
         'V2' AS kind,
         r.name AS name,
-        CASE WHEN s.state = 'INITIALIZING' THEN 'PAUSED' ELSE s.state END AS state,
+        CASE
+            WHEN s.session_id IS NULL THEN r.state
+            WHEN s.state = 'INITIALIZING' THEN 'PAUSED'
+            ELSE s.state
+        END AS state,
         r.source_kind AS source_kind,
         r.integrity_mode AS integrity_mode,
         r.time_disclosure_policy AS time_disclosure_policy,
@@ -128,20 +133,31 @@ WITH cards AS (
             SELECT COUNT(*) FROM replay_training_market_track AS t
             WHERE t.run_id = r.run_id AND t.subscription_tier != 'NONE'
         ) AS subscribed_track_count,
-        s.source_sequence AS progress_sequence,
-        CASE WHEN r.summary_revision = s.revision THEN r.current_equity ELSE NULL END AS equity,
+        COALESCE(s.source_sequence, r.source_sequence) AS progress_sequence,
         CASE
-            WHEN r.summary_revision = s.revision AND r.current_equity IS NOT NULL THEN 'CURRENT'
+            WHEN r.summary_revision = COALESCE(s.revision, r.revision)
+            THEN r.current_equity
+            ELSE NULL
+        END AS equity,
+        CASE
+            WHEN r.summary_revision = COALESCE(s.revision, r.revision)
+             AND r.current_equity IS NOT NULL THEN 'CURRENT'
             ELSE 'STALE'
         END AS equity_status,
         r.settlement_asset AS settlement_asset,
-        CASE WHEN s.updated_at_ms > r.updated_at_ms THEN s.updated_at_ms ELSE r.updated_at_ms END AS updated_at_ms,
+        CASE
+            WHEN COALESCE(s.updated_at_ms, 0) > r.updated_at_ms THEN s.updated_at_ms
+            ELSE r.updated_at_ms
+        END AS updated_at_ms,
         CASE
             WHEN s.degraded_reason IS NULL AND r.compatibility = 'READY' THEN 'READY'
             ELSE 'UNAVAILABLE'
         END AS compatibility,
         CASE
-            WHEN s.degraded_reason IS NULL AND r.compatibility = 'READY' THEN 'OPEN_ADAPTER'
+            WHEN r.state = 'AWAITING_MARKET' AND r.compatibility = 'READY'
+            THEN 'SELECT_MARKET'
+            WHEN s.degraded_reason IS NULL AND r.compatibility = 'READY'
+            THEN 'OPEN_ADAPTER'
             ELSE 'UNAVAILABLE'
         END AS resume_action,
         selected_track.adapter_session_id AS adapter_session_id,
@@ -161,11 +177,10 @@ WITH cards AS (
         ) AS review_available
     FROM replay_training_run AS r
     JOIN replay_training_viewer_state AS viewer USING(run_id)
-    JOIN replay_training_market_track AS selected_track
+    LEFT JOIN replay_training_market_track AS selected_track
       ON selected_track.run_id = r.run_id
      AND selected_track.track_id = viewer.selected_track_id
-     AND selected_track.adapter_session_id IS NOT NULL
-    JOIN replay_session AS s ON s.session_id = selected_track.adapter_session_id
+    LEFT JOIN replay_session AS s ON s.session_id = selected_track.adapter_session_id
 )
 """
 
@@ -647,6 +662,152 @@ class TrainingRunStore:
             now_ms=now_ms,
         )
 
+    async def create_empty_run(
+        self,
+        *,
+        run_id: str,
+        request: TrainingRunSetupRequest,
+    ) -> None:
+        """Persist a run identity before any market or replay clock exists."""
+
+        if not isinstance(request, TrainingRunSetupRequest):
+            raise TypeError("request must be TrainingRunSetupRequest")
+        setup = request.to_dict()
+        now_ms = self.base_store._validated_now_ms()
+        name = _safe_name(
+            setup.get("name") if isinstance(setup.get("name"), str) else None,
+            fallback=f"回放训练 {run_id[-8:]}",
+        )
+
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """
+                INSERT INTO replay_training_run(
+                    run_id, adapter_session_id, protocol, schema_version,
+                    name, state, source_kind, start_mode, integrity_mode,
+                    time_disclosure_policy, book_mode, margin_mode,
+                    funding_mode, execution_model, allow_rule_changes,
+                    exchange, market_type, last_symbol, settlement_asset,
+                    base_interval, display_interval, initial_equity,
+                    current_equity, summary_revision, revision,
+                    source_sequence, virtual_time_ms, active_rule_revision,
+                    catalog_epoch, dataset_epoch, compatibility,
+                    created_at_ms, updated_at_ms, saved_at_ms
+                ) VALUES (
+                    ?, NULL, 'replay.v2', 'replay.training.v1',
+                    ?, 'AWAITING_MARKET', ?, ?, ?, ?, ?, ?, ?,
+                    'TOUCH_OR_TAPE_V2', ?, NULL, NULL, NULL, ?,
+                    NULL, NULL, ?, ?, 0, 0, 0, NULL, 0,
+                    NULL, NULL, 'READY', ?, ?, ?
+                )
+                """,
+                (
+                    run_id,
+                    name,
+                    setup["source_kind"],
+                    setup["start_mode"],
+                    setup["integrity_mode"],
+                    setup["time_disclosure_policy"],
+                    setup["book_mode"],
+                    setup["margin_mode"],
+                    setup["funding_mode"],
+                    int(bool(setup["allow_rule_changes"])),
+                    setup["settlement_asset"],
+                    setup["initial_equity"],
+                    setup["initial_equity"],
+                    now_ms,
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_run_setup(
+                    run_id, setup_json, setup_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    canonical_json(setup),
+                    canonical_sha256(setup),
+                    now_ms,
+                ),
+            )
+            self._insert_viewer_state(
+                connection,
+                ViewerState(
+                    run_id=run_id,
+                    selected_track_id=None,
+                    display_interval="1m",
+                    chart_type="candles",
+                    visible_range=None,
+                    pane_layout={},
+                    rail_layout={},
+                    semantic_view_revision=0,
+                ),
+                now_ms=now_ms,
+            )
+            self._insert_initial_action(
+                connection,
+                run_id=run_id,
+                action_type="CREATE_RUN",
+                action={
+                    "schema": "replay.training.action.v2",
+                    "state": "AWAITING_MARKET",
+                    "setup_hash": canonical_sha256(setup),
+                },
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def get_run_setup(
+        self,
+        run_id: str,
+        *,
+        require_awaiting_market: bool = True,
+    ) -> TrainingRunSetupRequest:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT run.state, setup.setup_json, setup.setup_hash
+                FROM replay_training_run AS run
+                JOIN replay_training_run_setup AS setup USING(run_id)
+                WHERE run.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist or has no setup",
+                status_code=404,
+            )
+        if require_awaiting_market and str(row["state"]) != "AWAITING_MARKET":
+            raise TrainingRunError(
+                "TRAINING_RUN_ALREADY_INITIALIZED",
+                "training run already has a market clock",
+                status_code=409,
+            )
+        try:
+            payload = json.loads(str(row["setup_json"]))
+            request = TrainingRunSetupRequest.from_dict(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training run setup is invalid",
+                status_code=503,
+            ) from exc
+        if canonical_sha256(request.to_dict()) != str(row["setup_hash"]):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training run setup failed its integrity check",
+                status_code=503,
+            )
+        return request
+
     def initial_run_writer(
         self,
         *,
@@ -664,6 +825,8 @@ class TrainingRunStore:
         source_fingerprint: str,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
         account_history_binding: PreparedAccountHistoryBinding | None = None,
+        existing_shell: bool = False,
+        preparation_id: str | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
         def write(connection: sqlite3.Connection, now_ms: int) -> None:
             cursor = session_state.get("cursor")
@@ -679,16 +842,14 @@ class TrainingRunStore:
             rule = request.to_dict(redact_hidden_start=True)
             self._validated_selection_preparation(
                 connection,
-                preparation_id=run_id,
+                preparation_id=preparation_id or run_id,
                 request=request,
                 history_policy=history_policy,
                 source_fingerprint=source_fingerprint,
                 actual_replay_start_ms=actual_replay_start_ms,
                 actual_replay_end_ms=actual_replay_end_ms,
             )
-            self._insert_run(
-                connection,
-                {
+            run_values = {
                     "run_id": run_id,
                     "adapter_session_id": adapter_session_id,
                     "name": name,
@@ -717,8 +878,50 @@ class TrainingRunStore:
                     "dataset_epoch": str(session_state["data_epoch"]),
                     "compatibility": "READY",
                     "now_ms": now_ms,
-                },
-            )
+                }
+            if existing_shell:
+                updated = connection.execute(
+                    """
+                    UPDATE replay_training_run
+                    SET adapter_session_id = :adapter_session_id,
+                        state = :state, source_kind = :source_kind,
+                        start_mode = :start_mode,
+                        integrity_mode = :integrity_mode,
+                        time_disclosure_policy = :time_disclosure_policy,
+                        book_mode = :book_mode, margin_mode = :margin_mode,
+                        funding_mode = :funding_mode,
+                        allow_rule_changes = :allow_rule_changes,
+                        exchange = :exchange, market_type = :market_type,
+                        last_symbol = :last_symbol,
+                        settlement_asset = :settlement_asset,
+                        base_interval = :base_interval,
+                        display_interval = :display_interval,
+                        initial_equity = :initial_equity,
+                        current_equity = :current_equity,
+                        summary_revision = :summary_revision,
+                        revision = :revision,
+                        source_sequence = :source_sequence,
+                        virtual_time_ms = :virtual_time_ms,
+                        active_rule_revision = 1,
+                        catalog_epoch = :catalog_epoch,
+                        dataset_epoch = :dataset_epoch,
+                        compatibility = :compatibility,
+                        updated_at_ms = :now_ms,
+                        saved_at_ms = :now_ms
+                    WHERE run_id = :run_id
+                      AND state = 'AWAITING_MARKET'
+                      AND adapter_session_id IS NULL
+                    """,
+                    run_values,
+                )
+                if updated.rowcount != 1:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_ALREADY_INITIALIZED",
+                        "training run already has a market clock",
+                        status_code=409,
+                    )
+            else:
+                self._insert_run(connection, run_values)
             self._insert_launch_context(
                 connection,
                 run_id=run_id,
@@ -746,7 +949,11 @@ class TrainingRunStore:
                     error_message = NULL, updated_at_ms = ?
                 WHERE preparation_id = ? AND status = 'PREPARING_DATA'
                 """,
-                (str(session_state["data_epoch"]), now_ms, run_id),
+                (
+                    str(session_state["data_epoch"]),
+                    now_ms,
+                    preparation_id or run_id,
+                ),
             )
             if preparation_update.rowcount != 1:
                 raise TrainingRunError(
@@ -804,9 +1011,7 @@ class TrainingRunStore:
                     run_id=run_id,
                     now_ms=now_ms,
                 )
-            self._insert_viewer_state(
-                connection,
-                ViewerState(
+            initialized_viewer = ViewerState(
                     run_id=run_id,
                     selected_track_id="track-1",
                     display_interval=request.display_interval,
@@ -814,10 +1019,48 @@ class TrainingRunStore:
                     visible_range=None,
                     pane_layout={},
                     rail_layout={},
-                    semantic_view_revision=0,
-                ),
-                now_ms=now_ms,
-            )
+                    semantic_view_revision=1 if existing_shell else 0,
+                )
+            if existing_shell:
+                viewer_payload = initialized_viewer.to_dict()
+                viewer_update = connection.execute(
+                    """
+                    UPDATE replay_training_viewer_state
+                    SET selected_track_id = ?, display_interval = ?,
+                        chart_type = ?, visible_range_json = NULL,
+                        pane_layout_json = '{}', rail_layout_json = '{}',
+                        semantic_view_revision = 1, updated_at_ms = ?
+                    WHERE run_id = ? AND selected_track_id IS NULL
+                    """,
+                    (
+                        initialized_viewer.selected_track_id,
+                        initialized_viewer.display_interval,
+                        initialized_viewer.chart_type,
+                        now_ms,
+                        run_id,
+                    ),
+                )
+                if viewer_update.rowcount != 1:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_ALREADY_INITIALIZED",
+                        "training run viewer already selected a market",
+                        status_code=409,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_viewer_event(
+                        run_id, semantic_view_revision, command_id, event_type,
+                        request_json, viewer_state_json, created_at_ms
+                    ) VALUES (?, 1, NULL, 'SELECT_INITIAL_MARKET', '{}', ?, ?)
+                    """,
+                    (run_id, canonical_json(viewer_payload), now_ms),
+                )
+            else:
+                self._insert_viewer_state(
+                    connection,
+                    initialized_viewer,
+                    now_ms=now_ms,
+                )
             self._insert_rule(connection, run_id=run_id, rule=rule, now_ms=now_ms)
             if request.account_data_mode.value == "HISTORICAL_EXACT":
                 self._apply_exact_mark_projection(
@@ -826,18 +1069,33 @@ class TrainingRunStore:
                     track_id="track-1",
                     now_ms=now_ms,
                 )
-            self._insert_initial_action(
-                connection,
-                run_id=run_id,
-                action_type="CREATE_RUN",
-                action={
-                    "schema": "replay.training.action.v1",
-                    "adapter_session_id": adapter_session_id,
-                    "source_kind": request.source_kind.value,
-                    "start_mode": request.start_mode.value,
-                },
-                now_ms=now_ms,
-            )
+            market_action = {
+                "schema": "replay.training.action.v2",
+                "adapter_session_id": adapter_session_id,
+                "source_kind": request.source_kind.value,
+                "start_mode": request.start_mode.value,
+                "exchange": request.exchange,
+                "market_type": request.market_type,
+                "symbol": request.symbol,
+            }
+            if existing_shell:
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_action(
+                        run_id, action_sequence, action_type,
+                        action_json, created_at_ms
+                    ) VALUES (?, 2, 'SELECT_MARKET', ?, ?)
+                    """,
+                    (run_id, canonical_json(market_action), now_ms),
+                )
+            else:
+                self._insert_initial_action(
+                    connection,
+                    run_id=run_id,
+                    action_type="CREATE_RUN",
+                    action=market_action,
+                    now_ms=now_ms,
+                )
             self._insert_pin(
                 connection,
                 run_id=run_id,
@@ -918,11 +1176,12 @@ class TrainingRunStore:
                     rule_revision, public_time_json, old_value_json,
                     new_value_json, reason, state_hash_before,
                     state_hash_after, created_at_ms
-                ) VALUES (?, 1, 'action-00000001', NULL, 'CREATE_RUN', 1,
-                          ?, '{}', ?, 'atomic create', NULL, ?, ?)
+                ) VALUES (?, 1, 'action-00000001', NULL, ?, 1,
+                          ?, '{}', ?, ?, NULL, ?, ?)
                 """,
                 (
                     run_id,
+                    "SELECT_MARKET" if existing_shell else "CREATE_RUN",
                     canonical_json(public_time),
                     canonical_json(
                         {
@@ -931,6 +1190,7 @@ class TrainingRunStore:
                             "result_label": result_label,
                         }
                     ),
+                    "initialize first market" if existing_shell else "atomic create",
                     state_hash,
                     now_ms,
                 ),
@@ -4401,7 +4661,7 @@ class TrainingRunStore:
                 UNION
                 SELECT adapter_session_id
                 FROM replay_training_run
-                WHERE run_id = ?
+                WHERE run_id = ? AND adapter_session_id IS NOT NULL
                 """,
                 (run_id, run_id),
             ).fetchall()
@@ -4451,7 +4711,7 @@ class TrainingRunStore:
                     UNION
                     SELECT adapter_session_id
                     FROM replay_training_run
-                    WHERE run_id = ?
+                    WHERE run_id = ? AND adapter_session_id IS NOT NULL
                     """,
                     (run_id, run_id),
                 ).fetchall()
@@ -7510,11 +7770,12 @@ class TrainingRunStore:
                 tuple[sqlite3.Row, ...],
                 dict[str, object],
                 dict[str, sqlite3.Row],
-                dict[str, object],
+                dict[str, object] | None,
             ] | None:
             run = connection.execute(
                 """
-                SELECT r.run_id, r.initial_equity, r.source_kind, r.book_mode,
+                SELECT r.run_id, r.state AS run_state, r.initial_equity,
+                       r.source_kind, r.book_mode,
                        launch.context_json AS launch_context_json,
                        launch.context_hash AS launch_context_hash,
                        viewer.*
@@ -7561,6 +7822,12 @@ class TrainingRunStore:
                 tracks=track_payloads,
             )
             launch_context = self._launch_context_projection(run)
+            if launch_context is None and str(run["run_state"]) != "AWAITING_MARKET":
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "initialized training run is missing its replay launch context",
+                    status_code=503,
+                )
             return run, rows, portfolio, book_rows, launch_context
 
         result = await self.base_store.run_extension_read(read)
@@ -12413,13 +12680,17 @@ class TrainingRunStore:
         )
 
     @staticmethod
-    def _launch_context_projection(row: Mapping[str, object]) -> dict[str, object]:
+    def _launch_context_projection(
+        row: Mapping[str, object],
+    ) -> dict[str, object] | None:
         raw_json = row["launch_context_json"]
         raw_hash = row["launch_context_hash"]
+        if raw_json is None and raw_hash is None:
+            return None
         if raw_json is None or raw_hash is None:
             raise TrainingRunError(
                 "TRAINING_RUN_STORAGE_DEGRADED",
-                "stored replay launch context is missing",
+                "stored replay launch context is incomplete",
                 status_code=503,
             )
         try:
@@ -12586,9 +12857,12 @@ class TrainingRunStore:
     @staticmethod
     def _viewer_from_row(row: Mapping[str, object]) -> ViewerState:
         visible_raw = row["visible_range_json"]
+        selected_track_id = row["selected_track_id"]
         return ViewerState(
             run_id=str(row["run_id"]),
-            selected_track_id=str(row["selected_track_id"]),
+            selected_track_id=(
+                None if selected_track_id is None else str(selected_track_id)
+            ),
             display_interval=str(row["display_interval"]),
             chart_type=str(row["chart_type"]),
             visible_range=(
@@ -12774,6 +13048,11 @@ class TrainingRunStore:
                 "code": "UNAVAILABLE",
                 "message": "存档当前不可恢复；请检查服务端诊断或导出记录。",
             }
+        elif row["state"] == "AWAITING_MARKET":
+            status = {
+                "code": "AWAITING_MARKET",
+                "message": "回放已创建，请选择第一个商品。",
+            }
         elif row["state"] == "ENDED":
             status = {"code": "ENDED", "message": "训练已结束，可打开复盘。"}
         else:
@@ -12786,7 +13065,9 @@ class TrainingRunStore:
             "source_kind": str(row["source_kind"]),
             "integrity_mode": row["integrity_mode"],
             "time_disclosure_policy": str(row["time_disclosure_policy"]),
-            "last_symbol": str(row["last_symbol"]),
+            "last_symbol": (
+                None if row["last_symbol"] is None else str(row["last_symbol"])
+            ),
             "subscribed_track_count": int(row["subscribed_track_count"]),
             "progress": {"source_sequence": int(row["progress_sequence"])},
             "equity": row["equity"],
@@ -12795,7 +13076,11 @@ class TrainingRunStore:
             "updated_at_ms": int(row["updated_at_ms"]),
             "compatibility": str(row["compatibility"]),
             "resume_action": str(row["resume_action"]),
-            "adapter_session_id": str(row["adapter_session_id"]),
+            "adapter_session_id": (
+                None
+                if row["adapter_session_id"] is None
+                else str(row["adapter_session_id"])
+            ),
             "status": status,
             "report_available": bool(row["report_available"]),
             "review_available": bool(row["review_available"]),

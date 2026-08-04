@@ -206,8 +206,9 @@ async def test_return_to_hub_transfers_recovery_lease_before_idle_reaper(
     prune_task: asyncio.Task[None] | None = None
     try:
         created = await service.training.create_run(await _request(service))
+        run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])
-        first_return = await service.training.return_to_hub_by_session(session_id)
+        first_return = await service.training.return_to_hub(run_id)
         assert first_return["released"] is True
         assert session_id not in service._sessions
 
@@ -246,7 +247,7 @@ async def test_return_to_hub_transfers_recovery_lease_before_idle_reaper(
             prune_as_soon_as_the_recovery_lease_is_released()
         )
         returned = await asyncio.wait_for(
-            service.training.return_to_hub_by_session(session_id),
+            service.training.return_to_hub(run_id),
             timeout=2.0,
         )
         await asyncio.wait_for(prune_task, timeout=2.0)
@@ -553,6 +554,7 @@ async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
     service = await _service(path)
     try:
         created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
         session_id = created["run"]["adapter_session_id"]
         await service.command(
             session_id,
@@ -562,7 +564,7 @@ async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
             session_id,
             _command("play", CommandType.PLAY, revision=1),
         )
-        returned = await service.training.return_to_hub_by_session(session_id)  # type: ignore[union-attr]
+        returned = await service.training.return_to_hub(run_id)  # type: ignore[union-attr]
         assert returned == {
             "protocol": "replay.v2",
             "run_id": "run-1",
@@ -600,6 +602,7 @@ async def test_ended_run_card_is_labeled_for_review_instead_of_continue(
         training = service.training
         assert training is not None
         created = await training.create_run(await _request(service))
+        run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])
         await service.command(
             session_id,
@@ -641,7 +644,7 @@ async def test_ended_run_card_is_labeled_for_review_instead_of_continue(
             "code": "ENDED",
             "message": "训练已结束，可打开复盘。",
         }
-        returned = await training.return_to_hub_by_session(session_id)
+        returned = await training.return_to_hub(run_id)
         assert returned == {
             "protocol": "replay.v2",
             "run_id": "run-1",

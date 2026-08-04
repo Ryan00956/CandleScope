@@ -8,7 +8,7 @@ import {
   parseReplayIntegrityResponse,
   parseReplayReviewResponse,
 } from "../replayIntegrityModel.js";
-import { buildTrainingRunCreateRequest, evaluateTrainingRunDraft } from "../trainingHubModel.js";
+import { buildTrainingRunPreparationRequest, evaluateTrainingRunDraft } from "../trainingHubModel.js";
 import { parseReplayCapabilities, parseReplayCatalog } from "../replayParser.js";
 import { enabledCapabilities } from "./fixtures.js";
 
@@ -369,7 +369,7 @@ test("create contract exposes all seven policies and explicit integrity allowlis
   };
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
   assert.equal(evaluation.canSubmit, true);
-  const request = buildTrainingRunCreateRequest(draft, evaluation, catalog);
+  const request = buildTrainingRunPreparationRequest(draft, evaluation, catalog);
   assert.equal(request.integrity_mode, "PRACTICE");
   assert.equal(request.time_disclosure_policy, "HIDE_MINUTE");
   assert.deepEqual(request.allowed_mutations, ["deposit", "withdraw"]);

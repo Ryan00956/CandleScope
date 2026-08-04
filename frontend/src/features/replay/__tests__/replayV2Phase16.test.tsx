@@ -12,9 +12,10 @@ import {
 import { parseReplayTrainingReportResponse } from "../replayIntegrityModel.js";
 import { parseReplaySegmentPreparePlan } from "../replaySegmentTypes.js";
 import {
-  buildTrainingRunCreateRequest,
+  buildTrainingRunPreparationRequest,
   createTrainingRunDraft,
   evaluateTrainingRunDraft,
+  evaluateTrainingRunSetupDraft,
 } from "../trainingHubModel.js";
 import type { TrainingHubRuntime } from "../useTrainingHub.js";
 import {
@@ -321,7 +322,7 @@ test("Phase 16 launcher pins the exact plan ref and rejects every implicit proxy
   const plan = parseReplaySegmentPreparePlan(exactPlan());
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog, plan);
   assert.equal(evaluation.canSubmit, true);
-  const payload = buildTrainingRunCreateRequest(draft, evaluation, catalog);
+  const payload = buildTrainingRunPreparationRequest(draft, evaluation, catalog);
   assert.equal(payload.account_data_mode, "HISTORICAL_EXACT");
   assert.equal(payload.funding_mode, "HISTORICAL_EXACT");
   assert.deepEqual(payload.account_history_ref, plan.account_history.account_history_ref);
@@ -454,18 +455,16 @@ test("Phase 16 report and CSV retain archive/auditor proof and both liquidation 
   assert.match(csv, /historical_market_liquidation.*UNSUPPORTED_NO_HISTORY/s);
 });
 
-test("Phase 16 Hub visibly discloses the exact archive contract before create", () => {
+test("Phase 16 Hub defers exact archive binding until a market is selected", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = visibleCatalog();
-  const plan = parseReplaySegmentPreparePlan(exactPlan());
   const draft = {
-    ...createTrainingRunDraft(catalog),
+    ...createTrainingRunDraft(),
     startMode: "MANUAL" as const,
     requestedStartMs: START_MS,
     accountDataMode: "HISTORICAL_EXACT" as const,
     fundingMode: "HISTORICAL_EXACT" as const,
   };
-  const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog, plan);
+  const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);
   const runtime = {
     phase: "READY",
     items: [],
@@ -475,10 +474,10 @@ test("Phase 16 Hub visibly discloses the exact archive contract before create", 
     error: null,
     createOpen: true,
     capabilities,
-    catalog,
+    catalog: null,
     draft,
     evaluation,
-    segmentPlan: plan,
+    segmentPlan: null,
     storageOpen: false,
     storageInventory: null,
     storagePlan: null,
@@ -505,8 +504,9 @@ test("Phase 16 Hub visibly discloses the exact archive contract before create", 
     },
   } satisfies TrainingHubRuntime;
   const html = renderToStaticMarkup(<TrainingHubDialog runtime={runtime} />);
-  assert.match(html, /data-account-history-capability="AVAILABLE_EXACT"/);
-  assert.match(html, /account-btc-202403/);
-  assert.match(html, /公开 K 线代理.*拒绝/);
+  assert.match(html, /历史 L2、精确账户历史与 funding 仍 fail closed/);
+  assert.match(html, /选中具体商品后绑定对应 archive ref/);
+  assert.match(html, /Run 保持空局/);
   assert.match(html, /HISTORICAL_EXACT · 归档结算/);
+  assert.doesNotMatch(html, /data-account-history-capability|account-btc-202403/);
 });

@@ -39,6 +39,8 @@ from app.replay.training.models import (
     TimeDisclosurePolicy,
     TrainingCursor,
     TrainingRunCreateRequest,
+    TrainingRunMarketSelectionRequest,
+    TrainingRunSetupRequest,
 )
 from app.replay.training.service import TrainingRunService
 
@@ -236,7 +238,7 @@ class AccountHistoryRefPayload(_StrictModel):
     checksum_sha256: str = Field(min_length=71, max_length=71)
 
 
-class TrainingRunCreatePayload(_StrictModel):
+class TrainingRunPreparationPayload(_StrictModel):
     protocol: Literal["replay.v2"]
     catalog_epoch: str = Field(min_length=71, max_length=71)
     name: str | None = Field(default=None, min_length=1, max_length=80)
@@ -279,6 +281,48 @@ class TrainingRunCreatePayload(_StrictModel):
     allow_rule_changes: bool
     allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
     launch_context: ReplayLaunchContextPayload | None = None
+
+
+class TrainingRunSetupPayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    source_kind: ReplaySource
+    start_mode: StartMode
+    settlement_asset: str = Field(min_length=1, max_length=128)
+    requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
+    indicator_warmup_bars: int = Field(
+        ge=1,
+        le=REPLAY_SETTINGS.max_warmup_bars,
+    )
+    visible_history_lookback: VisibleHistoryLookbackPayload
+    forward_cache_ms: int = Field(ge=1, le=_MAX_HORIZON_MS)
+    random_seed: int | None = Field(default=None, ge=0, le=MAX_RANDOM_SEED)
+    initial_equity: str = Field(min_length=1, max_length=128)
+    max_leverage: str = Field(min_length=1, max_length=128)
+    maker_fee_bps: str = Field(min_length=1, max_length=128)
+    taker_fee_bps: str = Field(min_length=1, max_length=128)
+    market_slippage_bps: str = Field(min_length=1, max_length=128)
+    integrity_mode: IntegrityMode
+    time_disclosure_policy: TimeDisclosurePolicy
+    book_mode: BookMode
+    margin_mode: MarginMode
+    funding_mode: FundingMode
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
+    funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
+    allow_rule_changes: bool
+    allowed_mutations: list[str] = Field(default_factory=list, max_length=6)
+    market_selection_hint: ReplayLaunchContextPayload | None = None
+
+
+class TrainingRunMarketSelectionPayload(_StrictModel):
+    catalog_epoch: str = Field(min_length=71, max_length=71)
+    exchange: str = Field(min_length=1, max_length=128)
+    market_type: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=128)
+    base_interval: str = Field(min_length=1, max_length=128)
+    display_interval: str = Field(min_length=1, max_length=128)
+    account_history_ref: AccountHistoryRefPayload | None = None
 
 
 class TrainingCursorPayload(_StrictModel):
@@ -551,12 +595,54 @@ async def list_replay_v2_runs(
 )
 async def create_replay_v2_run(
     request: Request,
-    payload: TrainingRunCreatePayload,
+    payload: TrainingRunSetupPayload,
 ) -> dict[str, object]:
-    create_request = TrainingRunCreateRequest.from_dict(
+    create_request = TrainingRunSetupRequest.from_dict(
         payload.model_dump(mode="json")
     )
-    return await _training_service(request).create_run(create_request)
+    return await _training_service(request).create_empty_run(create_request)
+
+
+@router.post(
+    "/runs/{run_id}/markets",
+    status_code=201,
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def select_initial_replay_v2_market(
+    run_id: str,
+    request: Request,
+    payload: TrainingRunMarketSelectionPayload,
+) -> dict[str, object]:
+    selection = TrainingRunMarketSelectionRequest.from_dict(
+        payload.model_dump(mode="json")
+    )
+    return await _training_service(request).select_initial_market(
+        run_id,
+        selection,
+    )
+
+
+@router.get("/runs/{run_id}/market-catalog")
+async def replay_v2_run_market_catalog(
+    run_id: str,
+    request: Request,
+) -> dict[str, object]:
+    return await _training_service(request).market_catalog(run_id)
+
+
+@router.post(
+    "/runs/{run_id}/markets/plan",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def plan_initial_replay_v2_market(
+    run_id: str,
+    request: Request,
+    payload: TrainingRunMarketSelectionPayload,
+) -> dict[str, object]:
+    selection = TrainingRunMarketSelectionRequest.from_dict(
+        payload.model_dump(mode="json")
+    )
+    return await _training_service(request).initial_market_plan(run_id, selection)
 
 
 @router.post(
@@ -565,7 +651,7 @@ async def create_replay_v2_run(
 )
 async def plan_replay_v2_data_segment(
     request: Request,
-    payload: TrainingRunCreatePayload,
+    payload: TrainingRunPreparationPayload,
 ) -> dict[str, object]:
     create_request = TrainingRunCreateRequest.from_dict(
         payload.model_dump(mode="json")
@@ -798,14 +884,14 @@ async def get_replay_adapter_session(
 
 
 @router.post(
-    "/runs/session/{session_id}/return-to-hub",
+    "/runs/{run_id}/return-to-hub",
     dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
 )
 async def return_replay_v2_run_to_hub(
     request: Request,
-    session_id: str,
+    run_id: str,
 ) -> dict[str, object]:
-    return await _training_service(request).return_to_hub_by_session(session_id)
+    return await _training_service(request).return_to_hub(run_id)
 
 
 @router.get("/runs/session/{session_id}/history")
@@ -1218,7 +1304,9 @@ __all__ = [
     "MAX_REPLAY_REQUEST_BYTES",
     "ReplayCommandPayload",
     "ReplayV2CommandPayload",
-    "TrainingRunCreatePayload",
+    "TrainingRunPreparationPayload",
+    "TrainingRunMarketSelectionPayload",
+    "TrainingRunSetupPayload",
     "replay_error_payload",
     "replay_training_unavailable_payload",
     "replay_service_from_state",

@@ -1,16 +1,16 @@
 import type { TrainingRunReturnResponse } from "./replayV2Types.js";
 
 export interface ReturnToHubApi {
-  returnToHub(sessionId: string, signal?: AbortSignal): Promise<TrainingRunReturnResponse>;
+  returnToHub(runId: string, signal?: AbortSignal): Promise<TrainingRunReturnResponse>;
 }
 
 export async function returnToTrainingHub(
-  sessionId: string,
+  runId: string,
   api: ReturnToHubApi,
   navigate: (url: string) => void = (url) => window.location.assign(url),
   signal?: AbortSignal,
 ): Promise<TrainingRunReturnResponse> {
-  const result = await api.returnToHub(sessionId, signal);
+  const result = await api.returnToHub(runId, signal);
   if (!new Set(["PAUSED", "ENDED", "ERROR"]).has(result.state)
     || !result.checkpointed
     || !result.released) {

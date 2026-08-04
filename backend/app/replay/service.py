@@ -455,6 +455,7 @@ class ReplayService:
         config: ReplaySessionConfig,
         *,
         expected_catalog_epoch: str,
+        minimum_history_bars: int | None = None,
     ) -> dict[str, object]:
         """Freeze the start choice before Phase 14 expands visible history.
 
@@ -465,6 +466,19 @@ class ReplayService:
 
         if not isinstance(config, ReplaySessionConfig):
             raise TypeError("config must be ReplaySessionConfig")
+        required_history_bars = (
+            config.warmup_bars
+            if minimum_history_bars is None
+            else minimum_history_bars
+        )
+        if (
+            isinstance(required_history_bars, bool)
+            or not isinstance(required_history_bars, int)
+            or required_history_bars < config.warmup_bars
+        ):
+            raise ValueError(
+                "minimum_history_bars must be an integer at least as large as warmup_bars"
+            )
         self._ensure_available(blind_mode=config.blind_mode)
         if config.source_kind is SourceKind.AGG_TRADE:
             try:
@@ -507,6 +521,7 @@ class ReplayService:
                     self._catalog,
                     entry,
                     config,
+                    minimum_history_bars=required_history_bars,
                 )
             else:
                 window = self._select_manual_window(
@@ -3771,14 +3786,34 @@ class ReplayService:
         catalog: ReplayCatalog,
         entry: ReplayCatalogEntry,
         config: ReplaySessionConfig,
+        *,
+        minimum_history_bars: int | None = None,
     ) -> tuple[EligibleWindow, str | None]:
+        required_history_bars = (
+            config.warmup_bars
+            if minimum_history_bars is None
+            else minimum_history_bars
+        )
         if config.source_kind is SourceKind.BAR:
+            eligible_ranges = self._minimum_history_ranges(
+                entry,
+                self._bar_tail_reachable_ranges(entry),
+                configured_warmup_bars=config.warmup_bars,
+                minimum_history_bars=required_history_bars,
+            )
             return (
                 catalog.select_random_from_ranges(
                     entry,
-                    eligible_ranges=self._bar_tail_reachable_ranges(entry),
+                    eligible_ranges=eligible_ranges,
                     seed=config.random_seed,
-                    selection_namespace="bar_source_latest_reachable.v1",
+                    selection_namespace=(
+                        "bar_source_latest_reachable.v1"
+                        if required_history_bars == config.warmup_bars
+                        else (
+                            "bar_source_latest_reachable.minimum_history.v1:"
+                            f"{required_history_bars}"
+                        )
+                    ),
                 ),
                 None,
             )
@@ -3807,9 +3842,14 @@ class ReplayService:
                     symbol=config.symbol,
                 )
                 trade_catalog_epoch = None
-            eligible_ranges = self._intersect_trade_eligible_ranges(
+            eligible_ranges = self._minimum_history_ranges(
                 entry,
-                selection_windows,
+                self._intersect_trade_eligible_ranges(
+                    entry,
+                    selection_windows,
+                ),
+                configured_warmup_bars=config.warmup_bars,
+                minimum_history_bars=required_history_bars,
             )
         except ReplayDomainError:
             raise
@@ -3831,10 +3871,64 @@ class ReplayService:
                 seed=config.random_seed,
                 selection_namespace=(
                     "agg_trade_official_availability.approximate_bars.v1"
+                    if required_history_bars == config.warmup_bars
+                    else (
+                        "agg_trade_official_availability.minimum_history.v1:"
+                        f"{required_history_bars}"
+                    )
                 ),
             ),
             trade_catalog_epoch,
         )
+
+    @staticmethod
+    def _minimum_history_ranges(
+        entry: ReplayCatalogEntry,
+        ranges: Sequence[EligibleWindowRange],
+        *,
+        configured_warmup_bars: int,
+        minimum_history_bars: int,
+    ) -> tuple[EligibleWindowRange, ...]:
+        if minimum_history_bars < configured_warmup_bars:
+            raise ValueError("minimum history cannot be smaller than catalog warmup")
+        extra_bars = minimum_history_bars - configured_warmup_bars
+        if extra_bars == 0:
+            return tuple(ranges)
+        restricted: list[EligibleWindowRange] = []
+        for candidate in ranges:
+            source = next(
+                (
+                    source_range
+                    for source_range in entry.eligible_ranges
+                    if source_range.interval == candidate.interval
+                    and source_range.interval_ms == candidate.interval_ms
+                    and source_range.warmup_bars == candidate.warmup_bars
+                    and source_range.replay_bars == candidate.replay_bars
+                    and source_range.contains(candidate.first_start_ms)
+                    and source_range.contains(candidate.last_start_ms)
+                ),
+                None,
+            )
+            if source is None:
+                raise ValueError("eligible range is not bound to its source catalog range")
+            first_start_ms = max(
+                candidate.first_start_ms,
+                source.first_start_ms + extra_bars * candidate.interval_ms,
+            )
+            if first_start_ms > candidate.last_start_ms:
+                continue
+            restricted.append(
+                replace(
+                    candidate,
+                    first_start_ms=first_start_ms,
+                    count=(
+                        (candidate.last_start_ms - first_start_ms)
+                        // candidate.interval_ms
+                    )
+                    + 1,
+                )
+            )
+        return tuple(restricted)
 
     async def _trade_selection_catalog_epoch(
         self,

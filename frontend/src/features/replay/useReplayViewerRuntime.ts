@@ -526,14 +526,14 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   }, [refreshMarketTracks]);
 
   useEffect(() => {
-    if (marketTracks?.global_clock.state !== "PLAYING") return;
+    if (marketTracks?.global_clock?.state !== "PLAYING") return;
     const timer = setInterval(() => {
       void refreshMarketTracks(marketTracks.run_id).catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : "全局时钟状态刷新失败");
       });
     }, 250);
     return () => clearInterval(timer);
-  }, [marketTracks?.global_clock.state, marketTracks?.run_id, refreshMarketTracks]);
+  }, [marketTracks?.global_clock?.state, marketTracks?.run_id, refreshMarketTracks]);
 
   useEffect(() => {
     if (requiresSourceBucketProjection) {
@@ -914,7 +914,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       "select-track",
     );
     if (runtime.store.sessionId !== result.session_id && typeof globalThis.location !== "undefined") {
-      globalThis.location.assign(`/replay.html?session=${encodeURIComponent(result.session_id)}`);
+      globalThis.location.assign(`/replay.html?run=${encodeURIComponent(result.run_id)}`);
     }
     return result;
   }, [runtime.store, submitTrackCommand]);

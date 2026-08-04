@@ -11,8 +11,8 @@ export interface ReplayLauncherDialogProps {
   readonly onRequestClose: () => void;
 }
 
-function replaySessionUrl(sessionId: string): string {
-  return `/replay.html?session=${encodeURIComponent(sessionId)}`;
+function replayRunUrl(runId: string): string {
+  return `/replay.html?run=${encodeURIComponent(runId)}`;
 }
 
 export default function ReplayLauncherDialog({
@@ -38,8 +38,8 @@ export default function ReplayLauncherDialog({
     pendingReplayWindowRef.current = null;
     if (orphan !== null && !orphan.closed) orphan.close();
   }, []);
-  const navigateToSession = useCallback((sessionId: string) => {
-    const url = replaySessionUrl(sessionId);
+  const navigateToRun = useCallback((runId: string) => {
+    const url = replayRunUrl(runId);
     const reserved = pendingReplayWindowRef.current;
     pendingReplayWindowRef.current = null;
     if (reserved !== null && !reserved.closed) {
@@ -56,7 +56,7 @@ export default function ReplayLauncherDialog({
     child.location.replace(url);
     onRequestClose();
   }, [onRequestClose]);
-  const runtime = useTrainingHub({ launchContext, navigateToSession });
+  const runtime = useTrainingHub({ launchContext, navigateToRun });
   const launcherRuntime = useMemo<TrainingHubRuntime>(() => ({
     ...runtime,
     actions: {
@@ -86,10 +86,10 @@ export default function ReplayLauncherDialog({
   }, []);
 
   const launchLabel = [
-    "已从实时行情带入",
+    "已从实时行情带入自选快照；创建 Run 后仍由你选择首个商品。当前查看的是",
     `${launchContext.exchange} · ${launchContext.market_type} · ${launchContext.symbol}`,
     `· ${launchContext.display_interval}`,
-    `以及 ${launchContext.watchlist_snapshot.groups.length} 个结构化自选分组；未激活商品保持 NONE。`,
+    `以及 ${launchContext.watchlist_snapshot.groups.length} 个结构化自选分组。`,
   ].join(" ");
 
   return (

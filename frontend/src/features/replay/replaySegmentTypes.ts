@@ -3,7 +3,7 @@ import type {
   ReplayAccountHistoryRef,
   ReplayV2AccountDataMode,
   ReplayV2SourceKind,
-  TrainingRunCreatePayload,
+  TrainingRunPreparationPayload,
 } from "./replayV2Types.js";
 
 
@@ -98,7 +98,7 @@ export interface ReplaySegmentPreparePlan {
 
 export interface ReplaySegmentPlanApi {
   segmentPlan(
-    payload: TrainingRunCreatePayload,
+    payload: TrainingRunPreparationPayload,
     signal?: AbortSignal,
   ): Promise<ReplaySegmentPreparePlan>;
 }

@@ -397,7 +397,8 @@ export function useReplayHistoryRuntime(
       && runtime.store.sessionId !== null
       && runtime.store.dataEpoch !== null
       && runtime.store.virtualTimeMs !== null
-      && viewer.viewerState !== null) {
+      && viewer.viewerState?.selected_track_id !== null
+      && viewer.viewerState?.selected_track_id !== undefined) {
       const response = await defaultReplayV2Api.displayProjectionBySession(
         runtime.store.sessionId,
         {

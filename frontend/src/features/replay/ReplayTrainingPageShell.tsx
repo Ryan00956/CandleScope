@@ -319,17 +319,17 @@ export default function ReplayTrainingPageShell({
     [formatPublicTime, publicTimePolicy],
   );
   const returnToHub = useCallback(async () => {
-    const sessionId = runtime.store.sessionId;
-    if (sessionId === null || returningToHub) return;
+    const runId = viewer.viewerState?.run_id ?? null;
+    if (runId === null || returningToHub) return;
     setReturningToHub(true);
     setReturnToHubError(null);
     try {
-      await returnToTrainingHub(sessionId, defaultReplayV2Api);
+      await returnToTrainingHub(runId, defaultReplayV2Api);
     } catch (cause) {
       setReturnToHubError(cause instanceof Error ? cause.message : "返回存档大厅失败");
       setReturningToHub(false);
     }
-  }, [returningToHub, runtime.store.sessionId]);
+  }, [returningToHub, viewer.viewerState?.run_id]);
 
   useEffect(() => {
     setLiveDrawingError(null);
@@ -1093,7 +1093,7 @@ export default function ReplayTrainingPageShell({
                 }}
               >训练成绩</button>
             )}
-            {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
+            {active && viewer.viewerState?.run_id !== undefined && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
             <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
           </>}
         />

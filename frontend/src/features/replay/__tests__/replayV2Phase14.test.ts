@@ -4,7 +4,7 @@ import test from "node:test";
 import { parseReplayCapabilities, parseReplayCatalog } from "../replayParser.js";
 import { parseReplaySegmentPreparePlan } from "../replaySegmentTypes.js";
 import {
-  buildTrainingRunCreateRequest,
+  buildTrainingRunPreparationRequest,
   createTrainingRunDraft,
   evaluateTrainingRunDraft,
 } from "../trainingHubModel.js";
@@ -115,7 +115,7 @@ test("Phase 14 create payload separates indicator warmup from visible history", 
   assert.equal(draft.visibleHistoryLookbackMs, null);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, sourceCatalog);
   assert.equal(evaluation.canSubmit, true);
-  const payload = buildTrainingRunCreateRequest(draft, evaluation, sourceCatalog);
+  const payload = buildTrainingRunPreparationRequest(draft, evaluation, sourceCatalog);
   assert.equal(payload.indicator_warmup_bars, 200);
   assert.deepEqual(payload.visible_history_lookback, {
     mode: "ALL_AVAILABLE",
@@ -169,7 +169,7 @@ test("Phase 14 model rejects misalignment and accepts explicit all-available pol
   );
   assert.equal(accepted.canSubmit, true);
   assert.deepEqual(
-    buildTrainingRunCreateRequest(
+    buildTrainingRunPreparationRequest(
       allAvailable,
       accepted,
       sourceCatalog,

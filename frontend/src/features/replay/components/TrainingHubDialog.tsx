@@ -1,10 +1,8 @@
 import { useState } from "react";
-import type { ReplayCatalogEntry } from "../replayTypes.js";
 import type { TrainingRunDraft } from "../trainingHubModel.js";
 import {
   formatUtcReplayStartInput,
   parseUtcReplayStartInput,
-  replayStartWindow,
 } from "../trainingHubModel.js";
 import {
   REPLAY_POLICY_MUTATIONS,
@@ -16,7 +14,6 @@ import type {
   TrainingRunCard,
   TrainingRunCompatibility,
 } from "../replayV2Types.js";
-import { replayCatalogIdentity } from "../replayUiModel.js";
 import type { TrainingHubRuntime } from "../useTrainingHub.js";
 import ReplayStorageGovernancePanel from "./ReplayStorageGovernancePanel.js";
 
@@ -35,35 +32,6 @@ function patchDraft(
   runtime.actions.setDraft({ ...runtime.draft, ...patch });
 }
 
-function chooseCatalogEntry(runtime: TrainingHubRuntime, identity: string): void {
-  const entry = runtime.catalog?.entries.find(
-    (candidate) => replayCatalogIdentity(candidate) === identity,
-  );
-  if (entry === undefined || runtime.draft === null) return;
-  const interval = entry.selected_base_interval ?? entry.base_intervals[0] ?? "1m";
-  patchDraft(runtime, {
-    exchange: entry.identity.exchange,
-    marketType: entry.identity.market_type,
-    symbol: entry.identity.symbol,
-    baseInterval: interval,
-    displayInterval: interval,
-  });
-}
-
-function CatalogOption({ entry }: { readonly entry: ReplayCatalogEntry }) {
-  return (
-    <option value={replayCatalogIdentity(entry)}>
-      {entry.identity.exchange} · {entry.identity.market_type} · {entry.identity.symbol}
-    </option>
-  );
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
 function trainingRunStatusMessage(card: TrainingRunCard): string {
   if (card.state !== "ENDED") return card.status.message;
   return card.resume_action === "UNAVAILABLE"
@@ -72,6 +40,7 @@ function trainingRunStatusMessage(card: TrainingRunCard): string {
 }
 
 function trainingRunPrimaryActionLabel(card: TrainingRunCard): string {
+  if (card.state === "AWAITING_MARKET") return "选择商品";
   return card.state === "ENDED" ? "打开复盘" : "继续训练";
 }
 
@@ -116,11 +85,11 @@ export function TrainingRunDeleteConfirmation({
 function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
   const { draft, evaluation } = runtime;
   if (!runtime.createOpen) return null;
-  if (draft === null || evaluation === null || runtime.catalog === null) {
+  if (draft === null || evaluation === null) {
     return (
       <section className="training-hub-create" aria-label="新建训练配置">
         <div className="replay-loading-spinner" />
-        <p>正在按需加载服务端能力与盲化目录…</p>
+        <p>正在读取创建 Run 所需的服务端能力…</p>
         <button type="button" onClick={runtime.actions.closeCreate}>取消</button>
       </section>
     );
@@ -133,13 +102,6 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
     : runtime.operation === "create-context"
       ? "正在校验时间目录…"
       : "正在校验数据…";
-  const historicalBook = runtime.segmentPlan?.historical_book ?? null;
-  const historicalBookExact = historicalBook?.capability_state === "AVAILABLE_EXACT";
-  const accountHistory = runtime.segmentPlan?.account_history ?? null;
-  const accountHistoryExact = accountHistory?.capability_state === "AVAILABLE_EXACT";
-  const startWindow = evaluation.selectedEntry === null
-    ? null
-    : replayStartWindow(evaluation.selectedEntry);
   const toggleMutation = (mutation: ReplayPolicyMutation, checked: boolean) => {
     const next = checked
       ? [...draft.allowedMutations, mutation]
@@ -150,9 +112,9 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
     <section className="training-hub-create" aria-label="新建训练配置">
       <header>
         <div>
-          <span className="training-hub-kicker">ATOMIC CREATE · replay.v2</span>
+          <span className="training-hub-kicker">CREATE RUN · SELECT MARKET LATER</span>
           <h2>新建训练</h2>
-          <p>提交后一次事务创建存档、单轨 adapter、规则、账户和初始 checkpoint。</p>
+          <p>这里只创建训练规则和账户配置；进入 Run 后再选择第一个商品并启动回放时钟。</p>
         </div>
         <button type="button" onClick={runtime.actions.closeCreate} disabled={busy}>关闭</button>
       </header>
@@ -164,21 +126,6 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             maxLength={80}
             onChange={(event) => patchDraft(runtime, { name: event.target.value })}
           />
-        </label>
-        <label>
-          商品
-          <select
-            data-training-field="market-identity"
-            value={`${draft.exchange}:${draft.marketType}:${draft.symbol}`}
-            onChange={(event) => chooseCatalogEntry(runtime, event.target.value)}
-          >
-            {runtime.catalog.entries.map((entry) => (
-              <CatalogOption
-                key={`${entry.identity.exchange}:${entry.identity.market_type}:${entry.identity.symbol}`}
-                entry={entry}
-              />
-            ))}
-          </select>
         </label>
         <label>
           历史源
@@ -216,34 +163,20 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               开始时间（UTC）
               <input
                 type="datetime-local"
-                min={formatUtcReplayStartInput(startWindow?.earliestEligibleMs ?? null)}
-                max={formatUtcReplayStartInput(startWindow?.latestEligibleMs ?? null)}
-                step={startWindow?.stepSeconds ?? 60}
+                step={60}
                 value={formatUtcReplayStartInput(draft.requestedStartMs)}
                 onChange={(event) => patchDraft(runtime, {
                   requestedStartMs: parseUtcReplayStartInput(event.target.value),
                 })}
               />
             </label>
-            <button
-              type="button"
-              disabled={startWindow?.earliestEligibleMs == null}
-              onClick={() => patchDraft(runtime, {
-                requestedStartMs: startWindow?.earliestEligibleMs ?? null,
-              })}
-            >
-              使用最早合格起点
-            </button>
             <p className="training-hub-field-warning" role="note">
               手动起点属于已知时间；即使隐藏显示，也不会获得严格 Challenge 结果标签。
             </p>
           </>
         )}
         <p className="training-hub-field-note" role="note">
-          {startWindow?.eligibleWindowCount ?? 0} 个合格随机窗口
-          {startWindow?.earliestHistoryMs == null
-            ? "；盲化目录不会披露历史边界"
-            : `；历史最早 ${formatUtcReplayStartInput(startWindow.earliestHistoryMs)} UTC`}
+          商品覆盖与手动起点会在 Run 内选品时按最新服务端目录校验；失败不会启动时钟。
         </p>
         <label>
           完整性模式
@@ -287,10 +220,6 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           </select>
         </label>
         <label>
-          基础 / 显示周期
-          <input value={`${draft.baseInterval} / ${draft.displayInterval}`} readOnly />
-        </label>
-        <label>
           指标预热 BAR
           <input
             type="number"
@@ -314,7 +243,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                   ? null
                   : draft.visibleHistoryLookbackMs
                     ?? draft.indicatorWarmupBars
-                      * (startWindow?.stepSeconds ?? 60)
+                      * 60
                       * 1_000,
               });
             }}
@@ -333,8 +262,8 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             可见历史时长（ms）
             <input
               type="number"
-              min={(startWindow?.stepSeconds ?? 60) * 1_000}
-              step={(startWindow?.stepSeconds ?? 60) * 1_000}
+              min={60_000}
+              step={60_000}
               value={draft.visibleHistoryLookbackMs ?? ""}
               onChange={(event) => patchDraft(runtime, {
                 visibleHistoryLookbackMs: Number(event.target.value),
@@ -414,9 +343,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             </option>
             <option
               value="HISTORICAL_EXACT"
-              disabled={draft.accountDataMode !== "HISTORICAL_EXACT"
-                || !accountHistoryExact
-                || !accountHistory?.historical_funding_exact}
+              disabled={draft.accountDataMode !== "HISTORICAL_EXACT"}
             >
               HISTORICAL_EXACT · 归档结算
             </option>
@@ -431,7 +358,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="OFF">OFF · Touch/Tape</option>
-            <option value="BOOK_ASSISTED_REQUIRED" disabled={!historicalBookExact}>
+            <option value="BOOK_ASSISTED_REQUIRED">
               BOOK_ASSISTED_REQUIRED · 连续历史 L2
             </option>
           </select>
@@ -503,75 +430,10 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         ))}
         <p>入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件；Challenge 仍全部锁定。</p>
       </fieldset>
-      <div className="training-hub-capability-boundary" aria-label="Phase 14 数据与能力边界">
-        <h3>Phase 14 按需数据策略</h3>
-        {runtime.segmentPlan === null ? (
-          <p>参数变更后会在提交前重新生成服务端 prepare plan；选择商品本身不会加载历史。</p>
-        ) : (
-          <ul>
-            <li><strong>动作</strong> — {runtime.segmentPlan.prepare_action}</li>
-            <li><strong>预计范围</strong> — {runtime.segmentPlan.estimated_rows} rows · {formatBytes(runtime.segmentPlan.estimated_size_bytes)}</li>
-            <li>
-              <strong>指标预热</strong> — {runtime.segmentPlan.history_policy.indicator_warmup_bars} rows
-            </li>
-            <li>
-              <strong>可见历史</strong> — {runtime.segmentPlan.history_policy.visible_history_lookback.mode}
-              {runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms === null
-                ? " · 按需分页至选中连续数据段起点"
-                : ` · ${runtime.segmentPlan.history_policy.visible_history_lookback.duration_ms} ms · ${runtime.segmentPlan.history_policy.visible_history_rows_estimate ?? "未对齐"} rows`}
-            </li>
-            <li>
-              <strong>执行快照预热估算</strong> — {runtime.segmentPlan.history_policy.effective_warmup_bars_estimate} rows；
-              前向 {runtime.segmentPlan.history_policy.forward_rows_estimate} rows
-            </li>
-            <li>
-              <strong>执行快照预算</strong> — {runtime.segmentPlan.history_policy.accepted
-                ? `预校验通过（上限 ${runtime.segmentPlan.history_policy.max_dataset_rows} rows；左侧分页不计入）`
-                : `拒绝：${runtime.segmentPlan.history_policy.blocked_reason ?? "UNKNOWN"}`}
-            </li>
-            <li><strong>本地同源 READY 库存</strong> — {runtime.segmentPlan.existing_ready_segments} segments · {formatBytes(runtime.segmentPlan.existing_ready_bytes)}（创建时再核对范围）</li>
-            <li><strong>失败策略</strong> — 校验失败 quarantine，禁止 Run 引用</li>
-            <li><strong>后台下载</strong> — {runtime.segmentPlan.download_worker_enabled ? "显式启用" : "默认关闭"}</li>
-            <li><strong>自动 GC</strong> — {runtime.segmentPlan.auto_gc_enabled ? "显式启用" : "默认关闭"}</li>
-          </ul>
-        )}
-        <h3>Phase 9 历史 L2</h3>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void runtime.actions.refreshCreatePlan()}
-        >
-          {runtime.operation === "plan" ? "正在校验…" : "按当前参数校验盘口能力"}
-        </button>
-        {historicalBook === null ? (
-          <p>尚无当前参数的服务端校验结果；BOOK_ASSISTED 保持 fail closed。</p>
-        ) : (
-          <ul data-historical-book-capability={historicalBook.capability_state}>
-            <li><strong>能力</strong> — {historicalBook.capability_state} · {historicalBook.reason}</li>
-            <li><strong>来源</strong> — Binance USD-M snapshot + ordered diff-depth</li>
-            <li><strong>连续性</strong> — {historicalBook.continuity_contract}</li>
-            <li><strong>可固定</strong> — {historicalBook.pinnable ? "是" : "否"}</li>
-            <li><strong>本地 READY</strong> — {formatBytes(historicalBook.ready_archive_bytes)}</li>
-            <li><strong>执行 fidelity</strong> — {historicalBook.execution_fidelity}</li>
-            <li><strong>Queue exact</strong> — 否</li>
-          </ul>
-        )}
-        <h3>Phase 16 精确账户历史</h3>
-        {accountHistory === null ? (
-          <p>尚无当前参数的服务端校验结果；HISTORICAL_EXACT 保持 fail closed。</p>
-        ) : (
-          <ul data-account-history-capability={accountHistory.capability_state}>
-            <li><strong>能力</strong> — {accountHistory.capability_state} · {accountHistory.reason}</li>
-            <li><strong>模型</strong> — {accountHistory.supported_contract_model} · {accountHistory.supported_position_mode} · {accountHistory.supported_margin_asset_mode}</li>
-            <li><strong>Mark / index / 规则</strong> — {accountHistoryExact ? "固定归档 exact" : "不可用"}</li>
-            <li><strong>Funding</strong> — {accountHistory.historical_funding_exact ? "完整历史结算可用" : "无完整 exact 结算"}</li>
-            <li><strong>公开 K 线代理</strong> — {accountHistory.public_kline_proxy_accepted ? "接受" : "拒绝"}</li>
-            <li><strong>本地 READY</strong> — {formatBytes(accountHistory.ready_archive_bytes)} / {formatBytes(accountHistory.max_archive_bytes)}</li>
-            <li><strong>Archive ref</strong> — <code>{accountHistory.account_history_ref?.archive_id ?? "none"}</code></li>
-          </ul>
-        )}
-        <h3>Phase 6 合约账户基础</h3>
-        <p>Run 仍固定使用 TOUCH_OR_TAPE_V2；BOOK_ASSISTED 只增加连续 L2 能力门禁与报告区分，当前已揭示参考价立即 taker，后续触价挂单 maker，并持续标注“不含盘口排队”。</p>
+      <div className="training-hub-capability-boundary" aria-label="选品与数据边界">
+        <h3>商品在 Run 内选择</h3>
+        <p>创建时不固定商品、交易所、市场类型、基础周期或数据集。进入空 Run 后搜索商品，服务端再生成 prepare plan、校验覆盖并原子创建首条 MarketTrack。</p>
+        <p>历史 L2、精确账户历史与 funding 仍 fail closed：它们会在选中具体商品后绑定对应 archive ref，校验失败时 Run 保持空局。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
           <li><strong>账户历史</strong> — {evaluation.unsupported.account_history}</li>
@@ -592,7 +454,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         disabled={!evaluation.canSubmit || busy}
         onClick={() => void runtime.actions.createRun(draft)}
       >
-        {busy ? busyLabel : "创建并进入训练"}
+        {busy ? busyLabel : "创建 Run 并选择商品"}
       </button>
     </section>
   );
@@ -654,7 +516,7 @@ export default function TrainingHubDialog({
               })}
             >
               <option value="">全部状态</option>
-              {(["PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"] as const).map((state) => (
+              {(["AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"] as const).map((state) => (
                 <option key={state} value={state}>{state}</option>
               ))}
             </select>
@@ -722,7 +584,7 @@ export default function TrainingHubDialog({
                   <strong data-run-state={card.state}>{card.state}</strong>
                 </header>
                 <dl>
-                  <div><dt>商品</dt><dd>{card.last_symbol}</dd></div>
+                  <div><dt>当前商品</dt><dd>{card.last_symbol ?? "未选择"}</dd></div>
                   <div><dt>历史源</dt><dd>{card.source_kind}</dd></div>
                   <div><dt>进度</dt><dd>#{card.progress.source_sequence}</dd></div>
                   <div>

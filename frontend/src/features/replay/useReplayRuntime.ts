@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { MarketDataRuntimeContract } from "../market-data/marketDataRuntimeContract.js";
-import type { ReplayEntry } from "./replayEntry.js";
 import { defaultReplayApi, ReplayApiError } from "./replayApi.js";
 import type { ReplayApiClient } from "./replayApi.js";
 import type { ReplayJournalResponse, ReplayReportResponse } from "./replayParser.js";
@@ -28,6 +27,12 @@ export type ReplayRuntimePhase =
   | "ACTIVE"
   | "ERROR"
   | "STOPPED";
+
+export type ReplayRuntimeEntry =
+  | { readonly kind: "adapter"; readonly sessionId: string }
+  | { readonly kind: "session"; readonly sessionId: string }
+  | { readonly kind: "configure" }
+  | { readonly kind: "error"; readonly code: "REPLAY_ROUTE_MISMATCH" | "REPLAY_ENTRY_INVALID"; readonly message: string };
 
 export interface ReplayRuntimeError {
   readonly code: string;
@@ -88,7 +93,7 @@ interface ReplayStreamBoundary {
 }
 
 export interface ReplayRuntimeLifecycleOptions {
-  entry: ReplayEntry;
+  entry: ReplayRuntimeEntry;
   api?: ReplayApiBoundary;
   store?: ReplayStore;
   streamFactory?: (options: ReplayStreamControllerOptions) => ReplayStreamBoundary;
@@ -226,7 +231,7 @@ function assertInitialStreamAuthorityFloor(
 export class ReplayRuntimeLifecycle {
   readonly store: ReplayStore;
   readonly marketDataActions: MarketDataRuntimeContract["actions"];
-  private readonly entry: ReplayEntry;
+  private readonly entry: ReplayRuntimeEntry;
   private readonly api: ReplayApiBoundary;
   private readonly streamFactory: (options: ReplayStreamControllerOptions) => ReplayStreamBoundary;
   private readonly clientInstanceId: string;
@@ -768,7 +773,7 @@ export class ReplayRuntimeLifecycle {
       this.phase = "ENTRY_ERROR";
       this.error = {
         code: "REPLAY_ENTRY_INVALID",
-        message: "Replay workspace requires a v2 training run session.",
+        message: "Replay runtime requires an initialized MarketTrack adapter.",
       };
       this.publish();
       return;
@@ -1263,7 +1268,7 @@ export class ReplayLifecycleEffectGuard {
 }
 
 export function useReplayRuntime(
-  entry: ReplayEntry,
+  entry: ReplayRuntimeEntry,
   {
     api,
     store,

@@ -17,6 +17,7 @@ from app.replay.training.errors import TrainingRunError
 from app.replay.training.segments import ReplaySegmentManager, SegmentPrepareSpec
 from tests.test_replay_v2_training_api import (
     _app as api_app,
+    _create_initialized_run as api_create_initialized_run,
     _payload as api_payload,
     _request as api_request,
     _service as api_service,
@@ -169,7 +170,6 @@ async def test_actor_checkpoint_and_review_owners_follow_archive_lifecycle(
         assert service.training is not None
         created = await service.training.create_run(await _request(service))
         run_id = str(created["run"]["run_id"])
-        session_id = str(created["run"]["adapter_session_id"])
         with sqlite3.connect(service.store.path) as connection:
             assert connection.execute(
                 """
@@ -179,7 +179,7 @@ async def test_actor_checkpoint_and_review_owners_follow_archive_lifecycle(
                 (run_id,),
             ).fetchone() == (1,)
 
-        returned = await service.training.return_to_hub_by_session(session_id)
+        returned = await service.training.return_to_hub(run_id)
         assert returned["checkpointed"] is True
         with sqlite3.connect(service.store.path) as connection:
             assert connection.execute(
@@ -782,8 +782,7 @@ async def test_gc_claim_blocks_new_actor_pin_until_rehydration(
         manager = service.training.segments
         created = await service.training.create_run(await _request(service))
         run_id = str(created["run"]["run_id"])
-        session_id = str(created["run"]["adapter_session_id"])
-        await service.training.return_to_hub_by_session(session_id)
+        await service.training.return_to_hub(run_id)
 
         payload = b"pin race payload"
         trusted = tmp_path / "trusted-pin-race.bin"
@@ -1018,7 +1017,7 @@ async def test_phase7_http_plan_does_not_build_dataset_and_hidden_run_redacts_ra
         assert planned.json()["selection_loads_history"] is False
         assert calls == 0
 
-        created = await api_request(app, "POST", "/api/v1/replay/runs", json=payload)
+        created = await api_create_initialized_run(app, service, payload)
         assert created.status_code == 201
         assert calls == 1
         run_id = created.json()["run"]["run_id"]

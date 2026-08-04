@@ -88,7 +88,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     ? viewer.marketTracks.portfolio
     : null;
   const effectiveState = replayEffectiveTrainingState(
-    viewer.marketTracks?.global_clock.state,
+    viewer.marketTracks?.global_clock?.state,
     store.state,
     store.controllerClientId,
   );

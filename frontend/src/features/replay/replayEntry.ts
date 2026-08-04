@@ -1,8 +1,8 @@
-const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type ReplayEntry =
   | { readonly kind: "configure" }
-  | { readonly kind: "session"; readonly sessionId: string }
+  | { readonly kind: "run"; readonly runId: string }
   | { readonly kind: "error"; readonly code: "REPLAY_ROUTE_MISMATCH" | "REPLAY_ENTRY_INVALID"; readonly message: string };
 
 export interface ReplayEntryLocation {
@@ -21,25 +21,25 @@ export function resolveReplayEntry(location: ReplayEntryLocation): ReplayEntry {
   }
 
   const params = new URLSearchParams(location.search);
-  const unknown = [...params.keys()].filter((key) => key !== "session");
-  const sessions = params.getAll("session");
-  if (unknown.length > 0 || sessions.length > 1) {
+  const unknown = [...params.keys()].filter((key) => key !== "run");
+  const runs = params.getAll("run");
+  if (unknown.length > 0 || runs.length > 1) {
     return {
       kind: "error",
       code: "REPLAY_ENTRY_INVALID",
       message: "Replay URL query parameters are invalid.",
     };
   }
-  if (sessions.length === 0) return { kind: "configure" };
-  const sessionId = sessions[0] ?? "";
-  if (!SESSION_ID.test(sessionId)) {
+  if (runs.length === 0) return { kind: "configure" };
+  const runId = runs[0] ?? "";
+  if (!RUN_ID.test(runId)) {
     return {
       kind: "error",
       code: "REPLAY_ENTRY_INVALID",
-      message: "Replay session id is invalid.",
+      message: "Replay run id is invalid.",
     };
   }
-  return { kind: "session", sessionId };
+  return { kind: "run", runId };
 }
 
 export function replayEntryFromWindow(target: Pick<Window, "location"> = window): ReplayEntry {

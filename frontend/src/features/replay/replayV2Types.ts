@@ -6,7 +6,14 @@ function enumValues<const T extends readonly string[]>(...values: T): Readonly<T
 }
 
 export const REPLAY_V2_ENUMS = Object.freeze({
-  run_state: enumValues("PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"),
+  run_state: enumValues(
+    "AWAITING_MARKET",
+    "PAUSED",
+    "PLAYING",
+    "ADVANCING",
+    "ENDED",
+    "ERROR",
+  ),
   track_state: enumValues("DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"),
   source_kind: enumValues("BAR", "AGG_TRADE"),
   start_mode: enumValues("MANUAL", "RANDOM"),
@@ -415,11 +422,11 @@ export interface ReplayMarketTracksResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly run_id: string;
   readonly ordering_version: "replay.global-order.v1";
-  readonly launch_context: ReplayLaunchContext;
+  readonly launch_context: ReplayLaunchContext | null;
   readonly viewer_state: ReplayViewerState;
   readonly tracks: readonly ReplayTrainingMarketTrack[];
   readonly portfolio: ReplayTrainingPortfolio;
-  readonly global_clock: ReplayGlobalClock;
+  readonly global_clock: ReplayGlobalClock | null;
 }
 
 export type ReplayV2Json = null | string | boolean | number | readonly ReplayV2Json[] | {
@@ -451,7 +458,7 @@ export interface ReplayV2Event {
 
 export interface ReplayViewerState {
   readonly run_id: string;
-  readonly selected_track_id: string;
+  readonly selected_track_id: string | null;
   readonly display_interval: string;
   readonly chart_type: string;
   readonly visible_range: Readonly<Record<string, ReplayV2Json>> | null;
@@ -1585,16 +1592,26 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
   const runId = identifier(response.run_id, "market tracks response.run_id");
   const viewer = parseReplayViewerState(response.viewer_state);
   const tracks = response.tracks.map(parseReplayTrainingMarketTrack);
-  const launchContext = parseReplayLaunchContext(response.launch_context);
+  const launchContext = response.launch_context === null
+    ? null
+    : parseReplayLaunchContext(response.launch_context);
   const primaryTrack = tracks.find((track) => track.stable_ordinal === 1) ?? null;
+  const emptyRun = tracks.length === 0
+    && viewer.selected_track_id === null
+    && launchContext === null
+    && response.global_clock === null;
+  const initializedRun = primaryTrack !== null
+    && viewer.selected_track_id !== null
+    && launchContext !== null
+    && response.global_clock !== null
+    && tracks.some((track) => track.track_id === viewer.selected_track_id)
+    && primaryTrack.exchange === launchContext.exchange
+    && primaryTrack.market_type === launchContext.market_type
+    && primaryTrack.symbol === launchContext.symbol;
   if (
     viewer.run_id !== runId
     || tracks.some((track) => track.run_id !== runId)
-    || !tracks.some((track) => track.track_id === viewer.selected_track_id)
-    || primaryTrack === null
-    || primaryTrack.exchange !== launchContext.exchange
-    || primaryTrack.market_type !== launchContext.market_type
-    || primaryTrack.symbol !== launchContext.symbol
+    || (!emptyRun && !initializedRun)
   ) {
     throw new TypeError("market tracks response run/viewer identity is inconsistent");
   }
@@ -1606,7 +1623,9 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
     viewer_state: viewer,
     tracks,
     portfolio: parseReplayTrainingPortfolio(response.portfolio),
-    global_clock: parseReplayGlobalClock(response.global_clock),
+    global_clock: response.global_clock === null
+      ? null
+      : parseReplayGlobalClock(response.global_clock),
   };
 }
 
@@ -1841,7 +1860,10 @@ export function parseReplayViewerState(value: unknown): ReplayViewerState {
   ]);
   return {
     run_id: identifier(viewer.run_id, "viewer_state.run_id"),
-    selected_track_id: identifier(viewer.selected_track_id, "viewer_state.selected_track_id"),
+    selected_track_id: nullableIdentifier(
+      viewer.selected_track_id,
+      "viewer_state.selected_track_id",
+    ),
     display_interval: identifier(viewer.display_interval, "viewer_state.display_interval"),
     chart_type: identifier(viewer.chart_type, "viewer_state.chart_type"),
     visible_range: viewer.visible_range === null
@@ -2003,7 +2025,7 @@ export function parseReplayV2Event(
 }
 
 export type TrainingRunCompatibility = "READY" | "UNAVAILABLE";
-export type TrainingRunResumeAction = "OPEN_ADAPTER" | "UNAVAILABLE";
+export type TrainingRunResumeAction = "SELECT_MARKET" | "OPEN_ADAPTER" | "UNAVAILABLE";
 export type TrainingRunEquityStatus = "CURRENT" | "STALE";
 
 export interface TrainingRunCard {
@@ -2014,7 +2036,7 @@ export interface TrainingRunCard {
   readonly source_kind: ReplayV2SourceKind;
   readonly integrity_mode: ReplayV2IntegrityMode;
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
-  readonly last_symbol: string;
+  readonly last_symbol: string | null;
   readonly subscribed_track_count: number;
   readonly progress: { readonly source_sequence: number };
   readonly equity: string | null;
@@ -2023,7 +2045,7 @@ export interface TrainingRunCard {
   readonly updated_at_ms: number;
   readonly compatibility: TrainingRunCompatibility;
   readonly resume_action: TrainingRunResumeAction;
-  readonly adapter_session_id: string;
+  readonly adapter_session_id: string | null;
   readonly status: { readonly code: string; readonly message: string };
   readonly report_available: boolean;
   readonly review_available: boolean;
@@ -2039,6 +2061,12 @@ export interface TrainingRunListResponse {
 export interface TrainingRunMutationResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly created: boolean;
+  readonly run: TrainingRunCard;
+}
+
+export interface TrainingRunMarketSelectionResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly initialized: true;
   readonly run: TrainingRunCard;
 }
 
@@ -2497,6 +2525,55 @@ export interface TrainingRunReturnResponse {
 
 export interface TrainingRunCreatePayload {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly name: string | null;
+  readonly source_kind: ReplayV2SourceKind;
+  readonly start_mode: ReplayV2StartMode;
+  readonly settlement_asset: string;
+  readonly requested_start_ms: number | null;
+  readonly indicator_warmup_bars: number;
+  readonly visible_history_lookback: {
+    readonly mode: ReplayVisibleHistoryMode;
+    readonly duration_ms: number | null;
+  };
+  readonly forward_cache_ms: number;
+  readonly random_seed: number | null;
+  readonly initial_equity: string;
+  readonly max_leverage: string;
+  readonly maker_fee_bps: string;
+  readonly taker_fee_bps: string;
+  readonly market_slippage_bps: string;
+  readonly integrity_mode: ReplayV2IntegrityMode;
+  readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
+  readonly book_mode: ReplayV2BookMode;
+  readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+  readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
+  readonly account_data_mode: ReplayV2AccountDataMode;
+  readonly fixed_funding_rate: string | null;
+  readonly funding_interval_ms: number | null;
+  readonly allow_rule_changes: boolean;
+  readonly allowed_mutations: readonly Extract<ReplayV2CommandType,
+    | "deposit"
+    | "withdraw"
+    | "change_fee_policy"
+    | "change_leverage_cap"
+    | "change_funding_policy"
+    | "reveal_time"
+  >[];
+  readonly market_selection_hint: ReplayLaunchContext | null;
+}
+
+export interface TrainingRunMarketSelectionPayload {
+  readonly catalog_epoch: string;
+  readonly exchange: string;
+  readonly market_type: string;
+  readonly symbol: string;
+  readonly base_interval: string;
+  readonly display_interval: string;
+  readonly account_history_ref: ReplayAccountHistoryRef | null;
+}
+
+export interface TrainingRunPreparationPayload {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly catalog_epoch: string;
   readonly name: string | null;
   readonly source_kind: ReplayV2SourceKind;
@@ -2608,7 +2685,7 @@ function parseTrainingRunCard(value: unknown, fieldName: string): TrainingRunCar
       REPLAY_V2_ENUMS.time_disclosure_policy,
       `${fieldName}.time_disclosure_policy`,
     ),
-    last_symbol: identifier(card.last_symbol, `${fieldName}.last_symbol`),
+    last_symbol: nullableIdentifier(card.last_symbol, `${fieldName}.last_symbol`),
     subscribed_track_count: counter(card.subscribed_track_count, `${fieldName}.subscribed_track_count`),
     progress: { source_sequence: counter(progress.source_sequence, `${fieldName}.progress.source_sequence`) },
     equity: nullableCanonicalDecimal(card.equity, `${fieldName}.equity`),
@@ -2626,10 +2703,13 @@ function parseTrainingRunCard(value: unknown, fieldName: string): TrainingRunCar
     ),
     resume_action: enumValue(
       card.resume_action,
-      enumValues("OPEN_ADAPTER", "UNAVAILABLE"),
+      enumValues("SELECT_MARKET", "OPEN_ADAPTER", "UNAVAILABLE"),
       `${fieldName}.resume_action`,
     ),
-    adapter_session_id: identifier(card.adapter_session_id, `${fieldName}.adapter_session_id`),
+    adapter_session_id: nullableIdentifier(
+      card.adapter_session_id,
+      `${fieldName}.adapter_session_id`,
+    ),
     status: {
       code: identifier(status.code, `${fieldName}.status.code`),
       message: displayString(status.message, `${fieldName}.status.message`, 512),
@@ -2680,6 +2760,24 @@ export function parseTrainingRunMutationResponse(value: unknown): TrainingRunMut
   };
 }
 
+export function parseTrainingRunMarketSelectionResponse(
+  value: unknown,
+): TrainingRunMarketSelectionResponse {
+  const payload = exactObject(value, "market selection", [
+    "protocol",
+    "initialized",
+    "run",
+  ]);
+  if (payload.protocol !== REPLAY_V2_PROTOCOL || payload.initialized !== true) {
+    throw new TypeError("market selection response is unsupported");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    initialized: true,
+    run: parseTrainingRunCard(payload.run, "market selection.run"),
+  };
+}
+
 export function parseTrainingRunDeleteResponse(value: unknown): TrainingRunDeleteResponse {
   const payload = exactObject(value, "run deletion", [
     "protocol",
@@ -2690,8 +2788,8 @@ export function parseTrainingRunDeleteResponse(value: unknown): TrainingRunDelet
   if (payload.protocol !== REPLAY_V2_PROTOCOL || payload.deleted !== true) {
     throw new TypeError("run deletion response is unsupported");
   }
-  if (!Array.isArray(payload.session_ids) || payload.session_ids.length === 0) {
-    throw new TypeError("run deletion.session_ids must be a non-empty array");
+  if (!Array.isArray(payload.session_ids)) {
+    throw new TypeError("run deletion.session_ids must be an array");
   }
   const sessionIds = payload.session_ids.map((sessionId, index) => (
     identifier(sessionId, `run deletion.session_ids[${index}]`)

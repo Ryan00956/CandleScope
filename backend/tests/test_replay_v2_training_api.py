@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -95,6 +96,96 @@ async def _payload(service: ReplayService) -> dict[str, object]:
     }
 
 
+def _setup_payload(payload: dict[str, object]) -> dict[str, object]:
+    indicator_warmup_bars = payload.get(
+        "indicator_warmup_bars",
+        payload.get("warmup_bars"),
+    )
+    return {
+        "protocol": payload["protocol"],
+        "name": payload["name"],
+        "source_kind": payload["source_kind"],
+        "start_mode": payload["start_mode"],
+        "settlement_asset": payload["settlement_asset"],
+        "requested_start_ms": payload["requested_start_ms"],
+        "indicator_warmup_bars": indicator_warmup_bars,
+        "visible_history_lookback": payload.get("visible_history_lookback", {
+            "mode": "DURATION",
+            "duration_ms": 4 * INTERVAL_MS,
+        }),
+        "forward_cache_ms": payload["forward_cache_ms"],
+        "random_seed": payload["random_seed"],
+        "initial_equity": payload["initial_equity"],
+        "max_leverage": payload["max_leverage"],
+        "maker_fee_bps": payload["maker_fee_bps"],
+        "taker_fee_bps": payload["taker_fee_bps"],
+        "market_slippage_bps": payload["market_slippage_bps"],
+        "integrity_mode": payload["integrity_mode"],
+        "time_disclosure_policy": payload["time_disclosure_policy"],
+        "book_mode": payload["book_mode"],
+        "margin_mode": payload["margin_mode"],
+        "funding_mode": payload["funding_mode"],
+        "account_data_mode": payload.get("account_data_mode", "APPROX_PROXY"),
+        "fixed_funding_rate": payload.get("fixed_funding_rate"),
+        "funding_interval_ms": payload.get("funding_interval_ms"),
+        "allow_rule_changes": payload["allow_rule_changes"],
+        "allowed_mutations": payload.get("allowed_mutations", []),
+    }
+
+
+async def _create_empty_run(
+    app: FastAPI,
+    service: ReplayService,
+    payload: dict[str, object] | None = None,
+):
+    full_payload = await _payload(service) if payload is None else payload
+    return await _request(
+        app,
+        "POST",
+        "/api/v1/replay/runs",
+        json=_setup_payload(full_payload),
+    )
+
+
+async def _select_initial_market(
+    app: FastAPI,
+    run_id: str,
+    payload: dict[str, object],
+):
+    catalog = await _request(
+        app,
+        "GET",
+        f"/api/v1/replay/runs/{run_id}/market-catalog",
+    )
+    assert catalog.status_code == 200
+    return await _request(
+        app,
+        "POST",
+        f"/api/v1/replay/runs/{run_id}/markets",
+        json={
+            "catalog_epoch": catalog.json()["catalog_epoch"],
+            "exchange": payload["exchange"],
+            "market_type": payload["market_type"],
+            "symbol": payload["symbol"],
+            "base_interval": payload["base_interval"],
+            "display_interval": payload["display_interval"],
+            "account_history_ref": payload.get("account_history_ref"),
+        },
+    )
+
+
+async def _create_initialized_run(
+    app: FastAPI,
+    service: ReplayService,
+    payload: dict[str, object] | None = None,
+):
+    full_payload = await _payload(service) if payload is None else payload
+    created = await _create_empty_run(app, service, full_payload)
+    assert created.status_code == 201
+    run_id = str(created.json()["run"]["run_id"])
+    return await _select_initial_market(app, run_id, full_payload)
+
+
 async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> None:
     service = await _service(tmp_path / "api.db")
     app = _app(service)
@@ -103,12 +194,7 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         assert empty.status_code == 200
         assert empty.json()["items"] == []
 
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         assert created.json()["run"]["run_id"] == "run-1"
         assert created.json()["run"]["adapter_session_id"] == "adapter-1"
@@ -151,7 +237,7 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         returned = await _request(
             app,
             "POST",
-            "/api/v1/replay/runs/session/adapter-1/return-to-hub",
+            "/api/v1/replay/runs/run-1/return-to-hub",
         )
         assert returned.status_code == 200
         assert returned.json()["checkpointed"] is True
@@ -174,7 +260,14 @@ async def test_v2_http_failed_preparation_can_retry_same_commitment(
         }
     )
     original_create = service._dataset_builder.create
+    original_select = service.select_training_window
     attempts = 0
+    selection_attempts = 0
+
+    async def track_selection(*args, **kwargs):
+        nonlocal selection_attempts
+        selection_attempts += 1
+        return await original_select(*args, **kwargs)
 
     def fail_first_materialization(*args, **kwargs):
         nonlocal attempts
@@ -191,43 +284,26 @@ async def test_v2_http_failed_preparation_can_retry_same_commitment(
         "create",
         fail_first_materialization,
     )
+    monkeypatch.setattr(service, "select_training_window", track_selection)
     try:
-        failed = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=payload,
-        )
+        created = await _create_empty_run(app, service, payload)
+        assert created.status_code == 201
+        run_id = str(created.json()["run"]["run_id"])
+        failed = await _select_initial_market(app, run_id, payload)
         assert failed.status_code == 409
-        preparation_id = failed.json()["error"]["details"]["preparation_id"]
+        shell = await _request(app, "GET", f"/api/v1/replay/runs/{run_id}")
+        assert shell.json()["state"] == "AWAITING_MARKET"
+        assert shell.json()["adapter_session_id"] is None
 
-        preparation = await _request(
-            app,
-            "GET",
-            f"/api/v1/replay/runs/preparations/{preparation_id}",
-        )
-        assert preparation.status_code == 200
-        before = preparation.json()["preparation"]
-        assert before["status"] == "FAILED"
-
-        retried = await _request(
-            app,
-            "POST",
-            f"/api/v1/replay/runs/preparations/{preparation_id}/retry",
-        )
-        assert retried.status_code == 201
-        assert retried.json()["run"]["run_id"] == preparation_id
-
-        ready = await _request(
-            app,
-            "GET",
-            f"/api/v1/replay/runs/preparations/{preparation_id}",
-        )
-        assert ready.status_code == 200
-        after = ready.json()["preparation"]
-        assert after["status"] == "READY"
-        assert after["selection_hash"] == before["selection_hash"]
-        assert after["retry_count"] == 1
+        retried = await _select_initial_market(app, run_id, payload)
+        assert retried.status_code == 201, retried.text
+        assert retried.json()["run"]["run_id"] == run_id
+        assert retried.json()["run"]["adapter_session_id"] == "adapter-1"
+        assert selection_attempts == 1
+        with sqlite3.connect(tmp_path / "retry-api.db") as connection:
+            assert connection.execute(
+                "SELECT status, retry_count FROM replay_training_selection_preparation"
+            ).fetchall() == [("READY", 1)]
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -238,12 +314,7 @@ async def test_v2_http_delete_archive_removes_run_and_adapter_session(
     service = await _service(tmp_path / "delete-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         assert created.json()["run"]["run_id"] == "run-1"
         assert created.json()["run"]["adapter_session_id"] == "adapter-1"
@@ -276,12 +347,7 @@ async def test_archive_delete_fences_lazy_recovery_until_sqlite_commits(
     app = _app(service)
     recovery_task: asyncio.Task[dict[str, object]] | None = None
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         assert service.training is not None
         original_delete = service.training.store.delete_run
@@ -333,12 +399,7 @@ async def test_archive_delete_invalidates_record_read_before_fence_claim(
     release_record = asyncio.Event()
     record_read = asyncio.Event()
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         await service.release_session_to_hub("adapter-1")
         original_get_session = service.store.get_session
@@ -388,12 +449,7 @@ async def test_cancelled_archive_delete_resolves_sqlite_before_releasing_fence(
     release_delete = asyncio.Event()
     try:
         assert service.training is not None
-        created = await _request(
-            _app(service),
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(_app(service), service)
         assert created.status_code == 201
         original_delete = service.training.store.delete_run
 
@@ -442,12 +498,7 @@ async def test_archive_delete_remains_available_for_evicted_degraded_session(
     service = await _service(tmp_path / "delete-degraded.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         await service.release_session_to_hub("adapter-1")
         service._unavailable_sessions["adapter-1"] = ReplayDomainError(
@@ -471,12 +522,7 @@ async def test_archive_delete_rejects_session_target_drift_atomically(
     service = await _service(tmp_path / "delete-target-drift.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         assert service.training is not None
 
@@ -498,12 +544,7 @@ async def test_archive_delete_fails_closed_while_adapter_is_in_use(
     service = await _service(tmp_path / "delete-busy.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
 
         async with service._lease_handle("adapter-1"):
@@ -527,12 +568,7 @@ async def test_phase17_rules_drawing_marker_review_control_and_fork_routes(
     service = await _service(tmp_path / "phase17-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         run = created.json()["run"]
         run_id = run["run_id"]
@@ -715,12 +751,7 @@ async def test_phase17_drawing_route_uses_the_canonical_document_budget(
     service = await _service(tmp_path / "phase17-large-drawing-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         run_id = str(created.json()["run"]["run_id"])
         document = {
@@ -764,12 +795,7 @@ async def test_phase8_plan_and_trade_flow_routes_fail_closed_by_source(
     service = await _service(tmp_path / "phase8-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         run = created.json()["run"]
         session = await service.get_session(run["adapter_session_id"])
@@ -805,12 +831,7 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
     service = await _service(tmp_path / "history-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         snapshot_response = await _request(
             app,
@@ -872,12 +893,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
     try:
         create_payload = await _payload(service)
         create_payload["display_interval"] = "15m"
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=create_payload,
-        )
+        created = await _create_initialized_run(app, service, create_payload)
         run = created.json()["run"]
         snapshot_response = await _request(
             app,
@@ -892,7 +908,8 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
             "GET",
             f"/api/v1/replay/runs/session/{run['adapter_session_id']}/viewer",
         )
-        assert viewer.json()["viewer_state"]["display_interval"] == "15m"
+        viewer_state = viewer.json()["viewer_state"]
+        assert viewer_state["display_interval"] == "15m"
 
         command = {
             "protocol": "replay.v2",
@@ -908,7 +925,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
             "type": "set_display_interval",
             "payload": {
                 "display_interval": "1h",
-                "expected_viewer_revision": 0,
+                "expected_viewer_revision": viewer_state["semantic_view_revision"],
             },
         }
         changed = await _request(
@@ -949,12 +966,7 @@ async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
     service = await _service(tmp_path / "phase5-tracks-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         run = created.json()["run"]
         by_session = await _request(
             app,
@@ -987,12 +999,7 @@ async def test_phase4_http_boundaries_expose_only_public_time_and_exact_review_f
     service = await _service(tmp_path / "phase4-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         assert created.status_code == 201
         run = created.json()["run"]
         run_id = run["run_id"]
@@ -1066,23 +1073,33 @@ async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
     service = await _service(tmp_path / "errors.db")
     app = _app(service)
     try:
+        payload = await _payload(service)
         invalid = await _request(
             app,
             "POST",
             "/api/v1/replay/runs",
-            json={**await _payload(service), "future_field": True},
+            json={**_setup_payload(payload), "future_field": True},
         )
         assert invalid.status_code == 422
         assert invalid.json()["protocol"] == "replay.v2"
         assert invalid.json()["error"]["code"] == "TRAINING_RUN_INVALID"
 
-        stale_payload = await _payload(service)
-        stale_payload["catalog_epoch"] = f"sha256:{'f' * 64}"
+        created = await _create_empty_run(app, service, payload)
+        assert created.status_code == 201
+        run_id = str(created.json()["run"]["run_id"])
         stale = await _request(
             app,
             "POST",
-            "/api/v1/replay/runs",
-            json=stale_payload,
+            f"/api/v1/replay/runs/{run_id}/markets",
+            json={
+                "catalog_epoch": f"sha256:{'f' * 64}",
+                "exchange": payload["exchange"],
+                "market_type": payload["market_type"],
+                "symbol": payload["symbol"],
+                "base_interval": payload["base_interval"],
+                "display_interval": payload["display_interval"],
+                "account_history_ref": None,
+            },
         )
         assert stale.status_code == 409
         assert stale.json()["error"]["code"] == "CATALOG_EPOCH_MISMATCH"
@@ -1121,12 +1138,7 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
     service = await _service(tmp_path / "order-preview-api.db")
     app = _app(service)
     try:
-        created = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=await _payload(service),
-        )
+        created = await _create_initialized_run(app, service)
         run = created.json()["run"]
         session_path = f"/api/v1/replay/runs/session/{run['adapter_session_id']}"
         before = (await _request(app, "GET", session_path)).json()["snapshot"]

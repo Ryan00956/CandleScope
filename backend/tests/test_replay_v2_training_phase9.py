@@ -38,6 +38,7 @@ from tests.test_replay_v2_training_phase5 import (
 )
 from tests.test_replay_v2_training_api import (
     _app as api_app,
+    _create_initialized_run as api_create_initialized_run,
     _request as api_request,
 )
 
@@ -823,12 +824,7 @@ async def test_phase9_http_plan_create_inventory_gc_and_resync_contracts(
         assert planned.json()["historical_book"]["capability_state"] == "AVAILABLE_EXACT"
         assert planned.json()["historical_book"]["queue_exact"] is False
 
-        created = await api_request(
-            app,
-            "POST",
-            "/api/v1/replay/runs",
-            json=payload,
-        )
+        created = await api_create_initialized_run(app, service, payload)
         assert created.status_code == 201
         run_id = created.json()["run"]["run_id"]
 

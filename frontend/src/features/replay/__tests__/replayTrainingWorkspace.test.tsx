@@ -76,7 +76,8 @@ test("every replay route stays on the v2 Hub or workspace", () => {
   const composition = source("src/features/replay/ReplayApp.tsx");
   assert.match(composition, /ReplayTrainingPageShell/);
   assert.match(composition, /entry\.kind === "configure"/);
-  assert.match(composition, /entry\.kind === "session"/);
+  assert.match(composition, /entry\.kind === "run"/);
+  assert.match(composition, /ReplayInitialMarketPicker/);
   assert.doesNotMatch(composition, /ReplayV1App|ReplayPageShell|resolveReplayProduct/);
 });
 

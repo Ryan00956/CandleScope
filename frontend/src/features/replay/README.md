@@ -13,16 +13,20 @@ safe GC, and Phase 8 explainable fast-forward plus aggregate-trade flow. New Tra
 configured maker/taker policies, CROSS or ISOLATED margin, approximate Sandbox
 funding, simulated-account liquidation events, and a hash-chained cash ledger.
 The UI continuously labels the no-book execution boundary. A direct
-`replay.html` configure entry opens the Hub; opaque `?session=<id>` entries open
-the v2 workspace backed by the internal deterministic adapter. Hub bootstrap performs only the bounded lightweight
+`replay.html` entry opens the Hub; opaque `?run=<id>` entries open one durable
+TrainingRun. A new Run contains only training rules and account settings. The
+user chooses the first market inside that Run, and may later search for and add
+more MarketTracks without changing the Run URL or archive identity. Adapter
+session ids remain internal deterministic transport details. Hub bootstrap performs only the bounded lightweight
 `GET /api/v1/replay/runs` request. Historical datasets are not loaded until a
-concrete training session is entered.
+market is selected inside a concrete Run.
 
 Phase 7 adds a checksum-bound data-segment registry over the existing immutable
 BAR snapshots and raw aggTrade partition manifests without rewriting either
-production store. Opening the create panel reads a small prepare plan only;
-selecting a symbol does not fetch history, and create prepares only the selected
-symbol/range. The Hub shows estimated rows/bytes, same-source READY inventory
+production store. Opening the create panel reads capabilities only; it does not
+read a market catalog or prepare a dataset. Selecting a product inside the Run
+reads its catalog and prepare plan, then materializes only the selected
+symbol/range. The storage view shows same-source READY inventory
 (with exact range reuse revalidated at create), and the fail-closed quarantine
 policy. Automatic download and automatic GC workers
 remain disabled by default. Explicit GC is LRU, rehydration-aware, and requires

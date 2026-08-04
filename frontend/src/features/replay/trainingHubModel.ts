@@ -12,6 +12,7 @@ import type {
   ReplayV2TimeDisclosurePolicy,
   ReplayVisibleHistoryMode,
   TrainingRunCreatePayload,
+  TrainingRunPreparationPayload,
 } from "./replayV2Types.js";
 import { intervalTiles, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
@@ -85,12 +86,12 @@ function firstEntry(catalog: ReplayCatalog): ReplayCatalogEntry | undefined {
 }
 
 export function createTrainingRunDraft(
-  catalog: ReplayCatalog,
+  catalog?: ReplayCatalog,
   launchContext?: ReplayLaunchContext,
 ): TrainingRunDraft {
   const entry = launchContext === undefined
-    ? firstEntry(catalog)
-    : catalog.entries.find((candidate) => (
+    ? (catalog === undefined ? undefined : firstEntry(catalog))
+    : catalog?.entries.find((candidate) => (
         candidate.identity.exchange === launchContext.exchange
         && candidate.identity.market_type === launchContext.market_type
         && candidate.identity.symbol === launchContext.symbol
@@ -99,7 +100,7 @@ export function createTrainingRunDraft(
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
   const displayInterval = launchContext?.display_interval ?? baseInterval;
   return {
-    name: `${symbol} 训练`,
+    name: "回放训练",
     sourceKind: "BAR",
     startMode: "RANDOM",
     exchange: launchContext?.exchange ?? entry?.identity.exchange ?? "binance",
@@ -109,10 +110,10 @@ export function createTrainingRunDraft(
     baseInterval,
     displayInterval,
     requestedStartMs: null,
-    indicatorWarmupBars: catalog.warmup_bars,
+    indicatorWarmupBars: catalog?.warmup_bars ?? 200,
     visibleHistoryMode: "ALL_AVAILABLE",
     visibleHistoryLookbackMs: null,
-    forwardCacheMs: catalog.horizon_ms,
+    forwardCacheMs: catalog?.horizon_ms ?? 86_400_000,
     initialEquity: "10000",
     maxLeverage: "3",
     makerFeeBps: "2",
@@ -125,7 +126,7 @@ export function createTrainingRunDraft(
     fundingIntervalMs: 28_800_000,
     bookMode: "OFF",
     integrityMode: "CHALLENGE",
-    timeDisclosurePolicy: catalog.blind_mode ? "HIDE_ALL" : "NONE",
+    timeDisclosurePolicy: catalog?.blind_mode === false ? "NONE" : "HIDE_ALL",
     allowedMutations: [],
   };
 }
@@ -377,12 +378,113 @@ export function evaluateTrainingRunDraft(
   };
 }
 
-export function buildTrainingRunCreateRequest(
+export function evaluateTrainingRunSetupDraft(
+  draft: TrainingRunDraft,
+  capabilities: ReplayCapabilities,
+): TrainingRunDraftEvaluation {
+  const errors: string[] = [];
+  const source = draft.sourceKind === "BAR"
+    ? capabilities.sources.bar
+    : capabilities.sources.agg_trade;
+  if (!capabilities.enabled || !capabilities.available) errors.push("回放服务当前不可用");
+  if (capabilities.persistence.degraded) errors.push("回放持久化处于降级状态");
+  if (!source.enabled) errors.push(`${draft.sourceKind} 历史源不可用`);
+  if (draft.startMode === "MANUAL" && draft.requestedStartMs === null) {
+    errors.push("手动开始需要明确的 UTC 时间");
+  }
+  if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
+    errors.push("随机开始不能携带真实开始时间");
+  }
+  if (draft.bookMode === "BOOK_ASSISTED_REQUIRED"
+    && (draft.startMode !== "MANUAL" || draft.requestedStartMs === null)) {
+    errors.push("历史盘口必须使用明确的手动开始时间");
+  }
+  if (draft.indicatorWarmupBars < 1
+    || draft.indicatorWarmupBars > capabilities.limits.max_warmup_bars) {
+    errors.push("指标预热 BAR 数超出服务端限制");
+  }
+  if (draft.visibleHistoryMode === "DURATION") {
+    if (draft.visibleHistoryLookbackMs === null
+      || !Number.isSafeInteger(draft.visibleHistoryLookbackMs)
+      || draft.visibleHistoryLookbackMs < 1) {
+      errors.push("可见历史时长必须是正的安全整数毫秒");
+    }
+  } else if (draft.visibleHistoryMode === "ALL_AVAILABLE") {
+    if (draft.visibleHistoryLookbackMs !== null) {
+      errors.push("全部可用历史不能同时指定固定时长");
+    }
+  } else {
+    errors.push("可见历史模式不受支持");
+  }
+  const maxForwardMs = capabilities.limits.max_horizon_days * 86_400_000;
+  if (draft.forwardCacheMs < 1 || draft.forwardCacheMs > maxForwardMs) {
+    errors.push("前向缓存窗口超出服务端限制");
+  }
+  if (draft.name.trim().length < 1 || draft.name.trim().length > 80) {
+    errors.push("名称必须为 1–80 个字符");
+  }
+  for (const [label, value] of [
+    ["初始权益", draft.initialEquity],
+    ["最大杠杆", draft.maxLeverage],
+  ] as const) {
+    if (!POSITIVE_DECIMAL.test(value)) errors.push(`${label}必须是正的规范十进制字符串`);
+  }
+  for (const [label, value] of [
+    ["Maker 费率", draft.makerFeeBps],
+    ["Taker 费率", draft.takerFeeBps],
+    ["市价滑点", draft.marketSlippageBps],
+  ] as const) {
+    if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
+  }
+  if (draft.accountDataMode === "HISTORICAL_EXACT") {
+    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
+      errors.push("精确账户历史必须使用明确的手动开始时间");
+    }
+    if (draft.fundingMode === "SANDBOX_FIXED") {
+      errors.push("精确账户历史不能混用 Sandbox 合成资金费");
+    }
+  }
+  if (draft.fundingMode === "HISTORICAL_EXACT"
+    && draft.accountDataMode !== "HISTORICAL_EXACT") {
+    errors.push("历史精确资金费必须同时选择精确账户历史");
+  } else if (draft.fundingMode === "SANDBOX_FIXED") {
+    if (draft.integrityMode !== "SANDBOX") {
+      errors.push("固定资金费只允许用于 Sandbox 近似练习");
+    }
+    if (!SIGNED_DECIMAL.test(draft.fixedFundingRate) || draft.fixedFundingRate === "-0") {
+      errors.push("固定资金费率必须是规范十进制字符串");
+    }
+    if (!Number.isSafeInteger(draft.fundingIntervalMs)
+      || draft.fundingIntervalMs < 60_000
+      || draft.fundingIntervalMs > 30 * 86_400_000) {
+      errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
+    }
+  }
+  if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
+    || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
+    errors.push("规则变更白名单包含重复或未知项");
+  }
+  if (draft.integrityMode === "CHALLENGE" && draft.allowedMutations.length > 0) {
+    errors.push("Challenge 模式必须锁定全部规则变更");
+  }
+  if (draft.integrityMode === "PRACTICE" && draft.allowedMutations.length === 0) {
+    errors.push("Practice 模式必须显式选择至少一项可审计变更");
+  }
+  return {
+    canSubmit: errors.length === 0,
+    errors,
+    selectedEntry: null,
+    accountHistoryRef: null,
+    unsupported: PHASE_6_BOUNDARIES,
+  };
+}
+
+export function buildTrainingRunPreparationRequest(
   draft: TrainingRunDraft,
   evaluation: TrainingRunDraftEvaluation,
   catalog: ReplayCatalog,
   launchContext?: ReplayLaunchContext,
-): TrainingRunCreatePayload {
+): TrainingRunPreparationPayload {
   if (!evaluation.canSubmit || evaluation.selectedEntry === null) {
     throw new TypeError("training run draft is not ready to submit");
   }
@@ -439,5 +541,52 @@ export function buildTrainingRunCreateRequest(
         display_interval: draft.displayInterval,
       },
     }),
+  };
+}
+
+export function buildTrainingRunCreateRequest(
+  draft: TrainingRunDraft,
+  evaluation: TrainingRunDraftEvaluation,
+  marketSelectionHint?: ReplayLaunchContext,
+): TrainingRunCreatePayload {
+  if (!evaluation.canSubmit) {
+    throw new TypeError("training run setup is not ready to submit");
+  }
+  return {
+    protocol: "replay.v2",
+    name: draft.name.trim(),
+    source_kind: draft.sourceKind,
+    start_mode: draft.startMode,
+    settlement_asset: draft.settlementAsset,
+    requested_start_ms: draft.startMode === "MANUAL" ? draft.requestedStartMs : null,
+    indicator_warmup_bars: draft.indicatorWarmupBars,
+    visible_history_lookback: {
+      mode: draft.visibleHistoryMode,
+      duration_ms: draft.visibleHistoryLookbackMs,
+    },
+    forward_cache_ms: draft.forwardCacheMs,
+    random_seed: null,
+    initial_equity: draft.initialEquity,
+    max_leverage: draft.maxLeverage,
+    maker_fee_bps: draft.makerFeeBps,
+    taker_fee_bps: draft.takerFeeBps,
+    market_slippage_bps: draft.marketSlippageBps,
+    integrity_mode: draft.integrityMode,
+    time_disclosure_policy: draft.timeDisclosurePolicy,
+    book_mode: draft.bookMode,
+    margin_mode: draft.marginMode,
+    funding_mode: draft.fundingMode,
+    account_data_mode: draft.accountDataMode,
+    fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
+      ? draft.fixedFundingRate
+      : null,
+    funding_interval_ms: draft.fundingMode === "SANDBOX_FIXED"
+      ? draft.fundingIntervalMs
+      : null,
+    allow_rule_changes: draft.integrityMode !== "CHALLENGE",
+    allowed_mutations: draft.integrityMode === "SANDBOX"
+      ? REPLAY_POLICY_MUTATIONS
+      : draft.allowedMutations,
+    market_selection_hint: marketSelectionHint ?? null,
   };
 }

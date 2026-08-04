@@ -15,7 +15,6 @@ import {
   inspectReplaySoakFrontendBuild,
   readJson,
   replayBackendHealth,
-  replayCatalogQueryFromCreatePayload,
   replaySpeedAction,
   replaySpeedRequestState,
   replayStepAction,
@@ -268,14 +267,37 @@ const catalogEntry = {
 };
 
 const createPayload = {
+  protocol: "replay.v2",
+  name: "Run-centric soak",
+  source_kind: "BAR",
+  start_mode: "RANDOM",
   exchange: "binance",
   market_type: "spot",
   symbol: "BTCUSDT",
+  settlement_asset: "USDT",
   base_interval: "1m",
+  display_interval: "1m",
+  requested_start_ms: null,
   indicator_warmup_bars: 200,
+  visible_history_lookback: { mode: "ALL_AVAILABLE", duration_ms: null },
   forward_cache_ms: 86_400_000,
   time_disclosure_policy: "HIDE_ALL",
   random_seed: 7,
+  initial_equity: "10000",
+  max_leverage: "3",
+  maker_fee_bps: "2",
+  taker_fee_bps: "5",
+  market_slippage_bps: "1",
+  integrity_mode: "CHALLENGE",
+  book_mode: "OFF",
+  margin_mode: "CROSS",
+  funding_mode: "OFF",
+  account_data_mode: "APPROX_PROXY",
+  account_history_ref: null,
+  fixed_funding_rate: null,
+  funding_interval_ms: null,
+  allow_rule_changes: false,
+  allowed_mutations: [],
 };
 
 function reconnectCdp({ recovery }) {
@@ -569,43 +591,25 @@ test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => 
 
   assert.equal(result.catalogEpochRefreshes, 1);
   assert.equal(result.catalogEpoch, `sha256:${"2".repeat(64)}`);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
+  assert.match(calls[3].url, /\/runs\/run-2\/market-catalog$/);
+  assert.equal(calls[3].url.includes("undefined"), false);
   assert.equal(
-    new URL(calls[2].url).searchParams.get("warmup_bars"),
-    "200",
-  );
-  assert.equal(calls[2].url.includes("undefined"), false);
-  assert.equal(
-    JSON.parse(calls[3].options.body).catalog_epoch,
+    JSON.parse(calls[4].options.body).catalog_epoch,
     result.catalogEpoch,
   );
-});
-
-test("v2 lifecycle catalog query binds the Phase 14 history-policy fields", () => {
-  assert.equal(
-    replayCatalogQueryFromCreatePayload(createPayload).toString(),
-    "warmup_bars=200&horizon_ms=86400000&quality_mode=exact&blind_mode=true",
-  );
-  assert.throws(
-    () => replayCatalogQueryFromCreatePayload({
-      ...createPayload,
-      indicator_warmup_bars: undefined,
-    }),
-    /indicator_warmup_bars/,
-  );
-  assert.throws(
-    () => replayCatalogQueryFromCreatePayload({
-      ...createPayload,
-      forward_cache_ms: undefined,
-    }),
-    /forward_cache_ms/,
-  );
+  const setup = JSON.parse(calls[0].options.body);
+  assert.equal(Object.hasOwn(setup, "symbol"), false);
+  assert.equal(Object.hasOwn(setup, "catalog_epoch"), false);
 });
 
 test("v2 lifecycle does not retry unrelated conflicts", async () => {
   let calls = 0;
-  const requestJson = async (_url, options = {}) => {
+  const requestJson = async (url, options = {}) => {
     calls += 1;
+    if (options.method && /\/api\/v1\/replay\/runs$/.test(new URL(url).pathname)) {
+      return { run: { run_id: "run-1", adapter_session_id: null } };
+    }
     if (!options.method) {
       return {
         catalog_epoch: `sha256:${"a".repeat(64)}`,
@@ -627,7 +631,7 @@ test("v2 lifecycle does not retry unrelated conflicts", async () => {
     }),
     /capacity conflict/,
   );
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
 test("replay soak rejects resync placeholders as command acknowledgements", () => {

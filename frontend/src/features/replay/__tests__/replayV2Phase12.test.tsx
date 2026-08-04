@@ -5,9 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import TrainingHubDialog from "../components/TrainingHubDialog.js";
 import {
-  buildTrainingRunCreateRequest,
+  buildTrainingRunPreparationRequest,
   createTrainingRunDraft,
   evaluateTrainingRunDraft,
+  evaluateTrainingRunSetupDraft,
   formatUtcReplayStartInput,
   isEligibleReplayStart,
   parseUtcReplayStartInput,
@@ -125,7 +126,7 @@ test("create payload delegates random seed ownership to the server", () => {
   assert.equal(requiresBlindTrainingCatalog(draft), true);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, blind);
   assert.equal(evaluation.canSubmit, true);
-  const request = buildTrainingRunCreateRequest(draft, evaluation, blind);
+  const request = buildTrainingRunPreparationRequest(draft, evaluation, blind);
   assert.equal(request.random_seed, null);
 
   const manual = {
@@ -138,7 +139,7 @@ test("create payload delegates random seed ownership to the server", () => {
   assert.equal(evaluateTrainingRunDraft(manual, capabilities, visible).canSubmit, true);
 });
 
-test("Hub rebinds blind and visible catalogs when disclosure or start mode changes", async (context) => {
+test("Hub creates a product-independent Run without reading or rebinding catalogs", async (context) => {
   const blindQueries: boolean[] = [];
   const lifecycle = new TrainingHubLifecycle({
     api: {
@@ -167,14 +168,15 @@ test("Hub rebinds blind and visible catalogs when disclosure or start mode chang
   lifecycle.start();
   await settle();
   await lifecycle.openCreate();
-  assert.deepEqual(blindQueries, [true]);
+  assert.deepEqual(blindQueries, []);
+  assert.equal(lifecycle.getSnapshot().catalog, null);
   const initial = lifecycle.getSnapshot().draft;
   assert.ok(initial);
 
   lifecycle.setDraft({ ...initial, timeDisclosurePolicy: "NONE" });
   await settle();
-  assert.deepEqual(blindQueries, [true, false]);
-  assert.equal(lifecycle.getSnapshot().catalog?.blind_mode, false);
+  assert.deepEqual(blindQueries, []);
+  assert.equal(lifecycle.getSnapshot().catalog, null);
 
   const visibleDraft = lifecycle.getSnapshot().draft;
   assert.ok(visibleDraft);
@@ -185,7 +187,7 @@ test("Hub rebinds blind and visible catalogs when disclosure or start mode chang
     requestedStartMs: START_MS + 2 * MINUTE_MS,
   });
   await settle();
-  assert.deepEqual(blindQueries, [true, false]);
+  assert.deepEqual(blindQueries, []);
 
   const manual = lifecycle.getSnapshot().draft;
   assert.ok(manual);
@@ -195,19 +197,18 @@ test("Hub rebinds blind and visible catalogs when disclosure or start mode chang
     requestedStartMs: null,
   });
   await settle();
-  assert.deepEqual(blindQueries, [true, false, true]);
+  assert.deepEqual(blindQueries, []);
 });
 
-test("manual create panel renders an accessible UTC picker, earliest action, and range summary", () => {
+test("manual create panel renders UTC setup and defers product coverage to the Run", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const visible = catalog(false);
-  const base = createTrainingRunDraft(visible);
+  const base = createTrainingRunDraft();
   const draft = {
     ...base,
     startMode: "MANUAL" as const,
     requestedStartMs: START_MS + 2 * MINUTE_MS,
   };
-  const evaluation = evaluateTrainingRunDraft(draft, capabilities, visible);
+  const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);
   const noop = () => undefined;
   const runtime = {
     phase: "READY",
@@ -218,7 +219,7 @@ test("manual create panel renders an accessible UTC picker, earliest action, and
     error: null,
     createOpen: true,
     capabilities,
-    catalog: visible,
+    catalog: null,
     draft,
     evaluation,
     segmentPlan: null,
@@ -250,8 +251,9 @@ test("manual create panel renders an accessible UTC picker, earliest action, and
   const markup = renderToStaticMarkup(<TrainingHubDialog runtime={runtime} />);
   assert.match(markup, /type="datetime-local"/);
   assert.match(markup, /UTC/);
-  assert.match(markup, /使用最早合格起点/);
-  assert.match(markup, /4 个合格随机窗口/);
+  assert.match(markup, /商品覆盖与手动起点会在 Run 内选品时/);
+  assert.match(markup, /创建 Run 并选择商品/);
+  assert.doesNotMatch(markup, /使用最早合格起点|个合格随机窗口/);
   assert.doesNotMatch(markup, /请求开始时间（ms）/);
 });
 

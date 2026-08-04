@@ -602,28 +602,6 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
 }
 
 async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
-  const identityValue = `${plan.exchange}:${plan.marketType}:${plan.symbol}`;
-  const selected = await evaluate(cdp, `(() => {
-    const select = document.querySelector('[data-training-field="market-identity"]');
-    if (!(select instanceof HTMLSelectElement)) return { configured: false, reason: "identity-control-missing" };
-    const options = [...select.options].map((option) => option.value);
-    if (!options.includes(${JSON.stringify(identityValue)})) {
-      return { configured: false, reason: "identity-option-missing", options };
-    }
-    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
-    if (typeof setter !== "function") return { configured: false, reason: "identity-setter-missing" };
-    setter.call(select, ${JSON.stringify(identityValue)});
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    return { configured: true, selected: select.value, options };
-  })()`, { userGesture: true });
-  assert(selected?.configured === true, "formal replay.v2 real identity selection failed", selected);
-  await waitForValue(
-    cdp,
-    `document.querySelector('[data-training-field="market-identity"]')?.value === ${JSON.stringify(identityValue)}`,
-    timeoutMs,
-    "formal replay.v2 real identity selection",
-  );
-
   const horizonValue = String(plan.forwardCacheMs);
   const horizon = await evaluate(cdp, `(() => {
     const input = document.querySelector('[data-training-field="forward-cache-ms"]');
@@ -646,18 +624,47 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
     cdp,
     `(() => {
       const button = [...document.querySelectorAll("button")]
-        .find((item) => item.textContent?.trim() === "创建并进入训练");
+        .find((item) => item.textContent?.trim() === "创建 Run 并选择商品");
       return button instanceof HTMLButtonElement && !button.disabled;
     })()`,
     timeoutMs,
     "formal replay.v2 configured create readiness",
   );
   return {
-    identityValue,
     forwardCacheMs: plan.forwardCacheMs,
-    selected,
     horizon,
   };
+}
+
+async function chooseReplayMarket(cdp, plan, timeoutMs) {
+  if (plan !== null) {
+    const query = JSON.stringify(plan.symbol);
+    const filtered = await evaluate(cdp, `(() => {
+      const input = document.querySelector('input[placeholder*="BTC"]');
+      if (!(input instanceof HTMLInputElement)) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (typeof setter !== "function") return false;
+      setter.call(input, ${query});
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()`, { userGesture: true });
+    assert(filtered === true, "formal replay.v2 market search control is unavailable");
+  }
+  const buttonText = await waitForValue(
+    cdp,
+    `(() => {
+      const expected = ${JSON.stringify(plan?.symbol ?? null)};
+      const button = [...document.querySelectorAll("button")].find((item) => {
+        const text = item.textContent?.trim() || "";
+        return !item.disabled && (expected === null ? text.startsWith("选择 ") : text === "选择 " + expected);
+      });
+      return button?.textContent?.trim() || null;
+    })()`,
+    timeoutMs,
+    "Run market picker readiness",
+  );
+  return keyboardActivateButton(cdp, { text: buttonText }, timeoutMs);
 }
 
 function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
@@ -1282,43 +1289,55 @@ function isCatalogEpochMismatch(error) {
   );
 }
 
-export function replayCatalogQueryFromCreatePayload(createPayload) {
-  const warmupBars = createPayload?.indicator_warmup_bars;
-  const horizonMs = createPayload?.forward_cache_ms;
-  const disclosurePolicy = createPayload?.time_disclosure_policy;
-  assert(
-    Number.isSafeInteger(warmupBars) && warmupBars >= 1,
-    "v2 lifecycle create payload is missing indicator_warmup_bars",
-    createPayload,
-  );
-  assert(
-    Number.isSafeInteger(horizonMs) && horizonMs >= 1,
-    "v2 lifecycle create payload is missing forward_cache_ms",
-    createPayload,
-  );
-  assert(
-    typeof disclosurePolicy === "string" && disclosurePolicy.length > 0,
-    "v2 lifecycle create payload is missing time_disclosure_policy",
-    createPayload,
-  );
-  return new URLSearchParams({
-    warmup_bars: String(warmupBars),
-    horizon_ms: String(horizonMs),
-    quality_mode: "exact",
-    blind_mode: String(disclosurePolicy !== "NONE"),
-  });
-}
-
 async function createV2ArchiveRun({
   backendOrigin,
   createPayload,
   index,
   requestJson = readJson,
 }) {
-  const catalogQuery = replayCatalogQueryFromCreatePayload(createPayload);
+  const setup = {
+    protocol: createPayload.protocol,
+    name: `Phase 10 lifecycle ${String(index + 1).padStart(3, "0")}`,
+    source_kind: createPayload.source_kind,
+    start_mode: createPayload.start_mode,
+    settlement_asset: createPayload.settlement_asset,
+    requested_start_ms: createPayload.requested_start_ms,
+    indicator_warmup_bars: createPayload.indicator_warmup_bars,
+    visible_history_lookback: createPayload.visible_history_lookback,
+    forward_cache_ms: createPayload.forward_cache_ms,
+    random_seed: (
+      (Number(createPayload.random_seed || 0) + index + 1)
+      % 2_147_483_647
+    ),
+    initial_equity: createPayload.initial_equity,
+    max_leverage: createPayload.max_leverage,
+    maker_fee_bps: createPayload.maker_fee_bps,
+    taker_fee_bps: createPayload.taker_fee_bps,
+    market_slippage_bps: createPayload.market_slippage_bps,
+    integrity_mode: createPayload.integrity_mode,
+    time_disclosure_policy: createPayload.time_disclosure_policy,
+    book_mode: createPayload.book_mode,
+    margin_mode: createPayload.margin_mode,
+    funding_mode: createPayload.funding_mode,
+    account_data_mode: createPayload.account_data_mode,
+    fixed_funding_rate: createPayload.fixed_funding_rate,
+    funding_interval_ms: createPayload.funding_interval_ms,
+    allow_rule_changes: createPayload.allow_rule_changes,
+    allowed_mutations: createPayload.allowed_mutations,
+  };
+  const shell = await requestJson(
+    `${backendOrigin}/api/v1/replay/runs`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(setup),
+    },
+  );
+  const runId = shell?.run?.run_id;
+  assert(typeof runId === "string", "v2 lifecycle empty Run did not return an identity", shell);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const catalog = await requestJson(
-      `${backendOrigin}/api/v1/replay/catalog?${catalogQuery}`,
+      `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/market-catalog`,
     );
     const catalogEntry = catalog?.entries?.find((entry) => (
       entry.identity?.exchange === createPayload.exchange
@@ -1331,21 +1350,22 @@ async function createV2ArchiveRun({
       "v2 lifecycle catalog no longer contains the exact create identity",
       catalog,
     );
-    const request = {
-      ...createPayload,
+    const selection = {
       catalog_epoch: catalog.catalog_epoch,
-      name: `Phase 10 lifecycle ${String(index + 1).padStart(3, "0")}`,
-      random_seed:
-        (Number(createPayload.random_seed || 0) + index + 1)
-        % 2_147_483_647,
+      exchange: createPayload.exchange,
+      market_type: createPayload.market_type,
+      symbol: createPayload.symbol,
+      base_interval: createPayload.base_interval,
+      display_interval: createPayload.display_interval,
+      account_history_ref: createPayload.account_history_ref ?? null,
     };
     try {
       const created = await requestJson(
-        `${backendOrigin}/api/v1/replay/runs`,
+        `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/markets`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(request),
+          body: JSON.stringify(selection),
         },
       );
       return {
@@ -1372,7 +1392,7 @@ async function v2ArchiveLifecycleCycle({ backendOrigin, createPayload, index }) 
   assert(typeof runId === "string" && typeof sessionId === "string", "v2 lifecycle create did not return identities", created);
 
   const returned = await postJson(
-    `${backendOrigin}/api/v1/replay/runs/session/${encodeURIComponent(sessionId)}/return-to-hub`,
+    `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/return-to-hub`,
   );
   assert(returned?.state === "PAUSED" && returned?.checkpointed === true && returned?.released === true, "v2 lifecycle return-to-hub failed", returned);
 
@@ -2046,14 +2066,14 @@ async function waitForSubscriberCount(diagnosticsUrl, sessionId, maximum, timeou
   throw new Error(`Replay subscriber count did not return to <=${maximum}: ${JSON.stringify(last)}`);
 }
 
-async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, sessionId, timeoutMs }) {
+async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId, sessionId, timeoutMs }) {
   const opened = Date.now();
   const page = await createTarget(debugBase);
   const capture = captureTarget(page.cdp);
   let navigation = null;
   let result = null;
   try {
-    const url = `${frontendOrigin}/replay.html?session=${encodeURIComponent(sessionId)}`;
+    const url = `${frontendOrigin}/replay.html?run=${encodeURIComponent(runId)}`;
     navigation = await page.cdp.send("Page.navigate", { url });
     assert(!navigation?.errorText, "lifecycle target navigation failed", navigation);
     const before = await waitForReplayStatus(
@@ -2354,7 +2374,7 @@ async function main() {
     await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "新建训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "Training Hub readiness");
     const opened = await keyboardActivateButton(replay.cdp, { text: "新建训练" }, args.timeoutMs);
     try {
-      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建并进入训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "create plan readiness");
+      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建 Run 并选择商品"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "create Run readiness");
       if (formalTrainingPlan !== null) {
         await configureFormalV2TrainingPlan(
           replay.cdp,
@@ -2382,8 +2402,9 @@ async function main() {
       };
       throw error;
     }
-    const created = await keyboardActivateButton(replay.cdp, { text: "创建并进入训练" }, args.timeoutMs);
-    const hubKeyboard = { opened, created };
+    const created = await keyboardActivateButton(replay.cdp, { text: "创建 Run 并选择商品" }, args.timeoutMs);
+    const selectedMarket = await chooseReplayMarket(replay.cdp, formalTrainingPlan, args.timeoutMs);
+    const hubKeyboard = { opened, created, selectedMarket };
     let initial;
     try {
       initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
@@ -2409,22 +2430,31 @@ async function main() {
       };
       throw error;
     }
-    const sessionId = new URL(await evaluate(replay.cdp, "location.href")).searchParams.get("session");
-    assert(sessionId, "replay session URL is missing an opaque session id");
+    const runId = new URL(await evaluate(replay.cdp, "location.href")).searchParams.get("run");
+    assert(runId, "replay URL is missing an opaque Run id");
+    const runDetail = await readJson(`${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}`);
+    const sessionId = runDetail?.adapter_session_id;
+    assert(typeof sessionId === "string", "initialized Run is missing its internal selected adapter", runDetail);
     const v2CreateRequest = [...replayCapture.requests].reverse().find((item) => (
       item.method === "POST" && /\/api\/v1\/replay\/runs$/.test(new URL(item.url).pathname)
     ));
     const v2CreatePayload = v2CreateRequest?.postData ? JSON.parse(v2CreateRequest.postData) : null;
     assert(v2CreatePayload?.protocol === "replay.v2", "training create payload was not captured", v2CreateRequest);
+    const v2MarketRequest = [...replayCapture.requests].reverse().find((item) => (
+      item.method === "POST" && /\/api\/v1\/replay\/runs\/[^/]+\/markets$/.test(new URL(item.url).pathname)
+    ));
+    const v2MarketPayload = v2MarketRequest?.postData ? JSON.parse(v2MarketRequest.postData) : null;
+    assert(v2MarketPayload?.symbol, "Run market selection payload was not captured", v2MarketRequest);
+    const v2LifecyclePayload = { ...v2CreatePayload, ...v2MarketPayload };
     const formalTrainingBinding = formalTrainingPlan === null
       ? null
       : {
         ...formalTrainingPlan,
         payloadBound: (
-          v2CreatePayload?.exchange === formalTrainingPlan.exchange
-          && v2CreatePayload?.market_type === formalTrainingPlan.marketType
-          && v2CreatePayload?.symbol === formalTrainingPlan.symbol
-          && v2CreatePayload?.base_interval === formalTrainingPlan.interval
+          v2MarketPayload?.exchange === formalTrainingPlan.exchange
+          && v2MarketPayload?.market_type === formalTrainingPlan.marketType
+          && v2MarketPayload?.symbol === formalTrainingPlan.symbol
+          && v2MarketPayload?.base_interval === formalTrainingPlan.interval
           && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
           && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
         ),
@@ -2433,7 +2463,7 @@ async function main() {
       assert(
         formalTrainingBinding.payloadBound === true,
         "formal replay.v2 training POST was not bound to the selected real source window",
-        { formalTrainingBinding, v2CreatePayload },
+        { formalTrainingBinding, v2CreatePayload, v2MarketPayload },
       );
     }
     assert(await evaluate(replay.cdp, "window.opener === null"), "primary replay target retained opener");
@@ -2606,7 +2636,7 @@ async function main() {
         try {
           archiveLifecycle = await v2ArchiveLifecycleCycle({
             backendOrigin,
-            createPayload: v2CreatePayload,
+            createPayload: v2LifecyclePayload,
             index: cycleIndex,
           });
         } catch (error) {
@@ -2637,6 +2667,7 @@ async function main() {
             debugBase,
             diagnosticsUrl,
             frontendOrigin,
+            runId,
             sessionId,
             timeoutMs: args.timeoutMs,
           });

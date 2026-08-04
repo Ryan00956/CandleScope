@@ -141,7 +141,7 @@ export function useReplayIntegrityRuntime(
       const currentRuntime = runtimeRef.current;
       const currentViewer = viewerRef.current;
       const currentState = replayEffectiveTrainingState(
-        currentViewer.marketTracks?.global_clock.state,
+        currentViewer.marketTracks?.global_clock?.state,
         currentRuntime.store.state,
         currentRuntime.store.controllerClientId,
       );

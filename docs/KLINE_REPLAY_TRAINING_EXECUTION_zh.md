@@ -4,6 +4,8 @@
 
 2026-08-03 开发期 cutover：训练数据允许清空重建，v1 不再作为用户产品或存档兼容目标。大厅只列 v2 `TrainingRun`，裸 `replay_session` 不再生成 `LEGACY_V1` 卡片，`LEGACY_ADAPTER`/`OPEN_V1` 和 legacy migration API 已退役；`ReplayV1App`、v1 shell 以及前后端产品选择器均已删除。`REPLAY_ENABLED=1` 时必须构造 TrainingRun 服务，关闭时整个 replay runtime fail closed。下文旧 Phase 中的兼容、迁移与回滚描述只保留为历史记录；仍出现的 `replay.v1` 指 v2 当前依赖的内部 actor/adapter 线协议，不代表对外提供 v1 训练产品。
 
+2026-08-04 Run-centric 开发期 cutover：公开身份统一为 `run_id`，不再接受 `?session=` 或 session-based 返回大厅入口。`POST /runs` 只创建 `AWAITING_MARKET` 空 Run，不读取 catalog、不绑定 symbol/dataset、不启动时钟；用户进入 `?run=<id>` 后通过 Run 专属目录选择首个商品，服务端再原子创建首条 MarketTrack。初始化后仍可在同一 Run 搜索、添加和切换商品。schema 直接升级并要求清空开发数据，不提供旧 one-shot create 或旧 schema 迁移。
+
 工作树：`H:\program\CandleScope-kline-replay`
 
 分支：`codex/kline-replay-training`
@@ -1287,24 +1289,24 @@ test(replay): close replay v2 product and release gates
 
 ## 22. Phase 11：实时页启动训练与归档启动上下文
 
+> 2026-08-04 run-centric cutover 覆盖本节旧的 one-shot 创建合同。实时页上下文现在只作为空 Run 的 `market_selection_hint` 与自选快照，不是首商品绑定；旧 schema/URL/创建 payload 不再兼容。
+
 ### 目标
 
 把回放入口放回正常实时行情工作流，但不让实时页面拥有回放 runtime：
 
 - 顶栏点击“回放”后打开页面内训练存档弹窗，共用现有 Training Hub；
-- 新建训练精确带入当前 `exchange / market_type / symbol / display_interval`；
-- 创建时冻结结构化自选分组快照，训练存档之后不再读取实时页 `localStorage`；
-- 创建成功后打开独立 `replay.html?session=...`，原实时页面和订阅保持独立；
-- 只有主商品创建 `FULL` 轨道；快照内其他商品只展示为 `NONE`，用户激活后才按既有规则创建轨道；
-- 直接访问 Hub、旧客户端不传启动上下文、既有 v7 数据库升级都保持兼容。
+- 新建空 Run 可把当前 `exchange / market_type / symbol / display_interval` 作为非绑定的选品提示，并冻结结构化自选分组快照；训练存档之后不再读取实时页 `localStorage`；
+- 创建成功后打开独立 `replay.html?run=...`，原实时页面和订阅保持独立；
+- 此时不创建任何商品轨道。用户在 Run 内显式选择首个商品后才创建 `FULL` 主轨；快照内其他商品按需添加，未激活时保持 `NONE`；
+- 开发期 cutover 直接拒绝旧客户端创建合同、`?session=` URL 与旧 training schema。
 
 ### 持久化与一致性边界
 
-- 新增 `replay.launch-context.v1` 与 `replay.watchlist-snapshot.v1`；
-- replay.training schema additive 升至 v8，启动上下文与 Run 在同一事务写入；
-- `context_json` 使用 canonical SHA-256 单独校验，不改变既有 rule hash 语义；
-- 旧 Run 在 v7 -> v8 时回填 `DIRECT_HUB` 上下文和空分组；
-- 上下文主商品身份与创建请求必须完全一致；前端商品选择使用完整复合身份，不能只按 symbol 匹配；
+- `replay.launch-context.v1` 与 `replay.watchlist-snapshot.v1` 继续作为初始化后快照合同；空 Run 先把原始提示写入带 hash 的 setup JSON；
+- 首次选品事务把 launch context 主身份改为实际选择的完整 `exchange / market_type / symbol / display_interval`，同时保留实时页自选快照；
+- 提示不得写入 Run 的 `last_symbol`、MarketTrack、dataset、pin 或全局时钟；缺失提示的直接 Hub Run 在首选品时生成 `DIRECT_HUB` 空快照；
+- 前端商品选择始终使用完整复合身份，不能只按 symbol 匹配；
 - 不能作为回放基础周期的临时序列保留稳定身份存在性，但其逐秒计数和闭合边界不能抖动历史目录 epoch；可用历史基础周期变化仍使 epoch fail closed。
 
 ### 浏览器退出门槛

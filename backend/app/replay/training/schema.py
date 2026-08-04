@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 11
+TRAINING_SCHEMA_VERSION = 12
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
@@ -21,8 +21,8 @@ REVIEW_TIMELINE_SCHEMA_VERSION = "replay.review.timeline.v1"
 TRAINING_SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS replay_training_run (
     run_id TEXT PRIMARY KEY,
-    adapter_session_id TEXT NOT NULL UNIQUE
-        REFERENCES replay_session(session_id) ON DELETE CASCADE,
+    adapter_session_id TEXT UNIQUE
+        REFERENCES replay_session(session_id) ON DELETE SET NULL,
     protocol TEXT NOT NULL CHECK (protocol = 'replay.v2'),
     schema_version TEXT NOT NULL CHECK (schema_version = 'replay.training.v1'),
     name TEXT NOT NULL,
@@ -36,21 +36,21 @@ CREATE TABLE IF NOT EXISTS replay_training_run (
     funding_mode TEXT NOT NULL,
     execution_model TEXT NOT NULL,
     allow_rule_changes INTEGER NOT NULL CHECK (allow_rule_changes IN (0, 1)),
-    exchange TEXT NOT NULL,
-    market_type TEXT NOT NULL,
-    last_symbol TEXT NOT NULL,
+    exchange TEXT,
+    market_type TEXT,
+    last_symbol TEXT,
     settlement_asset TEXT NOT NULL,
-    base_interval TEXT NOT NULL,
-    display_interval TEXT NOT NULL,
+    base_interval TEXT,
+    display_interval TEXT,
     initial_equity TEXT NOT NULL,
     current_equity TEXT,
     summary_revision INTEGER CHECK (summary_revision IS NULL OR summary_revision >= 0),
     revision INTEGER NOT NULL CHECK (revision >= 0),
     source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
-    active_rule_revision INTEGER NOT NULL CHECK (active_rule_revision >= 1),
-    catalog_epoch TEXT NOT NULL,
-    dataset_epoch TEXT NOT NULL,
+    virtual_time_ms INTEGER CHECK (virtual_time_ms IS NULL OR virtual_time_ms >= 0),
+    active_rule_revision INTEGER NOT NULL CHECK (active_rule_revision >= 0),
+    catalog_epoch TEXT,
+    dataset_epoch TEXT,
     compatibility TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
@@ -97,7 +97,7 @@ TRAINING_SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS replay_training_viewer_state (
     run_id TEXT PRIMARY KEY
         REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
-    selected_track_id TEXT NOT NULL,
+    selected_track_id TEXT,
     display_interval TEXT NOT NULL,
     chart_type TEXT NOT NULL,
     visible_range_json TEXT,
@@ -1377,6 +1377,14 @@ CREATE TABLE IF NOT EXISTS replay_archive_pin (
     PRIMARY KEY (run_id, track_id, source_revision)
 );
 
+CREATE TABLE IF NOT EXISTS replay_training_run_setup (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    setup_json TEXT NOT NULL,
+    setup_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_replay_archive_pin_revision
 ON replay_archive_pin(source_revision, exchange, market_type, symbol, base_interval);
 """
@@ -1636,27 +1644,6 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     ).fetchone()
     current = 0 if row is None else int(row[0])
     if current == TRAINING_SCHEMA_VERSION:
-        return
-    if current == 10:
-        version_columns = {
-            str(column[1])
-            for column in connection.execute(
-                "PRAGMA table_info(replay_training_schema_version)"
-            ).fetchall()
-        }
-        if "applied_at_ms" not in version_columns:
-            raise RuntimeError(
-                "replay training schema 10 is obsolete; "
-                "clear replay training data and create a fresh database"
-            )
-        _execute_script(connection, TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE)
-        connection.execute(
-            """
-            UPDATE replay_training_schema_version
-            SET version = ?, applied_at_ms = ? WHERE singleton = 1
-            """,
-            (TRAINING_SCHEMA_VERSION, now_ms),
-        )
         return
     if current != 0:
         raise RuntimeError(

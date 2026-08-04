@@ -2,7 +2,7 @@
   "protocol": "replay.v2",
   "schema_version": "replay.contract.v2.phase0",
   "enums": {
-    "run_state": ["PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"],
+    "run_state": ["AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"],
     "track_state": ["DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"],
     "source_kind": ["BAR", "AGG_TRADE"],
     "start_mode": ["MANUAL", "RANDOM"],

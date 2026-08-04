@@ -92,6 +92,9 @@ from .models import (
     TimeDisclosurePolicy,
     TrainingCursor,
     TrainingRunCreateRequest,
+    TrainingRunMarketSelectionRequest,
+    TrainingRunSetupRequest,
+    VisibleHistoryMode,
     validate_v2_counter,
 )
 
@@ -276,6 +279,14 @@ class TrainingRunService:
         self,
         preparation_id: str,
     ) -> dict[str, object]:
+        return await self._retry_selection_preparation(preparation_id)
+
+    async def _retry_selection_preparation(
+        self,
+        preparation_id: str,
+        *,
+        existing_shell_run_id: str | None = None,
+    ) -> dict[str, object]:
         normalized = self._identifier(
             preparation_id,
             field_name="preparation_id",
@@ -299,6 +310,7 @@ class TrainingRunService:
             return await self.create_run(
                 request,
                 _retry_preparation=retry,
+                _existing_shell_run_id=existing_shell_run_id,
             )
         except BaseException:
             await self.store.fail_selection_preparation(
@@ -327,6 +339,109 @@ class TrainingRunService:
 
     async def get_run(self, run_id: str) -> dict[str, object]:
         return await self.store.get_run(self._identifier(run_id, field_name="run_id"))
+
+    async def create_empty_run(
+        self,
+        request: TrainingRunSetupRequest,
+    ) -> dict[str, object]:
+        if not isinstance(request, TrainingRunSetupRequest):
+            raise TypeError("request must be TrainingRunSetupRequest")
+        run_id = self._identifier(self._run_id_factory(), field_name="run_id")
+        try:
+            await self.store.create_empty_run(run_id=run_id, request=request)
+        except sqlite3.IntegrityError as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_CONFLICT",
+                "training run identity already exists",
+                status_code=409,
+            ) from exc
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "created": True,
+            "run": await self.store.get_run(run_id),
+        }
+
+    async def select_initial_market(
+        self,
+        run_id: str,
+        selection: TrainingRunMarketSelectionRequest,
+    ) -> dict[str, object]:
+        if not isinstance(selection, TrainingRunMarketSelectionRequest):
+            raise TypeError("selection must be TrainingRunMarketSelectionRequest")
+        normalized = self._identifier(run_id, field_name="run_id")
+        actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        async with actor.serialized():
+            setup = await self.store.get_run_setup(normalized)
+            request = setup.for_market(selection)
+            preparation_id = canonical_sha256(
+                {
+                    "contract": "replay.initial-market-preparation.v1",
+                    "run_id": normalized,
+                    "selection": selection.to_dict(),
+                }
+            )[7:39]
+            try:
+                preparation = await self.store.selection_preparation(preparation_id)
+            except TrainingRunError as exc:
+                if exc.code != "TRAINING_PREPARATION_NOT_FOUND":
+                    raise
+                result = await self.create_run(
+                    request,
+                    _existing_shell_run_id=normalized,
+                    _preparation_id=preparation_id,
+                )
+            else:
+                status = str(preparation.get("status"))
+                if status == "FAILED":
+                    result = await self._retry_selection_preparation(
+                        preparation_id,
+                        existing_shell_run_id=normalized,
+                    )
+                elif status == "PREPARING_DATA":
+                    raise TrainingRunError(
+                        "TRAINING_RUN_BUSY",
+                        "the initial market is already being prepared",
+                        status_code=409,
+                        details={"preparation_id": preparation_id},
+                    )
+                else:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "an empty run has an already-completed market preparation",
+                        status_code=503,
+                        details={"preparation_id": preparation_id},
+                    )
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "initialized": True,
+            "run": result["run"],
+        }
+
+    async def market_catalog(self, run_id: str) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        setup = await self.store.get_run_setup(
+            normalized,
+            require_awaiting_market=False,
+        )
+        settings = setup.to_dict()
+        return await self.replay_service.catalog(
+            warmup_bars=int(settings["indicator_warmup_bars"]),
+            horizon_ms=int(settings["forward_cache_ms"]),
+            quality_mode="exact",
+            blind_mode=(
+                settings["start_mode"] == "RANDOM"
+                and settings["time_disclosure_policy"] != "NONE"
+            ),
+        )
+
+    async def initial_market_plan(
+        self,
+        run_id: str,
+        selection: TrainingRunMarketSelectionRequest,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        setup = await self.store.get_run_setup(normalized)
+        return await self.segment_plan(setup.for_market(selection))
 
     async def account_record_page(
         self,
@@ -1268,6 +1383,11 @@ class TrainingRunService:
                 status_code=503,
             )
         selected_track_id = viewer.get("selected_track_id")
+        if selected_track_id is None and not tracks:
+            return {
+                **dict(projection),
+                "global_clock": None,
+            }
         selected = next(
             (
                 track
@@ -1864,6 +1984,8 @@ class TrainingRunService:
         request: TrainingRunCreateRequest,
         *,
         _retry_preparation: Mapping[str, object] | None = None,
+        _existing_shell_run_id: str | None = None,
+        _preparation_id: str | None = None,
     ) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
@@ -1874,6 +1996,7 @@ class TrainingRunService:
                 selection = await self.replay_service.select_training_window(
                     selection_config,
                     expected_catalog_epoch=request.catalog_epoch,
+                    minimum_history_bars=self._selection_warmup_bars(request),
                 )
             except ReplayDomainError as exc:
                 if exc.details.get("reason") == "CATALOG_EPOCH_MISMATCH":
@@ -1965,11 +2088,31 @@ class TrainingRunService:
             )
         run_id = self._identifier(
             (
-                self._run_id_factory()
-                if _retry_preparation is None
-                else _retry_preparation.get("preparation_id")
+                _existing_shell_run_id
+                if _existing_shell_run_id is not None
+                else (
+                    self._run_id_factory()
+                    if _retry_preparation is None
+                    else _retry_preparation.get("preparation_id")
+                )
             ),
             field_name="run_id",
+        )
+        preparation_id = self._identifier(
+            (
+                _retry_preparation.get("preparation_id")
+                if _retry_preparation is not None
+                else (
+                    _preparation_id
+                    if _preparation_id is not None
+                    else (
+                        uuid.uuid4().hex
+                        if _existing_shell_run_id is not None
+                        else run_id
+                    )
+                )
+            ),
+            field_name="preparation_id",
         )
         config = self._adapter_config(
             request,
@@ -1987,7 +2130,7 @@ class TrainingRunService:
         if _retry_preparation is None:
             try:
                 await self.store.create_selection_preparation(
-                    preparation_id=run_id,
+                    preparation_id=preparation_id,
                     start_mode=request.start_mode.value,
                     random_seed=request.random_seed,
                     catalog_epoch=request.catalog_epoch,
@@ -2058,6 +2201,8 @@ class TrainingRunService:
                 source_fingerprint=str(selection["source_fingerprint"]),
                 historical_book_binding=bound_book,
                 account_history_binding=bound_account,
+                existing_shell=_existing_shell_run_id is not None,
+                preparation_id=preparation_id,
             )
 
         try:
@@ -2075,7 +2220,7 @@ class TrainingRunService:
             )
         except ReplayDomainError as exc:
             await self.store.fail_selection_preparation(
-                run_id,
+                preparation_id,
                 error_code=exc.code.value,
                 error_message="selected replay data could not be materialized",
             )
@@ -2091,7 +2236,7 @@ class TrainingRunService:
                     "CATALOG_EPOCH_MISMATCH",
                     "data capability changed after validation; refresh and try again",
                     status_code=409,
-                    details={"preparation_id": run_id},
+                    details={"preparation_id": preparation_id},
                 ) from exc
             raise TrainingRunError(
                 "TRAINING_RUN_CREATE_FAILED",
@@ -2099,12 +2244,12 @@ class TrainingRunService:
                 status_code=409,
                 details={
                     "reason": exc.code.value,
-                    "preparation_id": run_id,
+                    "preparation_id": preparation_id,
                 },
             ) from exc
         except sqlite3.IntegrityError as exc:
             await self.store.fail_selection_preparation(
-                run_id,
+                preparation_id,
                 error_code="TRAINING_RUN_CONFLICT",
                 error_message="training run persistence conflicted",
             )
@@ -2112,11 +2257,11 @@ class TrainingRunService:
                 "TRAINING_RUN_CONFLICT",
                 "training run identity already exists",
                 status_code=409,
-                details={"preparation_id": run_id},
+                details={"preparation_id": preparation_id},
             ) from exc
         except BaseException as exc:
             await self.store.fail_selection_preparation(
-                run_id,
+                preparation_id,
                 error_code=type(exc).__name__,
                 error_message="training data preparation failed",
             )
@@ -2128,9 +2273,8 @@ class TrainingRunService:
             "run": run,
         }
 
-    async def return_to_hub_by_session(self, session_id: str) -> dict[str, object]:
-        normalized = self._identifier(session_id, field_name="session_id")
-        run_id = await self.store.run_id_for_session(normalized)
+    async def return_to_hub(self, run_id: str) -> dict[str, object]:
+        run_id = self._identifier(run_id, field_name="run_id")
         actor = self._run_actors.setdefault(run_id, TrainingRunActor(run_id))
         async with actor.serialized():
             actor.request_ordered_pause(reason="RETURN_TO_HUB")
@@ -8920,6 +9064,31 @@ class TrainingRunService:
                 details={"missing": sorted(missing), "unknown": sorted(unknown)},
             )
         return payload
+
+    @staticmethod
+    def _selection_warmup_bars(request: TrainingRunCreateRequest) -> int:
+        visible = request.visible_history_lookback
+        if visible is None or visible.mode is VisibleHistoryMode.ALL_AVAILABLE:
+            return request.indicator_warmup_bars
+        assert visible.duration_ms is not None
+        interval_ms = parse_interval_ms(request.base_interval)
+        if interval_ms is None:
+            raise TrainingRunError(
+                "VISIBLE_HISTORY_INTERVAL_MISMATCH",
+                "visible history requires a fixed base interval",
+                status_code=422,
+            )
+        if visible.duration_ms % interval_ms:
+            raise TrainingRunError(
+                "VISIBLE_HISTORY_INTERVAL_MISMATCH",
+                "visible history duration must be an exact base-interval multiple",
+                status_code=422,
+                details={"base_interval_ms": interval_ms},
+            )
+        return max(
+            request.indicator_warmup_bars,
+            visible.duration_ms // interval_ms,
+        )
 
     @staticmethod
     def _adapter_config(

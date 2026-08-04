@@ -465,7 +465,7 @@ export default function ReplayIntegrityReviewPanel({
                 <code>{integrityRuntime.forked.run.state_hash}</code>
                 <span>{integrityRuntime.forked.tracks.length} tracks · event #{integrityRuntime.forked.parent_timeline_sequence}</span>
                 {integrityRuntime.forked.account_audit !== null && <span>Exact account auditor: {String(integrityRuntime.forked.account_audit.status ?? "--")}</span>}
-                <a href={`/replay.html?session=${encodeURIComponent(integrityRuntime.forked.run.adapter_session_id)}`}>
+                <a href={`/replay.html?run=${encodeURIComponent(integrityRuntime.forked.run.run_id)}`}>
                   打开子训练
                 </a>
               </div>

@@ -9,7 +9,7 @@ import { parseReplayCapabilities, parseReplayCatalog } from "../../replay/replay
 import {
   buildTrainingRunCreateRequest,
   createTrainingRunDraft,
-  evaluateTrainingRunDraft,
+  evaluateTrainingRunSetupDraft,
 } from "../../replay/trainingHubModel.js";
 import { buildLiveReplayLaunchContext } from "../replayLaunchContext.js";
 
@@ -100,7 +100,7 @@ test("Phase 11 snapshots live identity and structured watchlist without local pe
   assert.equal(okxContext.symbol, "BTC-USDT-SWAP");
 });
 
-test("Phase 11 preselects the live chart and carries its snapshot only on create", () => {
+test("live context may seed defaults but run creation remains market independent", () => {
   const catalog = blindCatalog();
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const context = buildLiveReplayLaunchContext({
@@ -116,24 +116,21 @@ test("Phase 11 preselects the live chart and carries its snapshot only on create
     }],
   });
   const draft = createTrainingRunDraft(catalog, context);
-  const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog);
+  const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);
 
   assert.equal(draft.symbol, "BTCUSDT");
   assert.equal(draft.baseInterval, "1m");
   assert.equal(draft.displayInterval, "15m");
   assert.equal(evaluation.canSubmit, true);
-  const payload = buildTrainingRunCreateRequest(
-    draft,
-    evaluation,
-    catalog,
-    context,
-  );
-  assert.deepEqual(payload.launch_context, context);
-  assert.equal(payload.symbol, context.symbol);
-  assert.equal(payload.display_interval, context.display_interval);
+  const payload = buildTrainingRunCreateRequest(draft, evaluation, context);
+  assert.equal(Object.hasOwn(payload, "launch_context"), false);
+  assert.equal(Object.hasOwn(payload, "symbol"), false);
+  assert.equal(Object.hasOwn(payload, "exchange"), false);
+  assert.deepEqual(payload.market_selection_hint, context);
+  assert.equal(payload.name, "回放训练");
 
-  const directPayload = buildTrainingRunCreateRequest(draft, evaluation, catalog);
-  assert.equal(Object.hasOwn(directPayload, "launch_context"), false);
+  const directPayload = buildTrainingRunCreateRequest(draft, evaluation);
+  assert.equal(directPayload.market_selection_hint, null);
 });
 
 test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
@@ -162,8 +159,8 @@ test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
     launcher,
     /useMarketDataRuntime|useWatchlistRuntime|ReplayRuntime|replayBars|WebSocket/,
   );
-  assert.match(trainingHub, /replayCatalogIdentity\(candidate\) === identity/);
-  assert.match(trainingHub, /value=\{`\$\{draft\.exchange\}:\$\{draft\.marketType\}:\$\{draft\.symbol\}`\}/);
-  assert.match(watchlist, /launch_context\.watchlist_snapshot\.groups/);
+  assert.doesNotMatch(trainingHub, /data-training-field="market-identity"/);
+  assert.match(trainingHub, /创建 Run 并选择商品/);
+  assert.match(watchlist, /launch_context\?\.watchlist_snapshot\.groups/);
   assert.doesNotMatch(watchlist, /localStorage|candlescope-watchlists/);
 });

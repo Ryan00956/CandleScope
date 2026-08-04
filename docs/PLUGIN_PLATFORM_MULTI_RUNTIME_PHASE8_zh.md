@@ -339,7 +339,7 @@ projection 与 attestation 会在运行时重新验证。仓库保存的最终�
 - Phase 8 真实 Windows/WSL2 门禁：通过，58.4 秒；
 - 冻结证据校验：通过，component SHA-256 为
   `99af98c6163433b9a951a9494b4bb154bb2195913021661e201d0f1fcf10bcea`，真实证据 SHA-256 为
-  `49080efabb2dbcbc692bcf5d6cbde443e9bccdf7f29450a9e36d7c447042cbe0`；
+  `33c5c51d6cc7da02d17b7db21cfd267bcbb2b02ce7534aba769019430e3919f1`；
 - Phase 8 Provider/Registry/gate：`12 passed`；
 - Phase 0～8 全部多运行时门禁：17 个测试文件，`125 passed`；
 - 完整插件后端回归：57 个测试文件，`521 passed`；

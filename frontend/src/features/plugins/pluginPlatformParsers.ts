@@ -2172,7 +2172,7 @@ function marketplaceLicense(value: unknown, path: string): string {
   return result;
 }
 
-function marketplaceRelease(value: unknown, path: string): PluginMarketplaceRelease {
+function marketplaceReleaseV1(value: unknown, path: string): PluginMarketplaceRelease {
   const data = record(value, path);
   exact(data, [
     "pluginId",
@@ -2379,6 +2379,287 @@ function localInstallPreview(value: unknown, path: string): PluginLocalInstallPr
   };
 }
 
+const MARKETPLACE_RUNTIME_KINDS = new Set([
+  "python-module",
+  "native-executable",
+  "java-jar",
+  "node-module",
+  "wasm-component",
+] as const);
+const MARKETPLACE_ROLLOUT_STAGES = new Set([
+  "internal",
+  "opted-in-local",
+  "preview",
+  "stable",
+] as const);
+
+function marketplacePermissionScopes(value: unknown, path: string) {
+  const data = record(value, path);
+  exact(data, ["required", "optional"], [], path);
+  const parse = (rawValue: unknown, childPath: string) => {
+    const values = array(rawValue, childPath, 128).map((raw, index) => {
+      const itemPath = `${childPath}[${index}]`;
+      const item = record(raw, itemPath);
+      exact(item, ["id", "scope"], [], itemPath);
+      const id = string(item.id, `${itemPath}.id`, 128);
+      if (!MARKETPLACE_LOCAL_ID.test(id)) fail(`${itemPath}.id`);
+      const scope = marketplaceScope(item.scope, `${itemPath}.scope`);
+      if (scope === null) fail(`${itemPath}.scope`);
+      return { id, scope };
+    });
+    if (
+      new Set(values.map((item) => item.id)).size !== values.length
+      || values.map((item) => item.id).join("\0") !== values.map((item) => item.id).sort().join("\0")
+    ) fail(childPath);
+    return values;
+  };
+  const required = parse(data.required, `${path}.required`);
+  const optional = parse(data.optional, `${path}.optional`);
+  if (required.some((item) => optional.some((other) => other.id === item.id))) fail(path);
+  return { required, optional };
+}
+
+function marketplaceSignedArtifact(value: unknown, path: string) {
+  const data = record(value, path);
+  exact(data, [
+    "artifactId",
+    "os",
+    "arch",
+    "fileName",
+    "url",
+    "sha256",
+    "size",
+    "manifestSha256",
+    "sbomSha256",
+    "licenseInventorySha256",
+    "runtimeBindings",
+    "provenance",
+    "reviewPolicy",
+    "signature",
+  ], [], path);
+  const artifactId = string(data.artifactId, `${path}.artifactId`, 128);
+  if (!MARKETPLACE_LOCAL_ID.test(artifactId)) fail(`${path}.artifactId`);
+  const fileName = string(data.fileName, `${path}.fileName`, 207);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.cspkg$/.test(fileName)) fail(`${path}.fileName`);
+  const runtimeBindings = array(data.runtimeBindings, `${path}.runtimeBindings`, 32).map((raw, index) => {
+    const itemPath = `${path}.runtimeBindings[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, [
+      "entrypointId",
+      "runtimeKind",
+      "runtimeId",
+      "pluginArtifactPath",
+      "pluginArtifactSha256",
+      "supplySource",
+      "hostRuntime",
+    ], [], itemPath);
+    const runtimeKind = oneOf(item.runtimeKind, MARKETPLACE_RUNTIME_KINDS, `${itemPath}.runtimeKind`);
+    const expectedSupply = runtimeKind === "python-module"
+      ? "host-python" as const
+      : runtimeKind === "native-executable"
+        ? "plugin-bundled" as const
+        : "host-managed" as const;
+    if (item.supplySource !== expectedSupply) fail(`${itemPath}.supplySource`);
+    const hostRuntime = item.hostRuntime === null ? null : (() => {
+      const host = record(item.hostRuntime, `${itemPath}.hostRuntime`);
+      exact(host, [
+        "registryId",
+        "registryRevision",
+        "registrySha256",
+        "runtimeArtifactSha256",
+        "licenseExpression",
+      ], [], `${itemPath}.hostRuntime`);
+      if (!new Set(["java-jar", "node-module", "wasm-component"]).has(runtimeKind)) fail(`${itemPath}.hostRuntime`);
+      return {
+        registryId: string(host.registryId, `${itemPath}.hostRuntime.registryId`, 128),
+        registryRevision: integer(host.registryRevision, `${itemPath}.hostRuntime.registryRevision`, 1),
+        registrySha256: digest(host.registrySha256, `${itemPath}.hostRuntime.registrySha256`),
+        runtimeArtifactSha256: digest(host.runtimeArtifactSha256, `${itemPath}.hostRuntime.runtimeArtifactSha256`),
+        licenseExpression: marketplaceLicense(host.licenseExpression, `${itemPath}.hostRuntime.licenseExpression`),
+      };
+    })();
+    if ((expectedSupply === "host-managed") !== (hostRuntime !== null)) fail(`${itemPath}.hostRuntime`);
+    const pluginArtifactPath = string(item.pluginArtifactPath, `${itemPath}.pluginArtifactPath`, 256);
+    if (
+      pluginArtifactPath.startsWith("/")
+      || pluginArtifactPath.includes("\\")
+      || pluginArtifactPath.split("/").some((part) => !part || part === "." || part === "..")
+    ) fail(`${itemPath}.pluginArtifactPath`);
+    return {
+      entrypointId: string(item.entrypointId, `${itemPath}.entrypointId`, 128),
+      runtimeKind,
+      runtimeId: string(item.runtimeId, `${itemPath}.runtimeId`, 128),
+      pluginArtifactPath,
+      pluginArtifactSha256: digest(item.pluginArtifactSha256, `${itemPath}.pluginArtifactSha256`),
+      supplySource: expectedSupply,
+      hostRuntime,
+    };
+  });
+  if (
+    !runtimeBindings.length
+    || new Set(runtimeBindings.map((item) => item.entrypointId)).size !== runtimeBindings.length
+    || runtimeBindings.map((item) => item.entrypointId).join("\0")
+      !== runtimeBindings.map((item) => item.entrypointId).sort().join("\0")
+  ) fail(`${path}.runtimeBindings`);
+  const provenance = record(data.provenance, `${path}.provenance`);
+  exact(provenance, [
+    "sourceRepository",
+    "sourceCommit",
+    "buildReceiptUrl",
+    "buildReceiptSha256",
+    "rebuildInstructionsUrl",
+    "rebuildInstructionsSha256",
+    "reproducibleBuilds",
+  ], [], `${path}.provenance`);
+  const sourceCommit = string(provenance.sourceCommit, `${path}.provenance.sourceCommit`, 40);
+  if (!/^[0-9a-f]{40}$/.test(sourceCommit) || provenance.reproducibleBuilds !== true) fail(`${path}.provenance`);
+  const reviewPolicy = record(data.reviewPolicy, `${path}.reviewPolicy`);
+  exact(reviewPolicy, [
+    "distribution",
+    "sourceBuild",
+    "systemRuntimeFallback",
+    "undeclaredDownloads",
+  ], [], `${path}.reviewPolicy`);
+  if (
+    reviewPolicy.distribution !== "prebuilt-only"
+    || reviewPolicy.sourceBuild !== false
+    || reviewPolicy.systemRuntimeFallback !== false
+    || reviewPolicy.undeclaredDownloads !== false
+  ) fail(`${path}.reviewPolicy`);
+  const signature = record(data.signature, `${path}.signature`);
+  exact(signature, ["algorithm", "keyId", "value"], [], `${path}.signature`);
+  if (signature.algorithm !== "ed25519") fail(`${path}.signature.algorithm`);
+  return {
+    artifactId,
+    os: oneOf(data.os, new Set(["windows", "linux", "macos"] as const), `${path}.os`),
+    arch: oneOf(data.arch, new Set(["x86_64", "arm64"] as const), `${path}.arch`),
+    fileName,
+    url: httpsUrl(data.url, `${path}.url`),
+    sha256: digest(data.sha256, `${path}.sha256`),
+    size: integer(data.size, `${path}.size`, 1, MARKETPLACE_MAX_ARTIFACT_BYTES),
+    manifestSha256: digest(data.manifestSha256, `${path}.manifestSha256`),
+    sbomSha256: digest(data.sbomSha256, `${path}.sbomSha256`),
+    licenseInventorySha256: digest(data.licenseInventorySha256, `${path}.licenseInventorySha256`),
+    runtimeBindings,
+    provenance: {
+      sourceRepository: httpsUrl(provenance.sourceRepository, `${path}.provenance.sourceRepository`),
+      sourceCommit,
+      buildReceiptUrl: httpsUrl(provenance.buildReceiptUrl, `${path}.provenance.buildReceiptUrl`),
+      buildReceiptSha256: digest(provenance.buildReceiptSha256, `${path}.provenance.buildReceiptSha256`),
+      rebuildInstructionsUrl: httpsUrl(provenance.rebuildInstructionsUrl, `${path}.provenance.rebuildInstructionsUrl`),
+      rebuildInstructionsSha256: digest(provenance.rebuildInstructionsSha256, `${path}.provenance.rebuildInstructionsSha256`),
+      reproducibleBuilds: true as const,
+    },
+    reviewPolicy: {
+      distribution: "prebuilt-only" as const,
+      sourceBuild: false as const,
+      systemRuntimeFallback: false as const,
+      undeclaredDownloads: false as const,
+    },
+    signature: {
+      algorithm: "ed25519" as const,
+      keyId: keyId(signature.keyId, `${path}.signature.keyId`),
+      value: string(signature.value, `${path}.signature.value`, 128),
+    },
+  };
+}
+
+function marketplaceReleaseV2(value: unknown, path: string): PluginMarketplaceRelease {
+  const data = record(value, path);
+  exact(data, [
+    "pluginId",
+    "version",
+    "publisherId",
+    "artifacts",
+    "publishedAt",
+    "licenseExpression",
+    "dependencies",
+    "minimumHostVersion",
+    "rolloutStage",
+    "officialMaintained",
+    "permissions",
+    "sha256Sums",
+    "sha256SumsSha256",
+    "publisherKeyId",
+    "runtimeKinds",
+    "transparency",
+    "revoked",
+  ], [], path);
+  const pluginId = string(data.pluginId, `${path}.pluginId`, 128);
+  const publisherId = string(data.publisherId, `${path}.publisherId`, 128);
+  if (!PLUGIN_ID.test(pluginId) || !MARKETPLACE_LOCAL_ID.test(publisherId)) fail(path);
+  const artifacts = array(data.artifacts, `${path}.artifacts`, 16).map((item, index) => (
+    marketplaceSignedArtifact(item, `${path}.artifacts[${index}]`)
+  ));
+  if (!artifacts.length || new Set(artifacts.map((item) => `${item.os}:${item.arch}`)).size !== artifacts.length) fail(`${path}.artifacts`);
+  const publisherKeyId = keyId(data.publisherKeyId, `${path}.publisherKeyId`);
+  if (artifacts.some((item) => item.signature.keyId !== publisherKeyId)) fail(`${path}.artifacts.signature.keyId`);
+  const dependencies = array(data.dependencies, `${path}.dependencies`, 1_000).map((raw, index) => {
+    const itemPath = `${path}.dependencies[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, ["name", "version", "licenseExpression"], [], itemPath);
+    const name = string(item.name, `${itemPath}.name`, 128);
+    if (!MARKETPLACE_LOCAL_ID.test(name)) fail(`${itemPath}.name`);
+    return {
+      name,
+      version: string(item.version, `${itemPath}.version`, 128),
+      licenseExpression: marketplaceLicense(item.licenseExpression, `${itemPath}.licenseExpression`),
+    };
+  });
+  const sha256Sums = rawString(data.sha256Sums, `${path}.sha256Sums`, 4_096);
+  const expectedSums = [...artifacts]
+    .sort((left, right) => left.fileName.localeCompare(right.fileName))
+    .map((item) => `${item.sha256.slice("sha256:".length)}  ${item.fileName}\n`)
+    .join("");
+  if (sha256Sums !== expectedSums) fail(`${path}.sha256Sums`);
+  const runtimeKinds = array(data.runtimeKinds, `${path}.runtimeKinds`, 5).map((item, index) => (
+    oneOf(item, MARKETPLACE_RUNTIME_KINDS, `${path}.runtimeKinds[${index}]`)
+  ));
+  const expectedRuntimeKinds = [...new Set(artifacts.flatMap((item) => item.runtimeBindings.map((binding) => binding.runtimeKind)))].sort();
+  if (runtimeKinds.join("\0") !== expectedRuntimeKinds.join("\0")) fail(`${path}.runtimeKinds`);
+  const transparency = record(data.transparency, `${path}.transparency`);
+  exact(transparency, ["logIndex", "leafSha256", "recordSha256"], [], `${path}.transparency`);
+  const first = artifacts[0]!;
+  return {
+    pluginId,
+    version: marketplaceVersion(data.version, `${path}.version`),
+    publisherId,
+    artifact: {
+      fileName: first.fileName,
+      url: first.url,
+      sha256: first.sha256,
+      size: first.size,
+      manifestSha256: first.manifestSha256,
+      sbomSha256: first.sbomSha256,
+    },
+    artifacts,
+    runtimeKinds,
+    publishedAt: utcTimestamp(data.publishedAt, `${path}.publishedAt`),
+    licenseExpression: marketplaceLicense(data.licenseExpression, `${path}.licenseExpression`),
+    dependencies,
+    minimumHostVersion: marketplaceVersion(data.minimumHostVersion, `${path}.minimumHostVersion`),
+    rolloutStage: oneOf(data.rolloutStage, MARKETPLACE_ROLLOUT_STAGES, `${path}.rolloutStage`),
+    officialMaintained: boolean(data.officialMaintained, `${path}.officialMaintained`),
+    permissions: marketplacePermissionScopes(data.permissions, `${path}.permissions`),
+    sha256Sums,
+    sha256SumsSha256: digest(data.sha256SumsSha256, `${path}.sha256SumsSha256`),
+    publisherKeyId,
+    transparency: {
+      logIndex: integer(transparency.logIndex, `${path}.transparency.logIndex`, 1),
+      leafSha256: digest(transparency.leafSha256, `${path}.transparency.leafSha256`),
+      recordSha256: digest(transparency.recordSha256, `${path}.transparency.recordSha256`),
+    },
+    revoked: boolean(data.revoked, `${path}.revoked`),
+  };
+}
+
+function marketplaceRelease(value: unknown, path: string): PluginMarketplaceRelease {
+  const data = record(value, path);
+  return "artifacts" in data
+    ? marketplaceReleaseV2(data, path)
+    : marketplaceReleaseV1(data, path);
+}
+
 export function parsePluginLocalInstallCandidate(value: unknown): PluginLocalInstallCandidate {
   const data = record(value, "localInstallCandidate");
   exact(data, ["candidateId", "previewSha256", "expiresAt", "preview"], [], "localInstallCandidate");
@@ -2489,7 +2770,25 @@ function marketplaceCandidate(value: unknown, path: string): PluginMarketplaceCa
   const permissionDiff = marketplacePermissionDiff(data.permissionDiff, `${path}.permissionDiff`);
   if (permissionDiff.pluginId !== pluginId) fail(`${path}.permissionDiff.pluginId`);
   const compatibility = record(data.compatibility, `${path}.compatibility`);
-  exact(compatibility, ["hostVersion", "verified"], [], `${path}.compatibility`);
+  const compatibilityV2 = "marketplaceSchema" in compatibility;
+  exact(
+    compatibility,
+    compatibilityV2
+      ? [
+        "hostVersion",
+        "verified",
+        "marketplaceSchema",
+        "platform",
+        "runtimeKinds",
+        "runtimeRegistry",
+        "sandboxAvailable",
+        "cacheReuse",
+        "rolloutStage",
+      ]
+      : ["hostVersion", "verified"],
+    [],
+    `${path}.compatibility`,
+  );
   const migration = record(data.migration, `${path}.migration`);
   exact(migration, ["required", "supported", "policy"], [], `${path}.migration`);
   const observation = record(data.observation, `${path}.observation`);
@@ -2508,6 +2807,7 @@ function marketplaceCandidate(value: unknown, path: string): PluginMarketplaceCa
       "active",
       "rolled-back",
       "failed",
+      "quarantined",
     ] as const), `${path}.phase`),
     preparedAt: utcTimestamp(data.preparedAt, `${path}.preparedAt`),
     fromVersion: data.fromVersion === null ? null : marketplaceVersion(data.fromVersion, `${path}.fromVersion`),
@@ -2515,6 +2815,35 @@ function marketplaceCandidate(value: unknown, path: string): PluginMarketplaceCa
     compatibility: {
       hostVersion: string(compatibility.hostVersion, `${path}.compatibility.hostVersion`, 64),
       verified: compatibility.verified === true ? true : fail(`${path}.compatibility.verified`),
+      ...(compatibilityV2 ? (() => {
+        const platform = record(compatibility.platform, `${path}.compatibility.platform`);
+        exact(platform, ["os", "arch", "artifactId"], [], `${path}.compatibility.platform`);
+        const runtimeKinds = array(compatibility.runtimeKinds, `${path}.compatibility.runtimeKinds`, 5).map((item, index) => (
+          oneOf(item, MARKETPLACE_RUNTIME_KINDS, `${path}.compatibility.runtimeKinds[${index}]`)
+        ));
+        const runtimeRegistry = array(compatibility.runtimeRegistry, `${path}.compatibility.runtimeRegistry`, 32).map((item, index) => {
+          const parsed = jsonValue(item, `${path}.compatibility.runtimeRegistry[${index}]`);
+          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) fail(`${path}.compatibility.runtimeRegistry[${index}]`);
+          return parsed;
+        });
+        return {
+          marketplaceSchema: oneOf(
+            compatibility.marketplaceSchema,
+            new Set(["candlescope.marketplace-index/1", "candlescope.marketplace-index/2"] as const),
+            `${path}.compatibility.marketplaceSchema`,
+          ),
+          platform: {
+            os: string(platform.os, `${path}.compatibility.platform.os`, 16),
+            arch: string(platform.arch, `${path}.compatibility.platform.arch`, 16),
+            artifactId: string(platform.artifactId, `${path}.compatibility.platform.artifactId`, 128),
+          },
+          runtimeKinds,
+          runtimeRegistry,
+          sandboxAvailable: boolean(compatibility.sandboxAvailable, `${path}.compatibility.sandboxAvailable`),
+          cacheReuse: boolean(compatibility.cacheReuse, `${path}.compatibility.cacheReuse`),
+          rolloutStage: oneOf(compatibility.rolloutStage, MARKETPLACE_ROLLOUT_STAGES, `${path}.compatibility.rolloutStage`),
+        };
+      })() : {}),
     },
     migration: {
       required: migration.required === false ? false : fail(`${path}.migration.required`),
@@ -2564,8 +2893,32 @@ function marketplaceUpdate(value: unknown, path: string): PluginMarketplaceUpdat
 
 export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplaceCatalog {
   const data = record(value, "marketplaceCatalog");
-  exact(data, ["schemaVersion", "enabled", "marketplaces", "plugins"], [], "marketplaceCatalog");
-  if (data.schemaVersion !== "candlescope.marketplace-catalog/1") fail("marketplaceCatalog.schemaVersion");
+  const schemaVersion = oneOf(
+    data.schemaVersion,
+    new Set(["candlescope.marketplace-catalog/1", "candlescope.marketplace-catalog/2"] as const),
+    "marketplaceCatalog.schemaVersion",
+  );
+  const schemaV2 = schemaVersion === "candlescope.marketplace-catalog/2";
+  exact(
+    data,
+    schemaV2
+      ? ["schemaVersion", "enabled", "rollout", "marketplaces", "plugins"]
+      : ["schemaVersion", "enabled", "marketplaces", "plugins"],
+    [],
+    "marketplaceCatalog",
+  );
+  const rollout = schemaV2 ? (() => {
+    const item = record(data.rollout, "marketplaceCatalog.rollout");
+    exact(item, ["channel", "stages"], [], "marketplaceCatalog.rollout");
+    const stages = array(item.stages, "marketplaceCatalog.rollout.stages", 4).map((stage, index) => (
+      oneOf(stage, MARKETPLACE_ROLLOUT_STAGES, `marketplaceCatalog.rollout.stages[${index}]`)
+    ));
+    if (stages.join("\0") !== "internal\0opted-in-local\0preview\0stable") fail("marketplaceCatalog.rollout.stages");
+    return {
+      channel: oneOf(item.channel, MARKETPLACE_ROLLOUT_STAGES, "marketplaceCatalog.rollout.channel"),
+      stages: ["internal", "opted-in-local", "preview", "stable"] as const,
+    };
+  })() : undefined;
   const marketplaces = array(data.marketplaces, "marketplaceCatalog.marketplaces", 32).map((raw, index) => {
     const path = `marketplaceCatalog.marketplaces[${index}]`;
     const item = record(raw, path);
@@ -2604,11 +2957,25 @@ export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplace
   const plugins = array(data.plugins, "marketplaceCatalog.plugins", 20_000).map((raw, index) => {
     const path = `marketplaceCatalog.plugins[${index}]`;
     const item = record(raw, path);
-    exact(item, ["pluginId", "publisher", "latest", "releaseCount", "installedVersion", "installable"], [], path);
+    exact(
+      item,
+      schemaV2
+        ? ["pluginId", "publisher", "latest", "assurances", "releaseCount", "installedVersion", "installable"]
+        : ["pluginId", "publisher", "latest", "releaseCount", "installedVersion", "installable"],
+      [],
+      path,
+    );
     const pluginId = string(item.pluginId, `${path}.pluginId`, 128);
     if (!PLUGIN_ID.test(pluginId)) fail(`${path}.pluginId`);
     const publisher = record(item.publisher, `${path}.publisher`);
-    exact(publisher, ["publisherId", "displayName", "keyId", "status"], [], `${path}.publisher`);
+    exact(
+      publisher,
+      schemaV2
+        ? ["publisherId", "displayName", "keyId", "status", "verificationTier"]
+        : ["publisherId", "displayName", "keyId", "status"],
+      [],
+      `${path}.publisher`,
+    );
     const publisherId = string(publisher.publisherId, `${path}.publisher.publisherId`, 128);
     if (!MARKETPLACE_LOCAL_ID.test(publisherId)) fail(`${path}.publisher.publisherId`);
     const publisherStatus = oneOf(
@@ -2618,6 +2985,59 @@ export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplace
     );
     const latest = marketplaceRelease(item.latest, `${path}.latest`);
     if (latest.pluginId !== pluginId || latest.publisherId !== publisherId) fail(path);
+    const verificationTier = schemaV2
+      ? oneOf(publisher.verificationTier, new Set(["verified", "official"] as const), `${path}.publisher.verificationTier`)
+      : undefined;
+    const assurances = schemaV2 ? (() => {
+      const assurance = record(item.assurances, `${path}.assurances`);
+      exact(assurance, [
+        "publisherVerified",
+        "officialMaintained",
+        "sandbox",
+        "permissions",
+        "rolloutStage",
+        "minimumHostVersion",
+        "platform",
+      ], [], `${path}.assurances`);
+      const sandbox = record(assurance.sandbox, `${path}.assurances.sandbox`);
+      exact(sandbox, ["available", "runtimeKinds", "profiles"], [], `${path}.assurances.sandbox`);
+      const runtimeKinds = array(sandbox.runtimeKinds, `${path}.assurances.sandbox.runtimeKinds`, 5).map((kind, kindIndex) => (
+        oneOf(kind, MARKETPLACE_RUNTIME_KINDS, `${path}.assurances.sandbox.runtimeKinds[${kindIndex}]`)
+      ));
+      const profiles = array(sandbox.profiles, `${path}.assurances.sandbox.profiles`, 5).map((profile, profileIndex) => (
+        trustProfile(profile, `${path}.assurances.sandbox.profiles[${profileIndex}]`)
+      ));
+      const sandboxAvailable = boolean(assurance.sandbox && sandbox.available, `${path}.assurances.sandbox.available`);
+      if (sandboxAvailable !== (profiles.length > 0 && profiles.every((profile) => profile.sandboxSupported))) fail(`${path}.assurances.sandbox.available`);
+      const permissions = marketplacePermissionScopes(assurance.permissions, `${path}.assurances.permissions`);
+      const platform = record(assurance.platform, `${path}.assurances.platform`);
+      exact(platform, ["os", "arch", "available", "artifactId"], [], `${path}.assurances.platform`);
+      const publisherVerified = boolean(assurance.publisherVerified, `${path}.assurances.publisherVerified`);
+      const officialMaintained = boolean(assurance.officialMaintained, `${path}.assurances.officialMaintained`);
+      if (
+        !publisherVerified
+        || (officialMaintained && verificationTier !== "official")
+        || latest.officialMaintained !== officialMaintained
+        || latest.rolloutStage !== assurance.rolloutStage
+        || JSON.stringify(latest.permissions) !== JSON.stringify(permissions)
+      ) fail(`${path}.assurances`);
+      return {
+        publisherVerified,
+        officialMaintained,
+        sandbox: { available: sandboxAvailable, runtimeKinds, profiles },
+        permissions,
+        rolloutStage: oneOf(assurance.rolloutStage, MARKETPLACE_ROLLOUT_STAGES, `${path}.assurances.rolloutStage`),
+        minimumHostVersion: assurance.minimumHostVersion === null
+          ? null
+          : marketplaceVersion(assurance.minimumHostVersion, `${path}.assurances.minimumHostVersion`),
+        platform: {
+          os: string(platform.os, `${path}.assurances.platform.os`, 16),
+          arch: string(platform.arch, `${path}.assurances.platform.arch`, 16),
+          available: boolean(platform.available, `${path}.assurances.platform.available`),
+          artifactId: platform.artifactId === null ? null : string(platform.artifactId, `${path}.assurances.platform.artifactId`, 128),
+        },
+      };
+    })() : undefined;
     const installable = boolean(item.installable, `${path}.installable`);
     if (installable && latest.artifact.size > MARKETPLACE_MAX_REMOTE_ARTIFACT_BYTES) fail(`${path}.installable`);
     return {
@@ -2627,8 +3047,10 @@ export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplace
         displayName: string(publisher.displayName, `${path}.publisher.displayName`, 128),
         keyId: keyId(publisher.keyId, `${path}.publisher.keyId`),
         status: publisherStatus,
+        ...(verificationTier === undefined ? {} : { verificationTier }),
       },
       latest,
+      ...(assurances === undefined ? {} : { assurances }),
       releaseCount: integer(item.releaseCount, `${path}.releaseCount`, 1, 20_000),
       installedVersion: item.installedVersion === null ? null : marketplaceVersion(item.installedVersion, `${path}.installedVersion`),
       installable,
@@ -2636,8 +3058,9 @@ export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplace
   });
   if (new Set(plugins.map((item) => item.pluginId)).size !== plugins.length) fail("marketplaceCatalog.plugins");
   return {
-    schemaVersion: "candlescope.marketplace-catalog/1",
+    schemaVersion,
     enabled: boolean(data.enabled, "marketplaceCatalog.enabled"),
+    ...(rollout === undefined ? {} : { rollout }),
     marketplaces,
     plugins,
   };
@@ -2645,7 +3068,25 @@ export function parsePluginMarketplaceCatalog(value: unknown): PluginMarketplace
 
 export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceStatus {
   const data = record(value, "marketplaceStatus");
-  exact(data, [
+  const schemaVersion = oneOf(
+    data.schemaVersion,
+    new Set(["candlescope.marketplace-status/1", "candlescope.marketplace-status/2"] as const),
+    "marketplaceStatus.schemaVersion",
+  );
+  const schemaV2 = schemaVersion === "candlescope.marketplace-status/2";
+  exact(data, schemaV2 ? [
+    "schemaVersion",
+    "enabled",
+    "automaticUpdates",
+    "rootCount",
+    "validCacheCount",
+    "cacheErrors",
+    "candidates",
+    "updates",
+    "rollout",
+    "telemetry",
+    "quarantine",
+  ] : [
     "schemaVersion",
     "enabled",
     "automaticUpdates",
@@ -2655,7 +3096,6 @@ export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceS
     "candidates",
     "updates",
   ], [], "marketplaceStatus");
-  if (data.schemaVersion !== "candlescope.marketplace-status/1") fail("marketplaceStatus.schemaVersion");
   const cacheErrorsRaw = record(data.cacheErrors, "marketplaceStatus.cacheErrors");
   if (Object.keys(cacheErrorsRaw).length > 32) fail("marketplaceStatus.cacheErrors");
   const cacheErrors = Object.fromEntries(Object.entries(cacheErrorsRaw).map(([marketplaceId, error]) => {
@@ -2677,8 +3117,83 @@ export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceS
     return { pluginId, ...update };
   });
   if (new Set(updates.map((item) => item.pluginId)).size !== updates.length) fail("marketplaceStatus.updates");
+  const rollout = schemaV2 ? (() => {
+    const item = record(data.rollout, "marketplaceStatus.rollout");
+    exact(item, ["channel", "stages"], [], "marketplaceStatus.rollout");
+    const stages = array(item.stages, "marketplaceStatus.rollout.stages", 4).map((stage, index) => (
+      oneOf(stage, MARKETPLACE_ROLLOUT_STAGES, `marketplaceStatus.rollout.stages[${index}]`)
+    ));
+    if (stages.join("\0") !== "internal\0opted-in-local\0preview\0stable") fail("marketplaceStatus.rollout.stages");
+    return {
+      channel: oneOf(item.channel, MARKETPLACE_ROLLOUT_STAGES, "marketplaceStatus.rollout.channel"),
+      stages: ["internal", "opted-in-local", "preview", "stable"] as const,
+    };
+  })() : undefined;
+  const telemetry = schemaV2 ? (() => {
+    const item = record(data.telemetry, "marketplaceStatus.telemetry");
+    exact(item, ["enabled", "uploadEnabled", "storage", "privacy", "counters"], [], "marketplaceStatus.telemetry");
+    if (item.uploadEnabled !== false || item.storage !== "local-aggregate-only") fail("marketplaceStatus.telemetry");
+    const privacy = record(item.privacy, "marketplaceStatus.telemetry.privacy");
+    exact(privacy, ["identifiers", "strategyInputs", "accounts", "pluginPrivateData"], [], "marketplaceStatus.telemetry.privacy");
+    if (Object.values(privacy).some((entry) => entry !== false)) fail("marketplaceStatus.telemetry.privacy");
+    const runtimeKinds = new Set([...MARKETPLACE_RUNTIME_KINDS, "mixed", "none"] as const);
+    const operations = new Set([
+      "refresh", "cache-reuse", "prepare", "apply", "activate", "observation", "rollback", "revocation-quarantine",
+    ] as const);
+    const outcomes = new Set(["success", "failure", "quarantined"] as const);
+    const counters = array(item.counters, "marketplaceStatus.telemetry.counters", 10_000).map((raw, index) => {
+      const counterPath = `marketplaceStatus.telemetry.counters[${index}]`;
+      const counter = record(raw, counterPath);
+      exact(counter, ["runtimeKind", "operation", "outcome", "count"], [], counterPath);
+      return {
+        runtimeKind: oneOf(counter.runtimeKind, runtimeKinds, `${counterPath}.runtimeKind`),
+        operation: oneOf(counter.operation, operations, `${counterPath}.operation`),
+        outcome: oneOf(counter.outcome, outcomes, `${counterPath}.outcome`),
+        count: integer(counter.count, `${counterPath}.count`, 1),
+      };
+    });
+    return {
+      enabled: boolean(item.enabled, "marketplaceStatus.telemetry.enabled"),
+      uploadEnabled: false as const,
+      storage: "local-aggregate-only" as const,
+      privacy: {
+        identifiers: false as const,
+        strategyInputs: false as const,
+        accounts: false as const,
+        pluginPrivateData: false as const,
+      },
+      counters,
+    };
+  })() : undefined;
+  const quarantine = schemaV2 ? array(data.quarantine, "marketplaceStatus.quarantine", 10_000).map((raw, index) => {
+    const itemPath = `marketplaceStatus.quarantine[${index}]`;
+    const item = record(raw, itemPath);
+    exact(item, [
+      "schemaVersion",
+      "pluginId",
+      "version",
+      "bundleSha256",
+      "reason",
+      "quarantinedAt",
+      "artifactFile",
+      "payloadMoved",
+    ], [], itemPath);
+    if (item.schemaVersion !== "candlescope.marketplace-quarantine/1") fail(`${itemPath}.schemaVersion`);
+    const pluginId = string(item.pluginId, `${itemPath}.pluginId`, 128);
+    if (!PLUGIN_ID.test(pluginId)) fail(`${itemPath}.pluginId`);
+    return {
+      schemaVersion: "candlescope.marketplace-quarantine/1" as const,
+      pluginId,
+      version: marketplaceVersion(item.version, `${itemPath}.version`),
+      bundleSha256: digest(item.bundleSha256, `${itemPath}.bundleSha256`),
+      reason: string(item.reason, `${itemPath}.reason`, 128),
+      quarantinedAt: utcTimestamp(item.quarantinedAt, `${itemPath}.quarantinedAt`),
+      artifactFile: item.artifactFile === null ? null : string(item.artifactFile, `${itemPath}.artifactFile`, 128),
+      payloadMoved: boolean(item.payloadMoved, `${itemPath}.payloadMoved`),
+    };
+  }) : undefined;
   return {
-    schemaVersion: "candlescope.marketplace-status/1",
+    schemaVersion,
     enabled: boolean(data.enabled, "marketplaceStatus.enabled"),
     automaticUpdates: data.automaticUpdates === false ? false : fail("marketplaceStatus.automaticUpdates"),
     rootCount: integer(data.rootCount, "marketplaceStatus.rootCount", 0, 32),
@@ -2686,6 +3201,9 @@ export function parsePluginMarketplaceStatus(value: unknown): PluginMarketplaceS
     cacheErrors,
     candidates,
     updates,
+    ...(rollout === undefined ? {} : { rollout }),
+    ...(telemetry === undefined ? {} : { telemetry }),
+    ...(quarantine === undefined ? {} : { quarantine }),
   };
 }
 

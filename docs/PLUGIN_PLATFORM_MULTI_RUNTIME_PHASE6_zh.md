@@ -368,7 +368,7 @@ Marketplace 文案固定为：“身份已验证不代表代码安全或官方�
 `backend/tests/fixtures/plugin_platform_multi_runtime/phase6_contract_v1.json`
 
 合同 SHA-256：
-`8e1e9e873d7497a8a2eee047f9bd8a1ba66e38015f5c5a80107606ea6871eae9`
+`41129042cbbe370bd782620bc13e05ae71f0c571870354a0050b353de2eb0b0d`
 
 合同冻结：alias、trust state、双重确认、Grant Store 绑定、sandbox profiles、攻击 fixture、
 Registry revision 3、ta4j runtime 迁移、API guard、UI parser/surface digest、默认开关、Phase 5
@@ -380,7 +380,10 @@ Registry revision 3、ta4j runtime 迁移、API guard、UI parser/surface digest
 `docs/perf-baselines/plugin-platform-v2/multi-runtime-phase6-2026-08-03-windows-amd64.json`
 
 证据 SHA-256：
-`46c26b4b02d6ba6413d60759478b542365d7fc7c08344107a02a1116dc6e0b76`
+`73a8b5717e7de73908e2adf1d317ed010c0da5eed3de3db7ce7a8281d5514445`
+
+以上摘要在 Phase 10 增加 Marketplace v2 严格 parser 与信任标签后重新冻结，并完整重跑本节真实
+Windows gate；攻击矩阵、授权边界和默认关闭语义没有被放宽。
 
 真实 gate 覆盖：
 

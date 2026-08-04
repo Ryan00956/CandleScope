@@ -335,6 +335,7 @@ class CorePluginPlatform:
             roots=tuple(marketplace_roots),
             enabled=marketplace_enabled,
             fetcher=marketplace_fetcher,
+            managed_runtime_registry=managed_runtime_registry,
         )
         self.authority = CapabilityHandleAuthority(
             self.audit_log,
@@ -2574,7 +2575,7 @@ class CorePluginPlatform:
                 if supervisor.state == "stopped":
                     await supervisor.start()
                 if supervisor.state == "handshaken":
-                    await supervisor.activate(grants)
+                    await supervisor.activate(effective_grants=grants)
                 if supervisor.state != "active":
                     raise core_error(
                         "PLUGIN_CORE_HEALTH_OBSERVATION_FAILED",

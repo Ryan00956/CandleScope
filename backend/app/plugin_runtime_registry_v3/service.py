@@ -1552,6 +1552,91 @@ class ManagedRuntimeRegistryService:
             )
             return registry, release
 
+    def verify_marketplace_binding(
+        self,
+        *,
+        registry_id: str,
+        registry_revision: int,
+        registry_sha256: str,
+        runtime_id: str,
+        runtime_kind: str,
+        runtime_artifact_sha256: str,
+        license_expression: str,
+        operating_system: str,
+        architecture: str,
+    ) -> dict[str, Any]:
+        """Verify signed Marketplace evidence against the active registry ancestry.
+
+        A release may bind an older accepted registry revision only while that
+        revision remains an ancestor of the active head.  A forward revision
+        left in storage after rollback is intentionally rejected.
+        """
+
+        self._assert_enabled()
+        with security_lock(self.lock_path):
+            active, state = self._active_registry_locked()
+            ancestry: dict[str, VerifiedRuntimeRegistry] = {}
+            current = active
+            while True:
+                ancestry[current.sha256] = current
+                if current.previous_registry_sha256 is None:
+                    break
+                current = self._load_registry_digest(current.previous_registry_sha256)
+            registry = ancestry.get(registry_sha256)
+            if (
+                registry is None
+                or registry.registry_id != registry_id
+                or registry.revision != registry_revision
+            ):
+                raise registry_error(
+                    "PLUGIN_RUNTIME_REGISTRY_BINDING_INVALID",
+                    "Marketplace runtime binding is not on the active signed registry ancestry",
+                    details={
+                        "registryId": registry_id,
+                        "registryRevision": registry_revision,
+                        "registrySha256": registry_sha256,
+                        "activeRegistrySha256": active.sha256,
+                    },
+                )
+            release = registry.by_key().get(
+                (runtime_id, runtime_kind, operating_system, architecture)
+            )
+            if (
+                release is None
+                or release.sha256 != runtime_artifact_sha256
+                or release.license_spdx != license_expression
+            ):
+                raise registry_error(
+                    "PLUGIN_RUNTIME_REGISTRY_BINDING_INVALID",
+                    "Marketplace runtime binding does not match the signed registry release",
+                    details={
+                        "runtimeId": runtime_id,
+                        "runtimeKind": runtime_kind,
+                        "os": operating_system,
+                        "arch": architecture,
+                    },
+                )
+            if release.sha256 in state["revokedArtifactSha256"]:
+                raise registry_error(
+                    "PLUGIN_RUNTIME_REGISTRY_RUNTIME_REVOKED",
+                    "Marketplace runtime binding references a revoked runtime artifact",
+                    details={
+                        "runtimeId": runtime_id,
+                        "sha256": release.sha256,
+                    },
+                )
+            return {
+                "registryId": registry.registry_id,
+                "registryRevision": registry.revision,
+                "registrySha256": registry.sha256,
+                "activeRegistrySha256": active.sha256,
+                "runtimeId": release.runtime_id,
+                "runtimeKind": release.kind,
+                "runtimeArtifactSha256": release.sha256,
+                "licenseExpression": release.license_spdx,
+                "verified": True,
+            }
+
     def _stage_download(
         self,
         *,

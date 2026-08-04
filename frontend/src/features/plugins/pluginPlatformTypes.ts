@@ -543,18 +543,72 @@ export interface PluginCatalog {
   trustUx?: PluginTrustUxStatus;
 }
 
+export interface PluginMarketplaceArtifact {
+  fileName: string;
+  url: string;
+  sha256: string;
+  size: number;
+  manifestSha256: string;
+  sbomSha256: string;
+}
+
+export interface PluginMarketplaceRuntimeBinding {
+  entrypointId: string;
+  runtimeKind: "python-module" | "native-executable" | "java-jar" | "node-module" | "wasm-component";
+  runtimeId: string;
+  pluginArtifactPath: string;
+  pluginArtifactSha256: string;
+  supplySource: "host-python" | "plugin-bundled" | "host-managed";
+  hostRuntime: null | {
+    registryId: string;
+    registryRevision: number;
+    registrySha256: string;
+    runtimeArtifactSha256: string;
+    licenseExpression: string;
+  };
+}
+
+export interface PluginMarketplaceSignedArtifact extends PluginMarketplaceArtifact {
+  artifactId: string;
+  os: "windows" | "linux" | "macos";
+  arch: "x86_64" | "arm64";
+  licenseInventorySha256: string;
+  runtimeBindings: PluginMarketplaceRuntimeBinding[];
+  provenance: {
+    sourceRepository: string;
+    sourceCommit: string;
+    buildReceiptUrl: string;
+    buildReceiptSha256: string;
+    rebuildInstructionsUrl: string;
+    rebuildInstructionsSha256: string;
+    reproducibleBuilds: true;
+  };
+  reviewPolicy: {
+    distribution: "prebuilt-only";
+    sourceBuild: false;
+    systemRuntimeFallback: false;
+    undeclaredDownloads: false;
+  };
+  signature: {
+    algorithm: "ed25519";
+    keyId: string;
+    value: string;
+  };
+}
+
+export interface PluginMarketplacePermissionScope {
+  id: string;
+  scope: Record<string, JsonValue>;
+}
+
 export interface PluginMarketplaceRelease {
   pluginId: string;
   version: string;
   publisherId: string;
-  artifact: {
-    fileName: string;
-    url: string;
-    sha256: string;
-    size: number;
-    manifestSha256: string;
-    sbomSha256: string;
-  };
+  /** Host-selected compatibility projection; v2 also retains all signed artifacts. */
+  artifact: PluginMarketplaceArtifact;
+  artifacts?: PluginMarketplaceSignedArtifact[];
+  runtimeKinds?: PluginMarketplaceRuntimeBinding["runtimeKind"][];
   publishedAt: string;
   licenseExpression: string;
   dependencies: Array<{
@@ -564,6 +618,13 @@ export interface PluginMarketplaceRelease {
   }>;
   sha256Sums: string;
   sha256SumsSha256: string;
+  minimumHostVersion?: string;
+  rolloutStage?: "internal" | "opted-in-local" | "preview" | "stable";
+  officialMaintained?: boolean;
+  permissions?: {
+    required: PluginMarketplacePermissionScope[];
+    optional: PluginMarketplacePermissionScope[];
+  };
   publisherKeyId: string;
   transparency: {
     logIndex: number;
@@ -613,13 +674,21 @@ export interface PluginMarketplaceCandidate {
     | "observing"
     | "active"
     | "rolled-back"
-    | "failed";
+    | "failed"
+    | "quarantined";
   preparedAt: string;
   fromVersion: string | null;
   permissionDiff: PluginMarketplacePermissionDiff;
   compatibility: {
     hostVersion: string;
     verified: true;
+    marketplaceSchema?: "candlescope.marketplace-index/1" | "candlescope.marketplace-index/2";
+    platform?: { os: string; arch: string; artifactId: string };
+    runtimeKinds?: PluginMarketplaceRuntimeBinding["runtimeKind"][];
+    runtimeRegistry?: Array<Record<string, JsonValue>>;
+    sandboxAvailable?: boolean;
+    cacheReuse?: boolean;
+    rolloutStage?: "internal" | "opted-in-local" | "preview" | "stable";
   };
   migration: {
     required: false;
@@ -643,9 +712,35 @@ export interface PluginMarketplaceUpdate {
   latest: PluginMarketplaceRelease | null;
 }
 
+export interface PluginMarketplaceAssurances {
+  publisherVerified: boolean;
+  officialMaintained: boolean;
+  sandbox: {
+    available: boolean;
+    runtimeKinds: PluginMarketplaceRuntimeBinding["runtimeKind"][];
+    profiles: PluginRestrictedRuntimeProfile[];
+  };
+  permissions: {
+    required: PluginMarketplacePermissionScope[];
+    optional: PluginMarketplacePermissionScope[];
+  };
+  rolloutStage: "internal" | "opted-in-local" | "preview" | "stable";
+  minimumHostVersion: string | null;
+  platform: {
+    os: string;
+    arch: string;
+    available: boolean;
+    artifactId: string | null;
+  };
+}
+
 export interface PluginMarketplaceCatalog {
-  schemaVersion: "candlescope.marketplace-catalog/1";
+  schemaVersion: "candlescope.marketplace-catalog/1" | "candlescope.marketplace-catalog/2";
   enabled: boolean;
+  rollout?: {
+    channel: "internal" | "opted-in-local" | "preview" | "stable";
+    stages: readonly ["internal", "opted-in-local", "preview", "stable"];
+  };
   marketplaces: Array<{
     marketplaceId: string;
     indexUrl: string;
@@ -669,8 +764,10 @@ export interface PluginMarketplaceCatalog {
       displayName: string;
       keyId: string;
       status: "active";
+      verificationTier?: "verified" | "official";
     };
     latest: PluginMarketplaceRelease;
+    assurances?: PluginMarketplaceAssurances;
     releaseCount: number;
     installedVersion: string | null;
     installable: boolean;
@@ -678,7 +775,7 @@ export interface PluginMarketplaceCatalog {
 }
 
 export interface PluginMarketplaceStatus {
-  schemaVersion: "candlescope.marketplace-status/1";
+  schemaVersion: "candlescope.marketplace-status/1" | "candlescope.marketplace-status/2";
   enabled: boolean;
   automaticUpdates: false;
   rootCount: number;
@@ -686,6 +783,34 @@ export interface PluginMarketplaceStatus {
   cacheErrors: Record<string, string>;
   candidates: PluginMarketplaceCandidate[];
   updates: Array<PluginMarketplaceUpdate & { pluginId: string }>;
+  rollout?: PluginMarketplaceCatalog["rollout"];
+  telemetry?: {
+    enabled: boolean;
+    uploadEnabled: false;
+    storage: "local-aggregate-only";
+    privacy: {
+      identifiers: false;
+      strategyInputs: false;
+      accounts: false;
+      pluginPrivateData: false;
+    };
+    counters: Array<{
+      runtimeKind: PluginMarketplaceRuntimeBinding["runtimeKind"] | "mixed" | "none";
+      operation: "refresh" | "cache-reuse" | "prepare" | "apply" | "activate" | "observation" | "rollback" | "revocation-quarantine";
+      outcome: "success" | "failure" | "quarantined";
+      count: number;
+    }>;
+  };
+  quarantine?: Array<{
+    schemaVersion: "candlescope.marketplace-quarantine/1";
+    pluginId: string;
+    version: string;
+    bundleSha256: string;
+    reason: string;
+    quarantinedAt: string;
+    artifactFile: string | null;
+    payloadMoved: boolean;
+  }>;
 }
 
 export interface PluginViewProjection {

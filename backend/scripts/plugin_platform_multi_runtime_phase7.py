@@ -986,7 +986,14 @@ async def _real_gate_async(root: Path, evidence_directory: Path) -> dict[str, An
     finally:
         await disabled_platform.stop()
 
-    rolled = registry.rollback_registry()
+    rollback_steps: list[dict[str, Any]] = []
+    while registry.active_registry().revision > 3:
+        rollback_steps.append(registry.rollback_registry())
+    if not rollback_steps or registry.active_registry().revision != 3:
+        raise Phase7GateError(
+            "Registry rollback did not reach the Phase 7 pre-Node revision"
+        )
+    rolled = rollback_steps[-1]
     try:
         registry.ensure(NODE_RUNTIME_ID, "node", offline=True)
     except RuntimeRegistryError as exc:
@@ -1052,6 +1059,14 @@ async def _real_gate_async(root: Path, evidence_directory: Path) -> dict[str, An
         "marketplace": marketplace,
         "disabled": disabled,
         "registryRollback": {
+            "fromRevision": rollback_steps[0]["fromRevision"],
+            "steps": [
+                {
+                    "fromRevision": item["fromRevision"],
+                    "toRevision": item["toRevision"],
+                }
+                for item in rollback_steps
+            ],
             "toRevision": rolled["toRevision"],
             "nodeUnavailableCode": rollback_unavailable_code,
             "restoredRevision": restored["revision"],

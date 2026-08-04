@@ -20,6 +20,16 @@ def test_phase7_recorded_real_gate_is_current_and_passed() -> None:
     assert evidence["runtime"]["cancelled"] is True
     assert evidence["sandbox"]["sandboxMode"] == "windows-appcontainer"
     assert evidence["marketplace"]["residualProcesses"] == 0
+    assert evidence["registryRollback"] == {
+        "fromRevision": 5,
+        "steps": [
+            {"fromRevision": 5, "toRevision": 4},
+            {"fromRevision": 4, "toRevision": 3},
+        ],
+        "toRevision": 3,
+        "nodeUnavailableCode": "PLUGIN_RUNTIME_REGISTRY_RUNTIME_NOT_FOUND",
+        "restoredRevision": 4,
+    }
 
 
 def test_phase7_release_gate_summary_is_fail_closed() -> None:

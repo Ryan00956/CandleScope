@@ -672,6 +672,13 @@ function MarketplacePanel({
       <details className="plugin-technical-details">
         <summary>签名边界与更新策略</summary>
         <p>市场元数据不会自动授予权限。下载只会生成已验证的候选版本，应用与激活均需显式操作，自动更新保持关闭。</p>
+        {catalog.rollout && <p>发布通道：{catalog.rollout.channel}（internal → opted-in local → preview → stable）。</p>}
+        {status?.telemetry && (
+          <p data-marketplace-telemetry={status.telemetry.enabled ? "enabled" : "disabled"}>
+            匿名稳定性遥测：{status.telemetry.enabled ? "用户已选择，仅保存在本机聚合计数" : "关闭"}
+            · 上传始终关闭 · 不记录策略输入、账户、标识符或插件私有数据
+          </p>
+        )}
       </details>
       <div className="plugin-marketplace-roots">
         {catalog.marketplaces.map((marketplace) => (
@@ -705,21 +712,47 @@ function MarketplacePanel({
           const installed = runtime.view.catalog?.plugins.find((item) => item.id === entry.pluginId) ?? null;
           const prepareAvailable = entry.installedVersion === null || update?.available === true;
           const activationReady = installed?.permissions.activationReady === true;
+          const selectedArtifact = entry.latest.artifacts?.find(
+            (artifact) => artifact.artifactId === entry.assurances?.platform.artifactId,
+          ) ?? entry.latest.artifact;
           return (
             <article key={entry.pluginId} data-marketplace-plugin={entry.pluginId}>
               <div className="plugin-marketplace-title">
                 <div>
                   <strong>{entry.pluginId}</strong>
-                  <small>{entry.publisher.displayName} · publisher key {entry.publisher.keyId.slice(0, 24)}… · 非安全背书</small>
+                  <small>{entry.publisher.displayName} · publisher key {entry.publisher.keyId.slice(0, 24)}… · 发布者验证不等于代码安全</small>
                 </div>
                 <span>
                   {entry.latest.version} · {entry.latest.licenseExpression}
                   {entry.latest.revoked ? " · revoked" : ""}
                 </span>
               </div>
+              {entry.assurances && (
+                <div className="plugin-marketplace-assurances" data-marketplace-assurances={entry.pluginId}>
+                  <span data-marketplace-publisher-verified={entry.assurances.publisherVerified}>
+                    发布者：{entry.assurances.publisherVerified ? "已验证" : "未验证"}
+                  </span>
+                  <span data-marketplace-official-maintained={entry.assurances.officialMaintained}>
+                    维护方：{entry.assurances.officialMaintained ? "CandleScope 官方" : "社区发布者"}
+                  </span>
+                  <span data-marketplace-sandbox-available={entry.assurances.sandbox.available}>
+                    沙箱：{entry.assurances.sandbox.available ? "本机可用" : "本机不可用"}
+                    {` · ${entry.assurances.sandbox.runtimeKinds.join(", ") || "无运行时"}`}
+                  </span>
+                  <span data-marketplace-rollout-stage={entry.assurances.rolloutStage}>
+                    发布阶段：{entry.assurances.rolloutStage}
+                  </span>
+                  <details data-marketplace-permission-scope>
+                    <summary>
+                      权限范围：{entry.assurances.permissions.required.length} 个必需，{entry.assurances.permissions.optional.length} 个可选
+                    </summary>
+                    <pre>{JSON.stringify(entry.assurances.permissions, null, 2)}</pre>
+                  </details>
+                </div>
+              )}
               <p>
-                {entry.latest.artifact.sha256}
-                {` · ${entry.latest.artifact.size} bytes · transparency #${entry.latest.transparency.logIndex}`}
+                {selectedArtifact.sha256}
+                {` · ${selectedArtifact.size} bytes · transparency #${entry.latest.transparency.logIndex}`}
               </p>
               <p>
                 Installed: {entry.installedVersion ?? "no"}
@@ -730,6 +763,8 @@ function MarketplacePanel({
                   <p>
                     Compatibility: Host {candidate.compatibility.hostVersion} verified · migration {candidate.migration.policy}
                     {` · permission confirmation ${candidate.permissionDiff.requiresConfirmation ? "required" : "not required"}`}
+                    {candidate.compatibility.runtimeKinds ? ` · ${candidate.compatibility.runtimeKinds.join(", ")}` : ""}
+                    {candidate.compatibility.cacheReuse === true ? " · offline verified cache reuse" : ""}
                   </p>
                   {candidate.permissionDiff.permissions.length > 0 && (
                     <ul>
@@ -743,6 +778,9 @@ function MarketplacePanel({
                   )}
                   {candidate.observation.status !== "not-started" && (
                     <p>Health observation: {candidate.observation.status}{candidate.observation.detail ? ` · ${candidate.observation.detail}` : ""}</p>
+                  )}
+                  {candidate.phase === "quarantined" && (
+                    <p role="alert">该签名版本已撤销，缓存产物已隔离，不能继续应用或激活。</p>
                   )}
                 </div>
               )}
@@ -794,6 +832,16 @@ function MarketplacePanel({
             </article>
           );
         })}
+        {status?.quarantine && status.quarantine.length > 0 && (
+          <details className="plugin-technical-details" data-marketplace-quarantine>
+            <summary>已隔离版本：{status.quarantine.length}</summary>
+            {status.quarantine.map((item) => (
+              <p key={`${item.bundleSha256}:${item.quarantinedAt}`}>
+                {item.pluginId} {item.version} · {item.reason} · {item.quarantinedAt}
+              </p>
+            ))}
+          </details>
+        )}
         {catalog.enabled && !catalog.plugins.length && <p>已验证的插件索引中暂无可安装版本。</p>}
       </div>
     </section>

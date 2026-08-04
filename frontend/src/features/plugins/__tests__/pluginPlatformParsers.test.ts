@@ -307,6 +307,75 @@ function marketplaceRelease() {
   };
 }
 
+function marketplaceReleaseV2() {
+  const fileName = "candlescope.aho-corasick-0.1.0-windows-x86_64.cspkg";
+  const artifactSha256 = `sha256:${"9".repeat(64)}`;
+  const artifact = {
+    artifactId: "windows-x86_64",
+    os: "windows",
+    arch: "x86_64",
+    fileName,
+    url: `https://plugins.example.invalid/artifacts/${fileName}`,
+    sha256: artifactSha256,
+    size: 4096,
+    manifestSha256: `sha256:${"8".repeat(64)}`,
+    sbomSha256: `sha256:${"7".repeat(64)}`,
+    licenseInventorySha256: `sha256:${"6".repeat(64)}`,
+    runtimeBindings: [{
+      entrypointId: "main",
+      runtimeKind: "native-executable",
+      runtimeId: "native-host",
+      pluginArtifactPath: "runtime/adapter.exe",
+      pluginArtifactSha256: `sha256:${"5".repeat(64)}`,
+      supplySource: "plugin-bundled",
+      hostRuntime: null,
+    }],
+    provenance: {
+      sourceRepository: "https://github.com/BurntSushi/aho-corasick",
+      sourceCommit: "4".repeat(40),
+      buildReceiptUrl: "https://plugins.example.invalid/provenance/receipt.json",
+      buildReceiptSha256: `sha256:${"3".repeat(64)}`,
+      rebuildInstructionsUrl: "https://plugins.example.invalid/provenance/rebuild.md",
+      rebuildInstructionsSha256: `sha256:${"2".repeat(64)}`,
+      reproducibleBuilds: true,
+    },
+    reviewPolicy: {
+      distribution: "prebuilt-only",
+      sourceBuild: false,
+      systemRuntimeFallback: false,
+      undeclaredDownloads: false,
+    },
+    signature: {
+      algorithm: "ed25519",
+      keyId: `ed25519:${"e".repeat(64)}`,
+      value: "signed-artifact",
+    },
+  };
+  return {
+    pluginId: "candlescope.aho-corasick",
+    version: "0.1.0",
+    publisherId: "candlescope",
+    artifacts: [artifact],
+    publishedAt: "2026-08-03T00:00:00Z",
+    licenseExpression: "GPL-3.0-only",
+    dependencies: [{ name: "aho-corasick", version: "1.1.4", licenseExpression: "Unlicense OR MIT" }],
+    minimumHostVersion: "0.4.0",
+    rolloutStage: "preview",
+    officialMaintained: true,
+    permissions: { required: [], optional: [] },
+    sha256Sums: `${"9".repeat(64)}  ${fileName}\n`,
+    sha256SumsSha256: `sha256:${"1".repeat(64)}`,
+    publisherKeyId: `ed25519:${"e".repeat(64)}`,
+    runtimeKinds: ["native-executable"],
+    transparency: {
+      logIndex: 1,
+      leafSha256: `sha256:${"f".repeat(64)}`,
+      recordSha256: `sha256:${"0".repeat(64)}`,
+    },
+    revoked: false,
+  };
+}
+
 function marketplaceCandidate() {
   return {
     pluginId: "acme.scanner",
@@ -1344,6 +1413,116 @@ test("marketplace catalog and status preserve only verified distribution metadat
   const injected = structuredClone(marketplaceCatalog);
   Object.assign(injected.plugins[0]!.latest, { installScript: "powershell -enc ..." });
   assert.throws(() => parsePluginMarketplaceCatalog(injected), /invalid/);
+});
+
+test("marketplace v2 preserves separate supply-chain assurances and local-only telemetry", () => {
+  const release = marketplaceReleaseV2();
+  const catalog = {
+    schemaVersion: "candlescope.marketplace-catalog/2",
+    enabled: true,
+    rollout: {
+      channel: "preview",
+      stages: ["internal", "opted-in-local", "preview", "stable"],
+    },
+    marketplaces: [{
+      marketplaceId: "candlescope.community",
+      indexUrl: "https://plugins.example.invalid/index.json",
+      keyId: `ed25519:${"2".repeat(64)}`,
+      enabled: true,
+      cache: {
+        status: "valid",
+        sequence: 2,
+        expiresAt: "2026-09-02T00:00:00Z",
+      },
+    }],
+    plugins: [{
+      pluginId: "candlescope.aho-corasick",
+      publisher: {
+        publisherId: "candlescope",
+        displayName: "CandleScope Official",
+        keyId: `ed25519:${"e".repeat(64)}`,
+        status: "active",
+        verificationTier: "official",
+      },
+      latest: release,
+      assurances: {
+        publisherVerified: true,
+        officialMaintained: true,
+        sandbox: {
+          available: true,
+          runtimeKinds: ["native-executable"],
+          profiles: [{
+            profileId: "restricted-native-v1",
+            runtimeKind: "native-executable",
+            sandboxMode: "windows-appcontainer",
+            sandboxSupported: true,
+            trustedLocalOnly: false,
+            networkDefault: "denied",
+            subprocessDeclared: false,
+            limits: { maxProcesses: 1 },
+          }],
+        },
+        permissions: { required: [], optional: [] },
+        rolloutStage: "preview",
+        minimumHostVersion: "0.4.0",
+        platform: {
+          os: "windows",
+          arch: "x86_64",
+          available: true,
+          artifactId: "windows-x86_64",
+        },
+      },
+      releaseCount: 1,
+      installedVersion: null,
+      installable: true,
+    }],
+  };
+  const parsed = parsePluginMarketplaceCatalog(catalog);
+  assert.equal(parsed.schemaVersion, "candlescope.marketplace-catalog/2");
+  assert.equal(parsed.plugins[0]?.publisher.verificationTier, "official");
+  assert.equal(parsed.plugins[0]?.assurances?.sandbox.available, true);
+  assert.equal(parsed.plugins[0]?.latest.artifacts?.[0]?.reviewPolicy.sourceBuild, false);
+
+  const status = {
+    schemaVersion: "candlescope.marketplace-status/2",
+    enabled: true,
+    automaticUpdates: false,
+    rootCount: 1,
+    validCacheCount: 1,
+    cacheErrors: {},
+    candidates: [],
+    updates: [],
+    rollout: catalog.rollout,
+    telemetry: {
+      enabled: true,
+      uploadEnabled: false,
+      storage: "local-aggregate-only",
+      privacy: {
+        identifiers: false,
+        strategyInputs: false,
+        accounts: false,
+        pluginPrivateData: false,
+      },
+      counters: [{ runtimeKind: "native-executable", operation: "prepare", outcome: "success", count: 1 }],
+    },
+    quarantine: [{
+      schemaVersion: "candlescope.marketplace-quarantine/1",
+      pluginId: "candlescope.aho-corasick",
+      version: "0.1.0",
+      bundleSha256: `sha256:${"9".repeat(64)}`,
+      reason: "MALICIOUS_RELEASE",
+      quarantinedAt: "2026-08-03T01:00:00Z",
+      artifactFile: `${"9".repeat(64)}.cspkg`,
+      payloadMoved: true,
+    }],
+  };
+  const parsedStatus = parsePluginMarketplaceStatus(status);
+  assert.equal(parsedStatus.telemetry?.uploadEnabled, false);
+  assert.equal(parsedStatus.quarantine?.[0]?.reason, "MALICIOUS_RELEASE");
+
+  const unsafe = structuredClone(catalog);
+  unsafe.plugins[0]!.latest.artifacts[0]!.reviewPolicy.sourceBuild = true;
+  assert.throws(() => parsePluginMarketplaceCatalog(unsafe), /reviewPolicy/);
 });
 
 test("management detail accepts only the Host-projected lifecycle shape", () => {

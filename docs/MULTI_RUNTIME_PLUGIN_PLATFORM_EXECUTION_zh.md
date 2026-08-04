@@ -1,14 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～9 已完成；Phase 10～11 尚未交付）
+> 状态：`IN_EXECUTION`（Phase 0～10 已完成；Phase 11 尚未交付）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
-> 本文是实施计划，不代表下述多运行时能力已经交付。
+> 本文同时记录实施与验收；Phase 11 中尚未完成的 GA 项目不代表当前能力声明。
 
 当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE9_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；Phase 10～11 仍是计划，不是当前能力声明。
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE10_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；Phase 11 仍是计划，不是当前 GA 能力声明。
 
 ## 1. 决策摘要
 
@@ -1046,6 +1046,21 @@ Phase 9 专用门禁 `37 passed`；全量 60 个插件测试文件按互斥集�
 
 撤销 Marketplace release 或 runtime registry revision；本地可信插件继续由用户管理，不混用 Marketplace 信任。
 
+**完成状态：已完成（2026-08-04）**
+
+见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE10_zh.md`。Phase 10 已交付 Marketplace index v2、
+按 Windows x86_64 独立签名的 Java/native artifact、publisher/release/artifact/transparency 三层签名、
+Runtime Registry/SBOM/license/provenance 精确绑定、verified offline cache、rollout、quarantine 与默认
+关闭的本地聚合 telemetry。真实 gate 用 ta4j `0.1.1 -> 0.1.2 -> 0.1.1` 和 Aho `0.1.0`
+完成 fresh/offline/update/rollback/revocation，AppContainer residual process/supervisor 均为 `0`。
+
+Phase 10 专项后端 `32 passed`；全量 63 个 `test_plugin*.py` 文件按互斥集合完成
+`208 + 155 + 118 + 92 = 573 passed`。前端 parser `18 passed`、SSR `4 passed`，并通过
+typecheck、Plugin Platform architecture、目标 ESLint 与 534-module production build；Python SDK
+`98 passed`，Rust/WASM SDK 与 Aho Adapter 各 `3 passed`，Ruff lint/format 与 cargo fmt 通过。
+Phase 6～8 因 Plugin Manager 严格 parser/surface 摘要变化逐级重新冻结并完整重跑真实门禁；同时修复
+Phase 7 在 official Registry revision 5 下需按 `5 -> 4 -> 3 -> 4` 执行历史 rollback 的旧假设。
+
 ---
 
 ### Phase 11：GA 门禁、故障注入与文档
@@ -1230,10 +1245,10 @@ Phase 9 专用门禁 `37 passed`；全量 60 个插件测试文件按互斥集�
 
 ## 16. 推荐的立即下一步
 
-下一阶段只实施 Phase 10，不提前混入 GA：
+下一阶段只实施 Phase 11，集中完成 GA 验收，不再扩展运行时或 Marketplace scope：
 
-1. 冻结 Marketplace 多运行时 release 与信任证据契约；
-2. 将 runtime kind、OS/arch artifact digest、SBOM、licenses 与 registry revision 绑定发布；
-3. 拒绝源码编译、系统 runtime fallback、未声明下载与跨平台假声明；
-4. 用 Java 与 native reference release 验证 fresh/offline/update/rollback/revocation；
-5. 保持 Marketplace flag 默认关闭，完成独立 Phase 10 提交后再进入 Phase 11。
+1. 运行 backend、四套 SDK、frontend `npm run check` 与全部 conformance transcript；
+2. 完成 fresh/update/rollback、failure injection、四种启动矩阵与所有新开关为 `0` 的回滚演练；
+3. 用 production headed Chromium 验证 Plugin Manager，并保存可复核的原始机器证据；
+4. 完成 ta4j point-in-time corpus/性能报告与 4 小时多插件 soak；
+5. 发布支持矩阵、作者/用户/GitHub/Marketplace 指南、诊断边界和回滚手册后再判定 GA。

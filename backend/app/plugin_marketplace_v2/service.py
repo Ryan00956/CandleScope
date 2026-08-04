@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from candlescope_plugin_sdk.platform_v2 import (
     JsonLimits,
     PlatformContractError,
+    canonical_sha256,
     loads_strict,
 )
 
@@ -34,7 +35,9 @@ from app.plugin_installer_v2.bundle import (
 )
 from app.plugin_installer_v2.registry import load_activation_registry
 from app.plugin_security_v2.grants import manifest_publisher_identity
+from app.plugin_security_v2.sandbox import restricted_runtime_profile
 from app.plugin_security_v2.storage import atomic_write_json, security_lock
+from app.plugin_runtime_registry_v3.service import host_platform
 
 from .errors import MarketplaceError
 from .models import (
@@ -45,11 +48,18 @@ from .models import (
     VerifiedMarketplaceIndex,
     verify_marketplace_index,
 )
+from .supply_chain import MultiRuntimeReleaseRecord, SignedArtifactRecord
+from .telemetry import MarketplaceTelemetry
 
 
 STATE_SCHEMA_VERSION = 1
 CATALOG_SCHEMA_VERSION = "candlescope.marketplace-catalog/1"
 STATUS_SCHEMA_VERSION = "candlescope.marketplace-status/1"
+CATALOG_SCHEMA_VERSION_V2 = "candlescope.marketplace-catalog/2"
+STATUS_SCHEMA_VERSION_V2 = "candlescope.marketplace-status/2"
+MARKETPLACE_ROLLOUT_ENV = "CANDLESCOPE_PLUGIN_MARKETPLACE_ROLLOUT"
+MARKETPLACE_TELEMETRY_ENV = "CANDLESCOPE_PLUGIN_MARKETPLACE_TELEMETRY_ENABLED"
+ROLLOUT_STAGES = ("internal", "opted-in-local", "preview", "stable")
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_REMOTE_ARTIFACT_BYTES = min(MAX_BUNDLE_BYTES, 128 * 1024 * 1024)
 DOWNLOAD_TIMEOUT_SECONDS = 30.0
@@ -66,6 +76,31 @@ _STATE_LIMITS = JsonLimits(
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _environment_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise MarketplaceError(
+        "PLUGIN_MARKETPLACE_CONFIGURATION_INVALID",
+        f"{name} must be one of 0/1/false/true/no/yes/off/on",
+    )
+
+
+def _rollout_stage(value: str | None) -> str:
+    result = value or os.environ.get(MARKETPLACE_ROLLOUT_ENV, "stable")
+    if result not in ROLLOUT_STAGES:
+        raise MarketplaceError(
+            "PLUGIN_MARKETPLACE_CONFIGURATION_INVALID",
+            f"{MARKETPLACE_ROLLOUT_ENV} has an unsupported rollout stage",
+        )
+    return result
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -318,6 +353,7 @@ def _validate_state(state: dict[str, Any]) -> None:
                 "active",
                 "rolled-back",
                 "failed",
+                "quarantined",
             }
             or not isinstance(raw["permissionDiff"], dict)
             or not isinstance(raw["compatibility"], dict)
@@ -575,16 +611,50 @@ class PluginMarketplaceService:
         roots: tuple[MarketplaceRoot, ...] = (),
         enabled: bool = False,
         fetcher: MarketplaceFetcher | None = None,
+        managed_runtime_registry: Any | None = None,
+        operating_system: str | None = None,
+        architecture: str | None = None,
+        rollout_stage: str | None = None,
+        telemetry_enabled: bool | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.installer = installer
         self.roots = {item.marketplace_id: item for item in roots}
         self.enabled = enabled
         self.fetcher = fetcher or PinnedMarketplaceFetcher()
+        self.managed_runtime_registry = (
+            managed_runtime_registry
+            if managed_runtime_registry is not None
+            else installer.managed_runtime_registry
+        )
+        detected_os, detected_arch = host_platform()
+        self.operating_system = operating_system or detected_os
+        self.architecture = architecture or detected_arch
+        if self.operating_system not in {"windows", "linux", "macos"} or (
+            self.architecture not in {"x86_64", "arm64"}
+        ):
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_PLATFORM_UNAVAILABLE",
+                "Marketplace Host platform is unsupported",
+            )
+        self.rollout_stage = _rollout_stage(rollout_stage)
+        telemetry_opt_in = (
+            _environment_bool(MARKETPLACE_TELEMETRY_ENV, default=False)
+            if telemetry_enabled is None
+            else telemetry_enabled
+        )
+        if not isinstance(telemetry_opt_in, bool):
+            raise ValueError("telemetry_enabled must be a boolean")
         self.state_path = self.root / "marketplace-state-v1.json"
         self.lock_path = self.root / "marketplace-v1.lock"
         self.index_directory = self.root / "marketplace-v1" / "indexes"
         self.artifact_directory = self.root / "marketplace-v1" / "artifacts"
+        self.quarantine_directory = self.root / "marketplace-v1" / "quarantine"
+        self.telemetry = MarketplaceTelemetry(
+            self.root / "marketplace-telemetry-v1.json",
+            self.root / "marketplace-telemetry-v1.lock",
+            telemetry_opt_in,
+        )
         self._indexes: dict[str, VerifiedMarketplaceIndex] = {}
         self._known_indexes: dict[str, VerifiedMarketplaceIndex] = {}
         self._cache_errors: dict[str, str] = {}
@@ -679,7 +749,7 @@ class PluginMarketplaceService:
             (index, release)
             for index in indexes.values()
             for release in index.releases
-            if release.artifact.sha256 == digest
+            if any(artifact.sha256 == digest for artifact in release.artifacts)
         ]
         if len(matches) > 1:
             raise MarketplaceError(
@@ -709,22 +779,209 @@ class PluginMarketplaceService:
             errors[marketplace_id] = "PLUGIN_MARKETPLACE_INDEX_EXPIRED"
         return errors
 
+    def _release_visible(self, release: ReleaseRecord) -> bool:
+        stage = getattr(release, "rollout_stage", "stable")
+        minimum = ROLLOUT_STAGES.index(self.rollout_stage)
+        return ROLLOUT_STAGES.index(stage) >= minimum
+
+    def _artifact_for_host(self, release: ReleaseRecord) -> Any:
+        return release.artifact_for_platform(
+            self.operating_system,
+            self.architecture,
+        )
+
+    def _release_available_on_host(self, release: ReleaseRecord) -> bool:
+        if not self._release_visible(release):
+            return False
+        try:
+            self._artifact_for_host(release)
+            self._assert_minimum_host(release)
+        except MarketplaceError:
+            return False
+        return True
+
     @staticmethod
+    def _runtime_kind_label(artifact: Any) -> str:
+        kinds = tuple(getattr(artifact, "runtime_kinds", ()))
+        if not kinds:
+            return "none"
+        return kinds[0] if len(kinds) == 1 else "mixed"
+
+    def _assert_minimum_host(self, release: ReleaseRecord) -> None:
+        minimum = getattr(release, "minimum_host_version", None)
+        if minimum is not None and _version_key(
+            self.installer.host_version
+        ) < _version_key(minimum):
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_HOST_VERSION_UNSUPPORTED",
+                "Marketplace release requires a newer CandleScope Host",
+                details={
+                    "hostVersion": self.installer.host_version,
+                    "minimumHostVersion": minimum,
+                },
+            )
+
+    def _assert_multi_runtime_release(
+        self,
+        bundle: VerifiedPlatformBundle,
+        release: ReleaseRecord,
+        artifact: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(release, MultiRuntimeReleaseRecord) or not isinstance(
+            artifact, SignedArtifactRecord
+        ):
+            return {
+                "runtimeKinds": ["python-module"],
+                "runtimeRegistry": [],
+                "sandboxAvailable": self.operating_system == "windows",
+            }
+        self._assert_minimum_host(release)
+        if bundle.manifest.permissions.to_wire() != release.permissions:
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_PERMISSION_INVALID",
+                "bundle permissions do not match the signed release scope",
+            )
+        declared = {
+            entrypoint.id: entrypoint
+            for entrypoint in bundle.manifest.normalized_entrypoints
+        }
+        bindings = {item.entrypoint_id: item for item in artifact.runtime_bindings}
+        if set(declared) != set(bindings):
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_RUNTIME_INVALID",
+                "signed runtime bindings do not cover every manifest entrypoint",
+            )
+        contents = {item.path: item for item in bundle.envelope.contents}
+        registry_evidence: list[dict[str, Any]] = []
+        sandbox_available = True
+        for entrypoint_id in sorted(declared):
+            entrypoint = declared[entrypoint_id]
+            runtime = entrypoint.runtime
+            binding = bindings[entrypoint_id]
+            expected_path = (
+                bundle.wheels[0].path
+                if runtime.kind == "python-module"
+                else runtime.artifact
+            )
+            content = contents.get(expected_path)
+            if (
+                binding.runtime_kind != runtime.kind
+                or binding.runtime_id != runtime.runtime_id
+                or binding.plugin_artifact_path != expected_path
+                or content is None
+                or binding.plugin_artifact_sha256 != content.sha256
+            ):
+                raise MarketplaceError(
+                    "PLUGIN_MARKETPLACE_RUNTIME_INVALID",
+                    "signed runtime binding does not match the immutable bundle manifest",
+                    details={"entrypointId": entrypoint_id},
+                )
+            profile = restricted_runtime_profile(runtime.kind)
+            sandbox_available = sandbox_available and profile.supported(
+                self.operating_system
+            )
+            if binding.host_runtime is not None:
+                if self.managed_runtime_registry is None or not callable(
+                    getattr(
+                        self.managed_runtime_registry,
+                        "verify_marketplace_binding",
+                        None,
+                    )
+                ):
+                    raise MarketplaceError(
+                        "PLUGIN_MARKETPLACE_RUNTIME_REGISTRY_UNAVAILABLE",
+                        "signed Marketplace runtime requires the managed Runtime Registry",
+                    )
+                runtime_kind = {
+                    "java-jar": "java",
+                    "node-module": "node",
+                    "wasm-component": "wasm",
+                }[binding.runtime_kind]
+                evidence = binding.host_runtime
+                try:
+                    registry_evidence.append(
+                        self.managed_runtime_registry.verify_marketplace_binding(
+                            registry_id=evidence.registry_id,
+                            registry_revision=evidence.registry_revision,
+                            registry_sha256=evidence.registry_sha256,
+                            runtime_id=binding.runtime_id,
+                            runtime_kind=runtime_kind,
+                            runtime_artifact_sha256=(evidence.runtime_artifact_sha256),
+                            license_expression=evidence.license_expression,
+                            operating_system=self.operating_system,
+                            architecture=self.architecture,
+                        )
+                    )
+                except MarketplaceError:
+                    raise
+                except Exception as exc:
+                    raise MarketplaceError(
+                        "PLUGIN_MARKETPLACE_RUNTIME_BINDING_INVALID",
+                        "signed Marketplace runtime evidence does not match the active Registry chain",
+                        details={
+                            "entrypointId": entrypoint_id,
+                            "errorType": type(exc).__name__,
+                        },
+                    ) from exc
+        expected_license_inventory = canonical_sha256(
+            {
+                "plugin": release.license_expression,
+                "dependencies": [item.to_wire() for item in release.dependencies],
+                "runtimeLicenses": sorted(
+                    {
+                        item.host_runtime.license_expression
+                        for item in artifact.runtime_bindings
+                        if item.host_runtime is not None
+                    }
+                ),
+            }
+        )
+        if artifact.license_inventory_sha256 != expected_license_inventory:
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_LICENSE_INVENTORY_MISMATCH",
+                "signed Marketplace license inventory does not cover plugin, dependencies, and runtimes",
+            )
+        if not sandbox_available:
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_SANDBOX_UNAVAILABLE",
+                "Marketplace release has no supported Host sandbox for this runtime target",
+                details={
+                    "os": self.operating_system,
+                    "runtimeKinds": list(artifact.runtime_kinds),
+                },
+            )
+        return {
+            "runtimeKinds": list(artifact.runtime_kinds),
+            "runtimeRegistry": registry_evidence,
+            "sandboxAvailable": sandbox_available,
+        }
+
     def _assert_bundle_release(
+        self,
         bundle: VerifiedPlatformBundle,
         release: ReleaseRecord,
         publisher: PublisherRecord,
-    ) -> None:
+        artifact: Any | None = None,
+    ) -> dict[str, Any]:
+        artifact = artifact or next(
+            (item for item in release.artifacts if item.sha256 == bundle.sha256),
+            None,
+        )
+        if artifact is None:
+            raise MarketplaceError(
+                "PLUGIN_MARKETPLACE_ARTIFACT_IDENTITY_MISMATCH",
+                "bundle digest is not one of the independently signed release artifacts",
+            )
         mismatches: dict[str, Any] = {}
         expected = {
-            "bundleSha256": release.artifact.sha256,
-            "bundleSize": release.artifact.size,
-            "manifestSha256": release.artifact.manifest_sha256,
+            "bundleSha256": artifact.sha256,
+            "bundleSize": artifact.size,
+            "manifestSha256": artifact.manifest_sha256,
             "pluginId": release.plugin_id,
             "version": release.version,
             "publisher": release.publisher_id,
             "publisherKeyId": publisher.key_id,
-            "sbomSha256": release.artifact.sbom_sha256,
+            "sbomSha256": artifact.sbom_sha256,
         }
         actual = {
             "bundleSha256": bundle.sha256,
@@ -753,6 +1010,7 @@ class PluginMarketplaceService:
                 details=mismatches,
             )
         PluginMarketplaceService._assert_sbom_release(bundle, release)
+        return self._assert_multi_runtime_release(bundle, release, artifact)
 
     @staticmethod
     def _license_expression(value: Any, label: str) -> str:
@@ -1138,8 +1396,14 @@ class PluginMarketplaceService:
                 "marketplace root is unavailable",
                 status_code=404,
             )
-        data = self.fetcher.get(root.index_url, maximum=MAX_INDEX_BYTES)
-        return self.import_index(data, marketplace_id=marketplace_id)
+        try:
+            data = self.fetcher.get(root.index_url, maximum=MAX_INDEX_BYTES)
+            result = self.import_index(data, marketplace_id=marketplace_id)
+        except Exception:
+            self.telemetry.record("none", "refresh", "failure")
+            raise
+        self.telemetry.record("none", "refresh", "success")
+        return result
 
     def _active_record(self, plugin_id: str) -> Any | None:
         return (
@@ -1168,6 +1432,7 @@ class PluginMarketplaceService:
             if release.plugin_id == plugin_id
             and (version is None or release.version == version)
             and not index.is_revoked(release)
+            and self._release_available_on_host(release)
         ]
         if not matches:
             raise MarketplaceError(
@@ -1241,6 +1506,67 @@ class PluginMarketplaceService:
             )
         return self.artifact_directory / f"{digest.removeprefix('sha256:')}.cspkg"
 
+    def _quarantine_cached_artifact(
+        self,
+        *,
+        release: ReleaseRecord,
+        artifact: Any,
+        reason: str,
+    ) -> dict[str, Any]:
+        source = self._artifact_path(artifact.sha256)
+        self.quarantine_directory.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        payload_name = f"{artifact.sha256.removeprefix('sha256:')}-{token}.cspkg"
+        destination = self.quarantine_directory / payload_name
+        moved = False
+        if source.exists() or source.is_symlink():
+            os.replace(source, destination)
+            moved = True
+        receipt = {
+            "schemaVersion": "candlescope.marketplace-quarantine/1",
+            "pluginId": release.plugin_id,
+            "version": release.version,
+            "bundleSha256": artifact.sha256,
+            "reason": reason[:128],
+            "quarantinedAt": _utc_now(),
+            "artifactFile": payload_name if moved else None,
+            "payloadMoved": moved,
+        }
+        atomic_write_json(
+            self.quarantine_directory / f"receipt-{token}.json",
+            receipt,
+        )
+        return receipt
+
+    def _quarantine_receipts(self) -> list[dict[str, Any]]:
+        if not self.quarantine_directory.exists():
+            return []
+        receipts: list[dict[str, Any]] = []
+        for path in sorted(self.quarantine_directory.glob("receipt-*.json")):
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_384:
+                continue
+            try:
+                value = loads_strict(path.read_bytes())
+            except (OSError, PlatformContractError):
+                continue
+            if (
+                isinstance(value, dict)
+                and set(value)
+                == {
+                    "schemaVersion",
+                    "pluginId",
+                    "version",
+                    "bundleSha256",
+                    "reason",
+                    "quarantinedAt",
+                    "artifactFile",
+                    "payloadMoved",
+                }
+                and value.get("schemaVersion") == "candlescope.marketplace-quarantine/1"
+            ):
+                receipts.append(value)
+        return receipts
+
     def prepare(
         self,
         plugin_id: str,
@@ -1249,21 +1575,42 @@ class PluginMarketplaceService:
         artifact_bytes: bytes | None = None,
     ) -> dict[str, Any]:
         index, release, publisher = self._release(plugin_id, version)
+        artifact = self._artifact_for_host(release)
+        self._assert_minimum_host(release)
         self._assert_ownership(plugin_id, release, index.marketplace_id)
+        destination = self._artifact_path(artifact.sha256)
+        cache_reused = False
         if artifact_bytes is None:
-            if release.artifact.size > MAX_REMOTE_ARTIFACT_BYTES:
+            if (
+                destination.is_file()
+                and not destination.is_symlink()
+                and _hash_file(destination) == (artifact.sha256, artifact.size)
+            ):
+                artifact_bytes = destination.read_bytes()
+                cache_reused = True
+                self.telemetry.record(
+                    self._runtime_kind_label(artifact), "cache-reuse", "success"
+                )
+            elif destination.exists() or destination.is_symlink():
+                self._quarantine_cached_artifact(
+                    release=release,
+                    artifact=artifact,
+                    reason="CACHE_CORRUPT",
+                )
+            if artifact_bytes is None and artifact.size > MAX_REMOTE_ARTIFACT_BYTES:
                 raise MarketplaceError(
                     "PLUGIN_MARKETPLACE_REMOTE_ARTIFACT_TOO_LARGE",
                     "remote marketplace artifacts exceed the bounded download limit",
                     details={"maximum": MAX_REMOTE_ARTIFACT_BYTES},
                 )
-            artifact_bytes = self.fetcher.get(
-                release.artifact.url,
-                maximum=release.artifact.size,
-            )
+            if artifact_bytes is None:
+                artifact_bytes = self.fetcher.get(
+                    artifact.url,
+                    maximum=artifact.size,
+                )
         if (
-            len(artifact_bytes) != release.artifact.size
-            or _sha256_bytes(artifact_bytes) != release.artifact.sha256
+            len(artifact_bytes) != artifact.size
+            or _sha256_bytes(artifact_bytes) != artifact.sha256
         ):
             raise MarketplaceError(
                 "PLUGIN_MARKETPLACE_ARTIFACT_DIGEST_MISMATCH",
@@ -1283,11 +1630,15 @@ class PluginMarketplaceService:
         try:
             bundle = verify_platform_bundle(
                 temporary_path,
-                expected_sha256=release.artifact.sha256,
+                expected_sha256=artifact.sha256,
                 host_version=self.installer.host_version,
             )
-            self._assert_bundle_release(bundle, release, publisher)
-            destination = self._artifact_path(release.artifact.sha256)
+            compatibility = self._assert_bundle_release(
+                bundle,
+                release,
+                publisher,
+                artifact,
+            )
             _write_bytes(destination, artifact_bytes)
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -1311,17 +1662,15 @@ class PluginMarketplaceService:
             )
             permission_diff = self.installer.preview_permission_diff(
                 destination,
-                expected_sha256=release.artifact.sha256,
+                expected_sha256=artifact.sha256,
             ).to_wire()
             candidate = {
                 "pluginId": plugin_id,
                 "version": release.version,
                 "marketplaceId": index.marketplace_id,
                 "publisherId": release.publisher_id,
-                "bundleSha256": release.artifact.sha256,
-                "artifactFile": (
-                    f"{release.artifact.sha256.removeprefix('sha256:')}.cspkg"
-                ),
+                "bundleSha256": artifact.sha256,
+                "artifactFile": (f"{artifact.sha256.removeprefix('sha256:')}.cspkg"),
                 "phase": "verified-staged",
                 "preparedAt": _utc_now(),
                 "fromVersion": current.version if current is not None else None,
@@ -1329,6 +1678,17 @@ class PluginMarketplaceService:
                 "compatibility": {
                     "hostVersion": self.installer.host_version,
                     "verified": True,
+                    "marketplaceSchema": index.schema_version,
+                    "platform": {
+                        "os": self.operating_system,
+                        "arch": self.architecture,
+                        "artifactId": getattr(artifact, "artifact_id", "legacy"),
+                    },
+                    "runtimeKinds": compatibility["runtimeKinds"],
+                    "runtimeRegistry": compatibility["runtimeRegistry"],
+                    "sandboxAvailable": compatibility["sandboxAvailable"],
+                    "cacheReuse": cache_reused,
+                    "rolloutStage": getattr(release, "rollout_stage", "stable"),
                 },
                 "migration": {
                     "required": False,
@@ -1347,6 +1707,7 @@ class PluginMarketplaceService:
             ]
             state["candidates"].append(candidate)
             self._commit_state(state)
+        self.telemetry.record(self._runtime_kind_label(artifact), "prepare", "success")
         return dict(candidate)
 
     def _verified_candidate(
@@ -1362,17 +1723,18 @@ class PluginMarketplaceService:
                 status_code=404,
             )
         index, release, publisher = self._release(plugin_id, candidate["version"])
+        artifact = self._artifact_for_host(release)
         if (
             index.marketplace_id != candidate["marketplaceId"]
             or release.publisher_id != candidate["publisherId"]
-            or release.artifact.sha256 != candidate["bundleSha256"]
+            or artifact.sha256 != candidate["bundleSha256"]
         ):
             raise MarketplaceError(
                 "PLUGIN_MARKETPLACE_CANDIDATE_STALE",
                 "marketplace candidate no longer matches the verified index",
             )
         current = self._active_record(plugin_id)
-        if current is None or current.bundle_sha256 != release.artifact.sha256:
+        if current is None or current.bundle_sha256 != artifact.sha256:
             self._assert_ownership(plugin_id, release, index.marketplace_id)
         path = self.artifact_directory / candidate["artifactFile"]
         if (
@@ -1380,8 +1742,8 @@ class PluginMarketplaceService:
             or not path.is_file()
             or _hash_file(path)
             != (
-                release.artifact.sha256,
-                release.artifact.size,
+                artifact.sha256,
+                artifact.size,
             )
         ):
             raise MarketplaceError(
@@ -1390,10 +1752,10 @@ class PluginMarketplaceService:
             )
         bundle = verify_platform_bundle(
             path,
-            expected_sha256=release.artifact.sha256,
+            expected_sha256=artifact.sha256,
             host_version=self.installer.host_version,
         )
-        self._assert_bundle_release(bundle, release, publisher)
+        self._assert_bundle_release(bundle, release, publisher, artifact)
         return dict(candidate), release, publisher, path
 
     def _replace_candidate_in_state(
@@ -1424,7 +1786,7 @@ class PluginMarketplaceService:
             activation_savepoint = self.installer.capture_activation_state(plugin_id)
             result = self.installer.install(
                 path,
-                expected_sha256=release.artifact.sha256,
+                expected_sha256=candidate["bundleSha256"],
                 enabled=False,
                 force_staged=True,
             )
@@ -1457,6 +1819,11 @@ class PluginMarketplaceService:
                             },
                         ) from compensation_error
                 raise
+        self.telemetry.record(
+            self._runtime_kind_label(self._artifact_for_host(release)),
+            "apply",
+            "success",
+        )
         return {
             "candidate": candidate,
             "installation": result.to_wire(),
@@ -1466,9 +1833,10 @@ class PluginMarketplaceService:
         with security_lock(self.lock_path):
             candidate, release, _publisher, _path = self._verified_candidate(plugin_id)
             current = self._active_record(plugin_id)
+            artifact = self._artifact_for_host(release)
             if (
                 current is None
-                or current.bundle_sha256 != release.artifact.sha256
+                or current.bundle_sha256 != artifact.sha256
                 or candidate["phase"] not in {"activation-staged", "observing"}
             ):
                 raise MarketplaceError(
@@ -1487,6 +1855,11 @@ class PluginMarketplaceService:
             except BaseException:
                 self.installer.disable(plugin_id)
                 raise
+        self.telemetry.record(
+            self._runtime_kind_label(self._artifact_for_host(release)),
+            "activate",
+            "success",
+        )
         return {"candidate": candidate, "stateChange": result.to_wire()}
 
     def finish_observation(
@@ -1496,6 +1869,7 @@ class PluginMarketplaceService:
         healthy: bool,
         detail: str,
     ) -> dict[str, Any]:
+        observed_release: ReleaseRecord | None = None
         with security_lock(self.lock_path):
             state = self._state()
             candidate = self._candidate(state, plugin_id)
@@ -1508,11 +1882,12 @@ class PluginMarketplaceService:
                 _verified, release, _publisher, _path = self._verified_candidate(
                     plugin_id
                 )
+                observed_release = release
                 current = self._active_record(plugin_id)
                 if (
                     current is None
                     or current.state != "active"
-                    or current.bundle_sha256 != release.artifact.sha256
+                    or current.bundle_sha256 != self._artifact_for_host(release).sha256
                 ):
                     raise MarketplaceError(
                         "PLUGIN_MARKETPLACE_OBSERVATION_INVALID",
@@ -1526,6 +1901,16 @@ class PluginMarketplaceService:
                 "detail": detail[:512],
             }
             self._replace_candidate_in_state(state, replacement)
+        if observed_release is None:
+            _index, observed_release, _publisher = self._release(
+                plugin_id,
+                candidate["version"],
+            )
+        self.telemetry.record(
+            self._runtime_kind_label(self._artifact_for_host(observed_release)),
+            "observation",
+            "success" if healthy else "failure",
+        )
         return replacement
 
     def mark_rolled_back(self, plugin_id: str, *, detail: str) -> None:
@@ -1542,11 +1927,25 @@ class PluginMarketplaceService:
                 "detail": detail[:512],
             }
             self._replace_candidate_in_state(state, replacement)
+        try:
+            _index, release, _publisher = self._release(
+                plugin_id,
+                candidate["version"],
+            )
+        except MarketplaceError:
+            return
+        self.telemetry.record(
+            self._runtime_kind_label(self._artifact_for_host(release)),
+            "rollback",
+            "success",
+        )
 
     def enforce_trust_policy(self) -> tuple[str, ...]:
         changed: list[str] = []
+        quarantined_digests: set[str] = set()
         with security_lock(self.lock_path):
             state = self._state()
+            state_changed = False
             registry = load_activation_registry(self.installer.registry_path)
             current_indexes = self._current_indexes()
             for record in registry.plugins:
@@ -1578,6 +1977,67 @@ class PluginMarketplaceService:
                     result = self.installer.disable(record.plugin_id)
                     if result.changed:
                         changed.append(record.plugin_id)
+                    if valid is not None and valid.is_revoked(release):
+                        artifact = next(
+                            item
+                            for item in release.artifacts
+                            if item.sha256 == record.bundle_sha256
+                        )
+                        if self._artifact_path(artifact.sha256).exists():
+                            self._quarantine_cached_artifact(
+                                release=release,
+                                artifact=artifact,
+                                reason="SIGNED_REVOCATION",
+                            )
+                            quarantined_digests.add(artifact.sha256)
+            for candidate in state["candidates"]:
+                known = self._release_for_digest(
+                    candidate["bundleSha256"],
+                    include_expired=True,
+                )
+                if known is None:
+                    continue
+                index, release = known
+                valid = current_indexes.get(index.marketplace_id)
+                if valid is None or not valid.is_revoked(release):
+                    continue
+                artifact = next(
+                    item
+                    for item in release.artifacts
+                    if item.sha256 == candidate["bundleSha256"]
+                )
+                if (
+                    artifact.sha256 not in quarantined_digests
+                    and self._artifact_path(artifact.sha256).exists()
+                ):
+                    self._quarantine_cached_artifact(
+                        release=release,
+                        artifact=artifact,
+                        reason="SIGNED_REVOCATION",
+                    )
+                    quarantined_digests.add(artifact.sha256)
+                if candidate["phase"] != "quarantined":
+                    candidate["phase"] = "quarantined"
+                    candidate["observation"] = {
+                        "status": "failed",
+                        "observedAt": _utc_now(),
+                        "detail": "SIGNED_REVOCATION",
+                    }
+                    state_changed = True
+            if state_changed:
+                self._commit_state(state)
+        for digest in quarantined_digests:
+            known = self._release_for_digest(digest, include_expired=True)
+            if known is not None:
+                _index, release = known
+                artifact = next(
+                    item for item in release.artifacts if item.sha256 == digest
+                )
+                self.telemetry.record(
+                    self._runtime_kind_label(artifact),
+                    "revocation-quarantine",
+                    "quarantined",
+                )
         return tuple(changed)
 
     def _update_for_record(self, record: Any) -> dict[str, Any]:
@@ -1612,6 +2072,7 @@ class PluginMarketplaceService:
             and release.publisher_id == current_release.publisher_id
             and index.marketplace_id == current_index.marketplace_id
             and not index.is_revoked(release)
+            and self._release_available_on_host(release)
             and _major(release.version) == _major(record.version)
             and _version_key(release.version) > _version_key(record.version)
         ]
@@ -1646,13 +2107,82 @@ class PluginMarketplaceService:
             )
         return self._update_for_record(record)
 
+    def _catalog_assurances(
+        self,
+        release: ReleaseRecord,
+        publisher: PublisherRecord,
+    ) -> dict[str, Any]:
+        try:
+            artifact = self._artifact_for_host(release)
+        except MarketplaceError:
+            artifact = None
+        runtime_kinds = (
+            list(getattr(artifact, "runtime_kinds", ())) if artifact is not None else []
+        )
+        profiles = [
+            restricted_runtime_profile(kind).to_wire(
+                platform_name=self.operating_system
+            )
+            for kind in runtime_kinds
+        ]
+        sandbox_available = bool(profiles) and all(
+            item["sandboxSupported"] for item in profiles
+        )
+        if not isinstance(release, MultiRuntimeReleaseRecord):
+            runtime_kinds = ["python-module"]
+            profiles = [
+                restricted_runtime_profile("python-module").to_wire(
+                    platform_name=self.operating_system
+                )
+            ]
+            sandbox_available = profiles[0]["sandboxSupported"]
+        return {
+            "publisherVerified": publisher.verification_tier
+            in {"verified", "official"},
+            "officialMaintained": getattr(
+                release,
+                "official_maintained",
+                False,
+            ),
+            "sandbox": {
+                "available": sandbox_available,
+                "runtimeKinds": runtime_kinds,
+                "profiles": profiles,
+            },
+            "permissions": getattr(
+                release,
+                "permissions",
+                {"required": [], "optional": []},
+            ),
+            "rolloutStage": getattr(release, "rollout_stage", "stable"),
+            "minimumHostVersion": getattr(
+                release,
+                "minimum_host_version",
+                None,
+            ),
+            "platform": {
+                "os": self.operating_system,
+                "arch": self.architecture,
+                "available": artifact is not None,
+                "artifactId": (
+                    getattr(artifact, "artifact_id", "legacy")
+                    if artifact is not None
+                    else None
+                ),
+            },
+        }
+
     def public_catalog(self) -> dict[str, Any]:
         current_indexes = self._current_indexes()
+        schema_v2 = any(
+            index.schema_version.endswith("/2") for index in current_indexes.values()
+        )
         cache_errors = self._current_cache_errors(current_indexes)
         plugins: dict[str, list[tuple[VerifiedMarketplaceIndex, ReleaseRecord]]] = {}
         for index in current_indexes.values():
             for release in index.releases:
-                plugins.setdefault(release.plugin_id, []).append((index, release))
+                if self._release_visible(release):
+                    plugins.setdefault(release.plugin_id, []).append((index, release))
         entries = []
         installed = load_activation_registry(self.installer.registry_path).by_id()
         for plugin_id in sorted(plugins):
@@ -1666,38 +2196,53 @@ class PluginMarketplaceService:
                     (index, release)
                     for index, release in releases
                     if not index.is_revoked(release)
+                    and self._release_available_on_host(release)
                 ),
                 None,
             )
             latest_index, latest = installable_release or releases[0]
             publisher = latest_index.publisher_by_id()[latest.publisher_id]
-            entries.append(
-                {
-                    "pluginId": plugin_id,
-                    "publisher": publisher.to_public_wire(),
-                    "latest": latest.to_public_wire(
-                        revoked=latest_index.is_revoked(latest)
-                    ),
-                    "releaseCount": len(releases),
-                    "installedVersion": (
-                        installed[plugin_id].version if plugin_id in installed else None
-                    ),
-                    "installable": (
-                        installable_release is not None
-                        and latest.artifact.size <= MAX_REMOTE_ARTIFACT_BYTES
-                        and (
-                            plugin_id not in installed
-                            or self._release_for_digest(
-                                installed[plugin_id].bundle_sha256,
-                                include_expired=True,
-                            )
-                            is not None
+            assurances = self._catalog_assurances(latest, publisher)
+            try:
+                host_artifact = self._artifact_for_host(latest)
+            except MarketplaceError:
+                host_artifact = None
+            publisher_wire = publisher.to_public_wire()
+            if not isinstance(latest, MultiRuntimeReleaseRecord):
+                publisher_wire.pop("verificationTier", None)
+            entry = {
+                "pluginId": plugin_id,
+                "publisher": publisher_wire,
+                "latest": latest.to_public_wire(
+                    revoked=latest_index.is_revoked(latest)
+                ),
+                "releaseCount": len(releases),
+                "installedVersion": (
+                    installed[plugin_id].version if plugin_id in installed else None
+                ),
+                "installable": (
+                    installable_release is not None
+                    and host_artifact is not None
+                    and host_artifact.size <= MAX_REMOTE_ARTIFACT_BYTES
+                    and self._release_available_on_host(latest)
+                    and assurances["sandbox"]["available"]
+                    and (
+                        plugin_id not in installed
+                        or self._release_for_digest(
+                            installed[plugin_id].bundle_sha256,
+                            include_expired=True,
                         )
-                    ),
-                }
-            )
-        return {
-            "schemaVersion": CATALOG_SCHEMA_VERSION,
+                        is not None
+                    )
+                ),
+            }
+            if isinstance(latest, MultiRuntimeReleaseRecord):
+                entry["assurances"] = assurances
+            entries.append(entry)
+        result = {
+            "schemaVersion": (
+                CATALOG_SCHEMA_VERSION_V2 if schema_v2 else CATALOG_SCHEMA_VERSION
+            ),
             "enabled": self.enabled,
             "marketplaces": [
                 {
@@ -1723,14 +2268,25 @@ class PluginMarketplaceService:
             ],
             "plugins": entries,
         }
+        if schema_v2:
+            result["rollout"] = {
+                "channel": self.rollout_stage,
+                "stages": list(ROLLOUT_STAGES),
+            }
+        return result
 
     def status(self) -> dict[str, Any]:
         state = self._state()
         registry = load_activation_registry(self.installer.registry_path)
         current_indexes = self._current_indexes()
         cache_errors = self._current_cache_errors(current_indexes)
-        return {
-            "schemaVersion": STATUS_SCHEMA_VERSION,
+        schema_v2 = any(
+            index.schema_version.endswith("/2") for index in current_indexes.values()
+        )
+        result = {
+            "schemaVersion": (
+                STATUS_SCHEMA_VERSION_V2 if schema_v2 else STATUS_SCHEMA_VERSION
+            ),
             "enabled": self.enabled,
             "automaticUpdates": False,
             "rootCount": len(self.roots),
@@ -1745,3 +2301,15 @@ class PluginMarketplaceService:
                 for record in registry.plugins
             ],
         }
+        if schema_v2:
+            result.update(
+                {
+                    "rollout": {
+                        "channel": self.rollout_stage,
+                        "stages": list(ROLLOUT_STAGES),
+                    },
+                    "telemetry": self.telemetry.public_status(),
+                    "quarantine": self._quarantine_receipts(),
+                }
+            )
+        return result

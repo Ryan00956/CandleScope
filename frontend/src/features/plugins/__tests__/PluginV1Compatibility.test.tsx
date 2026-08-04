@@ -223,3 +223,102 @@ test("Phase 6 trust UX replaces direct install with an explicit double-confirmat
   assert.match(manager, /选择 \.cspkg 并生成审阅单/);
   assert.doesNotMatch(manager, /经过摘要校验的本地插件包/);
 });
+
+test("Marketplace v2 renders publisher, maintenance, sandbox, and permission assurances separately", () => {
+  const value = runtime(true);
+  const artifactSha256 = `sha256:${"9".repeat(64)}`;
+  value.view.marketplaceCatalog = {
+    schemaVersion: "candlescope.marketplace-catalog/2",
+    enabled: true,
+    rollout: {
+      channel: "preview",
+      stages: ["internal", "opted-in-local", "preview", "stable"],
+    },
+    marketplaces: [],
+    plugins: [{
+      pluginId: "candlescope.aho-corasick",
+      publisher: {
+        publisherId: "candlescope",
+        displayName: "CandleScope Official",
+        keyId: `ed25519:${"e".repeat(64)}`,
+        status: "active",
+        verificationTier: "official",
+      },
+      latest: {
+        pluginId: "candlescope.aho-corasick",
+        version: "0.1.0",
+        publisherId: "candlescope",
+        artifact: {
+          fileName: "aho.cspkg",
+          url: "https://plugins.example.invalid/aho.cspkg",
+          sha256: artifactSha256,
+          size: 4096,
+          manifestSha256: `sha256:${"8".repeat(64)}`,
+          sbomSha256: `sha256:${"7".repeat(64)}`,
+        },
+        publishedAt: "2026-08-03T00:00:00Z",
+        licenseExpression: "GPL-3.0-only",
+        dependencies: [],
+        sha256Sums: `${"9".repeat(64)}  aho.cspkg\n`,
+        sha256SumsSha256: `sha256:${"6".repeat(64)}`,
+        publisherKeyId: `ed25519:${"e".repeat(64)}`,
+        minimumHostVersion: "0.4.0",
+        rolloutStage: "preview",
+        officialMaintained: true,
+        permissions: {
+          required: [{ id: "market.bars.read", scope: { maxHistoryBars: 5000 } }],
+          optional: [],
+        },
+        transparency: {
+          logIndex: 1,
+          leafSha256: `sha256:${"5".repeat(64)}`,
+          recordSha256: `sha256:${"4".repeat(64)}`,
+        },
+        revoked: false,
+      },
+      assurances: {
+        publisherVerified: true,
+        officialMaintained: true,
+        sandbox: {
+          available: true,
+          runtimeKinds: ["native-executable"],
+          profiles: [{
+            profileId: "restricted-native-v1",
+            runtimeKind: "native-executable",
+            sandboxMode: "windows-appcontainer",
+            sandboxSupported: true,
+            trustedLocalOnly: false,
+            networkDefault: "denied",
+            subprocessDeclared: false,
+            limits: { maxProcesses: 1 },
+          }],
+        },
+        permissions: {
+          required: [{ id: "market.bars.read", scope: { maxHistoryBars: 5000 } }],
+          optional: [],
+        },
+        rolloutStage: "preview",
+        minimumHostVersion: "0.4.0",
+        platform: {
+          os: "windows",
+          arch: "x86_64",
+          available: true,
+          artifactId: "windows-x86_64",
+        },
+      },
+      releaseCount: 1,
+      installedVersion: null,
+      installable: true,
+    }],
+  };
+
+  const manager = renderToStaticMarkup(<PluginSettingsPanel runtime={value} />);
+  assert.match(manager, /data-marketplace-publisher-verified="true"/);
+  assert.match(manager, /data-marketplace-official-maintained="true"/);
+  assert.match(manager, /data-marketplace-sandbox-available="true"/);
+  assert.match(manager, /data-marketplace-permission-scope="true"/);
+  assert.match(manager, /发布者：已验证/);
+  assert.match(manager, /维护方：CandleScope 官方/);
+  assert.match(manager, /权限范围：1 个必需，0 个可选/);
+  assert.match(manager, /发布者验证不等于代码安全/);
+});

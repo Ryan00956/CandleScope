@@ -4677,6 +4677,30 @@ body {
   background: rgba(59, 130, 246, 0.08);
 }
 .plugin-marketplace-candidate ul { margin: 7px 0 0; padding-left: 20px; color: var(--text-secondary); }
+.plugin-marketplace-assurances {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.plugin-marketplace-assurances > span,
+.plugin-marketplace-assurances > details {
+  padding: 4px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.plugin-marketplace-assurances > details {
+  flex-basis: 100%;
+  border-radius: 7px;
+}
+.plugin-marketplace-assurances summary { cursor: pointer; }
+.plugin-marketplace-assurances pre {
+  overflow: auto;
+  max-height: 220px;
+  margin: 7px 0 0;
+  white-space: pre-wrap;
+}
 
 .plugin-command-layout nav,
 .plugin-manager-layout nav {

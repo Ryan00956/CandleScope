@@ -29,6 +29,7 @@ from .errors import MarketplaceError
 
 ROOTS_SCHEMA_VERSION = 1
 INDEX_SCHEMA_VERSION = "candlescope.marketplace-index/1"
+INDEX_SCHEMA_VERSION_V2 = "candlescope.marketplace-index/2"
 MAX_ROOTS_BYTES = 256 * 1024
 MAX_INDEX_BYTES = 8 * 1024 * 1024
 MAX_PUBLISHERS = 2_000
@@ -318,6 +319,7 @@ class PublisherRecord:
     key_id: str
     public_key: bytes
     status: str
+    verification_tier: str = "verified"
 
     def to_public_wire(self) -> dict[str, Any]:
         return {
@@ -325,6 +327,7 @@ class PublisherRecord:
             "displayName": self.display_name,
             "keyId": self.key_id,
             "status": self.status,
+            "verificationTier": self.verification_tier,
         }
 
 
@@ -378,6 +381,17 @@ class ReleaseRecord:
     leaf_sha256: str
     previous_record_sha256: str
     record_sha256: str
+
+    @property
+    def artifacts(self) -> tuple[ArtifactRecord, ...]:
+        return (self.artifact,)
+
+    def artifact_for_platform(
+        self, _operating_system: str, _architecture: str
+    ) -> ArtifactRecord:
+        # Index v1 predates per-platform release artifacts. Bundle verification
+        # remains the authoritative compatibility check for this legacy path.
+        return self.artifact
 
     @property
     def identity(self) -> tuple[str, str]:
@@ -442,12 +456,17 @@ class VerifiedMarketplaceIndex:
     revocations: tuple[RevocationRecord, ...]
     index_sha256: str
     canonical_bytes: bytes
+    schema_version: str = INDEX_SCHEMA_VERSION
 
     def release_by_identity(self) -> dict[tuple[str, str], ReleaseRecord]:
         return {item.identity: item for item in self.releases}
 
     def release_by_digest(self) -> dict[str, ReleaseRecord]:
-        return {item.artifact.sha256: item for item in self.releases}
+        return {
+            artifact.sha256: item
+            for item in self.releases
+            for artifact in item.artifacts
+        }
 
     def publisher_by_id(self) -> dict[str, PublisherRecord]:
         return {item.publisher_id: item for item in self.publishers}
@@ -462,8 +481,15 @@ class VerifiedMarketplaceIndex:
         subjects = {
             ("publisher", release.publisher_id),
             ("plugin", release.plugin_id),
-            ("release", release.artifact.sha256),
+            ("release", release.leaf_sha256),
+            *(("release", artifact.sha256) for artifact in release.artifacts),
+            *(("artifact", artifact.sha256) for artifact in release.artifacts),
         }
+        for artifact in release.artifacts:
+            for binding in getattr(artifact, "runtime_bindings", ()):
+                host_runtime = getattr(binding, "host_runtime", None)
+                if host_runtime is not None:
+                    subjects.add(("runtime-registry", host_runtime.registry_sha256))
         return any(
             item.effective_datetime <= current
             and (item.scope, item.subject) in subjects
@@ -471,14 +497,18 @@ class VerifiedMarketplaceIndex:
         )
 
 
-def _publisher(value: Any, index: int) -> PublisherRecord:
+def _publisher(
+    value: Any,
+    index: int,
+    *,
+    schema_version: str = INDEX_SCHEMA_VERSION,
+) -> PublisherRecord:
     label = f"marketplace index.publishers[{index}]"
     item = _mapping(value, label)
-    _only_keys(
-        item,
-        {"publisherId", "displayName", "keyId", "publicKey", "status"},
-        label,
-    )
+    fields = {"publisherId", "displayName", "keyId", "publicKey", "status"}
+    if schema_version == INDEX_SCHEMA_VERSION_V2:
+        fields.add("verificationTier")
+    _only_keys(item, fields, label)
     publisher_id = _identifier(item["publisherId"], f"{label}.publisherId")
     display_name = _string(item["displayName"], f"{label}.displayName", maximum=128)
     public_key = decode_base64url(
@@ -498,12 +528,23 @@ def _publisher(value: Any, index: int) -> PublisherRecord:
             "PLUGIN_MARKETPLACE_PUBLISHER_INVALID",
             f"{label} has an unsupported publisher status",
         )
+    verification_tier = (
+        _string(item["verificationTier"], f"{label}.verificationTier", maximum=16)
+        if schema_version == INDEX_SCHEMA_VERSION_V2
+        else "verified"
+    )
+    if verification_tier not in {"verified", "official"}:
+        raise MarketplaceError(
+            "PLUGIN_MARKETPLACE_PUBLISHER_INVALID",
+            f"{label}.verificationTier is unsupported",
+        )
     return PublisherRecord(
         publisher_id,
         display_name,
         expected_key_id,
         public_key,
         status,
+        verification_tier,
     )
 
 
@@ -791,19 +832,28 @@ def _release(
     )
 
 
-def _revocation(value: Any, index: int, generated_at: datetime) -> RevocationRecord:
+def _revocation(
+    value: Any,
+    index: int,
+    generated_at: datetime,
+    *,
+    schema_version: str = INDEX_SCHEMA_VERSION,
+) -> RevocationRecord:
     label = f"marketplace index.revocations[{index}]"
     item = _mapping(value, label)
     _only_keys(item, {"scope", "subject", "reasonCode", "effectiveAt"}, label)
     scope = _string(item["scope"], f"{label}.scope", maximum=16)
-    if scope not in {"publisher", "plugin", "release"}:
+    allowed_scopes = {"publisher", "plugin", "release"}
+    if schema_version == INDEX_SCHEMA_VERSION_V2:
+        allowed_scopes.update({"artifact", "runtime-registry"})
+    if scope not in allowed_scopes:
         raise MarketplaceError(
             "PLUGIN_MARKETPLACE_REVOCATION_INVALID",
             f"{label}.scope is unsupported",
         )
     subject = (
         _sha256(item["subject"], f"{label}.subject")
-        if scope == "release"
+        if scope in {"release", "artifact", "runtime-registry"}
         else _identifier(item["subject"], f"{label}.subject")
     )
     reason_code = _string(item["reasonCode"], f"{label}.reasonCode", maximum=64)
@@ -873,7 +923,8 @@ def verify_marketplace_index(
             "PLUGIN_MARKETPLACE_CANONICAL_JSON_REQUIRED",
             "marketplace index must use canonical JSON bytes",
         )
-    if document["schemaVersion"] != INDEX_SCHEMA_VERSION:
+    schema_version = document["schemaVersion"]
+    if schema_version not in {INDEX_SCHEMA_VERSION, INDEX_SCHEMA_VERSION_V2}:
         raise MarketplaceError(
             "PLUGIN_MARKETPLACE_SCHEMA_INVALID",
             "marketplace index schemaVersion is unsupported",
@@ -984,7 +1035,7 @@ def verify_marketplace_index(
         label="marketplace index.signature",
     )
     publishers = tuple(
-        _publisher(raw, index)
+        _publisher(raw, index, schema_version=schema_version)
         for index, raw in enumerate(
             _sequence(
                 document["publishers"],
@@ -1002,8 +1053,14 @@ def verify_marketplace_index(
             "marketplace publishers must be ID-sorted and unique",
         )
     publisher_map = {item.publisher_id: item for item in publishers}
+    if schema_version == INDEX_SCHEMA_VERSION_V2:
+        from .supply_chain import parse_multi_runtime_release
+
+        release_parser = parse_multi_runtime_release
+    else:
+        release_parser = _release
     releases = tuple(
-        _release(
+        release_parser(
             raw,
             index,
             publishers=publisher_map,
@@ -1019,7 +1076,7 @@ def verify_marketplace_index(
         )
     )
     identities = [item.identity for item in releases]
-    digests = [item.artifact.sha256 for item in releases]
+    digests = [artifact.sha256 for item in releases for artifact in item.artifacts]
     if len(set(identities)) != len(identities) or len(set(digests)) != len(digests):
         raise MarketplaceError(
             "PLUGIN_MARKETPLACE_RELEASE_CONFLICT",
@@ -1043,7 +1100,12 @@ def verify_marketplace_index(
             "marketplace transparency head does not match its release chain",
         )
     revocations = tuple(
-        _revocation(raw, index, generated_datetime)
+        _revocation(
+            raw,
+            index,
+            generated_datetime,
+            schema_version=schema_version,
+        )
         for index, raw in enumerate(
             _sequence(
                 document["revocations"],
@@ -1077,4 +1139,5 @@ def verify_marketplace_index(
         revocations,
         _digest(canonical),
         canonical,
+        schema_version,
     )

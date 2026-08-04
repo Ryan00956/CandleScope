@@ -37,11 +37,16 @@ from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
 from .bars.trade_builder import TradeReplayBarBuilder
 from .broker.execution import ConservativeBarBroker
 from .broker.models import (
+    Account,
     BrokerConfig,
     BrokerLimits,
     InstrumentFilters,
+    OrderRequest,
     PAPER_LINEAR_EXECUTION_MODE,
+    Position,
+    ReplayOrder,
 )
+from .broker.risk import build_order_preview
 from .canonical import canonical_json_bytes, canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError
 from .catalog import (
@@ -1151,6 +1156,60 @@ class ReplayService:
 
         async with self._lease_handle(session_id) as handle:
             return (await handle.actor.snapshot()).to_dict()
+
+    async def preview_order(
+        self,
+        session_id: str,
+        order: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Preview one order against an actor-serialized immutable snapshot."""
+
+        async with self._lease_handle(session_id) as handle:
+            snapshot = await handle.actor.public_snapshot()
+            components = snapshot.get("components")
+            if not isinstance(components, Mapping):
+                raise ReplayDomainError(
+                    ReplayErrorCode.PERSISTENCE_DEGRADED,
+                    "replay broker projection is unavailable",
+                )
+            raw_orders = components.get("orders")
+            raw_position = components.get("position")
+            raw_account = components.get("account")
+            if (
+                not isinstance(raw_orders, list)
+                or not isinstance(raw_position, Mapping)
+                or not isinstance(raw_account, Mapping)
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.PERSISTENCE_DEGRADED,
+                    "replay broker projection is invalid",
+                )
+            try:
+                request = OrderRequest.from_mapping(order)
+                preview = build_order_preview(
+                    config=handle.broker_config,
+                    request=request,
+                    position=Position.from_dict(raw_position),
+                    account=Account(**raw_account),  # type: ignore[arg-type]
+                    orders=(ReplayOrder.from_dict(item) for item in raw_orders),
+                )
+            except ReplayDomainError:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "order preview violates the order contract",
+                ) from exc
+            return {
+                "protocol": REPLAY_PROTOCOL,
+                "session_id": handle.session_id,
+                "revision": snapshot["revision"],
+                "state": snapshot["state"],
+                "state_hash": snapshot["state_hash"],
+                "cursor": snapshot["cursor"],
+                "execution_fidelity": self._execution_fidelity(handle.config),
+                "preview": preview,
+            }
 
     async def plan_source_chunk(
         self,

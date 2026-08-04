@@ -96,12 +96,14 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const disabled = pending !== null || phase3Pending !== null
     || store.connectionState !== "connected" || !ownsController
     || viewer.viewerState === null || viewer.viewerPending;
-  const domainProgress = effectiveState === "ENDED" ? 1 : null;
+  const cancelableAdvancePending = replayAdvanceIsCancelable(
+    viewer.controlPending,
+  );
   const phase3Ratio = viewer.progress?.ratio_ppm;
   const visiblePlan = fastForwardPlan(viewer.progress?.plan);
-  const progress = typeof phase3Ratio === "number" && Number.isSafeInteger(phase3Ratio)
+  const advanceProgress = typeof phase3Ratio === "number" && Number.isSafeInteger(phase3Ratio)
     ? Math.min(1, Math.max(0, phase3Ratio / 1_000_000))
-    : domainProgress;
+    : null;
   const baseIntervalMs = Math.max(1, (parseIntervalSeconds(config?.base_interval ?? "1m") ?? 60) * 1_000);
   const supportedBases = globalClock?.supported_bases ?? [];
   const playbackBases = globalClock?.playback_bases ?? [];
@@ -114,9 +116,6 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
   const virtualTimeQuantumMs = globalClock?.virtual_time_quantum_ms ?? baseIntervalMs;
   const basisCanPlay = playbackBases.includes(advanceBasis);
   const canonicalAdvancePending = phase3Pending === "advance";
-  const cancelableAdvancePending = replayAdvanceIsCancelable(
-    viewer.controlPending,
-  );
   const fallbackPublicTime = formatReplayPublicTime(store.virtualTimeMs, {
     blindMode: config?.blind_mode ?? true,
     originMs: store.replayStartMs,
@@ -357,16 +356,23 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         </label>
         <div
           className="replay-progress"
-          data-replay-progress={progress === null ? "unknown" : progress.toFixed(4)}
+          data-replay-progress={cancelableAdvancePending
+            ? advanceProgress === null ? "unknown" : advanceProgress.toFixed(4)
+            : "hidden"}
           data-replay-grain={phase3Pending ?? "idle"}
         >
-          <span>{publicTime}</span>
-          <progress
-            max={1}
-            {...(progress === null ? {} : { value: progress })}
-            aria-label="回放进度"
-          />
-          <span>{progress === null ? "持续训练" : `${(progress * 100).toFixed(1)}%`}</span>
+          <span className="replay-public-time">{publicTime}</span>
+          {cancelableAdvancePending && (
+            <span className="replay-advance-progress" data-replay-command-progress="active">
+              <span>本次推进</span>
+              <progress
+                max={1}
+                {...(advanceProgress === null ? {} : { value: advanceProgress })}
+                aria-label="本次推进进度"
+              />
+              <span>{advanceProgress === null ? "准备中…" : `${(advanceProgress * 100).toFixed(1)}%`}</span>
+            </span>
+          )}
         </div>
       </div>
 

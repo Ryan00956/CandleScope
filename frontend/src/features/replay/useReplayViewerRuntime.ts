@@ -6,6 +6,9 @@ import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 import type {
   ReplayAccountAuditResponse,
+  ReplayOrderPreview,
+  ReplayOrderRequest,
+  ReplayTradePlanDraft,
   ReplayV2Command,
   ReplayV2CommandResult,
   ReplayV2CommandType,
@@ -43,8 +46,12 @@ export type ReplayPhase3ControlType = Extract<ReplayV2CommandType,
 
 export type ReplayPhase5TradeType = Extract<ReplayV2CommandType,
   | "place_order"
+  | "replace_order"
   | "cancel_order"
+  | "cancel_orders"
   | "close_position"
+  | "execute_position_intent"
+  | "set_position_protection"
   | "allocate_isolated_margin"
 >;
 
@@ -302,6 +309,12 @@ export interface ReplayViewerRuntime {
       type: ReplayPhase5TradeType,
       payload: Readonly<Record<string, ReplayV2Json>>,
     ): Promise<ReplayV2CommandResult>;
+    previewOrder(
+      order: ReplayOrderRequest,
+      positionIntent: "NET" | "OPEN",
+      tradePlan?: ReplayTradePlanDraft | null,
+      signal?: AbortSignal,
+    ): Promise<ReplayOrderPreview>;
     auditAccount(): Promise<ReplayAccountAuditResponse>;
     resyncHistoricalBook(): Promise<void>;
     preparePeriodSummaries(): Promise<void>;
@@ -973,6 +986,35 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     }
   }, [buildCommand, failClosedAndRefreshMarketTracks, publishViewerState, refreshMarketTracks]);
 
+  const previewOrder = useCallback(async (
+    order: ReplayOrderRequest,
+    positionIntent: "NET" | "OPEN",
+    tradePlan: ReplayTradePlanDraft | null = null,
+    signal?: AbortSignal,
+  ): Promise<ReplayOrderPreview> => {
+    const viewer = viewerRef.current;
+    const store = runtime.store;
+    if (viewer === null || store.virtualTimeMs === null || store.sessionId === null) {
+      throw new Error("replay.v2 viewer is not preview-ready");
+    }
+    return defaultReplayV2Api.previewOrder(
+      viewer.run_id,
+      {
+        protocol: "replay.v2",
+        expected_revision: store.revision,
+        expected_cursor: {
+          virtual_time_ms: store.virtualTimeMs,
+          source_sequence: store.sourceSequence,
+          revision: store.revision,
+        },
+        position_intent: positionIntent,
+        order,
+        trade_plan: tradePlan,
+      },
+      signal,
+    );
+  }, [runtime.store]);
+
   const resyncHistoricalBook = useCallback(async (): Promise<void> => {
     const runId = viewerRef.current?.run_id;
     if (runId === undefined) throw new Error("ViewerState is unavailable");
@@ -1054,6 +1096,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       setSubscriptionTier,
       addAndSelectTrack,
       submitTrade,
+      previewOrder,
       auditAccount,
       resyncHistoricalBook,
       preparePeriodSummaries,

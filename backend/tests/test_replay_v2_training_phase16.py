@@ -1081,8 +1081,17 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
         assert portfolio["liquidations"][0]["state"] == "COMPLETED"
         liquidation = portfolio["liquidations"][0]
         assert liquidation["trigger_virtual_time_ms"] == REPLAY_START + 30_000
+        fill_page = await service.training.account_record_page(  # type: ignore[union-attr]
+            run_id,
+            record_type="FILLS",
+            order_scope="ALL",
+            track_id=None,
+            cursor=None,
+            limit=50,
+        )
+        entry_fill = next(fill for fill in fill_page["items"] if fill["side"] == "BUY")
         assert Decimal(liquidation["bankruptcy_price"]) == (
-            Decimal(portfolio["fills"][0]["price"])
+            Decimal(entry_fill["price"])
             - Decimal(liquidation["account_equity_before"])
             / (abs(Decimal(liquidation["position_quantity"])) * Decimal("10"))
         ), liquidation

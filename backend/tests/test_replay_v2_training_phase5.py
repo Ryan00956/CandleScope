@@ -384,6 +384,146 @@ async def _place_limit(
     )
 
 
+async def test_authoritative_order_preview_is_cursor_bound_and_non_mutating(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "order-preview.db")
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        before = await service.get_session(session_id)
+        snapshot = before["snapshot"]
+        assert isinstance(snapshot, dict)
+        cursor = snapshot["cursor"]
+        assert isinstance(cursor, dict)
+        revision = int(snapshot["revision"])
+        expected_cursor = TrainingCursor(
+            virtual_time_ms=int(cursor["virtual_time_ms"]),
+            source_sequence=int(cursor["source_sequence"]),
+            revision=revision,
+        )
+        order = {
+            "client_order_id": "preview-then-place",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "1",
+            "reduce_only": False,
+            "limit_price": None,
+            "stop_price": None,
+        }
+
+        preview = await service.training.preview_order(  # type: ignore[union-attr]
+            run_id,
+            expected_revision=revision,
+            expected_cursor=expected_cursor,
+            position_intent="OPEN",
+            order=order,
+        )
+        after = await service.get_session(session_id)
+        assert after["snapshot"]["revision"] == revision  # type: ignore[index]
+        assert after["snapshot"]["state_hash"] == snapshot["state_hash"]  # type: ignore[index]
+        assert preview["accepted"] is True
+        assert preview["cursor"] == expected_cursor.to_dict()
+        assert Decimal(str(preview["reserved_margin"])) > 0
+        assert Decimal(str(preview["estimated_fee"])) > 0
+
+        placed = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "place-after-preview",
+                ReplayV2CommandType.PLACE_ORDER,
+                after,
+                order,
+            ),
+        )
+        assert placed["data"]["orders"][0]["client_order_id"] == "preview-then-place"
+
+        with pytest.raises(TrainingRunError) as stale:
+            await service.training.preview_order(  # type: ignore[union-attr]
+                run_id,
+                expected_revision=revision,
+                expected_cursor=expected_cursor,
+                position_intent="OPEN",
+                order={**order, "client_order_id": "stale-preview"},
+            )
+        assert stale.value.code == "REVISION_CONFLICT"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_market_position_intent_and_atomic_protection_flow(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "position-workflows.db")
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        session = await service.get_session(session_id)
+        opened = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "intent-open",
+                ReplayV2CommandType.EXECUTE_POSITION_INTENT,
+                session,
+                {"intent": "OPEN", "side": "BUY", "quantity": "1"},
+            ),
+        )
+        assert opened["data"]["position"]["quantity"] == "1"
+
+        mark = Decimal(str(opened["data"]["position"]["mark_price"]))
+        session = await service.get_session(session_id)
+        protected = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "protect-position",
+                ReplayV2CommandType.SET_POSITION_PROTECTION,
+                session,
+                {
+                    "quantity": None,
+                    "stop_loss_price": format(mark - Decimal("1"), "f"),
+                    "take_profit_price": format(mark + Decimal("1"), "f"),
+                },
+            ),
+        )
+        assert [order["order_type"] for order in protected["data"]["orders"]] == [
+            "STOP_MARKET",
+            "TAKE_PROFIT_MARKET",
+        ]
+
+        session = await service.get_session(session_id)
+        reversed_result = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "intent-reverse",
+                ReplayV2CommandType.EXECUTE_POSITION_INTENT,
+                session,
+                {"intent": "REVERSE", "side": "SELL", "quantity": "2"},
+            ),
+        )
+        assert reversed_result["data"]["position"]["quantity"] == "-2"
+        assert len(reversed_result["data"]["orders"]) == 2
+        projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        selected = next(
+            track
+            for track in projection["tracks"]
+            if track["track_id"] == projection["viewer_state"]["selected_track_id"]
+        )
+        assert selected["position"]["quantity"] == "-2"
+        assert not any(
+            order["status"] in {"OPEN", "PARTIALLY_FILLED"}
+            for order in projection["portfolio"]["orders"]
+            if order["track_id"] == selected["track_id"]
+        )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 @pytest.mark.parametrize("track_count", (1, 2, 4, 8))
 def test_stable_market_event_order_is_input_order_independent(track_count: int) -> None:
     events = [

@@ -94,6 +94,10 @@ function commandId(prefix: string): string {
   return `${prefix}-${random}`.slice(0, 128);
 }
 
+function replayRunId(viewer: ReplayViewerRuntime): string | null {
+  return viewer.viewerState?.run_id ?? viewer.marketTracks?.run_id ?? null;
+}
+
 export function useReplayIntegrityRuntime(
   runtime: ReplayRuntime,
   viewer: ReplayViewerRuntime,
@@ -118,7 +122,7 @@ export function useReplayIntegrityRuntime(
   const viewerRef = useRef(viewer);
   runtimeRef.current = runtime;
   viewerRef.current = viewer;
-  const runId = viewer.viewerState?.run_id ?? null;
+  const runId = replayRunId(viewer);
   const globalClock = viewer.marketTracks?.global_clock ?? null;
   const effectiveState = replayEffectiveTrainingState(
     globalClock?.state,
@@ -129,7 +133,7 @@ export function useReplayIntegrityRuntime(
     || effectiveState === "ADVANCING";
 
   const refresh = useCallback(async (): Promise<void> => {
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) return;
     const requestGeneration = ++generation.current;
     setOperation((current) => current ?? "refresh");
@@ -157,7 +161,7 @@ export function useReplayIntegrityRuntime(
           : Promise.resolve(null),
       ]);
       if (requestGeneration !== generation.current
-        || viewerRef.current.viewerState?.run_id !== currentRunId) return;
+        || replayRunId(viewerRef.current) !== currentRunId) return;
       setIntegrity(nextIntegrity);
       setRules(nextRules);
       setEquity(nextEquity);
@@ -320,7 +324,7 @@ export function useReplayIntegrityRuntime(
     documentHash: `sha256:${string}`,
     entityCount: number,
   ): Promise<void> => {
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
     setOperation("drawing");
     setError(null);
@@ -354,7 +358,7 @@ export function useReplayIntegrityRuntime(
   }, []);
 
   const addMarker = useCallback(async (text: string): Promise<void> => {
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
     setOperation("marker");
     setError(null);
@@ -374,7 +378,7 @@ export function useReplayIntegrityRuntime(
   }, []);
 
   const startReview = useCallback(async (eventId: string | null = null): Promise<ReplayReviewResponse> => {
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
     setOperation("review");
     setError(null);
@@ -400,7 +404,7 @@ export function useReplayIntegrityRuntime(
     } = {},
   ): Promise<ReplayReviewControlResponse> => {
     const current = review;
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null || current === null) {
       throw new Error("ReviewMode is not active");
     }
@@ -472,7 +476,7 @@ export function useReplayIntegrityRuntime(
   }, [refresh]);
 
   const forkReview = useCallback(async (eventId: string): Promise<ReplayReviewForkResponse> => {
-    const currentRunId = viewerRef.current.viewerState?.run_id ?? null;
+    const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
     setOperation("fork");
     setError(null);

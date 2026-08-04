@@ -37,6 +37,7 @@ from app.replay.training.models import (
     ReplaySource,
     StartMode,
     TimeDisclosurePolicy,
+    TrainingCursor,
     TrainingRunCreateRequest,
 )
 from app.replay.training.service import TrainingRunService
@@ -295,6 +296,39 @@ class ReplayV2CommandPayload(_StrictModel):
     expected_cursor: TrainingCursorPayload
     type: str = Field(min_length=1, max_length=64)
     payload: dict[str, object]
+
+
+class ReplayOrderRequestPayload(_StrictModel):
+    client_order_id: str = Field(min_length=1, max_length=128)
+    side: Literal["BUY", "SELL"]
+    order_type: Literal[
+        "MARKET",
+        "LIMIT",
+        "STOP_MARKET",
+        "TAKE_PROFIT_MARKET",
+    ]
+    quantity: str = Field(min_length=1, max_length=128)
+    reduce_only: bool
+    limit_price: str | None = Field(default=None, min_length=1, max_length=128)
+    stop_price: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReplayTradePlanDraftPayload(_StrictModel):
+    sizing_mode: Literal["RISK_AMOUNT", "ACCOUNT_RISK_PERCENT"]
+    risk_amount: str | None = Field(default=None, min_length=1, max_length=128)
+    risk_percent: str | None = Field(default=None, min_length=1, max_length=128)
+    invalidation_price: str = Field(min_length=1, max_length=128)
+    target_price: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ReplayOrderPreviewPayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    expected_revision: int = Field(ge=0, le=MAX_COUNTER)
+    expected_cursor: TrainingCursorPayload
+    position_intent: Literal["NET", "OPEN"]
+    order: ReplayOrderRequestPayload
+    trade_plan: ReplayTradePlanDraftPayload | None = None
 
 
 class ReplayReviewPayload(_StrictModel):
@@ -940,6 +974,51 @@ async def command_replay_v2_run(
     return await _training_service(request).command(run_id, command)
 
 
+@router.post(
+    "/runs/{run_id}/order-preview",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def preview_replay_v2_order(
+    request: Request,
+    run_id: str,
+    payload: ReplayOrderPreviewPayload,
+) -> dict[str, object]:
+    return await _training_service(request).preview_order(
+        run_id,
+        expected_revision=payload.expected_revision,
+        expected_cursor=TrainingCursor.from_dict(
+            payload.expected_cursor.model_dump(mode="json")
+        ),
+        position_intent=payload.position_intent,
+        order=payload.order.model_dump(mode="json"),
+        trade_plan=(
+            None
+            if payload.trade_plan is None
+            else payload.trade_plan.model_dump(mode="json")
+        ),
+    )
+
+
+@router.get("/runs/{run_id}/account-records")
+async def replay_v2_account_record_page(
+    request: Request,
+    run_id: str,
+    record_type: Literal["ORDERS", "FILLS", "LEDGER"] = Query(),
+    order_scope: Literal["ACTIVE", "HISTORY", "ALL"] = Query(default="ALL"),
+    track_id: str | None = Query(default=None, min_length=1, max_length=128),
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, object]:
+    return await _training_service(request).account_record_page(
+        run_id,
+        record_type=record_type,
+        order_scope=order_scope,
+        track_id=track_id,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
 @router.get("/runs/{run_id}/integrity")
 async def replay_v2_training_integrity(
     request: Request,
@@ -1041,6 +1120,15 @@ async def replay_v2_training_report(
     run_id: str,
 ) -> dict[str, object]:
     return await _training_service(request).report(run_id)
+
+
+@router.get("/runs/{run_id}/training-results")
+async def replay_v2_training_results(
+    request: Request,
+    run_id: str,
+    limit: int = Query(default=500, ge=1, le=2_000),
+) -> dict[str, object]:
+    return await _training_service(request).training_results(run_id, limit=limit)
 
 
 @router.post(

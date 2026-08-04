@@ -3,10 +3,11 @@ import test from "node:test";
 
 import { ReplayV2ApiClient } from "../replayV2Api.js";
 import {
+  parseReplayOrderPreview,
   parseReplayV2CommandResult,
   parseReplayViewerStateResponse,
 } from "../replayV2Types.js";
-import type { ReplayV2Command } from "../replayV2Types.js";
+import type { ReplayOrderPreviewRequest, ReplayV2Command } from "../replayV2Types.js";
 
 
 function viewerState() {
@@ -45,6 +46,44 @@ function commandResult() {
   };
 }
 
+function orderPreview() {
+  return {
+    protocol: "replay.v2",
+    schema_version: "replay.order-preview.v1",
+    run_id: "run-1",
+    track_id: "track-1",
+    accepted: true,
+    position_intent: "OPEN",
+    revision: 6,
+    cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    state_hash: `sha256:${"b".repeat(64)}`,
+    execution_fidelity: "BAR_CONSERVATIVE",
+    order: {
+      client_order_id: "ticket-1",
+      side: "BUY",
+      order_type: "MARKET",
+      quantity: "1",
+      reduce_only: false,
+      limit_price: null,
+      stop_price: null,
+    },
+    reference_price: "100",
+    estimated_fill_price: "100.1",
+    estimated_notional: "100.1",
+    reserved_margin: "20",
+    estimated_fee: "0.04004",
+    fee_basis: "TAKER_WORST_CASE",
+    available_equity_after: "9980",
+    max_quantity: "10",
+    quote_asset: "USDT",
+    max_leverage: "5",
+  };
+}
+
 test("Phase 3 viewer and command response parsers are strict at the network boundary", () => {
   const viewer = parseReplayViewerStateResponse({
     protocol: "replay.v2",
@@ -61,6 +100,55 @@ test("Phase 3 viewer and command response parsers are strict at the network boun
     ...commandResult(),
     cursor: { ...commandResult().cursor, revision: 7 },
   }), /unknown/);
+});
+
+test("order preview parser preserves exact Decimal strings and rejects drift", () => {
+  const parsed = parseReplayOrderPreview(orderPreview());
+  assert.equal(parsed.estimated_fee, "0.04004");
+  assert.equal(parsed.position_intent, "OPEN");
+  assert.throws(() => parseReplayOrderPreview({
+    ...orderPreview(),
+    estimated_fee: 0.04004,
+  }), /canonical Decimal string/);
+  assert.throws(() => parseReplayOrderPreview({
+    ...orderPreview(),
+    cursor: { ...orderPreview().cursor, revision: 7 },
+  }), /revision is inconsistent/);
+});
+
+test("order preview API is run-scoped and sends the cursor-bound intent", async () => {
+  const requests: Array<{ url: string; body: string | null }> = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input, init) => {
+      requests.push({
+        url: String(input),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      return new Response(JSON.stringify(orderPreview()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const payload: ReplayOrderPreviewRequest = {
+    protocol: "replay.v2" as const,
+    expected_revision: 6,
+    expected_cursor: orderPreview().cursor,
+    position_intent: "OPEN" as const,
+    order: {
+      ...orderPreview().order,
+      side: "BUY",
+      order_type: "MARKET",
+    },
+  };
+
+  const result = await client.previewOrder("run-1", payload);
+
+  assert.equal(result.max_quantity, "10");
+  assert.deepEqual(requests, [{
+    url: "/api/v1/replay/runs/run-1/order-preview",
+    body: JSON.stringify(payload),
+  }]);
 });
 
 test("Phase 3 API uses run-scoped viewer, command, and progress routes", async () => {

@@ -470,3 +470,22 @@ test("v2 composition reuses the shared indicator product without hosted/cache re
   );
   assert.doesNotMatch(adapter, /candlescope-active-indicators/);
 });
+
+test("replay chart composes fills, position, orders, and risk references with indicator annotations", () => {
+  const workspace = source("src/features/replay/ReplayTrainingPageShell.tsx");
+
+  assert.match(workspace, /id: "replay-trade-fills"/);
+  assert.match(workspace, /runtime\.store\.fills\.map/);
+  assert.match(workspace, /shape: fill\.side === "BUY" \? "arrow_up" : "arrow_down"/);
+  assert.match(workspace, /id: "replay-position-average"/);
+  assert.match(workspace, /id: "replay-position-risk-reference"/);
+  assert.match(workspace, /id: `replay-order-\$\{order\.order_id\}`/);
+  assert.match(
+    workspace,
+    /const chartMarkers = useMemo\(\(\) => \[\s*\.\.\.indicators\.view\.markers,\s*\.\.\.replayTradeMarkers,/s,
+  );
+  assert.match(
+    workspace,
+    /const chartHlines = useMemo\(\(\) => \[\s*\.\.\.indicators\.view\.hlines,\s*\.\.\.replayTradeHlines,/s,
+  );
+});

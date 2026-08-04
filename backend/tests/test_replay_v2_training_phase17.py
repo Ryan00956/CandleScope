@@ -613,7 +613,17 @@ async def test_rule_history_marker_and_same_cursor_as_of_fork(
                 "stop_price": None,
             },
         )
-        assert opened["data"]["portfolio"]["fills"]
+        assert opened["data"]["portfolio"]["fills"] == []
+        assert opened["data"]["portfolio"]["history"]["fills_total"] == 1
+        fill_page = await service.training.account_record_page(
+            run_id,
+            record_type="FILLS",
+            order_scope="ALL",
+            track_id=None,
+            cursor=None,
+            limit=50,
+        )
+        assert fill_page["items"]
         marker = await service.training.record_review_marker(
             run_id,
             command_id="phase17-marker",

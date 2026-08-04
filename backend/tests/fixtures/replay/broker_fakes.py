@@ -9,6 +9,7 @@ from app.replay.broker.models import (
     OrderRequest,
     OrderSide,
     OrderType,
+    PAPER_LINEAR_EXECUTION_MODE,
 )
 from tests.fixtures.replay.bar_builder_fakes import (
     INTERVAL_MS,
@@ -55,6 +56,7 @@ def make_broker(
     config: BrokerConfig = CONFIG,
     display_interval: str = "1m",
     max_closed_bars: int = 32,
+    execution_mode: str = PAPER_LINEAR_EXECUTION_MODE,
 ) -> ConservativeBarBroker:
     builder = ReplayBarBuilder(
         base_interval="1m",
@@ -63,7 +65,11 @@ def make_broker(
         warmup_bars=(),
         max_closed_bars=max_closed_bars,
     )
-    return ConservativeBarBroker(config=config, bar_builder=builder)
+    return ConservativeBarBroker(
+        config=config,
+        bar_builder=builder,
+        execution_mode=execution_mode,
+    )
 
 
 def request(

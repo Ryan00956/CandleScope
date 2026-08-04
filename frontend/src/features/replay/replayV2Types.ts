@@ -87,8 +87,12 @@ export const REPLAY_V2_ENUMS = Object.freeze({
     "set_subscription_tier",
     "remove_unowned_track",
     "place_order",
+    "replace_order",
     "cancel_order",
+    "cancel_orders",
     "close_position",
+    "execute_position_intent",
+    "set_position_protection",
     "allocate_isolated_margin",
     "deposit",
     "withdraw",
@@ -308,6 +312,14 @@ export interface ReplayTrainingContractPortfolio {
   readonly positions: readonly ReplayTrainingPortfolioPosition[];
   readonly orders: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly fills: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly history: {
+    readonly orders_total: number;
+    readonly active_orders: number;
+    readonly historical_orders: number;
+    readonly fills_total: number;
+    readonly ledger_entries_total: number;
+    readonly page_limit_max: number;
+  };
   readonly active_fee_policy: Readonly<Record<string, ReplayV2Json>> | null;
   readonly instrument_rules: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly isolated_allocations: Readonly<Record<string, ReplayV2Json>>;
@@ -323,6 +335,21 @@ export interface ReplayTrainingContractPortfolio {
 }
 
 export type ReplayTrainingPortfolio = ReplayTrainingPortfolioV1 | ReplayTrainingContractPortfolio;
+
+export type ReplayAccountRecordType = "ORDERS" | "FILLS" | "LEDGER";
+export type ReplayAccountOrderScope = "ACTIVE" | "HISTORY" | "ALL";
+
+export interface ReplayAccountRecordPage {
+  readonly protocol: "replay.v2";
+  readonly schema_version: "replay.training.account-record-page.v1";
+  readonly run_id: string;
+  readonly record_type: ReplayAccountRecordType;
+  readonly order_scope: ReplayAccountOrderScope;
+  readonly track_id: string | null;
+  readonly items: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly total_count: number;
+  readonly next_cursor: string | null;
+}
 
 export interface ReplayTrainingPortfolioPosition {
   readonly track_id: string;
@@ -459,6 +486,149 @@ export interface ReplayV2CommandResult {
   readonly cursor: ReplayV2ControlCursor;
   readonly viewer_state: ReplayViewerState;
   readonly data: Readonly<Record<string, ReplayV2Json>>;
+}
+
+export interface ReplayOrderRequest {
+  readonly client_order_id: string;
+  readonly side: "BUY" | "SELL";
+  readonly order_type: "MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET";
+  readonly quantity: string;
+  readonly reduce_only: boolean;
+  readonly limit_price: string | null;
+  readonly stop_price: string | null;
+}
+
+export interface ReplayTradePlanDraft {
+  readonly sizing_mode: "RISK_AMOUNT" | "ACCOUNT_RISK_PERCENT";
+  readonly risk_amount: string | null;
+  readonly risk_percent: string | null;
+  readonly invalidation_price: string;
+  readonly target_price: string;
+  readonly reason: string;
+}
+
+export interface ReplayTradePlanSnapshot {
+  readonly schema_version: "replay.trade-plan.snapshot.v1";
+  readonly track_id: string;
+  readonly client_order_id: string;
+  readonly side: "BUY" | "SELL";
+  readonly order_type: "MARKET" | "LIMIT";
+  readonly sizing_mode: "RISK_AMOUNT" | "ACCOUNT_RISK_PERCENT";
+  readonly risk_amount: string;
+  readonly risk_percent: string | null;
+  readonly account_equity: string;
+  readonly entry_price: string;
+  readonly invalidation_price: string;
+  readonly target_price: string;
+  readonly risk_per_unit: string;
+  readonly reward_risk_ratio: string;
+  readonly quantity: string;
+  readonly reason: string;
+}
+
+export interface ReplayOrderPreviewRequest {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly expected_revision: number;
+  readonly expected_cursor: ReplayV2Cursor;
+  readonly position_intent: "NET" | "OPEN";
+  readonly order: ReplayOrderRequest;
+  readonly trade_plan?: ReplayTradePlanDraft | null;
+}
+
+export interface ReplayOrderPreview {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly schema_version: "replay.order-preview.v1" | "replay.order-preview.v2";
+  readonly run_id: string;
+  readonly track_id: string;
+  readonly accepted: true;
+  readonly position_intent: "NET" | "OPEN";
+  readonly revision: number;
+  readonly cursor: ReplayV2Cursor;
+  readonly state_hash: `sha256:${string}`;
+  readonly execution_fidelity: "BAR_CONSERVATIVE" | "AGG_TRADE_TAPE";
+  readonly order: ReplayOrderRequest;
+  readonly reference_price: string;
+  readonly estimated_fill_price: string;
+  readonly estimated_notional: string;
+  readonly reserved_margin: string;
+  readonly estimated_fee: string;
+  readonly fee_basis: "TAKER_WORST_CASE";
+  readonly available_equity_after: string;
+  readonly max_quantity: string;
+  readonly quote_asset: string;
+  readonly max_leverage: string;
+  readonly trade_plan: ReplayTradePlanSnapshot | null;
+}
+
+export interface ReplayTrainingResultPlan {
+  readonly plan_id: string;
+  readonly plan_hash: `sha256:${string}`;
+  readonly sizing_mode: "RISK_AMOUNT" | "ACCOUNT_RISK_PERCENT";
+  readonly risk_amount: string;
+  readonly risk_percent: string | null;
+  readonly entry_price: string;
+  readonly invalidation_price: string;
+  readonly target_price: string;
+  readonly reward_risk_ratio: string;
+  readonly quantity: string;
+  readonly reason: string;
+}
+
+export interface ReplayTrainingResultItem {
+  readonly trade_id: string;
+  readonly episode_id: string;
+  readonly track_id: string;
+  readonly symbol: string;
+  readonly settlement_asset: string;
+  readonly fill_id: string;
+  readonly position_side: "BUY" | "SELL";
+  readonly quantity: string;
+  readonly entry_price: string;
+  readonly exit_price: string;
+  readonly gross_realized_pnl: string;
+  readonly mae: string;
+  readonly mfe: string;
+  readonly initial_risk_amount: string | null;
+  readonly r_multiple: string | null;
+  readonly holding_duration_ms: number;
+  readonly entry_source_sequence: number;
+  readonly exit_source_sequence: number;
+  readonly entry_public_time: Readonly<Record<string, ReplayV2Json>>;
+  readonly exit_public_time: Readonly<Record<string, ReplayV2Json>>;
+  readonly plans: readonly ReplayTrainingResultPlan[];
+  readonly review_event_id: string | null;
+  readonly excursion_fidelity: "REVEALED_MARK_PATH_CONSERVATIVE";
+  readonly pnl_basis: "REALIZED_GROSS_EX_FEES";
+}
+
+export interface ReplayTrainingResultsResponse {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly schema_version: "replay.training-results.v1";
+  readonly run_id: string;
+  readonly summary: {
+    readonly trade_count: number;
+    readonly win_count: number;
+    readonly loss_count: number;
+    readonly win_rate: string;
+    readonly gross_realized_pnl: string;
+    readonly net_realized_pnl: string;
+    readonly fees_paid: string;
+    readonly average_win: string;
+    readonly average_loss: string;
+    readonly payoff_ratio: string | null;
+    readonly profit_factor: string | null;
+    readonly max_drawdown: string;
+    readonly average_mae: string;
+    readonly average_mfe: string;
+    readonly average_r_multiple: string | null;
+    readonly average_holding_duration_ms: number;
+    readonly planned_trade_count: number;
+  };
+  readonly items: readonly ReplayTrainingResultItem[];
+  readonly returned_count: number;
+  readonly truncated: boolean;
+  readonly data_fidelity: string;
+  readonly execution_fidelity: string;
 }
 
 export interface ReplayAdvanceProgressResponse {
@@ -1131,6 +1301,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       "positions",
       "orders",
       "fills",
+      "history",
       "active_fee_policy",
       "instrument_rules",
       "isolated_allocations",
@@ -1160,6 +1331,37 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
     const rawFills = objectList(portfolio.fills, "portfolio.fills");
     const rawRules = objectList(portfolio.instrument_rules, "portfolio.instrument_rules");
     const rawLiquidations = objectList(portfolio.liquidations, "portfolio.liquidations");
+    const rawHistory = exactObject(portfolio.history, "portfolio.history", [
+      "orders_total",
+      "active_orders",
+      "historical_orders",
+      "fills_total",
+      "ledger_entries_total",
+      "page_limit_max",
+    ]);
+    const history = {
+      orders_total: counter(rawHistory.orders_total, "portfolio.history.orders_total"),
+      active_orders: counter(rawHistory.active_orders, "portfolio.history.active_orders"),
+      historical_orders: counter(
+        rawHistory.historical_orders,
+        "portfolio.history.historical_orders",
+      ),
+      fills_total: counter(rawHistory.fills_total, "portfolio.history.fills_total"),
+      ledger_entries_total: counter(
+        rawHistory.ledger_entries_total,
+        "portfolio.history.ledger_entries_total",
+      ),
+      page_limit_max: counter(rawHistory.page_limit_max, "portfolio.history.page_limit_max"),
+    };
+    if (
+      history.orders_total !== history.active_orders + history.historical_orders
+      || history.active_orders !== rawOrders.length
+      || rawFills.length !== 0
+      || history.page_limit_max < 1
+      || history.page_limit_max > 200
+    ) {
+      throw new TypeError("portfolio history counters are inconsistent");
+    }
     const accountHistory = parseReplayAccountHistoryProjection(portfolio.account_history);
     const liquidationChannels = parseReplayLiquidationChannels(
       portfolio.liquidation_channels,
@@ -1230,6 +1432,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       positions,
       orders: objectArray(rawOrders, "portfolio.orders"),
       fills: objectArray(rawFills, "portfolio.fills"),
+      history,
       active_fee_policy: portfolio.active_fee_policy === null
         ? null
         : jsonObject(portfolio.active_fee_policy, "portfolio.active_fee_policy"),
@@ -1295,6 +1498,67 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         position: jsonObject(item.position, `${field}.position`),
       };
     }),
+  };
+}
+
+export function parseReplayAccountRecordPage(value: unknown): ReplayAccountRecordPage {
+  const page = exactObject(value, "account record page", [
+    "protocol",
+    "schema_version",
+    "run_id",
+    "record_type",
+    "order_scope",
+    "track_id",
+    "items",
+    "total_count",
+    "next_cursor",
+  ]);
+  if (
+    page.protocol !== REPLAY_V2_PROTOCOL
+    || page.schema_version !== "replay.training.account-record-page.v1"
+    || !Array.isArray(page.items)
+  ) {
+    throw new TypeError("account record page contract is unsupported");
+  }
+  const recordType = enumValue(
+    page.record_type,
+    enumValues("ORDERS", "FILLS", "LEDGER"),
+    "account record page.record_type",
+  );
+  const orderScope = enumValue(
+    page.order_scope,
+    enumValues("ACTIVE", "HISTORY", "ALL"),
+    "account record page.order_scope",
+  );
+  if (recordType !== "ORDERS" && orderScope !== "ALL") {
+    throw new TypeError("account record page order scope is inconsistent");
+  }
+  if (
+    page.next_cursor !== null
+    && (
+      typeof page.next_cursor !== "string"
+      || page.next_cursor.length < 1
+      || page.next_cursor.length > 2_048
+      || !/^[A-Za-z0-9_-]+$/.test(page.next_cursor)
+    )
+  ) {
+    throw new TypeError("account record page cursor is invalid");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: "replay.training.account-record-page.v1",
+    run_id: identifier(page.run_id, "account record page.run_id"),
+    record_type: recordType,
+    order_scope: orderScope,
+    track_id: page.track_id === null
+      ? null
+      : identifier(page.track_id, "account record page.track_id"),
+    items: page.items.map((item, index) => jsonObject(
+      item,
+      `account record page.items[${index}]`,
+    )),
+    total_count: counter(page.total_count, "account record page.total_count"),
+    next_cursor: page.next_cursor as string | null,
   };
 }
 
@@ -1776,6 +2040,444 @@ export interface TrainingRunMutationResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly created: boolean;
   readonly run: TrainingRunCard;
+}
+
+function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrderRequest {
+  const order = exactObject(value, fieldName, [
+    "client_order_id",
+    "side",
+    "order_type",
+    "quantity",
+    "reduce_only",
+    "limit_price",
+    "stop_price",
+  ]);
+  return {
+    client_order_id: identifier(order.client_order_id, `${fieldName}.client_order_id`),
+    side: enumValue(order.side, ["BUY", "SELL"] as const, `${fieldName}.side`),
+    order_type: enumValue(
+      order.order_type,
+      ["MARKET", "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"] as const,
+      `${fieldName}.order_type`,
+    ),
+    quantity: positiveDecimal(order.quantity, `${fieldName}.quantity`),
+    reduce_only: boolValue(order.reduce_only, `${fieldName}.reduce_only`),
+    limit_price: order.limit_price === null
+      ? null
+      : positiveDecimal(order.limit_price, `${fieldName}.limit_price`),
+    stop_price: order.stop_price === null
+      ? null
+      : positiveDecimal(order.stop_price, `${fieldName}.stop_price`),
+  };
+}
+
+function parseReplayTradePlanSnapshot(
+  value: unknown,
+  fieldName: string,
+): ReplayTradePlanSnapshot {
+  const plan = exactObject(value, fieldName, [
+    "schema_version",
+    "track_id",
+    "client_order_id",
+    "side",
+    "order_type",
+    "sizing_mode",
+    "risk_amount",
+    "risk_percent",
+    "account_equity",
+    "entry_price",
+    "invalidation_price",
+    "target_price",
+    "risk_per_unit",
+    "reward_risk_ratio",
+    "quantity",
+    "reason",
+  ]);
+  if (plan.schema_version !== "replay.trade-plan.snapshot.v1") {
+    throw new TypeError(`${fieldName} schema is unsupported`);
+  }
+  if (typeof plan.reason !== "string" || !plan.reason.trim() || plan.reason.length > 500) {
+    throw new TypeError(`${fieldName}.reason is invalid`);
+  }
+  return {
+    schema_version: "replay.trade-plan.snapshot.v1",
+    track_id: identifier(plan.track_id, `${fieldName}.track_id`),
+    client_order_id: identifier(plan.client_order_id, `${fieldName}.client_order_id`),
+    side: enumValue(plan.side, ["BUY", "SELL"] as const, `${fieldName}.side`),
+    order_type: enumValue(plan.order_type, ["MARKET", "LIMIT"] as const, `${fieldName}.order_type`),
+    sizing_mode: enumValue(
+      plan.sizing_mode,
+      ["RISK_AMOUNT", "ACCOUNT_RISK_PERCENT"] as const,
+      `${fieldName}.sizing_mode`,
+    ),
+    risk_amount: positiveDecimal(plan.risk_amount, `${fieldName}.risk_amount`),
+    risk_percent: plan.risk_percent === null
+      ? null
+      : positiveDecimal(plan.risk_percent, `${fieldName}.risk_percent`),
+    account_equity: positiveDecimal(plan.account_equity, `${fieldName}.account_equity`),
+    entry_price: positiveDecimal(plan.entry_price, `${fieldName}.entry_price`),
+    invalidation_price: positiveDecimal(
+      plan.invalidation_price,
+      `${fieldName}.invalidation_price`,
+    ),
+    target_price: positiveDecimal(plan.target_price, `${fieldName}.target_price`),
+    risk_per_unit: positiveDecimal(plan.risk_per_unit, `${fieldName}.risk_per_unit`),
+    reward_risk_ratio: positiveDecimal(
+      plan.reward_risk_ratio,
+      `${fieldName}.reward_risk_ratio`,
+    ),
+    quantity: positiveDecimal(plan.quantity, `${fieldName}.quantity`),
+    reason: plan.reason.trim(),
+  };
+}
+
+export function parseReplayOrderPreview(value: unknown): ReplayOrderPreview {
+  const rawPreview = objectValue(value, "order preview");
+  const schemaVersion = enumValue(
+    rawPreview.schema_version,
+    ["replay.order-preview.v1", "replay.order-preview.v2"] as const,
+    "order preview.schema_version",
+  );
+  const preview = exactObject(value, "order preview", [
+    "protocol",
+    "schema_version",
+    "run_id",
+    "track_id",
+    "accepted",
+    "position_intent",
+    "revision",
+    "cursor",
+    "state_hash",
+    "execution_fidelity",
+    "order",
+    "reference_price",
+    "estimated_fill_price",
+    "estimated_notional",
+    "reserved_margin",
+    "estimated_fee",
+    "fee_basis",
+    "available_equity_after",
+    "max_quantity",
+    "quote_asset",
+    "max_leverage",
+    ...(schemaVersion === "replay.order-preview.v2" ? ["trade_plan"] : []),
+  ]);
+  if (
+    preview.protocol !== REPLAY_V2_PROTOCOL
+    || preview.accepted !== true
+    || preview.fee_basis !== "TAKER_WORST_CASE"
+  ) {
+    throw new TypeError("order preview contract is unsupported");
+  }
+  const revision = counter(preview.revision, "order preview.revision");
+  const cursor = parseCursor(preview.cursor, "order preview.cursor");
+  if (cursor.revision !== revision) {
+    throw new TypeError("order preview cursor revision is inconsistent");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: schemaVersion,
+    run_id: identifier(preview.run_id, "order preview.run_id"),
+    track_id: identifier(preview.track_id, "order preview.track_id"),
+    accepted: true,
+    position_intent: enumValue(
+      preview.position_intent,
+      ["NET", "OPEN"] as const,
+      "order preview.position_intent",
+    ),
+    revision,
+    cursor,
+    state_hash: digest(preview.state_hash, "order preview.state_hash"),
+    execution_fidelity: enumValue(
+      preview.execution_fidelity,
+      ["BAR_CONSERVATIVE", "AGG_TRADE_TAPE"] as const,
+      "order preview.execution_fidelity",
+    ),
+    order: parseReplayOrderRequest(preview.order, "order preview.order"),
+    reference_price: positiveDecimal(preview.reference_price, "order preview.reference_price"),
+    estimated_fill_price: positiveDecimal(
+      preview.estimated_fill_price,
+      "order preview.estimated_fill_price",
+    ),
+    estimated_notional: positiveDecimal(
+      preview.estimated_notional,
+      "order preview.estimated_notional",
+    ),
+    reserved_margin: canonicalDecimal(preview.reserved_margin, "order preview.reserved_margin"),
+    estimated_fee: canonicalDecimal(preview.estimated_fee, "order preview.estimated_fee"),
+    fee_basis: "TAKER_WORST_CASE",
+    available_equity_after: canonicalDecimal(
+      preview.available_equity_after,
+      "order preview.available_equity_after",
+    ),
+    max_quantity: canonicalDecimal(preview.max_quantity, "order preview.max_quantity"),
+    quote_asset: identifier(preview.quote_asset, "order preview.quote_asset"),
+    max_leverage: positiveDecimal(preview.max_leverage, "order preview.max_leverage"),
+    trade_plan: schemaVersion === "replay.order-preview.v1"
+      ? null
+      : parseReplayTradePlanSnapshot(preview.trade_plan, "order preview.trade_plan"),
+  };
+}
+
+function parseReplayTrainingResultPlan(
+  value: unknown,
+  fieldName: string,
+): ReplayTrainingResultPlan {
+  const plan = exactObject(value, fieldName, [
+    "plan_id",
+    "plan_hash",
+    "sizing_mode",
+    "risk_amount",
+    "risk_percent",
+    "entry_price",
+    "invalidation_price",
+    "target_price",
+    "reward_risk_ratio",
+    "quantity",
+    "reason",
+  ]);
+  if (typeof plan.reason !== "string" || !plan.reason.trim() || plan.reason.length > 500) {
+    throw new TypeError(`${fieldName}.reason is invalid`);
+  }
+  return {
+    plan_id: identifier(plan.plan_id, `${fieldName}.plan_id`),
+    plan_hash: digest(plan.plan_hash, `${fieldName}.plan_hash`),
+    sizing_mode: enumValue(
+      plan.sizing_mode,
+      ["RISK_AMOUNT", "ACCOUNT_RISK_PERCENT"] as const,
+      `${fieldName}.sizing_mode`,
+    ),
+    risk_amount: positiveDecimal(plan.risk_amount, `${fieldName}.risk_amount`),
+    risk_percent: plan.risk_percent === null
+      ? null
+      : positiveDecimal(plan.risk_percent, `${fieldName}.risk_percent`),
+    entry_price: positiveDecimal(plan.entry_price, `${fieldName}.entry_price`),
+    invalidation_price: positiveDecimal(
+      plan.invalidation_price,
+      `${fieldName}.invalidation_price`,
+    ),
+    target_price: positiveDecimal(plan.target_price, `${fieldName}.target_price`),
+    reward_risk_ratio: positiveDecimal(
+      plan.reward_risk_ratio,
+      `${fieldName}.reward_risk_ratio`,
+    ),
+    quantity: positiveDecimal(plan.quantity, `${fieldName}.quantity`),
+    reason: plan.reason.trim(),
+  };
+}
+
+export function parseReplayTrainingResultsResponse(
+  value: unknown,
+): ReplayTrainingResultsResponse {
+  const response = exactObject(value, "training results", [
+    "protocol",
+    "schema_version",
+    "run_id",
+    "summary",
+    "items",
+    "returned_count",
+    "truncated",
+    "data_fidelity",
+    "execution_fidelity",
+  ]);
+  if (
+    response.protocol !== REPLAY_V2_PROTOCOL
+    || response.schema_version !== "replay.training-results.v1"
+    || !Array.isArray(response.items)
+  ) {
+    throw new TypeError("training results contract is unsupported");
+  }
+  const summary = exactObject(response.summary, "training results.summary", [
+    "trade_count",
+    "win_count",
+    "loss_count",
+    "win_rate",
+    "gross_realized_pnl",
+    "average_win",
+    "average_loss",
+    "payoff_ratio",
+    "average_mae",
+    "average_mfe",
+    "average_r_multiple",
+    "average_holding_duration_ms",
+    "planned_trade_count",
+    "max_drawdown",
+    "profit_factor",
+    "fees_paid",
+    "net_realized_pnl",
+  ]);
+  const items = response.items.map((valueItem, index): ReplayTrainingResultItem => {
+    const item = exactObject(valueItem, `training results.items[${index}]`, [
+      "trade_id",
+      "episode_id",
+      "track_id",
+      "symbol",
+      "settlement_asset",
+      "fill_id",
+      "position_side",
+      "quantity",
+      "entry_price",
+      "exit_price",
+      "gross_realized_pnl",
+      "mae",
+      "mfe",
+      "initial_risk_amount",
+      "r_multiple",
+      "holding_duration_ms",
+      "entry_source_sequence",
+      "exit_source_sequence",
+      "entry_public_time",
+      "exit_public_time",
+      "plans",
+      "review_event_id",
+      "excursion_fidelity",
+      "pnl_basis",
+    ]);
+    if (!Array.isArray(item.plans)) throw new TypeError("training result plans must be an array");
+    return {
+      trade_id: identifier(item.trade_id, `training results.items[${index}].trade_id`),
+      episode_id: identifier(item.episode_id, `training results.items[${index}].episode_id`),
+      track_id: identifier(item.track_id, `training results.items[${index}].track_id`),
+      symbol: marketIdentity(item.symbol, `training results.items[${index}].symbol`),
+      settlement_asset: marketIdentity(
+        item.settlement_asset,
+        `training results.items[${index}].settlement_asset`,
+      ),
+      fill_id: identifier(item.fill_id, `training results.items[${index}].fill_id`),
+      position_side: enumValue(
+        item.position_side,
+        ["BUY", "SELL"] as const,
+        `training results.items[${index}].position_side`,
+      ),
+      quantity: positiveDecimal(item.quantity, `training results.items[${index}].quantity`),
+      entry_price: positiveDecimal(
+        item.entry_price,
+        `training results.items[${index}].entry_price`,
+      ),
+      exit_price: positiveDecimal(item.exit_price, `training results.items[${index}].exit_price`),
+      gross_realized_pnl: canonicalDecimal(
+        item.gross_realized_pnl,
+        `training results.items[${index}].gross_realized_pnl`,
+      ),
+      mae: canonicalDecimal(item.mae, `training results.items[${index}].mae`),
+      mfe: canonicalDecimal(item.mfe, `training results.items[${index}].mfe`),
+      initial_risk_amount: item.initial_risk_amount === null
+        ? null
+        : positiveDecimal(
+          item.initial_risk_amount,
+          `training results.items[${index}].initial_risk_amount`,
+        ),
+      r_multiple: item.r_multiple === null
+        ? null
+        : canonicalDecimal(item.r_multiple, `training results.items[${index}].r_multiple`),
+      holding_duration_ms: counter(
+        item.holding_duration_ms,
+        `training results.items[${index}].holding_duration_ms`,
+      ),
+      entry_source_sequence: counter(
+        item.entry_source_sequence,
+        `training results.items[${index}].entry_source_sequence`,
+      ),
+      exit_source_sequence: counter(
+        item.exit_source_sequence,
+        `training results.items[${index}].exit_source_sequence`,
+      ),
+      entry_public_time: jsonObject(
+        item.entry_public_time,
+        `training results.items[${index}].entry_public_time`,
+      ),
+      exit_public_time: jsonObject(
+        item.exit_public_time,
+        `training results.items[${index}].exit_public_time`,
+      ),
+      plans: item.plans.map((plan, planIndex) => parseReplayTrainingResultPlan(
+        plan,
+        `training results.items[${index}].plans[${planIndex}]`,
+      )),
+      review_event_id: item.review_event_id === null
+        ? null
+        : identifier(item.review_event_id, `training results.items[${index}].review_event_id`),
+      excursion_fidelity: enumValue(
+        item.excursion_fidelity,
+        ["REVEALED_MARK_PATH_CONSERVATIVE"] as const,
+        `training results.items[${index}].excursion_fidelity`,
+      ),
+      pnl_basis: enumValue(
+        item.pnl_basis,
+        ["REALIZED_GROSS_EX_FEES"] as const,
+        `training results.items[${index}].pnl_basis`,
+      ),
+    };
+  });
+  const parsedSummary = {
+    trade_count: counter(summary.trade_count, "training results.summary.trade_count"),
+    win_count: counter(summary.win_count, "training results.summary.win_count"),
+    loss_count: counter(summary.loss_count, "training results.summary.loss_count"),
+    win_rate: canonicalDecimal(summary.win_rate, "training results.summary.win_rate"),
+    gross_realized_pnl: canonicalDecimal(
+      summary.gross_realized_pnl,
+      "training results.summary.gross_realized_pnl",
+    ),
+    net_realized_pnl: canonicalDecimal(
+      summary.net_realized_pnl,
+      "training results.summary.net_realized_pnl",
+    ),
+    fees_paid: canonicalDecimal(summary.fees_paid, "training results.summary.fees_paid"),
+    average_win: canonicalDecimal(summary.average_win, "training results.summary.average_win"),
+    average_loss: canonicalDecimal(
+      summary.average_loss,
+      "training results.summary.average_loss",
+    ),
+    payoff_ratio: summary.payoff_ratio === null
+      ? null
+      : canonicalDecimal(summary.payoff_ratio, "training results.summary.payoff_ratio"),
+    profit_factor: summary.profit_factor === null
+      ? null
+      : canonicalDecimal(summary.profit_factor, "training results.summary.profit_factor"),
+    max_drawdown: canonicalDecimal(
+      summary.max_drawdown,
+      "training results.summary.max_drawdown",
+    ),
+    average_mae: canonicalDecimal(summary.average_mae, "training results.summary.average_mae"),
+    average_mfe: canonicalDecimal(summary.average_mfe, "training results.summary.average_mfe"),
+    average_r_multiple: summary.average_r_multiple === null
+      ? null
+      : canonicalDecimal(
+        summary.average_r_multiple,
+        "training results.summary.average_r_multiple",
+      ),
+    average_holding_duration_ms: counter(
+      summary.average_holding_duration_ms,
+      "training results.summary.average_holding_duration_ms",
+    ),
+    planned_trade_count: counter(
+      summary.planned_trade_count,
+      "training results.summary.planned_trade_count",
+    ),
+  };
+  const returnedCount = counter(response.returned_count, "training results.returned_count");
+  if (
+    returnedCount !== items.length
+    || parsedSummary.win_count + parsedSummary.loss_count > parsedSummary.trade_count
+    || parsedSummary.planned_trade_count > parsedSummary.trade_count
+    || items.length > parsedSummary.trade_count
+  ) {
+    throw new TypeError("training results counters are inconsistent");
+  }
+  if (typeof response.data_fidelity !== "string" || typeof response.execution_fidelity !== "string") {
+    throw new TypeError("training results fidelity is invalid");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: "replay.training-results.v1",
+    run_id: identifier(response.run_id, "training results.run_id"),
+    summary: parsedSummary,
+    items,
+    returned_count: returnedCount,
+    truncated: boolValue(response.truncated, "training results.truncated"),
+    data_fidelity: response.data_fidelity,
+    execution_fidelity: response.execution_fidelity,
+  };
 }
 
 export interface TrainingRunDeleteResponse {

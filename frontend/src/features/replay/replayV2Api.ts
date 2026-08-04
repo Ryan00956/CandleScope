@@ -34,9 +34,12 @@ import {
   parseTrainingRunMutationResponse,
   parseTrainingRunDeleteResponse,
   parseTrainingRunReturnResponse,
+  parseReplayAccountRecordPage,
   parseReplayAccountAuditResponse,
   parseReplayAdvanceProgressResponse,
   parseReplayMarketTracksResponse,
+  parseReplayOrderPreview,
+  parseReplayTrainingResultsResponse,
   parseReplayV2CommandResult,
   parseReplayViewerStateResponse,
 } from "./replayV2Types.js";
@@ -68,8 +71,14 @@ import type {
 } from "./replayIntegrityModel.js";
 import type {
   ReplayAdvanceProgressResponse,
+  ReplayAccountOrderScope,
+  ReplayAccountRecordPage,
+  ReplayAccountRecordType,
   ReplayAccountAuditResponse,
   ReplayMarketTracksResponse,
+  ReplayOrderPreview,
+  ReplayOrderPreviewRequest,
+  ReplayTrainingResultsResponse,
   ReplayV2Command,
   ReplayV2CommandResult,
   ReplayViewerStateResponse,
@@ -508,6 +517,51 @@ export class ReplayV2ApiClient {
     );
   }
 
+  accountRecordsRun(
+    runId: string,
+    query: {
+      readonly recordType: ReplayAccountRecordType;
+      readonly orderScope?: ReplayAccountOrderScope;
+      readonly trackId?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayAccountRecordPage> {
+    const params = new URLSearchParams({ record_type: query.recordType });
+    if (query.orderScope !== undefined) {
+      params.set("order_scope", query.orderScope);
+    }
+    if (query.trackId !== undefined) {
+      params.set("track_id", safeIdentifier(query.trackId, "track id"));
+    }
+    if (query.cursor !== undefined) {
+      if (
+        query.cursor.length < 1
+        || query.cursor.length > 2_048
+        || !/^[A-Za-z0-9_-]+$/.test(query.cursor)
+      ) {
+        throw new ReplayV2ApiError(
+          "REPLAY_V2_PROTOCOL_ERROR",
+          "account record cursor is invalid",
+        );
+      }
+      params.set("cursor", query.cursor);
+    }
+    if (query.limit !== undefined) {
+      params.set("limit", String(boundedPositiveInteger(
+        query.limit,
+        "account record limit",
+        200,
+      )));
+    }
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/account-records?${params.toString()}`,
+      parseReplayAccountRecordPage,
+      signal ? { signal } : {},
+    );
+  }
+
   commandRun(
     runId: string,
     command: ReplayV2Command,
@@ -521,6 +575,33 @@ export class ReplayV2ApiClient {
         body: JSON.stringify(command),
         ...(signal ? { signal } : {}),
       },
+    );
+  }
+
+  previewOrder(
+    runId: string,
+    payload: ReplayOrderPreviewRequest,
+    signal?: AbortSignal,
+  ): Promise<ReplayOrderPreview> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/order-preview`,
+      parseReplayOrderPreview,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  trainingResultsRun(
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<ReplayTrainingResultsResponse> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/training-results?limit=2000`,
+      parseReplayTrainingResultsResponse,
+      signal ? { signal } : {},
     );
   }
 

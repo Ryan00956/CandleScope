@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 10
+TRAINING_SCHEMA_VERSION = 11
 TRAINING_SCHEMA_ID = "replay.training.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
@@ -1438,6 +1438,101 @@ ON replay_training_selection_preparation(status, updated_at_ms DESC);
 """
 
 
+TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_trade_plan (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    plan_sequence INTEGER NOT NULL CHECK (plan_sequence >= 1),
+    plan_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    client_order_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    order_type TEXT NOT NULL CHECK (order_type IN ('MARKET', 'LIMIT')),
+    sizing_mode TEXT NOT NULL
+        CHECK (sizing_mode IN ('RISK_AMOUNT', 'ACCOUNT_RISK_PERCENT')),
+    risk_amount TEXT NOT NULL,
+    risk_percent TEXT,
+    account_equity TEXT NOT NULL,
+    entry_price TEXT NOT NULL,
+    invalidation_price TEXT NOT NULL,
+    target_price TEXT NOT NULL,
+    risk_per_unit TEXT NOT NULL,
+    reward_risk_ratio TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    state_hash TEXT NOT NULL,
+    previous_plan_hash TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, plan_sequence),
+    UNIQUE (run_id, plan_id),
+    UNIQUE (run_id, command_id),
+    UNIQUE (run_id, track_id, order_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_trade_plan_order
+ON replay_training_trade_plan(run_id, track_id, order_id);
+
+CREATE TABLE IF NOT EXISTS replay_training_trade_projection (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    last_fill_ordinal INTEGER NOT NULL CHECK (last_fill_ordinal >= 0),
+    episode_sequence INTEGER NOT NULL CHECK (episode_sequence >= 0),
+    episode_id TEXT,
+    position_side TEXT CHECK (position_side IS NULL OR position_side IN ('BUY', 'SELL')),
+    net_quantity TEXT NOT NULL,
+    entry_price TEXT,
+    entry_time_ms INTEGER CHECK (entry_time_ms IS NULL OR entry_time_ms >= 0),
+    entry_source_sequence INTEGER
+        CHECK (entry_source_sequence IS NULL OR entry_source_sequence >= 0),
+    highest_mark TEXT,
+    lowest_mark TEXT,
+    plan_allocations_json TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id)
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_trade_result (
+    run_id TEXT NOT NULL
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    fill_id TEXT NOT NULL,
+    closing_order_id TEXT NOT NULL,
+    position_side TEXT NOT NULL CHECK (position_side IN ('BUY', 'SELL')),
+    quantity TEXT NOT NULL,
+    entry_price TEXT NOT NULL,
+    exit_price TEXT NOT NULL,
+    gross_realized_pnl TEXT NOT NULL,
+    mae TEXT NOT NULL,
+    mfe TEXT NOT NULL,
+    initial_risk_amount TEXT,
+    r_multiple TEXT,
+    holding_duration_ms INTEGER NOT NULL CHECK (holding_duration_ms >= 0),
+    entry_time_ms INTEGER NOT NULL CHECK (entry_time_ms >= 0),
+    exit_time_ms INTEGER NOT NULL CHECK (exit_time_ms >= entry_time_ms),
+    entry_source_sequence INTEGER NOT NULL CHECK (entry_source_sequence >= 0),
+    exit_source_sequence INTEGER NOT NULL CHECK (exit_source_sequence >= 0),
+    plan_ids_json TEXT NOT NULL,
+    excursion_fidelity TEXT NOT NULL,
+    pnl_basis TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, trade_id),
+    UNIQUE (run_id, track_id, fill_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_trade_result_exit
+ON replay_training_trade_result(run_id, exit_time_ms DESC, track_id, trade_id);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1542,6 +1637,27 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
     current = 0 if row is None else int(row[0])
     if current == TRAINING_SCHEMA_VERSION:
         return
+    if current == 10:
+        version_columns = {
+            str(column[1])
+            for column in connection.execute(
+                "PRAGMA table_info(replay_training_schema_version)"
+            ).fetchall()
+        }
+        if "applied_at_ms" not in version_columns:
+            raise RuntimeError(
+                "replay training schema 10 is obsolete; "
+                "clear replay training data and create a fresh database"
+            )
+        _execute_script(connection, TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE)
+        connection.execute(
+            """
+            UPDATE replay_training_schema_version
+            SET version = ?, applied_at_ms = ? WHERE singleton = 1
+            """,
+            (TRAINING_SCHEMA_VERSION, now_ms),
+        )
+        return
     if current != 0:
         raise RuntimeError(
             f"replay training schema {current} is obsolete; "
@@ -1564,6 +1680,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_PHASE18_ADDITIVE,
         TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE,
         TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE,
+        TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE,
     ):
         _execute_script(connection, script)
     connection.execute(

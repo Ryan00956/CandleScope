@@ -11,6 +11,7 @@ import DrawingToolbar from "../../components/DrawingToolbar.js";
 import IntervalSelector from "../../components/IntervalSelector.js";
 import SingleChartPanes from "../../components/SingleChartPanes.js";
 import IndicatorPanel from "../indicators/IndicatorPanel.js";
+import type { IndicatorHLine, IndicatorMarker } from "../indicators/indicatorTypes.js";
 import {
   providedBarsIndicatorSupport,
 } from "../indicators/useProvidedBarsIndicatorRuntime.js";
@@ -30,6 +31,7 @@ import {
 import type { IntervalString } from "../../utils/intervals.js";
 import ReplayBottomControlDock from "./components/ReplayBottomControlDock.js";
 import ReplayIntegrityReviewPanel from "./components/ReplayIntegrityReviewPanel.js";
+import ReplayTrainingResultsPanel from "./components/ReplayTrainingResultsPanel.js";
 import ReplayRightMarketRail from "./components/ReplayRightMarketRail.js";
 import { buildReplayCapabilityModel } from "./replayCapabilityModel.js";
 import {
@@ -165,6 +167,7 @@ export default function ReplayTrainingPageShell({
   const [returningToHub, setReturningToHub] = useState(false);
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
   const [integrityOpen, setIntegrityOpen] = useState(false);
+  const [trainingResultsOpen, setTrainingResultsOpen] = useState(false);
   const [indicatorPanelOpen, setIndicatorPanelOpen] = useState(false);
   const [intervalViewportTransfer, setIntervalViewportTransfer] = useState<ReplayIntervalViewportTransfer | null>(null);
   const intervalCommandOwnerRef = useRef<object | null>(null);
@@ -211,8 +214,8 @@ export default function ReplayTrainingPageShell({
   const integrityRuntime = useReplayIntegrityRuntime(runtime, viewer);
   const review = integrityRuntime.review;
   useEffect(() => {
-    if (review !== null) setIntegrityOpen(true);
-  }, [review]);
+    if (review !== null && !trainingResultsOpen) setIntegrityOpen(true);
+  }, [review, trainingResultsOpen]);
   useEffect(() => {
     if (review !== null) setIndicatorPanelOpen(false);
   }, [review]);
@@ -749,6 +752,110 @@ export default function ReplayTrainingPageShell({
     firstTime: viewerFirst?.time ?? null,
     lastTime: viewerLast?.time ?? null,
   };
+  const replayTradeMarkers = useMemo<IndicatorMarker[]>(() => [{
+    id: "replay-trade-fills",
+    pane: "main",
+    data: runtime.store.fills.map((fill) => ({
+      time: fill.event_time_ms / 1_000,
+      position: fill.side === "BUY" ? "below" : "above",
+      shape: fill.side === "BUY" ? "arrow_up" : "arrow_down",
+      color: fill.side === "BUY" ? "#16a34a" : "#e11d48",
+      text: `${fill.side === "BUY" ? "买" : "卖"} ${fill.quantity} @ ${fill.price}`,
+    })),
+  }], [runtime.store.fills]);
+  const replayTradeHlines = useMemo<IndicatorHLine[]>(() => {
+    const selectedTrackId = viewer.viewerState?.selected_track_id;
+    const portfolio = viewer.marketTracks?.portfolio;
+    const selectedPosition = selectedTrackId === undefined
+      ? undefined
+      : portfolio?.positions.find((item) => item.track_id === selectedTrackId);
+    const position = selectedPosition?.position;
+    const lines: IndicatorHLine[] = [];
+    const entryPrice = Number(position?.entry_price ?? Number.NaN);
+    const quantity = Number(position?.quantity ?? 0);
+    if (quantity !== 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
+      lines.push({
+        id: "replay-position-average",
+        pane: "main",
+        price: entryPrice,
+        title: `持仓均价 ${entryPrice}`,
+        color: "#2563eb",
+        linestyle: "solid",
+        linewidth: 1,
+      });
+    }
+    if (quantity !== 0 && selectedPosition !== undefined) {
+      const mark = Number(position?.mark_price ?? Number.NaN);
+      const marginEquity = Number(selectedPosition.margin_equity ?? Number.NaN);
+      const maintenance = Number(selectedPosition.maintenance_margin ?? Number.NaN);
+      let contractSize = 1;
+      if (portfolio?.schema_version === "replay.training.portfolio.v2") {
+        const rule = portfolio.instrument_rules.find((item) => item.track_id === selectedTrackId);
+        const rawRule = rule?.rule;
+        if (typeof rawRule === "object" && rawRule !== null && !Array.isArray(rawRule)) {
+          const parsed = Number((rawRule as Readonly<Record<string, unknown>>).contract_size ?? 1);
+          if (Number.isFinite(parsed) && parsed > 0) contractSize = parsed;
+        }
+      }
+      const sensitivity = Math.abs(quantity) * contractSize;
+      const buffer = marginEquity - maintenance;
+      const riskPrice = quantity > 0
+        ? mark - buffer / sensitivity
+        : mark + buffer / sensitivity;
+      if (
+        Number.isFinite(mark)
+        && Number.isFinite(marginEquity)
+        && Number.isFinite(maintenance)
+        && sensitivity > 0
+        && buffer >= 0
+        && Number.isFinite(riskPrice)
+        && riskPrice > 0
+      ) {
+        lines.push({
+          id: "replay-position-risk-reference",
+          pane: "main",
+          price: riskPrice,
+          title: `风险参考≈ ${riskPrice.toFixed(6)}`,
+          color: "#f59e0b",
+          linestyle: "dotted",
+          linewidth: 1,
+        });
+      }
+    }
+    for (const order of runtime.store.orders) {
+      if (order.status !== "OPEN" && order.status !== "PARTIALLY_FILLED") continue;
+      const rawPrice = order.limit_price ?? order.stop_price;
+      const orderPrice = Number(rawPrice ?? Number.NaN);
+      if (!Number.isFinite(orderPrice) || orderPrice <= 0) continue;
+      const protection = order.order_type === "STOP_MARKET"
+        ? "止损"
+        : order.order_type === "TAKE_PROFIT_MARKET"
+          ? "止盈"
+          : "委托";
+      lines.push({
+        id: `replay-order-${order.order_id}`,
+        pane: "main",
+        price: orderPrice,
+        title: `${protection} ${order.side === "BUY" ? "买" : "卖"} ${order.remaining_quantity}`,
+        color: order.order_type === "STOP_MARKET"
+          ? "#e11d48"
+          : order.order_type === "TAKE_PROFIT_MARKET"
+            ? "#16a34a"
+            : "#7c3aed",
+        linestyle: "dashed",
+        linewidth: 1,
+      });
+    }
+    return lines;
+  }, [runtime.store.orders, viewer.marketTracks?.portfolio, viewer.viewerState?.selected_track_id]);
+  const chartMarkers = useMemo(() => [
+    ...indicators.view.markers,
+    ...replayTradeMarkers,
+  ], [indicators.view.markers, replayTradeMarkers]);
+  const chartHlines = useMemo(() => [
+    ...indicators.view.hlines,
+    ...replayTradeHlines,
+  ], [indicators.view.hlines, replayTradeHlines]);
   const last = viewerLast ?? runtime.store.lastPrice;
   const isUp = Number(last?.close ?? 0) >= Number(last?.open ?? 0);
   const chart = active && review === null && liveDrawingError !== null ? (
@@ -843,9 +950,9 @@ export default function ReplayTrainingPageShell({
       onSelectedDrawingChange={drawings.actions.handleSelectedDrawingChange}
       mainOverlayLines={review === null ? indicators.view.mainOverlayLines : []}
       subPanes={review === null ? indicators.view.subPanes : []}
-      indicatorMarkers={review === null ? indicators.view.markers : []}
+      indicatorMarkers={review === null ? chartMarkers : []}
       indicatorFills={review === null ? indicators.view.fills : []}
-      indicatorHlines={review === null ? indicators.view.hlines : []}
+      indicatorHlines={review === null ? chartHlines : []}
       indicatorBgcolors={review === null ? indicators.view.bgcolors : []}
       indicatorBarcolors={review === null ? indicators.view.barcolors : []}
       onRemoveSubPane={review === null
@@ -965,10 +1072,26 @@ export default function ReplayTrainingPageShell({
                 data-review-active={review === null ? "false" : "true"}
                 aria-controls="replay-integrity-drawer"
                 aria-expanded={integrityOpen}
-                onClick={() => setIntegrityOpen((open) => !open)}
+                onClick={() => {
+                  setTrainingResultsOpen(false);
+                  setIntegrityOpen((open) => !open);
+                }}
               >
                 {review === null ? "复盘与完整性" : "复盘中"}
               </button>
+            )}
+            {active && integrityRuntime.runId !== null && (
+              <button
+                className="replay-integrity-toggle"
+                type="button"
+                data-replay-action="toggle-training-results"
+                aria-controls="replay-training-results-drawer"
+                aria-expanded={trainingResultsOpen}
+                onClick={() => {
+                  setIntegrityOpen(false);
+                  setTrainingResultsOpen((open) => !open);
+                }}
+              >训练成绩</button>
             )}
             {active && runtime.store.sessionId !== null && <button className="replay-return-hub" type="button" disabled={returningToHub || review !== null} title={review !== null ? "先退出只读 ReviewMode" : returnToHubError ?? "服务端暂停并写入 checkpoint 后返回存档大厅"} onClick={() => void returnToHub()}>{returningToHub ? "正在保存…" : "存档大厅"}</button>}
             <a className="replay-live-link" href="/" target="_blank" rel="noopener noreferrer">实时行情 ↗</a>
@@ -1080,6 +1203,21 @@ export default function ReplayTrainingPageShell({
               integrityRuntime={integrityRuntime}
               trainingState={effectiveState}
               onClose={() => setIntegrityOpen(false)}
+            />
+          </aside>
+        )}
+        {trainingResultsOpen && integrityRuntime.runId !== null && (
+          <aside
+            id="replay-training-results-drawer"
+            className="replay-integrity-drawer replay-training-results-drawer"
+            aria-label="训练成绩"
+            tabIndex={-1}
+          >
+            <ReplayTrainingResultsPanel
+              runId={integrityRuntime.runId}
+              integrityRuntime={integrityRuntime}
+              trainingState={effectiveState}
+              onClose={() => setTrainingResultsOpen(false)}
             />
           </aside>
         )}

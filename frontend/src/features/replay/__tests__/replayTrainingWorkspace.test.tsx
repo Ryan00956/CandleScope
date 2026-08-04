@@ -7,6 +7,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import ReplayCapabilitySurface from "../components/ReplayCapabilitySurface.js";
+import ReplayControlBar from "../components/ReplayControlBar.js";
 import { buildReplayCapabilityModel } from "../replayCapabilityModel.js";
 import {
   clearReplayWorkspacePreferences,
@@ -213,10 +214,35 @@ test("paper trading dock owns a complete readable surface in both app themes", (
   assert.match(rail, /role="tablist"/);
   assert.match(rail, /role="tabpanel"/);
   assert.match(rail, /handleRailTabKeyDown/);
-  assert.match(marketRail, /data-active-dock=\{preferences\.activeDock\}/);
+  assert.match(marketRail, /data-active-dock=\{activeDock\}/);
   assert.match(styles, /\[data-theme='light'\] \.replay-paper-trading/);
   assert.match(styles, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
   assert.match(styles, /--replay-rail-text-muted: #5f7086/);
+});
+
+test("right-rail trading workstation keeps positions and account history out of the chart stack", () => {
+  const rail = source("src/features/replay/components/ReplayRightRail.tsx");
+  const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");
+  const shell = source("src/features/replay/ReplayTrainingPageShell.tsx");
+  const styles = source("src/index.css");
+
+  assert.doesNotMatch(shell, /bottomPanel=/);
+  assert.doesNotMatch(shell, /ReplayTradingWorkbench/);
+  assert.match(marketRail, /<ReplayTradingWorkbench/);
+  assert.match(marketRail, /tab === "account" \? "仓位"/);
+  assert.match(rail, /data-replay-workbench="rail"/);
+  assert.match(rail, /\["open-orders", "当前"\]/);
+  assert.match(rail, /\["order-history", "历史"\]/);
+  assert.match(rail, /TERMINAL_ORDER_STATES\.has/);
+  assert.match(rail, /defaultReplayV2Api\.reportRun/);
+  assert.match(rail, /data-replay-action="close-partial"/);
+  assert.match(rail, /aria-live="polite"/);
+  assert.match(rail, /className="replay-position-card"/);
+  assert.match(rail, /className="replay-compact-record"/);
+  assert.match(styles, /\.replay-trading-workbench\[data-replay-workbench="rail"\]/);
+  assert.match(styles, /\.replay-rail-account-scroll \{/);
+  assert.match(styles, /\.replay-position-card,/);
+  assert.match(styles, /\.replay-submit-order\[data-side="BUY"\]/);
 });
 
 test("Phase 15 workspace exposes explicit bounded summary preparation and proof status", () => {
@@ -457,10 +483,88 @@ test("Phase 10 release surface exposes soak telemetry and an accessible danger d
   assert.match(styles, /\.replay-loading-spinner \{ animation: none !important; \}/);
 });
 
-test("forward cache is not rendered as the total training progress", () => {
+test("toolbar keeps idle time visible and scopes progress to an active cancelable advance", () => {
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const styles = source("src/index.css");
 
-  assert.match(controls, /effectiveState === "ENDED" \? 1 : null/);
-  assert.match(controls, /progress === null \? "持续训练"/);
-  assert.match(controls, /progress === null \? \{\} : \{ value: progress \}/);
+  assert.match(controls, /const cancelableAdvancePending = replayAdvanceIsCancelable\(/);
+  assert.match(controls, /\{cancelableAdvancePending && \(\s*<span className="replay-advance-progress"/s);
+  assert.match(controls, /aria-label="本次推进进度"/);
+  assert.match(controls, /advanceProgress === null \? "准备中…"/);
+  assert.doesNotMatch(controls, /aria-label="回放进度"|持续训练|domainProgress/);
+  assert.match(styles, /\.replay-advance-progress \{/);
+});
+
+function replayControlBarMarkup({
+  controlPending = null,
+  progress = null,
+}: {
+  readonly controlPending?: Readonly<Record<string, unknown>> | null;
+  readonly progress?: Readonly<Record<string, unknown>> | null;
+} = {}): string {
+  const runtime = {
+    clientInstanceId: "browser-1",
+    pendingCommand: null,
+    commandError: null,
+    commandRecoveryPending: false,
+    commandRecoveryReady: false,
+    commandRecoveryInFlight: false,
+    store: {
+      sessionConfig: {
+        source_kind: "bar",
+        base_interval: "1m",
+        blind_mode: true,
+      },
+      controllerClientId: "browser-1",
+      state: "PAUSED",
+      connectionState: "connected",
+      virtualTimeMs: 1_710_000_000_000,
+      replayStartMs: 1_710_000_000_000,
+      error: null,
+    },
+    actions: {},
+  };
+  const viewer = {
+    controlPending,
+    marketTracks: null,
+    viewerState: null,
+    viewerPending: false,
+    progress,
+    periodSummary: null,
+    summaryPreparing: false,
+    summaryError: null,
+    actions: {},
+  };
+  return renderToStaticMarkup(
+    <ReplayControlBar
+      runtime={runtime as never}
+      viewer={viewer as never}
+      publicTimeLabel="D+0 T+00:00:00"
+    />,
+  );
+}
+
+test("idle toolbar renders no progressbar and active virtual-time advance renders only command progress", () => {
+  const idle = replayControlBarMarkup();
+  assert.match(idle, /data-replay-progress="hidden"/);
+  assert.match(idle, /class="replay-public-time">D\+0 T\+00:00:00/);
+  assert.doesNotMatch(idle, /<progress|本次推进|持续训练/);
+
+  const controlPending = {
+    type: "advance",
+    payload: { basis: "VIRTUAL_TIME", duration_ms: 60_000 },
+  };
+  const preparing = replayControlBarMarkup({ controlPending });
+  assert.match(preparing, /data-replay-progress="unknown"/);
+  assert.match(preparing, /data-replay-command-progress="active"/);
+  assert.match(preparing, /aria-label="本次推进进度"/);
+  assert.match(preparing, /准备中…/);
+
+  const running = replayControlBarMarkup({
+    controlPending,
+    progress: { ratio_ppm: 250_000 },
+  });
+  assert.match(running, /data-replay-progress="0\.2500"/);
+  assert.match(running, /value="0\.25"/);
+  assert.match(running, /25\.0%/);
 });

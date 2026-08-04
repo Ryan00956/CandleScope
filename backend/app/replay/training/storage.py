@@ -97,6 +97,9 @@ from .segments import (
 
 
 _LIST_LIMIT_MAX = 100
+_ACCOUNT_RECORD_LIMIT_MAX = 200
+_ACCOUNT_RECORD_TYPES = {"ORDERS", "FILLS", "LEDGER"}
+_ACCOUNT_ORDER_SCOPES = {"ACTIVE", "HISTORY", "ALL"}
 _COMPATIBILITY_FILTERS = {"READY", "UNAVAILABLE"}
 _STATES = {"PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
@@ -248,6 +251,81 @@ def _encode_cursor(row: Mapping[str, object]) -> str:
             "updated_at_ms": int(row["updated_at_ms"]),
             "run_id": str(row["run_id"]),
             "kind": str(row["kind"]),
+        }
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _account_record_cursor_payload(
+    value: str | None,
+    *,
+    record_type: str,
+    order_scope: str,
+    track_id: str | None,
+) -> tuple[int, str, str] | None:
+    if value is None:
+        return None
+    try:
+        padding = "=" * (-len(value) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(value + padding).decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TrainingRunError(
+            "REPLAY_ACCOUNT_RECORD_CURSOR_INVALID",
+            "account record cursor is invalid",
+            status_code=422,
+        ) from exc
+    expected = {
+        "schema_version",
+        "record_type",
+        "order_scope",
+        "track_id",
+        "sort_value",
+        "sort_track_id",
+        "record_id",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected
+        or payload["schema_version"] != "replay.training.account-record-cursor.v1"
+        or payload["record_type"] != record_type
+        or payload["order_scope"] != order_scope
+        or payload["track_id"] != track_id
+        or isinstance(payload["sort_value"], bool)
+        or not isinstance(payload["sort_value"], int)
+        or payload["sort_value"] < 0
+        or not isinstance(payload["sort_track_id"], str)
+        or not isinstance(payload["record_id"], str)
+    ):
+        raise TrainingRunError(
+            "REPLAY_ACCOUNT_RECORD_CURSOR_INVALID",
+            "account record cursor does not match the requested record page",
+            status_code=422,
+        )
+    return (
+        payload["sort_value"],
+        payload["sort_track_id"],
+        payload["record_id"],
+    )
+
+
+def _encode_account_record_cursor(
+    *,
+    record_type: str,
+    order_scope: str,
+    track_id: str | None,
+    sort_value: int,
+    sort_track_id: str,
+    record_id: str,
+) -> str:
+    payload = canonical_json(
+        {
+            "schema_version": "replay.training.account-record-cursor.v1",
+            "record_type": record_type,
+            "order_scope": order_scope,
+            "track_id": track_id,
+            "sort_value": sort_value,
+            "sort_track_id": sort_track_id,
+            "record_id": record_id,
         }
     ).encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
@@ -3721,6 +3799,568 @@ class TrainingRunStore:
             )
         return self._card_from_row(row)
 
+    async def account_record_page(
+        self,
+        run_id: str,
+        *,
+        record_type: str,
+        order_scope: str,
+        track_id: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, object]:
+        if record_type not in _ACCOUNT_RECORD_TYPES:
+            raise TrainingRunError(
+                "REPLAY_ACCOUNT_RECORD_INVALID",
+                "record_type must be ORDERS, FILLS, or LEDGER",
+                status_code=422,
+            )
+        if order_scope not in _ACCOUNT_ORDER_SCOPES:
+            raise TrainingRunError(
+                "REPLAY_ACCOUNT_RECORD_INVALID",
+                "order_scope must be ACTIVE, HISTORY, or ALL",
+                status_code=422,
+            )
+        if record_type != "ORDERS" and order_scope != "ALL":
+            raise TrainingRunError(
+                "REPLAY_ACCOUNT_RECORD_INVALID",
+                "order_scope is only supported for order pages",
+                status_code=422,
+            )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _ACCOUNT_RECORD_LIMIT_MAX
+        ):
+            raise TrainingRunError(
+                "REPLAY_ACCOUNT_RECORD_INVALID",
+                f"limit must be between 1 and {_ACCOUNT_RECORD_LIMIT_MAX}",
+                status_code=422,
+            )
+        decoded_cursor = _account_record_cursor_payload(
+            cursor,
+            record_type=record_type,
+            order_scope=order_scope,
+            track_id=track_id,
+        )
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[tuple[sqlite3.Row, ...], int]:
+            exists = connection.execute(
+                "SELECT 1 FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if exists is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            cursor_value = None if decoded_cursor is None else decoded_cursor[0]
+            cursor_track = None if decoded_cursor is None else decoded_cursor[1]
+            cursor_record = None if decoded_cursor is None else decoded_cursor[2]
+            params: dict[str, object] = {
+                "run_id": run_id,
+                "track_id": track_id,
+                "order_scope": order_scope,
+                "cursor_value": cursor_value,
+                "cursor_track": cursor_track,
+                "cursor_record": cursor_record,
+                "row_limit": limit + 1,
+            }
+            if record_type == "ORDERS":
+                filters = """
+                    run_id = :run_id
+                    AND (:track_id IS NULL OR track_id = :track_id)
+                    AND (
+                        :order_scope = 'ALL'
+                        OR (
+                            :order_scope = 'ACTIVE'
+                            AND json_extract(order_json, '$.status')
+                                IN ('OPEN', 'PARTIALLY_FILLED')
+                        )
+                        OR (
+                            :order_scope = 'HISTORY'
+                            AND json_extract(order_json, '$.status')
+                                NOT IN ('OPEN', 'PARTIALLY_FILLED')
+                        )
+                    )
+                """
+                total = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM replay_training_contract_order WHERE {filters}",
+                        params,
+                    ).fetchone()[0]
+                )
+                rows = tuple(
+                    connection.execute(
+                        f"""
+                        SELECT *, updated_at_ms AS sort_value,
+                               track_id AS sort_track_id, order_id AS record_id
+                        FROM replay_training_contract_order
+                        WHERE {filters}
+                          AND (
+                              :cursor_value IS NULL
+                              OR updated_at_ms < :cursor_value
+                              OR (
+                                  updated_at_ms = :cursor_value
+                                  AND (
+                                      track_id < :cursor_track
+                                      OR (
+                                          track_id = :cursor_track
+                                          AND order_id < :cursor_record
+                                      )
+                                  )
+                              )
+                          )
+                        ORDER BY updated_at_ms DESC, track_id DESC, order_id DESC
+                        LIMIT :row_limit
+                        """,
+                        params,
+                    ).fetchall()
+                )
+                return rows, total
+            if record_type == "FILLS":
+                filters = """
+                    run_id = :run_id
+                    AND (:track_id IS NULL OR track_id = :track_id)
+                """
+                total = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM replay_training_contract_fill WHERE {filters}",
+                        params,
+                    ).fetchone()[0]
+                )
+                rows = tuple(
+                    connection.execute(
+                        f"""
+                        SELECT *, created_at_ms AS sort_value,
+                               track_id AS sort_track_id, fill_id AS record_id
+                        FROM replay_training_contract_fill
+                        WHERE {filters}
+                          AND (
+                              :cursor_value IS NULL
+                              OR created_at_ms < :cursor_value
+                              OR (
+                                  created_at_ms = :cursor_value
+                                  AND (
+                                      track_id < :cursor_track
+                                      OR (
+                                          track_id = :cursor_track
+                                          AND fill_id < :cursor_record
+                                      )
+                                  )
+                              )
+                          )
+                        ORDER BY created_at_ms DESC, track_id DESC, fill_id DESC
+                        LIMIT :row_limit
+                        """,
+                        params,
+                    ).fetchall()
+                )
+                return rows, total
+            filters = """
+                run_id = :run_id
+                AND (:track_id IS NULL OR track_id = :track_id)
+            """
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM replay_training_contract_ledger WHERE {filters}",
+                    params,
+                ).fetchone()[0]
+            )
+            rows = tuple(
+                connection.execute(
+                    f"""
+                    SELECT *, ledger_sequence AS sort_value,
+                           COALESCE(track_id, '') AS sort_track_id,
+                           posting_id AS record_id
+                    FROM replay_training_contract_ledger
+                    WHERE {filters}
+                      AND (
+                          :cursor_value IS NULL
+                          OR ledger_sequence < :cursor_value
+                          OR (
+                              ledger_sequence = :cursor_value
+                              AND posting_id < :cursor_record
+                          )
+                      )
+                    ORDER BY ledger_sequence DESC, posting_id DESC
+                    LIMIT :row_limit
+                    """,
+                    params,
+                ).fetchall()
+            )
+            return rows, total
+
+        rows, total_count = await self.base_store.run_extension_read(read)
+        visible = rows[:limit]
+        items: list[dict[str, object]] = []
+        for row in visible:
+            if record_type == "ORDERS":
+                items.append(
+                    {
+                        **json.loads(str(row["order_json"])),
+                        "track_id": str(row["track_id"]),
+                        "rule_revision": int(row["rule_revision"]),
+                        "updated_at_ms": int(row["updated_at_ms"]),
+                    }
+                )
+            elif record_type == "FILLS":
+                items.append(
+                    {
+                        **json.loads(str(row["fill_json"])),
+                        "track_id": str(row["track_id"]),
+                        "configured_fee": str(row["configured_fee"]),
+                        "fee_policy_revision": int(row["fee_policy_revision"]),
+                        "fee_fidelity": str(row["fee_fidelity"]),
+                    }
+                )
+            else:
+                items.append(
+                    {
+                        "ledger_sequence": int(row["ledger_sequence"]),
+                        "posting_id": str(row["posting_id"]),
+                        "track_id": row["track_id"],
+                        "kind": str(row["kind"]),
+                        "cash_delta": str(row["cash_delta"]),
+                        "asset": str(row["asset"]),
+                        "virtual_time_ms": int(row["virtual_time_ms"]),
+                        "source_sequence": int(row["source_sequence"]),
+                        "fidelity": str(row["fidelity"]),
+                        "rule_revision": int(row["rule_revision"]),
+                        "reference_type": str(row["reference_type"]),
+                        "reference_id": str(row["reference_id"]),
+                        "metadata": json.loads(str(row["metadata_json"])),
+                        "previous_hash": str(row["previous_hash"]),
+                        "entry_hash": str(row["entry_hash"]),
+                    }
+                )
+        next_cursor = None
+        if len(rows) > limit and visible:
+            last = visible[-1]
+            next_cursor = _encode_account_record_cursor(
+                record_type=record_type,
+                order_scope=order_scope,
+                track_id=track_id,
+                sort_value=int(last["sort_value"]),
+                sort_track_id=str(last["sort_track_id"]),
+                record_id=str(last["record_id"]),
+            )
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "schema_version": "replay.training.account-record-page.v1",
+            "run_id": run_id,
+            "record_type": record_type,
+            "order_scope": order_scope,
+            "track_id": track_id,
+            "items": items,
+            "total_count": total_count,
+            "next_cursor": next_cursor,
+        }
+
+    async def training_results(self, run_id: str, *, limit: int) -> dict[str, object]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2_000:
+            raise TrainingRunError(
+                "TRAINING_RESULTS_INVALID",
+                "training-results limit must be between 1 and 2000",
+                status_code=422,
+            )
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[
+            sqlite3.Row,
+            tuple[sqlite3.Row, ...],
+            tuple[sqlite3.Row, ...],
+            tuple[sqlite3.Row, ...],
+        ]:
+            run = connection.execute(
+                """
+                SELECT r.run_id, r.time_disclosure_policy,
+                       COALESCE(i.revealed, 0) AS revealed
+                FROM replay_training_run AS r
+                LEFT JOIN replay_training_integrity AS i USING(run_id)
+                WHERE r.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise TrainingRunError(
+                    "TRAINING_RUN_NOT_FOUND",
+                    "training run does not exist",
+                    status_code=404,
+                )
+            rows = tuple(
+                connection.execute(
+                    """
+                    SELECT result.*, track.symbol, track.settlement_asset,
+                           track.adapter_session_id,
+                           (
+                               SELECT event.event_id
+                               FROM replay_review_timeline_event AS event
+                               WHERE event.run_id = result.run_id
+                                 AND event.track_id = result.track_id
+                                 AND event.source_sequence = result.exit_source_sequence
+                                 AND event.category = 'FILL'
+                               ORDER BY event.timeline_sequence DESC LIMIT 1
+                           ) AS review_event_id
+                    FROM replay_training_trade_result AS result
+                    JOIN replay_training_market_track AS track
+                      ON track.run_id = result.run_id
+                     AND track.track_id = result.track_id
+                    WHERE result.run_id = ?
+                    ORDER BY result.exit_time_ms DESC, result.track_id, result.trade_id
+                    LIMIT ?
+                    """,
+                    (run_id, limit),
+                ).fetchall()
+            )
+            plans = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_trade_plan
+                    WHERE run_id = ? ORDER BY plan_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+            metrics = tuple(
+                connection.execute(
+                    """
+                    SELECT gross_realized_pnl, mae, mfe, r_multiple,
+                           holding_duration_ms, initial_risk_amount
+                    FROM replay_training_trade_result WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+            return run, rows, plans, metrics
+
+        run, rows, plan_rows, metric_rows = await self.base_store.run_extension_read(read)
+        previous_plan_hash = "sha256:" + ("0" * 64)
+        for expected_sequence, plan_row in enumerate(plan_rows, start=1):
+            try:
+                persisted_plan = json.loads(str(plan_row["plan_json"]))
+            except json.JSONDecodeError as exc:
+                raise TrainingRunError(
+                    "TRAINING_RESULTS_INTEGRITY_FAILED",
+                    "trade-plan log contains invalid canonical JSON",
+                    status_code=503,
+                ) from exc
+            if not isinstance(persisted_plan, dict):
+                raise TrainingRunError(
+                    "TRAINING_RESULTS_INTEGRITY_FAILED",
+                    "trade-plan log entry is invalid",
+                    status_code=503,
+                )
+            logged_hash = persisted_plan.pop("plan_hash", None)
+            plan_snapshot = {
+                "schema_version": "replay.trade-plan.snapshot.v1",
+                "track_id": str(plan_row["track_id"]),
+                "client_order_id": str(plan_row["client_order_id"]),
+                "side": str(plan_row["side"]),
+                "order_type": str(plan_row["order_type"]),
+                "sizing_mode": str(plan_row["sizing_mode"]),
+                "risk_amount": str(plan_row["risk_amount"]),
+                "risk_percent": plan_row["risk_percent"],
+                "account_equity": str(plan_row["account_equity"]),
+                "entry_price": str(plan_row["entry_price"]),
+                "invalidation_price": str(plan_row["invalidation_price"]),
+                "target_price": str(plan_row["target_price"]),
+                "risk_per_unit": str(plan_row["risk_per_unit"]),
+                "reward_risk_ratio": str(plan_row["reward_risk_ratio"]),
+                "quantity": str(plan_row["quantity"]),
+                "reason": str(plan_row["reason"]),
+            }
+            expected_material = {
+                "schema_version": "replay.trade-plan.log.v1",
+                "run_id": run_id,
+                "plan_sequence": expected_sequence,
+                "plan_id": str(plan_row["plan_id"]),
+                "command_id": str(plan_row["command_id"]),
+                "track_id": str(plan_row["track_id"]),
+                "order_id": str(plan_row["order_id"]),
+                "virtual_time_ms": int(plan_row["virtual_time_ms"]),
+                "source_sequence": int(plan_row["source_sequence"]),
+                "state_hash": str(plan_row["state_hash"]),
+                "plan": plan_snapshot,
+                "previous_plan_hash": previous_plan_hash,
+            }
+            expected_hash = canonical_sha256(expected_material)
+            if (
+                int(plan_row["plan_sequence"]) != expected_sequence
+                or str(plan_row["previous_plan_hash"]) != previous_plan_hash
+                or persisted_plan != expected_material
+                or logged_hash != expected_hash
+                or str(plan_row["plan_hash"]) != expected_hash
+            ):
+                raise TrainingRunError(
+                    "TRAINING_RESULTS_INTEGRITY_FAILED",
+                    "trade-plan log hash chain verification failed",
+                    status_code=503,
+                    details={"plan_sequence": expected_sequence},
+                )
+            previous_plan_hash = expected_hash
+        timeline_values = tuple(
+            sorted(
+                {
+                    int(row[field_name])
+                    for row in rows
+                    for field_name in ("entry_time_ms", "exit_time_ms")
+                }
+            )
+        )
+        if timeline_values:
+            public_projection = await self.public_times(
+                run_id,
+                timeline_ms=timeline_values,
+                max_items=4_000,
+            )
+            public_time_index = {
+                int(item["input_timeline_ms"]): item["public_time"]
+                for item in public_projection["items"]
+                if isinstance(item, Mapping)
+            }
+        else:
+            public_time_index = {}
+        plan_index = {str(row["plan_id"]): row for row in plan_rows}
+        items: list[dict[str, object]] = []
+        pnls = [Decimal(str(row["gross_realized_pnl"])) for row in metric_rows]
+        maes = [Decimal(str(row["mae"])) for row in metric_rows]
+        mfes = [Decimal(str(row["mfe"])) for row in metric_rows]
+        r_values = [
+            Decimal(str(row["r_multiple"]))
+            for row in metric_rows
+            if row["r_multiple"] is not None
+        ]
+        holding_values = [int(row["holding_duration_ms"]) for row in metric_rows]
+        for row in rows:
+            plan_ids = json.loads(str(row["plan_ids_json"]))
+            if not isinstance(plan_ids, list) or any(
+                not isinstance(plan_id, str) for plan_id in plan_ids
+            ):
+                raise TypeError("training result plan_ids are invalid")
+            plans: list[dict[str, object]] = []
+            for plan_id in plan_ids:
+                plan = plan_index.get(plan_id)
+                if plan is None:
+                    raise TypeError("training result references a missing trade plan")
+                plans.append(
+                    {
+                        "plan_id": plan_id,
+                        "plan_hash": str(plan["plan_hash"]),
+                        "sizing_mode": str(plan["sizing_mode"]),
+                        "risk_amount": str(plan["risk_amount"]),
+                        "risk_percent": plan["risk_percent"],
+                        "entry_price": str(plan["entry_price"]),
+                        "invalidation_price": str(plan["invalidation_price"]),
+                        "target_price": str(plan["target_price"]),
+                        "reward_risk_ratio": str(plan["reward_risk_ratio"]),
+                        "quantity": str(plan["quantity"]),
+                        "reason": str(plan["reason"]),
+                    }
+                )
+            entry_public_time = public_time_index[int(row["entry_time_ms"])]
+            exit_public_time = public_time_index[int(row["exit_time_ms"])]
+            items.append(
+                {
+                    "trade_id": str(row["trade_id"]),
+                    "episode_id": str(row["episode_id"]),
+                    "track_id": str(row["track_id"]),
+                    "symbol": str(row["symbol"]),
+                    "settlement_asset": str(row["settlement_asset"]),
+                    "fill_id": str(row["fill_id"]),
+                    "position_side": str(row["position_side"]),
+                    "quantity": str(row["quantity"]),
+                    "entry_price": str(row["entry_price"]),
+                    "exit_price": str(row["exit_price"]),
+                    "gross_realized_pnl": str(row["gross_realized_pnl"]),
+                    "mae": str(row["mae"]),
+                    "mfe": str(row["mfe"]),
+                    "initial_risk_amount": row["initial_risk_amount"],
+                    "r_multiple": row["r_multiple"],
+                    "holding_duration_ms": int(row["holding_duration_ms"]),
+                    "entry_source_sequence": int(row["entry_source_sequence"]),
+                    "exit_source_sequence": int(row["exit_source_sequence"]),
+                    "entry_public_time": entry_public_time,
+                    "exit_public_time": exit_public_time,
+                    "plans": plans,
+                    "review_event_id": row["review_event_id"],
+                    "excursion_fidelity": str(row["excursion_fidelity"]),
+                    "pnl_basis": str(row["pnl_basis"]),
+                }
+            )
+
+        winners = [value for value in pnls if value > 0]
+        losers = [value for value in pnls if value < 0]
+        count = len(pnls)
+        average_win = (
+            Decimal(0) if not winners else sum(winners, Decimal(0)) / len(winners)
+        )
+        average_loss = (
+            Decimal(0) if not losers else sum(losers, Decimal(0)) / len(losers)
+        )
+        payoff_ratio = (
+            None
+            if average_win <= 0 or average_loss >= 0
+            else average_win / abs(average_loss)
+        )
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "schema_version": "replay.training-results.v1",
+            "run_id": run_id,
+            "summary": {
+                "trade_count": count,
+                "win_count": len(winners),
+                "loss_count": len(losers),
+                "win_rate": decimal_to_string(
+                    Decimal(0) if count == 0 else Decimal(len(winners)) / count,
+                    field_name="training win rate",
+                ),
+                "gross_realized_pnl": decimal_to_string(
+                    sum(pnls, Decimal(0)),
+                    field_name="training gross realized pnl",
+                ),
+                "average_win": decimal_to_string(average_win, field_name="average win"),
+                "average_loss": decimal_to_string(
+                    average_loss,
+                    field_name="average loss",
+                ),
+                "payoff_ratio": (
+                    None
+                    if payoff_ratio is None
+                    else decimal_to_string(payoff_ratio, field_name="payoff ratio")
+                ),
+                "average_mae": decimal_to_string(
+                    Decimal(0) if not maes else sum(maes, Decimal(0)) / len(maes),
+                    field_name="average mae",
+                ),
+                "average_mfe": decimal_to_string(
+                    Decimal(0) if not mfes else sum(mfes, Decimal(0)) / len(mfes),
+                    field_name="average mfe",
+                ),
+                "average_r_multiple": (
+                    None
+                    if not r_values
+                    else decimal_to_string(
+                        sum(r_values, Decimal(0)) / len(r_values),
+                        field_name="average r multiple",
+                    )
+                ),
+                "average_holding_duration_ms": (
+                    0 if not holding_values else sum(holding_values) // len(holding_values)
+                ),
+                "planned_trade_count": sum(
+                    1 for row in metric_rows if row["initial_risk_amount"] is not None
+                ),
+            },
+            "items": items,
+            "returned_count": len(items),
+            "truncated": len(items) < len(metric_rows),
+        }
+
     async def deletion_target(self, run_id: str) -> tuple[str, tuple[str, ...]]:
         """Return the archive kind and replay sessions that a delete would remove."""
 
@@ -4949,6 +5589,36 @@ class TrainingRunStore:
                     "marker_id": str(marker["marker_id"]),
                     "text": str(marker["text"]),
                     "content_hash": str(marker["content_hash"]),
+                }
+        if str(event["category"]) == "ORDER":
+            plan = connection.execute(
+                """
+                SELECT plan_id, plan_hash, order_id, side, order_type,
+                       sizing_mode, risk_amount, risk_percent, entry_price,
+                       invalidation_price, target_price, reward_risk_ratio,
+                       quantity, reason
+                FROM replay_training_trade_plan
+                WHERE run_id = ? AND command_id = ?
+                """,
+                (event["run_id"], command_id),
+            ).fetchone()
+            if plan is not None:
+                return {
+                    "kind": "TRADE_PLAN",
+                    "plan_id": str(plan["plan_id"]),
+                    "plan_hash": str(plan["plan_hash"]),
+                    "order_id": str(plan["order_id"]),
+                    "side": str(plan["side"]),
+                    "order_type": str(plan["order_type"]),
+                    "sizing_mode": str(plan["sizing_mode"]),
+                    "risk_amount": str(plan["risk_amount"]),
+                    "risk_percent": plan["risk_percent"],
+                    "entry_price": str(plan["entry_price"]),
+                    "invalidation_price": str(plan["invalidation_price"]),
+                    "target_price": str(plan["target_price"]),
+                    "reward_risk_ratio": str(plan["reward_risk_ratio"]),
+                    "quantity": str(plan["quantity"]),
+                    "reason": str(plan["reason"]),
                 }
         return None
 
@@ -9497,31 +10167,44 @@ class TrainingRunStore:
                 """
                 SELECT track_id, order_json, rule_revision
                 FROM replay_training_contract_order
-                WHERE run_id = ? ORDER BY track_id, order_id
+                WHERE run_id = ?
+                  AND json_extract(order_json, '$.status')
+                      IN ('OPEN', 'PARTIALLY_FILLED')
+                ORDER BY track_id, order_id
                 """,
                 (run_id,),
             ).fetchall()
         ]
-        fills = [
-            {
-                **json.loads(str(row["fill_json"])),
-                "track_id": str(row["track_id"]),
-                "configured_fee": str(row["configured_fee"]),
-                "fee_policy_revision": int(row["fee_policy_revision"]),
-                "fee_fidelity": str(row["fee_fidelity"]),
-            }
-            for row in connection.execute(
+        order_counts = connection.execute(
+            """
+            SELECT COUNT(*) AS total_count,
+                   SUM(
+                       CASE WHEN json_extract(order_json, '$.status')
+                                      IN ('OPEN', 'PARTIALLY_FILLED')
+                            THEN 1 ELSE 0 END
+                   ) AS active_count
+            FROM replay_training_contract_order
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if order_counts is None:
+            raise TypeError("contract order counts are unavailable")
+        order_total = int(order_counts["total_count"])
+        active_order_total = int(order_counts["active_count"] or 0)
+        fill_fee_rows = tuple(
+            connection.execute(
                 """
-                SELECT * FROM replay_training_contract_fill
-                WHERE run_id = ? ORDER BY track_id, fill_id
+                SELECT configured_fee FROM replay_training_contract_fill
+                WHERE run_id = ?
                 """,
                 (run_id,),
             ).fetchall()
-        ]
+        )
         ledger_rows = tuple(
             connection.execute(
                 """
-                SELECT * FROM replay_training_contract_ledger
+                SELECT kind, cash_delta FROM replay_training_contract_ledger
                 WHERE run_id = ? ORDER BY ledger_sequence
                 """,
                 (run_id,),
@@ -9532,7 +10215,7 @@ class TrainingRunStore:
             Decimal(0),
         )
         fee_total = sum(
-            (Decimal(str(fill["configured_fee"])) for fill in fills),
+            (Decimal(str(row["configured_fee"])) for row in fill_fee_rows),
             Decimal(0),
         )
         funding_total = sum(
@@ -9595,26 +10278,6 @@ class TrainingRunStore:
                 """,
                 (run_id,),
             ).fetchall()
-        ]
-        ledger_tail = [
-            {
-                "ledger_sequence": int(row["ledger_sequence"]),
-                "posting_id": str(row["posting_id"]),
-                "track_id": row["track_id"],
-                "kind": str(row["kind"]),
-                "cash_delta": str(row["cash_delta"]),
-                "asset": str(row["asset"]),
-                "virtual_time_ms": int(row["virtual_time_ms"]),
-                "source_sequence": int(row["source_sequence"]),
-                "fidelity": str(row["fidelity"]),
-                "rule_revision": int(row["rule_revision"]),
-                "reference_type": str(row["reference_type"]),
-                "reference_id": str(row["reference_id"]),
-                "metadata": json.loads(str(row["metadata_json"])),
-                "previous_hash": str(row["previous_hash"]),
-                "entry_hash": str(row["entry_hash"]),
-            }
-            for row in ledger_rows[-100:]
         ]
         archive_bindings = [
             {
@@ -9693,7 +10356,15 @@ class TrainingRunStore:
             ),
             "positions": risk_positions,
             "orders": orders,
-            "fills": fills,
+            "fills": [],
+            "history": {
+                "orders_total": order_total,
+                "active_orders": active_order_total,
+                "historical_orders": order_total - active_order_total,
+                "fills_total": len(fill_fee_rows),
+                "ledger_entries_total": len(ledger_rows),
+                "page_limit_max": _ACCOUNT_RECORD_LIMIT_MAX,
+            },
             "active_fee_policy": (
                 None
                 if active_policy is None
@@ -9781,7 +10452,7 @@ class TrainingRunStore:
                     cash - ledger_total,
                     field_name="ledger_reconciliation_delta",
                 ),
-                "entries": ledger_tail,
+                "entries": [],
             },
             "fidelity": {
                 "instrument_rules": (
@@ -12692,6 +13363,388 @@ class TrainingRunStore:
                 (now_ms, run_id),
             )
 
+    @classmethod
+    def _sync_trade_results_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        component_state: Mapping[str, object],
+        revealed_event_low: Decimal | None,
+        revealed_event_high: Decimal | None,
+        now_ms: int,
+    ) -> None:
+        """Incrementally project fills into immutable, reviewable trade results."""
+
+        row = connection.execute(
+            """
+            SELECT * FROM replay_training_trade_projection
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchone()
+        if row is None:
+            last_fill_ordinal = 0
+            episode_sequence = 0
+            episode_id: str | None = None
+            position_side: str | None = None
+            net_quantity = Decimal(0)
+            entry_price: Decimal | None = None
+            entry_time_ms: int | None = None
+            entry_source_sequence: int | None = None
+            highest_mark: Decimal | None = None
+            lowest_mark: Decimal | None = None
+            allocations: dict[str, Decimal] = {}
+        else:
+            last_fill_ordinal = int(row["last_fill_ordinal"])
+            episode_sequence = int(row["episode_sequence"])
+            episode_id = None if row["episode_id"] is None else str(row["episode_id"])
+            position_side = (
+                None if row["position_side"] is None else str(row["position_side"])
+            )
+            net_quantity = Decimal(str(row["net_quantity"]))
+            entry_price = (
+                None if row["entry_price"] is None else Decimal(str(row["entry_price"]))
+            )
+            entry_time_ms = (
+                None if row["entry_time_ms"] is None else int(row["entry_time_ms"])
+            )
+            entry_source_sequence = (
+                None
+                if row["entry_source_sequence"] is None
+                else int(row["entry_source_sequence"])
+            )
+            highest_mark = (
+                None if row["highest_mark"] is None else Decimal(str(row["highest_mark"]))
+            )
+            lowest_mark = (
+                None if row["lowest_mark"] is None else Decimal(str(row["lowest_mark"]))
+            )
+            decoded_allocations = json.loads(str(row["plan_allocations_json"]))
+            if not isinstance(decoded_allocations, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in decoded_allocations.items()
+            ):
+                raise TypeError("trade projection plan allocations are invalid")
+            allocations = {
+                key: Decimal(value) for key, value in decoded_allocations.items()
+            }
+
+        position = component_state.get("position")
+        current_mark: Decimal | None = None
+        if isinstance(position, Mapping) and position.get("mark_price") is not None:
+            current_mark = Decimal(str(position["mark_price"]))
+        if episode_id is not None and current_mark is not None:
+            highest_mark = (
+                current_mark if highest_mark is None else max(highest_mark, current_mark)
+            )
+            lowest_mark = (
+                current_mark if lowest_mark is None else min(lowest_mark, current_mark)
+            )
+        if episode_id is not None and revealed_event_high is not None:
+            highest_mark = (
+                revealed_event_high
+                if highest_mark is None
+                else max(highest_mark, revealed_event_high)
+            )
+        if episode_id is not None and revealed_event_low is not None:
+            lowest_mark = (
+                revealed_event_low
+                if lowest_mark is None
+                else min(lowest_mark, revealed_event_low)
+            )
+
+        raw_closed = component_state.get("closed_trades")
+        closed_by_fill = {
+            str(item["fill_id"]): item
+            for item in raw_closed
+            if isinstance(raw_closed, (list, tuple))
+            and isinstance(item, Mapping)
+            and isinstance(item.get("fill_id"), str)
+        } if isinstance(raw_closed, (list, tuple)) else {}
+
+        fill_rows = connection.execute(
+            """
+            SELECT fill_id, fill_json FROM replay_training_contract_fill
+            WHERE run_id = ? AND track_id = ? AND fill_id > ?
+            ORDER BY fill_id
+            """,
+            (run_id, track_id, f"fill-{last_fill_ordinal:010d}"),
+        ).fetchall()
+
+        def bind_plan(order_id: str, opening_quantity: Decimal) -> None:
+            plan = connection.execute(
+                """
+                SELECT plan_id, risk_per_unit, quantity
+                FROM replay_training_trade_plan
+                WHERE run_id = ? AND track_id = ? AND order_id = ?
+                """,
+                (run_id, track_id, order_id),
+            ).fetchone()
+            if plan is None or opening_quantity <= 0:
+                return
+            planned_quantity = Decimal(str(plan["quantity"]))
+            if planned_quantity <= 0:
+                raise TypeError("trade plan quantity is invalid")
+            allocation = Decimal(str(plan["risk_per_unit"])) * opening_quantity
+            plan_id = str(plan["plan_id"])
+            allocations[plan_id] = allocations.get(plan_id, Decimal(0)) + allocation
+
+        for fill_row in fill_rows:
+            raw = json.loads(str(fill_row["fill_json"]))
+            if not isinstance(raw, Mapping):
+                raise TypeError("contract fill projection is invalid")
+            fill_id = str(raw["fill_id"])
+            try:
+                fill_ordinal = int(fill_id.rsplit("-", 1)[1])
+            except (IndexError, ValueError) as exc:
+                raise TypeError("contract fill identifier is invalid") from exc
+            fill_side = str(raw["side"])
+            side_sign = Decimal(1) if fill_side == "BUY" else Decimal(-1)
+            fill_quantity = Decimal(str(raw["quantity"]))
+            fill_price = Decimal(str(raw["price"]))
+            fill_time_ms = int(raw["event_time_ms"])
+            fill_source_sequence = int(raw["source_sequence"])
+            contract_size = Decimal(str(raw.get("contract_size", "1")))
+
+            if episode_id is not None:
+                highest_mark = (
+                    fill_price if highest_mark is None else max(highest_mark, fill_price)
+                )
+                lowest_mark = (
+                    fill_price if lowest_mark is None else min(lowest_mark, fill_price)
+                )
+
+            same_direction = net_quantity == 0 or (net_quantity > 0) == (side_sign > 0)
+            if same_direction:
+                if net_quantity == 0:
+                    episode_sequence += 1
+                    episode_id = f"trade-episode-{episode_sequence:08d}"
+                    position_side = fill_side
+                    net_quantity = side_sign * fill_quantity
+                    entry_price = fill_price
+                    entry_time_ms = fill_time_ms
+                    entry_source_sequence = fill_source_sequence
+                    highest_mark = fill_price
+                    lowest_mark = fill_price
+                    allocations = {}
+                    if revealed_event_high is not None:
+                        highest_mark = max(highest_mark, revealed_event_high)
+                    if revealed_event_low is not None:
+                        lowest_mark = min(lowest_mark, revealed_event_low)
+                else:
+                    assert entry_price is not None
+                    combined = abs(net_quantity) + fill_quantity
+                    entry_price = (
+                        abs(net_quantity) * entry_price + fill_quantity * fill_price
+                    ) / combined
+                    net_quantity += side_sign * fill_quantity
+                bind_plan(str(raw["order_id"]), fill_quantity)
+                last_fill_ordinal = fill_ordinal
+                continue
+
+            assert episode_id is not None
+            assert position_side is not None
+            assert entry_price is not None
+            assert entry_time_ms is not None
+            assert entry_source_sequence is not None
+            assert highest_mark is not None
+            assert lowest_mark is not None
+            absolute_position = abs(net_quantity)
+            closing_quantity = min(absolute_position, fill_quantity)
+            position_sign = Decimal(1) if net_quantity > 0 else Decimal(-1)
+            gross_pnl = (
+                (fill_price - entry_price)
+                * closing_quantity
+                * position_sign
+                * contract_size
+            )
+            if net_quantity > 0:
+                mae = (lowest_mark - entry_price) * closing_quantity * contract_size
+                mfe = (highest_mark - entry_price) * closing_quantity * contract_size
+            else:
+                mae = (entry_price - highest_mark) * closing_quantity * contract_size
+                mfe = (entry_price - lowest_mark) * closing_quantity * contract_size
+            mae = min(Decimal(0), mae)
+            mfe = max(Decimal(0), mfe)
+            risk_total = sum(allocations.values(), Decimal(0))
+            close_fraction = closing_quantity / absolute_position
+            allocated_risk = risk_total * close_fraction
+            result_allocations = {
+                plan_id: amount * close_fraction
+                for plan_id, amount in allocations.items()
+                if amount * close_fraction > 0
+            }
+            remaining_allocations = {
+                plan_id: amount - result_allocations.get(plan_id, Decimal(0))
+                for plan_id, amount in allocations.items()
+                if amount - result_allocations.get(plan_id, Decimal(0)) > 0
+            }
+            r_multiple = None if allocated_risk <= 0 else gross_pnl / allocated_risk
+            closed = closed_by_fill.get(fill_id)
+            trade_id = (
+                str(closed["trade_id"])
+                if isinstance(closed, Mapping) and isinstance(closed.get("trade_id"), str)
+                else f"trade-{fill_ordinal:010d}"
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO replay_training_trade_result(
+                    run_id, track_id, trade_id, episode_id, fill_id,
+                    closing_order_id, position_side, quantity, entry_price,
+                    exit_price, gross_realized_pnl, mae, mfe,
+                    initial_risk_amount, r_multiple, holding_duration_ms,
+                    entry_time_ms, exit_time_ms, entry_source_sequence,
+                    exit_source_sequence, plan_ids_json, excursion_fidelity,
+                    pnl_basis, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    track_id,
+                    trade_id,
+                    episode_id,
+                    fill_id,
+                    raw["order_id"],
+                    position_side,
+                    decimal_to_string(closing_quantity, field_name="closing quantity"),
+                    decimal_to_string(entry_price, field_name="trade entry price"),
+                    decimal_to_string(fill_price, field_name="trade exit price"),
+                    decimal_to_string(gross_pnl, field_name="trade gross pnl"),
+                    decimal_to_string(mae, field_name="trade mae"),
+                    decimal_to_string(mfe, field_name="trade mfe"),
+                    (
+                        None
+                        if allocated_risk <= 0
+                        else decimal_to_string(allocated_risk, field_name="trade risk")
+                    ),
+                    (
+                        None
+                        if r_multiple is None
+                        else decimal_to_string(r_multiple, field_name="trade r multiple")
+                    ),
+                    max(0, fill_time_ms - entry_time_ms),
+                    entry_time_ms,
+                    fill_time_ms,
+                    entry_source_sequence,
+                    fill_source_sequence,
+                    canonical_json(sorted(result_allocations)),
+                    "REVEALED_MARK_PATH_CONSERVATIVE",
+                    "REALIZED_GROSS_EX_FEES",
+                    now_ms,
+                ),
+            )
+
+            residual_close_quantity = fill_quantity - closing_quantity
+            if residual_close_quantity > 0:
+                episode_sequence += 1
+                episode_id = f"trade-episode-{episode_sequence:08d}"
+                position_side = fill_side
+                net_quantity = side_sign * residual_close_quantity
+                entry_price = fill_price
+                entry_time_ms = fill_time_ms
+                entry_source_sequence = fill_source_sequence
+                highest_mark = fill_price
+                lowest_mark = fill_price
+                allocations = {}
+                if revealed_event_high is not None:
+                    highest_mark = max(highest_mark, revealed_event_high)
+                if revealed_event_low is not None:
+                    lowest_mark = min(lowest_mark, revealed_event_low)
+                bind_plan(str(raw["order_id"]), residual_close_quantity)
+            elif closing_quantity == absolute_position:
+                episode_id = None
+                position_side = None
+                net_quantity = Decimal(0)
+                entry_price = None
+                entry_time_ms = None
+                entry_source_sequence = None
+                highest_mark = None
+                lowest_mark = None
+                allocations = {}
+            else:
+                net_quantity = position_sign * (absolute_position - closing_quantity)
+                allocations = remaining_allocations
+            last_fill_ordinal = fill_ordinal
+
+        if episode_id is not None and current_mark is not None:
+            highest_mark = (
+                current_mark if highest_mark is None else max(highest_mark, current_mark)
+            )
+            lowest_mark = (
+                current_mark if lowest_mark is None else min(lowest_mark, current_mark)
+            )
+        if episode_id is not None and revealed_event_high is not None:
+            highest_mark = (
+                revealed_event_high
+                if highest_mark is None
+                else max(highest_mark, revealed_event_high)
+            )
+        if episode_id is not None and revealed_event_low is not None:
+            lowest_mark = (
+                revealed_event_low
+                if lowest_mark is None
+                else min(lowest_mark, revealed_event_low)
+            )
+        connection.execute(
+            """
+            INSERT INTO replay_training_trade_projection(
+                run_id, track_id, last_fill_ordinal, episode_sequence,
+                episode_id, position_side, net_quantity, entry_price,
+                entry_time_ms, entry_source_sequence, highest_mark, lowest_mark,
+                plan_allocations_json, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, track_id) DO UPDATE SET
+                last_fill_ordinal = excluded.last_fill_ordinal,
+                episode_sequence = excluded.episode_sequence,
+                episode_id = excluded.episode_id,
+                position_side = excluded.position_side,
+                net_quantity = excluded.net_quantity,
+                entry_price = excluded.entry_price,
+                entry_time_ms = excluded.entry_time_ms,
+                entry_source_sequence = excluded.entry_source_sequence,
+                highest_mark = excluded.highest_mark,
+                lowest_mark = excluded.lowest_mark,
+                plan_allocations_json = excluded.plan_allocations_json,
+                updated_at_ms = excluded.updated_at_ms
+            """,
+            (
+                run_id,
+                track_id,
+                last_fill_ordinal,
+                episode_sequence,
+                episode_id,
+                position_side,
+                decimal_to_string(net_quantity, field_name="projected net quantity"),
+                (
+                    None
+                    if entry_price is None
+                    else decimal_to_string(entry_price, field_name="projected entry price")
+                ),
+                entry_time_ms,
+                entry_source_sequence,
+                (
+                    None
+                    if highest_mark is None
+                    else decimal_to_string(highest_mark, field_name="projected high mark")
+                ),
+                (
+                    None
+                    if lowest_mark is None
+                    else decimal_to_string(lowest_mark, field_name="projected low mark")
+                ),
+                canonical_json(
+                    {
+                        plan_id: decimal_to_string(amount, field_name="plan allocation")
+                        for plan_id, amount in sorted(allocations.items())
+                    }
+                ),
+                now_ms,
+            ),
+        )
+
     def _sync_session_summary(
         self,
         connection: sqlite3.Connection,
@@ -12889,6 +13942,58 @@ class TrainingRunStore:
             component_state=component_state,
             now_ms=now_ms,
         )
+        revealed_event_low: Decimal | None = None
+        revealed_event_high: Decimal | None = None
+        latest_mutation = connection.execute(
+            """
+            SELECT kind, source_sequence FROM replay_mutation_log
+            WHERE session_id = ? ORDER BY mutation_id DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        if (
+            latest_mutation is not None
+            and latest_mutation["kind"] == "source_event"
+            and latest_mutation["source_sequence"] is not None
+            and int(latest_mutation["source_sequence"])
+            == int(state["source_sequence"])
+        ):
+            source_row = connection.execute(
+                """
+                SELECT event_json FROM replay_source_event
+                WHERE session_id = ? AND source_sequence = ?
+                """,
+                (session_id, state["source_sequence"]),
+            ).fetchone()
+            if source_row is None:
+                raise TypeError("revealed source event is missing")
+            source_event = json.loads(str(source_row["event_json"]))
+            if not isinstance(source_event, Mapping):
+                raise TypeError("revealed source event must be an object")
+            raw_low = source_event.get("low", source_event.get("price"))
+            raw_high = source_event.get("high", source_event.get("price"))
+            if raw_low is not None and raw_high is not None:
+                try:
+                    revealed_event_low = Decimal(str(raw_low))
+                    revealed_event_high = Decimal(str(raw_high))
+                except InvalidOperation as exc:
+                    raise TypeError("revealed source event price range is invalid") from exc
+                if (
+                    not revealed_event_low.is_finite()
+                    or not revealed_event_high.is_finite()
+                    or revealed_event_low <= 0
+                    or revealed_event_high < revealed_event_low
+                ):
+                    raise TypeError("revealed source event price range is invalid")
+        self._sync_trade_results_projection(
+            connection,
+            run_id=run_id,
+            track_id=track_id,
+            component_state=component_state,
+            revealed_event_low=revealed_event_low,
+            revealed_event_high=revealed_event_high,
+            now_ms=now_ms,
+        )
         account_history = connection.execute(
             """
             SELECT account_data_mode, status
@@ -12963,6 +14068,7 @@ class TrainingRunStore:
             return
         command_type = command.get("type")
         if command_type not in {
+            "place_order",
             "_training_adjust_capital",
             "_training_reveal_history",
         }:
@@ -12971,7 +14077,8 @@ class TrainingRunStore:
             """
             SELECT r.run_id, r.integrity_mode, r.time_disclosure_policy,
                    r.active_rule_revision, r.current_equity,
-                   i.start_time_known, i.strict_eligible, i.revealed
+                   i.start_time_known, i.strict_eligible, i.revealed,
+                   track.track_id
             FROM replay_training_run AS r
             JOIN replay_training_integrity AS i USING(run_id)
             JOIN replay_training_market_track AS track USING(run_id)
@@ -12988,6 +14095,126 @@ class TrainingRunStore:
         if not isinstance(cursor, Mapping):
             raise TypeError("training policy command cursor must be an object")
         command_id = str(command["command_id"])
+        if command_type == "place_order":
+            trade_plan = payload.get("trade_plan")
+            if trade_plan is None:
+                return
+            if not isinstance(trade_plan, Mapping):
+                raise TypeError("accepted trade plan must be an object")
+            if result is None:
+                raise TypeError("accepted trade plan is missing its command result")
+            result_data = result.get("data")
+            raw_orders = (
+                result_data.get("orders")
+                if isinstance(result_data, Mapping)
+                else None
+            )
+            if not isinstance(raw_orders, list):
+                raise TypeError("accepted trade plan result has no order projection")
+            client_order_id = str(payload.get("client_order_id", ""))
+            order = next(
+                (
+                    item
+                    for item in raw_orders
+                    if isinstance(item, Mapping)
+                    and item.get("client_order_id") == client_order_id
+                ),
+                None,
+            )
+            if not isinstance(order, Mapping):
+                raise TypeError("accepted trade plan could not bind its order")
+            if (
+                trade_plan.get("track_id") != run["track_id"]
+                or trade_plan.get("client_order_id") != client_order_id
+                or trade_plan.get("side") != payload.get("side")
+                or trade_plan.get("order_type") != payload.get("order_type")
+                or trade_plan.get("quantity") != payload.get("quantity")
+            ):
+                raise TypeError("accepted trade plan does not match its order")
+            sequence = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(plan_sequence), 0) + 1
+                    FROM replay_training_trade_plan WHERE run_id = ?
+                    """,
+                    (run["run_id"],),
+                ).fetchone()[0]
+            )
+            previous = connection.execute(
+                """
+                SELECT plan_hash FROM replay_training_trade_plan
+                WHERE run_id = ? ORDER BY plan_sequence DESC LIMIT 1
+                """,
+                (run["run_id"],),
+            ).fetchone()
+            previous_hash = (
+                "sha256:" + ("0" * 64)
+                if previous is None
+                else str(previous["plan_hash"])
+            )
+            plan_id = f"trade-plan-{sequence:08d}"
+            material = {
+                "schema_version": "replay.trade-plan.log.v1",
+                "run_id": str(run["run_id"]),
+                "plan_sequence": sequence,
+                "plan_id": plan_id,
+                "command_id": command_id,
+                "track_id": str(run["track_id"]),
+                "order_id": str(order["order_id"]),
+                "virtual_time_ms": int(cursor["virtual_time_ms"]),
+                "source_sequence": validate_v2_counter(
+                    state["source_sequence"],
+                    field_name="trade-plan source_sequence",
+                ),
+                "state_hash": str(state["state_hash"]),
+                "plan": dict(trade_plan),
+                "previous_plan_hash": previous_hash,
+            }
+            plan_hash = canonical_sha256(material)
+            connection.execute(
+                """
+                INSERT INTO replay_training_trade_plan(
+                    run_id, plan_sequence, plan_id, command_id, track_id,
+                    order_id, client_order_id, side, order_type, sizing_mode,
+                    risk_amount, risk_percent, account_equity, entry_price,
+                    invalidation_price, target_price, risk_per_unit,
+                    reward_risk_ratio, quantity, reason, virtual_time_ms,
+                    source_sequence, state_hash, previous_plan_hash, plan_hash,
+                    plan_json, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run["run_id"],
+                    sequence,
+                    plan_id,
+                    command_id,
+                    run["track_id"],
+                    order["order_id"],
+                    client_order_id,
+                    trade_plan["side"],
+                    trade_plan["order_type"],
+                    trade_plan["sizing_mode"],
+                    trade_plan["risk_amount"],
+                    trade_plan["risk_percent"],
+                    trade_plan["account_equity"],
+                    trade_plan["entry_price"],
+                    trade_plan["invalidation_price"],
+                    trade_plan["target_price"],
+                    trade_plan["risk_per_unit"],
+                    trade_plan["reward_risk_ratio"],
+                    trade_plan["quantity"],
+                    trade_plan["reason"],
+                    cursor["virtual_time_ms"],
+                    material["source_sequence"],
+                    state["state_hash"],
+                    previous_hash,
+                    plan_hash,
+                    canonical_json({**material, "plan_hash": plan_hash}),
+                    now_ms,
+                ),
+            )
+            return
         sequence_row = connection.execute(
             """
             SELECT COALESCE(MAX(action_sequence), 0) + 1 AS next_sequence

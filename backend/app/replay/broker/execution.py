@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Mapping, Sequence
 
 from ..bars.builder import ReplayBarBuilder, ReplayDisplayBar
@@ -48,6 +48,7 @@ from .models import (
 )
 from .risk import (
     adverse_market_price,
+    build_order_preview,
     build_account,
     decimal_multiple,
     fee_for_fill,
@@ -425,6 +426,17 @@ class ConservativeBarBroker:
             )
         return order
 
+    def preview_order(self, request: OrderRequest) -> Mapping[str, object]:
+        if not isinstance(request, OrderRequest):
+            raise TypeError("request must be OrderRequest")
+        return build_order_preview(
+            config=self.config,
+            request=request,
+            position=self._position,
+            account=self._account,
+            orders=self.orders,
+        )
+
     def place_order(
         self,
         request: OrderRequest,
@@ -507,13 +519,19 @@ class ConservativeBarBroker:
         working.ledger = ledger
         immediate = self._revealed_reference_trigger(order)
         if immediate is not None:
-            self._fill_working(
+            filled = self._fill_working(
                 working,
                 order,
                 source_sequence=sequence,
                 event_time_ms=event_time_ms,
                 trigger=immediate,
             )
+            if filled and Decimal(working.position.quantity) == 0:
+                self._cancel_orphan_reduce_orders(
+                    working,
+                    source_sequence=sequence,
+                    event_time_ms=event_time_ms,
+                )
         account = self._account_from(
             working.ledger or ledger,
             working.position,
@@ -554,6 +572,108 @@ class ConservativeBarBroker:
         self._has_trading_activity = True
         return canceled
 
+    def replace_order(
+        self,
+        order_id: str,
+        request: OrderRequest,
+        *,
+        command_id: str,
+        accepted_source_sequence: int | None = None,
+        created_time_ms: int | None = None,
+    ) -> tuple[ReplayOrder, ReplayOrder]:
+        """Atomically cancel an open order and place its constrained replacement."""
+
+        checkpoint = self.snapshot()
+        try:
+            existing = self.order(order_id)
+            if existing.status not in {
+                OrderStatus.OPEN,
+                OrderStatus.PARTIALLY_FILLED,
+            }:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "only open orders can be replaced",
+                )
+            if (
+                request.side is not existing.side
+                or request.order_type is not existing.order_type
+                or request.reduce_only is not existing.reduce_only
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "replacement must preserve side, order_type, and reduce_only",
+                )
+            canceled = self.cancel_order(
+                order_id,
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+            )
+            replacement = self.place_order(
+                request,
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+            )
+            return canceled, replacement
+        except (ReplayDomainError, InvalidOperation, TypeError, ValueError):
+            self.restore(checkpoint)
+            raise
+
+    def cancel_orders(
+        self,
+        *,
+        scope: str,
+        order_ids: Sequence[str],
+        command_id: str,
+        accepted_source_sequence: int | None = None,
+        created_time_ms: int | None = None,
+    ) -> tuple[ReplayOrder, ...]:
+        """Atomically cancel selected orders or every open order in this broker track."""
+
+        if scope not in {"ORDER_IDS", "SELECTED_TRACK"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders scope is invalid",
+            )
+        normalized_ids = tuple(order_ids)
+        if any(not isinstance(order_id, str) for order_id in normalized_ids):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders order_ids are invalid",
+            )
+        if len(normalized_ids) != len(set(normalized_ids)):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders order_ids must be unique",
+            )
+        if scope == "ORDER_IDS" and not 1 <= len(normalized_ids) <= 64:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "ORDER_IDS requires between 1 and 64 order_ids",
+            )
+        if scope == "SELECTED_TRACK":
+            if normalized_ids:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "SELECTED_TRACK requires an empty order_ids array",
+                )
+            normalized_ids = tuple(order.order_id for order in self.open_orders)
+        checkpoint = self.snapshot()
+        try:
+            return tuple(
+                self.cancel_order(
+                    order_id,
+                    command_id=command_id,
+                    accepted_source_sequence=accepted_source_sequence,
+                    created_time_ms=created_time_ms,
+                )
+                for order_id in normalized_ids
+            )
+        except (ReplayDomainError, InvalidOperation, TypeError, ValueError):
+            self.restore(checkpoint)
+            raise
+
     def close_position(
         self,
         quantity: str | None = None,
@@ -584,6 +704,215 @@ class ConservativeBarBroker:
             accepted_source_sequence=accepted_source_sequence,
             created_time_ms=created_time_ms,
         )
+
+    def execute_position_intent(
+        self,
+        *,
+        intent: str,
+        side: str | None,
+        quantity: str | None,
+        command_id: str,
+        accepted_source_sequence: int | None = None,
+        created_time_ms: int | None = None,
+    ) -> tuple[ReplayOrder, ...]:
+        """Execute an unambiguous market OPEN, CLOSE, or REVERSE action."""
+
+        checkpoint = self.snapshot()
+        try:
+            position_quantity = Decimal(self._position.quantity)
+            if intent == "OPEN":
+                if side is None or quantity is None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.ORDER_REJECTED,
+                        "OPEN requires side and quantity",
+                    )
+                normalized_side = OrderSide(side)
+                if position_quantity != 0 and (
+                    position_quantity > 0
+                ) != (normalized_side is OrderSide.BUY):
+                    raise ReplayDomainError(
+                        ReplayErrorCode.ORDER_REJECTED,
+                        "OPEN cannot reduce or reverse the current position",
+                    )
+                order = self.place_order(
+                    OrderRequest(
+                        client_order_id=f"intent-open-{self._next_order:010d}",
+                        side=normalized_side,
+                        order_type=OrderType.MARKET,
+                        quantity=quantity,
+                        reduce_only=False,
+                    ),
+                    command_id=command_id,
+                    accepted_source_sequence=accepted_source_sequence,
+                    created_time_ms=created_time_ms,
+                )
+                return (order,)
+            if intent == "CLOSE":
+                if side is not None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.ORDER_REJECTED,
+                        "CLOSE side must be null",
+                    )
+                return (
+                    self.close_position(
+                        quantity,
+                        command_id=command_id,
+                        accepted_source_sequence=accepted_source_sequence,
+                        created_time_ms=created_time_ms,
+                    ),
+                )
+            if intent != "REVERSE":
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "position intent must be OPEN, CLOSE, or REVERSE",
+                )
+            if self._execution_mode != TOUCH_OR_TAPE_EXECUTION_MODE:
+                raise ReplayDomainError(
+                    ReplayErrorCode.UNSUPPORTED_EXECUTION_MODEL,
+                    "REVERSE requires revealed-reference execution",
+                )
+            if position_quantity == 0:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "REVERSE requires an open position",
+                )
+            if side is None or quantity is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "REVERSE requires target side and quantity",
+                )
+            normalized_side = OrderSide(side)
+            if (position_quantity > 0) == (normalized_side is OrderSide.BUY):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "REVERSE target side must oppose the current position",
+                )
+            closed = self.close_position(
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+            )
+            opened = self.place_order(
+                OrderRequest(
+                    client_order_id=f"intent-reverse-{self._next_order:010d}",
+                    side=normalized_side,
+                    order_type=OrderType.MARKET,
+                    quantity=quantity,
+                    reduce_only=False,
+                ),
+                command_id=command_id,
+                accepted_source_sequence=accepted_source_sequence,
+                created_time_ms=created_time_ms,
+            )
+            return (closed, opened)
+        except (ReplayDomainError, InvalidOperation, TypeError, ValueError):
+            self.restore(checkpoint)
+            raise
+
+    def set_position_protection(
+        self,
+        *,
+        quantity: str | None,
+        stop_loss_price: str | None,
+        take_profit_price: str | None,
+        command_id: str,
+        accepted_source_sequence: int | None = None,
+        created_time_ms: int | None = None,
+    ) -> tuple[ReplayOrder, ...]:
+        """Atomically replace this workflow's stop-loss/take-profit orders."""
+
+        checkpoint = self.snapshot()
+        changed: list[ReplayOrder] = []
+        try:
+            for existing in self.open_orders:
+                if (
+                    existing.client_order_id.startswith("protection-")
+                    and existing.reduce_only
+                    and existing.order_type
+                    in {OrderType.STOP_MARKET, OrderType.TAKE_PROFIT_MARKET}
+                ):
+                    changed.append(
+                        self.cancel_order(
+                            existing.order_id,
+                            command_id=command_id,
+                            accepted_source_sequence=accepted_source_sequence,
+                            created_time_ms=created_time_ms,
+                        )
+                    )
+            if stop_loss_price is None and take_profit_price is None:
+                if quantity is not None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.ORDER_REJECTED,
+                        "clearing protection requires quantity to be null",
+                    )
+                return tuple(changed)
+
+            position_quantity = Decimal(self._position.quantity)
+            if position_quantity == 0:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "position protection requires an open position",
+                )
+            protected_quantity = quantity or decimal_to_string(
+                abs(position_quantity),
+                field_name="protection quantity",
+            )
+            normalized_quantity = canonical_decimal(
+                protected_quantity,
+                field_name="protection quantity",
+                positive=True,
+            )
+            if Decimal(normalized_quantity) > abs(position_quantity):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "protection quantity exceeds the position",
+                )
+            mark = Decimal(self._position.mark_price)
+            stop = None if stop_loss_price is None else Decimal(stop_loss_price)
+            take_profit = (
+                None if take_profit_price is None else Decimal(take_profit_price)
+            )
+            if position_quantity > 0:
+                valid_stop = stop is None or stop < mark
+                valid_take_profit = take_profit is None or take_profit > mark
+                close_side = OrderSide.SELL
+            else:
+                valid_stop = stop is None or stop > mark
+                valid_take_profit = take_profit is None or take_profit < mark
+                close_side = OrderSide.BUY
+            if not valid_stop or not valid_take_profit:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "protection prices are on the wrong side of the current mark",
+                    details={"mark_price": self._position.mark_price},
+                )
+            for label, order_type, price in (
+                ("stop", OrderType.STOP_MARKET, stop_loss_price),
+                ("take", OrderType.TAKE_PROFIT_MARKET, take_profit_price),
+            ):
+                if price is None:
+                    continue
+                changed.append(
+                    self.place_order(
+                        OrderRequest(
+                            client_order_id=(
+                                f"protection-{label}-{self._next_order:010d}"
+                            ),
+                            side=close_side,
+                            order_type=order_type,
+                            quantity=normalized_quantity,
+                            reduce_only=True,
+                            stop_price=price,
+                        ),
+                        command_id=command_id,
+                        accepted_source_sequence=accepted_source_sequence,
+                        created_time_ms=created_time_ms,
+                    )
+                )
+            return tuple(changed)
+        except (ReplayDomainError, InvalidOperation, TypeError, ValueError):
+            self.restore(checkpoint)
+            raise
 
     def adjust_capital(
         self,
@@ -1042,9 +1371,12 @@ class ConservativeBarBroker:
                 source_sequence=source_sequence,
                 event_time_ms=virtual_time_ms,
             ).to_dict()
+        orders: tuple[ReplayOrder, ...]
         if normalized is CommandType.PLACE_ORDER:
             try:
-                request = OrderRequest.from_mapping(values)
+                order_values = dict(values)
+                order_values.pop("trade_plan", None)
+                request = OrderRequest.from_mapping(order_values)
             except (TypeError, ValueError) as exc:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
@@ -1056,6 +1388,50 @@ class ConservativeBarBroker:
                 accepted_source_sequence=source_sequence,
                 created_time_ms=virtual_time_ms,
             )
+            orders = (order,)
+        elif normalized is CommandType.REPLACE_ORDER:
+            if set(values) != {
+                "order_id",
+                "client_order_id",
+                "quantity",
+                "limit_price",
+                "stop_price",
+            }:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "replace_order payload is invalid",
+                )
+            try:
+                existing = self.order(str(values["order_id"]))
+                request = OrderRequest(
+                    client_order_id=str(values["client_order_id"]),
+                    side=existing.side,
+                    order_type=existing.order_type,
+                    quantity=str(values["quantity"]),
+                    reduce_only=existing.reduce_only,
+                    limit_price=(
+                        None
+                        if values["limit_price"] is None
+                        else str(values["limit_price"])
+                    ),
+                    stop_price=(
+                        None
+                        if values["stop_price"] is None
+                        else str(values["stop_price"])
+                    ),
+                )
+                orders = self.replace_order(
+                    str(values["order_id"]),
+                    request,
+                    command_id=command_id,
+                    accepted_source_sequence=source_sequence,
+                    created_time_ms=virtual_time_ms,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "replace_order payload violates the order contract",
+                ) from exc
         elif normalized is CommandType.CANCEL_ORDER:
             if set(values) != {"order_id"} or not isinstance(values["order_id"], str):
                 raise ReplayDomainError(
@@ -1064,6 +1440,26 @@ class ConservativeBarBroker:
                 )
             order = self.cancel_order(
                 values["order_id"],
+                command_id=command_id,
+                accepted_source_sequence=source_sequence,
+                created_time_ms=virtual_time_ms,
+            )
+            orders = (order,)
+        elif normalized is CommandType.CANCEL_ORDERS:
+            if set(values) != {"scope", "order_ids"}:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "cancel_orders payload is invalid",
+                )
+            raw_order_ids = values["order_ids"]
+            if not isinstance(raw_order_ids, (list, tuple)):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "cancel_orders order_ids are invalid",
+                )
+            orders = self.cancel_orders(
+                scope=str(values["scope"]),
+                order_ids=raw_order_ids,
                 command_id=command_id,
                 accepted_source_sequence=source_sequence,
                 created_time_ms=virtual_time_ms,
@@ -1087,10 +1483,71 @@ class ConservativeBarBroker:
                     accepted_source_sequence=source_sequence,
                     created_time_ms=virtual_time_ms,
                 )
+                orders = (order,)
             except (TypeError, ValueError) as exc:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
                     "close_position quantity violates the order contract",
+                ) from exc
+        elif normalized is CommandType.EXECUTE_POSITION_INTENT:
+            if set(values) != {"intent", "side", "quantity"}:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "execute_position_intent payload is invalid",
+                )
+            try:
+                orders = self.execute_position_intent(
+                    intent=str(values["intent"]),
+                    side=(None if values["side"] is None else str(values["side"])),
+                    quantity=(
+                        None
+                        if values["quantity"] is None
+                        else str(values["quantity"])
+                    ),
+                    command_id=command_id,
+                    accepted_source_sequence=source_sequence,
+                    created_time_ms=virtual_time_ms,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "position intent violates the order contract",
+                ) from exc
+        elif normalized is CommandType.SET_POSITION_PROTECTION:
+            if set(values) != {
+                "quantity",
+                "stop_loss_price",
+                "take_profit_price",
+            }:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "set_position_protection payload is invalid",
+                )
+            try:
+                orders = self.set_position_protection(
+                    quantity=(
+                        None
+                        if values["quantity"] is None
+                        else str(values["quantity"])
+                    ),
+                    stop_loss_price=(
+                        None
+                        if values["stop_loss_price"] is None
+                        else str(values["stop_loss_price"])
+                    ),
+                    take_profit_price=(
+                        None
+                        if values["take_profit_price"] is None
+                        else str(values["take_profit_price"])
+                    ),
+                    command_id=command_id,
+                    accepted_source_sequence=source_sequence,
+                    created_time_ms=virtual_time_ms,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "position protection violates the order contract",
                 ) from exc
         else:
             raise ReplayDomainError(
@@ -1102,7 +1559,7 @@ class ConservativeBarBroker:
         # next-source-event behavior.
         return BrokerEventResult(
             bar_update=None,
-            orders=(order,),
+            orders=orders,
             fills=tuple(self._fills[fills_before:]),
             warnings=tuple(self._warnings[warnings_before:]),
             position=self._position,

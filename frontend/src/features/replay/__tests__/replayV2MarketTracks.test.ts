@@ -241,7 +241,15 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         mark_fidelity: "REVEALED_BAR_CLOSE_PROXY",
       }],
       orders: [{ order_id: "ord-1", track_id: "track-2", status: "OPEN" }],
-      fills: [{ fill_id: "fill-1", track_id: "track-2", configured_fee: "1" }],
+      fills: [],
+      history: {
+        orders_total: 1,
+        active_orders: 1,
+        historical_orders: 0,
+        fills_total: 1,
+        ledger_entries_total: 3,
+        page_limit_max: 200,
+      },
       active_fee_policy: { revision: 1, maker_fee_bps: "2", taker_fee_bps: "5" },
       instrument_rules: [{ track_id: "track-2", revision: 1 }],
       isolated_allocations: { "track-2": "1000" },
@@ -399,4 +407,37 @@ test("Phase 5 replay watchlist is backed only by replay.v2 track commands", () =
   assert.match(controls, /phase3Command\("acquire_controller", \{ takeover: false \}\)/);
   assert.match(controls, /readonly viewer: ReplayViewerRuntime/);
   assert.doesNotMatch(controls, /viewer === undefined|viewer !== undefined|runtime\.actions\.submitCommand/);
+});
+
+test("account records API binds type, scope, cursor, and page limit", async () => {
+  const requests: string[] = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({
+        protocol: "replay.v2",
+        schema_version: "replay.training.account-record-page.v1",
+        run_id: "run-1",
+        record_type: "ORDERS",
+        order_scope: "HISTORY",
+        track_id: "track-2",
+        items: [{ order_id: "ord-1", status: "FILLED" }],
+        total_count: 1,
+        next_cursor: "eyJjdXJzb3IiOjF9",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const page = await client.accountRecordsRun("run-1", {
+    recordType: "ORDERS",
+    orderScope: "HISTORY",
+    trackId: "track-2",
+    cursor: "cursor_1",
+    limit: 25,
+  });
+  assert.equal(page.items[0]?.order_id, "ord-1");
+  assert.match(requests[0] ?? "", /record_type=ORDERS/);
+  assert.match(requests[0] ?? "", /order_scope=HISTORY/);
+  assert.match(requests[0] ?? "", /track_id=track-2/);
+  assert.match(requests[0] ?? "", /cursor=cursor_1/);
+  assert.match(requests[0] ?? "", /limit=25/);
 });

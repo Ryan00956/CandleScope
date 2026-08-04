@@ -361,8 +361,18 @@ async def test_contract_account_fee_revision_and_ledger_recompute_to_zero(
         assert portfolio["schema_version"] == "replay.training.portfolio.v2"
         assert portfolio["execution_model"] == "TOUCH_OR_TAPE_V2"
         assert portfolio["active_fee_policy"]["revision"] == 2
-        assert portfolio["fills"][-1]["fee_policy_revision"] == 2
-        assert portfolio["fills"][-1]["liquidity"] == "TAKER"
+        assert portfolio["fills"] == []
+        assert portfolio["history"]["fills_total"] == 1
+        fill_page = await service.training.account_record_page(  # type: ignore[union-attr]
+            run_id,
+            record_type="FILLS",
+            order_scope="ALL",
+            track_id=None,
+            cursor=None,
+            limit=50,
+        )
+        assert fill_page["items"][-1]["fee_policy_revision"] == 2
+        assert fill_page["items"][-1]["liquidity"] == "TAKER"
         assert portfolio["ledger"]["reconciliation_delta"] == "0"
 
         with sqlite3.connect(tmp_path / "contract-ledger.db") as connection:
@@ -405,6 +415,129 @@ async def test_contract_account_fee_revision_and_ledger_recompute_to_zero(
             cash_total += Decimal(str(row["cash_delta"]))
         assert previous == account["ledger_tail_hash"]
         assert cash_total == Decimal(str(portfolio["cash_balance"]))
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_training_run_replace_batch_cancel_and_record_pages_are_strict(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "order-management-pages.db")
+    try:
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            _sandbox_request(await _request(service))
+        )
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="order-management-acquire",
+        )
+        placed = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="order-management-place",
+            command_type=ReplayV2CommandType.PLACE_ORDER,
+            payload={
+                "client_order_id": "order-management-original",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": "50",
+                "stop_price": None,
+            },
+        )
+        original = placed["data"]["portfolio"]["orders"][0]
+        replaced = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="order-management-replace",
+            command_type=ReplayV2CommandType.REPLACE_ORDER,
+            payload={
+                "order_id": original["order_id"],
+                "client_order_id": "order-management-replacement",
+                "quantity": "2",
+                "limit_price": "51",
+                "stop_price": None,
+            },
+        )
+        active = replaced["data"]["portfolio"]["orders"]
+        assert len(active) == 1
+        assert active[0]["client_order_id"] == "order-management-replacement"
+        assert active[0]["quantity"] == "2"
+        history = replaced["data"]["portfolio"]["history"]
+        assert history["orders_total"] == 2
+        assert history["active_orders"] == 1
+        assert history["historical_orders"] == 1
+        assert history["fills_total"] == 0
+        assert history["ledger_entries_total"] >= 1
+        assert history["page_limit_max"] == 200
+
+        second = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="order-management-second",
+            command_type=ReplayV2CommandType.PLACE_ORDER,
+            payload={
+                "client_order_id": "order-management-second",
+                "side": "BUY",
+                "order_type": "LIMIT",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": "49",
+                "stop_price": None,
+            },
+        )
+        active_ids = [
+            order["order_id"] for order in second["data"]["portfolio"]["orders"]
+        ]
+        canceled = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="order-management-batch-cancel",
+            command_type=ReplayV2CommandType.CANCEL_ORDERS,
+            payload={"scope": "ORDER_IDS", "order_ids": active_ids},
+        )
+        assert canceled["data"]["portfolio"]["orders"] == []
+        assert canceled["data"]["portfolio"]["history"]["historical_orders"] == 3
+
+        first_page = await service.training.account_record_page(  # type: ignore[union-attr]
+            run_id,
+            record_type="ORDERS",
+            order_scope="HISTORY",
+            track_id=None,
+            cursor=None,
+            limit=1,
+        )
+        assert len(first_page["items"]) == 1
+        assert first_page["total_count"] == 3
+        assert isinstance(first_page["next_cursor"], str)
+        second_page = await service.training.account_record_page(  # type: ignore[union-attr]
+            run_id,
+            record_type="ORDERS",
+            order_scope="HISTORY",
+            track_id=None,
+            cursor=first_page["next_cursor"],
+            limit=1,
+        )
+        assert second_page["items"][0]["order_id"] != first_page["items"][0]["order_id"]
+        with pytest.raises(TrainingRunError) as mismatch:
+            await service.training.account_record_page(  # type: ignore[union-attr]
+                run_id,
+                record_type="FILLS",
+                order_scope="ALL",
+                track_id=None,
+                cursor=first_page["next_cursor"],
+                limit=1,
+            )
+        assert mismatch.value.code == "REPLAY_ACCOUNT_RECORD_CURSOR_INVALID"
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -703,9 +836,16 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
             payload={"quantity": None},
         )
         assert closed["data"]["portfolio"]["isolated_allocations"] == {}
-        kinds = [
-            item["kind"] for item in closed["data"]["portfolio"]["ledger"]["entries"]
-        ]
+        assert closed["data"]["portfolio"]["ledger"]["entries"] == []
+        ledger_page = await service.training.account_record_page(  # type: ignore[union-attr]
+            run_id,
+            record_type="LEDGER",
+            order_scope="ALL",
+            track_id=None,
+            cursor=None,
+            limit=200,
+        )
+        kinds = [item["kind"] for item in ledger_page["items"]]
         assert "MARGIN_ALLOCATION" in kinds
         assert "MARGIN_RELEASE" in kinds
     finally:

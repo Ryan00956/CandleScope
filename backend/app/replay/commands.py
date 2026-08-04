@@ -19,6 +19,27 @@ MAX_STEP_COUNT = 100_000
 MAX_ADVANCE_MS = 30 * 86_400_000
 MAX_JOURNAL_NOTE_CHARS = 4_000
 MAX_POLICY_REASON_CHARS = 500
+MAX_TRADE_PLAN_REASON_CHARS = 500
+
+
+_TRADE_PLAN_FIELDS = {
+    "schema_version",
+    "track_id",
+    "client_order_id",
+    "side",
+    "order_type",
+    "sizing_mode",
+    "risk_amount",
+    "risk_percent",
+    "account_equity",
+    "entry_price",
+    "invalidation_price",
+    "target_price",
+    "risk_per_unit",
+    "reward_risk_ratio",
+    "quantity",
+    "reason",
+}
 
 
 def _exact_keys(payload: Mapping[str, object], expected: set[str]) -> None:
@@ -56,6 +77,118 @@ def _positive_bounded_int(
             f"{field_name} must be between 1 and {upper_bound}",
         )
     return normalized
+
+
+def _parse_trade_plan(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan must be an object",
+        )
+    _exact_keys(value, _TRADE_PLAN_FIELDS)
+    if value["schema_version"] != "replay.trade-plan.snapshot.v1":
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan schema is unsupported",
+        )
+    for field_name in ("track_id", "client_order_id"):
+        field_value = value[field_name]
+        if (
+            not isinstance(field_value, str)
+            or not field_value
+            or len(field_value) > 128
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                f"trade_plan {field_name} is invalid",
+            )
+    if value["side"] not in {"BUY", "SELL"}:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan side is invalid",
+        )
+    if value["order_type"] not in {"MARKET", "LIMIT"}:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan order_type is invalid",
+        )
+    sizing_mode = value["sizing_mode"]
+    if sizing_mode not in {"RISK_AMOUNT", "ACCOUNT_RISK_PERCENT"}:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan sizing_mode is invalid",
+        )
+    for field_name in (
+        "risk_amount",
+        "account_equity",
+        "entry_price",
+        "invalidation_price",
+        "target_price",
+        "risk_per_unit",
+        "reward_risk_ratio",
+        "quantity",
+    ):
+        field_value = value[field_name]
+        if not isinstance(field_value, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                f"trade_plan {field_name} must be a Decimal string",
+            )
+        try:
+            number = Decimal(field_value)
+        except InvalidOperation as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                f"trade_plan {field_name} is invalid",
+            ) from exc
+        if not number.is_finite() or number <= 0 or format(number, "f") != field_value:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                f"trade_plan {field_name} must be a positive canonical Decimal string",
+            )
+    risk_percent = value["risk_percent"]
+    if sizing_mode == "RISK_AMOUNT":
+        if risk_percent is not None:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "fixed-risk trade_plan must not contain risk_percent",
+            )
+    else:
+        if not isinstance(risk_percent, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "percentage-risk trade_plan requires risk_percent",
+            )
+        try:
+            percent = Decimal(risk_percent)
+        except InvalidOperation as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "trade_plan risk_percent is invalid",
+            ) from exc
+        if (
+            not percent.is_finite()
+            or percent <= 0
+            or percent > 100
+            or format(percent, "f") != risk_percent
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "trade_plan risk_percent must be a canonical value in (0, 100]",
+            )
+    reason = value["reason"]
+    if not isinstance(reason, str):
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "trade_plan reason must be a string",
+        )
+    normalized_reason = reason.strip()
+    if not normalized_reason or len(normalized_reason) > MAX_TRADE_PLAN_REASON_CHARS:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            f"trade_plan reason must contain 1-{MAX_TRADE_PLAN_REASON_CHARS} characters",
+        )
+    return {**dict(value), "reason": normalized_reason}
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +280,12 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             "limit_price",
             "stop_price",
         )
-        _exact_keys(payload, set(fields))
+        expected = set(fields)
+        if set(payload) == expected:
+            trade_plan = None
+        else:
+            _exact_keys(payload, expected | {"trade_plan"})
+            trade_plan = _parse_trade_plan(payload["trade_plan"])
         for field_name in ("client_order_id", "side", "order_type", "quantity"):
             if not isinstance(payload[field_name], str):
                 raise ReplayDomainError(
@@ -169,6 +307,36 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 )
         return ParsedCommand(
             command_type,
+            {
+                **{field_name: payload[field_name] for field_name in fields},
+                **({} if trade_plan is None else {"trade_plan": trade_plan}),
+            },
+        )
+    if command_type is CommandType.REPLACE_ORDER:
+        fields = (
+            "order_id",
+            "client_order_id",
+            "quantity",
+            "limit_price",
+            "stop_price",
+        )
+        _exact_keys(payload, set(fields))
+        for field_name in ("order_id", "client_order_id", "quantity"):
+            if not isinstance(payload[field_name], str):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    f"{field_name} must be a string",
+                )
+        for field_name in ("limit_price", "stop_price"):
+            if payload[field_name] is not None and not isinstance(
+                payload[field_name], str
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    f"{field_name} must be a Decimal string or null",
+                )
+        return ParsedCommand(
+            command_type,
             {field_name: payload[field_name] for field_name in fields},
         )
     if command_type is CommandType.CANCEL_ORDER:
@@ -179,6 +347,41 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 "order_id must be a string",
             )
         return ParsedCommand(command_type, {"order_id": payload["order_id"]})
+    if command_type is CommandType.CANCEL_ORDERS:
+        _exact_keys(payload, {"scope", "order_ids"})
+        scope = payload["scope"]
+        order_ids = payload["order_ids"]
+        if scope not in {"ORDER_IDS", "SELECTED_TRACK"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders scope must be ORDER_IDS or SELECTED_TRACK",
+            )
+        if not isinstance(order_ids, (list, tuple)) or any(
+            not isinstance(order_id, str) for order_id in order_ids
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders order_ids must be an array of strings",
+            )
+        if len(order_ids) != len(set(order_ids)):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "cancel_orders order_ids must be unique",
+            )
+        if scope == "ORDER_IDS" and not 1 <= len(order_ids) <= 64:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "ORDER_IDS requires between 1 and 64 order_ids",
+            )
+        if scope == "SELECTED_TRACK" and order_ids:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "SELECTED_TRACK requires an empty order_ids array",
+            )
+        return ParsedCommand(
+            command_type,
+            {"scope": scope, "order_ids": tuple(order_ids)},
+        )
     if command_type is CommandType.CLOSE_POSITION:
         if not payload:
             return ParsedCommand(command_type, {"quantity": None})
@@ -189,6 +392,55 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 "quantity must be a Decimal string or null",
             )
         return ParsedCommand(command_type, {"quantity": payload["quantity"]})
+    if command_type is CommandType.EXECUTE_POSITION_INTENT:
+        _exact_keys(payload, {"intent", "side", "quantity"})
+        intent = payload["intent"]
+        if intent not in {"OPEN", "CLOSE", "REVERSE"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position intent must be OPEN, CLOSE, or REVERSE",
+            )
+        side = payload["side"]
+        quantity = payload["quantity"]
+        if side is not None and not isinstance(side, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position intent side must be a string or null",
+            )
+        if quantity is not None and not isinstance(quantity, str):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position intent quantity must be a Decimal string or null",
+            )
+        return ParsedCommand(
+            command_type,
+            {"intent": intent, "side": side, "quantity": quantity},
+        )
+    if command_type is CommandType.SET_POSITION_PROTECTION:
+        _exact_keys(
+            payload,
+            {"quantity", "stop_loss_price", "take_profit_price"},
+        )
+        for field_name in (
+            "quantity",
+            "stop_loss_price",
+            "take_profit_price",
+        ):
+            if payload[field_name] is not None and not isinstance(
+                payload[field_name], str
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    f"{field_name} must be a Decimal string or null",
+                )
+        return ParsedCommand(
+            command_type,
+            {
+                "quantity": payload["quantity"],
+                "stop_loss_price": payload["stop_loss_price"],
+                "take_profit_price": payload["take_profit_price"],
+            },
+        )
     if command_type is CommandType.ADD_JOURNAL_NOTE:
         _exact_keys(payload, {"text"})
         text = payload["text"]

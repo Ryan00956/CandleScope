@@ -122,6 +122,31 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         detail = await _request(app, "GET", "/api/v1/replay/runs/run-1")
         assert detail.status_code == 200
         assert detail.json()["run_id"] == "run-1"
+        records = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/run-1/account-records"
+            "?record_type=ORDERS&order_scope=HISTORY&limit=50",
+        )
+        assert records.status_code == 200
+        assert records.json() == {
+            "protocol": "replay.v2",
+            "schema_version": "replay.training.account-record-page.v1",
+            "run_id": "run-1",
+            "record_type": "ORDERS",
+            "order_scope": "HISTORY",
+            "track_id": None,
+            "items": [],
+            "total_count": 0,
+            "next_cursor": None,
+        }
+        invalid_scope = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/run-1/account-records"
+            "?record_type=FILLS&order_scope=HISTORY",
+        )
+        assert invalid_scope.status_code == 422
 
         returned = await _request(
             app,
@@ -1086,6 +1111,67 @@ async def test_unowned_adapter_session_has_no_training_migration_or_delete_surfa
         assert deleted.status_code == 404
         assert deleted.json()["error"]["code"] == "TRAINING_RUN_NOT_FOUND"
         assert await service.store.get_session(session_id) is not None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "order-preview-api.db")
+    app = _app(service)
+    try:
+        created = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs",
+            json=await _payload(service),
+        )
+        run = created.json()["run"]
+        session_path = f"/api/v1/replay/runs/session/{run['adapter_session_id']}"
+        before = (await _request(app, "GET", session_path)).json()["snapshot"]
+        preview_payload = {
+            "protocol": "replay.v2",
+            "expected_revision": before["revision"],
+            "expected_cursor": {
+                "virtual_time_ms": before["cursor"]["virtual_time_ms"],
+                "source_sequence": before["cursor"]["source_sequence"],
+                "revision": before["revision"],
+            },
+            "position_intent": "OPEN",
+            "order": {
+                "client_order_id": "api-preview-order",
+                "side": "BUY",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+            },
+        }
+        preview = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/order-preview",
+            json=preview_payload,
+        )
+        assert preview.status_code == 200
+        assert preview.json()["schema_version"] == "replay.order-preview.v1"
+        assert preview.json()["position_intent"] == "OPEN"
+        assert preview.json()["order"] == preview_payload["order"]
+        assert float(preview.json()["reserved_margin"]) > 0
+        after = (await _request(app, "GET", session_path)).json()["snapshot"]
+        assert after["revision"] == before["revision"]
+        assert after["state_hash"] == before["state_hash"]
+
+        malformed = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/order-preview",
+            json={**preview_payload, "future_field": True},
+        )
+        assert malformed.status_code == 422
+        assert malformed.json()["error"]["code"] == "TRAINING_RUN_INVALID"
     finally:
         await service.shutdown(step_timeout=1.0)
 

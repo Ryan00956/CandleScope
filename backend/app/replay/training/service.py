@@ -9,7 +9,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from app.data_engine.interval_policy import (
@@ -26,7 +26,7 @@ from app.replay.constants import (
     SourceKind,
     StartPolicy,
 )
-from app.replay.broker.models import TOUCH_OR_TAPE_EXECUTION_MODE
+from app.replay.broker.models import TOUCH_OR_TAPE_EXECUTION_MODE, decimal_to_string
 from app.replay.canonical import canonical_sha256
 from app.replay.catalog import ReplaySeriesIdentity
 from app.replay.display_time import SourceBucketTimeMapper
@@ -328,6 +328,31 @@ class TrainingRunService:
     async def get_run(self, run_id: str) -> dict[str, object]:
         return await self.store.get_run(self._identifier(run_id, field_name="run_id"))
 
+    async def account_record_page(
+        self,
+        run_id: str,
+        *,
+        record_type: str,
+        order_scope: str,
+        track_id: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        normalized_track = (
+            None
+            if track_id is None
+            else self._identifier(track_id, field_name="track_id")
+        )
+        return await self.store.account_record_page(
+            normalized,
+            record_type=record_type,
+            order_scope=order_scope,
+            track_id=normalized_track,
+            cursor=cursor,
+            limit=limit,
+        )
+
     async def delete_run(self, run_id: str) -> dict[str, object]:
         """Pause, detach, and atomically remove one Hub archive."""
 
@@ -596,6 +621,285 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         projection = await self.store.get_market_tracks(normalized)
         return await self._with_global_clock(normalized, projection)
+
+    async def preview_order(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_cursor: TrainingCursor,
+        position_intent: str,
+        order: Mapping[str, object],
+        trade_plan: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Return a non-mutating order preview bound to one authoritative cursor."""
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        if expected_revision != expected_cursor.revision:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "preview revision must match expected cursor revision",
+                status_code=422,
+            )
+        actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        async with actor.serialized():
+            binding = await self.store.run_binding(normalized)
+            projection = await self.store.get_market_tracks(normalized)
+            tracks = projection.get("tracks")
+            if not isinstance(tracks, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market tracks projection is invalid",
+                    status_code=503,
+                )
+            selected_track_id = str(binding["selected_track_id"])
+            selected = next(
+                (
+                    track
+                    for track in tracks
+                    if isinstance(track, Mapping)
+                    and track.get("track_id") == selected_track_id
+                ),
+                None,
+            )
+            if (
+                selected is None
+                or selected.get("subscription_tier") != "FULL"
+                or selected.get("state") != "READY"
+            ):
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_READY",
+                    "order preview requires the selected market track to be READY and FULL",
+                    status_code=409,
+                )
+            session_id = str(binding["adapter_session_id"])
+            session = await self.replay_service.get_session(session_id)
+            snapshot = self._snapshot(session)
+            cursor = snapshot.get("cursor")
+            if not isinstance(cursor, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter cursor is invalid",
+                    status_code=503,
+                )
+            actual = {
+                "virtual_time_ms": cursor.get("virtual_time_ms"),
+                "source_sequence": cursor.get("source_sequence"),
+                "revision": snapshot.get("revision"),
+            }
+            if actual != expected_cursor.to_dict():
+                raise TrainingRunError(
+                    "REVISION_CONFLICT",
+                    "preview cursor does not match the authoritative run cursor",
+                    status_code=409,
+                    details={"expected": expected_cursor.to_dict(), "actual": actual},
+                )
+            await self._guard_historical_book_current(
+                run_id=normalized,
+                binding=binding,
+                snapshot=snapshot,
+            )
+            payload = dict(
+                self._exact_payload(
+                    order,
+                    {
+                        "client_order_id",
+                        "side",
+                        "order_type",
+                        "quantity",
+                        "reduce_only",
+                        "limit_price",
+                        "stop_price",
+                    },
+                )
+            )
+            if position_intent not in {"NET", "OPEN"}:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "order preview position intent is unsupported",
+                    status_code=422,
+                )
+            if position_intent == "OPEN":
+                if (
+                    payload.get("order_type") != "MARKET"
+                    or payload.get("reduce_only") is not False
+                ):
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "OPEN preview is only available for non-reduce-only market orders",
+                        status_code=422,
+                    )
+                position = selected.get("position")
+                if not isinstance(position, Mapping):
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "selected position projection is invalid",
+                        status_code=503,
+                    )
+                try:
+                    position_quantity = Decimal(str(position.get("quantity")))
+                except InvalidOperation as exc:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "selected position quantity is invalid",
+                        status_code=503,
+                    ) from exc
+                if position_quantity != 0 and (
+                    position_quantity > 0
+                ) != (payload.get("side") == "BUY"):
+                    raise TrainingRunError(
+                        "ORDER_REJECTED",
+                        "OPEN cannot reduce or reverse the current position",
+                        status_code=409,
+                    )
+            normalized_plan: dict[str, object] | None = None
+            if trade_plan is not None:
+                if position_intent != "OPEN":
+                    raise TrainingRunError(
+                        "TRADE_PLAN_INVALID",
+                        "trade plans are only available for opening orders",
+                        status_code=422,
+                    )
+                provisional_entry = self._planned_entry_reference(
+                    payload=payload,
+                    selected_track=selected,
+                )
+                normalized_plan = self._build_trade_plan_snapshot(
+                    draft=trade_plan,
+                    payload=payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    entry_price=provisional_entry,
+                )
+                payload["quantity"] = normalized_plan["quantity"]
+            self._assert_exact_account_order_filters(
+                payload=payload,
+                selected_track=selected,
+                portfolio=projection.get("portfolio"),
+            )
+            self._assert_shared_settlement_reservation(
+                payload=payload,
+                selected_track=selected,
+                portfolio=projection.get("portfolio"),
+                binding=binding,
+            )
+            try:
+                adapter_preview = await self.replay_service.preview_order(
+                    session_id,
+                    payload,
+                )
+            except ReplayDomainError as exc:
+                raise TrainingRunError(
+                    exc.code.value,
+                    exc.message,
+                    status_code=exc.http_status,
+                    details=exc.details,
+                ) from exc
+            preview_cursor = adapter_preview.get("cursor")
+            if not isinstance(preview_cursor, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter preview cursor is invalid",
+                    status_code=503,
+                )
+            preview_actual = {
+                "virtual_time_ms": preview_cursor.get("virtual_time_ms"),
+                "source_sequence": preview_cursor.get("source_sequence"),
+                "revision": adapter_preview.get("revision"),
+            }
+            if preview_actual != expected_cursor.to_dict():
+                raise TrainingRunError(
+                    "REVISION_CONFLICT",
+                    "market advanced while the order preview was built",
+                    status_code=409,
+                    details={
+                        "expected": expected_cursor.to_dict(),
+                        "actual": preview_actual,
+                    },
+                )
+            preview = adapter_preview.get("preview")
+            if not isinstance(preview, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter order preview is invalid",
+                    status_code=503,
+                )
+            if normalized_plan is not None:
+                normalized_plan = self._build_trade_plan_snapshot(
+                    draft=trade_plan,
+                    payload=payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    entry_price=preview.get("estimated_fill_price"),
+                )
+                if payload["quantity"] != normalized_plan["quantity"]:
+                    payload["quantity"] = normalized_plan["quantity"]
+                    self._assert_exact_account_order_filters(
+                        payload=payload,
+                        selected_track=selected,
+                        portfolio=projection.get("portfolio"),
+                    )
+                    self._assert_shared_settlement_reservation(
+                        payload=payload,
+                        selected_track=selected,
+                        portfolio=projection.get("portfolio"),
+                        binding=binding,
+                    )
+                    try:
+                        adapter_preview = await self.replay_service.preview_order(
+                            session_id,
+                            payload,
+                        )
+                    except ReplayDomainError as exc:
+                        raise TrainingRunError(
+                            exc.code.value,
+                            exc.message,
+                            status_code=exc.http_status,
+                            details=exc.details,
+                        ) from exc
+                    preview = _stored_mapping(
+                        adapter_preview.get("preview"),
+                        field_name="adapter order preview",
+                    )
+                    revised_cursor = _stored_mapping(
+                        adapter_preview.get("cursor"),
+                        field_name="adapter order preview cursor",
+                    )
+                    revised_actual = {
+                        "virtual_time_ms": revised_cursor.get("virtual_time_ms"),
+                        "source_sequence": revised_cursor.get("source_sequence"),
+                        "revision": adapter_preview.get("revision"),
+                    }
+                    if revised_actual != expected_cursor.to_dict():
+                        raise TrainingRunError(
+                            "REVISION_CONFLICT",
+                            "market advanced while the planned quantity was recalculated",
+                            status_code=409,
+                            details={
+                                "expected": expected_cursor.to_dict(),
+                                "actual": revised_actual,
+                            },
+                        )
+            response = {
+                **dict(preview),
+                "protocol": REPLAY_V2_PROTOCOL,
+                "schema_version": (
+                    "replay.order-preview.v2"
+                    if normalized_plan is not None
+                    else "replay.order-preview.v1"
+                ),
+                "run_id": normalized,
+                "track_id": selected_track_id,
+                "accepted": True,
+                "position_intent": position_intent,
+                "revision": expected_revision,
+                "cursor": expected_cursor.to_dict(),
+                "state_hash": adapter_preview["state_hash"],
+                "execution_fidelity": adapter_preview["execution_fidelity"],
+            }
+            if normalized_plan is not None:
+                response["trade_plan"] = normalized_plan
+            return response
 
     async def get_fast_forward_plan(
         self,
@@ -1270,6 +1574,42 @@ class TrainingRunService:
                 if report.get("revealed") and "actual_history" in report
                 else {}
             ),
+        }
+
+    async def training_results(self, run_id: str, *, limit: int) -> dict[str, object]:
+        normalized = self._identifier(run_id, field_name="run_id")
+        projection = await self.store.training_results(normalized, limit=limit)
+        binding = await self.store.run_binding(normalized)
+        broker_report = await self.replay_service.report(
+            str(binding["adapter_session_id"])
+        )
+        report = _stored_mapping(
+            broker_report.get("report"),
+            field_name="broker report",
+        )
+        summary = _stored_mapping(
+            projection.get("summary"),
+            field_name="training-results summary",
+        )
+        realized_pnl = Decimal(str(report.get("realized_pnl", "0")))
+        fees_paid = Decimal(str(report.get("fees_paid", "0")))
+        return {
+            **projection,
+            "summary": {
+                **dict(summary),
+                "max_drawdown": report.get("max_drawdown", "0"),
+                "profit_factor": report.get("profit_factor"),
+                "fees_paid": decimal_to_string(
+                    fees_paid,
+                    field_name="training results fees paid",
+                ),
+                "net_realized_pnl": decimal_to_string(
+                    realized_pnl - fees_paid,
+                    field_name="training results net realized pnl",
+                ),
+            },
+            "data_fidelity": broker_report.get("data_fidelity"),
+            "execution_fidelity": broker_report.get("execution_fidelity"),
         }
 
     async def _assert_review_original_quiescent(self, run_id: str) -> None:
@@ -2703,8 +3043,12 @@ class TrainingRunService:
             return result
         if command.type in {
             ReplayV2CommandType.PLACE_ORDER,
+            ReplayV2CommandType.REPLACE_ORDER,
             ReplayV2CommandType.CANCEL_ORDER,
+            ReplayV2CommandType.CANCEL_ORDERS,
             ReplayV2CommandType.CLOSE_POSITION,
+            ReplayV2CommandType.EXECUTE_POSITION_INTENT,
+            ReplayV2CommandType.SET_POSITION_PROTECTION,
         }:
             snapshot = self._assert_expected_cursor(command, session)
             await self._guard_historical_book_current(
@@ -3650,17 +3994,66 @@ class TrainingRunService:
                 "limit_price",
                 "stop_price",
             },
+            ReplayV2CommandType.REPLACE_ORDER: {
+                "order_id",
+                "client_order_id",
+                "quantity",
+                "limit_price",
+                "stop_price",
+            },
             ReplayV2CommandType.CANCEL_ORDER: {"order_id"},
+            ReplayV2CommandType.CANCEL_ORDERS: {"scope", "order_ids"},
             ReplayV2CommandType.CLOSE_POSITION: {"quantity"},
+            ReplayV2CommandType.EXECUTE_POSITION_INTENT: {
+                "intent",
+                "side",
+                "quantity",
+            },
+            ReplayV2CommandType.SET_POSITION_PROTECTION: {
+                "quantity",
+                "stop_loss_price",
+                "take_profit_price",
+            },
         }
         v1_types = {
             ReplayV2CommandType.PLACE_ORDER: CommandType.PLACE_ORDER,
+            ReplayV2CommandType.REPLACE_ORDER: CommandType.REPLACE_ORDER,
             ReplayV2CommandType.CANCEL_ORDER: CommandType.CANCEL_ORDER,
+            ReplayV2CommandType.CANCEL_ORDERS: CommandType.CANCEL_ORDERS,
             ReplayV2CommandType.CLOSE_POSITION: CommandType.CLOSE_POSITION,
+            ReplayV2CommandType.EXECUTE_POSITION_INTENT: (
+                CommandType.EXECUTE_POSITION_INTENT
+            ),
+            ReplayV2CommandType.SET_POSITION_PROTECTION: (
+                CommandType.SET_POSITION_PROTECTION
+            ),
         }
-        payload = dict(
-            self._exact_payload(command.payload, expected_fields[command.type])
-        )
+        trade_plan_draft: Mapping[str, object] | None = None
+        if (
+            command.type is ReplayV2CommandType.PLACE_ORDER
+            and "trade_plan" in command.payload
+        ):
+            payload_with_plan = self._exact_payload(
+                command.payload,
+                expected_fields[command.type] | {"trade_plan"},
+            )
+            raw_trade_plan = payload_with_plan["trade_plan"]
+            if not isinstance(raw_trade_plan, Mapping):
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    "trade_plan must be an object",
+                    status_code=422,
+                )
+            trade_plan_draft = raw_trade_plan
+            payload = {
+                key: value
+                for key, value in payload_with_plan.items()
+                if key != "trade_plan"
+            }
+        else:
+            payload = dict(
+                self._exact_payload(command.payload, expected_fields[command.type])
+            )
         projection = await self.store.get_market_tracks(command.run_id)
         tracks = projection.get("tracks")
         if not isinstance(tracks, list):
@@ -3689,7 +4082,53 @@ class TrainingRunService:
                 "orders require the selected market track to be READY and FULL",
                 status_code=409,
             )
+        session_id = str(binding["adapter_session_id"])
         if command.type is ReplayV2CommandType.PLACE_ORDER:
+            if trade_plan_draft is not None:
+                provisional_plan = self._build_trade_plan_snapshot(
+                    draft=trade_plan_draft,
+                    payload=payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    entry_price=self._planned_entry_reference(
+                        payload=payload,
+                        selected_track=selected,
+                    ),
+                )
+                try:
+                    raw_plan_preview = await self.replay_service.preview_order(
+                        session_id,
+                        {**payload, "quantity": provisional_plan["quantity"]},
+                    )
+                except ReplayDomainError as exc:
+                    raise TrainingRunError(
+                        exc.code.value,
+                        exc.message,
+                        status_code=exc.http_status,
+                        details=exc.details,
+                    ) from exc
+                plan_preview = _stored_mapping(
+                    raw_plan_preview.get("preview"),
+                    field_name="adapter trade-plan preview",
+                )
+                normalized_plan = self._build_trade_plan_snapshot(
+                    draft=trade_plan_draft,
+                    payload=payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    entry_price=plan_preview.get("estimated_fill_price"),
+                )
+                if payload.get("quantity") != normalized_plan["quantity"]:
+                    raise TrainingRunError(
+                        "TRADE_PLAN_QUANTITY_CHANGED",
+                        "planned quantity no longer matches the authoritative cursor",
+                        status_code=409,
+                        details={
+                            "submitted_quantity": payload.get("quantity"),
+                            "calculated_quantity": normalized_plan["quantity"],
+                        },
+                    )
+                payload["trade_plan"] = normalized_plan
             self._assert_exact_account_order_filters(
                 payload=payload,
                 selected_track=selected,
@@ -3701,7 +4140,110 @@ class TrainingRunService:
                 portfolio=projection.get("portfolio"),
                 binding=binding,
             )
-        session_id = str(binding["adapter_session_id"])
+        elif command.type is ReplayV2CommandType.REPLACE_ORDER:
+            portfolio = projection.get("portfolio")
+            if not isinstance(portfolio, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "run portfolio projection is invalid",
+                    status_code=503,
+                )
+            raw_orders = portfolio.get("orders")
+            if not isinstance(raw_orders, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "active order projection is invalid",
+                    status_code=503,
+                )
+            existing = next(
+                (
+                    order
+                    for order in raw_orders
+                    if isinstance(order, Mapping)
+                    and order.get("order_id") == payload.get("order_id")
+                    and order.get("track_id") == selected_track_id
+                    and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                ),
+                None,
+            )
+            if not isinstance(existing, Mapping):
+                raise TrainingRunError(
+                    "ORDER_REJECTED",
+                    "replacement requires an open order on the selected track",
+                    status_code=409,
+                    details={"order_id": payload.get("order_id")},
+                )
+            replacement_payload = {
+                "quantity": payload.get("quantity"),
+                "reduce_only": existing.get("reduce_only"),
+                "limit_price": payload.get("limit_price"),
+                "stop_price": payload.get("stop_price"),
+            }
+            self._assert_exact_account_order_filters(
+                payload=replacement_payload,
+                selected_track=selected,
+                portfolio=portfolio,
+            )
+            self._assert_shared_settlement_reservation(
+                payload=replacement_payload,
+                selected_track=selected,
+                portfolio=portfolio,
+                binding=binding,
+                release_order_reservation=Decimal(
+                    str(existing.get("reserved_margin", "0"))
+                ),
+            )
+        elif command.type is ReplayV2CommandType.EXECUTE_POSITION_INTENT:
+            intent = payload.get("intent")
+            if intent in {"OPEN", "REVERSE"}:
+                opening_payload = {
+                    "quantity": payload.get("quantity"),
+                    "reduce_only": False,
+                    "limit_price": None,
+                    "stop_price": None,
+                }
+                self._assert_exact_account_order_filters(
+                    payload=opening_payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    replace_position=intent == "REVERSE",
+                )
+                self._assert_shared_settlement_reservation(
+                    payload=opening_payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    binding=binding,
+                    release_selected_margin=intent == "REVERSE",
+                )
+        elif command.type is ReplayV2CommandType.SET_POSITION_PROTECTION:
+            position = selected.get("position")
+            raw_quantity = payload.get("quantity")
+            if raw_quantity is None and isinstance(position, Mapping):
+                try:
+                    raw_quantity = normalize_decimal_string(
+                        format(abs(Decimal(str(position.get("quantity")))), "f"),
+                        field_name="protection quantity",
+                    )
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "position protection quantity is invalid",
+                        status_code=422,
+                    ) from exc
+            for field_name in ("stop_loss_price", "take_profit_price"):
+                price = payload.get(field_name)
+                if price is None:
+                    continue
+                self._assert_exact_account_order_filters(
+                    payload={
+                        "quantity": raw_quantity,
+                        "reduce_only": True,
+                        "limit_price": None,
+                        "stop_price": price,
+                    },
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                )
         controller_snapshot = await self._ensure_track_controller(
             session_id=session_id,
             client_instance_id=command.client_instance_id,
@@ -3762,11 +4304,262 @@ class TrainingRunService:
         )
 
     @staticmethod
+    def _planned_entry_reference(
+        *,
+        payload: Mapping[str, object],
+        selected_track: Mapping[str, object],
+    ) -> object:
+        if payload.get("order_type") == "LIMIT":
+            return payload.get("limit_price")
+        position = selected_track.get("position")
+        if isinstance(position, Mapping) and position.get("mark_price") is not None:
+            return position.get("mark_price")
+        return selected_track.get("public_price")
+
+    @staticmethod
+    def _active_instrument_rule(
+        portfolio: Mapping[str, object],
+        *,
+        track_id: str,
+    ) -> Mapping[str, object]:
+        rules = portfolio.get("instrument_rules")
+        if not isinstance(rules, list):
+            raise TrainingRunError(
+                "TRADE_PLAN_RULE_UNAVAILABLE",
+                "trade-plan sizing requires an active instrument rule",
+                status_code=409,
+            )
+        active = next(
+            (
+                item
+                for item in rules
+                if isinstance(item, Mapping)
+                and item.get("track_id") == track_id
+                and isinstance(item.get("rule"), Mapping)
+            ),
+            None,
+        )
+        if not isinstance(active, Mapping) or not isinstance(active.get("rule"), Mapping):
+            raise TrainingRunError(
+                "TRADE_PLAN_RULE_UNAVAILABLE",
+                "trade-plan sizing requires an active instrument rule",
+                status_code=409,
+            )
+        return cast(Mapping[str, object], active["rule"])
+
+    @classmethod
+    def _build_trade_plan_snapshot(
+        cls,
+        *,
+        draft: Mapping[str, object],
+        payload: Mapping[str, object],
+        selected_track: Mapping[str, object],
+        portfolio: object,
+        entry_price: object,
+    ) -> dict[str, object]:
+        expected = {
+            "sizing_mode",
+            "risk_amount",
+            "risk_percent",
+            "invalidation_price",
+            "target_price",
+            "reason",
+        }
+        if set(draft) != expected:
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade-plan fields do not match the contract",
+                status_code=422,
+                details={
+                    "missing": sorted(expected - set(draft)),
+                    "unknown": sorted(set(draft) - expected),
+                },
+            )
+        if (
+            payload.get("reduce_only") is not False
+            or payload.get("order_type") not in {"MARKET", "LIMIT"}
+        ):
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade plans require a non-reduce-only market or limit order",
+                status_code=422,
+            )
+        side = payload.get("side")
+        if side not in {"BUY", "SELL"}:
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade-plan side is invalid",
+                status_code=422,
+            )
+        if not isinstance(portfolio, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "run portfolio projection is invalid",
+                status_code=503,
+            )
+
+        def decimal_value(value: object, field_name: str) -> Decimal:
+            try:
+                normalized = normalize_decimal_string(value, field_name=field_name)
+                parsed = Decimal(normalized)
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    f"{field_name} is invalid",
+                    status_code=422,
+                ) from exc
+            if parsed <= 0:
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    f"{field_name} must be positive",
+                    status_code=422,
+                )
+            return parsed
+
+        def decimal_text(value: Decimal, field_name: str) -> str:
+            return normalize_decimal_string(format(value, "f"), field_name=field_name)
+
+        entry = decimal_value(entry_price, "trade-plan entry price")
+        invalidation = decimal_value(
+            draft["invalidation_price"],
+            "trade-plan invalidation price",
+        )
+        target = decimal_value(draft["target_price"], "trade-plan target price")
+        if side == "BUY":
+            price_sides_valid = invalidation < entry < target
+        else:
+            price_sides_valid = target < entry < invalidation
+        if not price_sides_valid:
+            raise TrainingRunError(
+                "TRADE_PLAN_PRICE_SIDE_INVALID",
+                "invalidation and target prices must bracket entry in the order direction",
+                status_code=422,
+                details={"side": side, "entry_price": decimal_text(entry, "entry")},
+            )
+        reason = draft["reason"]
+        if not isinstance(reason, str):
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade-plan reason must be a string",
+                status_code=422,
+            )
+        normalized_reason = reason.strip()
+        if not normalized_reason or len(normalized_reason) > 500:
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade-plan reason must contain 1-500 characters",
+                status_code=422,
+            )
+        equity = decimal_value(portfolio.get("equity"), "account equity")
+        sizing_mode = draft["sizing_mode"]
+        risk_percent: str | None
+        if sizing_mode == "RISK_AMOUNT":
+            if draft.get("risk_percent") is not None:
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    "fixed-risk sizing must not include risk_percent",
+                    status_code=422,
+                )
+            risk_budget = decimal_value(draft.get("risk_amount"), "risk amount")
+            risk_percent = None
+        elif sizing_mode == "ACCOUNT_RISK_PERCENT":
+            if draft.get("risk_amount") is not None:
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    "percentage-risk sizing must not include risk_amount",
+                    status_code=422,
+                )
+            percent = decimal_value(draft.get("risk_percent"), "risk percent")
+            if percent > 100:
+                raise TrainingRunError(
+                    "TRADE_PLAN_INVALID",
+                    "risk percent must not exceed 100",
+                    status_code=422,
+                )
+            risk_percent = decimal_text(percent, "risk percent")
+            risk_budget = equity * percent / Decimal(100)
+        else:
+            raise TrainingRunError(
+                "TRADE_PLAN_INVALID",
+                "trade-plan sizing mode is unsupported",
+                status_code=422,
+            )
+        if risk_budget > equity:
+            raise TrainingRunError(
+                "TRADE_PLAN_RISK_EXCEEDS_EQUITY",
+                "planned maximum loss exceeds current account equity",
+                status_code=422,
+                details={
+                    "risk_amount": decimal_text(risk_budget, "risk amount"),
+                    "account_equity": decimal_text(equity, "account equity"),
+                },
+            )
+        track_id = str(selected_track["track_id"])
+        rule = cls._active_instrument_rule(portfolio, track_id=track_id)
+        contract_size = decimal_value(rule.get("contract_size"), "contract size")
+        quantity_step = decimal_value(rule.get("quantity_step"), "quantity step")
+        minimum_quantity = decimal_value(rule.get("min_quantity"), "minimum quantity")
+        maximum_quantity = decimal_value(rule.get("max_quantity"), "maximum quantity")
+        risk_per_unit = abs(entry - invalidation) * contract_size
+        raw_quantity = risk_budget / risk_per_unit
+        quantity = (
+            (raw_quantity / quantity_step).to_integral_value(rounding=ROUND_FLOOR)
+            * quantity_step
+        )
+        quantity = min(quantity, maximum_quantity)
+        if quantity < minimum_quantity or quantity <= 0:
+            raise TrainingRunError(
+                "TRADE_PLAN_SIZE_BELOW_MINIMUM",
+                "risk budget is too small for the active minimum quantity",
+                status_code=422,
+                details={
+                    "minimum_quantity": decimal_text(minimum_quantity, "minimum quantity"),
+                    "quantity_step": decimal_text(quantity_step, "quantity step"),
+                },
+            )
+        position = selected_track.get("position")
+        if isinstance(position, Mapping):
+            try:
+                position_quantity = Decimal(str(position.get("quantity", "0")))
+            except InvalidOperation as exc:
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "selected position quantity is invalid",
+                    status_code=503,
+                ) from exc
+            if position_quantity != 0 and (position_quantity > 0) != (side == "BUY"):
+                raise TrainingRunError(
+                    "TRADE_PLAN_REVERSE_REQUIRES_EXPLICIT_ACTION",
+                    "a trade plan cannot implicitly reduce or reverse the current position",
+                    status_code=409,
+                )
+        reward_risk_ratio = abs(target - entry) * contract_size / risk_per_unit
+        return {
+            "schema_version": "replay.trade-plan.snapshot.v1",
+            "track_id": track_id,
+            "client_order_id": str(payload["client_order_id"]),
+            "side": side,
+            "order_type": str(payload["order_type"]),
+            "sizing_mode": sizing_mode,
+            "risk_amount": decimal_text(risk_budget, "risk amount"),
+            "risk_percent": risk_percent,
+            "account_equity": decimal_text(equity, "account equity"),
+            "entry_price": decimal_text(entry, "entry price"),
+            "invalidation_price": decimal_text(invalidation, "invalidation price"),
+            "target_price": decimal_text(target, "target price"),
+            "risk_per_unit": decimal_text(risk_per_unit, "risk per unit"),
+            "reward_risk_ratio": decimal_text(reward_risk_ratio, "reward risk ratio"),
+            "quantity": decimal_text(quantity, "planned quantity"),
+            "reason": normalized_reason,
+        }
+
+    @staticmethod
     def _assert_exact_account_order_filters(
         *,
         payload: Mapping[str, object],
         selected_track: Mapping[str, object],
         portfolio: object,
+        replace_position: bool = False,
     ) -> None:
         if not isinstance(portfolio, Mapping):
             raise TrainingRunError(
@@ -3861,7 +4654,11 @@ class TrainingRunService:
             if payload.get("reduce_only") is not True:
                 minimum_notional = Decimal(str(rule["min_notional"]))
                 maximum_notional = Decimal(str(rule["max_notional"]))
-                existing_notional = Decimal(str(position.get("notional", "0")))
+                existing_notional = (
+                    Decimal(0)
+                    if replace_position
+                    else Decimal(str(position.get("notional", "0")))
+                )
                 if (
                     notional < minimum_notional
                     or notional > maximum_notional
@@ -4028,6 +4825,8 @@ class TrainingRunService:
         selected_track: Mapping[str, object],
         portfolio: object,
         binding: Mapping[str, object],
+        release_selected_margin: bool = False,
+        release_order_reservation: Decimal = Decimal(0),
     ) -> None:
         if payload.get("reduce_only") is True:
             return
@@ -4103,6 +4902,9 @@ class TrainingRunService:
                     str(track_account.get("reserved_margin", "0"))
                 )
                 available = allocated - in_use
+                if release_selected_margin:
+                    available += Decimal(str(track_account.get("margin_used", "0")))
+                available += release_order_reservation
                 if allocated <= 0:
                     raise TrainingRunError(
                         "ISOLATED_MARGIN_REQUIRED",
@@ -4112,6 +4914,12 @@ class TrainingRunService:
                     )
             else:
                 available = Decimal(str(portfolio["available_equity"]))
+                if release_selected_margin:
+                    track_account = selected_track.get("account")
+                    if not isinstance(track_account, Mapping):
+                        raise TypeError("selected track account is invalid")
+                    available += Decimal(str(track_account.get("margin_used", "0")))
+                available += release_order_reservation
             reservation = (quantity * price * contract_size / leverage).quantize(
                 Decimal("0.00000001"),
                 rounding=ROUND_CEILING,

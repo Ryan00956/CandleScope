@@ -2180,8 +2180,12 @@ class ReplaySessionActor:
             )
         if command_type in {
             CommandType.PLACE_ORDER,
+            CommandType.REPLACE_ORDER,
             CommandType.CANCEL_ORDER,
+            CommandType.CANCEL_ORDERS,
             CommandType.CLOSE_POSITION,
+            CommandType.EXECUTE_POSITION_INTENT,
+            CommandType.SET_POSITION_PROTECTION,
             InternalCommandType.ADJUST_CAPITAL,
         }:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:

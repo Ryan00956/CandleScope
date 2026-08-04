@@ -28,6 +28,7 @@ export interface MarketRightRailDockLayout {
   readonly height: number;
   readonly collapsed: boolean;
   readonly onHeightChange: (value: number) => void;
+  readonly minimumSidebarHeight?: number;
 }
 
 export interface MarketRightRailFrameProps {
@@ -66,8 +67,9 @@ export default function MarketRightRailFrame({
   const [heightResizing, setHeightResizing] = useState(false);
   const [transientWidth, setTransientWidth] = useState<number | null>(null);
   const [transientHeight, setTransientHeight] = useState<number | null>(null);
+  const minimumSidebarHeight = dockLayout.minimumSidebarHeight ?? MARKET_RAIL_MIN_SIDEBAR_HEIGHT;
   const maximumDockHeight = railHeight > 0
-    ? clamp(railHeight - MARKET_RAIL_MIN_SIDEBAR_HEIGHT - 8, MARKET_DOCK_MIN_HEIGHT, MARKET_DOCK_MAX_HEIGHT)
+    ? clamp(railHeight - minimumSidebarHeight - 8, MARKET_DOCK_MIN_HEIGHT, MARKET_DOCK_MAX_HEIGHT)
     : MARKET_DOCK_MAX_HEIGHT;
   const expandedDockHeight = clamp(
     transientHeight ?? dockLayout.height,

@@ -150,6 +150,108 @@ def validate_order_risk(
     return decimal_to_string(reservation, field_name="reserved_margin")
 
 
+def build_order_preview(
+    *,
+    config: BrokerConfig,
+    request: OrderRequest,
+    position: Position,
+    account: Account,
+    orders: Iterable[ReplayOrder],
+) -> dict[str, object]:
+    """Build an exact, read-only preview from the same risk inputs as placement."""
+
+    all_orders = tuple(orders)
+    open_orders = tuple(
+        order
+        for order in all_orders
+        if order.status.value in {"OPEN", "PARTIALLY_FILLED"}
+    )
+    if request.client_order_id in {order.client_order_id for order in all_orders}:
+        _order_rejected("client_order_id already exists")
+    if len(all_orders) >= config.limits.max_orders:
+        raise ReplayDomainError(
+            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+            "broker order capacity exceeded",
+        )
+    if len(open_orders) >= config.limits.max_open_orders:
+        _risk_rejected("open order limit exceeded")
+
+    reservation = validate_order_risk(
+        config=config,
+        request=request,
+        position=position,
+        account=account,
+        open_orders=open_orders,
+    )
+    reference = order_reference_price(request, position.mark_price)
+    estimated_fill = (
+        Decimal(adverse_market_price(position.mark_price, request.side, config))
+        if request.limit_price is None and request.stop_price is None
+        else reference
+    )
+    estimated_notional = estimated_fill * Decimal(request.quantity)
+    fee = fee_for_fill(notional=estimated_notional, maker=False, config=config)
+    available_after = Decimal(account.available_equity) - Decimal(reservation)
+
+    if request.reduce_only:
+        maximum = abs(Decimal(position.quantity))
+    else:
+        existing_exposure = abs(Decimal(position.quantity)) * Decimal(
+            position.mark_price
+        )
+        for order in open_orders:
+            if order.reduce_only:
+                continue
+            existing_exposure += Decimal(order.remaining_quantity) * (
+                order_reference_price_for_existing(order, position.mark_price)
+            )
+        notional_capacity = max(
+            Decimal(0),
+            Decimal(config.limits.max_position_notional) - existing_exposure,
+        )
+        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * Decimal(
+            config.limits.max_leverage
+        )
+        maximum = min(
+            Decimal(config.instrument.max_quantity),
+            Decimal(config.limits.max_order_quantity),
+            Decimal(config.instrument.max_notional) / reference,
+            notional_capacity / reference,
+            margin_capacity / reference,
+        )
+    maximum = round_to_step(
+        max(Decimal(0), maximum),
+        Decimal(config.instrument.quantity_step),
+        upward=False,
+    )
+    return {
+        "schema_version": "replay.order-preview.v1",
+        "order": request.to_dict(),
+        "reference_price": decimal_to_string(reference, field_name="reference_price"),
+        "estimated_fill_price": decimal_to_string(
+            estimated_fill,
+            field_name="estimated_fill_price",
+        ),
+        "estimated_notional": decimal_to_string(
+            estimated_notional,
+            field_name="estimated_notional",
+        ),
+        "reserved_margin": reservation,
+        "estimated_fee": fee,
+        "fee_basis": "TAKER_WORST_CASE",
+        "available_equity_after": decimal_to_string(
+            available_after,
+            field_name="available_equity_after",
+        ),
+        "max_quantity": decimal_to_string(
+            maximum,
+            field_name="max_quantity",
+        ),
+        "quote_asset": account.quote_asset,
+        "max_leverage": config.limits.max_leverage,
+    }
+
+
 def mark_position(position: Position, mark_price: str) -> Position:
     mark = Decimal(
         canonical_decimal(mark_price, field_name="mark_price", positive=True)

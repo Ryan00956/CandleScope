@@ -207,6 +207,14 @@ function exactPortfolioRaw() {
     positions: [],
     orders: [],
     fills: [],
+    history: {
+      orders_total: 0,
+      active_orders: 0,
+      historical_orders: 0,
+      fills_total: 0,
+      ledger_entries_total: 3,
+      page_limit_max: 200,
+    },
     active_fee_policy: null,
     instrument_rules: [{
       track_id: "track-1",

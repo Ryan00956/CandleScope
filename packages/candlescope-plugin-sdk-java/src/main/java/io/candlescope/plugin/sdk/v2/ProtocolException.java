@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** A stable protocol error that is safe to return to the Host. */
+@SuppressWarnings("serial") // Process-local protocol state is never Java-serialized.
 public final class ProtocolException extends RuntimeException {
     private final int rpcCode;
     private final String symbolicCode;

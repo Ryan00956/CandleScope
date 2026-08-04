@@ -11,7 +11,7 @@ import type {
   MutableRefObject,
   PointerEvent as ReactPointerEvent,
 } from "react";
-import type { TickMarkType } from "lightweight-charts";
+import type { TickMarkType } from "../chart-adapter/chartAdapterTypes.js";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import {
   createDrawingFrameSnapshotFactory,

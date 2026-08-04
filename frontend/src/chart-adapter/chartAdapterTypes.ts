@@ -18,6 +18,8 @@ import type {
 } from "../features/chart-representation/chartRepresentationTypes.js";
 import type { MainChartType } from "../shared/mainChartTypes.js";
 
+export { TickMarkType } from "lightweight-charts";
+
 export type ChartTime = number | string | BusinessDay | OrdinalAxisTime;
 
 export type LightweightChartApi = IChartApi | IChartApiBase<OrdinalAxisTime>;

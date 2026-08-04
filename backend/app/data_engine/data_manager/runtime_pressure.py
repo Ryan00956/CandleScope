@@ -1,4 +1,5 @@
 """Runtime pressure probes used by cache GC dry-runs."""
+
 from __future__ import annotations
 
 import ctypes
@@ -90,18 +91,22 @@ def storage_file_snapshot(path: str | Path) -> dict[str, Any]:
                 conn.execute("BEGIN")
                 page_size = int(conn.execute("PRAGMA page_size").fetchone()[0] or 0)
                 page_count = int(conn.execute("PRAGMA page_count").fetchone()[0] or 0)
-                freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+                freelist_count = int(
+                    conn.execute("PRAGMA freelist_count").fetchone()[0] or 0
+                )
                 page_metrics_available = page_size > 0
                 try:
-                    managed_objects = sorted({
-                        str(row[0])
-                        for row in conn.execute(
-                            "SELECT name FROM sqlite_schema "
-                            "WHERE name = 'klines' "
-                            "OR (type = 'index' AND tbl_name = 'klines')"
-                        )
-                        if row[0]
-                    })
+                    managed_objects = sorted(
+                        {
+                            str(row[0])
+                            for row in conn.execute(
+                                "SELECT name FROM sqlite_schema "
+                                "WHERE name = 'klines' "
+                                "OR (type = 'index' AND tbl_name = 'klines')"
+                            )
+                            if row[0]
+                        }
+                    )
                     page_owners = [
                         (str(row[0]), int(row[1] or 0))
                         for row in conn.execute(
@@ -111,9 +116,7 @@ def storage_file_snapshot(path: str | Path) -> dict[str, Any]:
                     attributed_bytes = sum(size for _, size in page_owners)
                     managed_names = set(managed_objects)
                     klines_managed_bytes = sum(
-                        size
-                        for name, size in page_owners
-                        if name in managed_names
+                        size for name, size in page_owners if name in managed_names
                     )
                     owner_attribution_available = True
                 except sqlite3.Error as exc:
@@ -128,26 +131,20 @@ def storage_file_snapshot(path: str | Path) -> dict[str, Any]:
     db_size_after = _safe_file_size(db_path)
     wal_size_after = _safe_file_size(wal_path)
     shm_size_after = _safe_file_size(shm_path)
-    file_set_stable = (
-        (db_size, wal_size, shm_size)
-        == (db_size_after, wal_size_after, shm_size_after)
-        and data_version_before == data_version_after
-    )
+    file_set_stable = (db_size, wal_size, shm_size) == (
+        db_size_after,
+        wal_size_after,
+        shm_size_after,
+    ) and data_version_before == data_version_after
     db_size = db_size_after
     wal_size = wal_size_after
     shm_size = shm_size_after
     physical_size = db_size + wal_size
     allocated = page_count * page_size if page_metrics_available else 0
     logical_used = (
-        max(0, page_count - freelist_count) * page_size
-        if page_metrics_available
-        else 0
+        max(0, page_count - freelist_count) * page_size if page_metrics_available else 0
     )
-    reclaimable = (
-        max(0, freelist_count) * page_size
-        if page_metrics_available
-        else 0
-    )
+    reclaimable = max(0, freelist_count) * page_size if page_metrics_available else 0
     unmanaged_bytes = (
         max(0, logical_used - klines_managed_bytes)
         if owner_attribution_available
@@ -157,9 +154,7 @@ def storage_file_snapshot(path: str | Path) -> dict[str, Any]:
     # pages.  Compare the current file set with SQLite's logical page count
     # instead of assuming the whole WAL is reclaimable.
     checkpoint_reclaimable = (
-        max(0, physical_size - allocated)
-        if page_metrics_available
-        else 0
+        max(0, physical_size - allocated) if page_metrics_available else 0
     )
     return {
         "captured_at_ms": int(time.time() * 1000),
@@ -218,9 +213,7 @@ def build_storage_watermarks(
     db_size = int(files.get("db_size_bytes", 0) or 0)
     wal_size = int(files.get("wal_size_bytes", 0) or 0)
     shm_size = int(files.get("shm_size_bytes", 0) or 0)
-    physical_size = int(
-        files.get("physical_size_bytes", db_size + wal_size) or 0
-    )
+    physical_size = int(files.get("physical_size_bytes", db_size + wal_size) or 0)
     # Older callers only supplied total_size_bytes.  Preserve compatibility
     # without treating SHM as logically reclaimable data when component sizes
     # are available.
@@ -237,15 +230,11 @@ def build_storage_watermarks(
     checkpoint_reclaimable = int(
         files.get(
             "checkpoint_reclaimable_bytes",
-            max(0, physical_size - logical_allocated)
-            if page_metrics_available
-            else 0,
+            max(0, physical_size - logical_allocated) if page_metrics_available else 0,
         )
         or 0
     )
-    owner_attribution_available = bool(
-        files.get("owner_attribution_available", False)
-    )
+    owner_attribution_available = bool(files.get("owner_attribution_available", False))
     klines_managed = int(files.get("klines_managed_bytes", 0) or 0)
     unmanaged = int(files.get("unmanaged_bytes", 0) or 0)
     compacted_db = int(
@@ -278,13 +267,8 @@ def build_storage_watermarks(
         if budget > 0 and level in {"high", "critical", "over_budget"}
         else 0
     )
-    relief_planning_available = (
-        required_physical_relief <= 0
-        or (
-            file_set_stable
-            and page_metrics_available
-            and checkpoint_reclaimable_available
-        )
+    relief_planning_available = required_physical_relief <= 0 or (
+        file_set_stable and page_metrics_available and checkpoint_reclaimable_available
     )
     checkpoint_relief = (
         min(required_physical_relief, max(0, checkpoint_reclaimable))
@@ -322,10 +306,7 @@ def build_storage_watermarks(
         relief_planning_available
         and (
             required_logical_relief <= 0
-            or (
-                owner_attribution_available
-                and not klines_relief_insufficient
-            )
+            or (owner_attribution_available and not klines_relief_insufficient)
         )
     )
     required_klines_relief = (
@@ -443,7 +424,13 @@ def _posix_process_memory() -> dict[str, Any]:
                 "rss_bytes": rss_bytes,
             }
         errors.append("ps returned zero RSS")
-    except (IndexError, OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
+    except (
+        IndexError,
+        OSError,
+        subprocess.SubprocessError,
+        TypeError,
+        ValueError,
+    ) as exc:
         errors.append(f"ps: {exc}")
 
     peak_rss_bytes = 0
@@ -451,11 +438,7 @@ def _posix_process_memory() -> dict[str, Any]:
         import resource
 
         peak_value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        peak_rss_bytes = (
-            peak_value
-            if sys.platform == "darwin"
-            else peak_value * 1024
-        )
+        peak_rss_bytes = peak_value if sys.platform == "darwin" else peak_value * 1024
     except (ImportError, OSError, TypeError, ValueError) as exc:
         errors.append(f"resource.ru_maxrss: {exc}")
     return {
@@ -482,20 +465,23 @@ def _windows_process_memory() -> dict[str, Any]:
         ]
 
     try:
-        kernel32 = ctypes.windll.kernel32
-        psapi = ctypes.windll.psapi
-        kernel32.GetCurrentProcess.argtypes = []
-        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-        psapi.GetProcessMemoryInfo.argtypes = [
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        get_current_process = ctypes.WINFUNCTYPE(
+            ctypes.c_void_p,
+            use_last_error=True,
+        )(("GetCurrentProcess", kernel32))
+        get_process_memory_info = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
             ctypes.c_void_p,
             ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
             ctypes.c_ulong,
-        ]
-        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+            use_last_error=True,
+        )(("GetProcessMemoryInfo", psapi))
         counters = PROCESS_MEMORY_COUNTERS()
         counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-        handle = kernel32.GetCurrentProcess()
-        ok = psapi.GetProcessMemoryInfo(
+        handle = get_current_process()
+        ok = get_process_memory_info(
             handle,
             ctypes.byref(counters),
             counters.cb,

@@ -14,7 +14,7 @@ test.before(async () => {
   server = await createServer({
     appType: "custom",
     optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true },
+    server: { hmr: false, middlewareMode: true },
   });
   const module = await server.ssrLoadModule(
     "/src/services/indicatorApi.js",

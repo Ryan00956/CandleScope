@@ -1,0 +1,60 @@
+"""Launch the multi-runtime Phase 11 browser fixture from repository sources."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import uvicorn
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--bundle-directory", type=Path, required=True)
+    parser.add_argument("--evidence-directory", type=Path, required=True)
+    parser.add_argument("--frontend-dist", type=Path, required=True)
+    parser.add_argument("--origin", default="http://127.0.0.1:18141")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=18141)
+    args = parser.parse_args()
+
+    repository = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repository / "backend"))
+    sys.path.insert(0, str(repository / "packages/candlescope-plugin-sdk/src"))
+    os.environ.update(
+        {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+            "PHASE11_MULTI_BROWSER_PLATFORM_ROOT": str(args.root.resolve()),
+            "PHASE11_MULTI_BROWSER_BUNDLE_DIRECTORY": str(
+                args.bundle_directory.resolve()
+            ),
+            "PHASE11_MULTI_BROWSER_EVIDENCE_DIRECTORY": str(
+                args.evidence_directory.resolve()
+            ),
+            "PHASE11_MULTI_BROWSER_FRONTEND_DIST": str(
+                args.frontend_dist.resolve(strict=True)
+            ),
+            "PHASE11_MULTI_BROWSER_ORIGIN": args.origin,
+            "PHASE11_MULTI_BROWSER_MANAGEMENT_API_ORIGIN": (
+                f"http://localhost:{args.port}"
+            ),
+        }
+    )
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+    uvicorn.run(
+        "tests.plugin_platform_multi_runtime_phase11_browser_server:app",
+        host=args.host,
+        port=args.port,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

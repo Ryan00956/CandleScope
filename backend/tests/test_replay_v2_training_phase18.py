@@ -15,6 +15,7 @@ from app.replay.training.anchor_codec import (
 )
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
+from app.replay.training.schema import TRAINING_SCHEMA_VERSION
 from app.replay.training.segments import ReplaySegmentManager
 from app.replay.training.storage_governance import ReplayStorageGovernance
 from scripts.validate_replay_v2_real_sources import validate_kline_source
@@ -471,7 +472,7 @@ async def test_account_gc_source_drift_fails_closed_and_schema_is_additive(
                 SELECT version FROM replay_training_schema_version
                 WHERE singleton = 1
                 """
-            ).fetchone() == (10,)
+            ).fetchone() == (TRAINING_SCHEMA_VERSION,)
             assert connection.execute(
                 """
                 SELECT name FROM sqlite_master

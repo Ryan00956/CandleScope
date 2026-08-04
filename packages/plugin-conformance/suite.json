@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "candlescope.plugin-conformance-suite/1",
+  "protocol": "candlescope.plugin/2",
+  "transport": "jsonl/1",
+  "canonicalTranscript": {
+    "path": "packages/candlescope-plugin-sdk/tests/fixtures/hello_command_transcript_v2.json",
+    "fileSha256": "sha256:a7c35dfdf8a911ddf66c988523a851e3e37f282f8506b3651af7778565428af5",
+    "transcriptSha256": "sha256:d98ebd2fc9f5b0695925caf47ecf961eae47a56b5e8ec110f28acc9365afdd38",
+    "manifestPath": "packages/candlescope-plugin-sdk/examples/platform-v2/hello-command.manifest.json"
+  },
+  "sdkConsumers": [
+    {
+      "language": "python",
+      "checkPath": "packages/candlescope-plugin-sdk/tests/test_platform_v2_transcript.py"
+    },
+    {
+      "language": "java",
+      "checkPath": "packages/candlescope-plugin-sdk-java/scripts/check.py"
+    },
+    {
+      "language": "typescript",
+      "checkPath": "packages/candlescope-plugin-sdk-typescript/scripts/check.py"
+    }
+  ],
+  "runtimeTranscripts": [
+    {
+      "runtimeKind": "python-module",
+      "runtimeId": "host-python",
+      "path": "packages/candlescope-plugin-sdk/tests/fixtures/hello_command_transcript_v2.json",
+      "fileSha256": "sha256:a7c35dfdf8a911ddf66c988523a851e3e37f282f8506b3651af7778565428af5",
+      "transcriptSha256": "sha256:d98ebd2fc9f5b0695925caf47ecf961eae47a56b5e8ec110f28acc9365afdd38",
+      "manifestPath": "packages/candlescope-plugin-sdk/examples/platform-v2/hello-command.manifest.json",
+      "requiredMethods": ["handshake", "describe", "activate", "invoke", "healthCheck", "cancel", "deactivate", "shutdown"]
+    },
+    {
+      "runtimeKind": "native-executable",
+      "runtimeId": "plugin-bundled",
+      "path": "examples/plugins/aho-corasick-adapter/conformance/control-transcript.json",
+      "fileSha256": "sha256:c9ad3a65cbfcd24dd820a881dea38c02212cb7f816000d480874630478cf5e08",
+      "transcriptSha256": "sha256:6984851b56ecf44f860501c4fee6043742e34afa20e9198c102d858f344c91e2",
+      "manifestPath": "examples/plugins/aho-corasick-adapter/manifest.json",
+      "requiredMethods": ["handshake", "describe", "activate", "invoke", "healthCheck", "cancel", "prepareUpgrade", "eventBatch", "deactivate", "shutdown"]
+    },
+    {
+      "runtimeKind": "java-jar",
+      "runtimeId": "temurin-25.0.4.7",
+      "path": "examples/plugins/ta4j-elliott-adapter/probes/ta4j-control.json",
+      "fileSha256": "sha256:78d365e7a771d6d153122f4d82ea26878c406392ca1764e97819d77cb18ef54f",
+      "transcriptSha256": "sha256:0b84757fc0dba6b3e7dc8a60881dc74b8b260fff8cb00285b01db8d63323b021",
+      "manifestPath": "examples/plugins/ta4j-elliott-adapter/manifest.json",
+      "requiredMethods": ["handshake", "describe", "activate", "invoke", "healthCheck", "deactivate", "shutdown"]
+    },
+    {
+      "runtimeKind": "node-module",
+      "runtimeId": "node-24.19.0",
+      "path": "examples/plugin-platform-node-typescript/probes/node-control.json",
+      "fileSha256": "sha256:f3c666af0776ec8634223ba834e54dfb12105e3ad22d131ca9ade7ade5dc0e30",
+      "transcriptSha256": "sha256:755dcac9d779b1a49f82da0e8bbd7da8d1a2543d6e4f38442c150b44a3d32624",
+      "manifestPath": "examples/plugin-platform-node-typescript/manifest.json",
+      "requiredMethods": ["handshake", "describe", "activate", "invoke", "healthCheck", "cancel", "prepareUpgrade", "eventBatch", "deactivate", "shutdown"]
+    },
+    {
+      "runtimeKind": "wasm-component",
+      "runtimeId": "wasmtime-47.0.3",
+      "path": "examples/plugin-platform-wasm-rust/probes/wasm-control.json",
+      "fileSha256": "sha256:86d1bc27b98450e29f9ba3797492c85fb39bebdcd706ee44d2036834a8edf29b",
+      "transcriptSha256": "sha256:447b2b15f8be4d1f5a8232f0af1a400acaa30e78eaace277bc29197fb38f3ed4",
+      "manifestPath": "examples/plugin-platform-wasm-rust/manifest.json",
+      "requiredMethods": ["handshake", "describe", "activate", "invoke", "healthCheck", "cancel", "prepareUpgrade", "eventBatch", "deactivate", "shutdown"]
+    }
+  ],
+  "cases": [
+    {"id": "handshake-before-method", "evidence": "packages/candlescope-plugin-sdk/tests/test_server.py::test_server_requires_handshake_before_runtime_methods"},
+    {"id": "feature-negotiation", "evidence": "packages/candlescope-plugin-sdk/tests/test_server.py::test_handshake_rejects_missing_required_host_feature"},
+    {"id": "describe-manifest-parity", "evidence": "packages/candlescope-plugin-sdk/tests/test_platform_v2_transcript.py::test_v2_hello_command_transcript_and_host_call_examples_are_frozen"},
+    {"id": "generation-mismatch", "evidence": "backend/tests/test_plugin_host_v2.py::test_invoke_result_is_rejected_after_its_generation_is_deactivated"},
+    {"id": "duplicate-request-id", "evidence": "backend/tests/test_plugin_host_v2.py::test_host_call_context_rejects_concurrent_replay"},
+    {"id": "invoke-success", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_host_is_wire_compatible_with_the_real_sdk_hello_runtime"},
+    {"id": "invoke-business-error", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_well_formed_remote_error_keeps_session_usable"},
+    {"id": "invoke-internal-error", "evidence": "packages/candlescope-plugin-sdk/tests/test_server.py::test_unexpected_plugin_exception_is_hidden_from_json_rpc_client"},
+    {"id": "host-call-request-response", "evidence": "backend/tests/test_plugin_host_v2.py::test_bidirectional_host_call_supports_reentrant_host_requests"},
+    {"id": "host-call-cancel", "evidence": "backend/tests/test_plugin_host_v2.py::test_cancelled_invoke_cancels_its_pending_host_call"},
+    {"id": "health-check", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_supervisor_runs_a_complete_serialized_session"},
+    {"id": "deactivate-prepare-upgrade-shutdown", "evidence": "backend/tests/test_plugin_host_v2.py::test_invalid_lifecycle_results_discard_the_session"},
+    {"id": "invalid-json", "evidence": "packages/candlescope-plugin-sdk/tests/test_server.py::test_server_maps_invalid_json_and_unknown_methods_to_json_rpc_errors"},
+    {"id": "duplicate-json-field", "evidence": "packages/candlescope-plugin-sdk/tests/test_server.py::test_server_rejects_duplicate_keys_and_non_standard_numbers"},
+    {"id": "nan", "evidence": "packages/candlescope-plugin-sdk/tests/test_platform_v2_json.py::test_strict_json_rejects_ambiguous_numbers_and_duplicate_keys"},
+    {"id": "over-depth", "evidence": "packages/candlescope-plugin-sdk/tests/test_platform_v2_json.py::test_strict_json_enforces_message_depth_container_and_string_limits"},
+    {"id": "oversized-message", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_oversized_local_request_is_rejected_without_killing_session"},
+    {"id": "invalid-utf8", "evidence": "backend/tests/test_plugin_host_v2.py::test_startup_process_and_wire_faults_fail_closed"},
+    {"id": "stdout-pollution", "evidence": "backend/tests/test_plugin_host_v2.py::test_startup_process_and_wire_faults_fail_closed"},
+    {"id": "stderr-redaction", "evidence": "backend/tests/test_plugin_host_v2.py::test_stderr_is_bounded_and_ambient_secrets_do_not_cross_process_boundary"},
+    {"id": "timeout", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_request_timeout_discards_the_process"},
+    {"id": "cancel-race", "evidence": "backend/tests/test_plugin_host_v2.py::test_cancelled_shutdown_still_closes_the_process_session"},
+    {"id": "late-response", "evidence": "backend/tests/test_plugin_host_v2.py::test_host_call_result_is_dropped_after_generation_revocation"},
+    {"id": "process-exit", "evidence": "backend/tests/test_plugin_host_v2.py::test_idle_process_exit_revokes_generation_owned_contributions"},
+    {"id": "restart-budget", "evidence": "backend/tests/test_plugin_runtime_supervisor.py::test_crash_restart_budget_opens_a_circuit"},
+    {"id": "circuit-breaker", "evidence": "backend/tests/test_plugin_host_v2.py::test_restart_storm_opens_the_entrypoint_circuit"},
+    {"id": "capability-lease-revoke", "evidence": "backend/tests/test_plugin_host_v2.py::test_unknown_or_revoked_capability_handle_fails_without_killing_session"},
+    {"id": "deterministic-canonical-output", "evidence": "packages/candlescope-plugin-sdk/tests/test_platform_v2_json.py::test_canonical_json_is_deterministic_and_language_neutral"}
+  ]
+}

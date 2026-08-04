@@ -1,4 +1,4 @@
-import { TickMarkType } from "lightweight-charts";
+import { TickMarkType } from "../../chart-adapter/chartAdapterTypes.js";
 import type { ReplayV2TimeDisclosurePolicy } from "./replayV2Types.js";
 
 export interface ReplayPublicTimeFormatterOptions {

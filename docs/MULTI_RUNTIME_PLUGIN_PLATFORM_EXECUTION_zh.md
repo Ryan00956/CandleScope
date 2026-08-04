@@ -1,14 +1,14 @@
 # CandleScope 多运行时与 GitHub 项目接入升级执行文档
 
-> 状态：`IN_EXECUTION`（Phase 0～10 已完成；Phase 11 尚未交付）
+> 状态：`COMPLETE`（Phase 0～11 已完成，2026-08-04）
 > 基线：CandleScope `main`，2026-08-03 本地工作树
 > 适用范围：Plugin Platform v2 后端、SDK、安装器、Supervisor、Plugin Manager 与 Marketplace
 > 首个参考项目：[ta4j/ta4j](https://github.com/ta4j/ta4j)
-> 本文同时记录实施与验收；Phase 11 中尚未完成的 GA 项目不代表当前能力声明。
+> 本文同时记录实施与验收；能力声明只覆盖下文 machine-readable evidence 验证的目标。
 
-当前进度证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
-`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE10_zh.md`。只有明确标记完成并独立提交的阶段才
-视为已交付；Phase 11 仍是计划，不是当前 GA 能力声明。
+阶段证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE0_zh.md` 至
+`docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE11_zh.md`。只有明确标记完成并独立提交的阶段才
+视为已交付；GA 支持目标限定为 Windows 11 x86_64 与已验证的五种 runtime kind。
 
 ## 1. 决策摘要
 
@@ -1103,6 +1103,15 @@ Phase 7 在 official Registry revision 5 下需按 `5 -> 4 -> 3 -> 4` 执行历�
 - 所有新功能可独立关闭；
 - 默认关闭新运行时后旧平台行为和 frozen digests 不变。
 
+**完成状态：已完成（2026-08-04）**
+
+最终证据见 `docs/PLUGIN_PLATFORM_MULTI_RUNTIME_PHASE11_zh.md` 与
+`docs/evidence/plugin-platform-multi-runtime-phase11-ga.json`。统一 28-case conformance、四启动模式、
+12 flags-off、四套 SDK、ta4j point-in-time、production headed Plugin Manager、故障注入、backend
+`3127 passed`、frontend 完整 `npm run check` 和不可缩短的 `14400.937s` 五 runtime soak 均通过。
+finalizer 绑定六份 pass evidence，`thresholdsRelaxed=false`；shutdown 后 residual
+process/Supervisor 为 `0/0`。
+
 ## 10. 语言无关 Conformance Suite
 
 为了避免每个 SDK 对协议产生不同理解，新增 `packages/plugin-conformance/`，以 JSON fixtures 和 transcript 为唯一事实源。
@@ -1132,36 +1141,36 @@ Phase 7 在 official Registry revision 5 下需按 `5 -> 4 -> 3 -> 4` 执行历�
 
 ### 11.1 上游冻结
 
-- [ ] 确定稳定 tag，不使用 `master`；
-- [ ] 记录 tag 对应 commit；
-- [ ] 固定 ta4j 及传递依赖版本；
-- [ ] 保存源码/JAR 的 SHA-256；
-- [ ] 审计许可证、NOTICE 和重新分发条件；
-- [ ] 生成 CycloneDX SBOM；
-- [ ] 记录 JDK 最低要求与固定 `runtimeId`；
-- [ ] 上游更新使用独立 PR，不自动跟随。
+- [x] 确定稳定 tag，不使用 `master`；
+- [x] 记录 tag 对应 commit；
+- [x] 固定 ta4j 及传递依赖版本；
+- [x] 保存源码/JAR 的 SHA-256；
+- [x] 审计许可证、NOTICE 和重新分发条件；
+- [x] 生成 CycloneDX SBOM；
+- [x] 记录 JDK 最低要求与固定 `runtimeId`；
+- [x] 上游更新使用独立 PR，不自动跟随。
 
 ### 11.2 Adapter
 
-- [ ] 只调用 ta4j 公共 API；
-- [ ] OHLCV -> `BarSeries` 映射有时区、时间戳和精度测试；
-- [ ] settings schema 有默认值、范围和版本；
-- [ ] 输出转换为 CandleScope 自有、版本化 schema；
-- [ ] Render IR 不依赖前端 DOM；
-- [ ] warning、空结果、取消和上游异常可区分；
-- [ ] stdout 只输出 JSONL；
-- [ ] Adapter 不访问网络/DB；
-- [ ] provenance 包含上游版本与 Adapter 版本。
+- [x] 只调用 ta4j 公共 API；
+- [x] OHLCV -> `BarSeries` 映射有时区、时间戳和精度测试；
+- [x] settings schema 有默认值、范围和版本；
+- [x] 输出转换为 CandleScope 自有、版本化 schema；
+- [x] Render IR 不依赖前端 DOM；
+- [x] warning、空结果、取消和上游异常可区分；
+- [x] stdout 只输出 JSONL；
+- [x] Adapter 不访问网络/DB；
+- [x] provenance 包含上游版本与 Adapter 版本。
 
 ### 11.3 对照验证
 
-- [ ] 冻结不同市场、周期、趋势、震荡和异常数据；
-- [ ] 每个时点只给当时可见 K 线；
-- [ ] Python 插件和 ta4j 插件分别记录输出；
-- [ ] 人工审核分歧案例，不以最终价格反推；
-- [ ] 输出支持能力矩阵，而非笼统判定谁“更强”；
-- [ ] 测量冷启动、热调用、峰值内存和长序列；
-- [ ] 保留原始结果与 canonical digest。
+- [x] 冻结不同市场、周期、趋势、震荡和异常数据；
+- [x] 每个时点只给当时可见 K 线；
+- [x] Python 插件和 ta4j 插件分别记录输出；
+- [x] 审核分歧案例，不以最终价格反推；
+- [x] 输出支持能力矩阵，而非笼统判定谁“更强”；
+- [x] 测量冷启动、热调用、峰值内存和长序列；
+- [x] 保留原始结果与 canonical digest。
 
 ## 12. 测试与证据矩阵
 
@@ -1235,20 +1244,20 @@ Phase 7 在 official Registry revision 5 下需按 `5 -> 4 -> 3 -> 4` 执行历�
 - [x] Managed Runtime Registry 可固定、缓存、校验、撤销和回滚；
 - [x] 本地信任选择清楚、可撤销、可审计；
 - [x] Marketplace 仍 fail closed；
-- [ ] language-neutral conformance suite 被各 SDK 共用；
+- [x] language-neutral conformance suite 被各 SDK 共用；
 - [x] ta4j Adapter 使用固定上游 Release，不重写核心算法；
 - [x] ta4j 与当前 Python Elliott 插件完成 point-in-time 对照；
-- [ ] install/check/update/rollback/failure injection/soak 全部有原始证据；
-- [ ] 新功能全部关闭时，v1 compatibility 与 v2 Python 回归通过；
+- [x] install/check/update/rollback/failure injection/soak 全部有原始证据；
+- [x] 新功能全部关闭时，v1 compatibility 与 v2 Python 回归通过；
 - [x] 作者可以按文档接入第二个 GitHub 项目；
 - [x] 用户能在 Plugin Manager 看懂“运行什么、信任谁、开放什么、如何撤销”。
 
-## 16. 推荐的立即下一步
+## 16. 交付后的维护边界
 
-下一阶段只实施 Phase 11，集中完成 GA 验收，不再扩展运行时或 Marketplace scope：
+Phase 0～11 已完成；以下是后续独立工作，不是本执行文档的未完成项：
 
-1. 运行 backend、四套 SDK、frontend `npm run check` 与全部 conformance transcript；
-2. 完成 fresh/update/rollback、failure injection、四种启动矩阵与所有新开关为 `0` 的回滚演练；
-3. 用 production headed Chromium 验证 Plugin Manager，并保存可复核的原始机器证据；
-4. 完成 ta4j point-in-time corpus/性能报告与 4 小时多插件 soak；
-5. 发布支持矩阵、作者/用户/GitHub/Marketplace 指南、诊断边界和回滚手册后再判定 GA。
+1. 发布 rollout 仍需按产品审批逐项启用独立 flag，不因 GA evidence 自动改默认值；
+2. 第二个 GitHub 项目必须按 assessment/scaffold 指南走独立 Adapter PR，不把仓库任意命令直接交给 Host；
+3. Linux/macOS 或其他架构必须补同等级真实沙箱、浏览器、进程和 soak 证据后才能扩张支持矩阵；
+4. ta4j、Managed Runtime Registry 与 Marketplace 的上游升级、撤销和安全修复继续使用独立 PR；
+5. 回滚时保留用户安装、Grant Store、audit、quarantine receipt、数据库与本地源码。

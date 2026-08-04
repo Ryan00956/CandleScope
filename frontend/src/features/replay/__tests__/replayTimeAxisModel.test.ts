@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TickMarkType } from "lightweight-charts";
+import { TickMarkType } from "../../../chart-adapter/chartAdapterTypes.js";
 
 import {
   formatReplayTimeAxisLabel,

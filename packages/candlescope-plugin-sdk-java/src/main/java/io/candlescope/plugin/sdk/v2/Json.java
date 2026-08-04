@@ -33,6 +33,7 @@ public final class Json {
         }
     }
 
+    @SuppressWarnings("serial") // Process-local parse failures are never Java-serialized.
     public static final class JsonException extends RuntimeException {
         private final String code;
         private final String path;

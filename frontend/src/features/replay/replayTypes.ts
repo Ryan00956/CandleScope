@@ -41,13 +41,29 @@ export const REPLAY_COMMAND_TYPES = [
   "advance_by",
   "seek_to",
   "place_order",
+  "replace_order",
   "cancel_order",
+  "cancel_orders",
   "close_position",
+  "execute_position_intent",
+  "set_position_protection",
   "add_journal_note",
   "reveal_history",
   "end_session",
 ] as const;
 export type ReplayCommandType = (typeof REPLAY_COMMAND_TYPES)[number];
+
+export const REPLAY_ORDER_EVENT_COMMAND_TYPES = [
+  "place_order",
+  "replace_order",
+  "cancel_order",
+  "cancel_orders",
+  "close_position",
+  "execute_position_intent",
+  "set_position_protection",
+  "_training_adjust_capital",
+] as const;
+export type ReplayOrderEventCommandType = (typeof REPLAY_ORDER_EVENT_COMMAND_TYPES)[number];
 
 export const REPLAY_EVENT_TYPES = [
   "replay.delta",
@@ -662,7 +678,7 @@ export type ReplayParsedEvent = Omit<ReplayEventEnvelope, "data"> & {
     | ReplayFinalStateEventData
     | { readonly state: ReplaySessionState; readonly reason: string; readonly speed: ReplaySpeed; readonly controller_client_id: string | null }
     | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceEvent; readonly projection: ReplayProjection }
-    | { readonly command_type: ReplayCommandType; readonly projection: ReplayProjection }
+    | { readonly command_type: ReplayOrderEventCommandType; readonly projection: ReplayProjection }
     | ReplayJournalEntry
     | { readonly reset: true; readonly reason: string }
     | { readonly reason: string; readonly projection: ReplayProjection };

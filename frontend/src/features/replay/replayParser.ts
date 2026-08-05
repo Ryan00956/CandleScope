@@ -5,6 +5,7 @@ import {
   REPLAY_EVENT_TYPES,
   REPLAY_EXECUTION_FIDELITIES,
   REPLAY_EXECUTION_MODELS,
+  REPLAY_ORDER_EVENT_COMMAND_TYPES,
   REPLAY_PROTOCOL,
   REPLAY_QUALITY_MODES,
   REPLAY_SESSION_STATES,
@@ -23,7 +24,6 @@ import type {
   ReplayCatalog,
   ReplayCatalogEntry,
   ReplayCommandResult,
-  ReplayCommandType,
   ReplayClosedTrade,
   ReplayCursor,
   ReplayDataFidelity,
@@ -39,6 +39,7 @@ import type {
   ReplayJournalEntry,
   ReplayJson,
   ReplayOrder,
+  ReplayOrderEventCommandType,
   ReplayParsedEvent,
   ReplayPosition,
   ReplayProjection,
@@ -1505,7 +1506,11 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
       }
       assertProjectionTime(projection, virtualTime, `${path}.projection`);
       return {
-        command_type: enumeration(source.command_type, REPLAY_COMMAND_TYPES, `${path}.command_type`) as ReplayCommandType,
+        command_type: enumeration(
+          source.command_type,
+          REPLAY_ORDER_EVENT_COMMAND_TYPES,
+          `${path}.command_type`,
+        ) as ReplayOrderEventCommandType,
         projection,
       };
     }

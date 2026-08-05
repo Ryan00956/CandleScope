@@ -540,6 +540,8 @@ test("create posts market-independent setup and defers catalog refresh to the ru
   const submittedPayload = submitted as unknown as Record<string, unknown>;
   assert.equal(submittedPayload.indicator_warmup_bars, 300);
   assert.equal(submittedPayload.forward_cache_ms, 43_200_000);
+  assert.equal(submittedPayload.random_range_start_ms, edited.randomRangeStartMs);
+  assert.equal(submittedPayload.random_range_end_ms, edited.randomRangeEndMs);
   assert.equal(Object.hasOwn(submittedPayload, "catalog_epoch"), false);
   assert.equal(Object.hasOwn(submittedPayload, "symbol"), false);
 });
@@ -562,6 +564,8 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(Object.hasOwn(request, "catalog_epoch"), false);
   assert.equal(Object.hasOwn(request, "symbol"), false);
   assert.equal(request.time_disclosure_policy, "HIDE_ALL");
+  assert.equal(request.random_range_start_ms, draft.randomRangeStartMs);
+  assert.equal(request.random_range_end_ms, draft.randomRangeEndMs);
   assert.equal(request.integrity_mode, "CHALLENGE");
   assert.equal(request.funding_mode, "OFF");
   assert.equal(request.account_data_mode, "APPROX_PROXY");
@@ -725,7 +729,8 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /指标预热 BAR/);
   assert.match(html, /全部可用（默认，按需加载）/);
   assert.match(html, /像实时行情一样向左按需分页/);
-  assert.match(html, /创建 Run 并选择商品/);
+  assert.match(html, /确认时间并创建 Run/);
+  assert.match(html, /创建确认后 T0 永久不变/);
   assert.match(html, /不含真实盘口排队/);
   assert.doesNotMatch(html, /1710000000000|dataset_epoch|snapshot_blob/);
 });

@@ -376,6 +376,48 @@ test("blind catalog entries cannot smuggle source fingerprint or bounds", () => 
   assert.throws(() => parseReplayCatalog(blind), /unknown field/);
 });
 
+test("run market catalog preserves immutable T0 proof without leaking a hidden random start", () => {
+  const parsed = parseReplayCatalog({
+    protocol: "replay.v1",
+    catalog_epoch: replayDigest("b"),
+    warmup_bars: 200,
+    horizon_ms: 86_400_000,
+    quality_mode: "exact",
+    blind_mode: true,
+    time_commitment: {
+      schema_version: "replay.time-commitment.v1",
+      start_mode: "RANDOM",
+      committed: true,
+      committed_start_ms: null,
+      random_range_start_ms: null,
+      random_range_end_ms: null,
+      commitment_hash: replayDigest("c"),
+    },
+    entries: [{
+      identity: { exchange: "binance", market_type: "spot", symbol: "BTCUSDT" },
+      base_intervals: ["1m"],
+      selected_base_interval: "1m",
+      eligible_window_count: 10,
+      quality: "EXACT_BAR_COVERAGE",
+      limitations: [],
+      catalog_epoch: replayDigest("b"),
+      bounds: null,
+      eligible_ranges: [],
+      start_compatibility: {
+        state: "UNSUPPORTED",
+        code: "MARKET_NOT_LISTED_AT_START",
+        message: "本局开始时该商品尚未上市。",
+      },
+    }],
+  });
+  assert.equal(parsed.time_commitment?.committed, true);
+  assert.equal(parsed.time_commitment?.committed_start_ms, null);
+  assert.equal(
+    parsed.entries[0]?.start_compatibility?.code,
+    "MARKET_NOT_LISTED_AT_START",
+  );
+});
+
 test("report actual history is accepted only at the explicit revealed boundary", () => {
   const base = {
     protocol: "replay.v1",

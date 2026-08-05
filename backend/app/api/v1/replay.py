@@ -290,6 +290,8 @@ class TrainingRunSetupPayload(_StrictModel):
     start_mode: StartMode
     settlement_asset: str = Field(min_length=1, max_length=128)
     requested_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
+    random_range_start_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
+    random_range_end_ms: int | None = Field(default=None, ge=0, le=MAX_TIMESTAMP_MS)
     indicator_warmup_bars: int = Field(
         ge=1,
         le=REPLAY_SETTINGS.max_warmup_bars,

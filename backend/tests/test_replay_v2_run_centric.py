@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import httpx
 import pytest
@@ -26,7 +27,7 @@ from tests.fixtures.replay.service_fakes import (
 pytestmark = pytest.mark.anyio
 
 
-async def _service(path: Path) -> ReplayService:
+async def _service(path: Path, *, random_seed: int = 1) -> ReplayService:
     service = ReplayService(
         settings=replay_settings(path),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
@@ -34,6 +35,7 @@ async def _service(path: Path) -> ReplayService:
         now_ms=lambda: NOW_MS,
         session_id_factory=SessionIdFactory("adapter"),
         training_run_id_factory=SessionIdFactory("run"),
+        training_random_seed_factory=lambda: random_seed,
         native_intervals=lambda _identity: ("1m",),
     )
     await service.start()
@@ -241,5 +243,104 @@ async def test_failed_first_market_selection_leaves_run_empty(tmp_path: Path) ->
         tracks = await _request(app, "GET", "/api/v1/replay/runs/run-1/tracks")
         assert tracks.status_code == 200
         assert tracks.json()["tracks"] == []
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_unsupported_market_never_moves_the_committed_start(tmp_path: Path) -> None:
+    database = tmp_path / "immutable-start.db"
+    service = await _service(database)
+    app = _app(service)
+    payload = _setup_payload()
+    payload["requested_start_ms"] = START_MS - INTERVAL_MS
+    try:
+        created = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert created.status_code == 201, created.text
+        catalog = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/run-1/market-catalog",
+        )
+        assert catalog.status_code == 200, catalog.text
+        body = catalog.json()
+        assert body["time_commitment"]["committed_start_ms"] is None
+        assert body["entries"][0]["start_compatibility"] == {
+            "state": "UNSUPPORTED",
+            "code": "MARKET_NOT_LISTED_AT_START",
+            "message": "本局开始时该商品尚未上市或尚无历史数据。",
+        }
+        rejected = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs/run-1/markets",
+            json={
+                "catalog_epoch": body["catalog_epoch"],
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "account_history_ref": None,
+            },
+        )
+        assert rejected.status_code == 409
+        assert rejected.json()["error"]["code"] == "MARKET_NOT_LISTED_AT_START"
+        assert rejected.json()["error"]["details"]["requires_new_run"] is True
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT committed_start_ms FROM replay_training_time_commitment"
+            ).fetchone() == (START_MS - INTERVAL_MS,)
+            assert connection.execute(
+                "SELECT state, virtual_time_ms FROM replay_training_run"
+            ).fetchone() == ("AWAITING_MARKET", START_MS - INTERVAL_MS)
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_range_random_commits_once_before_market_selection(tmp_path: Path) -> None:
+    database = tmp_path / "range-random.db"
+    service = await _service(database, random_seed=1)
+    app = _app(service)
+    payload = _setup_payload()
+    payload.update({
+        "start_mode": "RANDOM",
+        "requested_start_ms": None,
+        "random_range_start_ms": START_MS + 3 * INTERVAL_MS,
+        "random_range_end_ms": START_MS + 5 * INTERVAL_MS,
+    })
+    try:
+        created = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert created.status_code == 201, created.text
+        catalog = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/run-1/market-catalog",
+        )
+        body = catalog.json()
+        assert body["time_commitment"]["committed_start_ms"] is None
+        assert body["time_commitment"]["random_range_start_ms"] is None
+        assert body["entries"][0]["start_compatibility"]["state"] == "READY"
+        initialized = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs/run-1/markets",
+            json={
+                "catalog_epoch": body["catalog_epoch"],
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "account_history_ref": None,
+            },
+        )
+        assert initialized.status_code == 201, initialized.text
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT random_seed, committed_start_ms FROM replay_training_time_commitment"
+            ).fetchone() == (1, START_MS + 4 * INTERVAL_MS)
+            assert connection.execute(
+                "SELECT random_seed, actual_start_ms FROM replay_training_start_selection"
+            ).fetchone() == (1, START_MS + 4 * INTERVAL_MS)
     finally:
         await service.shutdown(step_timeout=1.0)

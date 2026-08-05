@@ -108,6 +108,16 @@ def _setup_payload(payload: dict[str, object]) -> dict[str, object]:
         "start_mode": payload["start_mode"],
         "settlement_asset": payload["settlement_asset"],
         "requested_start_ms": payload["requested_start_ms"],
+        "random_range_start_ms": (
+            START_MS + 4 * INTERVAL_MS
+            if payload["start_mode"] == "RANDOM"
+            else None
+        ),
+        "random_range_end_ms": (
+            START_MS + 8 * INTERVAL_MS
+            if payload["start_mode"] == "RANDOM"
+            else None
+        ),
         "indicator_warmup_bars": indicator_warmup_bars,
         "visible_history_lookback": payload.get("visible_history_lookback", {
             "mode": "DURATION",

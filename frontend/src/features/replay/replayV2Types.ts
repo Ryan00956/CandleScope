@@ -2530,6 +2530,8 @@ export interface TrainingRunCreatePayload {
   readonly start_mode: ReplayV2StartMode;
   readonly settlement_asset: string;
   readonly requested_start_ms: number | null;
+  readonly random_range_start_ms: number | null;
+  readonly random_range_end_ms: number | null;
   readonly indicator_warmup_bars: number;
   readonly visible_history_lookback: {
     readonly mode: ReplayVisibleHistoryMode;

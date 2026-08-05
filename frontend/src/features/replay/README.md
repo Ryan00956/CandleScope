@@ -14,12 +14,17 @@ configured maker/taker policies, CROSS or ISOLATED margin, approximate Sandbox
 funding, simulated-account liquidation events, and a hash-chained cash ledger.
 The UI continuously labels the no-book execution boundary. A direct
 `replay.html` entry opens the Hub; opaque `?run=<id>` entries open one durable
-TrainingRun. A new Run contains only training rules and account settings. The
-user chooses the first market inside that Run, and may later search for and add
+TrainingRun. A new Run contains training rules, account settings, and an
+immutable account-level T0 commitment; it still contains no chart or market
+track. Manual T0 is frozen at create, while range-random T0 is sampled once from
+the user interval with a server seed. The user chooses the first compatible
+market inside that Run, and may later search for and add
 more MarketTracks without changing the Run URL or archive identity. Adapter
 session ids remain internal deterministic transport details. Hub bootstrap performs only the bounded lightweight
 `GET /api/v1/replay/runs` request. Historical datasets are not loaded until a
-market is selected inside a concrete Run.
+market is selected inside a concrete Run. Market selection may reject an
+unlisted, coverage-incomplete, or mode-incompatible product, but it must never
+move, clamp, or re-randomize the committed T0.
 
 Phase 7 adds a checksum-bound data-segment registry over the existing immutable
 BAR snapshots and raw aggTrade partition manifests without rewriting either

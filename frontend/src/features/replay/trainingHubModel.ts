@@ -36,6 +36,8 @@ export interface TrainingRunDraft {
   readonly baseInterval: string;
   readonly displayInterval: string;
   readonly requestedStartMs: number | null;
+  readonly randomRangeStartMs: number | null;
+  readonly randomRangeEndMs: number | null;
   readonly indicatorWarmupBars: number;
   readonly visibleHistoryMode: ReplayVisibleHistoryMode;
   readonly visibleHistoryLookbackMs: number | null;
@@ -99,6 +101,7 @@ export function createTrainingRunDraft(
   const symbol = launchContext?.symbol ?? entry?.identity.symbol ?? "BTCUSDT";
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
   const displayInterval = launchContext?.display_interval ?? baseInterval;
+  const randomRangeEndMs = Math.floor(Date.now() / 60_000) * 60_000;
   return {
     name: "回放训练",
     sourceKind: "BAR",
@@ -110,6 +113,8 @@ export function createTrainingRunDraft(
     baseInterval,
     displayInterval,
     requestedStartMs: null,
+    randomRangeStartMs: Date.UTC(2020, 0, 1),
+    randomRangeEndMs,
     indicatorWarmupBars: catalog?.warmup_bars ?? 200,
     visibleHistoryMode: "ALL_AVAILABLE",
     visibleHistoryLookbackMs: null,
@@ -395,6 +400,15 @@ export function evaluateTrainingRunSetupDraft(
   if (draft.startMode === "RANDOM" && draft.requestedStartMs !== null) {
     errors.push("随机开始不能携带真实开始时间");
   }
+  if (draft.startMode === "RANDOM") {
+    if (draft.randomRangeStartMs === null || draft.randomRangeEndMs === null) {
+      errors.push("区间随机需要明确的起止时间");
+    } else if (draft.randomRangeEndMs < draft.randomRangeStartMs) {
+      errors.push("随机区间结束时间不能早于开始时间");
+    } else if ((draft.randomRangeEndMs - draft.randomRangeStartMs) % 60_000 !== 0) {
+      errors.push("随机区间起止时间必须使用同一分钟网格");
+    }
+  }
   if (draft.bookMode === "BOOK_ASSISTED_REQUIRED"
     && (draft.startMode !== "MANUAL" || draft.requestedStartMs === null)) {
     errors.push("历史盘口必须使用明确的手动开始时间");
@@ -559,6 +573,8 @@ export function buildTrainingRunCreateRequest(
     start_mode: draft.startMode,
     settlement_asset: draft.settlementAsset,
     requested_start_ms: draft.startMode === "MANUAL" ? draft.requestedStartMs : null,
+    random_range_start_ms: draft.startMode === "RANDOM" ? draft.randomRangeStartMs : null,
+    random_range_end_ms: draft.startMode === "RANDOM" ? draft.randomRangeEndMs : null,
     indicator_warmup_bars: draft.indicatorWarmupBars,
     visible_history_lookback: {
       mode: draft.visibleHistoryMode,

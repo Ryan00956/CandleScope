@@ -79,11 +79,13 @@ from .schema import (
     RUN_RULES_SCHEMA_VERSION,
     SELECTION_PREPARATION_SCHEMA_VERSION,
     START_SELECTION_SCHEMA_VERSION,
+    TIME_COMMITMENT_SCHEMA_VERSION,
     TRAINING_SCHEMA_ID,
     data_policy_hash,
     migrate_training_schema,
     selection_preparation_hash,
     start_selection_hash,
+    time_commitment_hash,
 )
 from .review import (
     REVIEW_ARTIFACT_BYTES_LIMIT,
@@ -667,12 +669,48 @@ class TrainingRunStore:
         *,
         run_id: str,
         request: TrainingRunSetupRequest,
+        committed_start_ms: int,
+        random_seed: int | None,
     ) -> None:
-        """Persist a run identity before any market or replay clock exists."""
+        """Persist a run identity and immutable T0 before any market exists."""
 
         if not isinstance(request, TrainingRunSetupRequest):
             raise TypeError("request must be TrainingRunSetupRequest")
         setup = request.to_dict()
+        committed_start = validate_v2_counter(
+            committed_start_ms,
+            field_name="committed_start_ms",
+        )
+        start_mode = str(setup["start_mode"])
+        range_start = setup["random_range_start_ms"]
+        range_end = setup["random_range_end_ms"]
+        seed_source = "SERVER" if start_mode == "RANDOM" else "MANUAL"
+        if start_mode == "MANUAL":
+            if committed_start != setup["requested_start_ms"] or random_seed is not None:
+                raise ValueError("manual time commitment does not match the setup")
+        else:
+            random_seed = validate_v2_counter(
+                random_seed,
+                field_name="random_seed",
+            )
+            if (
+                not isinstance(range_start, int)
+                or isinstance(range_start, bool)
+                or not isinstance(range_end, int)
+                or isinstance(range_end, bool)
+                or committed_start < range_start
+                or committed_start > range_end
+            ):
+                raise ValueError("random time commitment is outside the setup range")
+        commitment_hash = time_commitment_hash(
+            run_id=run_id,
+            start_mode=start_mode,
+            seed_source=seed_source,
+            random_seed=random_seed,
+            random_range_start_ms=range_start if isinstance(range_start, int) else None,
+            random_range_end_ms=range_end if isinstance(range_end, int) else None,
+            committed_start_ms=committed_start,
+        )
         now_ms = self.base_store._validated_now_ms()
         name = _safe_name(
             setup.get("name") if isinstance(setup.get("name"), str) else None,
@@ -697,7 +735,7 @@ class TrainingRunStore:
                     ?, NULL, 'replay.v2', 'replay.training.v1',
                     ?, 'AWAITING_MARKET', ?, ?, ?, ?, ?, ?, ?,
                     'TOUCH_OR_TAPE_V2', ?, NULL, NULL, NULL, ?,
-                    NULL, NULL, ?, ?, 0, 0, 0, NULL, 0,
+                    NULL, NULL, ?, ?, 0, 0, 0, ?, 0,
                     NULL, NULL, 'READY', ?, ?, ?
                 )
                 """,
@@ -715,8 +753,30 @@ class TrainingRunStore:
                     setup["settlement_asset"],
                     setup["initial_equity"],
                     setup["initial_equity"],
+                    committed_start,
                     now_ms,
                     now_ms,
+                    now_ms,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_time_commitment(
+                    run_id, schema_version, start_mode, seed_source,
+                    random_seed, random_range_start_ms, random_range_end_ms,
+                    committed_start_ms, commitment_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    TIME_COMMITMENT_SCHEMA_VERSION,
+                    start_mode,
+                    seed_source,
+                    random_seed,
+                    range_start,
+                    range_end,
+                    committed_start,
+                    commitment_hash,
                     now_ms,
                 ),
             )
@@ -755,11 +815,66 @@ class TrainingRunStore:
                     "schema": "replay.training.action.v2",
                     "state": "AWAITING_MARKET",
                     "setup_hash": canonical_sha256(setup),
+                    "time_commitment_hash": commitment_hash,
                 },
                 now_ms=now_ms,
             )
 
         await self.base_store.run_extension_write(write)
+
+    async def get_time_commitment(self, run_id: str) -> dict[str, object]:
+        def read(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            return connection.execute(
+                """
+                SELECT * FROM replay_training_time_commitment WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        row = await self.base_store.run_extension_read(read)
+        if row is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training run has no immutable time commitment",
+                status_code=503,
+            )
+        payload = {
+            "schema_version": str(row["schema_version"]),
+            "run_id": str(row["run_id"]),
+            "start_mode": str(row["start_mode"]),
+            "seed_source": str(row["seed_source"]),
+            "random_seed": row["random_seed"],
+            "random_range_start_ms": row["random_range_start_ms"],
+            "random_range_end_ms": row["random_range_end_ms"],
+            "committed_start_ms": int(row["committed_start_ms"]),
+            "commitment_hash": str(row["commitment_hash"]),
+        }
+        expected = time_commitment_hash(
+            run_id=str(payload["run_id"]),
+            start_mode=str(payload["start_mode"]),
+            seed_source=str(payload["seed_source"]),
+            random_seed=(
+                None if payload["random_seed"] is None else int(payload["random_seed"])
+            ),
+            random_range_start_ms=(
+                None
+                if payload["random_range_start_ms"] is None
+                else int(payload["random_range_start_ms"])
+            ),
+            random_range_end_ms=(
+                None
+                if payload["random_range_end_ms"] is None
+                else int(payload["random_range_end_ms"])
+            ),
+            committed_start_ms=int(payload["committed_start_ms"]),
+        )
+        if expected != payload["commitment_hash"]:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training time commitment hash does not match",
+                status_code=503,
+            )
+        return payload
 
     async def get_run_setup(
         self,

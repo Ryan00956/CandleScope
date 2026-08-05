@@ -1577,7 +1577,9 @@ class TrainingRunSetupRequest:
 
     @classmethod
     def from_dict(cls, value: object) -> "TrainingRunSetupRequest":
-        payload = expect_mapping(value, field_name="training run setup")
+        payload = dict(expect_mapping(value, field_name="training run setup"))
+        payload.setdefault("random_range_start_ms", None)
+        payload.setdefault("random_range_end_ms", None)
         required = {
             "protocol",
             "name",
@@ -1585,6 +1587,8 @@ class TrainingRunSetupRequest:
             "start_mode",
             "settlement_asset",
             "requested_start_ms",
+            "random_range_start_ms",
+            "random_range_end_ms",
             "indicator_warmup_bars",
             "visible_history_lookback",
             "forward_cache_ms",
@@ -1616,7 +1620,11 @@ class TrainingRunSetupRequest:
         candidate_payload = {
             key: item
             for key, item in payload.items()
-            if key != "market_selection_hint"
+            if key not in {
+                "market_selection_hint",
+                "random_range_start_ms",
+                "random_range_end_ms",
+            }
         }
         candidate_payload.update(
             {
@@ -1631,6 +1639,28 @@ class TrainingRunSetupRequest:
         )
         candidate = TrainingRunCreateRequest.from_dict(candidate_payload)
         setup = cls.from_market_request(candidate).to_dict()
+        range_start = payload["random_range_start_ms"]
+        range_end = payload["random_range_end_ms"]
+        if candidate.start_mode is StartMode.MANUAL:
+            if range_start is not None or range_end is not None:
+                raise ValueError("MANUAL start cannot include a random time range")
+        else:
+            if range_start is None or range_end is None:
+                raise ValueError("RANDOM start requires a complete random time range")
+            range_start = validate_timestamp_ms(
+                range_start,
+                field_name="random_range_start_ms",
+            )
+            range_end = validate_timestamp_ms(
+                range_end,
+                field_name="random_range_end_ms",
+            )
+            if range_end < range_start:
+                raise ValueError("random time range end cannot precede its start")
+            if (range_end - range_start) % 60_000 != 0:
+                raise ValueError("random time range endpoints must share a UTC-minute grid")
+        setup["random_range_start_ms"] = range_start
+        setup["random_range_end_ms"] = range_end
         setup["market_selection_hint"] = (
             None if hint is None else hint.to_dict()
         )
@@ -1659,6 +1689,8 @@ class TrainingRunSetupRequest:
             if request.launch_context is None
             else request.launch_context.to_dict()
         )
+        settings["random_range_start_ms"] = None
+        settings["random_range_end_ms"] = None
         return cls(settings=settings)
 
     def for_market(
@@ -1669,6 +1701,8 @@ class TrainingRunSetupRequest:
             raise TypeError("selection must be TrainingRunMarketSelectionRequest")
         payload = self.to_dict()
         raw_hint = payload.pop("market_selection_hint")
+        payload.pop("random_range_start_ms")
+        payload.pop("random_range_end_ms")
         payload.update(selection.to_dict())
         if raw_hint is None:
             payload["launch_context"] = None

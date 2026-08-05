@@ -348,6 +348,8 @@ test("create contract exposes all seven policies and explicit integrity allowlis
     baseInterval: "1m",
     displayInterval: "1m",
     requestedStartMs: null,
+    randomRangeStartMs: 1_577_836_800_000,
+    randomRangeEndMs: 1_710_000_000_000,
     indicatorWarmupBars: 200,
     visibleHistoryMode: "DURATION" as const,
     visibleHistoryLookbackMs: 12_000_000,

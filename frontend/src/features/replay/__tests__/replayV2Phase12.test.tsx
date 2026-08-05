@@ -251,8 +251,8 @@ test("manual create panel renders UTC setup and defers product coverage to the R
   const markup = renderToStaticMarkup(<TrainingHubDialog runtime={runtime} />);
   assert.match(markup, /type="datetime-local"/);
   assert.match(markup, /UTC/);
-  assert.match(markup, /商品覆盖与手动起点会在 Run 内选品时/);
-  assert.match(markup, /创建 Run 并选择商品/);
+  assert.match(markup, /创建确认后 T0 永久不变/);
+  assert.match(markup, /确认时间并创建 Run/);
   assert.doesNotMatch(markup, /使用最早合格起点|个合格随机窗口/);
   assert.doesNotMatch(markup, /请求开始时间（ms）/);
 });

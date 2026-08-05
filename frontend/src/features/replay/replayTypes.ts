@@ -252,6 +252,21 @@ export interface ReplayCatalogEntry {
   readonly source_fingerprint?: ReplayDigest;
   readonly catalog_epoch: ReplayDigest;
   readonly limitations: readonly string[];
+  readonly start_compatibility?: {
+    readonly state: "READY" | "UNSUPPORTED";
+    readonly code: string;
+    readonly message: string;
+  };
+}
+
+export interface ReplayTimeCommitment {
+  readonly schema_version: "replay.time-commitment.v1";
+  readonly start_mode: "MANUAL" | "RANDOM";
+  readonly committed: true;
+  readonly committed_start_ms: ReplayTimestampMs | null;
+  readonly random_range_start_ms: ReplayTimestampMs | null;
+  readonly random_range_end_ms: ReplayTimestampMs | null;
+  readonly commitment_hash: ReplayDigest;
 }
 
 export interface ReplayCatalog {
@@ -262,6 +277,7 @@ export interface ReplayCatalog {
   readonly quality_mode: ReplayQualityMode;
   readonly blind_mode: boolean;
   readonly entries: readonly ReplayCatalogEntry[];
+  readonly time_commitment?: ReplayTimeCommitment;
 }
 
 export interface ReplayDisplayBar {

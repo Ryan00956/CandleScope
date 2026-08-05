@@ -347,8 +347,23 @@ class TrainingRunService:
         if not isinstance(request, TrainingRunSetupRequest):
             raise TypeError("request must be TrainingRunSetupRequest")
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
+        settings = request.to_dict()
+        if settings["start_mode"] == StartMode.MANUAL.value:
+            committed_start_ms = int(settings["requested_start_ms"])
+            random_seed = None
+        else:
+            random_seed = self._authoritative_random_seed()
+            range_start = int(settings["random_range_start_ms"])
+            range_end = int(settings["random_range_end_ms"])
+            minute_count = ((range_end - range_start) // 60_000) + 1
+            committed_start_ms = range_start + (random_seed % minute_count) * 60_000
         try:
-            await self.store.create_empty_run(run_id=run_id, request=request)
+            await self.store.create_empty_run(
+                run_id=run_id,
+                request=request,
+                committed_start_ms=committed_start_ms,
+                random_seed=random_seed,
+            )
         except sqlite3.IntegrityError as exc:
             raise TrainingRunError(
                 "TRAINING_RUN_CONFLICT",
@@ -372,12 +387,23 @@ class TrainingRunService:
         actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
         async with actor.serialized():
             setup = await self.store.get_run_setup(normalized)
+            commitment = await self.store.get_time_commitment(normalized)
             request = setup.for_market(selection)
+            if request.start_mode is StartMode.RANDOM:
+                request = replace(request, random_seed=int(commitment["random_seed"]))
+            else:
+                request = replace(request, random_seed=None)
+            await self._require_market_at_committed_start(
+                selection=selection,
+                setup=setup,
+                commitment=commitment,
+            )
             preparation_id = canonical_sha256(
                 {
                     "contract": "replay.initial-market-preparation.v1",
                     "run_id": normalized,
                     "selection": selection.to_dict(),
+                    "time_commitment_hash": commitment["commitment_hash"],
                 }
             )[7:39]
             try:
@@ -389,6 +415,7 @@ class TrainingRunService:
                     request,
                     _existing_shell_run_id=normalized,
                     _preparation_id=preparation_id,
+                    _committed_start_ms=int(commitment["committed_start_ms"]),
                 )
             else:
                 status = str(preparation.get("status"))
@@ -424,15 +451,42 @@ class TrainingRunService:
             require_awaiting_market=False,
         )
         settings = setup.to_dict()
-        return await self.replay_service.catalog(
+        blind_mode = (
+            settings["start_mode"] == "RANDOM"
+            and settings["time_disclosure_policy"] != "NONE"
+        )
+        catalog = await self.replay_service.catalog(
             warmup_bars=int(settings["indicator_warmup_bars"]),
             horizon_ms=int(settings["forward_cache_ms"]),
             quality_mode="exact",
-            blind_mode=(
-                settings["start_mode"] == "RANDOM"
-                and settings["time_disclosure_policy"] != "NONE"
-            ),
+            blind_mode=blind_mode,
         )
+        internal_catalog = (
+            await self.replay_service.catalog(
+                warmup_bars=int(settings["indicator_warmup_bars"]),
+                horizon_ms=int(settings["forward_cache_ms"]),
+                quality_mode="exact",
+                blind_mode=False,
+            )
+            if blind_mode
+            else catalog
+        )
+        commitment = await self.store.get_time_commitment(normalized)
+        internal_by_identity = {
+            self._catalog_identity_key(entry): entry
+            for entry in cast(list[Mapping[str, object]], internal_catalog["entries"])
+        }
+        for entry in cast(list[dict[str, object]], catalog["entries"]):
+            internal_entry = internal_by_identity.get(self._catalog_identity_key(entry), entry)
+            entry["start_compatibility"] = self._market_start_compatibility(
+                internal_entry,
+                int(commitment["committed_start_ms"]),
+            )
+        catalog["time_commitment"] = self._public_time_commitment(
+            commitment,
+            disclose_start=settings["time_disclosure_policy"] == "NONE",
+        )
+        return catalog
 
     async def initial_market_plan(
         self,
@@ -441,7 +495,21 @@ class TrainingRunService:
     ) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")
         setup = await self.store.get_run_setup(normalized)
-        return await self.segment_plan(setup.for_market(selection))
+        commitment = await self.store.get_time_commitment(normalized)
+        await self._require_market_at_committed_start(
+            selection=selection,
+            setup=setup,
+            commitment=commitment,
+        )
+        request = setup.for_market(selection)
+        return await self.segment_plan(
+            replace(
+                request,
+                start_mode=StartMode.MANUAL,
+                requested_start_ms=int(commitment["committed_start_ms"]),
+                random_seed=None,
+            )
+        )
 
     async def account_record_page(
         self,
@@ -1986,12 +2054,22 @@ class TrainingRunService:
         _retry_preparation: Mapping[str, object] | None = None,
         _existing_shell_run_id: str | None = None,
         _preparation_id: str | None = None,
+        _committed_start_ms: int | None = None,
     ) -> dict[str, object]:
         if not isinstance(request, TrainingRunCreateRequest):
             raise TypeError("request must be TrainingRunCreateRequest")
         if _retry_preparation is None:
-            request = self._authoritative_start_request(request)
-            selection_config = self._adapter_config(request)
+            if _committed_start_ms is None:
+                request = self._authoritative_start_request(request)
+                selection_request = request
+            else:
+                selection_request = replace(
+                    request,
+                    start_mode=StartMode.MANUAL,
+                    requested_start_ms=_committed_start_ms,
+                    random_seed=None,
+                )
+            selection_config = self._adapter_config(selection_request)
             try:
                 selection = await self.replay_service.select_training_window(
                     selection_config,
@@ -2006,10 +2084,13 @@ class TrainingRunService:
                         status_code=409,
                     ) from exc
                 raise TrainingRunError(
-                    "TRAINING_RUN_CREATE_FAILED",
-                    "training start could not be selected",
+                    "MARKET_UNSUPPORTED_AT_COMMITTED_START",
+                    "this market cannot replay from the run's immutable start time",
                     status_code=409,
-                    details={"reason": exc.code.value},
+                    details={
+                        "reason": exc.code.value,
+                        "requires_new_run": True,
+                    },
                 ) from exc
         else:
             raw_selection = _retry_preparation.get("selection")
@@ -9176,6 +9257,9 @@ class TrainingRunService:
     ) -> TrainingRunCreateRequest:
         if request.start_mode is StartMode.MANUAL:
             return replace(request, random_seed=None)
+        return replace(request, random_seed=self._authoritative_random_seed())
+
+    def _authoritative_random_seed(self) -> int:
         try:
             seed = validate_v2_counter(
                 self._random_seed_factory(),
@@ -9187,7 +9271,162 @@ class TrainingRunService:
                 "server could not generate an authoritative random start seed",
                 status_code=503,
             ) from exc
-        return replace(request, random_seed=seed)
+        return seed
+
+    @staticmethod
+    def _catalog_identity_key(entry: Mapping[str, object]) -> tuple[str, str, str]:
+        identity = entry.get("identity")
+        if not isinstance(identity, Mapping):
+            return ("", "", "")
+        return (
+            str(identity.get("exchange", "")),
+            str(identity.get("market_type", "")),
+            str(identity.get("symbol", "")),
+        )
+
+    @staticmethod
+    def _market_start_compatibility(
+        entry: Mapping[str, object],
+        committed_start_ms: int,
+    ) -> dict[str, object]:
+        interval = entry.get("selected_base_interval")
+        if not isinstance(interval, str):
+            return {
+                "state": "UNSUPPORTED",
+                "code": "MARKET_MODE_INCOMPATIBLE",
+                "message": "当前训练参数没有可用的精确基础周期。",
+            }
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None:
+            return {
+                "state": "UNSUPPORTED",
+                "code": "START_NOT_ALIGNED",
+                "message": "本局固定开始时间无法对齐该商品的基础周期。",
+            }
+        raw_ranges = entry.get("eligible_ranges")
+        within_range_but_unaligned = False
+        if isinstance(raw_ranges, list):
+            for raw_range in raw_ranges:
+                if not isinstance(raw_range, Mapping):
+                    continue
+                first = raw_range.get("first_start_ms")
+                last = raw_range.get("last_start_ms")
+                step = raw_range.get("interval_ms")
+                if (
+                    isinstance(first, int)
+                    and not isinstance(first, bool)
+                    and isinstance(last, int)
+                    and not isinstance(last, bool)
+                    and isinstance(step, int)
+                    and not isinstance(step, bool)
+                    and step > 0
+                    and first <= committed_start_ms <= last
+                ):
+                    if (committed_start_ms - first) % step == 0:
+                        return {
+                            "state": "READY",
+                            "code": "TIME_COMPATIBLE",
+                            "message": "该商品支持本局已冻结的开始时间。",
+                        }
+                    within_range_but_unaligned = True
+        if within_range_but_unaligned:
+            return {
+                "state": "UNSUPPORTED",
+                "code": "START_NOT_ALIGNED",
+                "message": "本局固定开始时间无法对齐该商品的基础周期。",
+            }
+        bounds = entry.get("bounds")
+        earliest = bounds.get("earliest_open_ms") if isinstance(bounds, Mapping) else None
+        if isinstance(earliest, int) and committed_start_ms < earliest:
+            return {
+                "state": "UNSUPPORTED",
+                "code": "MARKET_NOT_LISTED_AT_START",
+                "message": "本局开始时该商品尚未上市或尚无历史数据。",
+            }
+        return {
+            "state": "UNSUPPORTED",
+            "code": "MARKET_COVERAGE_INSUFFICIENT",
+            "message": "该商品在本局固定开始时间缺少预热、连续历史或前向覆盖。",
+        }
+
+    async def _require_market_at_committed_start(
+        self,
+        *,
+        selection: TrainingRunMarketSelectionRequest,
+        setup: TrainingRunSetupRequest,
+        commitment: Mapping[str, object],
+    ) -> None:
+        settings = setup.to_dict()
+        catalog = await self.replay_service.catalog(
+            warmup_bars=int(settings["indicator_warmup_bars"]),
+            horizon_ms=int(settings["forward_cache_ms"]),
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        if catalog["catalog_epoch"] != selection.catalog_epoch:
+            raise TrainingRunError(
+                "CATALOG_EPOCH_MISMATCH",
+                "data capability changed after validation; refresh and try again",
+                status_code=409,
+            )
+        identity = (selection.exchange, selection.market_type, selection.symbol)
+        entry = next(
+            (
+                item
+                for item in cast(list[Mapping[str, object]], catalog["entries"])
+                if self._catalog_identity_key(item) == identity
+            ),
+            None,
+        )
+        if entry is None:
+            compatibility = {
+                "state": "UNSUPPORTED",
+                "code": "MARKET_NOT_IN_CATALOG",
+                "message": "该商品不在当前回放能力目录中。",
+            }
+        elif entry.get("selected_base_interval") != selection.base_interval:
+            compatibility = {
+                "state": "UNSUPPORTED",
+                "code": "MARKET_MODE_INCOMPATIBLE",
+                "message": "所选基础周期与当前精确回放能力不兼容。",
+            }
+        else:
+            compatibility = self._market_start_compatibility(
+                entry,
+                int(commitment["committed_start_ms"]),
+            )
+        if compatibility["state"] != "READY":
+            raise TrainingRunError(
+                str(compatibility["code"]),
+                str(compatibility["message"]),
+                status_code=409,
+                details={
+                    "requires_new_run": True,
+                    "time_commitment_hash": commitment["commitment_hash"],
+                },
+            )
+
+    @staticmethod
+    def _public_time_commitment(
+        commitment: Mapping[str, object],
+        *,
+        disclose_start: bool,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": "replay.time-commitment.v1",
+            "start_mode": commitment["start_mode"],
+            "committed": True,
+            "committed_start_ms": (
+                commitment["committed_start_ms"] if disclose_start else None
+            ),
+            "random_range_start_ms": (
+                commitment["random_range_start_ms"] if disclose_start else None
+            ),
+            "random_range_end_ms": (
+                commitment["random_range_end_ms"] if disclose_start else None
+            ),
+            "commitment_hash": commitment["commitment_hash"],
+        }
 
 
 __all__ = ["TrainingRunService"]

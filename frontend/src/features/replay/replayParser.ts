@@ -1091,9 +1091,10 @@ export function parseReplayCapabilities(value: unknown, path = "$"): ReplayCapab
 
 function parseCatalogEntry(value: unknown, path: string, blind: boolean): ReplayCatalogEntry {
   const source = record(value, path);
-  const keys = blind
+  const keys = (blind
     ? ["identity", "base_intervals", "selected_base_interval", "eligible_window_count", "quality", "limitations", "catalog_epoch", "bounds", "eligible_ranges"]
-    : ["identity", "base_intervals", "selected_base_interval", "bounds", "gap_summary", "eligible_ranges", "eligible_window_count", "quality", "source_fingerprint", "limitations", "catalog_epoch"];
+    : ["identity", "base_intervals", "selected_base_interval", "bounds", "gap_summary", "eligible_ranges", "eligible_window_count", "quality", "source_fingerprint", "limitations", "catalog_epoch"])
+    .concat(Object.hasOwn(source, "start_compatibility") ? ["start_compatibility"] : []);
   exact(source, keys, path);
   const identitySource = record(source.identity, `${path}.identity`);
   exact(identitySource, ["exchange", "market_type", "symbol"], `${path}.identity`);
@@ -1152,6 +1153,19 @@ function parseCatalogEntry(value: unknown, path: string, blind: boolean): Replay
     }
     return parsed;
   });
+  const startCompatibility = Object.hasOwn(source, "start_compatibility") ? (() => {
+    const compatibility = record(source.start_compatibility, `${path}.start_compatibility`);
+    exact(compatibility, ["state", "code", "message"], `${path}.start_compatibility`);
+    return {
+      state: enumeration(
+        compatibility.state,
+        ["READY", "UNSUPPORTED"] as const,
+        `${path}.start_compatibility.state`,
+      ),
+      code: identifier(compatibility.code, `${path}.start_compatibility.code`),
+      message: string(compatibility.message, `${path}.start_compatibility.message`),
+    };
+  })() : undefined;
   return {
     identity: {
       exchange: identifier(identitySource.exchange, `${path}.identity.exchange`),
@@ -1170,12 +1184,25 @@ function parseCatalogEntry(value: unknown, path: string, blind: boolean): Replay
     ...(!blind ? { source_fingerprint: digest(source.source_fingerprint, `${path}.source_fingerprint`) } : {}),
     catalog_epoch: digest(source.catalog_epoch, `${path}.catalog_epoch`),
     limitations: stringList(source.limitations, `${path}.limitations`),
+    ...(startCompatibility === undefined ? {} : {
+      start_compatibility: startCompatibility,
+    }),
   };
 }
 
 export function parseReplayCatalog(value: unknown, path = "$"): ReplayCatalog {
   const source = record(value, path);
-  exact(source, ["protocol", "catalog_epoch", "warmup_bars", "horizon_ms", "quality_mode", "blind_mode", "entries"], path);
+  const hasTimeCommitment = Object.hasOwn(source, "time_commitment");
+  exact(source, [
+    "protocol",
+    "catalog_epoch",
+    "warmup_bars",
+    "horizon_ms",
+    "quality_mode",
+    "blind_mode",
+    "entries",
+    ...(hasTimeCommitment ? ["time_commitment"] : []),
+  ], path);
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
   const blindMode = bool(source.blind_mode, `${path}.blind_mode`);
   const catalogEpoch = digest(source.catalog_epoch, `${path}.catalog_epoch`);
@@ -1183,6 +1210,49 @@ export function parseReplayCatalog(value: unknown, path = "$"): ReplayCatalog {
   for (const [index, entry] of entries.entries()) {
     if (entry.catalog_epoch !== catalogEpoch) fail(`${path}.entries[${index}].catalog_epoch`, "does not match catalog epoch");
   }
+  const timeCommitment = hasTimeCommitment ? (() => {
+    const commitment = record(source.time_commitment, `${path}.time_commitment`);
+    exact(commitment, [
+      "schema_version",
+      "start_mode",
+      "committed",
+      "committed_start_ms",
+      "random_range_start_ms",
+      "random_range_end_ms",
+      "commitment_hash",
+    ], `${path}.time_commitment`);
+    if (commitment.schema_version !== "replay.time-commitment.v1") {
+      fail(`${path}.time_commitment.schema_version`, "unsupported time commitment schema");
+    }
+    if (commitment.committed !== true) {
+      fail(`${path}.time_commitment.committed`, "time commitment must be frozen");
+    }
+    return {
+      schema_version: "replay.time-commitment.v1" as const,
+      start_mode: enumeration(
+        commitment.start_mode,
+        ["MANUAL", "RANDOM"] as const,
+        `${path}.time_commitment.start_mode`,
+      ),
+      committed: true as const,
+      committed_start_ms: nullableTimestamp(
+        commitment.committed_start_ms,
+        `${path}.time_commitment.committed_start_ms`,
+      ),
+      random_range_start_ms: nullableTimestamp(
+        commitment.random_range_start_ms,
+        `${path}.time_commitment.random_range_start_ms`,
+      ),
+      random_range_end_ms: nullableTimestamp(
+        commitment.random_range_end_ms,
+        `${path}.time_commitment.random_range_end_ms`,
+      ),
+      commitment_hash: digest(
+        commitment.commitment_hash,
+        `${path}.time_commitment.commitment_hash`,
+      ),
+    };
+  })() : undefined;
   return {
     protocol: REPLAY_PROTOCOL,
     catalog_epoch: catalogEpoch,
@@ -1191,6 +1261,7 @@ export function parseReplayCatalog(value: unknown, path = "$"): ReplayCatalog {
     quality_mode: enumeration(source.quality_mode, REPLAY_QUALITY_MODES, `${path}.quality_mode`),
     blind_mode: blindMode,
     entries,
+    ...(timeCommitment === undefined ? {} : { time_commitment: timeCommitment }),
   };
 }
 

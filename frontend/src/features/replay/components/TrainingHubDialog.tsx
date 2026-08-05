@@ -114,7 +114,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <div>
           <span className="training-hub-kicker">CREATE RUN · SELECT MARKET LATER</span>
           <h2>新建训练</h2>
-          <p>这里只创建训练规则和账户配置；进入 Run 后再选择第一个商品并启动回放时钟。</p>
+          <p>先创建模拟账户并永久冻结开局时间；进入 Run 后再选择支持该时间的商品。</p>
         </div>
         <button type="button" onClick={runtime.actions.closeCreate} disabled={busy}>关闭</button>
       </header>
@@ -151,9 +151,11 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             onChange={(event) => patchDraft(runtime, {
               startMode: event.target.value as TrainingRunDraft["startMode"],
               requestedStartMs: event.target.value === "RANDOM" ? null : draft.requestedStartMs,
+              randomRangeStartMs: event.target.value === "MANUAL" ? null : draft.randomRangeStartMs,
+              randomRangeEndMs: event.target.value === "MANUAL" ? null : draft.randomRangeEndMs,
             })}
           >
-            <option value="RANDOM">随机合格窗口</option>
+            <option value="RANDOM">给定区间内随机</option>
             <option value="MANUAL">手动选择 UTC 时间</option>
           </select>
         </label>
@@ -175,8 +177,34 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             </p>
           </>
         )}
+        {draft.startMode === "RANDOM" && (
+          <>
+            <label>
+              随机区间开始（UTC）
+              <input
+                type="datetime-local"
+                step={60}
+                value={formatUtcReplayStartInput(draft.randomRangeStartMs)}
+                onChange={(event) => patchDraft(runtime, {
+                  randomRangeStartMs: parseUtcReplayStartInput(event.target.value),
+                })}
+              />
+            </label>
+            <label>
+              随机区间结束（UTC）
+              <input
+                type="datetime-local"
+                step={60}
+                value={formatUtcReplayStartInput(draft.randomRangeEndMs)}
+                onChange={(event) => patchDraft(runtime, {
+                  randomRangeEndMs: parseUtcReplayStartInput(event.target.value),
+                })}
+              />
+            </label>
+          </>
+        )}
         <p className="training-hub-field-note" role="note">
-          商品覆盖与手动起点会在 Run 内选品时按最新服务端目录校验；失败不会启动时钟。
+          创建确认后 T0 永久不变。商品只做兼容性判断；不支持时需另开一局，系统不会改时间或重抽。
         </p>
         <label>
           完整性模式
@@ -432,7 +460,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       </fieldset>
       <div className="training-hub-capability-boundary" aria-label="选品与数据边界">
         <h3>商品在 Run 内选择</h3>
-        <p>创建时不固定商品、交易所、市场类型、基础周期或数据集。进入空 Run 后搜索商品，服务端再生成 prepare plan、校验覆盖并原子创建首条 MarketTrack。</p>
+        <p>创建时不固定商品、交易所、市场类型、基础周期或数据集，但会提交不可变 T0。进入空 Run 后搜索商品，服务端只校验它是否支持这个时间，再原子创建首条 MarketTrack。</p>
         <p>历史 L2、精确账户历史与 funding 仍 fail closed：它们会在选中具体商品后绑定对应 archive ref，校验失败时 Run 保持空局。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
@@ -454,7 +482,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         disabled={!evaluation.canSubmit || busy}
         onClick={() => void runtime.actions.createRun(draft)}
       >
-        {busy ? busyLabel : "创建 Run 并选择商品"}
+        {busy ? busyLabel : "确认时间并创建 Run"}
       </button>
     </section>
   );

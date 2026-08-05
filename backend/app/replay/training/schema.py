@@ -7,8 +7,9 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 12
+TRAINING_SCHEMA_VERSION = 13
 TRAINING_SCHEMA_ID = "replay.training.v1"
+TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
 DATA_POLICY_SCHEMA_VERSION = "replay.data-policy.v1"
@@ -1356,6 +1357,50 @@ CREATE INDEX IF NOT EXISTS idx_replay_account_history_gc_audit_created
 ON replay_account_history_gc_audit(created_at_ms DESC, audit_id DESC);
 """
 
+
+TRAINING_SCHEMA_TIME_COMMITMENT_ADDITIVE = """
+CREATE TABLE IF NOT EXISTS replay_training_time_commitment (
+    run_id TEXT PRIMARY KEY
+        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    schema_version TEXT NOT NULL
+        CHECK (schema_version = 'replay.time-commitment.v1'),
+    start_mode TEXT NOT NULL CHECK (start_mode IN ('MANUAL', 'RANDOM')),
+    seed_source TEXT NOT NULL CHECK (seed_source IN ('MANUAL', 'SERVER')),
+    random_seed INTEGER
+        CHECK (
+            random_seed IS NULL
+            OR (random_seed >= 0 AND random_seed <= 9007199254740991)
+        ),
+    random_range_start_ms INTEGER
+        CHECK (random_range_start_ms IS NULL OR random_range_start_ms >= 0),
+    random_range_end_ms INTEGER
+        CHECK (random_range_end_ms IS NULL OR random_range_end_ms >= 0),
+    committed_start_ms INTEGER NOT NULL CHECK (committed_start_ms >= 0),
+    commitment_hash TEXT NOT NULL
+        CHECK (
+            length(commitment_hash) = 71
+            AND substr(commitment_hash, 1, 7) = 'sha256:'
+        ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    CHECK (
+        (start_mode = 'MANUAL'
+         AND seed_source = 'MANUAL'
+         AND random_seed IS NULL
+         AND random_range_start_ms IS NULL
+         AND random_range_end_ms IS NULL)
+        OR
+        (start_mode = 'RANDOM'
+         AND seed_source = 'SERVER'
+         AND random_seed IS NOT NULL
+         AND random_range_start_ms IS NOT NULL
+         AND random_range_end_ms IS NOT NULL
+         AND random_range_end_ms >= random_range_start_ms
+         AND committed_start_ms >= random_range_start_ms
+         AND committed_start_ms <= random_range_end_ms)
+    )
+);
+"""
+
 TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE = """
 CREATE TABLE IF NOT EXISTS replay_archive_pin (
     run_id TEXT NOT NULL
@@ -1597,6 +1642,30 @@ def start_selection_hash(
     )
 
 
+def time_commitment_hash(
+    *,
+    run_id: str,
+    start_mode: str,
+    seed_source: str,
+    random_seed: int | None,
+    random_range_start_ms: int | None,
+    random_range_end_ms: int | None,
+    committed_start_ms: int,
+) -> str:
+    return canonical_sha256(
+        {
+            "schema_version": TIME_COMMITMENT_SCHEMA_VERSION,
+            "run_id": run_id,
+            "start_mode": start_mode,
+            "seed_source": seed_source,
+            "random_seed": random_seed,
+            "random_range_start_ms": random_range_start_ms,
+            "random_range_end_ms": random_range_end_ms,
+            "committed_start_ms": committed_start_ms,
+        }
+    )
+
+
 def selection_preparation_hash(
     *,
     preparation_id: str,
@@ -1660,6 +1729,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_V7,
         TRAINING_SCHEMA_V8,
         TRAINING_SCHEMA_V9,
+        TRAINING_SCHEMA_TIME_COMMITMENT_ADDITIVE,
         TRAINING_SCHEMA_PHASE14_ADDITIVE,
         TRAINING_SCHEMA_PHASE15_ADDITIVE,
         TRAINING_SCHEMA_PHASE16_ADDITIVE,
@@ -1694,10 +1764,12 @@ __all__ = [
     "RUN_RULES_SCHEMA_VERSION",
     "SELECTION_PREPARATION_SCHEMA_VERSION",
     "START_SELECTION_SCHEMA_VERSION",
+    "TIME_COMMITMENT_SCHEMA_VERSION",
     "TRAINING_SCHEMA_ID",
     "TRAINING_SCHEMA_VERSION",
     "data_policy_hash",
     "migrate_training_schema",
     "selection_preparation_hash",
     "start_selection_hash",
+    "time_commitment_hash",
 ]

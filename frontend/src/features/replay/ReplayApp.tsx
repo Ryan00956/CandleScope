@@ -133,6 +133,12 @@ function ReplayInitialMarketPicker({
       || entry.identity.market_type.toLowerCase().includes(needle)
     ));
   }, [catalog, query]);
+  const timeCommitment = catalog?.time_commitment;
+  const committedTimeLabel = timeCommitment?.committed_start_ms === null
+    ? "已冻结（按披露策略隐藏）"
+    : timeCommitment?.committed_start_ms === undefined
+      ? "正在读取"
+      : new Date(timeCommitment.committed_start_ms).toISOString();
 
   const selectMarket = async (entry: ReplayCatalogEntry) => {
     if (catalog === null || entry.selected_base_interval === null || selecting !== null) return;
@@ -188,9 +194,9 @@ function ReplayInitialMarketPicker({
       <section className="training-hub-shell">
         <header className="training-hub-heading">
           <div>
-            <span className="training-hub-kicker">RUN READY · CLOCK NOT STARTED</span>
+            <span className="training-hub-kicker">T0 COMMITTED · NO MARKET LOADED</span>
             <h1>{run.name}</h1>
-            <p>这局回放还没有绑定商品。选择第一个商品后，服务端才会冻结数据并启动全局回放时钟。</p>
+            <p>这局模拟账户的开始时间已经永久冻结。选择商品只会检查兼容性，不会改时间、顺延或重新随机。</p>
           </div>
           <div className="training-hub-heading-actions">
             <button type="button" onClick={loadCatalog} disabled={selecting !== null}>刷新商品</button>
@@ -208,7 +214,7 @@ function ReplayInitialMarketPicker({
               autoFocus
             />
           </label>
-          <span>账户结算：{run.settlement_asset} · 历史源：{run.source_kind}</span>
+          <span>开局时间：{committedTimeLabel} · 账户结算：{run.settlement_asset} · 历史源：{run.source_kind}</span>
         </div>
 
         {error !== null && <div className="replay-error-summary" role="alert">{error}</div>}
@@ -220,12 +226,14 @@ function ReplayInitialMarketPicker({
           <div className="training-hub-card-grid replay-market-picker-grid">
             {entries.map((entry) => {
               const interval = entry.selected_base_interval;
-              const available = interval !== null && entry.eligible_window_count > 0;
+              const compatibility = entry.start_compatibility;
+              const available = interval !== null
+                && compatibility?.state === "READY";
               return (
                 <article className="training-hub-card" key={`${entry.identity.exchange}:${entry.identity.market_type}:${entry.identity.symbol}`}>
                   <header>
                     <div><span>MARKET</span><h2>{entry.identity.symbol}</h2></div>
-                    <strong data-run-state={available ? "PAUSED" : "ERROR"}>{available ? "可回放" : "无覆盖"}</strong>
+                    <strong data-run-state={available ? "PAUSED" : "ERROR"}>{available ? "时间兼容" : "不支持本局"}</strong>
                   </header>
                   <dl>
                     <div><dt>市场</dt><dd>{marketLabel(entry)}</dd></div>
@@ -233,7 +241,7 @@ function ReplayInitialMarketPicker({
                     <div><dt>合格窗口</dt><dd>{entry.eligible_window_count}</dd></div>
                     <div><dt>来源</dt><dd>{run.source_kind}</dd></div>
                   </dl>
-                  <p>{available ? "选中后将在当前 Run 内创建第一条 MarketTrack。" : "当前训练参数下没有足够的精确历史覆盖。"}</p>
+                  <p>{compatibility?.message ?? "服务端尚未返回本局时间兼容性。"}</p>
                   <footer>
                     <button
                       type="button"
@@ -242,6 +250,7 @@ function ReplayInitialMarketPicker({
                     >
                       {selecting === entry.identity.symbol ? "正在初始化…" : `选择 ${entry.identity.symbol}`}
                     </button>
+                    {!available && <a href="/replay.html">另开一局</a>}
                   </footer>
                 </article>
               );

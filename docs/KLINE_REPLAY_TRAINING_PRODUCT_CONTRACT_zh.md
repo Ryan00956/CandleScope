@@ -32,7 +32,7 @@ Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 
 1. 用户从普通实时行情页顶部打开“训练存档大厅”页面内弹窗，可新建训练，也可恢复已有训练。
 2. 创建或加载训练后，在独立的 replay document 中运行回放；live 组合根不切换数据源。
-3. 一个存档代表一次组合级 `TrainingRun`，不是某一个币的一次回放。它拥有一个全局虚拟时钟、一个模拟账户、多条商品轨道和完整审计记录。
+3. 一个存档代表一次组合级 `TrainingRun`，不是某一个币的一次回放。创建时先冻结账户级时间基准 `T0`；随后它拥有一个全局虚拟时钟、一个模拟账户、多条商品轨道和完整审计记录。
 4. 进入训练后，页面必须复用实时行情页的视觉骨架、布局组件和用户布局偏好；差别只能来自 REPLAY 身份、历史能力状态、模拟交易面板和底部操控坞。
 5. replay document 只能挂载 replay runtime。它不得在加载、报错、恢复或缺数据时偷偷请求 live K 线、实时价格、实时盘口或实时高级市场数据。
 6. BAR 回放是离散基础 K 线事件；成交回放是按历史成交事件推进的连续虚拟时间。两者共用账户、命令、持久化和页面，不共用错误的播放语义。
@@ -47,12 +47,13 @@ Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 
 | 名词 | 合同含义 |
 |---|---|
-| `TrainingRun` | 一次总训练存档；创建时只拥有训练规则和账户设置，不属于任何单一商品。首个 MarketTrack 初始化后才拥有全局虚拟时钟，随后可维护多条商品轨道、事件日志和生命周期。 |
+| `TrainingRun` | 一次总训练存档；创建时拥有训练规则、账户设置和不可变时间承诺，但不属于任何单一商品。首个 MarketTrack 初始化后，全局虚拟时钟才进入可播放状态；随后可维护多条商品轨道、事件日志和生命周期。 |
 | `MarketTrack` | 某个 `exchange + market_type + symbol` 在该训练中的历史数据轨道；按 Run 的回放方式绑定数据源，并拥有 dataset identity、cursor、K 线构建器和订阅级别。 |
 | `ViewerState` | 当前查看商品、展示周期、可见范围、面板布局、图表类型和绘图等界面状态；它不是不可变数据源身份。 |
 | `BaseInterval` | BAR 数据源能够确定性推进的最小历史 K 线周期，例如 1m。 |
 | `DisplayInterval` | 用户当前查看的周期，例如 15m；可随时切换，不改变已经推进到的虚拟时间。 |
 | `VirtualTime` | 服务端权威的训练市场时间；一个 `TrainingRun` 只有一个全局虚拟时钟。 |
+| `TimeCommitment` | Run 创建时原子写入的不可变 `T0` 证明；包含开始方式、服务端 seed（私有）、随机区间和承诺 hash。商品选择不得改写它。 |
 | `DataFidelity` | 数据本身能证明到什么程度，例如精确 BAR、checksum/ID 已验证但 K 线近似聚合的 aggTrade、完整历史 L2。 |
 | `ExecutionFidelity` | 模拟订单能证明到什么程度，例如 BAR 保守触价、聚合成交 tape、历史盘口辅助。 |
 | `IntegrityMode` | 中途是否允许入金或修改规则，以及结果能否进入严格训练统计。 |
@@ -73,7 +74,7 @@ Run 生命周期只允许：
 
 | `RunState` | 合同语义 |
 |---|---|
-| `AWAITING_MARKET` | Run 已持久化，但尚未选择首个商品、创建 MarketTrack 或启动全局时钟；它是可恢复的正常空局。 |
+| `AWAITING_MARKET` | Run 与不可变 `T0` 已持久化，但尚未选择首个商品或创建 MarketTrack；没有首图、不能播放，是可恢复的正常空局。 |
 | `PAUSED` | 全局时钟停止；创建成功、恢复、controller 丢失和人工暂停都收口到该状态。 |
 | `PLAYING` | 按冻结调度语义连续消费原子事件。 |
 | `ADVANCING` | 正在执行有计划、有进度、可审计的 advance/fast-forward；不是跳过领域事件。 |
@@ -167,7 +168,7 @@ flowchart LR
 
 ### 4.3 新建训练
 
-创建流程应该像游戏新存档：先配置训练规则与账户并原子创建空 Run，然后进入这个 Run 选择首个商品。创建空 Run 不读取商品目录、不生成 dataset、不启动时钟。首个选品才执行 catalog、prepare plan、覆盖/L2/精确账户校验，并原子创建首条 MarketTrack；失败时保留可重试的空 Run，不得写入部分轨道或时钟。
+创建流程应该像游戏新存档：先配置训练规则、账户和开局时间规则并原子创建空 Run，然后进入这个 Run 选择首个商品。创建空 Run 不读取商品目录、不生成 dataset、不加载首图，但必须生成并冻结账户级 `T0`。首个选品只执行 catalog、prepare plan、固定 `T0` 的覆盖/L2/精确账户校验，并原子创建首条 MarketTrack；失败时保留空 Run，不得写入部分轨道，也不得改时间、顺延或重新随机。
 
 ### 4.4 训练中返回大厅
 
@@ -188,8 +189,8 @@ flowchart LR
 | 实时页选品提示 | 实时页可随空 Run 保存 `market_selection_hint` 与结构化自选快照，但它不是商品绑定，不写入 `last_symbol`、MarketTrack、dataset 或时钟。用户仍须在 Run 内显式选择首个商品；选择后只复用快照，并将 launch context 主身份改为实际所选商品。 |
 | 市场范围 | Run 不固定单一 symbol。首个多商品闭环仍要求同交易所、同市场类型、同结算资产；这是统一账户与数据适配范围，不是“这局属于 BTC”的商品限制。 |
 | 回放方式 | `BAR` 或 `AGG_TRADE`。它是整个 TrainingRun 的不可变模式，所有 MarketTrack 必须使用同一模式；UI 必须展示数据与成交真实性差异，不能只写“精确/普通”。 |
-| 开始方式 | `MANUAL` 或 `RANDOM`。手动选择可从该商品最早合格历史开始；随机只能从覆盖完整的合格范围抽样。 |
-| 开始时间 | 手动模式显示 capability 返回的可用边界、缺口和不可选原因；不能允许任意时间后再静默纠正。 |
+| 开始方式 | `MANUAL` 或 `RANDOM`。二者都不绑定参考商品：手动提交一个 UTC 时间；随机提交一个 UTC 起止区间，由服务端只抽取一次。 |
+| 开始时间 | Run 创建确认后立即冻结且不可编辑。选品只检查该商品在固定 `T0` 是否上市、是否有完整预热/前向覆盖以及模式是否兼容；不支持时明确给出原因，并要求另开一局。 |
 | 前向缓存长度 | 表示创建时优先准备的未来历史窗口，不等于训练强制结束时间；用量与预计磁盘占用必须可见。 |
 | 初始金额 | 使用结算资产的 Decimal 字符串；创建后只可通过已授权“入金/出金”事件改变。 |
 | 最大杠杆 | 是训练级上限；实际商品上限取训练上限、商品规则上限和风险模型上限的最小值。 |
@@ -216,29 +217,27 @@ flowchart LR
 
 ### 5.3 随机起点
 
-- 随机候选只来自 `BaseInterval` 对齐、warmup 完整、前向缓存窗口完整且没有未知缺口的范围。
-- BAR 随机候选必须来自远端 `replay-history` index/manifest 的版本化连续段，不能读取实时 `candlescope.db` 或本地正文缓存的覆盖范围。单个缺口只切分它所在的连续段，不得使缺口后的全部历史失效。
-- AGG_TRADE 随机候选必须来自 Binance 官方目录中 ZIP 与 CHECKSUM 成对存在的版本化连续日期段，再与 BAR 合格范围取交集；远端预转换 receipt 和本地 Parquet 只能加速命中，不能定义、扩大或缩小随机域。选中后才下载官方日包并校验 checksum、日内/跨日成交 ID 连续性和冻结 dataset epoch。
-- 每个连续段按其有效候选时间点数量进入前缀和；随机索引映射到所有连续段的候选全集，不能先等概率选段再选时间。
-- 随机算法使用服务端生成或保存的 seed，并将候选范围版本写入存档；相同 seed 与 dataset identity 必须得到相同起点。
-- catalog 校验、随机选择、冻结快照和 `ALL_AVAILABLE` 历史必须绑定同一个不可变归档 revision；发布新的 `current` revision 不得改变既有 Run。
-- 服务端必须先持久化 seed、选中时间、catalog 与 source revision 的 selection commitment，再下载正文。下载失败后的重试只能复用该 commitment，不能重新抽签；本地缓存仅用于加速，可缺失且不得扩大或缩小随机域。
+- 用户必须给出完整的 UTC 起止区间；客户端不得提交 seed。服务端在 Run 创建事务中生成 seed，并从该区间的分钟网格等概率抽取一个 `T0`。
+- 随机域是账户级时间区间，不是某个商品的上市区间或合格数据窗口。系统不得要求“开局参考商品”，也不得先选商品再决定时间。
+- `replay.time-commitment.v1` 必须在任何 MarketTrack、catalog epoch 或 dataset identity 之前持久化 seed、区间、选中时间和 canonical hash。下载失败、刷新目录或改选商品都只能复用它。
+- 首次选品时，BAR/AGG_TRADE 各自的版本化归档只用于验证固定 `T0` 的基础周期对齐、warmup、前向覆盖、缺口与 source fidelity，并冻结对应 dataset revision；验证不能改变 `T0`。
+- 兼容性至少区分：商品不在目录、开局时尚未上市、基础周期/模式不兼容、历史连续性或前向覆盖不足。任何失败都必须提示“需另开一局”，不能静默 clamp、顺延、回退或重抽。
 - 不能按未来收益、波动结果或用户未知的事后标签挑选起点。若未来增加“行情场景训练”，标签生成与防泄漏规则必须另立合同。
 - 严格盲测只能使用随机起点。用户手动选择具体日期后，存档必须标记 `START_TIME_KNOWN`，不得进入“未知起点”统计。
 
 ### 5.4 Run 创建与首个商品初始化原子性
 
-一次成功的空 Run 创建只原子写入：Run 元数据、训练设置、初始账户设置、disclosure/integrity policy、空 ViewerState 与创建审计事件。商品、dataset、时钟和 pin 均为空。
+一次成功的空 Run 创建只原子写入：Run 元数据、训练设置、初始账户设置、不可变 `TimeCommitment`、disclosure/integrity policy、空 ViewerState 与创建审计事件。商品、dataset、MarketTrack 和 pin 均为空；全局游标以 `T0` 为基准但不可播放。
 
 一次成功的首个商品初始化必须在不改变 `run_id` 的同一事务中完成：
 
 1. 初始 `MarketTrack` 与不可变 dataset ref 绑定；
-2. 全局时钟、初始账户、账本和 checkpoint 建立；
+2. 全局时钟从既有 `T0` 建立可播放 cursor，初始账户、账本和 checkpoint 建立；
 3. ViewerState 选中首条轨道；
 4. 数据 pin 或可确定重建的 rehydration manifest 写入；
 5. Run 从 `AWAITING_MARKET` 转为可运行状态。
 
-任一步失败都回滚本次初始化并释放临时 pin；既有空 Run、其设置和 `run_id` 保持不变，可重新选品。
+任一步失败都回滚本次初始化并释放临时 pin；既有空 Run、其设置、`run_id` 与 `TimeCommitment` 保持不变。用户可改选兼容商品；若目标商品不支持该时间，只能复制设置或另开一局。
 
 ---
 
@@ -619,12 +618,12 @@ flowchart LR
 
 以下场景全部通过前，不能称“符合产品合同”：
 
-1. 从 live 的 BTCUSDT/15m 打开页内存档大厅，live 页面不漂移；创建的是商品无关空 Run。BTCUSDT 只允许出现在非绑定的 `market_selection_hint`/自选快照中，不能出现在 Run 的商品、MarketTrack、dataset 或时钟字段；进入 `?run=<id>` 后仍由用户显式选择首个商品。
+1. 从 live 的 BTCUSDT/15m 打开页内存档大厅，live 页面不漂移；创建的是商品无关空 Run。BTCUSDT 只允许出现在非绑定的 `market_selection_hint`/自选快照中，不能决定 Run 的 `T0`、MarketTrack 或 dataset；进入 `?run=<id>` 后仍由用户显式选择首个商品。
 2. 大厅能列出、继续、查看和恢复存档；打开大厅不批量下载历史数据。
-3. 空 Run 即使商品目录暂时不可用也能创建；选品时手动开始能查看最早合格时间与不可选缺口，随机开始可由 seed 重现。
+3. 空 Run 即使商品目录暂时不可用也能创建；手动时间或区间随机结果在创建时冻结。选品目录逐商品显示固定 `T0` 的兼容状态；随机结果可由私有 seed 重现。
 4. `HIDE_DAY` 时所有真实年月日边界都不泄漏，但小时分钟正常显示。
 5. `HIDE_ALL` 时 HTTP、WS、DOM、ARIA、浏览器存储、日志和导出均无真实时间。
-6. 首次选品失败回滚数据 pin、账户、时钟和 MarketTrack，但同一个 Run 保持 `AWAITING_MARKET` 并可重试。
+6. 首次选品失败回滚数据 pin、账户和 MarketTrack，但同一个 Run 保持 `AWAITING_MARKET`，且 `T0` 与 commitment hash 完全不变；不支持的商品明确要求另开一局。
 7. 训练页的顶栏、周期栏、图表、绘图、右栏、状态栏与 live 共用视觉骨架。
 8. replay 页面在 capability 缺失、报错和恢复期间都不请求 live 数据。
 9. 开始点前向左滚动能补历史，向右永远不超过 `VirtualTime`。

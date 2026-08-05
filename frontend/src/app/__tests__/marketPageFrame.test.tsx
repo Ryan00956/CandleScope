@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -138,4 +140,12 @@ test("right rail can collapse content to activity-bar-only mode", () => {
   assert.match(html, /data-market-shell-owner="activity-bar"/);
   assert.doesNotMatch(html, /data-market-shell-owner="right-rail-panel"/);
   assert.doesNotMatch(html, /class="wl-resize-handle/);
+});
+
+test("right rail keeps undersized stacked views scrollable instead of shrinking them into overlap", () => {
+  const styles = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+  assert.match(styles, /\.market-rail-panel \{[\s\S]*?overflow-y: auto;/);
+  assert.match(styles, /\.market-rail-stack-slot \{[\s\S]*?flex: 0 0 auto;/);
+  assert.match(styles, /\.market-rail-view-host \{[\s\S]*?flex: 0 0 auto;/);
+  assert.match(styles, /\.replay-market-dock-body \{ flex: 1 1 0; min-height: 0; overflow: auto; \}/);
 });

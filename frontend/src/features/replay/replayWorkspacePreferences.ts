@@ -5,18 +5,24 @@ import {
   MARKET_DOCK_MIN_HEIGHT,
   MARKET_RAIL_DEFAULT_WIDTH,
   MARKET_RAIL_MAX_WIDTH,
+  MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
   MARKET_RAIL_MIN_WIDTH,
 } from "../../shared/marketRailLayout.js";
 
+export const REPLAY_RAIL_VIEW_IDS = {
+  watchlist: "replay-watchlist",
+  paper: "replay-paper",
+  account: "replay-account",
+  activity: "replay-activity",
+  capabilities: "replay-capabilities",
+} as const;
 
-export type ReplayDockView = "capabilities" | "paper" | "activity";
+export type ReplayRailViewId = (typeof REPLAY_RAIL_VIEW_IDS)[keyof typeof REPLAY_RAIL_VIEW_IDS];
 
 export interface ReplayWorkspacePreferences {
   readonly railWidth: number;
-  readonly railCollapsed: boolean;
-  readonly dockHeight: number;
-  readonly dockCollapsed: boolean;
-  readonly activeDock: ReplayDockView;
+  readonly openViewIds: readonly ReplayRailViewId[];
+  readonly viewHeights: Readonly<Partial<Record<ReplayRailViewId, number>>>;
 }
 
 export interface ReplayPreferenceStorage {
@@ -27,10 +33,8 @@ export interface ReplayPreferenceStorage {
 
 export interface ReplayWorkspacePreferenceActions {
   setRailWidth(value: number): void;
-  setRailCollapsed(value: boolean): void;
-  setDockHeight(value: number): void;
-  setDockCollapsed(value: boolean): void;
-  setActiveDock(value: ReplayDockView): void;
+  toggleView(viewId: ReplayRailViewId): void;
+  setViewHeight(viewId: ReplayRailViewId, value: number): void;
 }
 
 const LIVE_RAIL_WIDTH_KEY = "candlescope-sidebar-width";
@@ -38,7 +42,14 @@ const LIVE_RAIL_COLLAPSED_KEY = "candlescope-sidebar-collapsed";
 const LIVE_DOCK_HEIGHT_KEY = "candlescope-order-book-height";
 const LIVE_DOCK_COLLAPSED_KEY = "candlescope-order-book-collapsed";
 const SCOPED_PREFIX = "candlescope-replay-workspace:";
-const DOCKS = new Set<ReplayDockView>(["capabilities", "paper", "activity"]);
+const REPLAY_RAIL_VIEW_ID_SET = new Set<ReplayRailViewId>(Object.values(REPLAY_RAIL_VIEW_IDS));
+const REPLAY_VIEW_HEIGHT_LIMITS: Readonly<Record<ReplayRailViewId, readonly [number, number]>> = {
+  [REPLAY_RAIL_VIEW_IDS.watchlist]: [MARKET_RAIL_MIN_SIDEBAR_HEIGHT, MARKET_DOCK_MAX_HEIGHT],
+  [REPLAY_RAIL_VIEW_IDS.paper]: [MARKET_DOCK_MIN_HEIGHT, MARKET_DOCK_MAX_HEIGHT],
+  [REPLAY_RAIL_VIEW_IDS.account]: [180, MARKET_DOCK_MAX_HEIGHT],
+  [REPLAY_RAIL_VIEW_IDS.activity]: [MARKET_DOCK_MIN_HEIGHT, MARKET_DOCK_MAX_HEIGHT],
+  [REPLAY_RAIL_VIEW_IDS.capabilities]: [160, MARKET_DOCK_MAX_HEIGHT],
+};
 
 function clamp(value: unknown, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
@@ -58,6 +69,61 @@ function scopedKey(sessionId: string): string {
   return `${SCOPED_PREFIX}${sessionId}`;
 }
 
+function defaultViewHeights(dockHeight: number): Record<ReplayRailViewId, number> {
+  return {
+    [REPLAY_RAIL_VIEW_IDS.watchlist]: MARKET_DOCK_DEFAULT_HEIGHT,
+    [REPLAY_RAIL_VIEW_IDS.paper]: dockHeight,
+    [REPLAY_RAIL_VIEW_IDS.account]: Math.max(dockHeight, 360),
+    [REPLAY_RAIL_VIEW_IDS.activity]: dockHeight,
+    [REPLAY_RAIL_VIEW_IDS.capabilities]: 280,
+  };
+}
+
+function normalizeOpenViewIds(value: unknown, fallback: readonly ReplayRailViewId[]): ReplayRailViewId[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const seen = new Set<ReplayRailViewId>();
+  const open: ReplayRailViewId[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== "string" || !REPLAY_RAIL_VIEW_ID_SET.has(candidate as ReplayRailViewId)) continue;
+    const viewId = candidate as ReplayRailViewId;
+    if (seen.has(viewId)) continue;
+    seen.add(viewId);
+    open.push(viewId);
+  }
+  return open;
+}
+
+function normalizeViewHeights(
+  value: unknown,
+  fallback: Readonly<Partial<Record<ReplayRailViewId, number>>>,
+): Partial<Record<ReplayRailViewId, number>> {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const next: Partial<Record<ReplayRailViewId, number>> = {};
+  for (const viewId of Object.values(REPLAY_RAIL_VIEW_IDS)) {
+    const candidate = source[viewId] ?? fallback[viewId];
+    if (candidate === undefined) continue;
+    const [minimum, maximum] = REPLAY_VIEW_HEIGHT_LIMITS[viewId];
+    next[viewId] = clamp(candidate, minimum, minimum, maximum);
+  }
+  return next;
+}
+
+function legacyOpenViewIds(source: Record<string, unknown>, fallback: ReplayWorkspacePreferences): ReplayRailViewId[] {
+  const open: ReplayRailViewId[] = [];
+  const fallbackHasDock = fallback.openViewIds.some((id) => id !== REPLAY_RAIL_VIEW_IDS.watchlist);
+  if (!bool(source.railCollapsed, !fallback.openViewIds.includes(REPLAY_RAIL_VIEW_IDS.watchlist))) {
+    open.push(REPLAY_RAIL_VIEW_IDS.watchlist);
+  }
+  if (!bool(source.dockCollapsed, !fallbackHasDock)) {
+    if (source.activeDock === "paper") open.push(REPLAY_RAIL_VIEW_IDS.paper);
+    else if (source.activeDock === "activity") open.push(REPLAY_RAIL_VIEW_IDS.activity);
+    else open.push(REPLAY_RAIL_VIEW_IDS.capabilities);
+  }
+  return open;
+}
+
 function browserStorage(): ReplayPreferenceStorage | null {
   try {
     return typeof window === "undefined" ? null : window.localStorage;
@@ -70,12 +136,18 @@ function inherited(storage: ReplayPreferenceStorage | null): ReplayWorkspacePref
   if (storage === null) {
     return {
       railWidth: MARKET_RAIL_DEFAULT_WIDTH,
-      railCollapsed: false,
-      dockHeight: MARKET_DOCK_DEFAULT_HEIGHT,
-      dockCollapsed: false,
-      activeDock: "capabilities",
+      openViewIds: [REPLAY_RAIL_VIEW_IDS.watchlist, REPLAY_RAIL_VIEW_IDS.capabilities],
+      viewHeights: defaultViewHeights(MARKET_DOCK_DEFAULT_HEIGHT),
     };
   }
+  const railCollapsed = bool(storage.getItem(LIVE_RAIL_COLLAPSED_KEY));
+  const dockCollapsed = bool(storage.getItem(LIVE_DOCK_COLLAPSED_KEY));
+  const dockHeight = clamp(
+    storage.getItem(LIVE_DOCK_HEIGHT_KEY),
+    MARKET_DOCK_DEFAULT_HEIGHT,
+    MARKET_DOCK_MIN_HEIGHT,
+    MARKET_DOCK_MAX_HEIGHT,
+  );
   return {
     railWidth: clamp(
       storage.getItem(LIVE_RAIL_WIDTH_KEY),
@@ -83,30 +155,34 @@ function inherited(storage: ReplayPreferenceStorage | null): ReplayWorkspacePref
       MARKET_RAIL_MIN_WIDTH,
       MARKET_RAIL_MAX_WIDTH,
     ),
-    railCollapsed: bool(storage.getItem(LIVE_RAIL_COLLAPSED_KEY)),
-    dockHeight: clamp(
-      storage.getItem(LIVE_DOCK_HEIGHT_KEY),
-      MARKET_DOCK_DEFAULT_HEIGHT,
-      MARKET_DOCK_MIN_HEIGHT,
-      MARKET_DOCK_MAX_HEIGHT,
-    ),
-    dockCollapsed: bool(storage.getItem(LIVE_DOCK_COLLAPSED_KEY)),
-    activeDock: "capabilities",
+    openViewIds: [
+      ...(railCollapsed ? [] : [REPLAY_RAIL_VIEW_IDS.watchlist]),
+      ...(dockCollapsed ? [] : [REPLAY_RAIL_VIEW_IDS.capabilities]),
+    ],
+    viewHeights: defaultViewHeights(dockHeight),
   };
 }
 
 function normalize(value: unknown, fallback: ReplayWorkspacePreferences): ReplayWorkspacePreferences {
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
   const source = value as Record<string, unknown>;
-  const activeDock = typeof source.activeDock === "string" && DOCKS.has(source.activeDock as ReplayDockView)
-    ? source.activeDock as ReplayDockView
-    : fallback.activeDock;
+  const legacyDockHeight = clamp(
+    source.dockHeight,
+    fallback.viewHeights[REPLAY_RAIL_VIEW_IDS.paper] ?? MARKET_DOCK_DEFAULT_HEIGHT,
+    MARKET_DOCK_MIN_HEIGHT,
+    MARKET_DOCK_MAX_HEIGHT,
+  );
+  const legacyHeights = defaultViewHeights(legacyDockHeight);
+  const hasModularOpenState = Array.isArray(source.openViewIds);
   return {
     railWidth: clamp(source.railWidth, fallback.railWidth, MARKET_RAIL_MIN_WIDTH, MARKET_RAIL_MAX_WIDTH),
-    railCollapsed: bool(source.railCollapsed, fallback.railCollapsed),
-    dockHeight: clamp(source.dockHeight, fallback.dockHeight, MARKET_DOCK_MIN_HEIGHT, MARKET_DOCK_MAX_HEIGHT),
-    dockCollapsed: bool(source.dockCollapsed, fallback.dockCollapsed),
-    activeDock,
+    openViewIds: hasModularOpenState
+      ? normalizeOpenViewIds(source.openViewIds, fallback.openViewIds)
+      : legacyOpenViewIds(source, fallback),
+    viewHeights: normalizeViewHeights(
+      source.viewHeights,
+      source.dockHeight === undefined ? fallback.viewHeights : legacyHeights,
+    ),
   };
 }
 
@@ -172,10 +248,22 @@ export function useReplayWorkspacePreferences(sessionId: string): {
   }, [sessionId, storage]);
   const actions = useMemo<ReplayWorkspacePreferenceActions>(() => ({
     setRailWidth: (value) => update({ railWidth: value }),
-    setRailCollapsed: (value) => update({ railCollapsed: value }),
-    setDockHeight: (value) => update({ dockHeight: value }),
-    setDockCollapsed: (value) => update({ dockCollapsed: value }),
-    setActiveDock: (value) => update({ activeDock: value }),
-  }), [update]);
+    toggleView: (viewId) => setPreferences((current) => {
+      const openViewIds = current.openViewIds.includes(viewId)
+        ? current.openViewIds.filter((id) => id !== viewId)
+        : [...current.openViewIds, viewId];
+      const next = normalize({ ...current, openViewIds }, current);
+      saveReplayWorkspacePreferences(sessionId, next, storage);
+      return next;
+    }),
+    setViewHeight: (viewId, value) => setPreferences((current) => {
+      const next = normalize({
+        ...current,
+        viewHeights: { ...current.viewHeights, [viewId]: value },
+      }, current);
+      saveReplayWorkspacePreferences(sessionId, next, storage);
+      return next;
+    }),
+  }), [sessionId, storage, update]);
   return { preferences, actions };
 }

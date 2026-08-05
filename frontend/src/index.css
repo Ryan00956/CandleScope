@@ -161,12 +161,15 @@ body {
   min-width: 0;
   min-height: 0;
   height: 100%;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
   background: var(--bg-secondary);
 }
 
 .market-rail-stack-slot {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
@@ -174,6 +177,7 @@ body {
 
 .market-rail-view-host {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
@@ -9403,7 +9407,7 @@ body {
 .replay-market-dock-tabs button { min-height: 27px; padding: 4px 7px; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); background: transparent; font-size: 10px; }
 .replay-market-dock-tabs button.active { border-color: rgba(59, 130, 246, .4); color: #bfdbfe; background: rgba(59, 130, 246, .12); }
 .replay-market-dock-tabs .replay-market-dock-collapse { margin-left: auto; }
-.replay-market-dock-body { min-height: 0; overflow: auto; }
+.replay-market-dock-body { flex: 1 1 0; min-height: 0; overflow: auto; }
 .replay-market-dock textarea { width: 100%; min-height: 70px; resize: vertical; }
 .replay-capability-surface > header { display: grid; gap: 3px; padding: 9px; border-bottom: 1px solid var(--border-color); }
 .replay-capability-surface > header small { color: var(--text-muted); font-size: 9px; }
@@ -10117,7 +10121,7 @@ body {
 }
 
 .replay-market-dock[data-active-dock="paper"] .replay-market-dock-body {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .replay-order-surface {

@@ -8,7 +8,7 @@ import {
   replayOwnsController,
 } from "../replayUiModel.js";
 import { defaultReplayV2Api } from "../replayV2Api.js";
-import { rebaseReplayMaxQuantity } from "../replayOrderSizing.js";
+import { rebaseReplayMaxQuantity, replayOrderPreviewSide } from "../replayOrderSizing.js";
 import type { ReplayClosedTrade } from "../replayTypes.js";
 import type {
   ReplayOrderPreview,
@@ -388,6 +388,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const rule = selectedRule(contract, selectedTrackId);
   const selectedPosition = portfolio?.positions.find((item) => item.track_id === selectedTrackId) ?? null;
   const positionQty = finiteNumber(selectedPosition?.position.quantity) ?? 0;
+  const previewSide = replayOrderPreviewSide(positionQty, side);
   const maxLeverage = Math.max(1, finiteNumber(config?.max_leverage) ?? 1);
   const [selectedLeverage, setLeverage] = useState(maxLeverage);
   const leverage = Math.min(Math.max(1, selectedLeverage), maxLeverage);
@@ -413,7 +414,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   );
   const maxQuantitySizingKey = JSON.stringify([
     selectedTrackId,
-    side,
+    previewSide,
     orderType,
     reduceOnly,
     reduceOnly ? positionQty : null,
@@ -481,7 +482,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     store.virtualTimeMs,
     previewPositionIntent,
     clientOrderId,
-    side,
+    previewSide,
     orderType,
     quantity,
     reduceOnly,
@@ -494,7 +495,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     store.revision,
     store.sourceSequence,
     store.virtualTimeMs,
-    side,
+    previewSide,
     orderType,
     reduceOnly,
     price,
@@ -520,7 +521,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     const timer = globalThis.setTimeout(() => {
       const previewDraftOrder: ReplayOrderRequest = {
         client_order_id: clientOrderId,
-        side,
+        side: previewSide,
         order_type: orderType,
         quantity: quantity.trim() || "0",
         reduce_only: reduceOnly,
@@ -583,7 +584,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     reduceOnly,
     riskValue,
     selectedTrackId,
-    side,
+    previewSide,
     store.connectionState,
     store.revision,
     store.sourceSequence,
@@ -704,6 +705,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       setNotice({ tone: "error", message: `杠杆须在 1–${maxLeverage}x 之间` });
       return;
     }
+    setSide(nextSide);
     const order: ReplayOrderRequest = {
       client_order_id: clientOrderId,
       side: nextSide,
@@ -733,7 +735,6 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         setNotice({ tone: "error", message: "行情游标已变化，请重试提交" });
         return;
       }
-      setSide(nextSide);
       setNotice({ tone: "pending", message: "正在提交纸面委托…" });
       const planned = sidePreview.trade_plan;
       if (planned !== null && planForSide !== null) {

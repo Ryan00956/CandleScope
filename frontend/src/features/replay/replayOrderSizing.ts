@@ -13,6 +13,15 @@ function positiveFinite(value: number | null): value is number {
   return value !== null && Number.isFinite(value) && value > 0;
 }
 
+export function replayOrderPreviewSide(
+  positionQuantity: number,
+  selectedSide: "BUY" | "SELL",
+): "BUY" | "SELL" {
+  if (positionQuantity > 0) return "BUY";
+  if (positionQuantity < 0) return "SELL";
+  return selectedSide;
+}
+
 /**
  * Conservatively carry a server-authoritative quantity cap across a market
  * cursor change. The estimate may shrink immediately, but never grows until a

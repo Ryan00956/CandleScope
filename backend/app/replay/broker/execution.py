@@ -801,6 +801,7 @@ class ConservativeBarBroker:
                     order_type=OrderType.MARKET,
                     quantity=quantity,
                     reduce_only=False,
+                    leverage=leverage,
                 ),
                 command_id=command_id,
                 accepted_source_sequence=accepted_source_sequence,

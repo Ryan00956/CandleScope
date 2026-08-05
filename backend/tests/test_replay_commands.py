@@ -139,6 +139,63 @@ def test_command_payloads_are_exact_and_normalized_before_actor_mutation() -> No
             parse_command(command)
 
 
+def test_order_commands_accept_and_normalize_optional_leverage() -> None:
+    placed = parse_command(
+        _command(
+            "leveraged-order",
+            CommandType.PLACE_ORDER,
+            {
+                "client_order_id": "leveraged-order",
+                "side": "SELL",
+                "order_type": "LIMIT",
+                "quantity": "1.25",
+                "reduce_only": False,
+                "limit_price": "100.1",
+                "stop_price": None,
+                "leverage": "2.00",
+            },
+        )
+    )
+    assert placed.values["leverage"] == "2"
+
+    opened = parse_command(
+        _command(
+            "leveraged-intent",
+            CommandType.EXECUTE_POSITION_INTENT,
+            {
+                "intent": "OPEN",
+                "side": "SELL",
+                "quantity": "0.07595784",
+                "leverage": "3.0",
+            },
+        )
+    )
+    assert opened.values == {
+        "intent": "OPEN",
+        "side": "SELL",
+        "quantity": "0.07595784",
+        "leverage": "3",
+    }
+
+
+@pytest.mark.parametrize("leverage", (True, 2, "NaN", "1e2", "0.5", "-1"))
+def test_order_commands_reject_invalid_optional_leverage(leverage: object) -> None:
+    with pytest.raises(ReplayDomainError) as rejected:
+        parse_command(
+            _command(
+                "invalid-leverage",
+                CommandType.EXECUTE_POSITION_INTENT,
+                {
+                    "intent": "OPEN",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "leverage": leverage,
+                },
+            )
+        )
+    assert rejected.value.code is ReplayErrorCode.ORDER_REJECTED
+
+
 def test_command_history_replays_success_and_rejected_result_by_canonical_identity() -> (
     None
 ):

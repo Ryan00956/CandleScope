@@ -12,7 +12,13 @@ from .clock import validate_speed
 from .constants import CommandType, SessionState
 from .errors import ReplayDomainError, ReplayErrorCode
 from .internal_commands import InternalCommandType
-from .models import ReplayCommand, ReplayCursor, validate_counter, validate_timestamp_ms
+from .models import (
+    ReplayCommand,
+    ReplayCursor,
+    normalize_decimal_string,
+    validate_counter,
+    validate_timestamp_ms,
+)
 
 
 MAX_STEP_COUNT = 100_000
@@ -75,6 +81,25 @@ def _positive_bounded_int(
         raise ReplayDomainError(
             ReplayErrorCode.INVALID_STATE_TRANSITION,
             f"{field_name} must be between 1 and {upper_bound}",
+        )
+    return normalized
+
+
+def _optional_order_leverage(payload: Mapping[str, object]) -> str | None:
+    leverage = payload.get("leverage")
+    if leverage is None:
+        return None
+    try:
+        normalized = normalize_decimal_string(leverage, field_name="leverage")
+    except (TypeError, ValueError) as exc:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "leverage must be a finite Decimal string",
+        ) from exc
+    if Decimal(normalized) < 1:
+        raise ReplayDomainError(
+            ReplayErrorCode.ORDER_REJECTED,
+            "leverage must be at least 1",
         )
     return normalized
 
@@ -281,11 +306,14 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             "stop_price",
         )
         expected = set(fields)
-        if set(payload) == expected:
-            trade_plan = None
-        else:
-            _exact_keys(payload, expected | {"trade_plan"})
-            trade_plan = _parse_trade_plan(payload["trade_plan"])
+        optional = set(payload) & {"trade_plan", "leverage"}
+        _exact_keys(payload, expected | optional)
+        trade_plan = (
+            _parse_trade_plan(payload["trade_plan"])
+            if "trade_plan" in payload
+            else None
+        )
+        leverage = _optional_order_leverage(payload)
         for field_name in ("client_order_id", "side", "order_type", "quantity"):
             if not isinstance(payload[field_name], str):
                 raise ReplayDomainError(
@@ -310,6 +338,7 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             {
                 **{field_name: payload[field_name] for field_name in fields},
                 **({} if trade_plan is None else {"trade_plan": trade_plan}),
+                **({} if leverage is None else {"leverage": leverage}),
             },
         )
     if command_type is CommandType.REPLACE_ORDER:
@@ -393,7 +422,9 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             )
         return ParsedCommand(command_type, {"quantity": payload["quantity"]})
     if command_type is CommandType.EXECUTE_POSITION_INTENT:
-        _exact_keys(payload, {"intent", "side", "quantity"})
+        expected = {"intent", "side", "quantity"}
+        optional = set(payload) & {"leverage"}
+        _exact_keys(payload, expected | optional)
         intent = payload["intent"]
         if intent not in {"OPEN", "CLOSE", "REVERSE"}:
             raise ReplayDomainError(
@@ -402,6 +433,7 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             )
         side = payload["side"]
         quantity = payload["quantity"]
+        leverage = _optional_order_leverage(payload)
         if side is not None and not isinstance(side, str):
             raise ReplayDomainError(
                 ReplayErrorCode.ORDER_REJECTED,
@@ -414,7 +446,12 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
             )
         return ParsedCommand(
             command_type,
-            {"intent": intent, "side": side, "quantity": quantity},
+            {
+                "intent": intent,
+                "side": side,
+                "quantity": quantity,
+                **({} if leverage is None else {"leverage": leverage}),
+            },
         )
     if command_type is CommandType.SET_POSITION_PROTECTION:
         _exact_keys(

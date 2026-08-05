@@ -42,6 +42,7 @@ async def test_trade_plan_is_sized_logged_and_projected_into_training_results(
             "reduce_only": False,
             "limit_price": None,
             "stop_price": None,
+            "leverage": "2",
         }
         preview = await service.training.preview_order(  # type: ignore[union-attr]
             run_id,

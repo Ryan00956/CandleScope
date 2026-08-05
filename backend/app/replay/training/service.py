@@ -4436,6 +4436,7 @@ class TrainingRunService:
                     "reduce_only": False,
                     "limit_price": None,
                     "stop_price": None,
+                    "leverage": payload.get("leverage"),
                 }
                 self._assert_exact_account_order_filters(
                     payload=opening_payload,

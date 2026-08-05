@@ -411,6 +411,7 @@ async def test_authoritative_order_preview_is_cursor_bound_and_non_mutating(
             "reduce_only": False,
             "limit_price": None,
             "stop_price": None,
+            "leverage": "2",
         }
 
         preview = await service.training.preview_order(  # type: ignore[union-attr]
@@ -469,7 +470,12 @@ async def test_market_position_intent_and_atomic_protection_flow(
                 "intent-open",
                 ReplayV2CommandType.EXECUTE_POSITION_INTENT,
                 session,
-                {"intent": "OPEN", "side": "BUY", "quantity": "1"},
+                {
+                    "intent": "OPEN",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "leverage": "2",
+                },
             ),
         )
         assert opened["data"]["position"]["quantity"] == "1"
@@ -503,7 +509,12 @@ async def test_market_position_intent_and_atomic_protection_flow(
                 "intent-reverse",
                 ReplayV2CommandType.EXECUTE_POSITION_INTENT,
                 session,
-                {"intent": "REVERSE", "side": "SELL", "quantity": "2"},
+                {
+                    "intent": "REVERSE",
+                    "side": "SELL",
+                    "quantity": "2",
+                    "leverage": "2",
+                },
             ),
         )
         assert reversed_result["data"]["position"]["quantity"] == "-2"

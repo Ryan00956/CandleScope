@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rebaseReplayMaxQuantity } from "../replayOrderSizing.js";
+import { rebaseReplayMaxQuantity, replayOrderPreviewSide } from "../replayOrderSizing.js";
 
 const BASE_INPUT = {
   previousMaxQuantity: 0.5,
@@ -42,4 +42,11 @@ test("rebases against lower equity and leverage without changing reduce-only cap
     nextReferencePrice: 110,
     reduceOnly: true,
   }), 0.5);
+});
+
+test("previews the only non-reversing side once a position is open", () => {
+  assert.equal(replayOrderPreviewSide(0, "BUY"), "BUY");
+  assert.equal(replayOrderPreviewSide(0, "SELL"), "SELL");
+  assert.equal(replayOrderPreviewSide(1, "SELL"), "BUY");
+  assert.equal(replayOrderPreviewSide(-1, "BUY"), "SELL");
 });

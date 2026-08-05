@@ -106,6 +106,16 @@ def _descriptor() -> RuntimeDescriptor:
                 "object_events",
             ],
             "unsupportedRenderKinds": [],
+            "extensionProtocols": [
+                "candlescope.pyne-session/2",
+                "candlescope.pyne-data-broker/1",
+            ],
+            "v1Fallback": {
+                "protocol": "candlescope.script-runtime/1",
+                "method": "executeBatch",
+                "sessionState": False,
+                "brokeredData": False,
+            },
         },
     )
 

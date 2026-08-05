@@ -39,16 +39,36 @@ and restart the sidecar without creating a nested Pyne worker process.
 
 ## Render coverage
 
-Version 0.2.0 maps Pyne's current public output through the negotiated
+Version 0.2.0 maps the Pyne output-schema v1 surface through the negotiated
 `render.histogram-series/1` and `render.structured-output/1` features: lines,
 histograms, markers, horizontal lines, fills, backgrounds, bar colors, signals,
 legacy labels, strategy reports, and drawing objects. The bridge uses only the SDK's
 JSON-only `RenderCollections`; unknown collections fail closed and no Pyne Python
-object or CandleScope-private transport crosses the boundary.
+object or CandleScope-private transport crosses the boundary. Collections added
+in output-schema v2 intentionally fail closed on this legacy Render v1 path.
 
 The Phase 0 HTTP compute, range, and WebSocket goldens can now be rebuilt exactly by
 the sidecar. True stateful realtime sessions remain outside protocol v1; the sidecar
 path performs batch execution over confirmed bars.
+
+## Additive session and data-broker contracts
+
+Development builds export `candlescope.pyne-session/2` and
+`candlescope.pyne-data-broker/1` for the separate Pyne workbench adapter. The
+session service supports bounded TTL/LRU incremental sessions, preview and
+committed bar events, reconnect snapshots, rolling retention, and explicit
+close. The brokered batch flow never gives Pyne a CandleScope database or
+network object: it returns exact symbol/timeframe/start/end requests and accepts
+only correlated Host-supplied OHLCV pages.
+V2 consumers can request native Pyne output without narrowing it through the
+frozen Render v1 collections; the independent
+[`candlescope-plugin-pyne-workbench`](../candlescope-plugin-pyne-workbench/README.md)
+then performs the explicit chart-layer/2 projection.
+
+The installed `candlescope.pyne` runtime keeps the frozen
+`candlescope.script-runtime/1` `executeBatch` path. That v1 path remains
+stateless and has neither session nor brokered-data authority, so hosts that do
+not use the additive workbench protocols retain the existing behavior.
 
 ## Development
 

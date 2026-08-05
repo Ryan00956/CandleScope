@@ -507,6 +507,7 @@ Documentation:
 
 - [Indicator Engine](backend/app/indicator/README.md)
 - [Pyne Runtime plugin](packages/candlescope-plugin-pyne/README.md)
+- [Pyne Workbench v2 plugin](packages/candlescope-plugin-pyne-workbench/README.md)
 - [Pine Compatibility plugin](packages/candlescope-plugin-pine-compat/README.md)
 
 ## Plugin SDK (Developer Preview)
@@ -544,6 +545,13 @@ published as
 The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
+
+The development-only
+[`candlescope-plugin-pyne-workbench`](packages/candlescope-plugin-pyne-workbench/README.md)
+is a separate Plugin Platform v2 package. It reads the active chart through
+scoped Host calls, brokers exact `request.*` data, owns bounded incremental
+sessions, and publishes only validated `candlescope.render/2` items. It does
+not change or replace the installed v1 runtime bridge.
 
 The separately evolving general Plugin Platform v2 has completed Phases 1–12.
 Above the SDK, business-neutral Host, Bundle/Installer, permissions, and Windows
@@ -632,6 +640,7 @@ CandleScope/
 │   └── tests/
 ├── packages/
 │   ├── candlescope-plugin-pyne/
+│   ├── candlescope-plugin-pyne-workbench/
 │   ├── candlescope-plugin-sdk/
 │   └── pyne-runtime/
 └── frontend/

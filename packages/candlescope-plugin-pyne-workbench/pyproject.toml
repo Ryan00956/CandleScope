@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "candlescope-plugin-pyne-workbench"
+version = "0.1.0"
+description = "Independent Plugin Platform v2 workbench for Pyne Runtime."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "GPL-3.0-only"
+authors = [{ name = "CandleScope contributors" }]
+dependencies = [
+  "candlescope-plugin-sdk==0.2.0",
+  "candlescope-plugin-pyne>=0.3.0.dev0,<0.4.0",
+  "pyne-runtime>=0.3.0.dev0,<0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1",
+  "hatchling>=1.25",
+  "jsonschema>=4.22",
+  "pytest>=7",
+  "ruff>=0.5",
+  "twine>=5",
+]
+
+[project.scripts]
+candlescope-pyne-workbench = "candlescope_plugin_pyne_workbench.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/candlescope_plugin_pyne_workbench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+  ".",
+  "src",
+  "../candlescope-plugin-sdk/src",
+  "../candlescope-plugin-pyne/src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -36,15 +36,31 @@ Pyne worker，Windows 下也不会引入额外 spawn 状态。
 
 ## Render IR 覆盖范围
 
-0.2.0 通过 `render.histogram-series/1` 与 `render.structured-output/1` 完整映射
-Pyne 当前公开输出：line、histogram、marker、hline、fill、背景、K 线着色、signal、
+0.2.0 通过 `render.histogram-series/1` 与 `render.structured-output/1` 映射
+Pyne output-schema v1 的输出：line、histogram、marker、hline、fill、背景、K 线着色、signal、
 legacy label、strategy report 与 drawing objects。映射只使用 SDK 的 JSON-only
 `RenderCollections`，未知集合 fail closed，不夹带 Pyne Python 对象或 CandleScope
-私有 transport。
+私有 transport。output-schema v2 新增集合在这条旧 Render v1 路径上会明确拒绝，
+不会静默丢失。
 
 Phase 0 的 HTTP compute、range 和 WebSocket golden 已能由 sidecar 原样重建。真正
 有状态的 realtime session 仍不属于协议 v1；sidecar 路径按每次已确认 bars 做 batch
 执行，不能宣称是 incremental session。
+
+## 新增会话与数据代理契约
+
+开发版另外导出 `candlescope.pyne-session/2` 和
+`candlescope.pyne-data-broker/1`，供独立 Pyne 工作台适配器使用。会话服务支持
+有上限的 TTL/LRU 增量会话、预览/确认 K 线、断线重连快照、滚动保留和显式关闭。
+数据代理不会把 CandleScope 数据库或网络对象交给 Pyne；Pyne 只返回精确的
+symbol/timeframe/start/end 请求，并只接受 Host 关联校验过的 OHLCV 页面。
+v2 消费方还能取得不经冻结 Render v1 缩窄的原生 Pyne 输出；独立的
+[`candlescope-plugin-pyne-workbench`](../candlescope-plugin-pyne-workbench/README.md)
+负责把其中可表达的部分显式投影到 chart-layer/2。
+
+现有 `candlescope.pyne` 继续保留冻结的 `candlescope.script-runtime/1`
+`executeBatch` 路径。v1 仍是无状态执行，不自动获得会话或数据代理权限；未启用
+新版工作台协议时，行为与原来一致。
 
 ## 本地开发
 

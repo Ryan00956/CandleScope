@@ -421,6 +421,7 @@ Indicator docs:
 - [app/indicator](app/indicator/)
 - [Runtime plugin host](app/plugin_runtime/README.md)
 - [Pyne sidecar bridge](../packages/candlescope-plugin-pyne/README.md)
+- [Pyne workbench v2](../packages/candlescope-plugin-pyne-workbench/README.md)
 
 Built-ins include `MA`, `EMA`, `MACD`, `RSI`, `BOLL`, `ATR`, and `VOL`.
 

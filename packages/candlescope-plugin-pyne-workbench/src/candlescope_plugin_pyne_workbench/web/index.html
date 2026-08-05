@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>Pyne Workbench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header><span class="dot"></span><div><h1>Pyne Workbench</h1><p id="status">等待 CandleScope 连接</p></div></header>
+    <section>
+      <h2>怎么用</h2>
+      <ol>
+        <li>打开支持范围内的实时主图。</li>
+        <li>在插件命令中运行“Run Pyne on current chart”。</li>
+        <li>需要逐根调试时，先启动 session，再推送或预览 K 线。</li>
+      </ol>
+    </section>
+    <section>
+      <h2>当前边界</h2>
+      <p>脚本和数据只走 Host 能力调用。图形会转换为受限的 Render IR v2；不能无损映射的 candle、table 和 linefill 仍保留在原生 Pyne 结果摘要中。</p>
+    </section>
+    <dl><dt>主图</dt><dd id="market">—</dd><dt>主题</dt><dd id="theme">—</dd></dl>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 2,
+  "plugin": {
+    "id": "candlescope.pyne-workbench",
+    "name": "Pyne Workbench",
+    "version": "0.1.0",
+    "publisher": "candlescope",
+    "license": "GPL-3.0-only",
+    "engines": {
+      "candlescope": ">=0.4.0 <0.5.0"
+    }
+  },
+  "backend": {
+    "entrypoints": [
+      {
+        "id": "main",
+        "pythonModule": "candlescope_plugin_pyne_workbench.plugin",
+        "resourceProfile": "standard",
+        "activationEvents": ["onCommand", "onView"]
+      }
+    ]
+  },
+  "frontend": {
+    "assetsRoot": "web",
+    "surfaces": [
+      {
+        "id": "workbench-view",
+        "type": "sandbox",
+        "entry": "index.html",
+        "slot": "side-panel"
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "id": "run",
+      "kind": "command/1",
+      "title": "Run Pyne on current chart",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette", "topToolbar"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source": {"type": "string", "minLength": 1, "maxLength": 16384},
+            "paramsJson": {"type": "string", "maxLength": 16384, "default": "{}"},
+            "lookbackBars": {"type": "integer", "minimum": 2, "maximum": 5000, "default": 500}
+          },
+          "required": ["source"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "start-session",
+      "kind": "command/1",
+      "title": "Start incremental Pyne session",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sessionId": {"type": "string", "minLength": 1, "maxLength": 128},
+            "source": {"type": "string", "minLength": 1, "maxLength": 16384},
+            "paramsJson": {"type": "string", "maxLength": 16384, "default": "{}"},
+            "lookbackBars": {"type": "integer", "minimum": 2, "maximum": 5000, "default": 500},
+            "retentionBars": {"type": "integer", "minimum": 2, "maximum": 100000, "default": 10000}
+          },
+          "required": ["sessionId", "source"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "push-bar",
+      "kind": "command/1",
+      "title": "Push bar to Pyne session",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sessionId": {"type": "string", "minLength": 1, "maxLength": 128},
+            "time": {"type": "integer", "minimum": 0},
+            "open": {"type": "number"},
+            "high": {"type": "number"},
+            "low": {"type": "number"},
+            "close": {"type": "number"},
+            "volume": {"type": "number"},
+            "preview": {"type": "boolean", "default": false}
+          },
+          "required": ["sessionId", "time", "open", "high", "low", "close", "volume"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "snapshot-session",
+      "kind": "command/1",
+      "title": "Snapshot Pyne session",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sessionId": {"type": "string", "minLength": 1, "maxLength": 128}
+          },
+          "required": ["sessionId"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "close-session",
+      "kind": "command/1",
+      "title": "Close Pyne session",
+      "entrypoint": "main",
+      "configuration": {
+        "requiresUserAction": true,
+        "placements": ["commandPalette"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sessionId": {"type": "string", "minLength": 1, "maxLength": 128}
+          },
+          "required": ["sessionId"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "workbench-view",
+      "kind": "view/1",
+      "title": "Pyne Workbench",
+      "entrypoint": "main",
+      "configuration": {
+        "slot": "sidePanel",
+        "renderer": "sandbox",
+        "surface": "workbench-view"
+      }
+    },
+    {
+      "id": "pyne-output",
+      "kind": "chart-layer/2",
+      "title": "Pyne output",
+      "entrypoint": "main",
+      "configuration": {
+        "target": "main-chart",
+        "zOrder": "above-series",
+        "maxItems": 500,
+        "maxPoints": 20000,
+        "maxBytes": 524288,
+        "maxTextChars": 128
+      }
+    }
+  ],
+  "permissions": {
+    "required": [
+      {
+        "id": "chart.context.read",
+        "scope": {
+          "chartIds": ["main-chart"],
+          "contexts": ["live"],
+          "exchanges": ["binance", "okx"],
+          "marketTypes": ["spot", "perpetual"],
+          "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+          "intervals": ["1m", "5m", "15m", "1h", "4h", "1d"]
+        }
+      },
+      {
+        "id": "market.bars.read",
+        "scope": {
+          "contexts": ["live"],
+          "exchanges": ["binance", "okx"],
+          "marketTypes": ["spot", "perpetual"],
+          "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+          "intervals": ["1m", "5m", "15m", "1h", "4h", "1d"],
+          "maxHistoryBars": 5000,
+          "maxConcurrent": 1
+        }
+      },
+      {
+        "id": "chart.layer.publish",
+        "scope": {
+          "chartIds": ["main-chart"],
+          "contexts": ["live"],
+          "exchanges": ["binance", "okx"],
+          "marketTypes": ["spot", "perpetual"],
+          "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+          "intervals": ["1m", "5m", "15m", "1h", "4h", "1d"],
+          "layers": ["pyne-output"],
+          "maxItems": 500,
+          "maxPoints": 20000
+        }
+      }
+    ],
+    "optional": []
+  },
+  "probes": []
+}

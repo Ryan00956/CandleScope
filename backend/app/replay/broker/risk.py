@@ -83,6 +83,20 @@ def order_reference_price_for_existing(order: ReplayOrder, mark_price: str) -> D
     return Decimal(mark_price)
 
 
+def effective_order_leverage(request: OrderRequest, config: BrokerConfig) -> Decimal:
+    """Resolve request leverage clamped to the session max leverage ceiling."""
+
+    maximum = Decimal(config.limits.max_leverage)
+    if request.leverage is None:
+        return maximum
+    leverage = Decimal(request.leverage)
+    if leverage < 1:
+        _order_rejected("leverage must be at least 1")
+    if leverage > maximum:
+        _risk_rejected("leverage exceeds session max_leverage")
+    return leverage
+
+
 def validate_order_risk(
     *,
     config: BrokerConfig,
@@ -144,7 +158,8 @@ def validate_order_risk(
     if projected_exposure > Decimal(limits.max_position_notional):
         _risk_rejected("order would exceed max_position_notional")
 
-    reservation = quote_round_up(notional / Decimal(limits.max_leverage), config)
+    leverage = effective_order_leverage(request, config)
+    reservation = quote_round_up(notional / leverage, config)
     if reservation > Decimal(account.available_equity):
         _risk_rejected("insufficient available equity for margin reservation")
     return decimal_to_string(reservation, field_name="reserved_margin")
@@ -193,6 +208,7 @@ def build_order_preview(
     fee = fee_for_fill(notional=estimated_notional, maker=False, config=config)
     available_after = Decimal(account.available_equity) - Decimal(reservation)
 
+    leverage = effective_order_leverage(request, config)
     if request.reduce_only:
         maximum = abs(Decimal(position.quantity))
     else:
@@ -209,9 +225,7 @@ def build_order_preview(
             Decimal(0),
             Decimal(config.limits.max_position_notional) - existing_exposure,
         )
-        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * Decimal(
-            config.limits.max_leverage
-        )
+        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * leverage
         maximum = min(
             Decimal(config.instrument.max_quantity),
             Decimal(config.limits.max_order_quantity),

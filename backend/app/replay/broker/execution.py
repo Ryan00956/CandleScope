@@ -714,6 +714,7 @@ class ConservativeBarBroker:
         command_id: str,
         accepted_source_sequence: int | None = None,
         created_time_ms: int | None = None,
+        leverage: str | None = None,
     ) -> tuple[ReplayOrder, ...]:
         """Execute an unambiguous market OPEN, CLOSE, or REVERSE action."""
 
@@ -741,6 +742,7 @@ class ConservativeBarBroker:
                         order_type=OrderType.MARKET,
                         quantity=quantity,
                         reduce_only=False,
+                        leverage=leverage,
                     ),
                     command_id=command_id,
                     accepted_source_sequence=accepted_source_sequence,
@@ -1490,23 +1492,35 @@ class ConservativeBarBroker:
                     "close_position quantity violates the order contract",
                 ) from exc
         elif normalized is CommandType.EXECUTE_POSITION_INTENT:
-            if set(values) != {"intent", "side", "quantity"}:
+            intent_values = dict(values)
+            leverage_value = intent_values.pop("leverage", None)
+            if set(intent_values) != {"intent", "side", "quantity"}:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
                     "execute_position_intent payload is invalid",
                 )
+            if leverage_value is not None and not isinstance(leverage_value, str):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "execute_position_intent leverage must be a Decimal string or null",
+                )
             try:
                 orders = self.execute_position_intent(
-                    intent=str(values["intent"]),
-                    side=(None if values["side"] is None else str(values["side"])),
+                    intent=str(intent_values["intent"]),
+                    side=(
+                        None
+                        if intent_values["side"] is None
+                        else str(intent_values["side"])
+                    ),
                     quantity=(
                         None
-                        if values["quantity"] is None
-                        else str(values["quantity"])
+                        if intent_values["quantity"] is None
+                        else str(intent_values["quantity"])
                     ),
                     command_id=command_id,
                     accepted_source_sequence=source_sequence,
                     created_time_ms=virtual_time_ms,
+                    leverage=leverage_value,
                 )
             except (TypeError, ValueError) as exc:
                 raise ReplayDomainError(

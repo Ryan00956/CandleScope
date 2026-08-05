@@ -883,7 +883,7 @@ class TrainingRunService:
                 snapshot=snapshot,
             )
             payload = dict(
-                self._exact_payload(
+                self._order_payload_with_optional_leverage(
                     order,
                     {
                         "client_order_id",
@@ -4258,7 +4258,7 @@ class TrainingRunService:
             command.type is ReplayV2CommandType.PLACE_ORDER
             and "trade_plan" in command.payload
         ):
-            payload_with_plan = self._exact_payload(
+            payload_with_plan = self._order_payload_with_optional_leverage(
                 command.payload,
                 expected_fields[command.type] | {"trade_plan"},
             )
@@ -4275,6 +4275,16 @@ class TrainingRunService:
                 for key, value in payload_with_plan.items()
                 if key != "trade_plan"
             }
+        elif command.type in {
+            ReplayV2CommandType.PLACE_ORDER,
+            ReplayV2CommandType.EXECUTE_POSITION_INTENT,
+        }:
+            payload = dict(
+                self._order_payload_with_optional_leverage(
+                    command.payload,
+                    expected_fields[command.type],
+                )
+            )
         else:
             payload = dict(
                 self._exact_payload(command.payload, expected_fields[command.type])
@@ -5079,7 +5089,17 @@ class TrainingRunService:
         try:
             quantity = Decimal(str(payload["quantity"]))
             price = Decimal(str(price_value))
-            leverage = Decimal(str(config["max_leverage"]))
+            max_leverage = Decimal(str(config["max_leverage"]))
+            leverage = max_leverage
+            raw_leverage = payload.get("leverage")
+            if raw_leverage is not None:
+                leverage = Decimal(str(raw_leverage))
+                if leverage < 1 or leverage > max_leverage:
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "order leverage must be between 1 and session max_leverage",
+                        status_code=409,
+                    )
             contract_size = Decimal(1)
             history = portfolio.get("account_history")
             if (
@@ -9145,6 +9165,42 @@ class TrainingRunService:
                 details={"missing": sorted(missing), "unknown": sorted(unknown)},
             )
         return payload
+
+    @classmethod
+    def _order_payload_with_optional_leverage(
+        cls,
+        payload: Mapping[str, object],
+        expected: set[str],
+    ) -> Mapping[str, object]:
+        """Exact payload contract with optional per-order leverage ≤ max."""
+
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
+        validated = dict(cls._exact_payload(data, expected))
+        if leverage is None:
+            return validated
+        if not isinstance(leverage, str):
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "leverage must be a canonical Decimal string",
+                status_code=422,
+            )
+        try:
+            normalized = normalize_decimal_string(leverage, field_name="leverage")
+        except (TypeError, ValueError) as exc:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "leverage is invalid",
+                status_code=422,
+            ) from exc
+        if Decimal(normalized) < 1:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "leverage must be at least 1",
+                status_code=422,
+            )
+        validated["leverage"] = normalized
+        return validated
 
     @staticmethod
     def _selection_warmup_bars(request: TrainingRunCreateRequest) -> int:

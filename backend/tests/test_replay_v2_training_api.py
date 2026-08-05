@@ -1169,6 +1169,7 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
                 "reduce_only": False,
                 "limit_price": None,
                 "stop_price": None,
+                "leverage": "2",
             },
         }
         preview = await _request(

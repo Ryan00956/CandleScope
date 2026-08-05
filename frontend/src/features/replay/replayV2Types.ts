@@ -503,6 +503,8 @@ export interface ReplayOrderRequest {
   readonly reduce_only: boolean;
   readonly limit_price: string | null;
   readonly stop_price: string | null;
+  /** Effective leverage ≤ session max; omitted when using max. */
+  readonly leverage?: string | null;
 }
 
 export interface ReplayTradePlanDraft {
@@ -2071,7 +2073,8 @@ export interface TrainingRunMarketSelectionResponse {
 }
 
 function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrderRequest {
-  const order = exactObject(value, fieldName, [
+  const raw = objectValue(value, fieldName);
+  const required = [
     "client_order_id",
     "side",
     "order_type",
@@ -2079,23 +2082,38 @@ function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrder
     "reduce_only",
     "limit_price",
     "stop_price",
-  ]);
+  ] as const;
+  for (const key of required) {
+    if (!Object.hasOwn(raw, key)) {
+      throw new TypeError(`${fieldName} missing ${key}`);
+    }
+  }
+  const unknown = Object.keys(raw).filter((key) => (
+    !(required as readonly string[]).includes(key) && key !== "leverage"
+  ));
+  if (unknown.length > 0) {
+    throw new TypeError(`${fieldName} has unknown ${unknown.join(", ")}`);
+  }
+  const leverage = !Object.hasOwn(raw, "leverage") || raw.leverage === null || raw.leverage === undefined
+    ? null
+    : positiveDecimal(raw.leverage, `${fieldName}.leverage`);
   return {
-    client_order_id: identifier(order.client_order_id, `${fieldName}.client_order_id`),
-    side: enumValue(order.side, ["BUY", "SELL"] as const, `${fieldName}.side`),
+    client_order_id: identifier(raw.client_order_id, `${fieldName}.client_order_id`),
+    side: enumValue(raw.side, ["BUY", "SELL"] as const, `${fieldName}.side`),
     order_type: enumValue(
-      order.order_type,
+      raw.order_type,
       ["MARKET", "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"] as const,
       `${fieldName}.order_type`,
     ),
-    quantity: positiveDecimal(order.quantity, `${fieldName}.quantity`),
-    reduce_only: boolValue(order.reduce_only, `${fieldName}.reduce_only`),
-    limit_price: order.limit_price === null
+    quantity: positiveDecimal(raw.quantity, `${fieldName}.quantity`),
+    reduce_only: boolValue(raw.reduce_only, `${fieldName}.reduce_only`),
+    limit_price: raw.limit_price === null
       ? null
-      : positiveDecimal(order.limit_price, `${fieldName}.limit_price`),
-    stop_price: order.stop_price === null
+      : positiveDecimal(raw.limit_price, `${fieldName}.limit_price`),
+    stop_price: raw.stop_price === null
       ? null
-      : positiveDecimal(order.stop_price, `${fieldName}.stop_price`),
+      : positiveDecimal(raw.stop_price, `${fieldName}.stop_price`),
+    leverage,
   };
 }
 

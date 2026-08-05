@@ -357,6 +357,7 @@ class ReplayOrderRequestPayload(_StrictModel):
     reduce_only: bool
     limit_price: str | None = Field(default=None, min_length=1, max_length=128)
     stop_price: str | None = Field(default=None, min_length=1, max_length=128)
+    leverage: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ReplayTradePlanDraftPayload(_StrictModel):

@@ -221,6 +221,20 @@ test("paper trading dock owns a complete readable surface in both app themes", (
   assert.match(styles, /--replay-rail-text-muted: #5f7086/);
 });
 
+test("order-size slider stays enabled while a changed amount refreshes its preview", () => {
+  const rail = source("src/features/replay/components/ReplayRightRail.tsx");
+
+  assert.match(rail, /const \[maxQuantitySnapshot, setMaxQuantitySnapshot\] = useState/);
+  assert.match(rail, /const \[sizeShareIntent, setSizeShareIntent\] = useState<number \| null>/);
+  assert.match(rail, /setMaxQuantitySnapshot\(\{/);
+  assert.match(rail, /rebaseReplayMaxQuantity\(\{/);
+  assert.match(rail, /sizeShareIntent === null[\s\S]*derivedSizeShare/);
+  assert.match(rail, /const resolvedSizeInput = sizeShareIntent !== null/);
+  assert.match(rail, /value=\{resolvedSizeInput\}/);
+  assert.match(rail, /aria-label="下单金额快速选择"/);
+  assert.match(rail, /onLostPointerCapture=\{\(\) => setSliderDragging\(false\)\}/);
+});
+
 test("right-rail trading workstation keeps positions and account history out of the chart stack", () => {
   const rail = source("src/features/replay/components/ReplayRightRail.tsx");
   const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");

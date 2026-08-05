@@ -442,6 +442,8 @@ class OrderRequest:
     reduce_only: bool
     limit_price: str | None = None
     stop_price: str | None = None
+    # Optional effective leverage for this order; None => broker max_leverage.
+    leverage: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -491,6 +493,15 @@ class OrderRequest:
                 positive=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(
+                self.leverage,
+                field_name="leverage",
+                positive=True,
+            ),
+        )
         if self.order_type is OrderType.MARKET:
             valid = self.limit_price is None and self.stop_price is None
         elif self.order_type is OrderType.LIMIT:
@@ -501,7 +512,7 @@ class OrderRequest:
             raise ValueError("order price fields do not match order_type")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "client_order_id": self.client_order_id,
             "side": self.side.value,
             "order_type": self.order_type.value,
@@ -510,11 +521,17 @@ class OrderRequest:
             "limit_price": self.limit_price,
             "stop_price": self.stop_price,
         }
+        # Keep legacy consumers exact-key compatible when leverage is omitted.
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
+        return payload
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "OrderRequest":
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
         exact_keys(
-            payload,
+            data,
             {
                 "client_order_id",
                 "side",
@@ -525,7 +542,7 @@ class OrderRequest:
                 "stop_price",
             },
         )
-        return cls(**payload)  # type: ignore[arg-type]
+        return cls(**data, leverage=leverage)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)

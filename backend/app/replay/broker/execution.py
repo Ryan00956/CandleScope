@@ -33,6 +33,7 @@ from .models import (
     LedgerAccount,
     LedgerKind,
     LiquidityRole,
+    OrderCapacityRequest,
     OrderRequest,
     OrderSide,
     OrderStatus,
@@ -48,6 +49,7 @@ from .models import (
 )
 from .risk import (
     adverse_market_price,
+    build_order_capacity,
     build_order_preview,
     build_account,
     decimal_multiple,
@@ -430,6 +432,17 @@ class ConservativeBarBroker:
         if not isinstance(request, OrderRequest):
             raise TypeError("request must be OrderRequest")
         return build_order_preview(
+            config=self.config,
+            request=request,
+            position=self._position,
+            account=self._account,
+            orders=self.orders,
+        )
+
+    def order_capacity(self, request: OrderCapacityRequest) -> Mapping[str, object]:
+        if not isinstance(request, OrderCapacityRequest):
+            raise TypeError("request must be OrderCapacityRequest")
+        return build_order_capacity(
             config=self.config,
             request=request,
             position=self._position,

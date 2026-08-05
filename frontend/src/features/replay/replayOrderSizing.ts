@@ -9,6 +9,30 @@ export interface ReplayMaxQuantityRebaseInput {
   readonly reduceOnly: boolean;
 }
 
+export interface ReplayOrderSizingAvailability {
+  readonly sliderDisabled: boolean;
+  readonly quantityExceedsCapacity: boolean;
+}
+
+/**
+ * Derive draft validity only from the independent capacity channel. Preview
+ * failures intentionally are not an input, so they cannot disable the slider.
+ */
+export function replayOrderSizingAvailability(
+  maxQuantity: string | null,
+  draftQuantity: string,
+): ReplayOrderSizingAvailability {
+  const maximum = maxQuantity === null ? Number.NaN : Number(maxQuantity);
+  const quantity = Number(draftQuantity);
+  const validMaximum = Number.isFinite(maximum) && maximum > 0;
+  return {
+    sliderDisabled: !validMaximum,
+    quantityExceedsCapacity: validMaximum
+      && Number.isFinite(quantity)
+      && quantity > maximum,
+  };
+}
+
 function positiveFinite(value: number | null): value is number {
   return value !== null && Number.isFinite(value) && value > 0;
 }
@@ -19,6 +43,17 @@ export function replayOrderPreviewSide(
 ): "BUY" | "SELL" {
   if (positionQuantity > 0) return "BUY";
   if (positionQuantity < 0) return "SELL";
+  return selectedSide;
+}
+
+export function replayOrderContextSide(
+  positionQuantity: number,
+  selectedSide: "BUY" | "SELL",
+  reduceOnly: boolean,
+): "BUY" | "SELL" {
+  if (!reduceOnly) return replayOrderPreviewSide(positionQuantity, selectedSide);
+  if (positionQuantity > 0) return "SELL";
+  if (positionQuantity < 0) return "BUY";
   return selectedSide;
 }
 

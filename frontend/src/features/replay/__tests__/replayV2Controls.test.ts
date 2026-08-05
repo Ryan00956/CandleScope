@@ -3,11 +3,16 @@ import test from "node:test";
 
 import { ReplayV2ApiClient } from "../replayV2Api.js";
 import {
+  parseReplayOrderCapacity,
   parseReplayOrderPreview,
   parseReplayV2CommandResult,
   parseReplayViewerStateResponse,
 } from "../replayV2Types.js";
-import type { ReplayOrderPreviewRequest, ReplayV2Command } from "../replayV2Types.js";
+import type {
+  ReplayOrderCapacityRequest,
+  ReplayOrderPreviewRequest,
+  ReplayV2Command,
+} from "../replayV2Types.js";
 
 
 function viewerState() {
@@ -84,6 +89,33 @@ function orderPreview() {
   };
 }
 
+function orderCapacity() {
+  const preview = orderPreview();
+  return {
+    protocol: "replay.v2",
+    schema_version: "replay.order-capacity.v1",
+    run_id: preview.run_id,
+    track_id: preview.track_id,
+    position_intent: preview.position_intent,
+    revision: preview.revision,
+    cursor: preview.cursor,
+    state_hash: preview.state_hash,
+    execution_fidelity: preview.execution_fidelity,
+    context: {
+      side: "BUY",
+      order_type: "MARKET",
+      reduce_only: false,
+      limit_price: null,
+      stop_price: null,
+      leverage: "5",
+    },
+    reference_price: "100",
+    max_quantity: "10",
+    quote_asset: "USDT",
+    max_leverage: "5",
+  };
+}
+
 test("Phase 3 viewer and command response parsers are strict at the network boundary", () => {
   const viewer = parseReplayViewerStateResponse({
     protocol: "replay.v2",
@@ -114,6 +146,20 @@ test("order preview parser preserves exact Decimal strings and rejects drift", (
     ...orderPreview(),
     cursor: { ...orderPreview().cursor, revision: 7 },
   }), /revision is inconsistent/);
+});
+
+test("order capacity parser keeps the quantity-independent contract strict", () => {
+  const parsed = parseReplayOrderCapacity(orderCapacity());
+  assert.equal(parsed.max_quantity, "10");
+  assert.equal(parsed.context.side, "BUY");
+  assert.throws(() => parseReplayOrderCapacity({
+    ...orderCapacity(),
+    max_quantity: 10,
+  }), /canonical Decimal string/);
+  assert.throws(() => parseReplayOrderCapacity({
+    ...orderCapacity(),
+    quantity: "1",
+  }), /unknown/);
 });
 
 test("order preview API is run-scoped and sends the cursor-bound intent", async () => {
@@ -149,6 +195,38 @@ test("order preview API is run-scoped and sends the cursor-bound intent", async 
     url: "/api/v1/replay/runs/run-1/order-preview",
     body: JSON.stringify(payload),
   }]);
+});
+
+test("order capacity API is run-scoped and never sends a draft quantity", async () => {
+  const requests: Array<{ url: string; body: string | null }> = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input, init) => {
+      requests.push({
+        url: String(input),
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      return new Response(JSON.stringify(orderCapacity()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const payload: ReplayOrderCapacityRequest = {
+    protocol: "replay.v2",
+    expected_revision: 6,
+    expected_cursor: orderCapacity().cursor,
+    position_intent: "OPEN",
+    context: orderCapacity().context as ReplayOrderCapacityRequest["context"],
+  };
+
+  const result = await client.orderCapacity("run-1", payload);
+
+  assert.equal(result.max_quantity, "10");
+  assert.deepEqual(requests, [{
+    url: "/api/v1/replay/runs/run-1/order-capacity",
+    body: JSON.stringify(payload),
+  }]);
+  assert.equal(requests[0]?.body?.includes("quantity"), false);
 });
 
 test("Phase 3 API uses run-scoped viewer, command, and progress routes", async () => {

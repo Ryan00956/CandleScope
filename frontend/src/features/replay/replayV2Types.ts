@@ -507,6 +507,40 @@ export interface ReplayOrderRequest {
   readonly leverage?: string | null;
 }
 
+export interface ReplayOrderCapacityContext {
+  readonly side: "BUY" | "SELL";
+  readonly order_type: "MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET";
+  readonly reduce_only: boolean;
+  readonly limit_price: string | null;
+  readonly stop_price: string | null;
+  readonly leverage?: string | null;
+}
+
+export interface ReplayOrderCapacityRequest {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly expected_revision: number;
+  readonly expected_cursor: ReplayV2Cursor;
+  readonly position_intent: "NET" | "OPEN";
+  readonly context: ReplayOrderCapacityContext;
+}
+
+export interface ReplayOrderCapacity {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly schema_version: "replay.order-capacity.v1";
+  readonly run_id: string;
+  readonly track_id: string;
+  readonly position_intent: "NET" | "OPEN";
+  readonly revision: number;
+  readonly cursor: ReplayV2Cursor;
+  readonly state_hash: `sha256:${string}`;
+  readonly execution_fidelity: "BAR_CONSERVATIVE" | "AGG_TRADE_TAPE";
+  readonly context: ReplayOrderCapacityContext;
+  readonly reference_price: string;
+  readonly max_quantity: string;
+  readonly quote_asset: string;
+  readonly max_leverage: string;
+}
+
 export interface ReplayTradePlanDraft {
   readonly sizing_mode: "RISK_AMOUNT" | "ACCOUNT_RISK_PERCENT";
   readonly risk_amount: string | null;
@@ -2117,6 +2151,45 @@ function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrder
   };
 }
 
+function parseReplayOrderCapacityContext(
+  value: unknown,
+  fieldName: string,
+): ReplayOrderCapacityContext {
+  const raw = objectValue(value, fieldName);
+  const required = [
+    "side",
+    "order_type",
+    "reduce_only",
+    "limit_price",
+    "stop_price",
+  ] as const;
+  for (const key of required) {
+    if (!Object.hasOwn(raw, key)) throw new TypeError(`${fieldName} missing ${key}`);
+  }
+  const unknown = Object.keys(raw).filter((key) => (
+    !(required as readonly string[]).includes(key) && key !== "leverage"
+  ));
+  if (unknown.length > 0) throw new TypeError(`${fieldName} has unknown ${unknown.join(", ")}`);
+  return {
+    side: enumValue(raw.side, ["BUY", "SELL"] as const, `${fieldName}.side`),
+    order_type: enumValue(
+      raw.order_type,
+      ["MARKET", "LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"] as const,
+      `${fieldName}.order_type`,
+    ),
+    reduce_only: boolValue(raw.reduce_only, `${fieldName}.reduce_only`),
+    limit_price: raw.limit_price === null
+      ? null
+      : positiveDecimal(raw.limit_price, `${fieldName}.limit_price`),
+    stop_price: raw.stop_price === null
+      ? null
+      : positiveDecimal(raw.stop_price, `${fieldName}.stop_price`),
+    leverage: !Object.hasOwn(raw, "leverage") || raw.leverage === null || raw.leverage === undefined
+      ? null
+      : positiveDecimal(raw.leverage, `${fieldName}.leverage`),
+  };
+}
+
 function parseReplayTradePlanSnapshot(
   value: unknown,
   fieldName: string,
@@ -2262,6 +2335,60 @@ export function parseReplayOrderPreview(value: unknown): ReplayOrderPreview {
     trade_plan: schemaVersion === "replay.order-preview.v1"
       ? null
       : parseReplayTradePlanSnapshot(preview.trade_plan, "order preview.trade_plan"),
+  };
+}
+
+export function parseReplayOrderCapacity(value: unknown): ReplayOrderCapacity {
+  const capacity = exactObject(value, "order capacity", [
+    "protocol",
+    "schema_version",
+    "run_id",
+    "track_id",
+    "position_intent",
+    "revision",
+    "cursor",
+    "state_hash",
+    "execution_fidelity",
+    "context",
+    "reference_price",
+    "max_quantity",
+    "quote_asset",
+    "max_leverage",
+  ]);
+  if (
+    capacity.protocol !== REPLAY_V2_PROTOCOL
+    || capacity.schema_version !== "replay.order-capacity.v1"
+  ) {
+    throw new TypeError("order capacity contract is unsupported");
+  }
+  const revision = counter(capacity.revision, "order capacity.revision");
+  const cursor = parseCursor(capacity.cursor, "order capacity.cursor");
+  if (cursor.revision !== revision) {
+    throw new TypeError("order capacity cursor revision is inconsistent");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: "replay.order-capacity.v1",
+    run_id: identifier(capacity.run_id, "order capacity.run_id"),
+    track_id: identifier(capacity.track_id, "order capacity.track_id"),
+    position_intent: enumValue(
+      capacity.position_intent,
+      ["NET", "OPEN"] as const,
+      "order capacity.position_intent",
+    ),
+    revision,
+    cursor,
+    state_hash: digest(capacity.state_hash, "order capacity.state_hash"),
+    execution_fidelity: enumValue(
+      capacity.execution_fidelity,
+      ["BAR_CONSERVATIVE", "AGG_TRADE_TAPE"] as const,
+      "order capacity.execution_fidelity",
+    ),
+    context: parseReplayOrderCapacityContext(capacity.context, "order capacity.context"),
+    reference_price: positiveDecimal(capacity.reference_price, "order capacity.reference_price"),
+    max_quantity: canonicalDecimal(capacity.max_quantity, "order capacity.max_quantity"),
+    quote_asset: identifier(capacity.quote_asset, "order capacity.quote_asset"),
+    max_leverage: positiveDecimal(capacity.max_leverage, "order capacity.max_leverage"),
   };
 }
 

@@ -546,6 +546,73 @@ class OrderRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderCapacityRequest:
+    """Quantity-independent order context used to calculate a safe maximum."""
+
+    side: OrderSide
+    order_type: OrderType
+    reduce_only: bool
+    limit_price: str | None = None
+    stop_price: str | None = None
+    leverage: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "side", coerce_enum(OrderSide, self.side, "side"))
+        object.__setattr__(
+            self,
+            "order_type",
+            coerce_enum(OrderType, self.order_type, "order_type"),
+        )
+        if not isinstance(self.reduce_only, bool):
+            raise TypeError("reduce_only must be a boolean")
+        object.__setattr__(
+            self,
+            "limit_price",
+            optional_decimal(self.limit_price, field_name="limit_price", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "stop_price",
+            optional_decimal(self.stop_price, field_name="stop_price", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(self.leverage, field_name="leverage", positive=True),
+        )
+        if self.order_type is OrderType.MARKET:
+            valid = self.limit_price is None and self.stop_price is None
+        elif self.order_type is OrderType.LIMIT:
+            valid = self.limit_price is not None and self.stop_price is None
+        else:
+            valid = self.limit_price is None and self.stop_price is not None
+        if not valid:
+            raise ValueError("order price fields do not match order_type")
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "side": self.side.value,
+            "order_type": self.order_type.value,
+            "reduce_only": self.reduce_only,
+            "limit_price": self.limit_price,
+            "stop_price": self.stop_price,
+        }
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
+        return payload
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "OrderCapacityRequest":
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
+        exact_keys(
+            data,
+            {"side", "order_type", "reduce_only", "limit_price", "stop_price"},
+        )
+        return cls(**data, leverage=leverage)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
 class ReplayOrder:
     order_id: str
     client_order_id: str

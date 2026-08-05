@@ -221,12 +221,15 @@ test("paper trading dock owns a complete readable surface in both app themes", (
   assert.match(styles, /--replay-rail-text-muted: #5f7086/);
 });
 
-test("order-size slider stays enabled while a changed amount refreshes its preview", () => {
+test("order-size capacity is independent from draft preview failures", () => {
   const rail = source("src/features/replay/components/ReplayRightRail.tsx");
 
   assert.match(rail, /const \[maxQuantitySnapshot, setMaxQuantitySnapshot\] = useState/);
+  assert.match(rail, /const \[capacityState, setCapacityState\] = useState/);
+  assert.match(rail, /viewer\.actions\.orderCapacity/);
   assert.match(rail, /const \[sizeShareIntent, setSizeShareIntent\] = useState<number \| null>/);
   assert.match(rail, /setMaxQuantitySnapshot\(\{/);
+  assert.match(rail, /replayOrderSizingAvailability\(estimatedMaxQuantity, quantity\)/);
   assert.match(rail, /rebaseReplayMaxQuantity\(\{/);
   assert.match(rail, /sizeShareIntent === null[\s\S]*derivedSizeShare/);
   assert.match(rail, /const resolvedSizeInput = sizeShareIntent !== null/);

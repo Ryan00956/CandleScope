@@ -31,6 +31,7 @@ from app.replay.training.models import (
     TrainingRunCreateRequest,
 )
 from app.replay.training.multitrack import StableMarketEvent, stable_market_event_order
+from app.replay.training.service import TrainingRunService
 from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
@@ -49,6 +50,23 @@ from tests.fixtures.replay.trade_service_fakes import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_order_capacity_is_clamped_by_shared_run_equity() -> None:
+    maximum = TrainingRunService._shared_order_capacity_quantity(
+        adapter_max_quantity="10",
+        reference_price="100",
+        payload={"reduce_only": False, "leverage": "2"},
+        selected_track={"track_id": "track-1"},
+        portfolio={
+            "margin_mode": "CROSS",
+            "available_equity": "100",
+            "instrument_rules": [],
+        },
+        binding={"adapter_config": {"max_leverage": "5"}},
+    )
+
+    assert maximum == "2"
 
 
 def _multi_repository(*symbols: str):

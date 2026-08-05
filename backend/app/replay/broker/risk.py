@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from ..errors import ReplayDomainError, ReplayErrorCode
 from .models import (
     Account,
     BrokerConfig,
+    OrderCapacityRequest,
     OrderRequest,
     OrderSide,
     Position,
@@ -16,6 +17,14 @@ from .models import (
     canonical_decimal,
     decimal_to_string,
 )
+
+
+class OrderRiskContext(Protocol):
+    side: OrderSide
+    reduce_only: bool
+    limit_price: str | None
+    stop_price: str | None
+    leverage: str | None
 
 
 def decimal_multiple(value: Decimal, step: Decimal) -> bool:
@@ -67,7 +76,7 @@ def fee_for_fill(
     return decimal_to_string(fee, field_name="fee")
 
 
-def order_reference_price(request: OrderRequest, mark_price: str) -> Decimal:
+def order_reference_price(request: OrderRiskContext, mark_price: str) -> Decimal:
     if request.limit_price is not None:
         return Decimal(request.limit_price)
     if request.stop_price is not None:
@@ -83,7 +92,7 @@ def order_reference_price_for_existing(order: ReplayOrder, mark_price: str) -> D
     return Decimal(mark_price)
 
 
-def effective_order_leverage(request: OrderRequest, config: BrokerConfig) -> Decimal:
+def effective_order_leverage(request: OrderRiskContext, config: BrokerConfig) -> Decimal:
     """Resolve request leverage clamped to the session max leverage ceiling."""
 
     maximum = Decimal(config.limits.max_leverage)
@@ -165,6 +174,95 @@ def validate_order_risk(
     return decimal_to_string(reservation, field_name="reserved_margin")
 
 
+def build_order_capacity(
+    *,
+    config: BrokerConfig,
+    request: OrderCapacityRequest,
+    position: Position,
+    account: Account,
+    orders: Iterable[ReplayOrder],
+) -> dict[str, object]:
+    """Calculate order capacity without depending on a draft quantity."""
+
+    all_orders = tuple(orders)
+    open_orders = tuple(
+        order
+        for order in all_orders
+        if order.status.value in {"OPEN", "PARTIALLY_FILLED"}
+    )
+    if len(all_orders) >= config.limits.max_orders:
+        raise ReplayDomainError(
+            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+            "broker order capacity exceeded",
+        )
+    if len(open_orders) >= config.limits.max_open_orders:
+        _risk_rejected("open order limit exceeded")
+
+    filters = config.instrument
+    for field_name, value in (
+        ("limit_price", request.limit_price),
+        ("stop_price", request.stop_price),
+    ):
+        if value is not None and not decimal_multiple(
+            Decimal(value),
+            Decimal(filters.price_tick),
+        ):
+            _order_rejected(f"{field_name} is not aligned to instrument tick")
+
+    reference = order_reference_price(request, position.mark_price)
+    leverage = effective_order_leverage(request, config)
+    if request.reduce_only:
+        position_quantity = Decimal(position.quantity)
+        if position_quantity == 0:
+            _order_rejected("reduce-only order requires an open position")
+        expected_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
+        if request.side is not expected_side:
+            _order_rejected("reduce-only side would increase the position")
+        maximum = abs(position_quantity)
+    else:
+        existing_exposure = abs(Decimal(position.quantity)) * Decimal(
+            position.mark_price
+        )
+        for order in open_orders:
+            if order.reduce_only:
+                continue
+            existing_exposure += Decimal(order.remaining_quantity) * (
+                order_reference_price_for_existing(order, position.mark_price)
+            )
+        notional_capacity = max(
+            Decimal(0),
+            Decimal(config.limits.max_position_notional) - existing_exposure,
+        )
+        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * leverage
+        maximum = min(
+            Decimal(filters.max_quantity),
+            Decimal(config.limits.max_order_quantity),
+            Decimal(filters.max_notional) / reference,
+            notional_capacity / reference,
+            margin_capacity / reference,
+        )
+    maximum = round_to_step(
+        max(Decimal(0), maximum),
+        Decimal(filters.quantity_step),
+        upward=False,
+    )
+    minimum_for_notional = round_to_step(
+        Decimal(filters.min_notional) / reference,
+        Decimal(filters.quantity_step),
+        upward=True,
+    )
+    if maximum < max(Decimal(filters.min_quantity), minimum_for_notional):
+        maximum = Decimal(0)
+    return {
+        "schema_version": "replay.order-capacity.v1",
+        "context": request.to_dict(),
+        "reference_price": decimal_to_string(reference, field_name="reference_price"),
+        "max_quantity": decimal_to_string(maximum, field_name="max_quantity"),
+        "quote_asset": account.quote_asset,
+        "max_leverage": config.limits.max_leverage,
+    }
+
+
 def build_order_preview(
     *,
     config: BrokerConfig,
@@ -191,6 +289,20 @@ def build_order_preview(
     if len(open_orders) >= config.limits.max_open_orders:
         _risk_rejected("open order limit exceeded")
 
+    capacity = build_order_capacity(
+        config=config,
+        request=OrderCapacityRequest(
+            side=request.side,
+            order_type=request.order_type,
+            reduce_only=request.reduce_only,
+            limit_price=request.limit_price,
+            stop_price=request.stop_price,
+            leverage=request.leverage,
+        ),
+        position=position,
+        account=account,
+        orders=all_orders,
+    )
     reservation = validate_order_risk(
         config=config,
         request=request,
@@ -208,36 +320,6 @@ def build_order_preview(
     fee = fee_for_fill(notional=estimated_notional, maker=False, config=config)
     available_after = Decimal(account.available_equity) - Decimal(reservation)
 
-    leverage = effective_order_leverage(request, config)
-    if request.reduce_only:
-        maximum = abs(Decimal(position.quantity))
-    else:
-        existing_exposure = abs(Decimal(position.quantity)) * Decimal(
-            position.mark_price
-        )
-        for order in open_orders:
-            if order.reduce_only:
-                continue
-            existing_exposure += Decimal(order.remaining_quantity) * (
-                order_reference_price_for_existing(order, position.mark_price)
-            )
-        notional_capacity = max(
-            Decimal(0),
-            Decimal(config.limits.max_position_notional) - existing_exposure,
-        )
-        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * leverage
-        maximum = min(
-            Decimal(config.instrument.max_quantity),
-            Decimal(config.limits.max_order_quantity),
-            Decimal(config.instrument.max_notional) / reference,
-            notional_capacity / reference,
-            margin_capacity / reference,
-        )
-    maximum = round_to_step(
-        max(Decimal(0), maximum),
-        Decimal(config.instrument.quantity_step),
-        upward=False,
-    )
     return {
         "schema_version": "replay.order-preview.v1",
         "order": request.to_dict(),
@@ -257,10 +339,7 @@ def build_order_preview(
             available_after,
             field_name="available_equity_after",
         ),
-        "max_quantity": decimal_to_string(
-            maximum,
-            field_name="max_quantity",
-        ),
+        "max_quantity": capacity["max_quantity"],
         "quote_asset": account.quote_asset,
         "max_leverage": config.limits.max_leverage,
     }

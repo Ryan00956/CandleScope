@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.replay.broker.models import (
+    OrderCapacityRequest,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -55,6 +56,27 @@ def test_order_preview_reuses_risk_math_without_mutating_broker() -> None:
         "quote_asset": "USDT",
         "max_leverage": "5",
     }
+
+
+def test_order_capacity_survives_an_oversized_draft_rejection() -> None:
+    broker = make_broker()
+    before = broker.state_hash
+    context = OrderCapacityRequest(
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        reduce_only=False,
+    )
+
+    first = broker.order_capacity(context)
+    with pytest.raises(ReplayDomainError) as rejected:
+        broker.preview_order(request(client_order_id="oversized", quantity="999999999"))
+    second = broker.order_capacity(context)
+
+    assert rejected.value.code is ReplayErrorCode.ORDER_REJECTED
+    assert first == second
+    assert first["schema_version"] == "replay.order-capacity.v1"
+    assert first["max_quantity"] == "10"
+    assert broker.state_hash == before
 
 
 def test_position_protection_replace_clear_and_failure_are_atomic() -> None:

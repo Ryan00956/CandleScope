@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rebaseReplayMaxQuantity, replayOrderPreviewSide } from "../replayOrderSizing.js";
+import {
+  rebaseReplayMaxQuantity,
+  replayOrderContextSide,
+  replayOrderPreviewSide,
+  replayOrderSizingAvailability,
+} from "../replayOrderSizing.js";
 
 const BASE_INPUT = {
   previousMaxQuantity: 0.5,
@@ -49,4 +54,22 @@ test("previews the only non-reversing side once a position is open", () => {
   assert.equal(replayOrderPreviewSide(0, "SELL"), "SELL");
   assert.equal(replayOrderPreviewSide(1, "SELL"), "BUY");
   assert.equal(replayOrderPreviewSide(-1, "BUY"), "SELL");
+});
+
+test("capacity context follows the closing side for reduce-only orders", () => {
+  assert.equal(replayOrderContextSide(1, "BUY", true), "SELL");
+  assert.equal(replayOrderContextSide(-1, "SELL", true), "BUY");
+  assert.equal(replayOrderContextSide(0, "SELL", true), "SELL");
+  assert.equal(replayOrderContextSide(1, "SELL", false), "BUY");
+});
+
+test("an oversized rejected draft cannot destroy independent slider capacity", () => {
+  const authoritativeCapacity = "0.50898188";
+  const oversized = replayOrderSizingAvailability(authoritativeCapacity, "999999999");
+  assert.equal(oversized.sliderDisabled, false);
+  assert.equal(oversized.quantityExceedsCapacity, true);
+
+  const corrected = replayOrderSizingAvailability(authoritativeCapacity, "0.001");
+  assert.equal(corrected.sliderDisabled, false);
+  assert.equal(corrected.quantityExceedsCapacity, false);
 });

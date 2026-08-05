@@ -7,11 +7,17 @@ import {
   REPLAY_ACTIVITY_VIEW_LIMIT,
   replayOwnsController,
 } from "../replayUiModel.js";
-import { defaultReplayV2Api } from "../replayV2Api.js";
-import { rebaseReplayMaxQuantity, replayOrderPreviewSide } from "../replayOrderSizing.js";
+import { defaultReplayV2Api, ReplayV2ApiError } from "../replayV2Api.js";
+import {
+  rebaseReplayMaxQuantity,
+  replayOrderContextSide,
+  replayOrderSizingAvailability,
+} from "../replayOrderSizing.js";
 import type { ReplayClosedTrade } from "../replayTypes.js";
 import type {
   ReplayOrderPreview,
+  ReplayOrderCapacity,
+  ReplayOrderCapacityContext,
   ReplayOrderRequest,
   ReplayTradePlanDraft,
   ReplayAccountOrderScope,
@@ -285,6 +291,16 @@ function eventTime(record: JsonRecord): number | null {
 }
 
 function commandErrorMessage(error: unknown): string {
+  if (error instanceof ReplayV2ApiError) {
+    if (error.code === "RUN_ACCOUNT_MARGIN_EXCEEDED") {
+      const available = finiteNumber(error.details.available_equity);
+      return available === null
+        ? "下单尺寸超过当前账户可用保证金"
+        : `下单尺寸超过当前可用保证金（可用 ${formatDecimal(available, 4)}）`;
+    }
+    if (error.code === "RISK_LIMIT_EXCEEDED") return `当前风控上限不允许此订单：${error.message}`;
+    if (error.code === "ORDER_REJECTED") return `订单参数未通过校验：${error.message}`;
+  }
   return error instanceof Error ? error.message : "命令提交失败，请等待状态收敛后重试";
 }
 
@@ -360,6 +376,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     result: ReplayOrderPreview | null;
     error: string | null;
   }> | null>(null);
+  const [capacityState, setCapacityState] = useState<Readonly<{
+    key: string;
+    status: "pending" | "ready" | "error";
+    result: ReplayOrderCapacity | null;
+    error: string | null;
+  }> | null>(null);
   const [maxQuantitySnapshot, setMaxQuantitySnapshot] = useState<Readonly<{
     key: string;
     sizingKey: string;
@@ -388,7 +410,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const rule = selectedRule(contract, selectedTrackId);
   const selectedPosition = portfolio?.positions.find((item) => item.track_id === selectedTrackId) ?? null;
   const positionQty = finiteNumber(selectedPosition?.position.quantity) ?? 0;
-  const previewSide = replayOrderPreviewSide(positionQty, side);
+  const previewSide = replayOrderContextSide(positionQty, side, reduceOnly);
   const maxLeverage = Math.max(1, finiteNumber(config?.max_leverage) ?? 1);
   const [selectedLeverage, setLeverage] = useState(maxLeverage);
   const leverage = Math.min(Math.max(1, selectedLeverage), maxLeverage);
@@ -474,6 +496,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     tradeReason,
   ]);
   const previewOrder = viewer.actions.previewOrder;
+  const orderCapacity = viewer.actions.orderCapacity;
   const previewPositionIntent = orderType === "MARKET" && !reduceOnly ? "OPEN" : "NET";
   const previewKey = JSON.stringify([
     selectedTrackId,
@@ -506,7 +529,102 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       viewer.viewerState === null
       || store.connectionState !== "connected"
       || store.virtualTimeMs === null
+      || (orderType !== "MARKET" && !price.trim())
+    ) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = globalThis.setTimeout(() => {
+      const context: ReplayOrderCapacityContext = {
+        side: previewSide,
+        order_type: orderType,
+        reduce_only: reduceOnly,
+        limit_price: orderType === "LIMIT" ? price : null,
+        stop_price: orderType === "STOP_MARKET" || orderType === "TAKE_PROFIT_MARKET"
+          ? price
+          : null,
+        leverage: String(leverage),
+      };
+      setCapacityState({
+        key: maxQuantityContextKey,
+        status: "pending",
+        result: null,
+        error: null,
+      });
+      void orderCapacity(
+        context,
+        previewPositionIntent,
+        controller.signal,
+      ).then((result) => {
+        if (controller.signal.aborted) return;
+        setMaxQuantitySnapshot({
+          key: maxQuantityContextKey,
+          sizingKey: maxQuantitySizingKey,
+          value: result.max_quantity,
+          referencePrice: finiteNumber(result.reference_price),
+          availableEquity: sizingAvailableEquity,
+          leverage,
+        });
+        setCapacityState({
+          key: maxQuantityContextKey,
+          status: "ready",
+          result,
+          error: null,
+        });
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setCapacityState({
+          key: maxQuantityContextKey,
+          status: "error",
+          result: null,
+          error: commandErrorMessage(error),
+        });
+      });
+    }, 0);
+    return () => {
+      globalThis.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    leverage,
+    maxQuantityContextKey,
+    maxQuantitySizingKey,
+    orderCapacity,
+    orderType,
+    previewSide,
+    previewPositionIntent,
+    price,
+    reduceOnly,
+    sizingAvailableEquity,
+    store.connectionState,
+    store.virtualTimeMs,
+    viewer.viewerState,
+  ]);
+  const currentCapacityState = capacityState?.key === maxQuantityContextKey
+    ? capacityState
+    : null;
+  const capacity = currentCapacityState?.status === "ready"
+    ? currentCapacityState.result
+    : null;
+  const capacityPending = currentCapacityState?.status === "pending";
+  const capacityError = currentCapacityState?.status === "error"
+    ? currentCapacityState.error
+    : null;
+  const estimatedMaxQuantity = capacity?.max_quantity
+    ?? (maxQuantitySnapshot?.key === maxQuantityContextKey
+      ? maxQuantitySnapshot.value
+      : rebasedMaxQuantity === null
+        ? null
+        : quantityForStep(rebasedMaxQuantity, quantityStep));
+  const sizingAvailability = replayOrderSizingAvailability(estimatedMaxQuantity, quantity);
+  const quantityExceedsCapacity = sizingAvailability.quantityExceedsCapacity;
+  useEffect(() => {
+    if (
+      viewer.viewerState === null
+      || store.connectionState !== "connected"
+      || store.virtualTimeMs === null
       || !quantity.trim()
+      || quantityExceedsCapacity
       || (orderType !== "MARKET" && !price.trim())
       || (tradePlanDraft !== null && (
         !riskValue.trim()
@@ -544,14 +662,6 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         controller.signal,
       ).then((result) => {
         if (controller.signal.aborted) return;
-        setMaxQuantitySnapshot({
-          key: maxQuantityContextKey,
-          sizingKey: maxQuantitySizingKey,
-          value: result.max_quantity,
-          referencePrice: finiteNumber(result.reference_price),
-          availableEquity: sizingAvailableEquity,
-          leverage,
-        });
         setPreviewState({
           key: previewKey,
           status: "ready",
@@ -595,6 +705,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     invalidationPrice,
     maxQuantityContextKey,
     maxQuantitySizingKey,
+    quantityExceedsCapacity,
     sizingAvailableEquity,
     viewer.viewerState,
   ]);
@@ -606,13 +717,9 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const previewError = currentPreviewState?.status === "error"
     ? currentPreviewState.error
     : null;
-  const liveMaxQuantity = preview?.max_quantity ?? null;
-  const estimatedMaxQuantity = liveMaxQuantity
-    ?? (maxQuantitySnapshot?.key === maxQuantityContextKey
-      ? maxQuantitySnapshot.value
-      : rebasedMaxQuantity === null
-        ? null
-        : quantityForStep(rebasedMaxQuantity, quantityStep));
+  const capacityValidationError = quantityExceedsCapacity
+    ? `输入尺寸超过当前上限；最多可下 ${formatDecimal(estimatedMaxQuantity, 8)} ${quantityAsset}`
+    : null;
   const isSpot = config?.market_type.toLowerCase().includes("spot") ?? false;
   const positionSide: "flat" | "long" | "short" = positionQty > 0
     ? "long"
@@ -640,6 +747,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     : sizeShareIntent === null
       ? derivedSizeShare
       : Math.round(sizeShareIntent * 100);
+  const displaySizeShareLabel = quantityExceedsCapacity ? ">100" : String(displaySizeShare);
 
   const setSizeShare = (share: number) => {
     const maximum = maxSizeValue;
@@ -705,7 +813,6 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       setNotice({ tone: "error", message: `杠杆须在 1–${maxLeverage}x 之间` });
       return;
     }
-    setSide(nextSide);
     const order: ReplayOrderRequest = {
       client_order_id: clientOrderId,
       side: nextSide,
@@ -720,8 +827,67 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     const planForSide = tradePlanEnabled && tradePlanEligible && !reduceOnly
       ? tradePlanDraft
       : null;
-    setNotice({ tone: "pending", message: "正在校验同侧预览…" });
+    const sideForContext = replayOrderContextSide(positionQty, nextSide, reduceOnly);
+    const sideContext: ReplayOrderCapacityContext = {
+      side: sideForContext,
+      order_type: orderType,
+      reduce_only: reduceOnly,
+      limit_price: orderType === "LIMIT" ? price : null,
+      stop_price: orderType === "STOP_MARKET" || orderType === "TAKE_PROFIT_MARKET"
+        ? price
+        : null,
+      leverage: String(leverage),
+    };
+    const sideSizingKey = JSON.stringify([
+      selectedTrackId,
+      sideForContext,
+      orderType,
+      reduceOnly,
+      reduceOnly ? positionQty : null,
+    ]);
+    const sideContextKey = JSON.stringify([
+      selectedTrackId,
+      store.revision,
+      store.sourceSequence,
+      store.virtualTimeMs,
+      sideForContext,
+      orderType,
+      reduceOnly,
+      price,
+      leverage,
+    ]);
+    setNotice({ tone: "pending", message: "正在获取同侧可下上限…" });
     try {
+      const sideCapacity = await orderCapacity(sideContext, intent);
+      setCapacityState({
+        key: sideContextKey,
+        status: "ready",
+        result: sideCapacity,
+        error: null,
+      });
+      setMaxQuantitySnapshot({
+        key: sideContextKey,
+        sizingKey: sideSizingKey,
+        value: sideCapacity.max_quantity,
+        referencePrice: finiteNumber(sideCapacity.reference_price),
+        availableEquity: sizingAvailableEquity,
+        leverage,
+      });
+      setSide(nextSide);
+      const requestedQuantity = finiteNumber(order.quantity);
+      const maximumQuantity = finiteNumber(sideCapacity.max_quantity);
+      if (
+        requestedQuantity === null
+        || maximumQuantity === null
+        || requestedQuantity > maximumQuantity
+      ) {
+        setNotice({
+          tone: "error",
+          message: `输入尺寸超过当前上限；最多可下 ${formatDecimal(sideCapacity.max_quantity, 8)} ${quantityAsset}`,
+        });
+        return;
+      }
+      setNotice({ tone: "pending", message: "正在校验同侧预览…" });
       const sidePreview = await previewOrder(order, intent, planForSide);
       if (sidePreview.order.side !== nextSide) {
         setNotice({ tone: "error", message: "预览方向与提交方向不一致，已取消提交" });
@@ -866,7 +1032,9 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
                  <input
                    data-replay-field="order-quantity"
                    value={resolvedSizeInput}
-                 inputMode="decimal"
+                   inputMode="decimal"
+                   aria-invalid={quantityExceedsCapacity || undefined}
+                   aria-describedby="replay-order-size-feedback"
                  onChange={(event) => {
                    setSizeShareIntent(null);
                    setSizeInput(event.target.value);
@@ -895,7 +1063,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             max={100}
             step={1}
             value={displaySizeShare}
-            disabled={maxSizeValue === null}
+            disabled={sizingAvailability.sliderDisabled || maxSizeValue === null}
             onPointerDown={() => {
               setSliderDragging(true);
               setSliderPct(displaySizeShare);
@@ -922,7 +1090,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
               <button
                 key={share}
                 type="button"
-                disabled={maxSizeValue === null}
+                disabled={sizingAvailability.sliderDisabled || maxSizeValue === null}
                 onClick={() => setSizeShare(share)}
               >{share * 100}%</button>
             ))}
@@ -934,7 +1102,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
                 ? ` · ${formatDecimal(estimatedMaxQuantity)} ${quantityAsset}`
                 : ""}
             </span>
-            <span>{displaySizeShare}%</span>
+            <span>{displaySizeShareLabel}%</span>
           </div>
         </div>
 
@@ -999,7 +1167,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             data-side="BUY"
             data-replay-action="place-order"
             title={buyGate.title || undefined}
-            disabled={!commandReady || submitting || !buyGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
+            disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !buyGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
             onClick={() => void placeOrderWithSide("BUY")}
           >{submitting && side === "BUY" ? "提交中…" : ctaLabel("BUY")}</button>
           <button
@@ -1008,13 +1176,13 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             data-side="SELL"
             data-replay-action="place-order"
             title={sellGate.title || undefined}
-            disabled={!commandReady || submitting || !sellGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
+            disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !sellGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
             onClick={() => void placeOrderWithSide("SELL")}
           >{submitting && side === "SELL" ? "提交中…" : ctaLabel("SELL")}</button>
         </div>
 
-        <div className="replay-trade-notice" role={notice?.tone === "error" ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? "idle"}>
-          {notice?.message ?? previewError ?? viewer.error ?? "提交前会按点击方向重新预览并校验游标、保证金与数量上限。"}
+        <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null ? "error" : "idle")}>
+          {notice?.message ?? capacityValidationError ?? capacityError ?? previewError ?? viewer.error ?? "提交前会按点击方向重新校验游标、保证金与数量上限。"}
         </div>
       </section>
     </div>

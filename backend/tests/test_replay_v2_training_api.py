@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -1172,6 +1173,30 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
                 "leverage": "2",
             },
         }
+        capacity_payload = {
+            "protocol": "replay.v2",
+            "expected_revision": before["revision"],
+            "expected_cursor": preview_payload["expected_cursor"],
+            "position_intent": "OPEN",
+            "context": {
+                "side": "BUY",
+                "order_type": "MARKET",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+                "leverage": "2",
+            },
+        }
+        capacity = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/order-capacity",
+            json=capacity_payload,
+        )
+        assert capacity.status_code == 200, capacity.text
+        assert capacity.json()["schema_version"] == "replay.order-capacity.v1"
+        assert capacity.json()["context"] == capacity_payload["context"]
+        assert Decimal(capacity.json()["max_quantity"]) > 0
         preview = await _request(
             app,
             "POST",
@@ -1186,6 +1211,25 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
         after = (await _request(app, "GET", session_path)).json()["snapshot"]
         assert after["revision"] == before["revision"]
         assert after["state_hash"] == before["state_hash"]
+
+        oversized = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/order-preview",
+            json={
+                **preview_payload,
+                "order": {**preview_payload["order"], "quantity": "999999999"},
+            },
+        )
+        assert oversized.status_code in {409, 422}
+        capacity_after_rejection = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/order-capacity",
+            json=capacity_payload,
+        )
+        assert capacity_after_rejection.status_code == 200
+        assert capacity_after_rejection.json()["max_quantity"] == capacity.json()["max_quantity"]
 
         malformed = await _request(
             app,

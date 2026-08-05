@@ -15,7 +15,8 @@ import {
 
 export interface UseOrderBookRuntimeOptions {
   identity: OrderBookIdentity;
-  railCollapsed: boolean;
+  /** Whether the order-book rail view is currently open. */
+  orderBookOpen: boolean;
 }
 
 function normalizeIdentity(identity: OrderBookIdentity): OrderBookIdentity {
@@ -43,7 +44,7 @@ function updateIntervals(identity: OrderBookIdentity): readonly OrderBookUpdateI
 
 export function useOrderBookRuntime({
   identity: rawIdentity,
-  railCollapsed,
+  orderBookOpen,
 }: UseOrderBookRuntimeOptions): OrderBookRuntime {
   const { exchange, marketType, symbol } = rawIdentity;
   const identity = useMemo(() => normalizeIdentity({ exchange, marketType, symbol }), [
@@ -56,7 +57,7 @@ export function useOrderBookRuntime({
   const [retryRevision, setRetryRevision] = useState(0);
   const message = supportMessage(identity);
   const supported = message === null;
-  const enabled = supported && !railCollapsed && !preferences.collapsed;
+  const enabled = supported && orderBookOpen;
   const availableUpdateIntervals = updateIntervals(identity);
   const defaultUpdateIntervalMs: OrderBookUpdateIntervalMs = (
     identity.marketType === "spot" ? 1000 : 250
@@ -76,7 +77,7 @@ export function useOrderBookRuntime({
       return undefined;
     }
     if (!enabled) {
-      store.reset("idle", railCollapsed ? "右侧栏已收起" : "订单簿已折叠");
+      store.reset("idle", orderBookOpen ? "订单簿不可用" : "盘口面板未打开");
       return undefined;
     }
     const wsBase = httpBaseToWsBase(API_BASE);
@@ -100,7 +101,7 @@ export function useOrderBookRuntime({
     preferences.mode,
     preferences.partialDepth,
     effectiveUpdateIntervalMs,
-    railCollapsed,
+    orderBookOpen,
     retryRevision,
     store,
     streamPriceGrouping,

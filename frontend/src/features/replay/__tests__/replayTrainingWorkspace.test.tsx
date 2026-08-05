@@ -215,7 +215,7 @@ test("paper trading dock owns a complete readable surface in both app themes", (
   assert.match(rail, /role="tablist"/);
   assert.match(rail, /role="tabpanel"/);
   assert.match(rail, /handleRailTabKeyDown/);
-  assert.match(marketRail, /data-active-dock=\{activeDock\}/);
+  assert.match(marketRail, /data-active-dock=\{dockAttr\}/);
   assert.match(styles, /\[data-theme='light'\] \.replay-paper-trading/);
   assert.match(styles, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
   assert.match(styles, /--replay-rail-text-muted: #5f7086/);
@@ -230,7 +230,7 @@ test("right-rail trading workstation keeps positions and account history out of 
   assert.doesNotMatch(shell, /bottomPanel=/);
   assert.doesNotMatch(shell, /ReplayTradingWorkbench/);
   assert.match(marketRail, /<ReplayTradingWorkbench/);
-  assert.match(marketRail, /tab === "account" \? "仓位"/);
+  assert.match(marketRail, /viewId === REPLAY_VIEW_IDS\.account \? "仓位"/);
   assert.match(rail, /data-replay-workbench="rail"/);
   assert.match(rail, /\["open-orders", "当前"\]/);
   assert.match(rail, /\["order-history", "历史"\]/);

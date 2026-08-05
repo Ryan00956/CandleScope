@@ -125,8 +125,141 @@ body {
   opacity: 0.65;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   Right market rail — VS Code-style activity bar + stacked panels
+   ═══════════════════════════════════════════════════════════════ */
+
 .right-market-rail {
+  --market-activity-bar-width: 44px;
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
   min-height: 0;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  z-index: 50;
+  position: relative;
+  --wl-up-color: var(--candle-up);
+  --wl-down-color: var(--candle-down);
+}
+.right-market-rail.resizing {
+  transition: none;
+}
+.right-market-rail.panel-collapsed {
+  border-left-color: var(--border-color);
+}
+.market-rail-loading {
+  width: calc(320px + var(--market-activity-bar-width, 44px));
+  opacity: 0.65;
+}
+
+.market-rail-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.market-rail-stack-slot {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.market-rail-view-host {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.market-rail-view-host > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Activity bar — always-visible icon strip on the outer right edge */
+.market-activity-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 var(--market-activity-bar-width);
+  width: var(--market-activity-bar-width);
+  min-height: 0;
+  height: 100%;
+  padding: 6px 0;
+  gap: 2px;
+  background: var(--bg-tertiary, rgba(0, 0, 0, 0.12));
+  border-left: 1px solid var(--border-color);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.market-activity-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.market-activity-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.market-activity-item:hover,
+.market-activity-item:focus-visible {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  outline: none;
+}
+.market-activity-item.active {
+  color: var(--accent-blue, #3b82f6);
+  background: rgba(59, 130, 246, 0.12);
+}
+.market-activity-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent-blue, #3b82f6);
+}
+.market-activity-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.market-activity-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent-blue, #3b82f6);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
 }
 
 .watchlist-pane {
@@ -134,7 +267,8 @@ body {
   flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
-  min-height: 180px;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -583,15 +717,19 @@ body {
   to   { opacity: 1; }
 }
 
-/* ── Resize handle ── */
+/* ── Resize handle (left edge of rail panel content) ── */
 .wl-resize-handle {
   width: 4px;
   cursor: col-resize;
   background: transparent;
   transition: background 0.2s;
   flex-shrink: 0;
+  align-self: stretch;
   position: relative;
   z-index: 51;
+}
+.right-market-rail > .wl-resize-handle {
+  margin-right: -2px;
 }
 .wl-resize-handle::after {
   content: '';
@@ -603,14 +741,14 @@ body {
   background: var(--accent-blue);
 }
 
-/* ── Right market rail: resizable order-book dock ── */
+/* ── Right market rail: resizable stacked view splitters ── */
 .market-rail-splitter {
   position: relative;
   display: flex;
-  flex: 0 0 8px;
+  flex: 0 0 5px;
   align-items: center;
   justify-content: center;
-  height: 8px;
+  height: 5px;
   cursor: row-resize;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
@@ -644,9 +782,11 @@ body {
 
 .order-book-dock {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
   background: var(--bg-secondary);
   color: var(--text-primary);

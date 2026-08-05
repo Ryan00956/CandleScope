@@ -15,6 +15,8 @@ export interface UseTradeFlowRuntimeOptions {
   seriesStore: SeriesWindowStore | null;
   buyColor: string;
   sellColor: string;
+  /** True when tape and/or profile rail views are open. */
+  tradeFlowOpen?: boolean;
 }
 
 function normalizeIdentity(identity: TradeFlowIdentity): TradeFlowIdentity {
@@ -40,6 +42,7 @@ export function useTradeFlowRuntime({
   seriesStore,
   buyColor,
   sellColor,
+  tradeFlowOpen,
 }: UseTradeFlowRuntimeOptions): TradeFlowRuntime {
   const { exchange, marketType, symbol } = rawIdentity;
   const identity = useMemo(() => normalizeIdentity({ exchange, marketType, symbol }), [
@@ -55,14 +58,16 @@ export function useTradeFlowRuntime({
   const [retryRevision, setRetryRevision] = useState(0);
   const message = supportMessage(identity);
   const supported = message === null;
-  const enabled = supported && preferences.dockView !== "order-book";
+  // Prefer explicit rail open state; fall back to legacy dockView exclusivity.
+  const streamOpen = tradeFlowOpen ?? preferences.dockView !== "order-book";
+  const enabled = supported && streamOpen;
 
   useEffect(() => {
     if (!supported) {
       store.reset("unsupported", message);
       return undefined;
     }
-    if (preferences.dockView === "order-book") {
+    if (!streamOpen) {
       store.reset("idle", "右侧实时订单流未打开");
       return undefined;
     }
@@ -79,7 +84,7 @@ export function useTradeFlowRuntime({
       clearTimeout(startTimer);
       controller.close();
     };
-  }, [identity, message, preferences.dockView, retryRevision, store, supported]);
+  }, [identity, message, retryRevision, store, streamOpen, supported]);
 
   const intervalSeconds = parseIntervalSeconds(interval);
   const markerSource = useMemo(() => (

@@ -8,6 +8,25 @@ import MarketWorkspaceFrame from "../MarketWorkspaceFrame.js";
 import MarketTopBarFrame from "../MarketTopBarFrame.js";
 import MarketStatusBar from "../MarketStatusBar.js";
 import MarketRightRailFrame from "../MarketRightRailFrame.js";
+import type { MarketRailViewDescriptor } from "../marketRailTypes.js";
+
+const sampleViews: MarketRailViewDescriptor[] = [
+  {
+    id: "watchlist",
+    title: "自选",
+    icon: <span data-icon="watchlist" />,
+    order: 10,
+    sizing: "flex",
+  },
+  {
+    id: "order-book",
+    title: "盘口",
+    icon: <span data-icon="order-book" />,
+    order: 20,
+    sizing: "fixed",
+    defaultHeight: 320,
+  },
+];
 
 test("MarketPageFrame preserves live shell slot order and root class", () => {
   const html = renderToStaticMarkup(
@@ -73,20 +92,50 @@ test("live and replay top/status adapters share exact source-neutral DOM owners"
   }
 });
 
-test("live and replay right rails share resize, sidebar, and dock ownership slots", () => {
+test("right rail keeps activity bar and stacked open views for live and replay", () => {
   for (const source of ["live", "replay"] as const) {
     const html = renderToStaticMarkup(
       <MarketRightRailFrame
         source={source}
-        sidebar={<div data-slot="sidebar" />}
-        renderDock={(height) => <div data-slot="dock" data-height={height} />}
-        layout={{ width: 360, collapsed: false, onWidthChange: () => undefined }}
-        dockLayout={{ height: 320, collapsed: false, onHeightChange: () => undefined }}
+        views={sampleViews}
+        openViewIds={["watchlist", "order-book"]}
+        onToggleView={() => undefined}
+        renderView={(viewId, height) => (
+          <div data-slot={viewId === "watchlist" ? "sidebar" : "dock"} data-height={height}>
+            {viewId}
+          </div>
+        )}
+        layout={{ width: 360, onWidthChange: () => undefined }}
+        viewHeights={{ "order-book": 320 }}
+        onViewHeightChange={() => undefined}
       />,
     );
     assert.match(html, /data-market-shell-owner="right-rail"/);
+    assert.match(html, /data-market-shell-owner="activity-bar"/);
+    assert.match(html, /data-market-shell-owner="right-rail-panel"/);
     assert.match(html, /class="wl-resize-handle/);
     assert.match(html, /class="market-rail-splitter/);
+    assert.match(html, /data-rail-view="watchlist"/);
+    assert.match(html, /data-rail-view="order-book"/);
     assert.ok(html.indexOf("data-slot=\"sidebar\"") < html.indexOf("data-slot=\"dock\""));
+    assert.ok(html.indexOf("data-slot=\"dock\"") < html.indexOf("data-market-shell-owner=\"activity-bar\""));
   }
+});
+
+test("right rail can collapse content to activity-bar-only mode", () => {
+  const html = renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={sampleViews}
+      openViewIds={[]}
+      onToggleView={() => undefined}
+      renderView={() => null}
+      layout={{ width: 360 }}
+    />,
+  );
+  assert.match(html, /panel-collapsed/);
+  assert.match(html, /data-panel-open="false"/);
+  assert.match(html, /data-market-shell-owner="activity-bar"/);
+  assert.doesNotMatch(html, /data-market-shell-owner="right-rail-panel"/);
+  assert.doesNotMatch(html, /class="wl-resize-handle/);
 });

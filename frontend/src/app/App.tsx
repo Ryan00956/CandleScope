@@ -15,6 +15,8 @@ import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
 import { useOrderBookRuntime } from "../features/order-book/useOrderBookRuntime";
 import { useTradeFlowRuntime } from "../features/trade-flow/useTradeFlowRuntime";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
+import { LIVE_RAIL_VIEW_IDS } from "../shared/marketRailLayout";
+import { useMarketRailLayout } from "./useMarketRailLayout";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability";
 import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext";
@@ -127,13 +129,28 @@ export default function App() {
     showReplayLauncher,
     watchlist.view.watchlists,
   ]);
+  const marketRailLayout = useMarketRailLayout();
+  const marketRail = useMemo(() => ({
+    openViewIds: marketRailLayout.openViewIds,
+    onToggleView: marketRailLayout.actions.toggleView,
+    viewHeights: marketRailLayout.viewHeights,
+    onViewHeightChange: marketRailLayout.actions.setViewHeight,
+  }), [
+    marketRailLayout.actions.setViewHeight,
+    marketRailLayout.actions.toggleView,
+    marketRailLayout.openViewIds,
+    marketRailLayout.viewHeights,
+  ]);
+  const orderBookOpen = marketRailLayout.openViewIds.includes(LIVE_RAIL_VIEW_IDS.orderBook);
+  const tradeFlowOpen = marketRailLayout.openViewIds.includes(LIVE_RAIL_VIEW_IDS.tape)
+    || marketRailLayout.openViewIds.includes(LIVE_RAIL_VIEW_IDS.profile);
   const orderBook = useOrderBookRuntime({
     identity: {
       exchange: chartSession.view.exchange,
       marketType: chartSession.view.marketType,
       symbol: chartSession.view.symbol,
     },
-    railCollapsed: watchlist.view.layout.sidebarCollapsed,
+    orderBookOpen,
   });
   const tradeFlow = useTradeFlowRuntime({
     identity: {
@@ -145,6 +162,7 @@ export default function App() {
     seriesStore: marketData.view.seriesStore,
     buyColor: settings.upColor,
     sellColor: settings.downColor,
+    tradeFlowOpen,
   });
   useWatchlistFullCacheRuntime({
     enabled: chartSession.status.marketDataReady,
@@ -277,6 +295,7 @@ export default function App() {
           watchlist={watchlist}
           orderBook={orderBook}
           tradeFlow={tradeFlow}
+          marketRail={marketRail}
           exportFlow={exportFlow}
           alerts={alertsRuntime}
           replayEntry={replayEntry}

@@ -33,6 +33,13 @@ export interface ChartWorkspaceChartModel {
   chartProps: SingleChartPanesProps & RefAttributes<ChartSurfaceHandle>;
 }
 
+export interface ChartWorkspaceRailLayout {
+  openViewIds: readonly string[];
+  onToggleView: (viewId: string) => void;
+  viewHeights: Readonly<Record<string, number>>;
+  onViewHeightChange: (viewId: string, height: number) => void;
+}
+
 export interface ChartWorkspaceProps {
   drawingToolbar: DrawingToolbarProps;
   exportPanel: ExportPanelProps;
@@ -40,6 +47,7 @@ export interface ChartWorkspaceProps {
   watchlist: WatchlistSidebarProps;
   orderBook: OrderBookRuntime;
   tradeFlow: TradeFlowRuntime;
+  marketRail: ChartWorkspaceRailLayout;
   pluginMarkerSource?: ExternalMarkerSource | null;
   pluginChartLayerSource?: PluginChartLayerSource | null;
   errorBoundary?: ComponentType<PropsWithChildren>;
@@ -52,6 +60,7 @@ function ChartWorkspace({
   watchlist,
   orderBook,
   tradeFlow,
+  marketRail,
   pluginMarkerSource = null,
   pluginChartLayerSource = null,
   errorBoundary = ChartErrorBoundary,
@@ -143,13 +152,20 @@ function ChartWorkspace({
         <React.Suspense
           fallback={(
             <div
-              className="watchlist-sidebar watchlist-sidebar-loading"
+              className="right-market-rail market-rail-loading"
               aria-hidden="true"
-              style={{ width: 320 }}
             />
           )}
         >
-          <RightMarketRail watchlist={watchlist} orderBook={orderBook} tradeFlow={tradeFlow} />
+          <RightMarketRail
+            watchlist={watchlist}
+            orderBook={orderBook}
+            tradeFlow={tradeFlow}
+            openViewIds={marketRail.openViewIds}
+            onToggleView={marketRail.onToggleView}
+            viewHeights={marketRail.viewHeights}
+            onViewHeightChange={marketRail.onViewHeightChange}
+          />
         </React.Suspense>
       )}
     />

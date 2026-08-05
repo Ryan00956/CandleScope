@@ -38,6 +38,7 @@ export function buildChartWorkspaceViewModel({
   tradeFlowActions,
   tradeFlowStatus,
   tradeFlowView,
+  marketRail,
 }: AppShellViewModelContext): ChartWorkspaceProps {
   const {
     symbol,
@@ -206,5 +207,6 @@ export function buildChartWorkspaceViewModel({
       actions: tradeFlowActions,
       status: tradeFlowStatus,
     },
+    marketRail,
   };
 }

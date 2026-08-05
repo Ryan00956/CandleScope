@@ -31,7 +31,8 @@ import {
 export interface OrderBookDockProps {
   runtime: OrderBookRuntime;
   height: number;
-  onOpenTradeFlow?(): void;
+  /** Closes this rail view (activity-bar style). */
+  onRequestClose?(): void;
 }
 
 const STATUS_LABELS: Record<OrderBookConnectionStatus, string> = {
@@ -230,7 +231,7 @@ function EmptyState({
   );
 }
 
-function OrderBookDock({ runtime, height, onOpenTradeFlow }: OrderBookDockProps) {
+function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) {
   const { view, actions } = runtime;
   const snapshot = useSyncExternalStore(
     view.store.subscribe,
@@ -249,47 +250,37 @@ function OrderBookDock({ runtime, height, onOpenTradeFlow }: OrderBookDockProps)
   const groupingOptions = view.preferences.mode === "partial"
     ? PARTIAL_PRICE_GROUPINGS
     : FULL_PRICE_GROUPINGS;
-  const collapsed = view.preferences.collapsed;
   const symbol = view.identity.symbol.replace(/USDT$|USDC$/, "");
 
   return (
     <section
-      className={`order-book-dock ${collapsed ? "collapsed" : ""}`}
+      className="order-book-dock"
       style={{ height }}
       aria-label="订单簿"
     >
       <header className="ob-header">
-        <button
-          type="button"
-          className="ob-collapse-button"
-          onClick={() => actions.setCollapsed(!collapsed)}
-          title={collapsed ? "展开订单簿" : "折叠订单簿"}
-          aria-expanded={!collapsed}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-            {collapsed ? <polyline points="6 15 12 9 18 15" /> : <polyline points="6 9 12 15 18 9" />}
-          </svg>
-        </button>
-        {onOpenTradeFlow ? (
-          <div className="market-dock-tabs" role="tablist" aria-label="市场微观结构视图">
-            <button type="button" role="tab" aria-selected className="active">盘口</button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={false}
-              onClick={onOpenTradeFlow}
-            >成交</button>
-          </div>
-        ) : <span className="ob-title">订单簿</span>}
-        {!collapsed && <span className="ob-symbol">{symbol || view.identity.symbol}</span>}
+        {onRequestClose && (
+          <button
+            type="button"
+            className="ob-collapse-button"
+            onClick={onRequestClose}
+            title="关闭盘口"
+            aria-label="关闭盘口"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+        )}
+        <span className="ob-title">盘口</span>
+        <span className="ob-symbol">{symbol || view.identity.symbol}</span>
         <span className={`ob-status ob-status-${snapshot.status}`} title={snapshot.message || snapshot.error || STATUS_LABELS[snapshot.status]}>
           <span className="ob-status-dot" aria-hidden="true" />
-          {!collapsed && STATUS_LABELS[snapshot.status]}
+          {STATUS_LABELS[snapshot.status]}
         </span>
       </header>
 
-      {!collapsed && (
-        <>
+      <>
           <div className="ob-controls">
             <div className="ob-mode-switch" role="group" aria-label="订单簿模式">
               <button
@@ -399,8 +390,7 @@ function OrderBookDock({ runtime, height, onOpenTradeFlow }: OrderBookDockProps)
               onRetry={actions.retry}
             />
           )}
-        </>
-      )}
+      </>
     </section>
   );
 }

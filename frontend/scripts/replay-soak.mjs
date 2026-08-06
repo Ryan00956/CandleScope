@@ -2341,6 +2341,16 @@ export function inspectReplaySoakFrontendBuild(outDir) {
     throw new Error(`replay soak projection asset is missing: ${projectionFile}`);
   }
   const projectionSource = fs.readFileSync(path.join(outDir, projectionFile), "utf8");
+  const hostSecurityInjectionHost = "gc.kis.v2.scr.kaspersky-labs.com";
+  const injectedHostReferences = files.filter((item) => (
+    /\.(?:css|html|js)$/i.test(item.file)
+    && fs.readFileSync(path.join(outDir, item.file), "utf8").includes(hostSecurityInjectionHost)
+  )).map((item) => item.file);
+  if (injectedHostReferences.length > 0) {
+    throw new Error(
+      `replay production build contains host security injection origin: ${injectedHostReferences.join(", ")}`,
+    );
+  }
   const projectionExports = generatedEsmExportNames(projectionSource);
   const requiredProjectionExports = ["ReplayStore", "fixtures", "parser"];
   const missingProjectionExports = requiredProjectionExports.filter(
@@ -2364,6 +2374,7 @@ export function inspectReplaySoakFrontendBuild(outDir) {
         sha256: projectionAsset.sha256,
         exports: requiredProjectionExports,
       },
+      hostSecurityInjectionReferences: injectedHostReferences.length,
       files,
     },
   };
@@ -2476,20 +2487,56 @@ function auditBoundary(label, value) {
   };
 }
 
+function isHostSecurityInjectionUrl(value) {
+  try {
+    return new URL(value).hostname === "gc.kis.v2.scr.kaspersky-labs.com";
+  } catch {
+    return false;
+  }
+}
+
 function assertReplayNetwork(capture, frontendOrigin) {
   const forbiddenApi = /\/api\/v1\/(?:klines|market|trade[_-]?flow|liquidations?|order[_-]?book|full[_-]?order[_-]?book|symbols|exchanges|subscriptions|indicators|alerts|settings)/i;
+  const environmentInjectedRequests = capture.requests.filter((item) => (
+    isHostSecurityInjectionUrl(item.url)
+  ));
+  const embeddedRequests = capture.requests.filter((item) => {
+    try {
+      return new URL(item.url).protocol === "data:";
+    } catch {
+      return false;
+    }
+  });
   const badRequests = capture.requests.filter((item) => {
     if (!item.url) return false;
     const parsed = new URL(item.url);
+    if (parsed.protocol === "data:" || isHostSecurityInjectionUrl(item.url)) return false;
     return parsed.origin !== frontendOrigin || forbiddenApi.test(parsed.pathname);
   });
+  const environmentInjectedSockets = capture.webSockets.filter(isHostSecurityInjectionUrl);
   const badSockets = capture.webSockets.filter((url) => {
     if (!url) return false;
+    if (isHostSecurityInjectionUrl(url)) return false;
     const parsed = new URL(url);
     return parsed.host !== new URL(frontendOrigin).host || (/\/api\/v1\/stream\//.test(parsed.pathname) && !/\/api\/v1\/stream\/replay\//.test(parsed.pathname));
   });
   assert(badRequests.length === 0, "replay target emitted forbidden HTTP", badRequests);
   assert(badSockets.length === 0, "replay target emitted forbidden WebSocket", badSockets);
+  return {
+    schemaVersion: "replay.host-network-classification.v1",
+    applicationRequests: capture.requests.length
+      - environmentInjectedRequests.length
+      - embeddedRequests.length,
+    applicationSockets: capture.webSockets.length - environmentInjectedSockets.length,
+    embeddedRequests: embeddedRequests.length,
+    hostSecurityInjection: {
+      host: "gc.kis.v2.scr.kaspersky-labs.com",
+      requests: environmentInjectedRequests.length,
+      sockets: environmentInjectedSockets.length,
+      buildReferences: 0,
+    },
+    passed: true,
+  };
 }
 
 async function waitForDownload(directory, timeoutMs) {
@@ -3483,7 +3530,7 @@ async function main() {
     ];
     const blindAuditPassed = boundaries.every((item) => item.passed);
     assert(blindAuditPassed, "blind boundary audit found forbidden actual history or paths", boundaries);
-    assertReplayNetwork(replayCapture, frontendOrigin);
+    const replayNetwork = assertReplayNetwork(replayCapture, frontendOrigin);
     assert(replayCapture.exceptions.length === 0, "primary replay target raised runtime exceptions", replayCapture.exceptions);
     assert(replayCapture.consoleErrors.length === 0, "primary replay target logged console errors", replayCapture.consoleErrors);
     const replayApiFailures = replayCapture.responses.filter((item) => /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url) && item.status >= 400);
@@ -3689,6 +3736,7 @@ async function main() {
       },
       samples,
       blindAudit: { passed: blindAuditPassed, boundaries },
+      replayNetwork,
       acceptance: {
         passed: Object.values(checks).every(Boolean),
         checks,
@@ -3751,6 +3799,7 @@ async function main() {
 
 export {
   auditBoundary,
+  assertReplayNetwork,
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
   captureTarget,

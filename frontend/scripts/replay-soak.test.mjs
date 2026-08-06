@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   auditBoundary,
+  assertReplayNetwork,
   captureTarget,
   CdpConnection,
   createV2ArchiveRun,
@@ -205,6 +206,7 @@ test("replay soak binds its projection URL and evidence to the production manife
   assert.equal(inspected.evidence.schema_version, "replay-soak-frontend-build.v1");
   assert.equal(inspected.evidence.runtime, "vite-production-preview");
   assert.equal(inspected.evidence.fileCount, 3);
+  assert.equal(inspected.evidence.hostSecurityInjectionReferences, 0);
   assert.equal(inspected.evidence.projectionAsset.file, "assets/projection-abc.js");
   assert.deepEqual(
     inspected.evidence.projectionAsset.exports,
@@ -212,6 +214,15 @@ test("replay soak binds its projection URL and evidence to the production manife
   );
   assert.match(inspected.evidence.projectionAsset.sha256, /^sha256:[a-f0-9]{64}$/);
   assert.match(inspected.evidence.manifestSha256, /^sha256:[a-f0-9]{64}$/);
+
+  fs.writeFileSync(
+    path.join(outDir, "assets", "projection-abc.js"),
+    "const u='http://gc.kis.v2.scr.kaspersky-labs.com';const R=class{},f={},p={};export{R as ReplayStore,f as fixtures,p as parser};\n",
+  );
+  assert.throws(
+    () => inspectReplaySoakFrontendBuild(outDir),
+    /contains host security injection origin/,
+  );
 
   fs.writeFileSync(
     path.join(outDir, "assets", "projection-abc.js"),
@@ -587,6 +598,35 @@ test("replay soak blind capture attributes late response bodies to request start
   assert.equal(result.itemCount, 2);
   assert.deepEqual(result.forbiddenMatches, []);
   assert.equal(capture.responseBodies.length, 2);
+});
+
+test("replay soak network gate isolates verified host injection without allowing other origins", () => {
+  const frontendOrigin = "http://127.0.0.1:4173";
+  const classified = assertReplayNetwork({
+    requests: [
+      { url: `${frontendOrigin}/api/v1/replay/runs/run-1` },
+      { url: "data:image/svg+xml;base64,PHN2Zy8+" },
+      { url: "http://gc.kis.v2.scr.kaspersky-labs.com/id/main.js" },
+    ],
+    webSockets: [
+      "ws://127.0.0.1:4173/api/v1/stream/replay/session-1",
+      "ws://gc.kis.v2.scr.kaspersky-labs.com/id/websocket",
+    ],
+  }, frontendOrigin);
+
+  assert.equal(classified.passed, true);
+  assert.equal(classified.applicationRequests, 1);
+  assert.equal(classified.embeddedRequests, 1);
+  assert.deepEqual(classified.hostSecurityInjection, {
+    host: "gc.kis.v2.scr.kaspersky-labs.com",
+    requests: 1,
+    sockets: 1,
+    buildReferences: 0,
+  });
+  assert.throws(() => assertReplayNetwork({
+    requests: [{ url: "https://example.com/runtime.js" }],
+    webSockets: [],
+  }, frontendOrigin), /forbidden HTTP/);
 });
 
 test("replay soak reconnect accepts an already-ready controller", async () => {

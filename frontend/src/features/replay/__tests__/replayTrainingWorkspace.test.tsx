@@ -107,6 +107,10 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   assert.match(workspace, /useReplayHistoryRuntime\(runtime, viewer, activeIntervalViewportTransfer\)/);
   assert.match(workspace, /intervalViewportTransfer\.targetInterval/);
   assert.match(workspace, /current\?\.snapshot === transfer/);
+  assert.match(workspace, /data-replay-source-bar-count/);
+  assert.match(workspace, /data-replay-viewer-bar-count/);
+  assert.match(workspace, /data-replay-source-series-version/);
+  assert.match(workspace, /data-replay-viewer-series-version/);
   assert.doesNotMatch(workspace, /\[\.\.\.indicators\.view\./);
   assert.match(workspace, /buildReplayIntervalCatalog/);
   assert.match(workspace, /useCustomIntervals/);

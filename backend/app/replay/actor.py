@@ -1800,7 +1800,11 @@ class ReplaySessionActor:
             # A successful SEEK establishes a new checkpoint cadence origin.
             # Its persisted checkpoint must enter the in-memory ring even when
             # the rewound cursor is below the previous high-water marks.
-            if command.type is CommandType.SEEK_TO or self._checkpoint_due():
+            if (
+                command.type is CommandType.SEEK_TO
+                or self._state is SessionState.ENDED
+                or self._checkpoint_due()
+            ):
                 self._record_checkpoint(checkpoint, initial=False)
             if not request.future.done():
                 request.future.set_result(result)
@@ -2408,6 +2412,21 @@ class ReplaySessionActor:
             completion.set_result(None)
 
     async def _handle_shutdown_request(self, request: _ShutdownRequest) -> None:
+        if self._state is SessionState.ENDED:
+            # Every transition into ENDED is acknowledged only after its command
+            # or source-event mutation has atomically persisted the terminal
+            # state. Reaper eviction is therefore a resource barrier, not a new
+            # domain mutation. Rewriting the same (potentially large) checkpoint
+            # here can race the report handoff and turn a durable terminal actor
+            # into ERROR solely because eviction persistence timed out.
+            if not request.future.done():
+                request.future.set_result(None)
+            self._publish_projection_batches(
+                self._coalescer.flush(wall_time=self._read_wall())
+            )
+            self._last_snapshot = self._snapshot_value(materialize=False)
+            self._exit_requested = True
+            return
         errors: list[str] = []
         try:
             rollback = self._capture_rollback()
@@ -2547,7 +2566,8 @@ class ReplaySessionActor:
             )
             if checkpoint
             and (
-                self._checkpoint_due()
+                self._state is SessionState.ENDED
+                or self._checkpoint_due()
                 or (
                     rollback is not None
                     and self._review_checkpoint_required(

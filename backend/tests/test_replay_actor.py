@@ -839,6 +839,8 @@ async def test_optional_mutation_hook_preserves_actor_state_events_and_checkpoin
     )
     assert len(source_mutation.source_events) == 1
     assert source_mutation.source_events[0]["value"] == 3
+    assert source_mutation.checkpoint is not None
+    assert with_hook.latest_checkpoint_blob() == source_mutation.checkpoint
 
     await without_hook.shutdown()
     await with_hook.shutdown()
@@ -1588,6 +1590,64 @@ async def test_checkpoint_restore_and_shutdown_are_bounded_and_leave_no_actor_ta
     assert task is not None and task.done()
     assert task not in asyncio.all_tasks()
     await restored.shutdown()
+
+
+@_async_test
+async def test_ended_shutdown_is_a_resource_barrier_without_redundant_persistence() -> (
+    None
+):
+    mutations = []
+
+    async def capture(mutation) -> None:
+        mutations.append(mutation)
+
+    async def reject_flush() -> None:
+        raise AssertionError("durable ENDED actor must not flush during eviction")
+
+    async def reject_checkpoint(_blob: bytes) -> None:
+        raise AssertionError("durable ENDED actor must not checkpoint during eviction")
+
+    actor = _actor(
+        reducer=CountingReducer(),
+        mutation_hook=capture,
+        flush_hook=reject_flush,
+        checkpoint_hook=reject_checkpoint,
+    )
+    await actor.start()
+    acquired = await actor.submit(
+        _command("terminal-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+    ended = await actor.submit(
+        _command(
+            "terminal-end",
+            CommandType.END_SESSION,
+            revision=acquired.revision,
+            payload={
+                "open_order_disposition": "expire",
+                "position_disposition": "keep",
+            },
+        )
+    )
+    assert ended.state is SessionState.ENDED
+    terminal = next(
+        mutation
+        for mutation in mutations
+        if mutation.command is not None
+        and mutation.command.command_id == "terminal-end"
+    )
+    assert terminal.checkpoint is not None
+    assert actor.latest_checkpoint_blob() == terminal.checkpoint
+    mutation_count = len(mutations)
+
+    await actor.shutdown(step_timeout=0.01)
+
+    assert len(mutations) == mutation_count
+    assert all(mutation.kind != "shutdown" for mutation in mutations)
+    assert actor.current_snapshot().state is SessionState.ENDED
+    assert actor.task is not None and actor.task.done()
+    diagnostics = actor.diagnostics()
+    assert diagnostics["shutdown_failures"] == 0
+    assert diagnostics["shutdown_timeouts"] == 0
 
 
 @_async_test

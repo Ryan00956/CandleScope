@@ -323,6 +323,19 @@ async def test_background_reaper_preserves_ended_report_handoff_grace(
     await service.start()
     created = await service.create_session(replay_config(blind_mode=True))
     session_id = str(created["session_id"])
+    actor = service._sessions[session_id].actor
+    persist_mutation = actor._mutation_hook
+    assert persist_mutation is not None
+    shutdown_mutations = 0
+
+    async def reject_redundant_shutdown(mutation) -> None:
+        nonlocal shutdown_mutations
+        if mutation.kind == "shutdown":
+            shutdown_mutations += 1
+            raise RuntimeError("ENDED eviction attempted redundant persistence")
+        await persist_mutation(mutation)
+
+    actor._mutation_hook = reject_redundant_shutdown
     acquired = await service.command(
         session_id,
         _command("acquire-ended-handoff", CommandType.ACQUIRE_CONTROLLER, revision=0),
@@ -343,6 +356,8 @@ async def test_background_reaper_preserves_ended_report_handoff_grace(
     # Capacity pressure can still reclaim an ended actor immediately.
     await service._prune_reclaimable_sessions()
     assert session_id not in service._sessions
+    assert shutdown_mutations == 0
+    assert service.diagnostics()["reaper_failures"] == 0
 
     first_report = await service.report(session_id)
     recovered = service._sessions[session_id]

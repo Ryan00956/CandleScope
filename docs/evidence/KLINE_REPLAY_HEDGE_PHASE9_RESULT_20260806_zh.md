@@ -45,11 +45,18 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 公开 projection 删除 `as_of_actual_time_ms`、`as_of_virtual_time_ms` 和原始 `state`，仅返回 `as_of_time_ms`、`state_hash`、`input_chain_hash` 与 `source_component_hash`；auditor 原始 differences 同样改为计数和逐项哈希，防止错误详情夹带真实时间。
 - 后端同时验证 dataset origin、HEDGE binding range 与 actor virtual timeline 的偏移一致性；任一混合时间域、越界时间或缺失元数据均以 storage degraded fail closed。
 
+### 2.5 终态报告交接与 actor 回收
+
+- 真实浏览器诊断在完成 HEDGE 动作周期和 archive lifecycle 后，发现 reaper 回收 `ENDED` actor 时会重复提交一份 `shutdown` checkpoint；大状态写入超过 5 秒后，已持久化的终态 actor 被错误改成 `ERROR`，报告页随即收到 `INVALID_STATE_TRANSITION`。
+- `END_SESSION` 和数据耗尽的终态现在都在原命令/源事件原子提交中持久化 checkpoint，并把终态 checkpoint 记入 actor ring；只有提交成功后才对调用方确认 `ENDED`。
+- 对已经 `ENDED` 的 actor，shutdown 明确是纯资源屏障：关闭投影批次和 actor task，但不再调用 flush、checkpoint 或 `shutdown` mutation 持久化钩子。活跃的 `PLAYING/PAUSED` actor 仍保持原有 shutdown pause 与持久化合同。
+- actor 回归测试用会主动失败的 flush/checkpoint 钩子证明终态回收不触碰外部持久化；service 回归测试用会拒绝 `shutdown` mutation 的真实 SQLite service 证明容量回收、报告恢复和 5 秒 handoff grace 均正常，且 `reaper_failures=0`。
+
 ## 3. 候选提交前验证
 
 ### 3.1 后端
 
-- `python -m pytest -q backend/tests -k replay`：`911 passed, 2322 deselected`。
+- `PYTHONPATH=packages/candlescope-plugin-sdk/src python -m pytest -q backend/tests -k replay`：`916 passed, 2322 deselected`。
 - Phase 5/6/8、真实多轨、Phase 9 和 benchmark 定向集均通过。
 - `python -m ruff check <changed-python-files>`：通过。
 - `python -m compileall -q backend/app/replay backend/scripts`：通过。
@@ -69,7 +76,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - replay-soak 脚本回归集：`26 passed, 0 failed`，覆盖稳定 rail identity、CDP 超时、盲测泄漏、重连与正式 HEDGE plan。
 - Ruff、TypeScript typecheck、ESLint 与 `git diff --check`：通过。
 
-### 3.3 冻结性能门槛
+### 3.4 终态回收修复增量验证
+
+- actor 定向 shutdown 合同：`3 passed`。
+- service 终态回收/报告 handoff：`2 passed`。
+- 完整 actor、service 与全部 HEDGE 文件：`146 passed`。
+- Ruff：通过。
+
+### 3.5 冻结性能门槛
 
 真实 ReplayService + SQLite/WAL + Decimal + immutable archive + 双腿持仓：
 

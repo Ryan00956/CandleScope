@@ -296,6 +296,7 @@ export interface SingleChartPanesProps {
   latestBarPosition?: number;
   dataMeta?: ChartDataCommitMeta | null;
   onViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
+  onUserViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
   onVisibleRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
   drawingTool?: DrawingToolId | null;
   onDrawingToolChange?: ((tool: DrawingToolId | null) => void) | null;
@@ -1260,6 +1261,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   latestBarPosition = 0.5,
   dataMeta = null,
   onViewportRangeChange = null,
+  onUserViewportRangeChange = null,
   onVisibleRangeChange = null,
   drawingTool = null,
   onDrawingToolChange,
@@ -1429,6 +1431,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const surfaceConfigKeyRef = useRef<string | null>(null);
   const drawingProjectionConfigRef = useRef<string | null>(null);
   const onViewportRangeChangeRef = useRef(onViewportRangeChange);
+  const onUserViewportRangeChangeRef = useRef(onUserViewportRangeChange);
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef<DrawingEngineApi | null>(null);
   const drawingApisByPaneRef = useRef<Map<string, DrawingEngineApi>>(new Map());
@@ -1440,6 +1443,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const selectedDrawingPaneIdRef = useRef<string | null>(null);
   const selectedDrawingsByPaneRef = useRef<Map<string, SelectedDrawingMeta>>(new Map());
   const drawingsHiddenRef = useRef(false);
+  const linkedViewportReadyListenersRef = useRef<Set<(generation: number) => void>>(new Set());
+  const linkedViewportReadyGenerationRef = useRef(0);
+  const linkedViewportReadyStateRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
   const paneCrosshairStoreLifecycle = useMemo(
     () => createPaneCrosshairStoreLifecycle(),
@@ -2227,6 +2233,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => { onNeedMoreRightRef.current = onNeedMoreRight; }, [onNeedMoreRight]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
   useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
+  useEffect(() => {
+    onUserViewportRangeChangeRef.current = onUserViewportRangeChange;
+  }, [onUserViewportRangeChange]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
 
   const settleDatasetViewportTransfer = useCallback((
@@ -2562,11 +2571,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = previousSyncing;
     }
+    markViewportRangeInteracted();
+    hasRestoredRangeRef.current = true;
+    lastViewportRestoreSourceRef.current = "linked-time-anchor";
     const visibleRange = captureVisibleRange();
     publishViewportRangeChange(visibleRange);
     scheduleVisibleRangeSave(visibleRange);
     return true;
-  }, [captureVisibleRange, publishViewportRangeChange, scheduleVisibleRangeSave]);
+  }, [captureVisibleRange, markViewportRangeInteracted, publishViewportRangeChange, scheduleVisibleRangeSave]);
 
   const setLinkedVisibleTimeRange = useCallback((
     range: ChartSurfaceLinkedTimeRange,
@@ -2590,11 +2602,42 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = previousSyncing;
     }
+    markViewportRangeInteracted();
+    hasRestoredRangeRef.current = true;
+    lastViewportRestoreSourceRef.current = "linked-date-range";
     const visibleRange = captureVisibleRange();
     publishViewportRangeChange(visibleRange);
     scheduleVisibleRangeSave(visibleRange);
     return true;
-  }, [captureVisibleRange, publishViewportRangeChange, scheduleVisibleRangeSave]);
+  }, [captureVisibleRange, markViewportRangeInteracted, publishViewportRangeChange, scheduleVisibleRangeSave]);
+
+  const linkedViewportIsReady = useCallback((): boolean => (
+    hasRestoredRangeRef.current
+    && pendingSurfaceViewportRef.current === null
+    && displayRowsRef.current.length > 0
+    && captureVisibleRange()?.logical !== undefined
+  ), [captureVisibleRange]);
+
+  const subscribeLinkedViewportReady = useCallback((listener: (generation: number) => void) => {
+    linkedViewportReadyListenersRef.current.add(listener);
+    if (linkedViewportReadyStateRef.current) {
+      listener(linkedViewportReadyGenerationRef.current);
+    }
+    return () => { linkedViewportReadyListenersRef.current.delete(listener); };
+  }, []);
+
+  const notifyLinkedViewportReady = useCallback(() => {
+    if (!linkedViewportIsReady()) {
+      linkedViewportReadyStateRef.current = false;
+      return;
+    }
+    if (!linkedViewportReadyStateRef.current) {
+      linkedViewportReadyStateRef.current = true;
+      linkedViewportReadyGenerationRef.current += 1;
+    }
+    const generation = linkedViewportReadyGenerationRef.current;
+    for (const listener of [...linkedViewportReadyListenersRef.current]) listener(generation);
+  }, [linkedViewportIsReady]);
 
   const updateMainSeriesReference = useCallback((
     series: MainSeriesHandle | null,
@@ -2615,6 +2658,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
+    linkedViewportReadyStateRef.current = false;
     const drawingApisForSurface = drawingApisByPaneRef.current;
     const surfaceViewportCache = surfaceViewportCacheRef.current;
     const initialSubPaneCount = activeSubPaneCountRef.current;
@@ -2832,6 +2876,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }) || !range) return;
       const visibleRange = captureVisibleRange();
       publishViewportRangeChange(visibleRange);
+      if (visibleRange) onUserViewportRangeChangeRef.current?.(visibleRange);
       scheduleVisibleRangeSave(visibleRange);
       if (!isChartPointerActiveRef.current && historyWheelGestureActiveRef.current) {
         evaluateHistoryEdgeGesture(range, { retireIfIdle: false });
@@ -2842,6 +2887,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
     return () => {
+      linkedViewportReadyStateRef.current = false;
       const owner = activeSurfaceOwnerRef.current?.chart === chart
         ? activeSurfaceOwnerRef.current
         : {
@@ -3607,6 +3653,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const chart = chartRef.current;
     const activeOwner = activeSurfaceOwnerRef.current;
+    linkedViewportReadyStateRef.current = false;
     const outgoingDatasetKey = activeOwner?.chart === chart
       ? activeOwner.datasetKey
       : null;
@@ -3949,6 +3996,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = false;
     }
+    notifyLinkedViewportReady();
 
     const unsubscribe = store.subscribe((delta, currentStore) => {
       if (projectionGenerationRef.current !== generation
@@ -4132,9 +4180,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       } finally {
         isSyncingRef.current = false;
       }
+      notifyLinkedViewportReady();
     });
     return () => { unsubscribe(); };
-  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, followLatestViewport, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, settleDatasetViewportTransfer, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, followLatestViewport, mainSeriesRenderContext, materializeRuntimePaneLayout, notifyLinkedViewportReady, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, settleDatasetViewportTransfer, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -4146,12 +4195,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       hasRows: rows.length > 0,
       lastRestoreSource: lastViewportRestoreSourceRef.current,
       userInteracted: userInteractedRef.current,
-    })) return;
+    })) {
+      notifyLinkedViewportReady();
+      return;
+    }
 
     if (followLatestViewport(displayRowsRef.current)) {
       hasRestoredRangeRef.current = true;
       lastViewportRestoreSourceRef.current = "follow-latest";
       publishViewportRangeChange();
+      notifyLinkedViewportReady();
       return;
     }
 
@@ -4176,7 +4229,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = dataMeta?.source || null;
     if (restored) publishViewportRangeChange();
-  }, [captureVisibleRange, dataMeta, datasetKey, followLatestViewport, publishViewportRangeChange, savedVisibleRange, seriesStore]);
+    notifyLinkedViewportReady();
+  }, [captureVisibleRange, dataMeta, datasetKey, followLatestViewport, notifyLinkedViewportReady, publishViewportRangeChange, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -4975,6 +5029,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setLinkedCrosshairTime,
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -5044,6 +5099,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setLinkedCrosshairTime,
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
   ]);

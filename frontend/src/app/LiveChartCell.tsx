@@ -155,8 +155,8 @@ function LiveChartCell({
     visibleRangeScope: cellStorageScope,
   });
   useEffect(
-    () => linkCoordinator.register(cell.id, chartSurface.actions),
-    [cell.id, chartSurface.actions, linkCoordinator],
+    () => linkCoordinator.register(cell.id, chartSurface.actions, workspaceId),
+    [cell.id, chartSurface.actions, linkCoordinator, workspaceId],
   );
   const plugins = usePluginPlatformRuntime({
     exchange: chartSession.view.exchange,
@@ -381,15 +381,10 @@ function LiveChartCell({
   const upstreamCrosshairMoveRef = useRef(
     model.chartWorkspace.chart.chartProps.onCrosshairMove,
   );
-  const upstreamViewportRangeChangeRef = useRef(
-    model.chartWorkspace.chart.chartProps.onViewportRangeChange,
-  );
   useLayoutEffect(() => {
     upstreamCrosshairMoveRef.current = model.chartWorkspace.chart.chartProps.onCrosshairMove;
-    upstreamViewportRangeChangeRef.current = model.chartWorkspace.chart.chartProps.onViewportRangeChange;
   }, [
     model.chartWorkspace.chart.chartProps.onCrosshairMove,
-    model.chartWorkspace.chart.chartProps.onViewportRangeChange,
   ]);
   const handleLinkedCrosshairMove = useCallback((value: MainSeriesCrosshairValue | null) => {
     upstreamCrosshairMoveRef.current?.(value);
@@ -399,7 +394,6 @@ function LiveChartCell({
     );
   }, [cell.id, linkCoordinator]);
   const handleLinkedViewportRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
-    upstreamViewportRangeChangeRef.current?.(range);
     if (typeof range.rightmostTime === "number") {
       linkCoordinator.publishTimeAnchor(cell.id, range.rightmostTime);
     }
@@ -414,7 +408,7 @@ function LiveChartCell({
       drawingKeyBase: drawingScopeBase,
       paneLayoutScope: cellStorageScope,
       onCrosshairMove: handleLinkedCrosshairMove,
-      onViewportRangeChange: handleLinkedViewportRangeChange,
+      onUserViewportRangeChange: handleLinkedViewportRangeChange,
     },
   }), [
     cellStorageScope,

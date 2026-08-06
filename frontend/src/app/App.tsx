@@ -260,14 +260,20 @@ function LiveWorkspaceApp() {
   const marketRailLayout = useMarketRailLayout();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
   const [linkCoordinator] = useState(
-    () => new ChartLinkCoordinator(workspace.view.document),
+    () => new ChartLinkCoordinator(
+      workspace.view.document,
+      workspace.view.activeWorkspaceId,
+    ),
   );
   const [viewportLinkIssue, setViewportLinkIssue] = useState<ChartLinkViewportIssue | null>(
     () => linkCoordinator.getViewportIssue(),
   );
   useLayoutEffect(() => {
-    linkCoordinator.updateDocument(workspace.view.document);
-  }, [linkCoordinator, workspace.view.document]);
+    linkCoordinator.updateDocument(
+      workspace.view.document,
+      workspace.view.activeWorkspaceId,
+    );
+  }, [linkCoordinator, workspace.view.activeWorkspaceId, workspace.view.document]);
   useEffect(
     () => linkCoordinator.subscribeViewportIssue(setViewportLinkIssue),
     [linkCoordinator],

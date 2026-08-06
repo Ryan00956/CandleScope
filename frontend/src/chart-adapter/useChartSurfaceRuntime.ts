@@ -26,6 +26,7 @@ export interface ChartSurfaceHandle {
   setLinkedCrosshairTime(time: number | null): boolean;
   setLinkedVisibleTimeAnchor(time: number): boolean;
   setLinkedVisibleTimeRange(range: ChartSurfaceLinkedTimeRange): boolean;
+  subscribeLinkedViewportReady(listener: (generation: number) => void): () => void;
   captureViewportTransfer(): SurfaceViewportSnapshot | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
@@ -51,6 +52,10 @@ export function useChartSurfaceRuntime() {
 
   const setLinkedVisibleTimeRange = useCallback((range: ChartSurfaceLinkedTimeRange) => (
     callChartSurface(ref, "setLinkedVisibleTimeRange", false, range)
+  ), []);
+
+  const subscribeLinkedViewportReady = useCallback((listener: (generation: number) => void) => (
+    callChartSurface(ref, "subscribeLinkedViewportReady", () => {}, listener)
   ), []);
 
   const captureViewportTransfer = useCallback(() => (
@@ -87,6 +92,7 @@ export function useChartSurfaceRuntime() {
     setLinkedCrosshairTime,
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -101,6 +107,7 @@ export function useChartSurfaceRuntime() {
     setLinkedCrosshairTime,
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
     prepareExport,
     setDrawingsHidden,
     updateSelectedDrawingStyle,

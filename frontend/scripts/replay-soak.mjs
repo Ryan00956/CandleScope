@@ -995,6 +995,17 @@ async function selectTrackedMarket(
 }
 
 async function selectReplayInterval(cdp, interval, timeoutMs) {
+  await waitForValue(
+    cdp,
+    `(() => {
+      const expected = ${JSON.stringify(interval)};
+      const button = [...document.querySelectorAll('button.interval-btn')]
+        .find((item) => item.textContent?.trim() === expected);
+      return button instanceof HTMLButtonElement && !button.disabled;
+    })()`,
+    timeoutMs,
+    `replay interval ${interval} readiness`,
+  );
   const clicked = await evaluate(cdp, `(() => {
     const expected = ${JSON.stringify(interval)};
     const button = [...document.querySelectorAll('button.interval-btn')]

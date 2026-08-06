@@ -67,6 +67,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /trackId !== 'unregistered'/);
   assert.match(soak, /captureCursor =/);
   assert.match(soak, /responseBodies: replayOnly/);
+  assert.match(soak, /replay interval \$\{interval\} readiness/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {

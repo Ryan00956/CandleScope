@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_2_COMPLETE`。Phase 0～2 已完成并通过各节记录的门禁；Phase 3～8 尚未完成。当前版本在默认关闭的 `MULTI_CHART_16_ENABLED` 后实现单窗口最多 16 图和可回滚的稳定挂载，默认 UI 仍限制为 4 图；尚未完成每窗口 broker/scheduler、四窗口和 64 图，不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_3_COMPLETE`。Phase 0～3 已完成并通过各节记录的门禁；Phase 4～8 尚未完成。当前版本在默认关闭的 `MULTI_CHART_16_ENABLED` 和 `CHART_WINDOW_BROKER_ENABLED` 后实现单窗口最多 16 图、稳定挂载以及每窗口 K 线/指标 broker 与调度预算，默认 UI 仍限制为 4 图；尚未完成后端批量订阅、四窗口和 64 图，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -695,15 +695,15 @@ MULTI_CHART_64_ENABLED=0
 
 ### 任务
 
-- [ ] 3.1 将现有 `SharedKlineStreamCoordinator` 升级为 window broker，公开 logical/physical/interval-union diagnostics。
-- [ ] 3.2 确认相同 SeriesKey 的 `SeriesWindowStore`、HTTP in-flight 和 gap repair 被共享，不只共享 WebSocket。
-- [ ] 3.3 新增 `SharedIndicatorStreamCoordinator`，按后端 `maxSubscriptions` 安全分片。
-- [ ] 3.4 指标 `clientId` 加入 `workspaceId/windowId/cellId/indicatorId`，防止跨窗口冲突。
-- [ ] 3.5 新增 `ChartWorkScheduler`，统一管理 focused/visible-secondary/hidden/minimized tier。
-- [ ] 3.6 forming K 线和指标 preview 使用 rAF/时间片合并；final/amended 不可丢。
-- [ ] 3.7 当前 `ForegroundPreloadGate` 扩展为窗口级公平队列，不能让第一个 Cell 长期饿死其余 Cell。
-- [ ] 3.8 指标 range、初始 history、load-more 和普通 prefetch 使用不同 lane。
-- [ ] 3.9 diagnostics 输出每 Cell/tier 的 pending、dropped/replaced、last commit 和 queue wait。
+- [x] 3.1 将现有 `SharedKlineStreamCoordinator` 升级为 window broker，公开 logical/physical/interval-union diagnostics。
+- [x] 3.2 确认相同 SeriesKey 的 `SeriesWindowStore`、HTTP in-flight 和 gap repair 被共享，不只共享 WebSocket。
+- [x] 3.3 新增 `SharedIndicatorStreamCoordinator`，按后端 `maxSubscriptions` 安全分片。
+- [x] 3.4 指标 `clientId` 加入 `workspaceId/windowId/cellId/indicatorId`，防止跨窗口冲突。
+- [x] 3.5 新增 `ChartWorkScheduler`，统一管理 focused/visible-secondary/hidden/minimized tier。
+- [x] 3.6 forming K 线和指标 preview 使用 rAF/时间片合并；final/amended 不可丢。
+- [x] 3.7 当前 `ForegroundPreloadGate` 扩展为窗口级公平队列，不能让第一个 Cell 长期饿死其余 Cell。
+- [x] 3.8 指标 range、初始 history、load-more 和普通 prefetch 使用不同 lane。
+- [x] 3.9 diagnostics 输出每 Cell/tier 的 pending、dropped/replaced、last commit 和 queue wait。
 
 ### 测试
 
@@ -717,14 +717,36 @@ MULTI_CHART_64_ENABLED=0
 
 ### 验收
 
-- [ ] S1 的 browser K 线 physical WS 不随 16 Cell 增长；
-- [ ] 每个有指标的 Cell 不再默认拥有独立指标 WS；
-- [ ] hidden/minimized 的 Canvas 和 preview 工作为 0；
-- [ ] 任何降载都不改变 closed/amended 数据语义。
+- [x] S1 的 browser K 线 physical WS 不随 16 Cell 增长；
+- [x] 每个有指标的 Cell 不再默认拥有独立指标 WS；
+- [x] hidden/minimized 的 Canvas 和 preview 工作为 0；
+- [x] 任何降载都不改变 closed/amended 数据语义。
+
+### Phase 3 实施记录（2026-08-06）
+
+1. `SharedKlineStreamCoordinator` 现在按 `exchange/marketType/symbol` 持有 window physical entry，并对逻辑订阅、physical stream、active interval 和 interval union 输出常量大小诊断。相同 series 的 interval 增减只更新 union，单 Cell 退订不会关闭其余订阅使用的连接。
+2. 新增 `SharedKlineRequestCoordinator`，对 history/before/range/latest 的语义相同请求合并 physical HTTP in-flight，同时保留每个逻辑调用独立 abort；最后一个 owner 离开时才取消 physical 请求。`SeriesWindowStore` 仍按 series+interval 共享，gap repair 和普通历史请求走同一 broker；真实并发暴露的“后加入 Cell 收到 NOOP 却没有采用已填充 shared store”竞态已用 shared snapshot adoption 修复并加入回归测试。
+3. 新增 `SharedIndicatorStreamCoordinator`：16 个逻辑 client 共用物理 socket，先读取后端 diagnostics 的 `maxSubscriptions` 再安全分片；capability 未知时 fail closed 为每 shard 1 subscription。wire `client_id` 包含 workspace/window/cell/indicator 身份且保持 256 字符合同，ACK、重连、局部取消和 inbound ID 本地化均有定向测试。
+4. 修复了真实浏览器才暴露的指标连接风暴：`LiveChartCell` 原先每次 render 都创建新的 stream identity，16 图样本曾创建 296 条指标 socket；identity 现在按 workspace/window/cell memoize，最终 S1/S4 均只有 1 条物理指标 socket。
+5. 新增 `ChartWorkScheduler`，按 focused、visible-secondary、hidden、minimized 分 tier，并把 indicator-range、initial-history、load-more、prefetch、forming K 线、indicator preview 和 authoritative final 分 lane。forming/preview 使用 latest-only rAF 合并；final/amended 立即提交并替换待处理 forming，不进入可丢弃队列。
+6. `ForegroundPreloadGate` 改为 FIFO owner 队列，取消等待者时会清理，不再让首个 Cell 独占预加载槽。scheduler diagnostics 对每个 Cell 输出 tier、各 lane committed、pending、dropped/replaced、last commit、last lane、last/max queue wait，并输出窗口 visibility 和总 pending/active 数。
+7. 容量脚本的 ready 合同提升为 16/16 Cell 都有 bars 且 Canvas mutation 安静至少 500 ms；失败请求会关联 method/URL/CORS。headed Chrome 显式关闭 Windows native occlusion/background throttling，并通过切到后台标签页验证真实 `document.hidden`：16 个 Cell 全部进入 minimized，forming/preview commit delta 均为 0，pending frame 为 0。
+8. 最终 S1 为 16 个同 series Cell、1 个 shared series store、16 个 logical K 线 subscriber、1 个当前 physical K 线 stream；91 个 logical HTTP 合并为 23 个 physical；16 个指标订阅为 1 个 physical shard。16/16 ready 为 3.494 秒、input p95 104 ms、0 long task、0 console/runtime/network error、0 Canvas remount。浏览器记录到 2 次 K 线 socket creation 是 bootstrap 到持久 Workspace 的一次 handoff，稳态 physical entry 为 1，并未随 Cell 数增长。
+9. 最终 S4 为 16 个 Cell、4 个 series store、16 个 logical K 线 subscriber、4 个当前 physical K 线 stream；60 个 logical HTTP 合并为 33 个 physical；默认 VOL/MA/RSI 共 48 个指标订阅仍为 1 个 physical shard。16/16 ready 为 2.818 秒、input p95 112 ms、2 个 long task、0 console/runtime/network error、0 Canvas remount。S1 的 3.494 秒仍未达到 Phase 5 的热库 ≤3 秒终验门槛，没有放宽阈值。
+10. 回滚组合使用真实 production build + headed Chrome 验证：`MULTI_CHART_16_ENABLED=1`、`CHART_WINDOW_BROKER_ENABLED=0` 时仍可创建、保存、刷新恢复 16 Cell；诊断明确为 broker disabled、indicator/HTTP broker/scheduler 为 `null`，旧 per-Cell runtime 路径继续工作，0 console error、0 warning、0 alert，v6 文档无需迁移或删除。
+11. 完整前端门禁为 architecture、plugins、typecheck、lint、`3029/3029` tests 和 production build 全部通过；broker 开启/关闭两种 build 也分别通过。Phase 3 未修改后端生产代码；真实容量运行以受控 `CORS_ORIGINS=http://127.0.0.1:15285,http://localhost:5173,http://localhost:3000` 启动既有 sidecar，未放宽产品 CORS 默认值。
+
+机器可读证据：
+
+- `docs/perf-baselines/multi-chart-workspace/phase3-s1-16cell-20260806.json`
+- `docs/perf-baselines/multi-chart-workspace/phase3-s4-16cell-20260806.json`
+- `docs/perf-baselines/multi-chart-workspace/hardware-profile-phase3-20260806.json`
+
+真实浏览器截图和后端只读快照保存在忽略版本控制的 `output/playwright/multi-chart-capacity/`。
 
 ### 回滚
 
-保留当前 per-Cell runtime 实现作为一个发布窗口内的默认关闭 fallback。回滚只切 broker/scheduler flag，不迁移用户数据。
+保留当前 per-Cell runtime 实现作为一个发布窗口内的默认关闭 fallback。回滚只关闭 `CHART_WINDOW_BROKER_ENABLED`，不迁移用户数据。
 
 ---
 

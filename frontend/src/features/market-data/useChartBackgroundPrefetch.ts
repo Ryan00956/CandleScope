@@ -199,9 +199,11 @@ export function useChartBackgroundPrefetch({
   enabled,
   priorityGate,
   isForegroundBusy,
+  schedulerOwner,
 }: UseChartBackgroundPrefetchOptions & {
   priorityGate?: ForegroundPreloadGate;
   isForegroundBusy?: () => boolean;
+  schedulerOwner?: string;
 }): void {
   const inFlightRef = useRef(new Set<string>());
   const attemptLedgerRef = useRef(new ChartBackgroundPrefetchAttemptLedger());
@@ -264,7 +266,9 @@ export function useChartBackgroundPrefetch({
         })) continue;
         const attemptClaim = attemptLedgerRef.current.claimInterval(canonicalInterval);
         if (!attemptClaim) continue;
-        const lease = prefetchPriority.tryAcquirePreload("chart-background-prefetch");
+        const lease = prefetchPriority.tryAcquirePreload(
+          schedulerOwner || "chart-background-prefetch",
+        );
         if (!lease) {
           attemptLedgerRef.current.releaseInterval(attemptClaim);
           const waitMs = prefetchPriority.waitMs();
@@ -324,6 +328,7 @@ export function useChartBackgroundPrefetch({
     return () => {
       cancelled = true;
       if (timer != null) clearTimeout(timer);
+      prefetchPriority.cancelQueued(schedulerOwner || "chart-background-prefetch");
       prefetchPriority.yieldToForeground();
     };
   }, [
@@ -336,6 +341,7 @@ export function useChartBackgroundPrefetch({
     nativeIntervals,
     prefetchPriority,
     seriesDataFeed,
+    schedulerOwner,
     symbol,
     trackedIntervals,
   ]);

@@ -631,6 +631,7 @@ function LiveWorkspaceApp() {
                     <LiveChartCell
                       key={`${workspace.view.runtimeKey}:${cellId}`}
                       workspaceId={workspace.view.activeWorkspaceId}
+                      windowId={workspace.view.window.id}
                       cell={chartWorkspaceCell(workspace.view.document, cellId)}
                       linkedDrawingScopeBase={chartCellDrawingScopeBase(
                         workspace.view.activeWorkspaceId,

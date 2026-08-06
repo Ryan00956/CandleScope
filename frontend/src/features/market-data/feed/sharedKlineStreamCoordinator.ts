@@ -40,6 +40,20 @@ export interface SharedKlineStreamCoordinatorOptions {
   createPhysicalStream?: PhysicalStreamFactory;
 }
 
+export interface SharedKlineStreamDiagnostics {
+  entries: Array<{
+    activeIntervals: IntervalString[];
+    intervalUnion: IntervalString[];
+    key: string;
+    logicalSubscribers: number;
+    open: boolean;
+    series: StreamSeries;
+  }>;
+  intervalUnionSize: number;
+  logicalSubscribers: number;
+  physicalStreams: number;
+}
+
 function canonicalIntervals(intervals: readonly IntervalString[] = []): IntervalString[] {
   const values = new Set<IntervalString>();
   for (const interval of intervals) {
@@ -157,6 +171,34 @@ export class SharedKlineStreamCoordinator {
 
   activePhysicalStreamCount(): number {
     return this.entries.size;
+  }
+
+  diagnostics(): SharedKlineStreamDiagnostics {
+    let logicalSubscribers = 0;
+    let intervalUnionSize = 0;
+    const entries = [...this.entries.values()].map((entry) => {
+      const intervalUnion = new Set<IntervalString>();
+      entry.subscribers.forEach((subscriber) => {
+        if (subscriber.closed) return;
+        logicalSubscribers += 1;
+        subscriber.intervals.forEach((interval) => intervalUnion.add(interval));
+      });
+      intervalUnionSize += intervalUnion.size;
+      return {
+        activeIntervals: [...entry.activeIntervals].sort(),
+        intervalUnion: [...intervalUnion].sort(),
+        key: entry.key,
+        logicalSubscribers: entry.subscribers.size,
+        open: entry.open,
+        series: { ...entry.series },
+      };
+    });
+    return {
+      entries,
+      intervalUnionSize,
+      logicalSubscribers,
+      physicalStreams: entries.length,
+    };
   }
 
   closeAll(): void {

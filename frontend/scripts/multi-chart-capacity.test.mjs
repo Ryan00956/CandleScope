@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   CAPACITY_SCHEMA_VERSION,
   buildWorkspaceBootstrap,
+  createNetworkFailureTracker,
   evaluateCapacityResult,
+  isCapacityReadySnapshot,
   parseArgs,
   validateCapacityEvidence,
 } from "./multi-chart-capacity.mjs";
@@ -45,11 +47,18 @@ test("gate evaluation computes pass, fail, and unsupported instead of trusting a
   const base = {
     supported: true,
     requestedCells: 2,
-    readiness: { ready: true, visibleCells: 2 },
+    readiness: { ready: true, visibleCells: 2, documentVisibility: "visible" },
     errors: { console: [], exceptions: [], network: [] },
     backendAfter: { ok: true, schemaVersion: "candlescope.backend.capacity/1" },
     mapping: { observedSeries: 1, expectedSeries: 1, duplicateSeries: [] },
     canvasRemounts: 0,
+    backgroundSuppression: {
+      hidden: true,
+      allMinimized: true,
+      formingDelta: 0,
+      previewDelta: 0,
+      pendingFrames: 0,
+    },
   };
   assert.equal(evaluateCapacityResult(base).result, "pass");
   assert.equal(evaluateCapacityResult({ ...base, canvasRemounts: 1 }).result, "fail");
@@ -70,4 +79,41 @@ test("capacity evidence validator enforces the stable top-level schema", () => {
   assert.match(validateCapacityEvidence({ ...evidence, result: "maybe" }).join(" "), /result/);
   assert.match(validateCapacityEvidence({ ...evidence, data: null }).join(" "), /data/);
   assert.match(validateCapacityEvidence({ ...evidence, hardware: { profileSha256: "sha256:abc" } }).join(" "), /hardware/);
+});
+
+test("network failure evidence retains request identity and ignores explicit cancellation", () => {
+  const tracker = createNetworkFailureTracker();
+  tracker.requestWillBeSent({
+    requestId: "failed",
+    request: { method: "GET", url: "http://127.0.0.1:18081/api/v1/indicators/diagnostics" },
+    type: "Fetch",
+  });
+  const failed = tracker.loadingFailed({
+    requestId: "failed",
+    type: "Fetch",
+    errorText: "net::ERR_FAILED",
+    corsErrorStatus: { corsError: "MissingAllowOriginHeader" },
+  });
+  assert.equal(failed.method, "GET");
+  assert.equal(failed.url, "http://127.0.0.1:18081/api/v1/indicators/diagnostics");
+  assert.deepEqual(failed.corsErrorStatus, { corsError: "MissingAllowOriginHeader" });
+
+  tracker.requestWillBeSent({ requestId: "canceled", request: { method: "GET", url: "http://example.test/" } });
+  assert.equal(tracker.loadingFailed({ requestId: "canceled", canceled: true, errorText: "net::ERR_FAILED" }), null);
+});
+
+test("capacity readiness requires every Cell to have committed market data", () => {
+  const stable = {
+    visibleCells: 2,
+    canvasCount: 14,
+    canvasQuietMs: 500,
+    statuses: ["multi-chart-cell-status live", "multi-chart-cell-status fallback"],
+    marketDataReady: ["true", "true"],
+    documentVisibility: "visible",
+  };
+  assert.equal(isCapacityReadySnapshot(stable, 2), true);
+  assert.equal(isCapacityReadySnapshot({ ...stable, marketDataReady: ["true", "false"] }, 2), false);
+  assert.equal(isCapacityReadySnapshot({ ...stable, statuses: ["live", "connecting"] }, 2), false);
+  assert.equal(isCapacityReadySnapshot({ ...stable, documentVisibility: "hidden" }, 2), false);
+  assert.equal(isCapacityReadySnapshot({ ...stable, canvasQuietMs: 499 }, 2), false);
 });

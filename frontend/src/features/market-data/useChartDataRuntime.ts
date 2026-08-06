@@ -28,6 +28,7 @@ import {
   pendingWarmPublicationMatchesCommit,
   resolvePatchedChartDataStatus,
   seriesCommitOwnsActiveChart,
+  shouldAdoptSharedSeriesSnapshot,
   shouldDeferWarmChartPublication,
 } from "./chartDataRuntime.js";
 import { MAX_SERIES_BARS } from "./phase1WindowPolicy.js";
@@ -1188,12 +1189,23 @@ export function useChartDataRuntime({
         pending: deferIndicatorWindow,
       });
       touchHistoryProof();
+      const next = store.snapshot();
+      const adoptSharedSnapshot = shouldAdoptSharedSeriesSnapshot({
+        currentRows: chartDataRef.current,
+        ownsActiveSeries: ownsActiveChart(key),
+        sharedRows: next,
+      });
+      if (adoptSharedSnapshot) {
+        chartDataRef.current = next;
+        setActiveSeriesStore(store);
+        setChartData(next);
+      }
       if (
         historyProofUpdate
         || indicatorWindowCommit.lifecycleChanged
         || indicatorWindowCommit.publish
+        || adoptSharedSnapshot
       ) {
-        const next = store.snapshot();
         flushPendingWarmPublicationBeforeCommit(key, store, next);
         recordChartDataCommit(sym, intv, next, source, {
           status: "ready",
@@ -1226,10 +1238,21 @@ export function useChartDataRuntime({
         pending: deferIndicatorWindow,
       });
       touchHistoryProof();
+      const adoptSharedSnapshot = shouldAdoptSharedSeriesSnapshot({
+        currentRows: chartDataRef.current,
+        ownsActiveSeries: ownsActiveChart(key),
+        sharedRows: next,
+      });
+      if (adoptSharedSnapshot) {
+        chartDataRef.current = next;
+        setActiveSeriesStore(store);
+        setChartData(next);
+      }
       if (
         historyProofUpdate
         || indicatorWindowCommit.lifecycleChanged
         || indicatorWindowCommit.publish
+        || adoptSharedSnapshot
       ) {
         flushPendingWarmPublicationBeforeCommit(key, store, next);
         recordChartDataCommit(sym, intv, next, source, {
@@ -1347,7 +1370,27 @@ export function useChartDataRuntime({
 
     if (ticks.length > 1) {
       const delta = store.applyRange(ticks, { source });
-      if (delta.type === WINDOW_DELTA_TYPES.NOOP) return;
+      if (delta.type === WINDOW_DELTA_TYPES.NOOP) {
+        const next = store.snapshot();
+        if (shouldAdoptSharedSeriesSnapshot({
+          currentRows: chartDataRef.current,
+          ownsActiveSeries: publishToActiveChart,
+          sharedRows: next,
+        })) {
+          chartDataRef.current = next;
+          setActiveSeriesStore(store);
+          const patchedStatus = resolvePatchedChartDataStatus(
+            source,
+            chartDataCommitMetaRef.current?.status,
+          );
+          recordChartDataCommit(sym, intv, next, source, {
+            ...(patchedStatus === undefined ? {} : { status: patchedStatus }),
+            sharedSnapshotAdopted: true,
+          });
+          setChartData(next);
+        }
+        return;
+      }
 
       const deferIndicatorWindow = indicatorWindowCommitBufferRef.current.hasPending(key);
       const indicatorWindowCommit = deferIndicatorWindow
@@ -1415,7 +1458,27 @@ export function useChartDataRuntime({
         structuralChangedRanges.push({ start: tick.time, end: tick.time, type: "mid-merge" });
       }
     }
-    if (!changed) return;
+    if (!changed) {
+      const next = store.snapshot();
+      if (shouldAdoptSharedSeriesSnapshot({
+        currentRows: chartDataRef.current,
+        ownsActiveSeries: publishToActiveChart,
+        sharedRows: next,
+      })) {
+        chartDataRef.current = next;
+        setActiveSeriesStore(store);
+        const patchedStatus = resolvePatchedChartDataStatus(
+          source,
+          chartDataCommitMetaRef.current?.status,
+        );
+        recordChartDataCommit(sym, intv, next, source, {
+          ...(patchedStatus === undefined ? {} : { status: patchedStatus }),
+          sharedSnapshotAdopted: true,
+        });
+        setChartData(next);
+      }
+      return;
+    }
 
     if (!structural && !appended && replaced && trimmedLeft === 0 && trimmedRight === 0) {
       // Replace-last fast path: the store patched its snapshot in place, so

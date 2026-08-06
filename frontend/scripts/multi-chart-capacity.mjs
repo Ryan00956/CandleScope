@@ -455,17 +455,19 @@ function initializationScript(bootstrap) {
     localStorage.setItem('candlescope-active-workspace-bootstrap-v1', JSON.stringify(record));
     localStorage.setItem('candlescope-workspace-library-fallback-v1', JSON.stringify(library));
     const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ = {
-      longTasks: [], inputEvents: [], canvasAdded: 0, canvasRemoved: 0, measuring: false,
+      longTasks: [], inputEvents: [], canvasAdded: 0, canvasRemoved: 0,
+      lastCanvasMutationAt: performance.now(), measuring: false,
     };
     const observeCanvas = (nodes, field) => {
       for (const node of nodes) {
         if (!(node instanceof Element)) continue;
-        if (node.matches('canvas')) state[field] += 1;
-        state[field] += node.querySelectorAll?.('canvas').length || 0;
+        if (node.matches('canvas')) { state[field] += 1; state.lastCanvasMutationAt = performance.now(); }
+        const nested = node.querySelectorAll?.('canvas').length || 0;
+        state[field] += nested;
+        if (nested > 0) state.lastCanvasMutationAt = performance.now();
       }
     };
     new MutationObserver((records) => {
-      if (!state.measuring) return;
       for (const record of records) {
         observeCanvas(record.addedNodes, 'canvasAdded');
         observeCanvas(record.removedNodes, 'canvasRemoved');
@@ -484,6 +486,17 @@ function initializationScript(bootstrap) {
   })();`;
 }
 
+export function isCapacityReadySnapshot(snapshot, cellCount) {
+  const statusesReady = snapshot?.statuses?.every((status) => /\b(live|fallback)\b/.test(status));
+  const chartDataReady = snapshot?.marketDataReady?.every((ready) => ready === "true");
+  return snapshot?.visibleCells === cellCount
+    && snapshot.canvasCount >= cellCount
+    && snapshot.canvasQuietMs >= 500
+    && snapshot.documentVisibility === "visible"
+    && statusesReady
+    && chartDataReady;
+}
+
 async function waitForCapacityReady(cdp, cellCount, timeoutMs) {
   const startedAt = Date.now();
   let latest = null;
@@ -491,18 +504,24 @@ async function waitForCapacityReady(cdp, cellCount, timeoutMs) {
     latest = await evaluateJson(cdp, `() => {
       const cells = Array.from(document.querySelectorAll('.multi-chart-cell'));
       const statuses = cells.map((cell) => cell.querySelector('.multi-chart-cell-status')?.className || 'missing');
+      const capacityState = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ || {};
       return {
         documentReady: document.readyState,
+        documentVisibility: document.visibilityState,
         visibleCells: cells.length,
         cellIds: cells.map((cell) => cell.getAttribute('data-chart-cell-id')),
+        marketDataReady: cells.map((cell) => cell.getAttribute('data-market-data-ready')),
+        canvasQuietMs: Math.max(0, performance.now() - Number(capacityState.lastCanvasMutationAt || 0)),
         statuses,
         canvasCount: cells.reduce((count, cell) => count + cell.querySelectorAll('canvas').length, 0),
         errorText: Array.from(document.querySelectorAll('.error-message, .chart-error')).map((node) => node.textContent?.trim()).filter(Boolean),
       };
     }`);
-    const statusesReady = latest?.statuses?.every((status) => /\b(live|fallback)\b/.test(status));
-    if (latest?.visibleCells === cellCount && latest.canvasCount >= cellCount && statusesReady) {
+    if (isCapacityReadySnapshot(latest, cellCount)) {
       return { ready: true, readyMs: Date.now() - startedAt, ...latest };
+    }
+    if (latest?.documentVisibility !== "visible") {
+      await cdp.send("Page.bringToFront").catch(() => {});
     }
     await wait(250);
   }
@@ -662,6 +681,7 @@ export function evaluateCapacityResult({
   backendAfter,
   mapping,
   canvasRemounts,
+  backgroundSuppression,
 }) {
   if (!supported) {
     return {
@@ -674,6 +694,7 @@ export function evaluateCapacityResult({
   const checks = {
     visibleCells: { actual: readiness.visibleCells ?? 0, expected: requestedCells, passed: readiness.visibleCells === requestedCells },
     allCellsReady: { actual: readiness.ready, expected: true, passed: readiness.ready === true },
+    documentVisible: { actual: readiness.documentVisibility || null, expected: "visible", passed: readiness.documentVisibility === "visible" },
     consoleErrors: { actual: errors.console.length, expected: 0, passed: errors.console.length === 0 },
     runtimeExceptions: { actual: errors.exceptions.length, expected: 0, passed: errors.exceptions.length === 0 },
     networkFailures: { actual: errors.network.length, expected: 0, passed: errors.network.length === 0 },
@@ -681,6 +702,15 @@ export function evaluateCapacityResult({
     expectedBackendSeries: { actual: mapping.observedSeries, expected: mapping.expectedSeries, passed: mapping.observedSeries === mapping.expectedSeries },
     duplicateBackendLease: { actual: mapping.duplicateSeries, expected: [], passed: mapping.duplicateSeries.length === 0 },
     canvasRemounts: { actual: canvasRemounts, expected: 0, passed: canvasRemounts === 0 },
+    backgroundSuppression: {
+      actual: backgroundSuppression || null,
+      expected: { hidden: true, allMinimized: true, formingDelta: 0, previewDelta: 0, pendingFrames: 0 },
+      passed: backgroundSuppression?.hidden === true
+        && backgroundSuppression?.allMinimized === true
+        && backgroundSuppression?.formingDelta === 0
+        && backgroundSuppression?.previewDelta === 0
+        && backgroundSuppression?.pendingFrames === 0,
+    },
   };
   return {
     result: Object.values(checks).every((check) => check.passed) ? "pass" : "fail",
@@ -716,6 +746,36 @@ export function validateCapacityEvidence(value) {
   return errors;
 }
 
+export function createNetworkFailureTracker() {
+  const requests = new Map();
+  return {
+    requestWillBeSent(event) {
+      requests.set(event.requestId, {
+        method: event.request?.method || null,
+        type: event.type || null,
+        url: event.request?.url || null,
+      });
+    },
+    loadingFinished(event) {
+      requests.delete(event.requestId);
+    },
+    loadingFailed(event) {
+      const request = requests.get(event.requestId) || {};
+      requests.delete(event.requestId);
+      if (event.canceled || event.errorText === "net::ERR_ABORTED") return null;
+      return {
+        atMs: Date.now(),
+        method: request.method || null,
+        type: event.type || request.type || null,
+        url: request.url || null,
+        errorText: event.errorText,
+        blockedReason: event.blockedReason || null,
+        corsErrorStatus: event.corsErrorStatus || null,
+      };
+    },
+  };
+}
+
 async function stopProcess(child) {
   if (!child || child.exitCode !== null) return;
   child.kill();
@@ -746,6 +806,10 @@ async function runSupported(args) {
     "--no-default-browser-check",
     "--enable-precise-memory-info",
     "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion",
     `--window-size=${DEFAULT_VIEWPORT.width},${DEFAULT_VIEWPORT.height}`,
     "about:blank",
   ], { stdio: "ignore", windowsHide: false });
@@ -755,6 +819,7 @@ async function runSupported(args) {
   const traceEvents = [];
   const webSockets = [];
   const errors = { console: [], exceptions: [], network: [] };
+  const networkFailureTracker = createNetworkFailureTracker();
   try {
     const targets = await waitForJson(`http://127.0.0.1:${debugPort}/json`, args.readyTimeoutMs);
     const page = targets.find((target) => target.type === "page") || targets[0];
@@ -766,8 +831,11 @@ async function runSupported(args) {
       if (event.type === "error") errors.console.push({ atMs: Date.now(), args: (event.args || []).map((arg) => arg.value ?? arg.description ?? null) });
     });
     cdp.on("Runtime.exceptionThrown", (event) => errors.exceptions.push({ atMs: Date.now(), text: event.exceptionDetails?.text || "", description: event.exceptionDetails?.exception?.description || null }));
+    cdp.on("Network.requestWillBeSent", (event) => networkFailureTracker.requestWillBeSent(event));
+    cdp.on("Network.loadingFinished", (event) => networkFailureTracker.loadingFinished(event));
     cdp.on("Network.loadingFailed", (event) => {
-      if (!event.canceled && event.errorText !== "net::ERR_ABORTED") errors.network.push({ atMs: Date.now(), type: event.type, errorText: event.errorText, blockedReason: event.blockedReason || null });
+      const failure = networkFailureTracker.loadingFailed(event);
+      if (failure) errors.network.push(failure);
     });
     cdp.on("Tracing.dataCollected", (event) => traceEvents.push(...(event.value || [])));
 
@@ -784,12 +852,19 @@ async function runSupported(args) {
       transferMode: "ReportEvents",
     });
     tracingStarted = true;
+    const browserWindow = await cdp.send("Browser.getWindowForTarget", { targetId: page.id });
+    await cdp.send("Browser.setWindowBounds", {
+      windowId: browserWindow.windowId,
+      bounds: { windowState: "normal" },
+    }).catch(() => {});
     await cdp.send("Page.bringToFront");
     const navigationStartedAt = Date.now();
     await cdp.send("Page.navigate", { url: args.url });
+    await cdp.send("Page.bringToFront");
     const readiness = await waitForCapacityReady(cdp, args.cells, args.readyTimeoutMs);
     readiness.navigationToReadyMs = Date.now() - navigationStartedAt;
 
+    await cdp.send("Page.bringToFront");
     await evaluate(cdp, `(() => {
       const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__;
       if (state) { state.measuring = true; state.canvasAdded = 0; state.canvasRemoved = 0; state.longTasks = []; state.inputEvents = []; }
@@ -825,8 +900,37 @@ async function runSupported(args) {
         display: { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight, devicePixelRatio, colorDepth: screen.colorDepth },
         webgl: { vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : null, renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : null },
         perf: window.__CANDLESCOPE_PERF__?.report?.() || null,
+        windowBroker: window.__CANDLESCOPE_WINDOW_BROKER__?.snapshot?.() || null,
       };
     }`);
+    const replaceableCommitCounts = (snapshot) => {
+      const cells = snapshot?.scheduler?.cells || [];
+      return {
+        forming: cells.reduce((total, cell) => total + Number(cell.committed?.['kline-forming'] || 0), 0),
+        preview: cells.reduce((total, cell) => total + Number(cell.committed?.['indicator-preview'] || 0), 0),
+      };
+    };
+    const replaceableBeforeBackground = replaceableCommitCounts(measured.windowBroker);
+    const backgroundPage = await cdp.send("Target.createTarget", { url: "about:blank" });
+    await cdp.send("Target.activateTarget", { targetId: backgroundPage.targetId });
+    await wait(1_200);
+    const backgroundSnapshot = await evaluateJson(cdp, `() => ({
+      documentVisibility: document.visibilityState,
+      windowBroker: window.__CANDLESCOPE_WINDOW_BROKER__?.snapshot?.() || null,
+    })`);
+    await cdp.send("Target.activateTarget", { targetId: page.id });
+    await cdp.send("Target.closeTarget", { targetId: backgroundPage.targetId }).catch(() => {});
+    await cdp.send("Page.bringToFront");
+    const replaceableAfterBackground = replaceableCommitCounts(backgroundSnapshot.windowBroker);
+    const minimizedCells = backgroundSnapshot.windowBroker?.scheduler?.cells || [];
+    const backgroundSuppression = {
+      hidden: backgroundSnapshot.documentVisibility === "hidden",
+      allMinimized: minimizedCells.length === args.cells
+        && minimizedCells.every((cell) => cell.tier === "minimized"),
+      formingDelta: replaceableAfterBackground.forming - replaceableBeforeBackground.forming,
+      previewDelta: replaceableAfterBackground.preview - replaceableBeforeBackground.preview,
+      pendingFrames: Number(backgroundSnapshot.windowBroker?.scheduler?.pendingFrames || 0),
+    };
     const heapAfter = await cdp.send("Runtime.getHeapUsage");
     const backendAfter = await httpJson(`${args.backendUrl}/debug/capacity?include_database_hash=true`, args.readyTimeoutMs);
     const backendDebug = await httpJson(`${args.backendUrl}/debug/snapshot`, args.readyTimeoutMs);
@@ -871,6 +975,7 @@ async function runSupported(args) {
       backendAfter,
       mapping,
       canvasRemounts: measured.canvasRemoved || 0,
+      backgroundSuppression,
     });
     const evidence = {
       schemaVersion: CAPACITY_SCHEMA_VERSION,
@@ -907,10 +1012,12 @@ async function runSupported(args) {
         reactCommits: { supported: false, reason: "React profiler is not enabled in the production build" },
         canvasRemounts: measured.canvasRemoved || 0,
         canvasAddsAfterReady: measured.canvasAdded || 0,
+        backgroundSuppression,
         klineWebSockets: socketSummary.kline.length,
         indicatorWebSockets: socketSummary.indicator.length,
         webSockets: socketSummary,
         perf: compactPerfSnapshot(measured.perf),
+        windowBroker: measured.windowBroker,
         errors,
       },
       backend: {

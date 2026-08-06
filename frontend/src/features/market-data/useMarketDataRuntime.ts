@@ -140,6 +140,7 @@ export interface UseMarketDataRuntimeOptions {
   realtimePriceRef: MutableRefObject<number | null>;
   foregroundPreloadGate?: ForegroundPreloadGate;
   backgroundPrefetchEnabled?: boolean;
+  schedulerCellId?: string;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -149,6 +150,7 @@ export function useMarketDataRuntime({
   realtimePriceRef,
   foregroundPreloadGate,
   backgroundPrefetchEnabled = true,
+  schedulerCellId,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
   const workspaceResources = useMarketDataWorkspaceResources();
   const {
@@ -355,7 +357,9 @@ export function useMarketDataRuntime({
   }, []);
   useEffect(() => {
     seriesDataFeed.configure({
-      api: defaultKlineApi,
+      api: workspaceResources?.klineApi || defaultKlineApi,
+      chartWorkScheduler: workspaceResources?.workScheduler || null,
+      chartWorkSchedulerCellId: schedulerCellId || null,
       foregroundPreloadGate: backgroundPrefetchPriority,
       canRequestSeries: canRequestChartSeries,
       getActiveSeries: () => ({
@@ -385,6 +389,7 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     symbol,
     workspaceResources,
+    schedulerCellId,
   ]);
 
   const resolveInitialRows = useCallback(
@@ -665,6 +670,8 @@ export function useMarketDataRuntime({
     updateRealtimePrice,
     handleBackfillCompleted,
     setWsStatus,
+    ...(schedulerCellId ? { schedulerCellId } : {}),
+    workScheduler: workspaceResources?.workScheduler || null,
   });
 
   const foregroundIndicatorRequestCount = indicatorRangeRequests.length;
@@ -751,6 +758,7 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     priorityGate: backgroundPrefetchPriority,
     isForegroundBusy: isForegroundBusyForPrefetch,
+    schedulerOwner: `chart-background-prefetch:${schedulerCellId || sessionKey}`,
     // Background interval warming must yield while the active chart is still
     // loading history, extending left, or waiting for indicator coverage.
     enabled: backgroundPrefetchEnabled

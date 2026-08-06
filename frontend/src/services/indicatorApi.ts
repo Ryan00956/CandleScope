@@ -419,6 +419,32 @@ export function getIndicatorStreamUrl(): string {
   return `${httpBaseToWsBase(API_BASE)}/stream/indicators`;
 }
 
+export interface IndicatorWebSocketLimits {
+  maxSubscriptions: number;
+}
+
+/** Read the server-owned per-socket limit used by the window indicator broker. */
+export async function fetchIndicatorWebSocketLimits(
+  signal?: AbortSignal,
+): Promise<IndicatorWebSocketLimits> {
+  const payload = await request(
+    `${API_BASE}/indicators/diagnostics`,
+    indicatorSignalOptions(signal),
+  );
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Indicator diagnostics must be an object");
+  }
+  const websocket = (payload as Record<string, unknown>).websocket;
+  if (!websocket || typeof websocket !== "object" || Array.isArray(websocket)) {
+    throw new TypeError("Indicator diagnostics.websocket must be an object");
+  }
+  const maxSubscriptions = (websocket as Record<string, unknown>).maxSubscriptions;
+  if (!Number.isSafeInteger(maxSubscriptions) || Number(maxSubscriptions) < 1) {
+    throw new TypeError("Indicator diagnostics.websocket.maxSubscriptions must be a positive integer");
+  }
+  return { maxSubscriptions: Number(maxSubscriptions) };
+}
+
 /** Delete a custom indicator */
 export async function deleteCustomIndicator(
   indicatorId: string,

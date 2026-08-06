@@ -93,6 +93,19 @@ test("same-instrument chart cells share one physical stream and receive only the
   }, physical.controller);
   assert.deepEqual(firstControls, [["1m"]]);
   assert.deepEqual(secondControls, [["5m"]]);
+  assert.deepEqual(coordinator.diagnostics(), {
+    entries: [{
+      activeIntervals: ["1m", "5m"],
+      intervalUnion: ["1m", "5m"],
+      key: "binance|spot|BTCUSDT",
+      logicalSubscribers: 2,
+      open: true,
+      series: BTC,
+    }],
+    intervalUnionSize: 2,
+    logicalSubscribers: 2,
+    physicalStreams: 1,
+  });
 
   const tickTime = toEpochSeconds(1)!;
   physical.options.onKline?.({

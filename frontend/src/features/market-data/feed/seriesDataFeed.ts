@@ -22,6 +22,7 @@ import type {
   SeriesDataFeedConfig,
 } from "../klineContracts.js";
 import type { ForegroundPreloadGate } from "../foregroundPreloadGate.js";
+import type { ChartWorkLane, ChartWorkScheduler } from "../chartWorkScheduler.js";
 import type {
   EpochSeconds,
   KlineBar,
@@ -713,6 +714,8 @@ export class SeriesDataFeed {
   private requestDemandBySeries: Map<SeriesKey, KlineRequestDemand>;
   private foregroundPreloadGate: ForegroundPreloadGate | null;
   private streamFactory: KlineStreamFactory | null;
+  private chartWorkScheduler: ChartWorkScheduler | null;
+  private chartWorkSchedulerCellId: string | null;
 
   constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
@@ -743,6 +746,8 @@ export class SeriesDataFeed {
     this.requestDemandBySeries = new Map();
     this.foregroundPreloadGate = null;
     this.streamFactory = null;
+    this.chartWorkScheduler = null;
+    this.chartWorkSchedulerCellId = null;
     this.configure(config);
   }
 
@@ -753,6 +758,12 @@ export class SeriesDataFeed {
     }
     if (config.streamFactory !== undefined) {
       this.streamFactory = config.streamFactory;
+    }
+    if (config.chartWorkScheduler !== undefined) {
+      this.chartWorkScheduler = config.chartWorkScheduler;
+    }
+    if (config.chartWorkSchedulerCellId !== undefined) {
+      this.chartWorkSchedulerCellId = config.chartWorkSchedulerCellId;
     }
     this.canRequestSeries = config.canRequestSeries || this.canRequestSeries || (() => true);
     this.getActiveSeries = config.getActiveSeries || this.getActiveSeries || (() => null);
@@ -790,14 +801,32 @@ export class SeriesDataFeed {
     owner: string,
     request: () => Promise<TResult>,
   ): Promise<TResult> {
-    const gate = this.foregroundPreloadGate;
-    if (!gate || priority !== "foreground") return request();
-    const lease = gate.enterForeground(owner);
-    try {
-      return await request();
-    } finally {
-      lease.release();
+    const execute = async () => {
+      const gate = this.foregroundPreloadGate;
+      if (!gate || priority !== "foreground") return request();
+      const lease = gate.enterForeground(owner);
+      try {
+        return await request();
+      } finally {
+        lease.release();
+      }
+    };
+    const scheduler = this.chartWorkScheduler;
+    const cellId = this.chartWorkSchedulerCellId;
+    if (!scheduler || !cellId) return execute();
+    return scheduler.run(cellId, this.schedulerLane(priority, owner), execute);
+  }
+
+  private schedulerLane(
+    priority: FeedRequestPriority,
+    owner: string,
+  ): Extract<ChartWorkLane, "indicator-range" | "initial-history" | "load-more" | "prefetch"> {
+    if (priority === "preload") return "prefetch";
+    if (owner.includes("indicator")) return "indicator-range";
+    if (priority === "hydrate" || owner.includes("initial") || owner.includes("reconnect")) {
+      return "initial-history";
     }
+    return "load-more";
   }
 
   private indicatorWindowOwner(

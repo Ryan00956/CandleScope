@@ -9,6 +9,7 @@ import {
   pendingWarmPublicationMatchesCommit,
   resolvePatchedChartDataStatus,
   seriesCommitOwnsActiveChart,
+  shouldAdoptSharedSeriesSnapshot,
   shouldDeferWarmChartPublication,
 } from "../chartDataRuntime.js";
 import { epochSeconds } from "../../../test/testHelpers.js";
@@ -120,6 +121,32 @@ test("klineRowsEqual compares rows by value instead of array identity", () => {
 
   assert.equal(klineRowsEqual({ length: 0 }, { length: 0 }), false);
   assert.equal(klineRowsEqual([{}], [null]), false);
+});
+
+test("a logical chart adopts rows committed first by another shared-store consumer", () => {
+  const sharedRows = [{
+    time: epochSeconds(1000),
+    open: 1,
+    high: 2,
+    low: 0.5,
+    close: 1.5,
+    volume: 10,
+  }];
+  assert.equal(shouldAdoptSharedSeriesSnapshot({
+    currentRows: [],
+    ownsActiveSeries: true,
+    sharedRows,
+  }), true);
+  assert.equal(shouldAdoptSharedSeriesSnapshot({
+    currentRows: sharedRows,
+    ownsActiveSeries: true,
+    sharedRows,
+  }), false, "the owning consumer must not republish an identical snapshot");
+  assert.equal(shouldAdoptSharedSeriesSnapshot({
+    currentRows: [],
+    ownsActiveSeries: false,
+    sharedRows,
+  }), false, "a stale series may never adopt the shared active snapshot");
 });
 
 test("latest and history response order always settles at ready", () => {

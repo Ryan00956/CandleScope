@@ -14,6 +14,12 @@ import {
   IndicatorStreamConnection,
   type IndicatorStreamSubscription,
 } from "./indicatorStreamConnection.js";
+import type {
+  IndicatorStreamIdentity,
+  SharedIndicatorLogicalOptions,
+  SharedIndicatorLogicalConnection,
+  SharedIndicatorStreamCoordinator,
+} from "./sharedIndicatorStreamCoordinator.js";
 import { formatIndicatorError } from "./indicatorPayloadRuntime.js";
 import {
   buildCurrentHostedIndicatorSignatures,
@@ -67,6 +73,8 @@ export interface UseIndicatorStreamControllerOptions {
   setIndicatorError(indicatorId: string, error: string): void;
   subscriptionUpdatesReady: boolean;
   symbol: string;
+  streamCoordinator?: SharedIndicatorStreamCoordinator | null;
+  streamIdentity?: IndicatorStreamIdentity | null;
 }
 
 export interface IndicatorStreamController {
@@ -224,8 +232,10 @@ export function useIndicatorStreamController({
   setIndicatorError,
   subscriptionUpdatesReady,
   symbol,
+  streamCoordinator,
+  streamIdentity,
 }: UseIndicatorStreamControllerOptions): IndicatorStreamController {
-  const connectionRef = useRef<IndicatorStreamConnection | null>(null);
+  const connectionRef = useRef<SharedIndicatorLogicalConnection | IndicatorStreamConnection | null>(null);
   const recomputedRangeSignaturesRef = useRef<Set<string>>(new Set());
   const hostedSeedCoverageRef = useRef<Map<string, HostedSeedCoverageState>>(
     new Map(),
@@ -382,7 +392,7 @@ export function useIndicatorStreamController({
   ]);
 
   const syncConnectionSubscriptions = useCallback((
-    connection: IndicatorStreamConnection,
+    connection: SharedIndicatorLogicalConnection | IndicatorStreamConnection,
     force = false,
   ): boolean => {
     if (!subscriptionUpdatesReadyRef.current) return false;
@@ -446,8 +456,7 @@ export function useIndicatorStreamController({
       return undefined;
     }
 
-    const connection = new IndicatorStreamConnection({
-      url: getIndicatorStreamUrl(),
+    const connectionOptions = {
       onConnectionReset: () => {
         recomputedRangeSignaturesRef.current.clear();
         markHostedSeedCoverageUnacknowledged(hostedSeedCoverageRef.current);
@@ -529,7 +538,13 @@ export function useIndicatorStreamController({
       onSubscriptionPending: (indicatorId) => {
         handlerRefs.current.handleIndicatorSubscriptionPending?.(indicatorId);
       },
-    });
+    } satisfies SharedIndicatorLogicalOptions;
+    const connection = streamCoordinator && streamIdentity
+      ? streamCoordinator.createLogicalConnection(streamIdentity, connectionOptions)
+      : new IndicatorStreamConnection({
+          url: getIndicatorStreamUrl(),
+          ...connectionOptions,
+        });
     connectionRef.current = connection;
     const initialSubscriptions = subscriptionUpdatesReadyRef.current
       ? buildDesiredSubscriptionsRef.current()
@@ -555,6 +570,8 @@ export function useIndicatorStreamController({
     symbol,
     requestRecomputedRange,
     syncConnectionSubscriptions,
+    streamCoordinator,
+    streamIdentity,
   ]);
 
   useEffect(() => {

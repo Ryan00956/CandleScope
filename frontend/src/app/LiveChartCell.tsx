@@ -26,6 +26,7 @@ import type {
   ChartLinkGroupId,
   ChartWorkspaceCellRole,
   ChartWorkspaceId,
+  ChartWindowId,
   ChartWorkspaceSplitDirection,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
@@ -38,6 +39,7 @@ import {
   type WorkspaceCellDensity,
 } from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import { useMarketDataWorkspaceResources } from "../features/market-data/marketDataWorkspaceContext.js";
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
 import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime.js";
@@ -99,6 +101,7 @@ export interface ActiveChartEnvironment {
 
 export interface LiveChartCellProps {
   workspaceId: ChartWorkspaceId;
+  windowId: ChartWindowId;
   cell: ChartCellState;
   linkedDrawingScopeBase: string;
   layoutRole: ChartWorkspaceCellRole | null;
@@ -137,6 +140,7 @@ export interface LiveChartCellProps {
 
 function LiveChartCell({
   workspaceId,
+  windowId,
   cell,
   linkedDrawingScopeBase,
   layoutRole,
@@ -168,6 +172,7 @@ function LiveChartCell({
   onOpenReplayLauncher,
   onActiveEnvironmentChange,
 }: LiveChartCellProps) {
+  const marketWorkspaceResources = useMarketDataWorkspaceResources();
   const sectionRef = useRef<HTMLElement | null>(null);
   const [density, setDensity] = useState<WorkspaceCellDensity>("full");
   const [mountToken] = useState(() => {
@@ -216,7 +221,18 @@ function LiveChartCell({
     realtimePriceRef,
     foregroundPreloadGate,
     backgroundPrefetchEnabled: active,
+    schedulerCellId: cell.id,
   });
+
+  const workTier = obscured ? "hidden" : active ? "focused" : "visible-secondary";
+  const workScheduler = marketWorkspaceResources?.workScheduler;
+  useLayoutEffect(() => {
+    if (!workScheduler) return undefined;
+    return workScheduler.registerCell(cell.id);
+  }, [cell.id, workScheduler]);
+  useLayoutEffect(() => {
+    workScheduler?.setCellTier(cell.id, workTier);
+  }, [cell.id, workScheduler, workTier]);
   const advancedMarketData = useAdvancedMarketDataRuntime({
     session: chartSession,
     dataMeta: marketData.view.meta,
@@ -277,6 +293,10 @@ function LiveChartCell({
   const openAlertsPanel = useCallback(() => setShowAlertsPanel(true), []);
   const closeAlertsPanel = useCallback(() => setShowAlertsPanel(false), []);
   const toggleAlertsPanel = useCallback(() => setShowAlertsPanel((value) => !value), []);
+  const indicatorStreamIdentity = useMemo(
+    () => ({ workspaceId, windowId, cellId: cell.id }),
+    [cell.id, windowId, workspaceId],
+  );
 
   const indicators = useIndicatorRuntime({
     session: chartSession,
@@ -287,6 +307,8 @@ function LiveChartCell({
     onIndicatorRemoved: drawings.actions.handleIndicatorRemoved,
     indicatorPersistence,
     realtimeEnabled: !obscured,
+    streamIdentity: indicatorStreamIdentity,
+    workSchedulerCellId: cell.id,
   });
   const exportFlow = useExportRuntime({
     session: chartSession,
@@ -519,6 +541,8 @@ function LiveChartCell({
         data-runtime-mount-token={mountToken}
         data-density={density}
         data-rendering-paused={obscured ? "true" : "false"}
+        data-market-data-ready={marketData.status.barCount > 0 ? "true" : "false"}
+        data-work-tier={workScheduler?.tier(cell.id) || "fallback"}
         data-active={active ? "true" : "false"}
         data-layout-role={layoutRole ?? "standard"}
         data-link-group={cell.linkGroup ?? "none"}

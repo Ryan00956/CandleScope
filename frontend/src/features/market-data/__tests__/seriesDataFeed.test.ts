@@ -294,11 +294,13 @@ test("concurrent initial latest and history retain foreground ownership until bo
   while (calls < 2) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(gate.snapshot().activeForeground, 2);
   assert.equal(gate.tryAcquirePreload("blocked-preload"), null);
+  gate.cancelQueued("blocked-preload");
 
   resolveLatest({ data: rows([20]) });
   await latest;
   assert.equal(gate.snapshot().activeForeground, 1);
   assert.equal(gate.tryAcquirePreload("still-blocked"), null);
+  gate.cancelQueued("still-blocked");
 
   resolveHistory({ data: rows([10, 20]) });
   await history;

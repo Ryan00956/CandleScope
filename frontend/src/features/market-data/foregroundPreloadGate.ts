@@ -27,6 +27,8 @@ export interface ForegroundPreloadGateSnapshot {
   blockedUntil: number;
   generation: number;
   waitMs: number;
+  queuedHydrationOwners: string[];
+  queuedPreloadOwners: string[];
 }
 
 type SpeculativeLane = "preload" | "hydration";
@@ -56,6 +58,10 @@ export class ForegroundPreloadGate {
   private generation = 0;
   private wakeTimer: TimerHandle | null = null;
   private foregroundPreemptionDepth = 0;
+  private readonly hydrationQueue: string[] = [];
+  private readonly hydrationQueued = new Set<string>();
+  private readonly preloadQueue: string[] = [];
+  private readonly preloadQueued = new Set<string>();
   private disposed = false;
 
   constructor(options: number | ForegroundPreloadGateOptions = {}) {
@@ -121,18 +127,21 @@ export class ForegroundPreloadGate {
   }
 
   tryAcquirePreload(ownerOrNow: string | number = "preload", requestedNow?: number): PreloadLease | null {
-    if (
-      this.disposed
-      || this.foregroundPreemptionDepth > 0
-      || this.activePreload
-      || this.foregroundOwners.size > 0
-    ) return null;
     const owner = typeof ownerOrNow === "string" ? ownerOrNow : "preload";
     const now = typeof ownerOrNow === "number" ? ownerOrNow : (requestedNow ?? this.now());
+    if (this.disposed || this.foregroundPreemptionDepth > 0) return null;
+    this.enqueueOwner(owner, "preload");
+    if (
+      this.activePreload
+      || this.foregroundOwners.size > 0
+      || this.hydrationQueue.length > 0
+    ) return null;
     if (this.waitMs(now) > 0) {
       this.scheduleWake();
       return null;
     }
+    if (this.preloadQueue[0] !== owner) return null;
+    this.dequeueOwner(owner, "preload");
     return this.acquireSpeculative(owner, "preload");
   }
 
@@ -150,16 +159,28 @@ export class ForegroundPreloadGate {
       || this.foregroundPreemptionDepth > 0
       || this.foregroundOwners.size > 0
     ) return null;
+    this.enqueueOwner(owner, "hydration");
     if (this.activePreload?.lane === "hydration") return null;
 
     const ordinaryPreload = this.activePreload;
     if (ordinaryPreload) {
       this.generation += 1;
-      const hydration = this.acquireSpeculative(owner, "hydration");
-      ordinaryPreload.controller.abort();
-      return hydration;
+      this.activePreload = null;
+      this.foregroundPreemptionDepth += 1;
+      try {
+        ordinaryPreload.controller.abort();
+      } finally {
+        this.foregroundPreemptionDepth -= 1;
+      }
     }
+    if (this.hydrationQueue[0] !== owner || this.activePreload) return null;
+    this.dequeueOwner(owner, "hydration");
     return this.acquireSpeculative(owner, "hydration");
+  }
+
+  cancelQueued(owner: string): void {
+    this.dequeueOwner(owner, "hydration");
+    this.dequeueOwner(owner, "preload");
   }
 
   isCurrent(lease: PreloadLease): boolean {
@@ -189,6 +210,8 @@ export class ForegroundPreloadGate {
       activePreloadOwner: this.activePreload?.owner || null,
       blockedUntil: this.blockedUntil,
       generation: this.generation,
+      queuedHydrationOwners: [...this.hydrationQueue],
+      queuedPreloadOwners: [...this.preloadQueue],
       waitMs: this.waitMs(now),
     };
   }
@@ -198,6 +221,10 @@ export class ForegroundPreloadGate {
     this.disposed = true;
     this.generation += 1;
     this.foregroundOwners.clear();
+    this.hydrationQueue.splice(0);
+    this.hydrationQueued.clear();
+    this.preloadQueue.splice(0);
+    this.preloadQueued.clear();
     const activePreload = this.activePreload;
     this.activePreload = null;
     activePreload?.controller.abort();
@@ -265,5 +292,22 @@ export class ForegroundPreloadGate {
 
   private notify(): void {
     for (const listener of [...this.listeners]) listener();
+  }
+
+  private enqueueOwner(owner: string, lane: SpeculativeLane): void {
+    if (this.disposed || !owner) return;
+    const queue = lane === "hydration" ? this.hydrationQueue : this.preloadQueue;
+    const queued = lane === "hydration" ? this.hydrationQueued : this.preloadQueued;
+    if (queued.has(owner)) return;
+    queued.add(owner);
+    queue.push(owner);
+  }
+
+  private dequeueOwner(owner: string, lane: SpeculativeLane): void {
+    const queue = lane === "hydration" ? this.hydrationQueue : this.preloadQueue;
+    const queued = lane === "hydration" ? this.hydrationQueued : this.preloadQueued;
+    if (!queued.delete(owner)) return;
+    const index = queue.indexOf(owner);
+    if (index >= 0) queue.splice(index, 1);
   }
 }

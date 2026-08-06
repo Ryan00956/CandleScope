@@ -1,5 +1,6 @@
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ForegroundPreloadGate } from "./foregroundPreloadGate.js";
+import type { ChartWorkScheduler } from "./chartWorkScheduler.js";
 import type {
   EpochMilliseconds,
   EpochSeconds,
@@ -221,6 +222,8 @@ export type KlineStreamFactory = (
 
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
+  chartWorkScheduler?: ChartWorkScheduler | null;
+  chartWorkSchedulerCellId?: string | null;
   foregroundPreloadGate?: ForegroundPreloadGate | null;
   canRequestSeries?: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries?: () => MarketSeries | null;

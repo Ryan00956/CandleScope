@@ -2741,10 +2741,14 @@ async function main() {
       await replayCapture.settle();
       phaseDiagnostics = {
         phase: "initial-replay-snapshot",
+        status: await replayStatus(replay.cdp).catch(() => null),
         page: await evaluate(replay.cdp, `({
           url: location.href,
           text: (document.body?.innerText || "").slice(-5000),
-          replayStatus: window.__candlescopeReplayStatus || null,
+          statusDataset: (() => {
+            const status = document.querySelector('#replay-status-bar, #status-bar[data-runtime-source="replay"]');
+            return status instanceof HTMLElement ? { ...status.dataset } : null;
+          })(),
           buttons: [...document.querySelectorAll("button")].map((button) => ({
             text: button.textContent?.trim() || "",
             disabled: button.disabled,
@@ -2753,7 +2757,15 @@ async function main() {
         apiRequests: replayCapture.requests.filter((item) => item.url.includes("/api/")).slice(-30),
         apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/")).slice(-30),
         responseBodies: replayCapture.responseBodies.slice(-30),
+        backend: await readJson(diagnosticsUrl).catch((backendError) => ({
+          error: backendError?.message || String(backendError),
+        })),
+        failedRequests: replayCapture.failedRequests.slice(-30),
         webSockets: replayCapture.webSockets,
+        webSocketFramesReceived: replayCapture.webSocketFramesReceived.slice(-10).map((payload) => ({
+          bytes: Buffer.byteLength(payload),
+          prefix: payload.slice(0, 8_000),
+        })),
         consoleErrors: replayCapture.consoleErrors,
         exceptions: replayCapture.exceptions,
       };

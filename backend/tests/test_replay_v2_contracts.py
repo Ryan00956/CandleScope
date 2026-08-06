@@ -100,6 +100,19 @@ def test_replay_v2_run_track_command_and_event_golden_round_trip() -> None:
     assert event.to_dict() == golden["sample_event"]
 
 
+def test_replay_v2_track_contract_accepts_account_wide_hedge_capabilities() -> None:
+    payload = deepcopy(_golden()["sample_track"])
+    payload["capabilities"] = {
+        "HISTORICAL_FEE_POLICY": "AVAILABLE_PINNED_ACCOUNT_WIDE",
+        "SIMULATED_INSURANCE_FUND": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
+        "SIMULATED_ADL_COHORT": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
+    }
+
+    track = MarketTrackContract.from_dict(payload)
+
+    assert track.to_dict()["capabilities"] == payload["capabilities"]
+
+
 @pytest.mark.parametrize(
     ("section", "path", "bad_value"),
     [

@@ -177,11 +177,11 @@ test("HEDGE track parser accepts every pinned and materialized exchange-parity c
       capabilities: {
         HISTORICAL_MARK_INDEX: "AVAILABLE_PINNED",
         HISTORICAL_INSTRUMENT_RULE: "AVAILABLE_PINNED",
-        HISTORICAL_FEE_POLICY: "AVAILABLE_PINNED",
+        HISTORICAL_FEE_POLICY: "AVAILABLE_PINNED_ACCOUNT_WIDE",
         HISTORICAL_FUNDING: "AVAILABLE_PINNED",
         HISTORICAL_L2: "AVAILABLE_PINNED_CONTINUITY_GATED",
-        SIMULATED_INSURANCE_FUND: "AVAILABLE_MATERIALIZED",
-        SIMULATED_ADL_COHORT: "AVAILABLE_MATERIALIZED",
+        SIMULATED_INSURANCE_FUND: "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
+        SIMULATED_ADL_COHORT: "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
       },
     } : track),
   });
@@ -191,7 +191,7 @@ test("HEDGE track parser accepts every pinned and materialized exchange-parity c
   );
   assert.equal(
     parsed.tracks[0]?.capabilities.SIMULATED_ADL_COHORT,
-    "AVAILABLE_MATERIALIZED",
+    "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
   );
   assert.throws(() => parseReplayMarketTracksResponse({
     ...payload,

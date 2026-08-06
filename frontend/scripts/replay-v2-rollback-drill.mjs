@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 import { freeHarnessPort } from "./replay-harness-port.mjs";
 import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
+import {
+  chooseReplayMarket,
+  configureFormalV2TrainingPlan,
+  selectFormalV2HedgeTrainingPlan,
+} from "./replay-soak.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptDirectory = path.dirname(scriptPath);
@@ -479,6 +484,7 @@ async function waitForLiveReady(cdp, timeoutMs) {
 async function openReplayFromLive({
   liveCdp,
   debugBase,
+  hedgePlan,
   timeoutMs,
 }) {
   const targetsBefore = await readJson(`${debugBase}/json/list`);
@@ -494,14 +500,15 @@ async function openReplayFromLive({
     liveCdp,
     `(() => {
       const button = [...document.querySelectorAll("button")].find(
-        (item) => item.textContent?.trim() === "创建并进入训练",
+        (item) => item.textContent?.trim() === "确认时间并创建 Run",
       );
-      return button instanceof HTMLButtonElement && !button.disabled;
+      return button instanceof HTMLButtonElement;
     })()`,
     timeoutMs,
-    "live v2 create plan readiness",
+    "live v2 current create contract",
   );
-  await clickButtonByText(liveCdp, "创建并进入训练", timeoutMs);
+  await configureFormalV2TrainingPlan(liveCdp, hedgePlan, timeoutMs);
+  await clickButtonByText(liveCdp, "确认时间并创建 Run", timeoutMs);
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const targets = await readJson(`${debugBase}/json/list`);
@@ -514,6 +521,7 @@ async function openReplayFromLive({
       const cdp = new CdpConnection(found.webSocketDebuggerUrl);
       await cdp.connect();
       await Promise.all([cdp.send("Page.enable"), cdp.send("Runtime.enable"), cdp.send("Network.enable")]);
+      await chooseReplayMarket(cdp, hedgePlan, timeoutMs);
       return { target: found, cdp };
     }
     await wait(100);
@@ -702,6 +710,7 @@ async function main() {
     const enabledFixture = await readJson(
       `${currentBackendOrigin}/__replay_smoke__/fixture`,
     );
+    const hedgePlan = selectFormalV2HedgeTrainingPlan(enabledFixture);
     assert(
       enabledFixture.gap_maintenance_enabled === false,
       "offline rollback fixture left gap maintenance enabled",
@@ -739,6 +748,7 @@ async function main() {
     const replay = await openReplayFromLive({
       liveCdp: live.cdp,
       debugBase,
+      hedgePlan,
       timeoutMs: args.timeoutMs,
     });
     connections.push(replay.cdp);

@@ -655,7 +655,7 @@ async function keyboardActivateButton(
   throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, railView, side, text: buttonText, tabs })}`);
 }
 
-async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
+export async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
   // datetime-local normalizes a zero-seconds value to the shortest valid form.
   const requestedStartValue = new Date(plan.requestedStartMs).toISOString().slice(0, 16);
   const start = await evaluate(cdp, `(() => {
@@ -738,7 +738,7 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
   };
 }
 
-async function chooseReplayMarket(cdp, plan, timeoutMs) {
+export async function chooseReplayMarket(cdp, plan, timeoutMs) {
   if (plan !== null) {
     await waitForValue(
       cdp,

@@ -71,3 +71,14 @@ test("rollback enables exact HEDGE inputs only for the current enabled build", (
   assert.equal(baseline.historicalBookEnabled, false);
   assert.equal(baseline.args.includes("--hedge"), false);
 });
+
+test("rollback follows the current two-stage Run and market contract", () => {
+  const source = fs.readFileSync(
+    new URL("./replay-v2-rollback-drill.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /确认时间并创建 Run/);
+  assert.match(source, /configureFormalV2TrainingPlan/);
+  assert.match(source, /chooseReplayMarket/);
+  assert.doesNotMatch(source, /创建并进入训练/);
+});

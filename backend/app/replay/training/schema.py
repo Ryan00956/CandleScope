@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 18
+TRAINING_SCHEMA_VERSION = 19
 TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
@@ -1798,6 +1798,7 @@ CREATE TABLE IF NOT EXISTS replay_training_liquidation_fill (
     case_id TEXT NOT NULL,
     order_id TEXT NOT NULL,
     fill_id TEXT NOT NULL,
+    broker_fill_id TEXT NOT NULL,
     fill_sequence INTEGER NOT NULL CHECK (fill_sequence >= 1),
     price TEXT NOT NULL,
     quantity TEXT NOT NULL,
@@ -2316,6 +2317,84 @@ CREATE TABLE IF NOT EXISTS replay_training_liquidation_book_execution (
 """
 
 
+TRAINING_SCHEMA_V19_HEDGE_TRACK_INPUTS = """
+CREATE TABLE IF NOT EXISTS replay_hedge_track_public_binding (
+    run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    track_id TEXT NOT NULL,
+    public_archive_id TEXT NOT NULL
+        REFERENCES replay_hedge_public_archive(archive_id) ON DELETE RESTRICT,
+    public_generation INTEGER NOT NULL CHECK (public_generation >= 1),
+    public_dataset_epoch TEXT NOT NULL,
+    public_checksum_sha256 TEXT NOT NULL,
+    public_event_chain_tail TEXT NOT NULL,
+    bound_range_start_ms INTEGER NOT NULL CHECK (bound_range_start_ms >= 0),
+    bound_range_end_ms INTEGER NOT NULL CHECK (bound_range_end_ms >= bound_range_start_ms),
+    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'QUARANTINED')),
+    degraded_reason TEXT,
+    input_proof_hash TEXT NOT NULL CHECK (
+        length(input_proof_hash) = 71 AND input_proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE CASCADE,
+    CHECK ((status = 'ACTIVE' AND degraded_reason IS NULL)
+        OR (status != 'ACTIVE' AND degraded_reason IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_hedge_track_public_archive
+ON replay_hedge_track_public_binding(public_archive_id, status, run_id, track_id);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_track_public_projection (
+    run_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    last_event_sequence INTEGER NOT NULL CHECK (last_event_sequence >= 0),
+    as_of_actual_time_ms INTEGER NOT NULL CHECK (as_of_actual_time_ms >= 0),
+    as_of_virtual_time_ms INTEGER NOT NULL CHECK (as_of_virtual_time_ms >= 0),
+    state_json TEXT NOT NULL,
+    input_chain_hash TEXT NOT NULL CHECK (
+        length(input_chain_hash) = 71 AND input_chain_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_hedge_track_public_binding(run_id, track_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_track_public_applied_event (
+    run_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL CHECK (event_sequence >= 1),
+    event_time_ms INTEGER NOT NULL CHECK (event_time_ms >= 0),
+    event_phase INTEGER NOT NULL CHECK (event_phase IN (10, 30, 40)),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN ('RULE', 'FEE_POLICY', 'MARK_INDEX', 'FUNDING')
+    ),
+    component_sequence INTEGER NOT NULL CHECK (component_sequence >= 1),
+    applied_virtual_time_ms INTEGER NOT NULL CHECK (applied_virtual_time_ms >= 0),
+    source_event_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    applied_payload_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, event_sequence),
+    UNIQUE (run_id, track_id, source_event_hash),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_hedge_track_public_binding(run_id, track_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_hedge_track_public_applied_order
+ON replay_hedge_track_public_applied_event(
+    run_id, event_time_ms, event_phase, track_id, event_sequence
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -2473,6 +2552,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_V16_HEDGE_ACCOUNTING,
         TRAINING_SCHEMA_V17_HEDGE_LIQUIDATION,
         TRAINING_SCHEMA_V18_HISTORICAL_L2_LIQUIDATION,
+        TRAINING_SCHEMA_V19_HEDGE_TRACK_INPUTS,
     ):
         _execute_script(connection, script)
     connection.execute(

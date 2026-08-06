@@ -57,6 +57,12 @@ def main() -> int:
     log_directory = output.parent / "logs" / "checks"
     environment = dict(os.environ)
     environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+    sdk_source = BACKEND_ROOT.parent / "packages" / "candlescope-plugin-sdk" / "src"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(sdk_source), environment.get("PYTHONPATH", ""))
+        if value
+    )
 
     backend, backend_stdout, _ = run_recorded_command(
         name="backend-pytest",

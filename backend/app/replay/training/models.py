@@ -1495,14 +1495,12 @@ class TrainingRunCreateRequest:
                     "HEDGE position mode requires DETERMINISTIC_SIMULATION account data; "
                     "legacy HEDGE account modes are not compatible with replay.v3"
                 )
-            placeholder = self.symbol == "UNSELECTED"
-            if not placeholder and self.hedge_public_history_ref is None:
+            if (self.hedge_public_history_ref is None) != (
+                self.simulation_manifest_ref is None
+            ):
                 raise ValueError(
-                    "HEDGE position mode requires a pinned hedge_public_history_ref"
-                )
-            if not placeholder and self.simulation_manifest_ref is None:
-                raise ValueError(
-                    "HEDGE position mode requires a pinned simulation_manifest_ref"
+                    "HEDGE planning may omit both hedge_public_history_ref and "
+                    "simulation_manifest_ref, but a partial binding is invalid"
                 )
             if self.account_history_ref is not None:
                 raise ValueError(

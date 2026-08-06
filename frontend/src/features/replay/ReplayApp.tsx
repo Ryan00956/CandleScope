@@ -172,10 +172,22 @@ function ReplayInitialMarketPicker({
           || plan.account_history.account_history_ref === null)) {
         throw new Error(`精确账户历史不可用：${plan.account_history.reason}`);
       }
+      if (plan.hedge_inputs.requested_position_mode === "HEDGE"
+        && (plan.hedge_inputs.capability_state !== "AVAILABLE_EXACT"
+          || plan.hedge_inputs.hedge_public_history_ref === null
+          || plan.hedge_inputs.simulation_manifest_ref === null)) {
+        throw new Error(`双向持仓输入不可用：${plan.hedge_inputs.reason}`);
+      }
       const result = await defaultReplayV2Api.selectInitialMarket(run.run_id, {
         ...selection,
         account_history_ref: plan.account_history.requested_mode === "HISTORICAL_EXACT"
           ? plan.account_history.account_history_ref
+          : null,
+        hedge_public_history_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
+          ? plan.hedge_inputs.hedge_public_history_ref
+          : null,
+        simulation_manifest_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
+          ? plan.hedge_inputs.simulation_manifest_ref
           : null,
       });
       onInitialized(result.run);

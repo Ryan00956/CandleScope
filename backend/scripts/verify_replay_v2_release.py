@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Mapping
 
 try:
+    from scripts.verify_replay_hedge_acceptance import (
+        MATRIX_PATH as HEDGE_MATRIX_PATH,
+        validate_matrix as validate_hedge_matrix,
+    )
+except ModuleNotFoundError:
+    from verify_replay_hedge_acceptance import (  # type: ignore[no-redef]
+        MATRIX_PATH as HEDGE_MATRIX_PATH,
+        validate_matrix as validate_hedge_matrix,
+    )
+
+try:
     from scripts.replay_v2_release_common import (
         BACKEND_ROOT,
         REPOSITORY_ROOT,
@@ -38,7 +49,7 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-manifest.v2"
+SCHEMA_VERSION = "replay.v2.release-manifest.v3"
 MATRIX_PATH = REPOSITORY_ROOT / "docs" / "replay-v2-release-acceptance.json"
 
 
@@ -295,6 +306,9 @@ def main() -> int:
         and checks["counts"].get("backend_pytest_passed", 0) > 0
         and checks["counts"].get("frontend_node_tests_passed", 0) > 0,
         "formal_benchmark": benchmark.get("profile") == "formal-release",
+        "hedge_exchange_parity_benchmark": isinstance(benchmark_checks, Mapping)
+        and benchmark_checks.get("hedge_exchange_parity_1_2_4_8") is True
+        and benchmark_checks.get("hedge_exchange_parity_acceptance") is True,
         "storage_capacity_and_redaction": isinstance(benchmark_checks, Mapping)
         and benchmark_checks.get("storage_inventory_10000_bounded") is True
         and benchmark_checks.get("account_history_acceptance") is True,
@@ -316,21 +330,23 @@ def main() -> int:
         and soak_config.get("durationMs", 0) >= 14_400_000
         and soak_config.get("cycles", 0) >= 100
         and soak_config.get("projectionEvents", 0) >= 1_000_000,
-        "v2_soak_real_bar_source": isinstance(soak_config, Mapping)
-        and soak_config.get("sourceProfile") == "REAL_BAR_SQLITE"
+        "v2_soak_real_bar_evidence": isinstance(soak_config, Mapping)
         and soak_config.get("realSource") is True
         and soak_config.get("realSourceIdentityCount", 0) >= 2
         and isinstance(soak_training_source, Mapping)
+        and soak_training_source.get("payloadBound") is True,
+        "v2_soak_hedge_exact_source": isinstance(soak_config, Mapping)
+        and soak_config.get("sourceProfile") == "HEDGE_EXACT_ARCHIVE_QA"
+        and isinstance(soak_training_source, Mapping)
         and soak_training_source.get("payloadBound") is True
         and soak_training_source.get("exchange") == "binance"
-        and soak_training_source.get("marketType") == "spot"
+        and soak_training_source.get("marketType") == "futures"
         and soak_training_source.get("interval") == "1m"
         and soak_training_source.get("forwardCacheMs") == 2_592_000_000
         and soak_training_source.get("requiredRows") == 43_400
-        and soak_training_source.get("validatedRows", 0)
-        >= soak_training_source.get("requiredRows", 43_401)
-        and soak_training_source.get("sourceSha256")
-        == soak_config.get("realSourceSha256"),
+        and soak_training_source.get("inputFidelity")
+        == "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
+        and soak_training_source.get("fallbackApplied") is False,
         "v2_100_archive_lifecycles": isinstance(soak_lifecycle, Mapping)
         and soak_lifecycle.get("completed", 0) >= 100,
         "v2_rollback": isinstance(rollback_config, Mapping)
@@ -346,10 +362,16 @@ def main() -> int:
         soak_acceptance.get("v2_keyboard_accessible") is True
         and soak_acceptance.get("v2_reduced_motion_effective") is True
     )
+    gate_checks["hedge_browser_account_continuity"] = (
+        soak_acceptance.get("hedge_account_continuity") is True
+        and soak_acceptance.get("hedge_both_legs_active") is True
+        and soak_acceptance.get("hedge_exact_training_bound") is True
+    )
     if not all(gate_checks.values()):
         raise RuntimeError(f"Phase 18 release gate failed: {gate_checks}")
 
     matrix, scenarios = _validate_matrix()
+    hedge_matrix = validate_hedge_matrix()
     default_flags = _validate_default_flags()
     revert = _run_revert_drill(head)
     assert_clean_head(head)
@@ -363,6 +385,12 @@ def main() -> int:
             "matrix": artifact(MATRIX_PATH),
             "matrix_schema": matrix["schema_version"],
             "scenarios": scenarios,
+            "hedge_exchange_parity": {
+                "scenario_count": hedge_matrix["scenario_count"],
+                "matrix": artifact(HEDGE_MATRIX_PATH),
+                "matrix_schema": hedge_matrix["schema_version"],
+                "scenarios": hedge_matrix["scenarios"],
+            },
         },
         "gate_checks": gate_checks,
         "artifacts": artifacts,

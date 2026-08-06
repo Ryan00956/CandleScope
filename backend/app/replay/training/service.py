@@ -723,6 +723,7 @@ class TrainingRunService:
             **plan,
             "historical_book": await self.historical_books.plan_for_request(request),
             "account_history": await self.account_history.plan_for_request(request),
+            "hedge_inputs": await self.hedge_inputs.plan_for_request(request),
         }
 
     async def list_account_history_archives(self) -> dict[str, object]:
@@ -4552,6 +4553,7 @@ class TrainingRunService:
         )
         historical_book_binding = None
         account_history_binding = None
+        hedge_track_public_binding = None
         if str(
             binding.get("account_data_mode")
         ) == AccountDataMode.HISTORICAL_EXACT.value and requested_tier in {
@@ -4606,12 +4608,42 @@ class TrainingRunService:
                 actual_time_ms=actual_time_ms,
                 virtual_time_ms=target_virtual_time_ms,
             )
+        if (
+            str(binding.get("position_mode")) == "HEDGE"
+            and requested_tier is SubscriptionTier.FULL
+        ):
+            actual_time_ms = self._actual_event_time_ms(
+                binding,
+                target_virtual_time_ms,
+            )
+            hedge_track_public_binding = (
+                await self.hedge_inputs.prepare_track_public_binding(
+                    run_id=command.run_id,
+                    track_id=str(track["track_id"]),
+                    exchange=str(track["exchange"]),
+                    market_type=str(track["market_type"]),
+                    symbol=str(track["symbol"]),
+                    settlement_asset=str(track["settlement_asset"]),
+                    bound_range_start_ms=_stored_counter(
+                        binding["actual_replay_start_ms"],
+                        field_name="actual_replay_start_ms",
+                    ),
+                    bound_range_end_ms=_stored_counter(
+                        binding["actual_replay_end_ms"],
+                        field_name="actual_replay_end_ms",
+                    ),
+                    actual_time_ms=actual_time_ms,
+                    virtual_time_ms=target_virtual_time_ms,
+                    historical_book_binding=historical_book_binding,
+                )
+            )
         extension_factory = self.store.attach_market_track_writer(
             run_id=command.run_id,
             track_id=str(track["track_id"]),
             requested_tier=requested_tier.value,
             historical_book_binding=historical_book_binding,
             account_history_binding=account_history_binding,
+            hedge_track_public_binding=hedge_track_public_binding,
         )
         try:
             track_catalog = await self.replay_service.catalog(
@@ -7482,6 +7514,11 @@ class TrainingRunService:
                     (*pending_account_events, *pending_hedge_events)
                 ),
             )
+        hedge_runtime_snapshot = (
+            await self.hedge_inputs.runtime_snapshot(command.run_id)
+            if hedge_mode
+            else None
+        )
         book_required = (
             str(binding.get("book_mode", "OFF"))
             == BookMode.BOOK_ASSISTED_REQUIRED.value
@@ -7606,6 +7643,7 @@ class TrainingRunService:
                 await self.hedge_inputs.next_event_time(
                     run_id=command.run_id,
                     target_actual_time_ms=target_actual_time_ms,
+                    runtime_snapshot=hedge_runtime_snapshot,
                 )
                 if hedge_mode
                 else None
@@ -7690,6 +7728,7 @@ class TrainingRunService:
                 await self.hedge_inputs.events_at(
                     run_id=command.run_id,
                     actual_time_ms=actual_wave_time,
+                    runtime_snapshot=hedge_runtime_snapshot,
                 )
                 if hedge_mode
                 else ()

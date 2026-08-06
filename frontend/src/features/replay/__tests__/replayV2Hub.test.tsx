@@ -141,6 +141,21 @@ function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
       coverage: null,
       account_history_ref: null,
     },
+    hedge_inputs: {
+      schema_version: "replay.hedge-input-plan.v1",
+      feature_enabled: true,
+      requested_position_mode: "ONE_WAY",
+      capability_state: "NOT_REQUIRED",
+      reason: "POSITION_MODE_ONE_WAY",
+      public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+      private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
+      historical_exchange_private_state: false,
+      fallback_applied: false,
+      coverage: null,
+      historical_l2_ref: null,
+      hedge_public_history_ref: null,
+      simulation_manifest_ref: null,
+    },
     ...overrides,
   };
 }
@@ -168,7 +183,7 @@ function blindCatalog() {
   });
 }
 
-function visibleCatalog() {
+function hedgeCatalog() {
   const epoch = `sha256:${"a".repeat(64)}`;
   const startMs = 1_710_000_000_000;
   return parseReplayCatalog({
@@ -179,7 +194,7 @@ function visibleCatalog() {
     quality_mode: "exact",
     blind_mode: false,
     entries: [{
-      identity: { exchange: "binance", market_type: "spot", symbol: "BTCUSDT" },
+      identity: { exchange: "binance", market_type: "futures", symbol: "BTCUSDT" },
       base_intervals: ["1m"],
       selected_base_interval: "1m",
       eligible_window_count: 1,
@@ -212,6 +227,43 @@ function visibleCatalog() {
       }],
     }],
   });
+}
+
+function exactHedgeInputPlan() {
+  return {
+    schema_version: "replay.hedge-input-plan.v1",
+    feature_enabled: true,
+    requested_position_mode: "HEDGE",
+    capability_state: "AVAILABLE_EXACT",
+    reason: "CROSS_VERIFIED_PINNED_PUBLIC_AND_SIMULATION_INPUTS",
+    public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+    private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
+    historical_exchange_private_state: false,
+    fallback_applied: false,
+    coverage: {
+      range_start_ms: 1_710_000_000_000,
+      range_end_ms: 1_710_086_400_000,
+    },
+    historical_l2_ref: {
+      archive_id: "book-btc-202403",
+      dataset_epoch: `sha256:${"b".repeat(64)}`,
+      checksum_sha256: `sha256:${"c".repeat(64)}`,
+    },
+    hedge_public_history_ref: {
+      schema_version: "replay.hedge-public-history-ref.v1",
+      archive_id: "public-btc-202403",
+      dataset_epoch: `sha256:${"d".repeat(64)}`,
+      checksum_sha256: `sha256:${"e".repeat(64)}`,
+    },
+    simulation_manifest_ref: {
+      schema_version: "replay.hedge-simulation-manifest-ref.v1",
+      manifest_id: "simulation-btc-202403",
+      dataset_epoch: `sha256:${"f".repeat(64)}`,
+      checksum_sha256: `sha256:${"1".repeat(64)}`,
+      contract_hash: `sha256:${"2".repeat(64)}`,
+      model_version: "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1",
+    },
+  };
 }
 
 async function settle(): Promise<void> {
@@ -363,7 +415,18 @@ test("segment plan uses the selected create contract and never opens a dataset e
     },
   });
   const catalog = blindCatalog();
-  const draft = createTrainingRunDraft(catalog);
+  const draft = {
+    ...createTrainingRunDraft(catalog),
+    positionMode: "ONE_WAY" as const,
+    accountDataMode: "APPROX_PROXY" as const,
+    fundingMode: "OFF" as const,
+    bookMode: "OFF" as const,
+    startMode: "RANDOM" as const,
+    requestedStartMs: null,
+    randomRangeStartMs: Date.UTC(2020, 0, 1),
+    randomRangeEndMs: Date.UTC(2020, 0, 2),
+    timeDisclosurePolicy: "HIDE_ALL" as const,
+  };
   const evaluation = evaluateTrainingRunDraft(
     draft,
     parseReplayCapabilities(enabledCapabilities()),
@@ -553,7 +616,7 @@ test("create posts market-independent setup and defers catalog refresh to the ru
 
 test("create model covers Phase 6 account fields and exposes fail-closed boundaries", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = blindCatalog();
+  const catalog = hedgeCatalog();
   const draft = createTrainingRunDraft(catalog);
   const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);
   assert.equal(evaluation.canSubmit, true);
@@ -568,24 +631,25 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.protocol, "replay.v3");
   assert.equal(Object.hasOwn(request, "catalog_epoch"), false);
   assert.equal(Object.hasOwn(request, "symbol"), false);
-  assert.equal(request.time_disclosure_policy, "HIDE_ALL");
-  assert.equal(request.random_range_start_ms, draft.randomRangeStartMs);
-  assert.equal(request.random_range_end_ms, draft.randomRangeEndMs);
+  assert.equal(request.time_disclosure_policy, "NONE");
+  assert.equal(request.requested_start_ms, draft.requestedStartMs);
+  assert.equal(request.random_range_start_ms, null);
+  assert.equal(request.random_range_end_ms, null);
   assert.equal(request.integrity_mode, "CHALLENGE");
-  assert.equal(request.funding_mode, "OFF");
+  assert.equal(request.funding_mode, "HISTORICAL_EXACT");
   assert.equal(request.account_data_mode, "DETERMINISTIC_SIMULATION");
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
-  assert.equal(request.book_mode, "OFF");
+  assert.equal(request.book_mode, "BOOK_ASSISTED_REQUIRED");
   assert.equal(request.margin_mode, "CROSS");
   assert.equal(request.position_mode, "HEDGE");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
 });
 
-test("HEDGE create model enables isolated Sandbox and pinned historical funding inputs", () => {
+test("HEDGE create model rejects Sandbox funding and keeps pinned historical inputs", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = blindCatalog();
+  const catalog = hedgeCatalog();
   const base = createTrainingRunDraft(catalog);
   const sandbox = {
     ...base,
@@ -596,24 +660,43 @@ test("HEDGE create model enables isolated Sandbox and pinned historical funding 
     fundingIntervalMs: 28_800_000,
   };
   const sandboxEvaluation = evaluateTrainingRunSetupDraft(sandbox, capabilities);
-  assert.equal(sandboxEvaluation.canSubmit, true);
-  const request = buildTrainingRunCreateRequest(sandbox, sandboxEvaluation);
-  assert.equal(request.margin_mode, "ISOLATED");
-  assert.equal(request.funding_mode, "SANDBOX_FIXED");
-  assert.equal(request.fixed_funding_rate, "-0.0001");
-  assert.equal(request.funding_interval_ms, 28_800_000);
+  assert.equal(sandboxEvaluation.canSubmit, false);
+  assert.match(sandboxEvaluation.errors.join("\n"), /历史资金费/);
 
+  const exactPlan = parseReplaySegmentPreparePlan(segmentPlanResponse({
+    historical_book: {
+      ...segmentPlanResponse().historical_book,
+      feature_enabled: true,
+      requested_mode: "BOOK_ASSISTED_REQUIRED",
+      capability_state: "AVAILABLE_EXACT",
+      reason: "VERIFIED_BINANCE_USDM_DIFF_DEPTH",
+      snapshot_and_ordered_deltas: true,
+      pinnable: true,
+      ready_archive_bytes: 1_024,
+    },
+    hedge_inputs: exactHedgeInputPlan(),
+  }));
   const exact = evaluateTrainingRunDraft(
-    { ...base, fundingMode: "HISTORICAL_EXACT" },
+    base,
     capabilities,
     catalog,
+    exactPlan,
   );
   assert.equal(exact.canSubmit, true);
+  const payload = buildTrainingRunPreparationRequest(base, exact, catalog);
+  assert.deepEqual(
+    payload.hedge_public_history_ref,
+    exactPlan.hedge_inputs.hedge_public_history_ref,
+  );
+  assert.deepEqual(
+    payload.simulation_manifest_ref,
+    exactPlan.hedge_inputs.simulation_manifest_ref,
+  );
 });
 
 test("HEDGE create mode is the default and accepts the exchange-parity policy matrix", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = blindCatalog();
+  const catalog = hedgeCatalog();
   const base = createTrainingRunDraft(catalog);
   const hedge = { ...base, positionMode: "HEDGE" as const };
   const evaluation = evaluateTrainingRunSetupDraft(hedge, capabilities);
@@ -622,7 +705,6 @@ test("HEDGE create mode is the default and accepts the exchange-parity policy ma
 
   for (const supported of [
     { ...hedge, marginMode: "ISOLATED" as const },
-    { ...hedge, fundingMode: "SANDBOX_FIXED" as const, integrityMode: "SANDBOX" as const },
   ]) {
     assert.equal(evaluateTrainingRunSetupDraft(supported, capabilities).canSubmit, true);
   }
@@ -634,7 +716,7 @@ test("HEDGE create mode is the default and accepts the exchange-parity policy ma
 
 test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const catalog = visibleCatalog();
+  const catalog = hedgeCatalog();
   const draft = {
     ...createTrainingRunDraft(catalog),
     startMode: "MANUAL" as const,
@@ -660,6 +742,7 @@ test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan"
   };
   const plan = parseReplaySegmentPreparePlan(segmentPlanResponse({
     historical_book: exactBook,
+    hedge_inputs: exactHedgeInputPlan(),
   }));
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, catalog, plan);
   assert.equal(evaluation.canSubmit, true);

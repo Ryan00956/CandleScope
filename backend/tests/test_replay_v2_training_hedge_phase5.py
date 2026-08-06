@@ -192,6 +192,7 @@ async def test_tier_step_down_partial_liquidation_recovers_without_full_close(
                     "maintenance_deduction": "49.5",
                 },
             ],
+            book_level_quantities=["0.1", "0.1", "0.1", "0.1", "10"],
         )
         created = await service.training.create_run(request)  # type: ignore[union-attr]
         run_id = str(created["run"]["run_id"])
@@ -248,6 +249,7 @@ async def test_tier_step_down_partial_liquidation_recovers_without_full_close(
             "PARTIAL_LIQUIDATION"
         ]
         assert execution_steps[0]["orders"][0]["requested_quantity"] == "0.4"
+        assert len(execution_steps[0]["orders"][0]["fills"]) == 4
         assert event["state"] == "COMPLETED"
     finally:
         await service.shutdown(step_timeout=1.0)

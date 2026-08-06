@@ -162,7 +162,10 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         "v2_reduced_motion_effective",
         "release-4h",
         "--real-klines-source",
-        "real_bar_source_profile",
+        "real_bar_source_evidence",
+        "hedge_exact_training_bound",
+        "hedge_account_continuity",
+        "HEDGE_EXACT_ARCHIVE_QA",
     ):
         assert needle in soak
     for needle in (

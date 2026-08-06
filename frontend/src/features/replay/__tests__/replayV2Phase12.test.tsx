@@ -121,7 +121,18 @@ test("UTC datetime helpers expose history and eligible boundaries without millis
 test("create payload delegates random seed ownership to the server", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const blind = catalog(true);
-  const draft = createTrainingRunDraft(blind);
+  const draft = {
+    ...createTrainingRunDraft(blind),
+    positionMode: "ONE_WAY" as const,
+    accountDataMode: "APPROX_PROXY" as const,
+    fundingMode: "OFF" as const,
+    bookMode: "OFF" as const,
+    startMode: "RANDOM" as const,
+    requestedStartMs: null,
+    randomRangeStartMs: START_MS,
+    randomRangeEndMs: START_MS + 10 * MINUTE_MS,
+    timeDisclosurePolicy: "HIDE_ALL" as const,
+  };
   assert.equal(Object.hasOwn(draft, "randomSeed"), false);
   assert.equal(requiresBlindTrainingCatalog(draft), true);
   const evaluation = evaluateTrainingRunDraft(draft, capabilities, blind);
@@ -133,6 +144,9 @@ test("create payload delegates random seed ownership to the server", () => {
     ...draft,
     startMode: "MANUAL" as const,
     requestedStartMs: START_MS + 2 * MINUTE_MS,
+    randomRangeStartMs: null,
+    randomRangeEndMs: null,
+    timeDisclosurePolicy: "NONE" as const,
   };
   assert.equal(requiresBlindTrainingCatalog(manual), false);
   const visible = catalog(false);

@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,7 +28,11 @@ from .hedge_simulation_contract import (
     validate_simulation_manifest,
 )
 from .historical_book import PreparedHistoricalBookBinding
-from .models import TrainingRunCreateRequest
+from .models import (
+    REPLAY_HEDGE_PUBLIC_HISTORY_REF_SCHEMA_VERSION,
+    REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION,
+    TrainingRunCreateRequest,
+)
 
 
 PUBLIC_ARCHIVE_PROTOCOL = "replay.hedge-public-history.archive.v1"
@@ -484,10 +488,19 @@ class HedgeInputEvent:
     previous_hash: str
     event_hash: str
     payload: Mapping[str, object]
+    track_id: str | None = None
 
     @property
     def stable_track_id(self) -> str:
+        if self.track_id is not None:
+            return f"hedge-{self.source_kind.lower()}:{self.source_id}:{self.track_id}"
         return f"hedge-{self.source_kind.lower()}:{self.source_id}"
+
+
+HedgeInputRuntimeSnapshot = tuple[
+    tuple[HedgeInputEvent, ...],
+    tuple[HedgeInputEvent, ...],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +521,16 @@ class PreparedHedgeInputBinding:
     simulation_generation: int
     public_projection: HedgeInputProjection
     simulation_projection: HedgeInputProjection
+    bound_range_start_ms: int
+    bound_range_end_ms: int
+    input_proof_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedHedgeTrackPublicBinding:
+    public: HedgePublicArchiveDescriptor
+    public_generation: int
+    public_projection: HedgeInputProjection
     bound_range_start_ms: int
     bound_range_end_ms: int
     input_proof_hash: str
@@ -540,6 +563,244 @@ def runtime_hedge_rule(
         "rule_fidelity": "PINNED_HISTORICAL_EXCHANGE_RULE",
         "effective_virtual_time_ms": effective_virtual_time_ms,
     }
+
+
+def hedge_track_public_proof_hash(
+    *,
+    run_id: str,
+    track_id: str,
+    public: HedgePublicArchiveDescriptor,
+    public_generation: int,
+    bound_range_start_ms: int,
+    bound_range_end_ms: int,
+) -> str:
+    return canonical_sha256(
+        {
+            "schema_version": "replay.hedge-track-public-binding.v1",
+            "run_id": run_id,
+            "track_id": track_id,
+            "public": {
+                "archive_id": public.archive_id,
+                "generation": public_generation,
+                "dataset_epoch": public.dataset_epoch,
+                "checksum_sha256": public.checksum_sha256,
+                "event_chain_tail": public.event_chain_tail,
+                "proof_hash": public.proof_hash,
+            },
+            "bound_range_start_ms": bound_range_start_ms,
+            "bound_range_end_ms": bound_range_end_ms,
+        }
+    )
+
+
+def bind_hedge_track_public_input(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    track_id: str,
+    source_kind: str,
+    binding: PreparedHedgeTrackPublicBinding,
+    virtual_time_ms: int,
+    now_ms: int,
+    verify_account_fee_policy: bool,
+) -> None:
+    """Bind one symbol's immutable public HEDGE inputs to one real track."""
+
+    public_row = connection.execute(
+        "SELECT * FROM replay_hedge_public_archive WHERE archive_id = ?",
+        (binding.public.archive_id,),
+    ).fetchone()
+    if (
+        public_row is None
+        or public_row["health"] != "READY"
+        or int(public_row["generation"]) != binding.public_generation
+        or public_row["checksum_sha256"] != binding.public.checksum_sha256
+        or public_row["event_chain_tail"] != binding.public.event_chain_tail
+    ):
+        raise TrainingRunError(
+            "HEDGE_TRACK_INPUT_CHANGED_BEFORE_BIND",
+            "a track public HEDGE input changed before the atomic bind",
+            status_code=409,
+            details={"track_id": track_id, "fallback_applied": False},
+        )
+    expected_proof = hedge_track_public_proof_hash(
+        run_id=run_id,
+        track_id=track_id,
+        public=binding.public,
+        public_generation=binding.public_generation,
+        bound_range_start_ms=binding.bound_range_start_ms,
+        bound_range_end_ms=binding.bound_range_end_ms,
+    )
+    if binding.input_proof_hash != expected_proof:
+        raise TrainingRunError(
+            "HEDGE_TRACK_INPUT_PROOF_MISMATCH",
+            "the prepared track public proof no longer matches the bind target",
+            status_code=409,
+            details={"track_id": track_id, "fallback_applied": False},
+        )
+    state = binding.public_projection.state
+    rule = state.get("rule")
+    fee = state.get("fee_policy")
+    mark = state.get("mark_index")
+    if (
+        not isinstance(rule, Mapping)
+        or not isinstance(fee, Mapping)
+        or not isinstance(mark, Mapping)
+    ):
+        raise TypeError("HEDGE track public start projection is incomplete")
+    if verify_account_fee_policy:
+        account_fee = connection.execute(
+            """
+            SELECT policy.maker_fee_bps, policy.taker_fee_bps,
+                   extension.liquidation_fee_bps,
+                   extension.policy_version, extension.account_tier
+            FROM replay_training_fee_policy AS policy
+            JOIN replay_training_fee_policy_extension AS extension
+              ON extension.run_id = policy.run_id
+             AND extension.revision = policy.revision
+            WHERE policy.run_id = ?
+            ORDER BY policy.effective_virtual_time_ms DESC,
+                     policy.revision DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        expected_fee = (
+            str(fee["maker_fee_bps"]),
+            str(fee["taker_fee_bps"]),
+            str(fee["liquidation_fee_bps"]),
+            str(fee["policy_version"]),
+            str(fee["account_tier"]),
+        )
+        actual_fee = (
+            None
+            if account_fee is None
+            else (
+                str(account_fee["maker_fee_bps"]),
+                str(account_fee["taker_fee_bps"]),
+                str(account_fee["liquidation_fee_bps"]),
+                str(account_fee["policy_version"]),
+                str(account_fee["account_tier"]),
+            )
+        )
+        if actual_fee != expected_fee:
+            raise TrainingRunError(
+                "HEDGE_TRACK_FEE_POLICY_MISMATCH",
+                "track public fee policy differs from the account-level policy",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+    connection.execute(
+        """
+        INSERT INTO replay_hedge_track_public_binding(
+            run_id, track_id, public_archive_id, public_generation,
+            public_dataset_epoch, public_checksum_sha256,
+            public_event_chain_tail, bound_range_start_ms,
+            bound_range_end_ms, status, degraded_reason,
+            input_proof_hash, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?, ?)
+        """,
+        (
+            run_id,
+            track_id,
+            binding.public.archive_id,
+            binding.public_generation,
+            binding.public.dataset_epoch,
+            binding.public.checksum_sha256,
+            binding.public.event_chain_tail,
+            binding.bound_range_start_ms,
+            binding.bound_range_end_ms,
+            binding.input_proof_hash,
+            now_ms,
+            now_ms,
+        ),
+    )
+    projection_payload = {
+        "schema_version": "replay.hedge-track-public-projection.v1",
+        "run_id": run_id,
+        "track_id": track_id,
+        "last_event_sequence": binding.public_projection.last_event_sequence,
+        "as_of_actual_time_ms": binding.public_projection.as_of_actual_time_ms,
+        "as_of_virtual_time_ms": virtual_time_ms,
+        "state": dict(binding.public_projection.state),
+        "input_chain_hash": binding.public_projection.input_chain_hash,
+    }
+    connection.execute(
+        """
+        INSERT INTO replay_hedge_track_public_projection(
+            run_id, track_id, last_event_sequence, as_of_actual_time_ms,
+            as_of_virtual_time_ms, state_json, input_chain_hash,
+            component_hash, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            track_id,
+            binding.public_projection.last_event_sequence,
+            binding.public_projection.as_of_actual_time_ms,
+            virtual_time_ms,
+            canonical_json(binding.public_projection.state),
+            binding.public_projection.input_chain_hash,
+            canonical_sha256(projection_payload),
+            now_ms,
+        ),
+    )
+    runtime_rule = runtime_hedge_rule(
+        rule,
+        track_id=track_id,
+        source_kind=source_kind,
+        effective_virtual_time_ms=virtual_time_ms,
+    )
+    connection.execute(
+        "DELETE FROM replay_training_instrument_rule WHERE run_id = ? AND track_id = ?",
+        (run_id, track_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO replay_training_instrument_rule(
+            run_id, track_id, revision, effective_virtual_time_ms,
+            rule_json, rule_hash, fidelity, created_at_ms
+        ) VALUES (?, ?, 1, ?, ?, ?, 'PINNED_HISTORICAL_EXCHANGE_RULE', ?)
+        """,
+        (
+            run_id,
+            track_id,
+            virtual_time_ms,
+            canonical_json(runtime_rule),
+            canonical_sha256(runtime_rule),
+            now_ms,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE replay_training_market_track
+        SET public_price = ?, capabilities_json = ?, updated_at_ms = ?
+        WHERE run_id = ? AND track_id = ?
+        """,
+        (
+            mark["mark_price"],
+            canonical_json(
+                {
+                    "HISTORICAL_MARK_INDEX": "AVAILABLE_PINNED",
+                    "HISTORICAL_INSTRUMENT_RULE": "AVAILABLE_PINNED",
+                    "HISTORICAL_FEE_POLICY": "AVAILABLE_PINNED_ACCOUNT_WIDE",
+                    "HISTORICAL_FUNDING": "AVAILABLE_PINNED",
+                    "HISTORICAL_L2": "AVAILABLE_PINNED_CONTINUITY_GATED",
+                    "SIMULATED_INSURANCE_FUND": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
+                    "SIMULATED_ADL_COHORT": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
+                }
+            ),
+            now_ms,
+            run_id,
+            track_id,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE replay_hedge_public_archive
+        SET last_used_at_ms = ?, updated_at_ms = ? WHERE archive_id = ?
+        """,
+        (now_ms, now_ms, binding.public.archive_id),
+    )
 
 
 def bind_hedge_inputs(
@@ -655,42 +916,35 @@ def bind_hedge_inputs(
                 now_ms,
             ),
         )
-    public_state = binding.public_projection.state
-    rule = public_state.get("rule")
-    fee = public_state.get("fee_policy")
-    mark = public_state.get("mark_index")
-    if (
-        not isinstance(rule, Mapping)
-        or not isinstance(fee, Mapping)
-        or not isinstance(mark, Mapping)
-    ):
-        raise TypeError("HEDGE public start projection is incomplete")
-    runtime_rule = runtime_hedge_rule(
-        rule,
-        track_id=track_id,
-        source_kind=source_kind,
-        effective_virtual_time_ms=virtual_time_ms,
-    )
-    connection.execute(
-        "DELETE FROM replay_training_instrument_rule WHERE run_id = ? AND track_id = ?",
-        (run_id, track_id),
-    )
-    connection.execute(
-        """
-        INSERT INTO replay_training_instrument_rule(
-            run_id, track_id, revision, effective_virtual_time_ms,
-            rule_json, rule_hash, fidelity, created_at_ms
-        ) VALUES (?, ?, 1, ?, ?, ?, 'PINNED_HISTORICAL_EXCHANGE_RULE', ?)
-        """,
-        (
-            run_id,
-            track_id,
-            virtual_time_ms,
-            canonical_json(runtime_rule),
-            canonical_sha256(runtime_rule),
-            now_ms,
+    track_public_binding = PreparedHedgeTrackPublicBinding(
+        public=binding.public,
+        public_generation=binding.public_generation,
+        public_projection=binding.public_projection,
+        bound_range_start_ms=bound_range_start_ms,
+        bound_range_end_ms=bound_range_end_ms,
+        input_proof_hash=hedge_track_public_proof_hash(
+            run_id=run_id,
+            track_id=track_id,
+            public=binding.public,
+            public_generation=binding.public_generation,
+            bound_range_start_ms=bound_range_start_ms,
+            bound_range_end_ms=bound_range_end_ms,
         ),
     )
+    bind_hedge_track_public_input(
+        connection,
+        run_id=run_id,
+        track_id=track_id,
+        source_kind=source_kind,
+        binding=track_public_binding,
+        virtual_time_ms=virtual_time_ms,
+        now_ms=now_ms,
+        verify_account_fee_policy=False,
+    )
+    public_state = binding.public_projection.state
+    fee = public_state.get("fee_policy")
+    if not isinstance(fee, Mapping):
+        raise TypeError("HEDGE public start projection is incomplete")
     fee_policy = {
         "schema_version": "replay.training.fee-policy.v1",
         "run_id": run_id,
@@ -782,37 +1036,6 @@ def bind_hedge_inputs(
             updated_at_ms = ? WHERE run_id = ?
         """,
         (now_ms, run_id),
-    )
-    connection.execute(
-        """
-        UPDATE replay_training_market_track
-        SET public_price = ?, capabilities_json = ?, updated_at_ms = ?
-        WHERE run_id = ? AND track_id = ?
-        """,
-        (
-            mark["mark_price"],
-            canonical_json(
-                {
-                    "HISTORICAL_MARK_INDEX": "AVAILABLE_PINNED",
-                    "HISTORICAL_INSTRUMENT_RULE": "AVAILABLE_PINNED",
-                    "HISTORICAL_FEE_POLICY": "AVAILABLE_PINNED",
-                    "HISTORICAL_FUNDING": "AVAILABLE_PINNED",
-                    "HISTORICAL_L2": "AVAILABLE_PINNED_CONTINUITY_GATED",
-                    "SIMULATED_INSURANCE_FUND": "AVAILABLE_MATERIALIZED",
-                    "SIMULATED_ADL_COHORT": "AVAILABLE_MATERIALIZED",
-                }
-            ),
-            now_ms,
-            run_id,
-            track_id,
-        ),
-    )
-    connection.execute(
-        """
-        UPDATE replay_hedge_public_archive
-        SET last_used_at_ms = ?, updated_at_ms = ? WHERE archive_id = ?
-        """,
-        (now_ms, now_ms, binding.public.archive_id),
     )
     connection.execute(
         """
@@ -1287,9 +1510,264 @@ class HedgeInputArchiveManager:
             else store.path.parent / f"{store.path.stem}-hedge-inputs"
         ).resolve()
         self._lock = asyncio.Lock()
+        self._verified_event_cache: dict[
+            tuple[str, str, str], tuple[HedgeInputEvent, ...]
+        ] = {}
 
     async def start(self) -> None:
         await asyncio.to_thread(self._ensure_dirs)
+
+    async def plan_for_request(
+        self,
+        request: TrainingRunCreateRequest,
+    ) -> dict[str, object]:
+        """Resolve the exact immutable refs required by a default HEDGE create.
+
+        The selected public archive must point at the same historical L2 object
+        that the book manager will deterministically select.  This prevents the
+        planning endpoint from advertising a pair that would later fail the
+        create-time cross-object proof.
+        """
+
+        base: dict[str, object] = {
+            "schema_version": "replay.hedge-input-plan.v1",
+            "feature_enabled": True,
+            "requested_position_mode": request.position_mode.value,
+            "public_fidelity": PUBLIC_INPUT_FIDELITY,
+            "private_fidelity": SIMULATION_INPUT_FIDELITY,
+            "historical_exchange_private_state": False,
+            "fallback_applied": False,
+        }
+        if request.position_mode.value != "HEDGE":
+            return {
+                **base,
+                "capability_state": "NOT_REQUIRED",
+                "reason": "POSITION_MODE_ONE_WAY",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        requested_start = request.requested_start_ms
+        if request.start_mode.value != "MANUAL" or requested_start is None:
+            return {
+                **base,
+                "capability_state": "UNSUPPORTED_SOURCE_MODE",
+                "reason": "MANUAL_START_REQUIRED",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        if (
+            request.exchange != "binance"
+            or request.market_type != "futures"
+            or request.book_mode.value != "BOOK_ASSISTED_REQUIRED"
+            or request.funding_mode.value != "HISTORICAL_EXACT"
+        ):
+            return {
+                **base,
+                "capability_state": "UNSUPPORTED_SOURCE_MODE",
+                "reason": "BINANCE_USDM_EXACT_L2_AND_FUNDING_REQUIRED",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        requested_end = requested_start + request.forward_cache_ms
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[
+            sqlite3.Row | None,
+            sqlite3.Row | None,
+            tuple[sqlite3.Row, ...],
+            bool,
+        ]:
+            book = connection.execute(
+                """
+                SELECT * FROM replay_historical_book_archive
+                WHERE exchange = ? AND market_type = ? AND symbol = ?
+                  AND health = 'READY' AND coverage_state = 'EXACT'
+                  AND continuity_state = 'CONTIGUOUS'
+                  AND range_start_ms <= ? AND range_end_ms >= ?
+                ORDER BY byte_size, range_start_ms DESC, archive_id
+                LIMIT 1
+                """,
+                (
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    requested_start,
+                    requested_end,
+                ),
+            ).fetchone()
+            public = None
+            if book is not None:
+                public = connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_public_archive
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND settlement_asset = ? AND health = 'READY'
+                      AND range_start_ms <= ? AND range_end_ms >= ?
+                      AND l2_archive_id = ? AND l2_dataset_epoch = ?
+                      AND l2_checksum_sha256 = ?
+                    ORDER BY byte_size, range_start_ms DESC, archive_id
+                    LIMIT 1
+                    """,
+                    (
+                        request.exchange,
+                        request.market_type,
+                        request.symbol,
+                        request.settlement_asset,
+                        requested_start,
+                        requested_end,
+                        book["archive_id"],
+                        book["dataset_epoch"],
+                        book["checksum_sha256"],
+                    ),
+                ).fetchone()
+            simulations = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_simulation_manifest
+                    WHERE settlement_asset = ? AND health = 'READY'
+                      AND range_start_ms <= ? AND range_end_ms >= ?
+                    ORDER BY byte_size, range_start_ms DESC, manifest_id
+                    """,
+                    (request.settlement_asset, requested_start, requested_end),
+                ).fetchall()
+            )
+            degraded = (
+                connection.execute(
+                    """
+                    SELECT 1
+                    FROM replay_hedge_public_archive
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND settlement_asset = ? AND health != 'READY'
+                    UNION ALL
+                    SELECT 1
+                    FROM replay_hedge_simulation_manifest
+                    WHERE settlement_asset = ? AND health != 'READY'
+                    LIMIT 1
+                    """,
+                    (
+                        request.exchange,
+                        request.market_type,
+                        request.symbol,
+                        request.settlement_asset,
+                        request.settlement_asset,
+                    ),
+                ).fetchone()
+                is not None
+            )
+            return book, public, simulations, degraded
+
+        book_row, public_row, simulation_rows, degraded = (
+            await self.store.run_extension_read(read)
+        )
+        def covers_requested_symbol(row: sqlite3.Row) -> bool:
+            try:
+                symbols = json.loads(str(row["required_symbols_json"]))
+            except (TypeError, ValueError):
+                return False
+            return isinstance(symbols, list) and request.symbol in {
+                str(symbol) for symbol in symbols
+            }
+
+        simulation_row = next(
+            (row for row in simulation_rows if covers_requested_symbol(row)),
+            None,
+        )
+        if book_row is None or public_row is None or simulation_row is None:
+            return {
+                **base,
+                "capability_state": (
+                    "DEGRADED" if degraded else "UNSUPPORTED_NO_HISTORY"
+                ),
+                "reason": "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        try:
+            public_path = await self._guard_catalog_row(
+                public_row, source_kind="PUBLIC"
+            )
+            simulation_path = await self._guard_catalog_row(
+                simulation_row, source_kind="SIMULATION"
+            )
+            public = await asyncio.to_thread(
+                verify_hedge_public_history, public_path
+            )
+            simulation = await asyncio.to_thread(
+                verify_hedge_simulation_manifest, simulation_path
+            )
+        except (OSError, TypeError, ValueError, TrainingRunError):
+            return {
+                **base,
+                "capability_state": "DEGRADED",
+                "reason": "INPUT_OBJECT_VERIFICATION_FAILED",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        expected_l2 = {
+            "archive_id": str(book_row["archive_id"]),
+            "dataset_epoch": str(book_row["dataset_epoch"]),
+            "checksum_sha256": str(book_row["checksum_sha256"]),
+        }
+        if (
+            dict(public.historical_l2_ref) != expected_l2
+            or public.archive_id != str(public_row["archive_id"])
+            or public.dataset_epoch != str(public_row["dataset_epoch"])
+            or public.checksum_sha256 != str(public_row["checksum_sha256"])
+            or simulation.manifest_id != str(simulation_row["manifest_id"])
+            or simulation.dataset_epoch != str(simulation_row["dataset_epoch"])
+            or simulation.checksum_sha256
+            != str(simulation_row["checksum_sha256"])
+            or simulation.contract_hash != str(simulation_row["contract_hash"])
+            or request.symbol not in simulation.required_symbols
+        ):
+            return {
+                **base,
+                "capability_state": "DEGRADED",
+                "reason": "INPUT_CATALOG_PROOF_MISMATCH",
+                "coverage": None,
+                "historical_l2_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        coverage_start = max(public.range_start_ms, simulation.range_start_ms)
+        coverage_end = min(public.range_end_ms, simulation.range_end_ms)
+        return {
+            **base,
+            "capability_state": "AVAILABLE_EXACT",
+            "reason": "CROSS_VERIFIED_PINNED_PUBLIC_AND_SIMULATION_INPUTS",
+            "coverage": {
+                "range_start_ms": coverage_start,
+                "range_end_ms": coverage_end,
+            },
+            "historical_l2_ref": expected_l2,
+            "hedge_public_history_ref": {
+                "schema_version": REPLAY_HEDGE_PUBLIC_HISTORY_REF_SCHEMA_VERSION,
+                "archive_id": public.archive_id,
+                "dataset_epoch": public.dataset_epoch,
+                "checksum_sha256": public.checksum_sha256,
+            },
+            "simulation_manifest_ref": {
+                "schema_version": (
+                    REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION
+                ),
+                "manifest_id": simulation.manifest_id,
+                "dataset_epoch": simulation.dataset_epoch,
+                "checksum_sha256": simulation.checksum_sha256,
+                "contract_hash": simulation.contract_hash,
+                "model_version": simulation.model_version,
+            },
+        }
 
     def _ensure_dirs(self) -> None:
         for name in ("public", "simulation", ".tmp", ".quarantine"):
@@ -1657,6 +2135,188 @@ class HedgeInputArchiveManager:
             input_proof_hash=proof,
         )
 
+    async def prepare_track_public_binding(
+        self,
+        *,
+        run_id: str,
+        track_id: str,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        settlement_asset: str,
+        bound_range_start_ms: int,
+        bound_range_end_ms: int,
+        actual_time_ms: int,
+        virtual_time_ms: int,
+        historical_book_binding: PreparedHistoricalBookBinding | None,
+    ) -> PreparedHedgeTrackPublicBinding | None:
+        """Resolve and pin the exact public archive for one added HEDGE track."""
+
+        if historical_book_binding is None:
+            raise TrainingRunError(
+                "HEDGE_TRACK_HISTORICAL_BOOK_REQUIRED",
+                "a HEDGE FULL track requires pinned historical L2",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+
+        def read(connection: sqlite3.Connection) -> dict[str, object]:
+            existing = connection.execute(
+                """
+                SELECT * FROM replay_hedge_track_public_binding
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            run_binding = connection.execute(
+                "SELECT * FROM replay_hedge_input_binding WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            simulation = (
+                None
+                if run_binding is None
+                else connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_simulation_manifest
+                    WHERE manifest_id = ?
+                    """,
+                    (run_binding["simulation_manifest_id"],),
+                ).fetchone()
+            )
+            candidates = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_public_archive
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND settlement_asset = ? AND health = 'READY'
+                      AND range_start_ms <= ? AND range_end_ms >= ?
+                      AND l2_archive_id = ? AND l2_dataset_epoch = ?
+                      AND l2_checksum_sha256 = ?
+                    ORDER BY (range_end_ms - range_start_ms), archive_id
+                    """,
+                    (
+                        exchange,
+                        market_type,
+                        symbol,
+                        settlement_asset,
+                        bound_range_start_ms,
+                        bound_range_end_ms,
+                        historical_book_binding.descriptor.archive_id,
+                        historical_book_binding.descriptor.dataset_epoch,
+                        historical_book_binding.descriptor.checksum_sha256,
+                    ),
+                ).fetchall()
+            )
+            return {
+                "existing": existing,
+                "run_binding": run_binding,
+                "simulation": simulation,
+                "candidates": candidates,
+            }
+
+        rows = await self.store.run_extension_read(read)
+        existing = rows["existing"]
+        if isinstance(existing, sqlite3.Row):
+            if existing["status"] != "ACTIVE":
+                raise TrainingRunError(
+                    "HEDGE_TRACK_INPUT_PAUSED",
+                    "the track public HEDGE input is not active",
+                    status_code=409,
+                    details={"track_id": track_id, "fallback_applied": False},
+                )
+            return None
+        run_binding = rows["run_binding"]
+        simulation_row = rows["simulation"]
+        if not isinstance(run_binding, sqlite3.Row) or not isinstance(
+            simulation_row, sqlite3.Row
+        ):
+            raise TrainingRunError(
+                "HEDGE_INPUT_BINDING_MISSING",
+                "the account-level HEDGE simulation binding is missing",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+        simulation_path = await self._guard_catalog_row(
+            simulation_row, source_kind="SIMULATION"
+        )
+        simulation = await asyncio.to_thread(
+            verify_hedge_simulation_manifest, simulation_path
+        )
+        if (
+            simulation.settlement_asset != settlement_asset
+            or symbol not in simulation.required_symbols
+            or bound_range_start_ms < simulation.range_start_ms
+            or bound_range_end_ms > simulation.range_end_ms
+        ):
+            raise TrainingRunError(
+                "HEDGE_TRACK_SIMULATION_COVERAGE_MISMATCH",
+                "the pinned simulation manifest does not cover the added symbol",
+                status_code=409,
+                details={"track_id": track_id, "symbol": symbol, "fallback_applied": False},
+            )
+        candidates = rows["candidates"]
+        if not isinstance(candidates, tuple) or not candidates:
+            raise TrainingRunError(
+                "HEDGE_TRACK_PUBLIC_INPUT_UNAVAILABLE",
+                "no exact public HEDGE archive matches the track and L2 binding",
+                status_code=409,
+                details={"track_id": track_id, "symbol": symbol, "fallback_applied": False},
+            )
+        public_row = candidates[0]
+        if not isinstance(public_row, sqlite3.Row):
+            raise TypeError("HEDGE public catalog row is invalid")
+        public_path = await self._guard_catalog_row(public_row, source_kind="PUBLIC")
+        public = await asyncio.to_thread(verify_hedge_public_history, public_path)
+        book = historical_book_binding.descriptor
+        if (
+            public.exchange != exchange
+            or public.market_type != market_type
+            or public.symbol != symbol
+            or public.settlement_asset != settlement_asset
+            or dict(public.historical_l2_ref)
+            != {
+                "archive_id": book.archive_id,
+                "dataset_epoch": book.dataset_epoch,
+                "checksum_sha256": book.checksum_sha256,
+            }
+        ):
+            raise TrainingRunError(
+                "HEDGE_TRACK_PUBLIC_INPUT_MISMATCH",
+                "resolved public HEDGE input differs from the requested track",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+        public_events = await asyncio.to_thread(_read_public_events, public_path)
+        projection = _projection(
+            public_events,
+            source_kind="PUBLIC",
+            actual_time_ms=actual_time_ms,
+            virtual_time_ms=virtual_time_ms,
+        )
+        if not {"rule", "fee_policy", "mark_index"}.issubset(projection.state):
+            raise TrainingRunError(
+                "HEDGE_TRACK_PUBLIC_INITIAL_STATE_MISSING",
+                "track public archive lacks a complete no-lookahead projection",
+                status_code=409,
+                details={"track_id": track_id, "fallback_applied": False},
+            )
+        generation = int(public_row["generation"])
+        return PreparedHedgeTrackPublicBinding(
+            public=public,
+            public_generation=generation,
+            public_projection=projection,
+            bound_range_start_ms=bound_range_start_ms,
+            bound_range_end_ms=bound_range_end_ms,
+            input_proof_hash=hedge_track_public_proof_hash(
+                run_id=run_id,
+                track_id=track_id,
+                public=public,
+                public_generation=generation,
+                bound_range_start_ms=bound_range_start_ms,
+                bound_range_end_ms=bound_range_end_ms,
+            ),
+        )
+
     async def _guard_catalog_row(self, row: sqlite3.Row, *, source_kind: str) -> Path:
         if row["health"] != "READY" or not isinstance(row["local_path"], str):
             raise TrainingRunError(
@@ -1674,6 +2334,36 @@ class HedgeInputArchiveManager:
                 details={"source_kind": source_kind, "fallback_applied": False},
             )
         return path
+
+    async def _cached_verified_events(
+        self,
+        *,
+        source_kind: str,
+        path: Path,
+        checksum_sha256: str,
+    ) -> tuple[HedgeInputEvent, ...]:
+        """Reuse parsed immutable events after the runtime checksum guard passes.
+
+        ``_guard_catalog_row`` hashes the owned object on every access, so this
+        cache cannot hide a post-start mutation.  The cache only avoids parsing,
+        canonical validation, and a second file digest for bytes that just
+        matched the checksum pinned in SQLite.
+        """
+
+        key = (source_kind, str(path), checksum_sha256)
+        cached = self._verified_event_cache.get(key)
+        if cached is not None:
+            return cached
+        reader = (
+            _read_public_events
+            if source_kind == "PUBLIC"
+            else _read_simulation_events
+        )
+        events = await asyncio.to_thread(reader, path)
+        if len(self._verified_event_cache) >= 64:
+            self._verified_event_cache.pop(next(iter(self._verified_event_cache)))
+        self._verified_event_cache[key] = events
+        return events
 
     async def _binding_rows(
         self, run_id: str
@@ -1709,8 +2399,8 @@ class HedgeInputArchiveManager:
 
     async def _runtime_events(
         self, run_id: str
-    ) -> tuple[tuple[HedgeInputEvent, ...], tuple[HedgeInputEvent, ...]]:
-        binding, public_row, simulation_row = await self._binding_rows(run_id)
+    ) -> HedgeInputRuntimeSnapshot:
+        binding, _primary_public_row, simulation_row = await self._binding_rows(run_id)
         if binding["status"] != "ACTIVE":
             raise TrainingRunError(
                 "HEDGE_INPUT_PAUSED",
@@ -1719,24 +2409,76 @@ class HedgeInputArchiveManager:
                 details={"fallback_applied": False},
             )
         try:
-            public_path = await self._guard_catalog_row(
-                public_row, source_kind="PUBLIC"
-            )
             simulation_path = await self._guard_catalog_row(
                 simulation_row, source_kind="SIMULATION"
             )
-            if (
-                int(binding["public_generation"]) != int(public_row["generation"])
-                or int(binding["simulation_generation"])
-                != int(simulation_row["generation"])
-                or binding["public_checksum_sha256"] != public_row["checksum_sha256"]
-                or binding["simulation_checksum_sha256"]
-                != simulation_row["checksum_sha256"]
-            ):
+            if int(binding["simulation_generation"]) != int(
+                simulation_row["generation"]
+            ) or binding["simulation_checksum_sha256"] != simulation_row[
+                "checksum_sha256"
+            ]:
                 raise ValueError("pinned HEDGE input generation changed")
+            track_rows, full_track_ids = await self.store.run_extension_read(
+                lambda connection: (
+                    tuple(
+                        connection.execute(
+                            """
+                            SELECT track_binding.*, archive.*
+                            FROM replay_hedge_track_public_binding AS track_binding
+                            JOIN replay_training_market_track AS track
+                              ON track.run_id = track_binding.run_id
+                             AND track.track_id = track_binding.track_id
+                            JOIN replay_hedge_public_archive AS archive
+                              ON archive.archive_id = track_binding.public_archive_id
+                            WHERE track_binding.run_id = ?
+                              AND track.subscription_tier = 'FULL'
+                            ORDER BY track_binding.track_id
+                            """,
+                            (run_id,),
+                        ).fetchall()
+                    ),
+                    tuple(
+                        str(row["track_id"])
+                        for row in connection.execute(
+                            """
+                            SELECT track_id FROM replay_training_market_track
+                            WHERE run_id = ? AND subscription_tier = 'FULL'
+                            ORDER BY track_id
+                            """,
+                            (run_id,),
+                        ).fetchall()
+                    ),
+                )
+            )
+            bound_ids = tuple(str(row["track_id"]) for row in track_rows)
+            if bound_ids != full_track_ids:
+                raise ValueError("every HEDGE FULL track must have one public binding")
+            public_events: list[HedgeInputEvent] = []
+            for row in track_rows:
+                if (
+                    row["status"] != "ACTIVE"
+                    or row["health"] != "READY"
+                    or int(row["public_generation"]) != int(row["generation"])
+                    or row["public_checksum_sha256"] != row["checksum_sha256"]
+                    or row["public_event_chain_tail"] != row["event_chain_tail"]
+                ):
+                    raise ValueError("pinned track public input changed")
+                path = await self._guard_catalog_row(row, source_kind="PUBLIC")
+                events = await self._cached_verified_events(
+                    source_kind="PUBLIC",
+                    path=path,
+                    checksum_sha256=str(row["checksum_sha256"]),
+                )
+                public_events.extend(
+                    replace(event, track_id=str(row["track_id"])) for event in events
+                )
             return (
-                await asyncio.to_thread(_read_public_events, public_path),
-                await asyncio.to_thread(_read_simulation_events, simulation_path),
+                tuple(public_events),
+                await self._cached_verified_events(
+                    source_kind="SIMULATION",
+                    path=simulation_path,
+                    checksum_sha256=str(simulation_row["checksum_sha256"]),
+                ),
             )
         except BaseException as exc:
             await self.pause_run(run_id, reason=type(exc).__name__)
@@ -1749,6 +2491,11 @@ class HedgeInputArchiveManager:
                 details={"fallback_applied": False},
             ) from exc
 
+    async def runtime_snapshot(self, run_id: str) -> HedgeInputRuntimeSnapshot:
+        """Verify every pinned object once for one atomic coordinator command."""
+
+        return await self._runtime_events(run_id)
+
     async def pause_run(self, run_id: str, *, reason: str) -> None:
         now_ms = self.store._validated_now_ms()
 
@@ -1756,6 +2503,14 @@ class HedgeInputArchiveManager:
             connection.execute(
                 """
                 UPDATE replay_hedge_input_binding
+                SET status = 'PAUSED', degraded_reason = ?, updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (reason, now_ms, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_hedge_track_public_binding
                 SET status = 'PAUSED', degraded_reason = ?, updated_at_ms = ?
                 WHERE run_id = ?
                 """,
@@ -1773,58 +2528,107 @@ class HedgeInputArchiveManager:
         await self.store.run_extension_write(write)
 
     async def next_event_time(
-        self, *, run_id: str, target_actual_time_ms: int
+        self,
+        *,
+        run_id: str,
+        target_actual_time_ms: int,
+        runtime_snapshot: HedgeInputRuntimeSnapshot | None = None,
     ) -> int | None:
-        public, simulation = await self._runtime_events(run_id)
+        public, simulation = (
+            await self._runtime_events(run_id)
+            if runtime_snapshot is None
+            else runtime_snapshot
+        )
 
-        def read(connection: sqlite3.Connection) -> dict[str, int]:
-            return {
-                str(row["source_kind"]): int(row["last_event_sequence"])
+        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
+            public_cursors = {
+                str(row["track_id"]): int(row["last_event_sequence"])
                 for row in connection.execute(
                     """
-                    SELECT source_kind, last_event_sequence
-                    FROM replay_hedge_input_projection WHERE run_id = ?
+                    SELECT track_id, last_event_sequence
+                    FROM replay_hedge_track_public_projection WHERE run_id = ?
                     """,
                     (run_id,),
                 ).fetchall()
             }
+            simulation = connection.execute(
+                """
+                SELECT last_event_sequence FROM replay_hedge_input_projection
+                WHERE run_id = ? AND source_kind = 'SIMULATION'
+                """,
+                (run_id,),
+            ).fetchone()
+            if simulation is None:
+                raise TypeError("HEDGE simulation projection is missing")
+            return public_cursors, int(simulation["last_event_sequence"])
 
-        cursors = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
         candidates = [
             event.event_time_ms
-            for events in (public, simulation)
-            for event in events
-            if event.event_sequence > cursors.get(event.source_kind, 0)
+            for event in public
+            if event.track_id is not None
+            and event.event_sequence > public_cursors.get(event.track_id, 0)
             and event.event_time_ms <= target_actual_time_ms
         ]
+        candidates.extend(
+            event.event_time_ms
+            for event in simulation
+            if event.event_sequence > simulation_cursor
+            and event.event_time_ms <= target_actual_time_ms
+        )
         return min(candidates) if candidates else None
 
     async def events_at(
-        self, *, run_id: str, actual_time_ms: int
+        self,
+        *,
+        run_id: str,
+        actual_time_ms: int,
+        runtime_snapshot: HedgeInputRuntimeSnapshot | None = None,
     ) -> tuple[HedgeInputEvent, ...]:
-        public, simulation = await self._runtime_events(run_id)
+        public, simulation = (
+            await self._runtime_events(run_id)
+            if runtime_snapshot is None
+            else runtime_snapshot
+        )
 
-        def read(connection: sqlite3.Connection) -> dict[str, int]:
-            return {
-                str(row["source_kind"]): int(row["last_event_sequence"])
+        def read(connection: sqlite3.Connection) -> tuple[dict[str, int], int]:
+            public_cursors = {
+                str(row["track_id"]): int(row["last_event_sequence"])
                 for row in connection.execute(
                     """
-                    SELECT source_kind, last_event_sequence
-                    FROM replay_hedge_input_projection WHERE run_id = ?
+                    SELECT track_id, last_event_sequence
+                    FROM replay_hedge_track_public_projection WHERE run_id = ?
                     """,
                     (run_id,),
                 ).fetchall()
             }
+            simulation_row = connection.execute(
+                """
+                SELECT last_event_sequence FROM replay_hedge_input_projection
+                WHERE run_id = ? AND source_kind = 'SIMULATION'
+                """,
+                (run_id,),
+            ).fetchone()
+            if simulation_row is None:
+                raise TypeError("HEDGE simulation projection is missing")
+            return public_cursors, int(simulation_row["last_event_sequence"])
 
-        cursors = await self.store.run_extension_read(read)
+        public_cursors, simulation_cursor = await self.store.run_extension_read(read)
         return tuple(
             sorted(
                 (
                     event
-                    for events in (public, simulation)
-                    for event in events
-                    if event.event_sequence > cursors.get(event.source_kind, 0)
-                    and event.event_time_ms == actual_time_ms
+                    for event in (*public, *simulation)
+                    if (
+                        event.event_sequence
+                        > (
+                            public_cursors.get(event.track_id, 0)
+                            if event.source_kind == "PUBLIC"
+                            and event.track_id is not None
+                            else simulation_cursor
+                        )
+                        and event.event_time_ms == actual_time_ms
+                    )
                 ),
                 key=lambda event: (
                     event.event_time_ms,
@@ -2087,6 +2891,256 @@ class HedgeInputArchiveManager:
                     "VALID_RECONSTRUCTABLE_PROJECTION",
                     type(exc).__name__,
                 )
+        track_inputs = await self.store.run_extension_read(
+            lambda connection: {
+                "full_track_ids": tuple(
+                    str(row["track_id"])
+                    for row in connection.execute(
+                        """
+                        SELECT track_id FROM replay_training_market_track
+                        WHERE run_id = ? AND subscription_tier = 'FULL'
+                        ORDER BY track_id
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                ),
+                "bindings": tuple(
+                    connection.execute(
+                        """
+                        SELECT track_binding.*, archive.proof_hash,
+                               archive.health, archive.local_path,
+                               archive.generation, archive.checksum_sha256,
+                               archive.event_chain_tail
+                        FROM replay_hedge_track_public_binding AS track_binding
+                        JOIN replay_training_market_track AS track
+                          ON track.run_id = track_binding.run_id
+                         AND track.track_id = track_binding.track_id
+                        JOIN replay_hedge_public_archive AS archive
+                          ON archive.archive_id = track_binding.public_archive_id
+                        WHERE track_binding.run_id = ?
+                          AND track.subscription_tier = 'FULL'
+                        ORDER BY track_binding.track_id
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                ),
+                "projections": tuple(
+                    connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_track_public_projection
+                        WHERE run_id = ? ORDER BY track_id
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                ),
+                "applied": tuple(
+                    connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_track_public_applied_event
+                        WHERE run_id = ? ORDER BY track_id, event_sequence
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                ),
+            }
+        )
+        track_bindings = {
+            str(row["track_id"]): row for row in track_inputs["bindings"]
+        }
+        if tuple(sorted(track_bindings)) != track_inputs["full_track_ids"]:
+            difference(
+                "track_public_bindings",
+                list(track_inputs["full_track_ids"]),
+                sorted(track_bindings),
+            )
+        track_projections = {
+            str(row["track_id"]): row for row in track_inputs["projections"]
+        }
+        track_applied: dict[str, list[sqlite3.Row]] = {}
+        for row in track_inputs["applied"]:
+            track_applied.setdefault(str(row["track_id"]), []).append(row)
+        track_projection_snapshot: list[dict[str, object]] = []
+        for track_id, track_binding in track_bindings.items():
+            try:
+                path = await self._guard_catalog_row(
+                    track_binding, source_kind="PUBLIC"
+                )
+                descriptor = await asyncio.to_thread(
+                    verify_hedge_public_history, path
+                )
+                expected_track_proof = hedge_track_public_proof_hash(
+                    run_id=run_id,
+                    track_id=track_id,
+                    public=descriptor,
+                    public_generation=int(track_binding["public_generation"]),
+                    bound_range_start_ms=int(
+                        track_binding["bound_range_start_ms"]
+                    ),
+                    bound_range_end_ms=int(track_binding["bound_range_end_ms"]),
+                )
+                if str(track_binding["input_proof_hash"]) != expected_track_proof:
+                    difference(
+                        f"track_binding.{track_id}.input_proof_hash",
+                        expected_track_proof,
+                        track_binding["input_proof_hash"],
+                    )
+                for field, expected in (
+                    ("public_generation", int(track_binding["generation"])),
+                    ("public_checksum_sha256", descriptor.checksum_sha256),
+                    ("public_event_chain_tail", descriptor.event_chain_tail),
+                ):
+                    if str(track_binding[field]) != str(expected):
+                        difference(
+                            f"track_binding.{track_id}.{field}",
+                            expected,
+                            track_binding[field],
+                        )
+                projection_row = track_projections.get(track_id)
+                if projection_row is None:
+                    difference(
+                        f"track_projection.{track_id}", "PRESENT", "MISSING"
+                    )
+                    continue
+                state = json.loads(str(projection_row["state_json"]))
+                projection_payload = {
+                    "schema_version": "replay.hedge-track-public-projection.v1",
+                    "run_id": run_id,
+                    "track_id": track_id,
+                    "last_event_sequence": int(
+                        projection_row["last_event_sequence"]
+                    ),
+                    "as_of_actual_time_ms": int(
+                        projection_row["as_of_actual_time_ms"]
+                    ),
+                    "as_of_virtual_time_ms": int(
+                        projection_row["as_of_virtual_time_ms"]
+                    ),
+                    "state": state,
+                    "input_chain_hash": str(projection_row["input_chain_hash"]),
+                }
+                expected_component = canonical_sha256(projection_payload)
+                if str(projection_row["component_hash"]) != expected_component:
+                    difference(
+                        f"track_projection.{track_id}.component_hash",
+                        expected_component,
+                        projection_row["component_hash"],
+                    )
+                events = await asyncio.to_thread(_read_public_events, path)
+                expected_projection = _projection(
+                    events,
+                    source_kind="PUBLIC",
+                    actual_time_ms=int(projection_row["as_of_actual_time_ms"]),
+                    virtual_time_ms=int(projection_row["as_of_virtual_time_ms"]),
+                )
+                for field, expected, actual in (
+                    (
+                        "last_event_sequence",
+                        expected_projection.last_event_sequence,
+                        int(projection_row["last_event_sequence"]),
+                    ),
+                    (
+                        "input_chain_hash",
+                        expected_projection.input_chain_hash,
+                        str(projection_row["input_chain_hash"]),
+                    ),
+                    ("state", dict(expected_projection.state), state),
+                ):
+                    if expected != actual:
+                        difference(
+                            f"track_projection.{track_id}.{field}", expected, actual
+                        )
+                initial_sequence = max(
+                    (
+                        event.event_sequence
+                        for event in events
+                        if event.event_time_ms
+                        <= int(track_binding["bound_range_start_ms"])
+                    ),
+                    default=0,
+                )
+                expected_events = [
+                    event
+                    for event in events
+                    if initial_sequence
+                    < event.event_sequence
+                    <= int(projection_row["last_event_sequence"])
+                ]
+                receipts = track_applied.get(track_id, [])
+                if [event.event_sequence for event in expected_events] != [
+                    int(row["event_sequence"]) for row in receipts
+                ]:
+                    difference(
+                        f"track_applied.{track_id}.sequences",
+                        [event.event_sequence for event in expected_events],
+                        [int(row["event_sequence"]) for row in receipts],
+                    )
+                by_sequence = {event.event_sequence: event for event in events}
+                for receipt in receipts:
+                    event = by_sequence.get(int(receipt["event_sequence"]))
+                    if event is None:
+                        difference(
+                            f"track_applied.{track_id}.{receipt['event_sequence']}",
+                            "SOURCE_EVENT",
+                            "MISSING",
+                        )
+                        continue
+                    expected_hash = canonical_sha256(
+                        {
+                            "run_id": run_id,
+                            "track_id": track_id,
+                            "virtual_time_ms": int(
+                                receipt["applied_virtual_time_ms"]
+                            ),
+                            "source_kind": "PUBLIC",
+                            "source_id": descriptor.archive_id,
+                            "event_sequence": event.event_sequence,
+                            "event_hash": event.event_hash,
+                            "payload": dict(event.payload),
+                        }
+                    )
+                    if (
+                        int(receipt["event_time_ms"]) != event.event_time_ms
+                        or int(receipt["event_phase"]) != event.event_phase
+                        or str(receipt["event_kind"]) != event.event_kind
+                        or int(receipt["component_sequence"])
+                        != event.component_sequence
+                        or str(receipt["source_event_hash"]) != event.event_hash
+                        or json.loads(str(receipt["payload_json"]))
+                        != dict(event.payload)
+                        or str(receipt["applied_payload_hash"]) != expected_hash
+                    ):
+                        difference(
+                            f"track_applied.{track_id}.{event.event_sequence}",
+                            "MATCHING_SOURCE_RECEIPT",
+                            "MISMATCH",
+                        )
+                track_projection_snapshot.append(
+                    {
+                        "track_id": track_id,
+                        "public_archive_id": descriptor.archive_id,
+                        "last_event_sequence": int(
+                            projection_row["last_event_sequence"]
+                        ),
+                        "input_chain_hash": str(
+                            projection_row["input_chain_hash"]
+                        ),
+                        "component_hash": str(projection_row["component_hash"]),
+                        "applied_event_count": len(receipts),
+                    }
+                )
+            except (
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                TrainingRunError,
+            ) as exc:
+                difference(
+                    f"track_projection.{track_id}",
+                    "VALID_RECONSTRUCTABLE_PROJECTION",
+                    type(exc).__name__,
+                )
         status = "PASS" if not differences else "FAIL"
         snapshot = {
             "schema_version": HEDGE_INPUT_AUDIT_SCHEMA_VERSION,
@@ -2095,6 +3149,7 @@ class HedgeInputArchiveManager:
             "public_archive_id": str(binding["public_archive_id"]),
             "simulation_manifest_id": str(binding["simulation_manifest_id"]),
             "projections": projection_snapshot,
+            "track_public_projections": track_projection_snapshot,
         }
         proof_hash = canonical_sha256(
             {

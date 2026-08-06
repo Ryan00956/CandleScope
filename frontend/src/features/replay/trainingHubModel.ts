@@ -2,6 +2,8 @@ import type { ReplayCapabilities, ReplayCatalog, ReplayCatalogEntry } from "./re
 import type {
   ReplayLaunchContext,
   ReplayAccountHistoryRef,
+  ReplayHedgePublicHistoryRef,
+  ReplayHedgeSimulationManifestRef,
   ReplayV2AccountDataMode,
   ReplayV2BookMode,
   ReplayV2IntegrityMode,
@@ -77,6 +79,8 @@ export interface TrainingRunDraftEvaluation {
   readonly errors: readonly string[];
   readonly selectedEntry: ReplayCatalogEntry | null;
   readonly accountHistoryRef: ReplayAccountHistoryRef | null;
+  readonly hedgePublicHistoryRef: ReplayHedgePublicHistoryRef | null;
+  readonly simulationManifestRef: ReplayHedgeSimulationManifestRef | null;
   readonly unsupported: TrainingHubUnsupportedCapabilities;
 }
 
@@ -89,7 +93,12 @@ export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.fre
 });
 
 function firstEntry(catalog: ReplayCatalog): ReplayCatalogEntry | undefined {
-  return catalog.entries.find((entry) => entry.selected_base_interval !== null)
+  return catalog.entries.find((entry) => (
+    entry.identity.exchange === "binance"
+    && entry.identity.market_type === "futures"
+    && entry.selected_base_interval !== null
+  ))
+    ?? catalog.entries.find((entry) => entry.selected_base_interval !== null)
     ?? catalog.entries[0];
 }
 
@@ -107,20 +116,24 @@ export function createTrainingRunDraft(
   const symbol = launchContext?.symbol ?? entry?.identity.symbol ?? "BTCUSDT";
   const baseInterval = entry?.selected_base_interval ?? entry?.base_intervals[0] ?? "1m";
   const displayInterval = launchContext?.display_interval ?? baseInterval;
-  const randomRangeEndMs = Math.floor(Date.now() / 60_000) * 60_000;
+  const latestEligibleStart = entry?.eligible_ranges.length
+    ? Math.max(...entry.eligible_ranges.map((range) => range.last_start_ms))
+    : Math.floor(
+        (Date.now() - (catalog?.horizon_ms ?? 86_400_000)) / 60_000,
+      ) * 60_000;
   return {
     name: "回放训练",
     sourceKind: "BAR",
-    startMode: "RANDOM",
+    startMode: "MANUAL",
     exchange: launchContext?.exchange ?? entry?.identity.exchange ?? "binance",
-    marketType: launchContext?.market_type ?? entry?.identity.market_type ?? "spot",
+    marketType: launchContext?.market_type ?? entry?.identity.market_type ?? "futures",
     symbol,
     settlementAsset: symbol.endsWith("USDT") ? "USDT" : "USDT",
     baseInterval,
     displayInterval,
-    requestedStartMs: null,
-    randomRangeStartMs: Date.UTC(2020, 0, 1),
-    randomRangeEndMs,
+    requestedStartMs: latestEligibleStart,
+    randomRangeStartMs: null,
+    randomRangeEndMs: null,
     indicatorWarmupBars: catalog?.warmup_bars ?? 200,
     visibleHistoryMode: "ALL_AVAILABLE",
     visibleHistoryLookbackMs: null,
@@ -132,13 +145,13 @@ export function createTrainingRunDraft(
     marketSlippageBps: "1",
     marginMode: "CROSS",
     positionMode: "HEDGE",
-    fundingMode: "OFF",
+    fundingMode: "HISTORICAL_EXACT",
     accountDataMode: "DETERMINISTIC_SIMULATION",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
-    bookMode: "OFF",
+    bookMode: "BOOK_ASSISTED_REQUIRED",
     integrityMode: "CHALLENGE",
-    timeDisclosurePolicy: catalog?.blind_mode === false ? "NONE" : "HIDE_ALL",
+    timeDisclosurePolicy: "NONE",
     allowedMutations: [],
   };
 }
@@ -333,6 +346,8 @@ export function evaluateTrainingRunDraft(
   }
   const accountHistoryPlan = segmentPlan?.account_history ?? null;
   let accountHistoryRef: ReplayAccountHistoryRef | null = null;
+  let hedgePublicHistoryRef: ReplayHedgePublicHistoryRef | null = null;
+  let simulationManifestRef: ReplayHedgeSimulationManifestRef | null = null;
   if (draft.accountDataMode === "HISTORICAL_EXACT") {
     if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
       errors.push("精确账户历史必须使用明确的手动开始时间");
@@ -376,6 +391,30 @@ export function evaluateTrainingRunDraft(
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
       errors.push("双向持仓必须使用版本化确定性模拟账户");
     }
+    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
+      errors.push("双向持仓必须使用明确的手动开始时间以 pin 全部历史输入");
+    }
+    if (draft.exchange !== "binance" || draft.marketType !== "futures") {
+      errors.push("双向持仓当前要求 Binance USD-M futures 历史输入");
+    }
+    if (draft.bookMode !== "BOOK_ASSISTED_REQUIRED") {
+      errors.push("双向持仓必须启用连续历史 L2 强平执行");
+    }
+    if (draft.fundingMode !== "HISTORICAL_EXACT") {
+      errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");
+    }
+    const hedgePlan = segmentPlan?.hedge_inputs ?? null;
+    if (hedgePlan === null) {
+      errors.push("尚未按当前参数校验双向持仓公开历史与模拟清单");
+    } else if (hedgePlan.requested_position_mode !== "HEDGE"
+      || hedgePlan.capability_state !== "AVAILABLE_EXACT"
+      || hedgePlan.hedge_public_history_ref === null
+      || hedgePlan.simulation_manifest_ref === null) {
+      errors.push(`双向持仓输入不可用：${hedgePlan.reason}`);
+    } else {
+      hedgePublicHistoryRef = hedgePlan.hedge_public_history_ref;
+      simulationManifestRef = hedgePlan.simulation_manifest_ref;
+    }
   } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
     errors.push("确定性双向模拟账户不能用于单向持仓");
   }
@@ -394,6 +433,8 @@ export function evaluateTrainingRunDraft(
     errors,
     selectedEntry: entry ?? null,
     accountHistoryRef,
+    hedgePublicHistoryRef,
+    simulationManifestRef,
     unsupported: PHASE_6_BOUNDARIES,
   };
 }
@@ -494,6 +535,15 @@ export function evaluateTrainingRunSetupDraft(
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
       errors.push("双向持仓必须使用版本化确定性模拟账户");
     }
+    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
+      errors.push("双向持仓必须使用明确的手动开始时间以 pin 全部历史输入");
+    }
+    if (draft.bookMode !== "BOOK_ASSISTED_REQUIRED") {
+      errors.push("双向持仓必须启用连续历史 L2 强平执行");
+    }
+    if (draft.fundingMode !== "HISTORICAL_EXACT") {
+      errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");
+    }
   } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
     errors.push("确定性双向模拟账户不能用于单向持仓");
   }
@@ -512,6 +562,8 @@ export function evaluateTrainingRunSetupDraft(
     errors,
     selectedEntry: null,
     accountHistoryRef: null,
+    hedgePublicHistoryRef: null,
+    simulationManifestRef: null,
     unsupported: PHASE_6_BOUNDARIES,
   };
 }
@@ -560,8 +612,12 @@ export function buildTrainingRunPreparationRequest(
     account_history_ref: draft.accountDataMode === "HISTORICAL_EXACT"
       ? evaluation.accountHistoryRef
       : null,
-    hedge_public_history_ref: null,
-    simulation_manifest_ref: null,
+    hedge_public_history_ref: draft.positionMode === "HEDGE"
+      ? evaluation.hedgePublicHistoryRef
+      : null,
+    simulation_manifest_ref: draft.positionMode === "HEDGE"
+      ? evaluation.simulationManifestRef
+      : null,
     account_fidelity: draft.positionMode === "HEDGE" ? HEDGE_ACCOUNT_FIDELITY : null,
     insurance_adl_fidelity: draft.positionMode === "HEDGE"
       ? HEDGE_INSURANCE_ADL_FIDELITY

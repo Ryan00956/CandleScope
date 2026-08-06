@@ -551,6 +551,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 预估：4–6 个工程日，不含 4 小时机器运行时间和问题修复。
 
+完成记录（2026-08-06，以候选提交后的 clean-HEAD 外部 release manifest 为最终判定）：逐轨 HEDGE public archive binding/projection/applied receipt、真实 ADD_TRACK 多标的输入、全局屏障强平判定、22 项验收矩阵、HEDGE 浏览器 fixture/账户连续性和 release manifest v3 已实现。候选提交前 replay 后端 `911 passed`，前端综合门禁 `2936 passed`；8 FULL 双腿普通 wave p95 `357.662 ms`，强平 wave p95/max `1374.952 ms`，冻结阈值未调整。正式 4 小时 soak、rollback 和 manifest 必须在候选提交后绑定同一 clean HEAD 写到仓库外；详见 [`evidence/KLINE_REPLAY_HEDGE_PHASE9_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE9_RESULT_20260806_zh.md)。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

@@ -90,9 +90,9 @@ async def test_hedge_liquidation_consumes_frozen_historical_l2_levels(
                 """
                 SELECT liquidation_fill.book_level, contract.fill_json
                 FROM replay_training_liquidation_fill AS liquidation_fill
-                JOIN replay_training_contract_fill AS contract
-                  ON contract.run_id = liquidation_fill.run_id
-                 AND contract.fill_id = liquidation_fill.fill_id
+                    JOIN replay_training_contract_fill AS contract
+                      ON contract.run_id = liquidation_fill.run_id
+                     AND contract.fill_id = liquidation_fill.broker_fill_id
                 WHERE liquidation_fill.run_id = ?
                 ORDER BY liquidation_fill.order_id, liquidation_fill.fill_sequence
                 """,

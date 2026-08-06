@@ -23,6 +23,7 @@ import {
   replaySoakFrontendProcessEnvironment,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
+  selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
 } from "./replay-soak.mjs";
 
@@ -556,6 +557,50 @@ test("formal v2 soak binds a 30-day plan to a contiguous real identity", () => {
   assert.throws(
     () => selectFormalV2RealTrainingPlan({ ...evidence, read_only: false }),
     /read-only real source identity evidence/,
+  );
+});
+
+test("formal HEDGE soak binds both exact public/L2 archives and one simulation model", () => {
+  const publicRefs = {
+    BTCUSDT: { archive_id: "btc-public" },
+    ETHUSDT: { archive_id: "eth-public" },
+  };
+  const simulationRef = { manifest_id: "simulation-v1" };
+  const historicalBook = {
+    BTCUSDT: { archive_id: "btc-book" },
+    ETHUSDT: { archive_id: "eth-book" },
+  };
+  const fixture = {
+    source_profile: "HEDGE_EXACT_ARCHIVE_QA",
+    historical_book: historicalBook,
+    hedge_inputs: {
+      fidelity: "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION",
+      fallback_applied: false,
+      public_refs: publicRefs,
+      simulation_ref: simulationRef,
+    },
+  };
+  assert.deepEqual(selectFormalV2HedgeTrainingPlan(fixture), {
+    exchange: "binance",
+    marketType: "futures",
+    symbol: "BTCUSDT",
+    secondarySymbol: "ETHUSDT",
+    interval: "1m",
+    forwardCacheMs: 2_592_000_000,
+    warmupBars: 200,
+    requiredRows: 43_400,
+    publicRefs,
+    simulationRef,
+    historicalBook,
+    inputFidelity: "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION",
+    fallbackApplied: false,
+  });
+  assert.throws(
+    () => selectFormalV2HedgeTrainingPlan({
+      ...fixture,
+      hedge_inputs: { ...fixture.hedge_inputs, fallback_applied: true },
+    }),
+    /exact per-symbol public\/L2 inputs/,
   );
 });
 

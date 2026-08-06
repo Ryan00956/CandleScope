@@ -42,7 +42,9 @@ from .hedge_inputs import (
     HEDGE_INPUT_PROOF_SCHEMA_VERSION,
     HedgeInputEvent,
     PreparedHedgeInputBinding,
+    PreparedHedgeTrackPublicBinding,
     bind_hedge_inputs,
+    bind_hedge_track_public_input,
     runtime_hedge_rule,
 )
 from .liquidation_projection import load_public_liquidation_cases
@@ -2012,12 +2014,7 @@ class TrainingRunStore:
 
         binding = connection.execute(
             """
-            SELECT binding.status, projection.*
-            FROM replay_hedge_input_binding AS binding
-            JOIN replay_hedge_input_projection AS projection
-              ON projection.run_id = binding.run_id
-             AND projection.source_kind = 'PUBLIC'
-            WHERE binding.run_id = ?
+            SELECT status FROM replay_hedge_input_binding WHERE run_id = ?
             """,
             (run_id,),
         ).fetchone()
@@ -2028,36 +2025,6 @@ class TrainingRunStore:
                 status_code=409,
                 details={"fallback_applied": False},
             )
-        try:
-            state = json.loads(str(binding["state_json"]))
-            projection_payload = {
-                "schema_version": "replay.hedge-input-projection.v1",
-                "source_kind": str(binding["source_kind"]),
-                "last_event_sequence": int(binding["last_event_sequence"]),
-                "as_of_actual_time_ms": int(binding["as_of_actual_time_ms"]),
-                "as_of_virtual_time_ms": int(binding["as_of_virtual_time_ms"]),
-                "state": state,
-                "input_chain_hash": str(binding["input_chain_hash"]),
-            }
-            if canonical_sha256(projection_payload) != binding["component_hash"]:
-                raise ValueError("HEDGE input projection hash is invalid")
-            mark_state = state["mark_index"]
-            mark = Decimal(str(mark_state["mark_price"]))
-            if mark <= 0:
-                raise ValueError("mark must be positive")
-        except (
-            InvalidOperation,
-            KeyError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            raise TrainingRunError(
-                "HEDGE_PINNED_MARK_UNAVAILABLE",
-                "pinned HEDGE mark is unavailable",
-                status_code=409,
-                details={"fallback_applied": False},
-            ) from exc
         run = connection.execute(
             """
             SELECT initial_equity FROM replay_training_run WHERE run_id = ?
@@ -2083,11 +2050,61 @@ class TrainingRunStore:
         ).fetchall()
         for track in tracks:
             try:
+                projection = connection.execute(
+                    """
+                    SELECT projection.*
+                    FROM replay_hedge_track_public_binding AS track_binding
+                    JOIN replay_hedge_track_public_projection AS projection
+                      ON projection.run_id = track_binding.run_id
+                     AND projection.track_id = track_binding.track_id
+                    WHERE track_binding.run_id = ?
+                      AND track_binding.track_id = ?
+                      AND track_binding.status = 'ACTIVE'
+                    """,
+                    (run_id, track["track_id"]),
+                ).fetchone()
+                if projection is None:
+                    raise ValueError("track public projection is missing")
+                state = json.loads(str(projection["state_json"]))
+                projection_payload = {
+                    "schema_version": "replay.hedge-track-public-projection.v1",
+                    "run_id": run_id,
+                    "track_id": str(track["track_id"]),
+                    "last_event_sequence": int(projection["last_event_sequence"]),
+                    "as_of_actual_time_ms": int(projection["as_of_actual_time_ms"]),
+                    "as_of_virtual_time_ms": int(
+                        projection["as_of_virtual_time_ms"]
+                    ),
+                    "state": state,
+                    "input_chain_hash": str(projection["input_chain_hash"]),
+                }
+                if canonical_sha256(projection_payload) != projection[
+                    "component_hash"
+                ]:
+                    raise ValueError("track public projection hash is invalid")
+                mark_state = state["mark_index"]
+                mark = Decimal(str(mark_state["mark_price"]))
+                if mark <= 0:
+                    raise ValueError("mark must be positive")
                 position = json.loads(str(track["position_json"]))
                 account = json.loads(str(track["account_json"]))
                 orders = json.loads(str(track["open_orders_json"]))
-            except json.JSONDecodeError as exc:
-                raise TypeError("HEDGE track projection JSON is invalid") from exc
+            except (
+                InvalidOperation,
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise TrainingRunError(
+                    "HEDGE_PINNED_MARK_UNAVAILABLE",
+                    "the track-specific pinned HEDGE mark is unavailable",
+                    status_code=409,
+                    details={
+                        "track_id": str(track["track_id"]),
+                        "fallback_applied": False,
+                    },
+                ) from exc
             if (
                 not isinstance(position, dict)
                 or position.get("position_mode") != "HEDGE"
@@ -2222,6 +2239,16 @@ class TrainingRunStore:
                     details={"fallback_applied": False},
                 )
             now_ms = self.base_store._validated_now_ms()
+            primary_track = connection.execute(
+                """
+                SELECT track_id FROM replay_training_market_track
+                WHERE run_id = ? ORDER BY stable_ordinal, track_id LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if primary_track is None:
+                raise TypeError("HEDGE primary track is missing")
+            primary_track_id = str(primary_track["track_id"])
             stable: list[StableMarketEvent] = []
             for event in materialized:
                 stable.append(
@@ -2232,22 +2259,43 @@ class TrainingRunStore:
                         source_sequence=event.event_sequence,
                     )
                 )
-                existing = connection.execute(
-                    """
-                    SELECT 1 FROM replay_hedge_input_applied_event
-                    WHERE run_id = ? AND source_kind = ? AND event_sequence = ?
-                    """,
-                    (run_id, event.source_kind, event.event_sequence),
-                ).fetchone()
+                if event.source_kind == "PUBLIC":
+                    if event.track_id is None:
+                        raise TypeError("HEDGE public event lacks a track identity")
+                    existing = connection.execute(
+                        """
+                        SELECT 1 FROM replay_hedge_track_public_applied_event
+                        WHERE run_id = ? AND track_id = ? AND event_sequence = ?
+                        """,
+                        (run_id, event.track_id, event.event_sequence),
+                    ).fetchone()
+                else:
+                    existing = connection.execute(
+                        """
+                        SELECT 1 FROM replay_hedge_input_applied_event
+                        WHERE run_id = ? AND source_kind = ? AND event_sequence = ?
+                        """,
+                        (run_id, event.source_kind, event.event_sequence),
+                    ).fetchone()
                 if existing is not None:
                     continue
-                projection = connection.execute(
-                    """
-                    SELECT * FROM replay_hedge_input_projection
-                    WHERE run_id = ? AND source_kind = ?
-                    """,
-                    (run_id, event.source_kind),
-                ).fetchone()
+                projection = (
+                    connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_track_public_projection
+                        WHERE run_id = ? AND track_id = ?
+                        """,
+                        (run_id, event.track_id),
+                    ).fetchone()
+                    if event.source_kind == "PUBLIC"
+                    else connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_input_projection
+                        WHERE run_id = ? AND source_kind = ?
+                        """,
+                        (run_id, event.source_kind),
+                    ).fetchone()
+                )
                 if projection is None:
                     raise TrainingRunError(
                         "HEDGE_INPUT_PROJECTION_MISSING",
@@ -2282,10 +2330,9 @@ class TrainingRunStore:
                     track = connection.execute(
                         """
                         SELECT track_id, source_kind FROM replay_training_market_track
-                        WHERE run_id = ? AND subscription_tier = 'FULL'
-                        ORDER BY stable_ordinal, track_id LIMIT 1
+                        WHERE run_id = ? AND track_id = ?
                         """,
-                        (run_id,),
+                        (run_id, event.track_id),
                     ).fetchone()
                     if track is None:
                         raise TypeError("HEDGE FULL track is missing")
@@ -2326,74 +2373,122 @@ class TrainingRunStore:
                     )
                 elif event.event_kind == "FEE_POLICY":
                     state["fee_policy"] = dict(event.payload)
-                    revision = int(
-                        connection.execute(
+                    if event.track_id != primary_track_id:
+                        active_fee = connection.execute(
                             """
-                            SELECT COALESCE(MAX(revision), 0) + 1
-                            FROM replay_training_fee_policy WHERE run_id = ?
+                            SELECT policy.maker_fee_bps, policy.taker_fee_bps,
+                                   extension.liquidation_fee_bps,
+                                   extension.policy_version,
+                                   extension.account_tier
+                            FROM replay_training_fee_policy AS policy
+                            JOIN replay_training_fee_policy_extension AS extension
+                              ON extension.run_id = policy.run_id
+                             AND extension.revision = policy.revision
+                            WHERE policy.run_id = ?
+                            ORDER BY policy.effective_virtual_time_ms DESC,
+                                     policy.revision DESC LIMIT 1
                             """,
                             (run_id,),
-                        ).fetchone()[0]
-                    )
-                    policy = {
-                        "schema_version": "replay.training.fee-policy.v1",
-                        "run_id": run_id,
-                        "revision": revision,
-                        "effective_virtual_time_ms": virtual_time_ms,
-                        **dict(event.payload),
-                        "fidelity": "PINNED_HISTORICAL_FEE_POLICY",
-                    }
-                    connection.execute(
-                        """
-                        INSERT INTO replay_training_fee_policy(
-                            run_id, revision, effective_virtual_time_ms,
-                            maker_fee_bps, taker_fee_bps, policy_hash,
-                            fidelity, reason, created_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?,
-                                  'PINNED_HISTORICAL_FEE_POLICY',
-                                  'HEDGE public input event', ?)
-                        """,
-                        (
-                            run_id,
-                            revision,
-                            virtual_time_ms,
-                            event.payload["maker_fee_bps"],
-                            event.payload["taker_fee_bps"],
-                            canonical_sha256(policy),
-                            now_ms,
-                        ),
-                    )
-                    extension = {
-                        "schema_version": "replay.training.fee-policy-extension.v1",
-                        "run_id": run_id,
-                        "revision": revision,
-                        "policy_version": event.payload["policy_version"],
-                        "account_tier": event.payload["account_tier"],
-                        "liquidation_fee_bps": event.payload["liquidation_fee_bps"],
-                        "source_kind": "PUBLIC",
-                        "source_id": event.source_id,
-                        "source_event_sequence": event.event_sequence,
-                    }
-                    connection.execute(
-                        """
-                        INSERT INTO replay_training_fee_policy_extension(
-                            run_id, revision, policy_version, account_tier,
-                            liquidation_fee_bps, source_kind, source_id,
-                            source_event_sequence, component_hash, created_at_ms
-                        ) VALUES (?, ?, ?, ?, ?, 'PUBLIC', ?, ?, ?, ?)
-                        """,
-                        (
-                            run_id,
-                            revision,
-                            event.payload["policy_version"],
-                            event.payload["account_tier"],
-                            event.payload["liquidation_fee_bps"],
-                            event.source_id,
-                            event.event_sequence,
-                            canonical_sha256(extension),
-                            now_ms,
-                        ),
-                    )
+                        ).fetchone()
+                        expected_fee = (
+                            str(event.payload["maker_fee_bps"]),
+                            str(event.payload["taker_fee_bps"]),
+                            str(event.payload["liquidation_fee_bps"]),
+                            str(event.payload["policy_version"]),
+                            str(event.payload["account_tier"]),
+                        )
+                        actual_fee = (
+                            None
+                            if active_fee is None
+                            else (
+                                str(active_fee["maker_fee_bps"]),
+                                str(active_fee["taker_fee_bps"]),
+                                str(active_fee["liquidation_fee_bps"]),
+                                str(active_fee["policy_version"]),
+                                str(active_fee["account_tier"]),
+                            )
+                        )
+                        if actual_fee != expected_fee:
+                            raise TrainingRunError(
+                                "HEDGE_TRACK_FEE_POLICY_MISMATCH",
+                                "track public fee event differs from account policy",
+                                status_code=409,
+                                details={
+                                    "track_id": event.track_id,
+                                    "fallback_applied": False,
+                                },
+                            )
+                    else:
+                        revision = int(
+                            connection.execute(
+                                """
+                                SELECT COALESCE(MAX(revision), 0) + 1
+                                FROM replay_training_fee_policy WHERE run_id = ?
+                                """,
+                                (run_id,),
+                            ).fetchone()[0]
+                        )
+                        policy = {
+                            "schema_version": "replay.training.fee-policy.v1",
+                            "run_id": run_id,
+                            "revision": revision,
+                            "effective_virtual_time_ms": virtual_time_ms,
+                            **dict(event.payload),
+                            "fidelity": "PINNED_HISTORICAL_FEE_POLICY",
+                        }
+                        connection.execute(
+                            """
+                            INSERT INTO replay_training_fee_policy(
+                                run_id, revision, effective_virtual_time_ms,
+                                maker_fee_bps, taker_fee_bps, policy_hash,
+                                fidelity, reason, created_at_ms
+                            ) VALUES (?, ?, ?, ?, ?, ?,
+                                      'PINNED_HISTORICAL_FEE_POLICY',
+                                      'HEDGE public input event', ?)
+                            """,
+                            (
+                                run_id,
+                                revision,
+                                virtual_time_ms,
+                                event.payload["maker_fee_bps"],
+                                event.payload["taker_fee_bps"],
+                                canonical_sha256(policy),
+                                now_ms,
+                            ),
+                        )
+                        extension = {
+                            "schema_version": "replay.training.fee-policy-extension.v1",
+                            "run_id": run_id,
+                            "revision": revision,
+                            "policy_version": event.payload["policy_version"],
+                            "account_tier": event.payload["account_tier"],
+                            "liquidation_fee_bps": event.payload[
+                                "liquidation_fee_bps"
+                            ],
+                            "source_kind": "PUBLIC",
+                            "source_id": event.source_id,
+                            "source_event_sequence": event.event_sequence,
+                        }
+                        connection.execute(
+                            """
+                            INSERT INTO replay_training_fee_policy_extension(
+                                run_id, revision, policy_version, account_tier,
+                                liquidation_fee_bps, source_kind, source_id,
+                                source_event_sequence, component_hash, created_at_ms
+                            ) VALUES (?, ?, ?, ?, ?, 'PUBLIC', ?, ?, ?, ?)
+                            """,
+                            (
+                                run_id,
+                                revision,
+                                event.payload["policy_version"],
+                                event.payload["account_tier"],
+                                event.payload["liquidation_fee_bps"],
+                                event.source_id,
+                                event.event_sequence,
+                                canonical_sha256(extension),
+                                now_ms,
+                            ),
+                        )
                 elif event.event_kind == "MARK_INDEX":
                     state["mark_index"] = dict(event.payload)
                 elif event.event_kind == "FUNDING":
@@ -2431,71 +2526,204 @@ class TrainingRunStore:
                         "HEDGE input event kind is unsupported",
                         status_code=409,
                     )
-                projection_payload = {
-                    "schema_version": "replay.hedge-input-projection.v1",
-                    "source_kind": event.source_kind,
-                    "last_event_sequence": event.event_sequence,
-                    "as_of_actual_time_ms": event.event_time_ms,
-                    "as_of_virtual_time_ms": virtual_time_ms,
-                    "state": state,
-                    "input_chain_hash": event.event_hash,
-                }
-                connection.execute(
-                    """
-                    UPDATE replay_hedge_input_projection
-                    SET last_event_sequence = ?, as_of_actual_time_ms = ?,
-                        as_of_virtual_time_ms = ?, state_json = ?,
-                        input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
-                    WHERE run_id = ? AND source_kind = ?
-                    """,
-                    (
-                        event.event_sequence,
-                        event.event_time_ms,
-                        virtual_time_ms,
-                        canonical_json(state),
-                        event.event_hash,
-                        canonical_sha256(projection_payload),
-                        now_ms,
-                        run_id,
-                        event.source_kind,
-                    ),
-                )
-                applied_hash = canonical_sha256(
-                    {
+                if event.source_kind == "PUBLIC":
+                    assert event.track_id is not None
+                    projection_payload = {
+                        "schema_version": "replay.hedge-track-public-projection.v1",
                         "run_id": run_id,
-                        "virtual_time_ms": virtual_time_ms,
-                        "source_kind": event.source_kind,
-                        "source_id": event.source_id,
-                        "event_sequence": event.event_sequence,
-                        "event_hash": event.event_hash,
-                        "payload": dict(event.payload),
+                        "track_id": event.track_id,
+                        "last_event_sequence": event.event_sequence,
+                        "as_of_actual_time_ms": event.event_time_ms,
+                        "as_of_virtual_time_ms": virtual_time_ms,
+                        "state": state,
+                        "input_chain_hash": event.event_hash,
                     }
-                )
-                connection.execute(
-                    """
-                    INSERT INTO replay_hedge_input_applied_event(
-                        run_id, source_kind, event_sequence, event_time_ms,
-                        event_phase, event_kind, component_sequence,
-                        applied_virtual_time_ms,
-                        source_event_hash, payload_json,
-                        applied_payload_hash, created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        event.source_kind,
-                        event.event_sequence,
-                        event.event_time_ms,
-                        event.event_phase,
-                        event.event_kind,
-                        event.component_sequence,
-                        virtual_time_ms,
-                        event.event_hash,
-                        canonical_json(event.payload),
-                        applied_hash,
-                        now_ms,
-                    ),
-                )
+                    connection.execute(
+                        """
+                        UPDATE replay_hedge_track_public_projection
+                        SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                            as_of_virtual_time_ms = ?, state_json = ?,
+                            input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
+                        WHERE run_id = ? AND track_id = ?
+                        """,
+                        (
+                            event.event_sequence,
+                            event.event_time_ms,
+                            virtual_time_ms,
+                            canonical_json(state),
+                            event.event_hash,
+                            canonical_sha256(projection_payload),
+                            now_ms,
+                            run_id,
+                            event.track_id,
+                        ),
+                    )
+                    applied_hash = canonical_sha256(
+                        {
+                            "run_id": run_id,
+                            "track_id": event.track_id,
+                            "virtual_time_ms": virtual_time_ms,
+                            "source_kind": event.source_kind,
+                            "source_id": event.source_id,
+                            "event_sequence": event.event_sequence,
+                            "event_hash": event.event_hash,
+                            "payload": dict(event.payload),
+                        }
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO replay_hedge_track_public_applied_event(
+                            run_id, track_id, event_sequence, event_time_ms,
+                            event_phase, event_kind, component_sequence,
+                            applied_virtual_time_ms, source_event_hash,
+                            payload_json, applied_payload_hash, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            event.track_id,
+                            event.event_sequence,
+                            event.event_time_ms,
+                            event.event_phase,
+                            event.event_kind,
+                            event.component_sequence,
+                            virtual_time_ms,
+                            event.event_hash,
+                            canonical_json(event.payload),
+                            applied_hash,
+                            now_ms,
+                        ),
+                    )
+                    if event.track_id == primary_track_id:
+                        compatibility_payload = {
+                            "schema_version": "replay.hedge-input-projection.v1",
+                            "source_kind": "PUBLIC",
+                            "last_event_sequence": event.event_sequence,
+                            "as_of_actual_time_ms": event.event_time_ms,
+                            "as_of_virtual_time_ms": virtual_time_ms,
+                            "state": state,
+                            "input_chain_hash": event.event_hash,
+                        }
+                        connection.execute(
+                            """
+                            UPDATE replay_hedge_input_projection
+                            SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                                as_of_virtual_time_ms = ?, state_json = ?,
+                                input_chain_hash = ?, component_hash = ?,
+                                updated_at_ms = ?
+                            WHERE run_id = ? AND source_kind = 'PUBLIC'
+                            """,
+                            (
+                                event.event_sequence,
+                                event.event_time_ms,
+                                virtual_time_ms,
+                                canonical_json(state),
+                                event.event_hash,
+                                canonical_sha256(compatibility_payload),
+                                now_ms,
+                                run_id,
+                            ),
+                        )
+                        compatibility_hash = canonical_sha256(
+                            {
+                                "run_id": run_id,
+                                "virtual_time_ms": virtual_time_ms,
+                                "source_kind": "PUBLIC",
+                                "source_id": event.source_id,
+                                "event_sequence": event.event_sequence,
+                                "event_hash": event.event_hash,
+                                "payload": dict(event.payload),
+                            }
+                        )
+                        connection.execute(
+                            """
+                            INSERT INTO replay_hedge_input_applied_event(
+                                run_id, source_kind, event_sequence,
+                                event_time_ms, event_phase, event_kind,
+                                component_sequence, applied_virtual_time_ms,
+                                source_event_hash, payload_json,
+                                applied_payload_hash, created_at_ms
+                            ) VALUES (?, 'PUBLIC', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                run_id,
+                                event.event_sequence,
+                                event.event_time_ms,
+                                event.event_phase,
+                                event.event_kind,
+                                event.component_sequence,
+                                virtual_time_ms,
+                                event.event_hash,
+                                canonical_json(event.payload),
+                                compatibility_hash,
+                                now_ms,
+                            ),
+                        )
+                else:
+                    projection_payload = {
+                        "schema_version": "replay.hedge-input-projection.v1",
+                        "source_kind": event.source_kind,
+                        "last_event_sequence": event.event_sequence,
+                        "as_of_actual_time_ms": event.event_time_ms,
+                        "as_of_virtual_time_ms": virtual_time_ms,
+                        "state": state,
+                        "input_chain_hash": event.event_hash,
+                    }
+                    connection.execute(
+                        """
+                        UPDATE replay_hedge_input_projection
+                        SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                            as_of_virtual_time_ms = ?, state_json = ?,
+                            input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
+                        WHERE run_id = ? AND source_kind = ?
+                        """,
+                        (
+                            event.event_sequence,
+                            event.event_time_ms,
+                            virtual_time_ms,
+                            canonical_json(state),
+                            event.event_hash,
+                            canonical_sha256(projection_payload),
+                            now_ms,
+                            run_id,
+                            event.source_kind,
+                        ),
+                    )
+                    applied_hash = canonical_sha256(
+                        {
+                            "run_id": run_id,
+                            "virtual_time_ms": virtual_time_ms,
+                            "source_kind": event.source_kind,
+                            "source_id": event.source_id,
+                            "event_sequence": event.event_sequence,
+                            "event_hash": event.event_hash,
+                            "payload": dict(event.payload),
+                        }
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO replay_hedge_input_applied_event(
+                            run_id, source_kind, event_sequence, event_time_ms,
+                            event_phase, event_kind, component_sequence,
+                            applied_virtual_time_ms, source_event_hash,
+                            payload_json, applied_payload_hash, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            event.source_kind,
+                            event.event_sequence,
+                            event.event_time_ms,
+                            event.event_phase,
+                            event.event_kind,
+                            event.component_sequence,
+                            virtual_time_ms,
+                            event.event_hash,
+                            canonical_json(event.payload),
+                            applied_hash,
+                            now_ms,
+                        ),
+                    )
             return stable_market_event_order(stable)
 
         return await self.base_store.run_extension_write(write)
@@ -2514,6 +2742,8 @@ class TrainingRunStore:
 
         if event.source_kind != "PUBLIC":
             raise TypeError("HEDGE funding must originate from the public archive")
+        if event.track_id is None:
+            raise TypeError("HEDGE funding event lacks a track identity")
         run = connection.execute(
             """
             SELECT run.position_mode, run.settlement_asset,
@@ -2538,10 +2768,9 @@ class TrainingRunStore:
             """
             SELECT track_id, source_sequence
             FROM replay_training_market_track
-            WHERE run_id = ? AND subscription_tier = 'FULL'
-            ORDER BY stable_ordinal, track_id LIMIT 1
+            WHERE run_id = ? AND track_id = ? AND subscription_tier = 'FULL'
             """,
-            (run_id,),
+            (run_id, event.track_id),
         ).fetchone()
         if track is None:
             raise TypeError("HEDGE funding FULL track is missing")
@@ -3041,7 +3270,8 @@ class TrainingRunStore:
                 raise TypeError("liquidation cancellation has no legs")
             for index, raw in enumerate(canceled_orders, start=1):
                 track_id = str(raw["track_id"])
-                order_id = str(raw["order_id"])
+                broker_order_id = str(raw["order_id"])
+                order_id = f"{track_id}:{broker_order_id}"
                 leg = next(
                     (item for item in legs if str(item["track_id"]) == track_id),
                     legs[0],
@@ -3050,6 +3280,7 @@ class TrainingRunStore:
                     "case_id": liquidation_id,
                     "step_sequence": step_sequence,
                     "order_id": order_id,
+                    "broker_order_id": broker_order_id,
                     "track_id": track_id,
                     "state": "CANCELED",
                 }
@@ -4348,10 +4579,14 @@ class TrainingRunStore:
                 )
                 / filled
             )
+            broker_order_id = order_id
+            evidence_order_id = f"{track_id}:{broker_order_id}"
             order_payload = {
                 "case_id": liquidation_id,
                 "step_sequence": step_sequence,
-                "order_id": order_id,
+                "order_id": evidence_order_id,
+                "broker_order_id": broker_order_id,
+                "track_id": track_id,
                 "plan": dict(plan),
                 "broker_order": dict(raw_order),
             }
@@ -4368,7 +4603,7 @@ class TrainingRunStore:
                     run_id,
                     liquidation_id,
                     step_sequence,
-                    order_id,
+                    evidence_order_id,
                     plan["liquidation_leg_id"],
                     plan["side"],
                     plan["quantity"],
@@ -4431,10 +4666,14 @@ class TrainingRunStore:
                     upward=True,
                 )
                 total_liquidation_fee += liquidation_fee
+                evidence_fill_id = f"{track_id}:{raw['fill_id']}"
                 fill_payload = {
                     "case_id": liquidation_id,
-                    "order_id": order_id,
-                    "fill_id": str(raw["fill_id"]),
+                    "order_id": evidence_order_id,
+                    "broker_order_id": broker_order_id,
+                    "track_id": track_id,
+                    "fill_id": evidence_fill_id,
+                    "broker_fill_id": str(raw["fill_id"]),
                     "price": str(raw["price"]),
                     "quantity": str(raw["quantity"]),
                     "notional": decimal_to_string(
@@ -4467,16 +4706,18 @@ class TrainingRunStore:
                 connection.execute(
                     """
                     INSERT INTO replay_training_liquidation_fill(
-                        run_id, case_id, order_id, fill_id, fill_sequence,
+                        run_id, case_id, order_id, fill_id, broker_fill_id,
+                        fill_sequence,
                         price, quantity, notional, trading_fee, liquidation_fee,
                         book_level, virtual_time_ms, source_sequence, fill_hash,
                         created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
                         liquidation_id,
-                        order_id,
+                        evidence_order_id,
+                        evidence_fill_id,
                         raw["fill_id"],
                         fill_sequence,
                         raw["price"],
@@ -4519,7 +4760,9 @@ class TrainingRunStore:
             self._append_contract_ledger(
                 connection,
                 run_id=run_id,
-                posting_id=f"liquidation-fee:{liquidation_id}:{order_id}",
+                posting_id=(
+                    f"liquidation-fee:{liquidation_id}:{evidence_order_id}"
+                ),
                 track_id=track_id,
                 kind="LIQUIDATION_FEE",
                 cash_delta=-total_liquidation_fee,
@@ -4539,9 +4782,10 @@ class TrainingRunStore:
                 ),
                 rule_revision=int(plan["rule_revision"]),
                 reference_type="LIQUIDATION_ORDER",
-                reference_id=order_id,
+                reference_id=evidence_order_id,
                 metadata={
                     "case_id": liquidation_id,
+                    "broker_order_id": broker_order_id,
                     "position_side": plan["position_side"],
                     "liquidation_leg_id": plan["liquidation_leg_id"],
                     "step_sequence": step_sequence,
@@ -6324,11 +6568,10 @@ class TrainingRunStore:
             )
             applied = connection.execute(
                 """
-                SELECT * FROM replay_hedge_input_applied_event
-                WHERE run_id = ? AND source_kind = 'PUBLIC'
-                  AND event_sequence = ?
+                SELECT * FROM replay_hedge_track_public_applied_event
+                WHERE run_id = ? AND track_id = ? AND event_sequence = ?
                 """,
-                (run_id, int(row["source_event_sequence"])),
+                (run_id, track_id, int(row["source_event_sequence"])),
             ).fetchone()
             if applied is None or applied["event_kind"] != "FUNDING":
                 add_difference(f"{prefix}.public_event", "APPLIED_FUNDING", "MISSING")
@@ -7967,6 +8210,15 @@ class TrainingRunStore:
                 """,
                 (now_ms, run_id),
             )
+            connection.execute(
+                """
+                UPDATE replay_hedge_track_public_binding
+                SET status = 'PAUSED', degraded_reason = 'ACCOUNT_AUDIT_FAILED',
+                    updated_at_ms = ?
+                WHERE run_id = ? AND status = 'ACTIVE'
+                """,
+                (now_ms, run_id),
+            )
         return {
             "schema_version": ACCOUNT_AUDIT_SCHEMA_VERSION,
             "status": status,
@@ -8129,13 +8381,6 @@ class TrainingRunStore:
                     fidelity=str(parent["history_fidelity"]),
                     now_ms=now_ms,
                 )
-            if str(parent["position_mode"]) == "HEDGE":
-                self._copy_hedge_input_binding(
-                    connection,
-                    parent_run_id=parent_run_id,
-                    child_run_id=child_run_id,
-                    now_ms=now_ms,
-                )
             self._copy_launch_context(
                 connection,
                 parent_run_id=parent_run_id,
@@ -8177,6 +8422,13 @@ class TrainingRunStore:
                 component_state=component_state,
                 now_ms=now_ms,
             )
+            if str(parent["position_mode"]) == "HEDGE":
+                self._copy_hedge_input_binding(
+                    connection,
+                    parent_run_id=parent_run_id,
+                    child_run_id=child_run_id,
+                    now_ms=now_ms,
+                )
             if str(parent["book_mode"]) == "BOOK_ASSISTED_REQUIRED":
                 self._copy_review_book_inputs(
                     connection,
@@ -13258,7 +13510,10 @@ class TrainingRunStore:
                     "isolated_equity": isolated_equity,
                 }
             )
-        cross_breached = bool(active_legs) and equity <= total_maintenance
+        cross_breached = (
+            bool(active_legs)
+            and equity <= total_maintenance + reserved
+        )
         affected = (
             list(active_legs)
             if str(account["margin_mode"]) == "CROSS" and cross_breached
@@ -14052,6 +14307,7 @@ class TrainingRunStore:
         requested_tier: str,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
         account_history_binding: PreparedAccountHistoryBinding | None = None,
+        hedge_track_public_binding: PreparedHedgeTrackPublicBinding | None = None,
         review_parent_run_id: str | None = None,
         review_parent_track_id: str | None = None,
         review_parent_event_id: str | None = None,
@@ -14241,6 +14497,26 @@ class TrainingRunStore:
                         effective_virtual_time_ms=int(cursor["virtual_time_ms"]),
                         now_ms=now_ms,
                     )
+                if (
+                    run is not None
+                    and connection.execute(
+                        "SELECT position_mode FROM replay_training_run WHERE run_id = ?",
+                        (run_id,),
+                    ).fetchone()["position_mode"]
+                    == "HEDGE"
+                    and requested_tier == "FULL"
+                    and hedge_track_public_binding is not None
+                ):
+                    bind_hedge_track_public_input(
+                        connection,
+                        run_id=run_id,
+                        track_id=track_id,
+                        source_kind=str(row["source_kind"]),
+                        binding=hedge_track_public_binding,
+                        virtual_time_ms=int(cursor["virtual_time_ms"]),
+                        now_ms=now_ms,
+                        verify_account_fee_policy=True,
+                    )
                 self._sync_contract_components(
                     connection,
                     run_id=run_id,
@@ -14261,6 +14537,31 @@ class TrainingRunStore:
                         connection,
                         run_id=run_id,
                         track_id=track_id,
+                        now_ms=now_ms,
+                    )
+                if (
+                    run is not None
+                    and connection.execute(
+                        "SELECT position_mode FROM replay_training_run WHERE run_id = ?",
+                        (run_id,),
+                    ).fetchone()["position_mode"]
+                    == "HEDGE"
+                    and requested_tier == "FULL"
+                ):
+                    existing_hedge_binding = connection.execute(
+                        """
+                        SELECT 1 FROM replay_hedge_track_public_binding
+                        WHERE run_id = ? AND track_id = ? AND status = 'ACTIVE'
+                        """,
+                        (run_id, track_id),
+                    ).fetchone()
+                    if existing_hedge_binding is None:
+                        raise TypeError(
+                            "HEDGE FULL track is missing its exact public input binding"
+                        )
+                    self._apply_hedge_mark_projection(
+                        connection,
+                        run_id=run_id,
                         now_ms=now_ms,
                     )
 
@@ -15663,6 +15964,50 @@ class TrainingRunStore:
             "SIMULATION",
         ]:
             raise TypeError("HEDGE input projections are incomplete")
+        track_public: list[dict[str, object]] = []
+        for row in connection.execute(
+            """
+            SELECT track_binding.*, projection.last_event_sequence,
+                   projection.as_of_actual_time_ms,
+                   projection.as_of_virtual_time_ms,
+                   projection.state_json, projection.input_chain_hash,
+                   projection.component_hash
+            FROM replay_hedge_track_public_binding AS track_binding
+            JOIN replay_hedge_track_public_projection AS projection
+              ON projection.run_id = track_binding.run_id
+             AND projection.track_id = track_binding.track_id
+            WHERE track_binding.run_id = ?
+            ORDER BY track_binding.track_id
+            """,
+            (run_id,),
+        ).fetchall():
+            state = json.loads(str(row["state_json"]))
+            payload = {
+                "schema_version": "replay.hedge-track-public-projection.v1",
+                "run_id": run_id,
+                "track_id": str(row["track_id"]),
+                "last_event_sequence": int(row["last_event_sequence"]),
+                "as_of_actual_time_ms": int(row["as_of_actual_time_ms"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "state": state,
+                "input_chain_hash": str(row["input_chain_hash"]),
+            }
+            if canonical_sha256(payload) != row["component_hash"]:
+                raise TypeError("HEDGE track public projection hash is invalid")
+            track_public.append(
+                {
+                    "track_id": str(row["track_id"]),
+                    "archive_id": str(row["public_archive_id"]),
+                    "generation": int(row["public_generation"]),
+                    "dataset_epoch": str(row["public_dataset_epoch"]),
+                    "checksum_sha256": str(row["public_checksum_sha256"]),
+                    "event_chain_tail": str(row["public_event_chain_tail"]),
+                    "input_proof_hash": str(row["input_proof_hash"]),
+                    "status": str(row["status"]),
+                    "degraded_reason": row["degraded_reason"],
+                    "projection": {**payload, "component_hash": str(row["component_hash"])},
+                }
+            )
         audit = connection.execute(
             """
             SELECT * FROM replay_hedge_input_audit
@@ -15697,6 +16042,7 @@ class TrainingRunStore:
                 "health": str(simulation["health"]),
             },
             "projections": projections,
+            "track_public": track_public,
             "auditor": {
                 "status": "NOT_RUN" if audit is None else str(audit["status"]),
                 "proof_hash": None if audit is None else str(audit["proof_hash"]),
@@ -17576,6 +17922,184 @@ class TrainingRunStore:
                     applied_hash,
                     now_ms,
                 ),
+            )
+        track_mapping = {
+            str(row["parent_track_id"]): str(row["child_track_id"])
+            for row in connection.execute(
+                """
+                SELECT parent.track_id AS parent_track_id,
+                       child.track_id AS child_track_id
+                FROM replay_training_market_track AS parent
+                JOIN replay_training_market_track AS child
+                  ON child.run_id = ?
+                 AND child.stable_ordinal = parent.stable_ordinal
+                 AND child.exchange = parent.exchange
+                 AND child.market_type = parent.market_type
+                 AND child.symbol = parent.symbol
+                WHERE parent.run_id = ?
+                """,
+                (child_run_id, parent_run_id),
+            ).fetchall()
+        }
+        for parent_track_id, child_track_id in track_mapping.items():
+            track_binding = connection.execute(
+                """
+                SELECT track_binding.*, archive.proof_hash
+                FROM replay_hedge_track_public_binding AS track_binding
+                JOIN replay_hedge_public_archive AS archive
+                  ON archive.archive_id = track_binding.public_archive_id
+                WHERE track_binding.run_id = ? AND track_binding.track_id = ?
+                """,
+                (parent_run_id, parent_track_id),
+            ).fetchone()
+            if track_binding is None:
+                continue
+            track_proof = canonical_sha256(
+                {
+                    "schema_version": "replay.hedge-track-public-binding.v1",
+                    "run_id": child_run_id,
+                    "track_id": child_track_id,
+                    "public": {
+                        "archive_id": str(track_binding["public_archive_id"]),
+                        "generation": int(track_binding["public_generation"]),
+                        "dataset_epoch": str(
+                            track_binding["public_dataset_epoch"]
+                        ),
+                        "checksum_sha256": str(
+                            track_binding["public_checksum_sha256"]
+                        ),
+                        "event_chain_tail": str(
+                            track_binding["public_event_chain_tail"]
+                        ),
+                        "proof_hash": str(track_binding["proof_hash"]),
+                    },
+                    "bound_range_start_ms": int(
+                        track_binding["bound_range_start_ms"]
+                    ),
+                    "bound_range_end_ms": int(
+                        track_binding["bound_range_end_ms"]
+                    ),
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_hedge_track_public_binding(
+                    run_id, track_id, public_archive_id, public_generation,
+                    public_dataset_epoch, public_checksum_sha256,
+                    public_event_chain_tail, bound_range_start_ms,
+                    bound_range_end_ms, status, degraded_reason,
+                    input_proof_hash, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    child_track_id,
+                    track_binding["public_archive_id"],
+                    track_binding["public_generation"],
+                    track_binding["public_dataset_epoch"],
+                    track_binding["public_checksum_sha256"],
+                    track_binding["public_event_chain_tail"],
+                    track_binding["bound_range_start_ms"],
+                    track_binding["bound_range_end_ms"],
+                    track_proof,
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            projection = connection.execute(
+                """
+                SELECT * FROM replay_hedge_track_public_projection
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (parent_run_id, parent_track_id),
+            ).fetchone()
+            if projection is None:
+                raise TypeError("forked HEDGE track projection is missing")
+            state = json.loads(str(projection["state_json"]))
+            projection_payload = {
+                "schema_version": "replay.hedge-track-public-projection.v1",
+                "run_id": child_run_id,
+                "track_id": child_track_id,
+                "last_event_sequence": int(projection["last_event_sequence"]),
+                "as_of_actual_time_ms": int(projection["as_of_actual_time_ms"]),
+                "as_of_virtual_time_ms": int(projection["as_of_virtual_time_ms"]),
+                "state": state,
+                "input_chain_hash": str(projection["input_chain_hash"]),
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_hedge_track_public_projection(
+                    run_id, track_id, last_event_sequence,
+                    as_of_actual_time_ms, as_of_virtual_time_ms, state_json,
+                    input_chain_hash, component_hash, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    child_track_id,
+                    projection["last_event_sequence"],
+                    projection["as_of_actual_time_ms"],
+                    projection["as_of_virtual_time_ms"],
+                    projection["state_json"],
+                    projection["input_chain_hash"],
+                    canonical_sha256(projection_payload),
+                    now_ms,
+                ),
+            )
+            track_events = connection.execute(
+                """
+                SELECT * FROM replay_hedge_track_public_applied_event
+                WHERE run_id = ? AND track_id = ? ORDER BY event_sequence
+                """,
+                (parent_run_id, parent_track_id),
+            ).fetchall()
+            for event_row in track_events:
+                payload = json.loads(str(event_row["payload_json"]))
+                event_hash = canonical_sha256(
+                    {
+                        "run_id": child_run_id,
+                        "track_id": child_track_id,
+                        "virtual_time_ms": int(
+                            event_row["applied_virtual_time_ms"]
+                        ),
+                        "source_kind": "PUBLIC",
+                        "source_id": str(track_binding["public_archive_id"]),
+                        "event_sequence": int(event_row["event_sequence"]),
+                        "event_hash": str(event_row["source_event_hash"]),
+                        "payload": payload,
+                    }
+                )
+                connection.execute(
+                    """
+                    INSERT INTO replay_hedge_track_public_applied_event(
+                        run_id, track_id, event_sequence, event_time_ms,
+                        event_phase, event_kind, component_sequence,
+                        applied_virtual_time_ms, source_event_hash,
+                        payload_json, applied_payload_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        child_run_id,
+                        child_track_id,
+                        event_row["event_sequence"],
+                        event_row["event_time_ms"],
+                        event_row["event_phase"],
+                        event_row["event_kind"],
+                        event_row["component_sequence"],
+                        event_row["applied_virtual_time_ms"],
+                        event_row["source_event_hash"],
+                        event_row["payload_json"],
+                        event_hash,
+                        now_ms,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE replay_hedge_public_archive
+                SET last_used_at_ms = ?, updated_at_ms = ?
+                WHERE archive_id = ?
+                """,
+                (now_ms, now_ms, track_binding["public_archive_id"]),
             )
         connection.execute(
             """
@@ -20949,7 +21473,7 @@ class TrainingRunStore:
             ]
         ] = []
         if str(account["margin_mode"]) == "CROSS":
-            if equity <= total_maintenance:
+            if equity <= total_maintenance + total_reserved_margin:
                 affected = positions
         else:
             for item in positions:
@@ -21878,6 +22402,7 @@ class TrainingRunStore:
         track = connection.execute(
             """
             SELECT t.*, viewer.selected_track_id, r.time_disclosure_policy,
+                   r.position_mode,
                    COALESCE(integrity.revealed, 0) AS revealed
             FROM replay_training_market_track AS t
             JOIN replay_training_run AS r USING(run_id)
@@ -21993,7 +22518,16 @@ class TrainingRunStore:
         if selected:
             reasons.add("VIEWED")
         quantity = position.get("quantity")
-        if isinstance(quantity, str) and quantity != "0":
+        hedge_open = False
+        if position.get("position_mode") == "HEDGE":
+            for leg_name in ("long", "short"):
+                leg = position.get(leg_name)
+                if isinstance(leg, Mapping):
+                    leg_quantity = leg.get("quantity")
+                    if isinstance(leg_quantity, str) and Decimal(leg_quantity) != 0:
+                        hedge_open = True
+                        break
+        if (isinstance(quantity, str) and Decimal(quantity) != 0) or hedge_open:
             reasons.update({"OPEN_POSITION", "LIQUIDATION_RISK"})
         if open_orders:
             reasons.add("OPEN_ORDER")
@@ -22069,7 +22603,7 @@ class TrainingRunStore:
         revealed_event_high: Decimal | None = None
         latest_mutation = connection.execute(
             """
-            SELECT kind, source_sequence FROM replay_mutation_log
+            SELECT kind, source_sequence, payload_json FROM replay_mutation_log
             WHERE session_id = ? ORDER BY mutation_id DESC LIMIT 1
             """,
             (session_id,),
@@ -22136,17 +22670,36 @@ class TrainingRunStore:
                 track_id=track_id,
                 now_ms=now_ms,
             )
-        self._settle_contract_funding(
-            connection,
-            run_id=run_id,
-            now_ms=now_ms,
+        mutation_command_type: object | None = None
+        if latest_mutation is not None and latest_mutation["kind"] == "command":
+            try:
+                mutation_payload = json.loads(str(latest_mutation["payload_json"]))
+            except json.JSONDecodeError as exc:
+                raise TypeError("latest replay command mutation is invalid") from exc
+            if not isinstance(mutation_payload, Mapping):
+                raise TypeError("latest replay command mutation must be an object")
+            mutation_command_type = mutation_payload.get("type")
+        coordinated_hedge_advance = (
+            str(track["position_mode"]) == "HEDGE"
+            and mutation_command_type
+            in {
+                "step",
+                "advance_by",
+                "_training_fast_forward_final_state",
+            }
         )
-        if not exact_account:
-            self._detect_contract_liquidations(
+        if not coordinated_hedge_advance:
+            self._settle_contract_funding(
                 connection,
                 run_id=run_id,
                 now_ms=now_ms,
             )
+            if not exact_account:
+                self._detect_contract_liquidations(
+                    connection,
+                    run_id=run_id,
+                    now_ms=now_ms,
+                )
         account_model = connection.execute(
             """
             SELECT account_model FROM replay_training_contract_account

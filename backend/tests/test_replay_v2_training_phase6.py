@@ -858,7 +858,11 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
         await service.shutdown(step_timeout=1.0)
 
 
-async def _risk_service(path: Path) -> ReplayService:
+async def _risk_service(
+    path: Path,
+    *,
+    symbols: tuple[str, ...] = ("BTCUSDT",),
+) -> ReplayService:
     repository = ImmutableReplayHistoryFake()
     prices = ["100", "101", "102", "103", "104", "50"] + ["50"] * 14
     rows = [
@@ -866,11 +870,12 @@ async def _risk_service(path: Path) -> ReplayService:
         for index, price in enumerate(prices)
     ]
     for market_type in ("spot", "futures"):
-        repository.add_rows(
-            FixtureIdentity("binance", market_type, "BTCUSDT"),
-            "1m",
-            rows,
-        )
+        for symbol in symbols:
+            repository.add_rows(
+                FixtureIdentity("binance", market_type, symbol),
+                "1m",
+                rows,
+            )
     service = ReplayService(
         settings=replace(
             replay_settings(path),

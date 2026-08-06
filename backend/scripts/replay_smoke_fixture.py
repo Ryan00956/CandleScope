@@ -38,6 +38,15 @@ SOAK_LIVE_INTERVALS: tuple[tuple[str, int], ...] = (
 AGG_TRADE_FIXTURE_MINUTES = 1_600
 AGG_TRADE_ROWS_PER_MINUTE = 2
 HISTORICAL_BOOK_FIXTURE_MINUTES = FIXTURE_ROWS
+HEDGE_BROWSER_FORWARD_CACHE_MS = 30 * 24 * 60 * 60 * 1_000
+HEDGE_BROWSER_WARMUP_BARS = 200
+HEDGE_BROWSER_FIXTURE_MINUTES = (
+    HEDGE_BROWSER_FORWARD_CACHE_MS // INTERVAL_MS + HEDGE_BROWSER_WARMUP_BARS
+)
+HEDGE_BROWSER_SYMBOLS: tuple[tuple[str, int], ...] = (
+    ("BTCUSDT", 30_000),
+    ("ETHUSDT", 2_000),
+)
 FIXTURE_SYMBOLS: tuple[tuple[str, float], ...] = (
     ("BTCUSDT", 30_000.0),
     ("ETHUSDT", 2_000.0),
@@ -487,7 +496,12 @@ def _seed_agg_trades() -> int:
     return imported
 
 
-def _seed_historical_book_source() -> Path:
+def _seed_historical_book_source(
+    *,
+    symbol: str = "BTCUSDT",
+    price_origin: int = 30_000,
+    fixture_minutes: int = HISTORICAL_BOOK_FIXTURE_MINUTES,
+) -> Path:
     """Create an opt-in trusted L2 capture outside replay-owned storage."""
 
     if os.environ.get("REPLAY_HISTORICAL_BOOK_ENABLED") != "1":
@@ -508,11 +522,11 @@ def _seed_historical_book_source() -> Path:
 
     root = Path(source_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
-    path = root / "BTCUSDT-binance-usdm-diff-depth.sqlite3"
+    path = root / f"{symbol}-binance-usdm-diff-depth.sqlite3"
     if path.exists():
         path.unlink()
     dataset_epoch = "sha256:" + sha256(
-        b"replay-smoke-historical-book:BTCUSDT:v1"
+        f"replay-smoke-historical-book:{symbol}:v2:{fixture_minutes}".encode()
     ).hexdigest()
     def compact(levels: list[list[str]]) -> str:
         return json.dumps(levels, separators=(",", ":"))
@@ -549,15 +563,16 @@ def _seed_historical_book_source() -> Path:
         connection.execute(
             """
             INSERT INTO archive_meta VALUES (
-                1, ?, ?, 'binance', 'futures', 'BTCUSDT', ?, ?, ?,
+                1, ?, ?, 'binance', 'futures', ?, ?, ?, ?,
                 'BINANCE_USDM_DIFF_DEPTH_CAPTURE', ?, 1000
             )
             """,
             (
                 ARCHIVE_PROTOCOL,
                 ARCHIVE_SCHEMA_VERSION,
+                symbol,
                 FIXTURE_START_MS,
-                FIXTURE_START_MS + HISTORICAL_BOOK_FIXTURE_MINUTES * INTERVAL_MS,
+                FIXTURE_START_MS + fixture_minutes * INTERVAL_MS,
                 dataset_epoch,
                 ARCHIVE_SOURCE_CONTRACT_URL,
             ),
@@ -571,17 +586,50 @@ def _seed_historical_book_source() -> Path:
             (
                 FIXTURE_START_MS,
                 FIXTURE_START_MS,
-                compact([["29999", "20"], ["29998", "30"]]),
-                compact([["30001", "20"], ["30002", "30"]]),
+                compact(
+                    [
+                        [str(price_origin - 1), "20"],
+                        [str(price_origin - 2), "30"],
+                    ]
+                ),
+                compact(
+                    [
+                        [str(price_origin + 1), "20"],
+                        [str(price_origin + 2), "30"],
+                    ]
+                ),
             ),
         )
         previous_u = 1_000_000
-        for minute in range(1, HISTORICAL_BOOK_FIXTURE_MINUTES + 1):
+        previous_bid_levels = {
+            str(price_origin - 1): "20",
+            str(price_origin - 2): "30",
+        }
+        previous_ask_levels = {
+            str(price_origin + 1): "20",
+            str(price_origin + 2): "30",
+        }
+        for minute in range(1, fixture_minutes + 1):
             final_u = previous_u + 1
-            previous_bid = 29_998 + minute
-            next_bid = 29_999 + minute
-            previous_ask = 30_000 + minute
-            next_ask = 30_001 + minute
+            mid = price_origin + minute % 120
+            next_bid_levels = {str(mid - 1): "20", str(mid - 2): "30"}
+            next_ask_levels = {str(mid + 1): "20", str(mid + 2): "30"}
+            bid_changes = {
+                **{
+                    price: "0"
+                    for price in previous_bid_levels
+                    if price not in next_bid_levels
+                },
+                **next_bid_levels,
+            }
+            ask_changes = {
+                **{
+                    price: "0"
+                    for price in previous_ask_levels
+                    if price not in next_ask_levels
+                },
+                **next_ask_levels,
+            }
             event_time_ms = FIXTURE_START_MS + minute * INTERVAL_MS
             connection.execute(
                 """
@@ -596,56 +644,222 @@ def _seed_historical_book_source() -> Path:
                     previous_u if minute == 1 else final_u,
                     final_u,
                     previous_u,
-                    compact(
-                        [[str(previous_bid), "0"], [str(next_bid), "20"]]
-                    ),
-                    compact(
-                        [[str(previous_ask), "0"], [str(next_ask), "20"]]
-                    ),
+                    compact([[price, quantity] for price, quantity in bid_changes.items()]),
+                    compact([[price, quantity] for price, quantity in ask_changes.items()]),
                 ),
             )
             previous_u = final_u
+            previous_bid_levels = next_bid_levels
+            previous_ask_levels = next_ask_levels
         connection.commit()
     return path
 
 
-def _seed_historical_book_futures_bars() -> int:
+def _seed_historical_book_futures_bars(
+    *,
+    symbols: tuple[tuple[str, int], ...] = (("BTCUSDT", 30_000),),
+    fixture_minutes: int = HISTORICAL_BOOK_FIXTURE_MINUTES,
+) -> int:
     """Extend the opt-in USD-M BAR catalog without inventing aggTrade rows."""
 
     from app.data_engine.storage.klines_repo import upsert_klines
 
-    bars: list[dict[str, object]] = []
-    for minute in range(HISTORICAL_BOOK_FIXTURE_MINUTES + 3):
-        open_time = FIXTURE_START_MS + minute * INTERVAL_MS
-        price = 30_000 + minute % 120
-        bars.append(
-            {
-                "open_time": open_time,
-                "close_time": open_time + INTERVAL_MS - 1,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": 3,
-                "quote_volume": price * 3,
-                "trades": AGG_TRADE_ROWS_PER_MINUTE,
-                "taker_buy_base": 2,
-                "taker_buy_quote": price * 2,
-            }
+    total = 0
+    for symbol, price_origin in symbols:
+        bars: list[dict[str, object]] = []
+        for minute in range(fixture_minutes + 1):
+            open_time = FIXTURE_START_MS + minute * INTERVAL_MS
+            price = price_origin + minute % 120
+            bars.append(
+                {
+                    "open_time": open_time,
+                    "close_time": open_time + INTERVAL_MS - 1,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 3,
+                    "quote_volume": price * 3,
+                    "trades": AGG_TRADE_ROWS_PER_MINUTE,
+                    "taker_buy_base": 2,
+                    "taker_buy_quote": price * 2,
+                }
+            )
+        written = upsert_klines(
+            symbol,
+            "1m",
+            bars,
+            source="replay-smoke-book-fixture",
+            exchange="binance",
+            market_type="futures",
         )
-    written = upsert_klines(
-        "BTCUSDT",
-        "1m",
-        bars,
-        source="replay-smoke-book-fixture",
-        exchange="binance",
-        market_type="futures",
+        if written not in {0, len(bars)}:
+            raise RuntimeError(
+                f"expected 0 or {len(bars)} {symbol} historical-book BAR rows, "
+                f"wrote {written}"
+            )
+        total += len(bars)
+    return total
+
+
+async def _seed_hedge_browser_inputs(
+    training: object,
+    *,
+    book_archives: dict[str, dict[str, object]],
+    source_root: Path,
+) -> dict[str, object]:
+    """Build immutable public archives and one versioned private-state model.
+
+    These inputs are deterministic browser-QA captures.  They exercise the
+    production verifiers and owned archive path, but never claim to be a
+    historical exchange insurance fund or ADL queue.
+    """
+
+    from app.replay.training.hedge_inputs import (
+        build_hedge_public_history_archive,
+        build_hedge_simulation_manifest,
     )
-    if written not in {0, len(bars)}:
-        raise RuntimeError(
-            f"expected 0 or {len(bars)} historical-book BAR rows, wrote {written}"
+
+    range_start_ms = FIXTURE_START_MS
+    range_end_ms = FIXTURE_START_MS + HEDGE_BROWSER_FIXTURE_MINUTES * INTERVAL_MS
+    public_refs: dict[str, dict[str, object]] = {}
+    rule = {
+        "rule_version": "BINANCE_USDM_LINEAR_V1",
+        "price_tick": "0.1",
+        "quantity_step": "0.001",
+        "min_quantity": "0.001",
+        "max_quantity": "100",
+        "min_notional": "5",
+        "max_notional": "1000000",
+        "quote_step": "0.01",
+        "contract_size": "1",
+        "max_leverage": "20",
+        "liquidation_fee_bps": "25",
+        "maintenance_tiers": [
+            {
+                "notional_cap": "50000",
+                "maintenance_rate": "0.005",
+                "maintenance_deduction": "0",
+            },
+            {
+                "notional_cap": "1000000",
+                "maintenance_rate": "0.01",
+                "maintenance_deduction": "250",
+            },
+        ],
+    }
+    fee_policy = {
+        "policy_version": "BINANCE_VIP0_V1",
+        "account_tier": "VIP0",
+        "maker_fee_bps": "2",
+        "taker_fee_bps": "5",
+        "liquidation_fee_bps": "25",
+    }
+    for symbol, price_origin in HEDGE_BROWSER_SYMBOLS:
+        book = book_archives[symbol]
+        events: list[dict[str, object]] = [
+            {"event_time_ms": range_start_ms, "event_kind": "RULE", "payload": rule},
+            {
+                "event_time_ms": range_start_ms,
+                "event_kind": "FEE_POLICY",
+                "payload": fee_policy,
+            },
+        ]
+        for minute in range(HEDGE_BROWSER_FIXTURE_MINUTES + 1):
+            mark = str(price_origin + minute % 120)
+            events.append(
+                {
+                    "event_time_ms": range_start_ms + minute * INTERVAL_MS,
+                    "event_kind": "MARK_INDEX",
+                    "payload": {"mark_price": mark, "index_price": mark},
+                }
+            )
+        for minute in range(480, HEDGE_BROWSER_FIXTURE_MINUTES + 1, 480):
+            mark = str(price_origin + minute % 120)
+            events.append(
+                {
+                    "event_time_ms": range_start_ms + minute * INTERVAL_MS,
+                    "event_kind": "FUNDING",
+                    "payload": {"funding_rate": "0.0001", "mark_price": mark},
+                }
+            )
+        events.sort(
+            key=lambda item: (
+                int(item["event_time_ms"]),
+                {"RULE": 10, "FEE_POLICY": 10, "MARK_INDEX": 30, "FUNDING": 40}[
+                    str(item["event_kind"])
+                ],
+                str(item["event_kind"]),
+            )
         )
-    return len(bars)
+        public_path = source_root / f"{symbol}-hedge-public.json"
+        public_ref = build_hedge_public_history_archive(
+            public_path,
+            archive_id=f"replay-browser-qa-{symbol.lower()}-public-v1",
+            exchange="binance",
+            market_type="futures",
+            symbol=symbol,
+            settlement_asset="USDT",
+            range_start_ms=range_start_ms,
+            range_end_ms=range_end_ms,
+            max_mark_gap_ms=INTERVAL_MS,
+            source_identity="REPLAY_BROWSER_QA_PINNED_PUBLIC_CAPTURE",
+            capture_receipt=f"receipt:replay-browser-qa:{symbol}:v1",
+            historical_l2_ref={
+                "archive_id": book["archive_id"],
+                "dataset_epoch": book["dataset_epoch"],
+                "checksum_sha256": book["checksum_sha256"],
+            },
+            events=events,
+        )
+        await training.hedge_inputs.import_public(public_path)
+        public_refs[symbol] = public_ref
+
+    simulation_path = source_root / "hedge-simulation.json"
+    simulation_ref = build_hedge_simulation_manifest(
+        simulation_path,
+        manifest_id="replay-browser-qa-simulation-v1",
+        range_start_ms=range_start_ms,
+        range_end_ms=range_end_ms,
+        settlement_asset="USDT",
+        required_symbols=[symbol for symbol, _ in HEDGE_BROWSER_SYMBOLS],
+        insurance_events=[
+            {
+                "effective_time_ms": range_start_ms,
+                "kind": "OPENING_BALANCE",
+                "amount": "1000000000",
+            }
+        ],
+        adl_snapshots=[
+            {
+                "symbol": symbol,
+                "effective_time_ms": range_start_ms,
+                "valid_until_ms": range_end_ms,
+                "candidates": [
+                    {
+                        "candidate_id": f"replay-browser-qa-{symbol.lower()}-short-1",
+                        "symbol": symbol,
+                        "position_side": "SHORT",
+                        "quantity": "100",
+                        "entry_price": str(price_origin + 100),
+                        "mark_price": str(price_origin),
+                        "initial_margin": "500",
+                        "margin_balance": "1000",
+                    }
+                ],
+            }
+            for symbol, price_origin in HEDGE_BROWSER_SYMBOLS
+        ],
+    )
+    await training.hedge_inputs.import_simulation(simulation_path)
+    return {
+        "fidelity": "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION",
+        "fallback_applied": False,
+        "range_start_ms": range_start_ms,
+        "range_end_ms": range_end_ms,
+        "public_refs": public_refs,
+        "simulation_ref": simulation_ref,
+    }
 
 
 def main() -> None:
@@ -653,6 +867,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--agg-trades", action="store_true")
     parser.add_argument("--historical-book", action="store_true")
+    parser.add_argument("--hedge", action="store_true")
     parser.add_argument("--live-tail", action="store_true")
     parser.add_argument("--live-window", action="store_true")
     parser.add_argument("--real-klines-source", type=Path)
@@ -661,6 +876,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.real_kline_window_rows is not None and args.real_klines_source is None:
         parser.error("--real-kline-window-rows requires --real-klines-source")
+    if args.hedge and not args.historical_book:
+        parser.error("--hedge requires --historical-book")
     if (
         args.real_kline_window_rows is not None
         and args.real_kline_window_rows < 2
@@ -682,11 +899,33 @@ def main() -> None:
         real_rows_by_symbol=real_rows_by_symbol,
     )
     agg_trade_rows = _seed_agg_trades() if args.agg_trades else 0
-    historical_book_bar_rows = (
-        _seed_historical_book_futures_bars() if args.historical_book else 0
+    historical_book_symbols = (
+        HEDGE_BROWSER_SYMBOLS if args.hedge else (("BTCUSDT", 30_000),)
     )
-    historical_book_source = (
-        _seed_historical_book_source() if args.historical_book else None
+    historical_book_minutes = (
+        HEDGE_BROWSER_FIXTURE_MINUTES
+        if args.hedge
+        else HISTORICAL_BOOK_FIXTURE_MINUTES
+    )
+    historical_book_bar_rows = (
+        _seed_historical_book_futures_bars(
+            symbols=historical_book_symbols,
+            fixture_minutes=historical_book_minutes,
+        )
+        if args.historical_book
+        else 0
+    )
+    historical_book_sources = (
+        {
+            symbol: _seed_historical_book_source(
+                symbol=symbol,
+                price_origin=price_origin,
+                fixture_minutes=historical_book_minutes,
+            )
+            for symbol, price_origin in historical_book_symbols
+        }
+        if args.historical_book
+        else {}
     )
     if args.disable_gap_maintenance:
         _disable_fixture_gap_maintenance()
@@ -704,12 +943,13 @@ def main() -> None:
     from app.main import app
 
     server_holder: dict[str, uvicorn.Server] = {}
-    historical_book_archive: dict[str, object] | None = None
+    historical_book_archives: dict[str, dict[str, object]] = {}
+    hedge_inputs: dict[str, object] | None = None
 
     @app.on_event("startup")
     async def import_replay_smoke_historical_book() -> None:
-        nonlocal historical_book_archive
-        if historical_book_source is None:
+        nonlocal hedge_inputs
+        if not historical_book_sources:
             return
         service = getattr(app.state, "replay_service", None)
         training = getattr(service, "training", None)
@@ -717,17 +957,30 @@ def main() -> None:
             raise RuntimeError(
                 "historical-book smoke fixture requires replay training runtime"
             )
-        historical_book_archive = await training.historical_books.import_archive(
-            historical_book_source,
-            trusted_origin="REPLAY_SMOKE_FIXTURE",
-        )
+        for symbol, source in historical_book_sources.items():
+            historical_book_archives[symbol] = (
+                await training.historical_books.import_archive(
+                    source,
+                    trusted_origin="REPLAY_SMOKE_FIXTURE",
+                )
+            )
+        if args.hedge:
+            hedge_inputs = await _seed_hedge_browser_inputs(
+                training,
+                book_archives=historical_book_archives,
+                source_root=Path(
+                    os.environ["REPLAY_SMOKE_BOOK_SOURCE_DIR"]
+                ).expanduser().resolve(),
+            )
 
     @app.get("/__replay_smoke__/fixture")
     async def replay_smoke_fixture_status() -> dict[str, object]:
         return {
             "offline": True,
             "source_profile": (
-                "REAL_BAR_SQLITE"
+                "HEDGE_EXACT_ARCHIVE_QA"
+                if args.hedge
+                else "REAL_BAR_SQLITE"
                 if real_source_evidence is not None
                 else "SYNTHETIC_DETERMINISTIC"
             ),
@@ -749,7 +1002,8 @@ def main() -> None:
             "gap_maintenance_enabled": not args.disable_gap_maintenance,
             "agg_trade_rows": agg_trade_rows,
             "historical_book_bar_rows": historical_book_bar_rows,
-            "historical_book": historical_book_archive,
+            "historical_book": historical_book_archives or None,
+            "hedge_inputs": hedge_inputs,
         }
 
     @app.get("/__replay_smoke__/diagnostics")

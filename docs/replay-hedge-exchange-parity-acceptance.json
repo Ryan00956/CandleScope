@@ -1,0 +1,209 @@
+{
+  "schema_version": "replay.hedge-exchange-parity.acceptance.v1",
+  "expected_scenarios": 22,
+  "execution_contract": {
+    "real_service": true,
+    "sqlite": true,
+    "decimal": true,
+    "fixture_only_is_sufficient": false,
+    "fallback_allowed": false
+  },
+  "release_gates": [
+    "backend_full",
+    "frontend_full",
+    "browser_soak",
+    "fresh_boot",
+    "static_audit"
+  ],
+  "scenarios": [
+    {
+      "id": 1,
+      "title": "同商品双腿独立开仓加仓保护部分平仓和平仓",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_same_symbol_hedge_legs_add_protect_partial_close_and_flatten"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "等量双腿保证金与余额按规则计算",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_hedge_phase2_margin.py", "needle": "test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "CROSS 共享权益不改写对向腿数量",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_hedge_phase2_margin.py", "needle": "test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_real_multitrack_cross_breach_creates_one_account_case"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "ISOLATED 任一方向强平不影响对向腿",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_isolated_liquidation_closes_only_the_breached_hedge_leg"}
+      ]
+    },
+    {
+      "id": 5,
+      "title": "双腿同刻资金费结算重启幂等",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_hedge_phase4_accounting.py", "needle": "test_opposite_funding_fee_revision_retry_and_restart_are_exact"}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "规则与风险档位同毫秒冻结总序",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_hedge_phase3_inputs.py", "needle": "test_run_binds_owned_inputs_orders_same_ms_and_rehydrates_offline"}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "撤销挂单释放保证金后恢复安全",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_cross_liquidation_cancels_opening_order_and_recovers_before_close"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "部分强平降档后停止继续清算",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase5.py", "needle": "test_tier_step_down_partial_liquidation_recovers_without_full_close"}
+      ]
+    },
+    {
+      "id": 9,
+      "title": "多次盘口 partial fill 后才恢复安全",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase5.py", "needle": "test_tier_step_down_partial_liquidation_recovers_without_full_close"}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "盘口深度不足时剩余仓位不被清零",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase6.py", "needle": "test_hedge_liquidation_fails_closed_without_execution_fallback"}
+      ]
+    },
+    {
+      "id": 11,
+      "title": "破产缺口由保险基金覆盖",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase5.py", "needle": "test_hedge_liquidation_persists_full_state_machine_and_insurance"}
+      ]
+    },
+    {
+      "id": 12,
+      "title": "保险不足触发可审计 ADL 排序与选择",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase5.py", "needle": "test_insurance_shortfall_executes_materialized_adl_counterparty_ledger"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "test_insurance_and_adl_are_independently_audited_and_tamper_evident"}
+      ]
+    },
+    {
+      "id": 13,
+      "title": "多商品 CROSS 一次 breach 仅一个账户 case 且不重复收费",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_real_multitrack_cross_breach_creates_one_account_case"}
+      ]
+    },
+    {
+      "id": 14,
+      "title": "双腿强平分别保存价格订单成交与账本",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_cross_hedge_liquidation_closes_and_records_each_leg"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_real_multitrack_cross_breach_creates_one_account_case"}
+      ]
+    },
+    {
+      "id": 15,
+      "title": "任一公开或模拟输入 gap 均暂停且无代理回退",
+      "release_gates": ["backend_full", "static_audit"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_hedge_phase3_inputs.py", "needle": "test_runtime_tamper_pauses_run_without_market_fallback"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase6.py", "needle": "test_hedge_liquidation_fails_closed_without_execution_fallback"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase5.py", "needle": "test_adl_cohort_exhaustion_pauses_run_failed_closed"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "test_insurance_and_adl_are_independently_audited_and_tamper_evident"}
+      ]
+    },
+    {
+      "id": 16,
+      "title": "每个清算状态边界进程丢失后与参考路径等价",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "test_each_liquidation_transition_recovers_after_real_restart"}
+      ]
+    },
+    {
+      "id": 17,
+      "title": "响应丢失重试不重复订单成交费用资金费保险或 ADL",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "AFTER_COMMIT_RESPONSE_LOSS"},
+        {"path": "backend/tests/test_replay_hedge_phase4_accounting.py", "needle": "test_opposite_funding_fee_revision_retry_and_restart_are_exact"}
+      ]
+    },
+    {
+      "id": 18,
+      "title": "fork review export import 保留双腿与清算 case",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase7.py", "needle": "test_liquidation_timeline_is_identical_in_portfolio_review_and_report"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "test_review_and_fork_leave_parent_hashes_immutable"},
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase8.py", "needle": "test_pinned_hedge_and_l2_archives_rehydrate_exact_receipts"}
+      ]
+    },
+    {
+      "id": 19,
+      "title": "快进参考与优化结果 hash 一致",
+      "release_gates": ["backend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase6.py", "needle": "test_fast_forward_request_uses_full_scan_and_matches_step_reference"}
+      ]
+    },
+    {
+      "id": 20,
+      "title": "无环境变量默认入口 HEDGE exact book 全部启用",
+      "release_gates": ["backend_full", "frontend_full", "browser_soak", "fresh_boot", "static_audit"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_segment_plan_resolves_cross_verified_default_hedge_refs"},
+        {"path": "frontend/src/features/replay/__tests__/replayV2Hub.test.tsx", "needle": "HEDGE create mode is the default and accepts the exchange-parity policy matrix"},
+        {"path": "frontend/scripts/replay-soak.mjs", "needle": "training create payload was not the default HEDGE exchange-parity contract"}
+      ]
+    },
+    {
+      "id": 21,
+      "title": "显式 ONE_WAY 保持既有单向语义",
+      "release_gates": ["backend_full", "frontend_full"],
+      "evidence": [
+        {"path": "backend/tests/test_replay_v2_training_phase6.py", "needle": "test_simulated_liquidation_closes_normally_and_stays_distinct"},
+        {"path": "frontend/src/features/replay/__tests__/replayV2Hub.test.tsx", "needle": "positionMode: \"ONE_WAY\" as const"}
+      ]
+    },
+    {
+      "id": 22,
+      "title": "浏览器刷新断线切商品切周期不改变服务端账户",
+      "release_gates": ["browser_soak"],
+      "evidence": [
+        {"path": "frontend/scripts/replay-soak.mjs", "needle": "hedgeBrowserAccountContinuityAudit"},
+        {"path": "frontend/scripts/replay-soak.mjs", "needle": "browser refresh/reconnect/product/period switches mutated server-authoritative account state"}
+      ]
+    }
+  ]
+}

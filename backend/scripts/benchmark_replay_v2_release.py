@@ -62,6 +62,12 @@ def main() -> int:
     benchmark_work_directory = output.parent / "work" / "benchmarks"
     environment = dict(os.environ)
     environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+    sdk_source = BACKEND_ROOT.parent / "packages" / "candlescope-plugin-sdk" / "src"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(sdk_source), environment.get("PYTHONPATH", ""))
+        if value
+    )
     specifications = (
         (
             "core-v1",
@@ -118,6 +124,19 @@ def main() -> int:
                 str(benchmark_work_directory / "account-history-v2"),
             ],
         ),
+        (
+            "hedge-exchange-parity-v3",
+            [
+                sys.executable,
+                "scripts/benchmark_replay_hedge_exchange_parity.py",
+                "--normal-iterations",
+                "8",
+                "--liquidation-samples",
+                "5",
+                "--temp-root",
+                str(benchmark_work_directory / "hedge-exchange-parity-v3"),
+            ],
+        ),
     )
     commands: list[dict[str, object]] = []
     payloads: dict[str, Mapping[str, object]] = {}
@@ -145,6 +164,7 @@ def main() -> int:
     fast_forward = payloads["fast-forward-v2"]
     historical_book = payloads["historical-book-v2"]
     account_history = payloads["account-history-v2"]
+    hedge_exchange_parity = payloads["hedge-exchange-parity-v3"]
     cases = multitrack.get("cases")
     if not isinstance(cases, list):
         raise RuntimeError("multi-track benchmark did not emit cases")
@@ -179,6 +199,24 @@ def main() -> int:
         ]
         == [1, 2, 4, 8],
         "account_history_acceptance": _accepted(account_history),
+        "hedge_exchange_parity_1_2_4_8": isinstance(
+            hedge_exchange_parity.get("normal_cases"),
+            list,
+        )
+        and [
+            case.get("track_count")
+            for case in hedge_exchange_parity["normal_cases"]
+            if isinstance(case, Mapping)
+        ]
+        == [1, 2, 4, 8]
+        and isinstance(hedge_exchange_parity.get("liquidation_cases"), list)
+        and [
+            case.get("track_count")
+            for case in hedge_exchange_parity["liquidation_cases"]
+            if isinstance(case, Mapping)
+        ]
+        == [1, 2, 4, 8],
+        "hedge_exchange_parity_acceptance": _accepted(hedge_exchange_parity),
     }
     if not all(checks.values()):
         raise RuntimeError(f"formal replay benchmark acceptance failed: {checks}")

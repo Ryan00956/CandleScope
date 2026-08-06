@@ -777,6 +777,7 @@ class ReviewRecorder:
                 "acquire_controller",
                 "step",
                 "advance_by",
+                "_training_execute_historical_book_close",
             }
         return command_id.startswith("v2part-") and command_type in {
             "_training_fast_forward_empty_account",

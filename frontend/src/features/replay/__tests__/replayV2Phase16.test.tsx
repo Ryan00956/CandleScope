@@ -178,6 +178,21 @@ function exactPlan(overrides: Record<string, unknown> = {}) {
         checksum_sha256: replayDigest("d"),
       },
     },
+    hedge_inputs: {
+      schema_version: "replay.hedge-input-plan.v1",
+      feature_enabled: true,
+      requested_position_mode: "ONE_WAY",
+      capability_state: "NOT_REQUIRED",
+      reason: "POSITION_MODE_ONE_WAY",
+      public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+      private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
+      historical_exchange_private_state: false,
+      fallback_applied: false,
+      coverage: null,
+      historical_l2_ref: null,
+      hedge_public_history_ref: null,
+      simulation_manifest_ref: null,
+    },
     ...overrides,
   };
 }
@@ -321,6 +336,7 @@ test("Phase 16 launcher pins the exact plan ref and rejects every implicit proxy
     accountDataMode: "HISTORICAL_EXACT" as const,
     positionMode: "ONE_WAY" as const,
     fundingMode: "HISTORICAL_EXACT" as const,
+    bookMode: "OFF" as const,
   };
   const withoutPlan = evaluateTrainingRunDraft(draft, capabilities, catalog);
   assert.equal(withoutPlan.canSubmit, false);

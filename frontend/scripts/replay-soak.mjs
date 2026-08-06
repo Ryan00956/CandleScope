@@ -30,6 +30,7 @@ const FORMAL_V2_REAL_WINDOW_ROWS = (
   + FORMAL_V2_WARMUP_BARS
 );
 const SHUTDOWN_REQUEST_TIMEOUT_MS = 5_000;
+const HEDGE_BROWSER_SOURCE_PROFILE = "HEDGE_EXACT_ARCHIVE_QA";
 
 function parseArgs(argv) {
   const result = {
@@ -155,6 +156,38 @@ export function selectFormalV2RealTrainingPlan(realSourceEvidence) {
     requiredRows: FORMAL_V2_REAL_WINDOW_ROWS,
     validatedRows: selected.validated_rows,
     sourceSha256: realSourceEvidence.file_sha256,
+  };
+}
+
+export function selectFormalV2HedgeTrainingPlan(fixture) {
+  const hedge = fixture?.hedge_inputs;
+  const historicalBook = fixture?.historical_book;
+  assert(
+    fixture?.source_profile === HEDGE_BROWSER_SOURCE_PROFILE
+      && hedge?.fidelity === "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
+      && hedge?.fallback_applied === false
+      && hedge?.public_refs?.BTCUSDT
+      && hedge?.public_refs?.ETHUSDT
+      && hedge?.simulation_ref
+      && historicalBook?.BTCUSDT
+      && historicalBook?.ETHUSDT,
+    "formal HEDGE browser soak requires exact per-symbol public/L2 inputs and one pinned simulation manifest",
+    fixture,
+  );
+  return {
+    exchange: "binance",
+    marketType: "futures",
+    symbol: "BTCUSDT",
+    secondarySymbol: "ETHUSDT",
+    interval: "1m",
+    forwardCacheMs: FORMAL_V2_FORWARD_CACHE_MS,
+    warmupBars: FORMAL_V2_WARMUP_BARS,
+    requiredRows: FORMAL_V2_REAL_WINDOW_ROWS,
+    publicRefs: hedge.public_refs,
+    simulationRef: hedge.simulation_ref,
+    historicalBook,
+    inputFidelity: hedge.fidelity,
+    fallbackApplied: false,
   };
 }
 
@@ -665,6 +698,221 @@ async function chooseReplayMarket(cdp, plan, timeoutMs) {
     "Run market picker readiness",
   );
   return keyboardActivateButton(cdp, { text: buttonText }, timeoutMs);
+}
+
+function accountContinuityProjection(response) {
+  const portfolio = response?.portfolio;
+  assert(
+    portfolio?.schema_version === "replay.training.portfolio.v2"
+      && portfolio?.position_mode === "HEDGE",
+    "browser continuity audit did not receive the authoritative HEDGE account",
+    response,
+  );
+  return {
+    schema_version: portfolio.schema_version,
+    position_mode: portfolio.position_mode,
+    margin_mode: portfolio.margin_mode,
+    status: portfolio.status,
+    initial_equity: portfolio.initial_equity,
+    equity: portfolio.equity,
+    cash_balance: portfolio.cash_balance,
+    available_equity: portfolio.available_equity,
+    reserved_margin: portfolio.reserved_margin,
+    margin_used: portfolio.margin_used,
+    maintenance_margin: portfolio.maintenance_margin,
+    realized_pnl: portfolio.realized_pnl,
+    unrealized_pnl: portfolio.unrealized_pnl,
+    fees_paid: portfolio.fees_paid,
+    funding_cashflow: portfolio.funding_cashflow,
+    liquidation_fees_paid: portfolio.liquidation_fees_paid,
+    positions: portfolio.positions,
+    orders: portfolio.orders,
+    fills: portfolio.fills,
+    isolated_allocations: portfolio.isolated_allocations,
+    liquidations: portfolio.liquidations,
+    liquidation_recoveries: portfolio.liquidation_recoveries,
+    hedge_state_hash: portfolio.hedge_state?.state_hash ?? null,
+    ledger: portfolio.ledger,
+  };
+}
+
+async function readServerAccountProof(backendOrigin, runId) {
+  const response = await readJson(
+    `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/markets`,
+  );
+  const projection = accountContinuityProjection(response);
+  return {
+    hash: sha256(JSON.stringify(projection)),
+    positionMode: projection.position_mode,
+    positionCount: projection.positions.length,
+    orderCount: projection.orders.length,
+    fillCount: projection.fills.length,
+  };
+}
+
+async function addAndSelectHedgeSecondaryMarket(cdp, symbol, timeoutMs) {
+  const expanded = await evaluate(cdp, `(() => {
+    const input = document.querySelector('input[aria-label="搜索当前 Run 可用商品"]');
+    if (input instanceof HTMLInputElement) return "already-expanded";
+    const button = document.querySelector('.replay-watchlist-pane.collapsed .wl-collapse-btn');
+    if (!(button instanceof HTMLButtonElement)) return "missing";
+    button.click();
+    return "expanded";
+  })()`, { userGesture: true });
+  assert(expanded !== "missing", "HEDGE browser watchlist cannot be expanded");
+  await waitForValue(
+    cdp,
+    `document.querySelector('input[aria-label="搜索当前 Run 可用商品"]') instanceof HTMLInputElement`,
+    timeoutMs,
+    "HEDGE secondary market search readiness",
+  );
+  const searched = await evaluate(cdp, `(() => {
+    const input = document.querySelector('input[aria-label="搜索当前 Run 可用商品"]');
+    if (!(input instanceof HTMLInputElement)) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (typeof setter !== "function") return false;
+    setter.call(input, ${JSON.stringify(symbol)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  })()`, { userGesture: true });
+  assert(searched === true, "HEDGE secondary market search could not be set");
+  await waitForValue(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    const button = [...document.querySelectorAll('.replay-market-search-results button')]
+      .find((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    return button instanceof HTMLButtonElement && !button.disabled;
+  })()`, timeoutMs, "HEDGE secondary market add readiness");
+  const clicked = await evaluate(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    const button = [...document.querySelectorAll('.replay-market-search-results button')]
+      .find((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+    button.click();
+    return true;
+  })()`, { userGesture: true });
+  assert(clicked === true, "HEDGE secondary market add was not dispatched");
+  return waitForValue(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    const row = [...document.querySelectorAll('.replay-watchlist-row.active')]
+      .find((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    return row?.getAttribute('data-replay-track-id') || null;
+  })()`, timeoutMs, "HEDGE secondary market select acknowledgement");
+}
+
+async function selectTrackedMarket(cdp, symbol, timeoutMs) {
+  const clicked = await evaluate(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    const row = [...document.querySelectorAll('.replay-watchlist-row')]
+      .find((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    const button = row?.querySelector('button.replay-watchlist-market');
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+    button.click();
+    return true;
+  })()`, { userGesture: true });
+  assert(clicked === true, `tracked HEDGE market ${symbol} was not selectable`);
+  return waitForValue(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    return [...document.querySelectorAll('.replay-watchlist-row.active')]
+      .some((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+  })()`, timeoutMs, `tracked HEDGE market ${symbol} selection`);
+}
+
+async function selectReplayInterval(cdp, interval, timeoutMs) {
+  const clicked = await evaluate(cdp, `(() => {
+    const expected = ${JSON.stringify(interval)};
+    const button = [...document.querySelectorAll('button.interval-btn')]
+      .find((item) => item.textContent?.trim() === expected);
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+    button.click();
+    return true;
+  })()`, { userGesture: true });
+  assert(clicked === true, `replay interval ${interval} was not selectable`);
+  return waitForValue(
+    cdp,
+    `document.querySelector('.interval-btn.active')?.textContent?.trim() === ${JSON.stringify(interval)}`,
+    timeoutMs,
+    `replay interval ${interval} selection`,
+  );
+}
+
+async function hedgeBrowserAccountContinuityAudit({
+  backendOrigin,
+  cdp,
+  runId,
+  sessionId,
+  timeoutMs,
+}) {
+  const secondaryTrackId = await addAndSelectHedgeSecondaryMarket(
+    cdp,
+    "ETHUSDT",
+    timeoutMs,
+  );
+  const baseline = await readServerAccountProof(backendOrigin, runId);
+  await selectTrackedMarket(cdp, "BTCUSDT", timeoutMs);
+  const afterProductSwitch = await readServerAccountProof(backendOrigin, runId);
+  await selectReplayInterval(cdp, "5m", timeoutMs);
+  await selectReplayInterval(cdp, "1m", timeoutMs);
+  const afterPeriodSwitch = await readServerAccountProof(backendOrigin, runId);
+
+  await evaluate(cdp, "globalThis.__CANDLESCOPE_HEDGE_CONTINUITY_OLD_DOCUMENT__ = true");
+  await cdp.send("Page.reload", { ignoreCache: true });
+  await waitForValue(
+    cdp,
+    "globalThis.__CANDLESCOPE_HEDGE_CONTINUITY_OLD_DOCUMENT__ !== true",
+    timeoutMs,
+    "HEDGE continuity reload document",
+  );
+  await waitForAuthoritativeReplayStatus(
+    cdp,
+    '(value) => value.connection === "connected" && value.state === "PAUSED"',
+    timeoutMs,
+    "HEDGE continuity reload convergence",
+  );
+  await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
+  const afterRefresh = await readServerAccountProof(backendOrigin, runId);
+
+  const disconnectRequest = readJson(
+    `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
+    { method: "POST" },
+  );
+  await waitForReplayStatus(
+    cdp,
+    '(value) => value.connection === "reconnecting" || value.connection === "resyncing"',
+    timeoutMs,
+    "HEDGE continuity disconnect feedback",
+  );
+  await disconnectRequest;
+  await waitForAuthoritativeReplayStatus(
+    cdp,
+    '(value) => value.connection === "connected" && value.state === "PAUSED"',
+    timeoutMs,
+    "HEDGE continuity reconnect convergence",
+  );
+  await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
+  const afterReconnect = await readServerAccountProof(backendOrigin, runId);
+  const hashes = [
+    baseline.hash,
+    afterProductSwitch.hash,
+    afterPeriodSwitch.hash,
+    afterRefresh.hash,
+    afterReconnect.hash,
+  ];
+  assert(
+    new Set(hashes).size === 1,
+    "browser refresh/reconnect/product/period switches mutated server-authoritative account state",
+    { baseline, afterProductSwitch, afterPeriodSwitch, afterRefresh, afterReconnect },
+  );
+  return {
+    schemaVersion: "replay.hedge-browser-account-continuity.v1",
+    secondaryTrackId,
+    baseline,
+    afterProductSwitch,
+    afterPeriodSwitch,
+    afterRefresh,
+    afterReconnect,
+    passed: true,
+  };
 }
 
 function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
@@ -1322,6 +1570,11 @@ async function createV2ArchiveRun({
     account_data_mode: createPayload.account_data_mode,
     fixed_funding_rate: createPayload.fixed_funding_rate,
     funding_interval_ms: createPayload.funding_interval_ms,
+    position_mode: createPayload.position_mode,
+    hedge_public_history_ref: createPayload.hedge_public_history_ref,
+    simulation_manifest_ref: createPayload.simulation_manifest_ref,
+    account_fidelity: createPayload.account_fidelity,
+    insurance_adl_fidelity: createPayload.insurance_adl_fidelity,
     allow_rule_changes: createPayload.allow_rule_changes,
     allowed_mutations: createPayload.allowed_mutations,
   };
@@ -1358,6 +1611,8 @@ async function createV2ArchiveRun({
       base_interval: createPayload.base_interval,
       display_interval: createPayload.display_interval,
       account_history_ref: createPayload.account_history_ref ?? null,
+      hedge_public_history_ref: createPayload.hedge_public_history_ref ?? null,
+      simulation_manifest_ref: createPayload.simulation_manifest_ref ?? null,
     };
     try {
       const created = await requestJson(
@@ -2254,6 +2509,8 @@ async function main() {
     String(backendPort),
     "--live-window",
     "--disable-gap-maintenance",
+    "--historical-book",
+    "--hedge",
     ...(args.realKlinesSource
       ? ["--real-klines-source", args.realKlinesSource]
       : []),
@@ -2266,7 +2523,8 @@ async function main() {
     env: {
       ...process.env,
       REPLAY_ENABLED: "1",
-      REPLAY_HISTORICAL_BOOK_ENABLED: "0",
+      REPLAY_HISTORICAL_BOOK_ENABLED: "1",
+      REPLAY_SMOKE_BOOK_SOURCE_DIR: path.join(tempRoot, "hedge-book-source"),
       REPLAY_IDLE_TTL_SECONDS: "1",
       KLINES_DB_PATH: path.join(tempRoot, "candlescope.db"),
       REPLAY_DB_PATH: path.join(tempRoot, "replay.db"),
@@ -2334,17 +2592,14 @@ async function main() {
     assert(fixture.gap_maintenance_enabled === false, "offline browser soak fixture left gap maintenance enabled", fixture);
     if (useBoundRealProfile) {
       assert(
-        fixture.source_profile === "REAL_BAR_SQLITE"
-          && fixture.real_source === true
+        fixture.real_source === true
           && fixture.real_source_evidence?.read_only === true
           && fixture.real_source_evidence?.identities?.length >= 2,
-        "formal replay.v2 soak did not load the validated real BAR profile",
+        "formal replay.v2 soak did not retain the separately validated real BAR evidence",
         fixture,
       );
     }
-    const formalTrainingPlan = useBoundRealProfile
-      ? selectFormalV2RealTrainingPlan(fixture.real_source_evidence)
-      : null;
+    const formalTrainingPlan = selectFormalV2HedgeTrainingPlan(fixture);
 
     const projectionPage = await createTarget(debugBase);
     connections.add(projectionPage.cdp);
@@ -2439,33 +2694,52 @@ async function main() {
       item.method === "POST" && /\/api\/v1\/replay\/runs$/.test(new URL(item.url).pathname)
     ));
     const v2CreatePayload = v2CreateRequest?.postData ? JSON.parse(v2CreateRequest.postData) : null;
-    assert(v2CreatePayload?.protocol === "replay.v2", "training create payload was not captured", v2CreateRequest);
+    assert(
+      v2CreatePayload?.protocol === "replay.v2"
+        && v2CreatePayload?.position_mode === "HEDGE"
+        && v2CreatePayload?.account_data_mode === "DETERMINISTIC_SIMULATION"
+        && v2CreatePayload?.book_mode === "BOOK_ASSISTED_REQUIRED"
+        && v2CreatePayload?.funding_mode === "HISTORICAL_EXACT",
+      "training create payload was not the default HEDGE exchange-parity contract",
+      v2CreateRequest,
+    );
     const v2MarketRequest = [...replayCapture.requests].reverse().find((item) => (
       item.method === "POST" && /\/api\/v1\/replay\/runs\/[^/]+\/markets$/.test(new URL(item.url).pathname)
     ));
     const v2MarketPayload = v2MarketRequest?.postData ? JSON.parse(v2MarketRequest.postData) : null;
     assert(v2MarketPayload?.symbol, "Run market selection payload was not captured", v2MarketRequest);
     const v2LifecyclePayload = { ...v2CreatePayload, ...v2MarketPayload };
-    const formalTrainingBinding = formalTrainingPlan === null
-      ? null
-      : {
-        ...formalTrainingPlan,
-        payloadBound: (
-          v2MarketPayload?.exchange === formalTrainingPlan.exchange
-          && v2MarketPayload?.market_type === formalTrainingPlan.marketType
-          && v2MarketPayload?.symbol === formalTrainingPlan.symbol
-          && v2MarketPayload?.base_interval === formalTrainingPlan.interval
-          && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
-          && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
-        ),
-      };
-    if (formalTrainingBinding !== null) {
-      assert(
-        formalTrainingBinding.payloadBound === true,
-        "formal replay.v2 training POST was not bound to the selected real source window",
-        { formalTrainingBinding, v2CreatePayload, v2MarketPayload },
-      );
-    }
+    const formalTrainingBinding = {
+      ...formalTrainingPlan,
+      payloadBound: (
+        v2MarketPayload?.exchange === formalTrainingPlan.exchange
+        && v2MarketPayload?.market_type === formalTrainingPlan.marketType
+        && v2MarketPayload?.symbol === formalTrainingPlan.symbol
+        && v2MarketPayload?.base_interval === formalTrainingPlan.interval
+        && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
+        && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
+        && v2CreatePayload?.hedge_public_history_ref?.archive_id
+          === formalTrainingPlan.publicRefs.BTCUSDT.archive_id
+        && v2CreatePayload?.simulation_manifest_ref?.manifest_id
+          === formalTrainingPlan.simulationRef.manifest_id
+        && v2MarketPayload?.hedge_public_history_ref?.archive_id
+          === formalTrainingPlan.publicRefs.BTCUSDT.archive_id
+        && v2MarketPayload?.simulation_manifest_ref?.manifest_id
+          === formalTrainingPlan.simulationRef.manifest_id
+      ),
+    };
+    assert(
+      formalTrainingBinding.payloadBound === true,
+      "formal replay.v2 training POST was not bound to the exact HEDGE input set",
+      { formalTrainingBinding, v2CreatePayload, v2MarketPayload },
+    );
+    const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({
+      backendOrigin,
+      cdp: replay.cdp,
+      runId,
+      sessionId,
+      timeoutMs: args.timeoutMs,
+    });
     assert(await evaluate(replay.cdp, "window.opener === null"), "primary replay target retained opener");
     const blindInitialDom = await evaluate(replay.cdp, "document.body.innerText");
     assert(!/\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/.test(String(blindInitialDom)), "blind replay DOM rendered a calendar date before reveal");
@@ -2738,6 +3012,13 @@ async function main() {
       await click(replay.cdp, '[data-replay-action="pause"]');
       await waitForReplayStatus(replay.cdp, `(value) => value.state === "PAUSED"`, args.timeoutMs, "final soak pause");
     }
+    const finalAccountResponse = await readJson(
+      `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/markets`,
+    );
+    const finalAccountProof = await readServerAccountProof(backendOrigin, runId);
+    const finalHedgeLegs = [...new Set(
+      (finalAccountResponse?.portfolio?.positions ?? []).map((item) => item.position_side),
+    )].sort();
     await waitForValue(
       replay.cdp,
       `(() => { const button = document.querySelector('[data-replay-action="end"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,
@@ -2879,18 +3160,28 @@ async function main() {
     const finalActor = actorDiagnostics(finalMetrics.backend, sessionId);
     const minimumSourceProgress = Math.max(0, Math.floor(args.durationMs / 60_000) - 3);
     const checks = {
-      real_bar_source_profile: !useBoundRealProfile || (
-        fixture.source_profile === "REAL_BAR_SQLITE"
-        && fixture.real_source === true
+      real_bar_source_evidence: !useBoundRealProfile || (
+        fixture.real_source === true
         && fixture.real_source_evidence?.read_only === true
         && fixture.real_source_evidence?.identities?.length >= 2
       ),
-      real_bar_training_bound: !useBoundRealProfile || (
-        formalTrainingBinding?.payloadBound === true
+      hedge_exact_training_bound: (
+        fixture.source_profile === HEDGE_BROWSER_SOURCE_PROFILE
+        && formalTrainingBinding.payloadBound === true
         && formalTrainingBinding.requiredRows === FORMAL_V2_REAL_WINDOW_ROWS
-        && formalTrainingBinding.validatedRows >= formalTrainingBinding.requiredRows
         && formalTrainingBinding.forwardCacheMs === FORMAL_V2_FORWARD_CACHE_MS
-        && fixture.real_source_evidence?.window_rows === formalTrainingBinding.requiredRows
+        && formalTrainingBinding.inputFidelity
+          === "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
+        && formalTrainingBinding.fallbackApplied === false
+        && formalTrainingBinding.publicRefs?.BTCUSDT
+        && formalTrainingBinding.publicRefs?.ETHUSDT
+        && formalTrainingBinding.simulationRef
+      ),
+      hedge_account_continuity: hedgeContinuity?.passed === true,
+      hedge_both_legs_active: (
+        finalAccountProof.positionMode === "HEDGE"
+        && finalHedgeLegs.includes("LONG")
+        && finalHedgeLegs.includes("SHORT")
       ),
       duration_complete: finalMetrics.elapsedMs >= args.durationMs,
       lifecycle_cycles_complete: cycles.length === args.cycles,
@@ -3006,6 +3297,9 @@ async function main() {
         webSocketFramesReceived: replayCapture.webSocketFramesReceived.length,
         exportSha256: sha256(exportedText),
         reportHash: exportedReportHash,
+        finalAccountProof,
+        finalHedgeLegs,
+        hedgeContinuity,
       },
       live: {
         before: liveBefore,

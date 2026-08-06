@@ -1,6 +1,12 @@
-import { parseReplayAccountHistoryRef } from "./replayV2Types.js";
+import {
+  parseReplayAccountHistoryRef,
+  parseReplayHedgePublicHistoryRef,
+  parseReplayHedgeSimulationManifestRef,
+} from "./replayV2Types.js";
 import type {
   ReplayAccountHistoryRef,
+  ReplayHedgePublicHistoryRef,
+  ReplayHedgeSimulationManifestRef,
   ReplayV2AccountDataMode,
   ReplayV2SourceKind,
   TrainingRunPreparationPayload,
@@ -71,6 +77,34 @@ export interface ReplayAccountHistoryCapabilityPlan {
   readonly account_history_ref: ReplayAccountHistoryRef | null;
 }
 
+export interface ReplayHedgeInputCapabilityPlan {
+  readonly schema_version: "replay.hedge-input-plan.v1";
+  readonly feature_enabled: true;
+  readonly requested_position_mode: "ONE_WAY" | "HEDGE";
+  readonly capability_state:
+    | "NOT_REQUIRED"
+    | "AVAILABLE_EXACT"
+    | "UNSUPPORTED_NO_HISTORY"
+    | "UNSUPPORTED_SOURCE_MODE"
+    | "DEGRADED";
+  readonly reason: string;
+  readonly public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT";
+  readonly private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION";
+  readonly historical_exchange_private_state: false;
+  readonly fallback_applied: false;
+  readonly coverage: {
+    readonly range_start_ms: number;
+    readonly range_end_ms: number;
+  } | null;
+  readonly historical_l2_ref: {
+    readonly archive_id: string;
+    readonly dataset_epoch: string;
+    readonly checksum_sha256: string;
+  } | null;
+  readonly hedge_public_history_ref: ReplayHedgePublicHistoryRef | null;
+  readonly simulation_manifest_ref: ReplayHedgeSimulationManifestRef | null;
+}
+
 export interface ReplaySegmentPreparePlan {
   readonly protocol: "replay.data.prepare.v1";
   readonly state: "PREPARE_ON_CREATE";
@@ -94,6 +128,7 @@ export interface ReplaySegmentPreparePlan {
   readonly failure_policy: "QUARANTINE_AND_FAIL_CLOSED";
   readonly historical_book: ReplayHistoricalBookCapabilityPlan;
   readonly account_history: ReplayAccountHistoryCapabilityPlan;
+  readonly hedge_inputs: ReplayHedgeInputCapabilityPlan;
 }
 
 export interface ReplaySegmentPlanApi {
@@ -161,6 +196,7 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "failure_policy",
     "historical_book",
     "account_history",
+    "hedge_inputs",
   ]);
   const identity = exactObject(payload.identity, "segment prepare plan.identity", [
     "exchange",
@@ -227,6 +263,25 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
       "max_archive_bytes",
       "coverage",
       "account_history_ref",
+    ],
+  );
+  const hedgeInputs = exactObject(
+    payload.hedge_inputs,
+    "segment prepare plan.hedge_inputs",
+    [
+      "schema_version",
+      "feature_enabled",
+      "requested_position_mode",
+      "capability_state",
+      "reason",
+      "public_fidelity",
+      "private_fidelity",
+      "historical_exchange_private_state",
+      "fallback_applied",
+      "coverage",
+      "historical_l2_ref",
+      "hedge_public_history_ref",
+      "simulation_manifest_ref",
     ],
   );
   if (payload.protocol !== "replay.data.prepare.v1" || payload.state !== "PREPARE_ON_CREATE") {
@@ -387,6 +442,69 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
   ) {
     throw new TypeError("account-history exact capability proof is inconsistent");
   }
+  if (hedgeInputs.schema_version !== "replay.hedge-input-plan.v1"
+    || hedgeInputs.feature_enabled !== true
+    || (hedgeInputs.requested_position_mode !== "ONE_WAY"
+      && hedgeInputs.requested_position_mode !== "HEDGE")
+    || ![
+      "NOT_REQUIRED",
+      "AVAILABLE_EXACT",
+      "UNSUPPORTED_NO_HISTORY",
+      "UNSUPPORTED_SOURCE_MODE",
+      "DEGRADED",
+    ].includes(String(hedgeInputs.capability_state))
+    || hedgeInputs.public_fidelity !== "PINNED_HISTORICAL_PUBLIC_INPUT"
+    || hedgeInputs.private_fidelity !== "VERSIONED_DETERMINISTIC_SIMULATION"
+    || hedgeInputs.historical_exchange_private_state !== false
+    || hedgeInputs.fallback_applied !== false) {
+    throw new TypeError("HEDGE input capability plan is unsupported");
+  }
+  const hedgeCapability = hedgeInputs.capability_state as (
+    ReplayHedgeInputCapabilityPlan["capability_state"]
+  );
+  const hedgeCoverage = hedgeInputs.coverage === null
+    ? null
+    : exactObject(
+        hedgeInputs.coverage,
+        "segment prepare plan.hedge_inputs.coverage",
+        ["range_start_ms", "range_end_ms"],
+      );
+  const hedgeL2 = hedgeInputs.historical_l2_ref === null
+    ? null
+    : exactObject(
+        hedgeInputs.historical_l2_ref,
+        "segment prepare plan.hedge_inputs.historical_l2_ref",
+        ["archive_id", "dataset_epoch", "checksum_sha256"],
+      );
+  const hedgePublicRef = hedgeInputs.hedge_public_history_ref === null
+    ? null
+    : parseReplayHedgePublicHistoryRef(
+        hedgeInputs.hedge_public_history_ref,
+        "segment prepare plan.hedge_inputs.hedge_public_history_ref",
+      );
+  const hedgeSimulationRef = hedgeInputs.simulation_manifest_ref === null
+    ? null
+    : parseReplayHedgeSimulationManifestRef(
+        hedgeInputs.simulation_manifest_ref,
+        "segment prepare plan.hedge_inputs.simulation_manifest_ref",
+      );
+  const hedgeExact = hedgeCapability === "AVAILABLE_EXACT";
+  if ((hedgeInputs.requested_position_mode === "ONE_WAY")
+      !== (hedgeCapability === "NOT_REQUIRED")
+    || hedgeExact !== (
+      hedgeCoverage !== null
+      && hedgeL2 !== null
+      && hedgePublicRef !== null
+      && hedgeSimulationRef !== null
+    )
+    || (!hedgeExact && (
+      hedgeCoverage !== null
+      || hedgeL2 !== null
+      || hedgePublicRef !== null
+      || hedgeSimulationRef !== null
+    ))) {
+    throw new TypeError("HEDGE input capability proof is inconsistent");
+  }
   return {
     protocol: "replay.data.prepare.v1",
     state: "PREPARE_ON_CREATE",
@@ -465,6 +583,40 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
       max_archive_bytes: accountMaxBytes,
       coverage: parsedCoverage,
       account_history_ref: accountReference,
+    },
+    hedge_inputs: {
+      schema_version: "replay.hedge-input-plan.v1",
+      feature_enabled: true,
+      requested_position_mode: hedgeInputs.requested_position_mode,
+      capability_state: hedgeCapability,
+      reason: displayString(hedgeInputs.reason, "HEDGE input.reason"),
+      public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+      private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
+      historical_exchange_private_state: false,
+      fallback_applied: false,
+      coverage: hedgeCoverage === null ? null : {
+        range_start_ms: count(
+          hedgeCoverage.range_start_ms,
+          "HEDGE input.coverage.range_start_ms",
+        ),
+        range_end_ms: count(
+          hedgeCoverage.range_end_ms,
+          "HEDGE input.coverage.range_end_ms",
+        ),
+      },
+      historical_l2_ref: hedgeL2 === null ? null : {
+        archive_id: displayString(hedgeL2.archive_id, "HEDGE input.L2.archive_id"),
+        dataset_epoch: displayString(
+          hedgeL2.dataset_epoch,
+          "HEDGE input.L2.dataset_epoch",
+        ),
+        checksum_sha256: displayString(
+          hedgeL2.checksum_sha256,
+          "HEDGE input.L2.checksum_sha256",
+        ),
+      },
+      hedge_public_history_ref: hedgePublicRef,
+      simulation_manifest_ref: hedgeSimulationRef,
     },
   };
 }

@@ -459,12 +459,13 @@ def build_account(
     reserved = Decimal(reserved_margin)
     with localcontext() as context:
         context.prec = 60
+        unrealized_pnl = position.unrealized_pnl
         cash = (
             Decimal(config.initial_equity) + realized - fees
             if cash_balance is None
             else Decimal(cash_balance)
         )
-        equity = cash + Decimal(position.unrealized_pnl)
+        equity = cash + Decimal(unrealized_pnl)
         legs = (
             (position.long, position.short)
             if isinstance(position, PositionBook)
@@ -494,7 +495,7 @@ def build_account(
             field_name="reserved_margin",
         ),
         realized_pnl=decimal_to_string(realized, field_name="realized_pnl"),
-        unrealized_pnl=position.unrealized_pnl,
+        unrealized_pnl=unrealized_pnl,
         fees_paid=decimal_to_string(fees, field_name="fees_paid"),
         quote_asset=config.quote_asset,
     )

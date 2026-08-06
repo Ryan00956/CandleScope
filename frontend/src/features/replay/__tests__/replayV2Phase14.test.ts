@@ -103,13 +103,43 @@ function plan(overrides: Record<string, unknown> = {}) {
       coverage: null,
       account_history_ref: null,
     },
+    hedge_inputs: {
+      schema_version: "replay.hedge-input-plan.v1",
+      feature_enabled: true,
+      requested_position_mode: "ONE_WAY",
+      capability_state: "NOT_REQUIRED",
+      reason: "POSITION_MODE_ONE_WAY",
+      public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+      private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
+      historical_exchange_private_state: false,
+      fallback_applied: false,
+      coverage: null,
+      historical_l2_ref: null,
+      hedge_public_history_ref: null,
+      simulation_manifest_ref: null,
+    },
+  };
+}
+
+function oneWayDraft(sourceCatalog: ReturnType<typeof catalog>) {
+  return {
+    ...createTrainingRunDraft(sourceCatalog),
+    positionMode: "ONE_WAY" as const,
+    accountDataMode: "APPROX_PROXY" as const,
+    fundingMode: "OFF" as const,
+    bookMode: "OFF" as const,
+    startMode: "RANDOM" as const,
+    requestedStartMs: null,
+    randomRangeStartMs: Date.UTC(2020, 0, 1),
+    randomRangeEndMs: Date.UTC(2020, 0, 2),
+    timeDisclosurePolicy: "HIDE_ALL" as const,
   };
 }
 
 test("Phase 14 create payload separates indicator warmup from visible history", () => {
   const sourceCatalog = catalog();
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const draft = createTrainingRunDraft(sourceCatalog);
+  const draft = oneWayDraft(sourceCatalog);
   assert.equal(draft.indicatorWarmupBars, 200);
   assert.equal(draft.visibleHistoryMode, "ALL_AVAILABLE");
   assert.equal(draft.visibleHistoryLookbackMs, null);
@@ -148,7 +178,7 @@ test("launch-context display periods keep the all-available history default", ()
 test("Phase 14 model rejects misalignment and accepts explicit all-available policy", () => {
   const sourceCatalog = catalog();
   const capabilities = parseReplayCapabilities(enabledCapabilities());
-  const base = createTrainingRunDraft(sourceCatalog);
+  const base = oneWayDraft(sourceCatalog);
   const misaligned = evaluateTrainingRunDraft(
     {
       ...base,

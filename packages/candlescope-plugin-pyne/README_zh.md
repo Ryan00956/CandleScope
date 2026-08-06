@@ -4,16 +4,18 @@
 公开协议桥。它不导入 CandleScope backend 私有包，也不复制 Pyne 源码；CandleScope
 通过 `candlescope.script-runtime/1` 在独立 managed venv 中启动它。
 
-## 兼容性锁
+## 源码候选兼容性锁
 
-- 插件：`candlescope-plugin-pyne==0.2.0`
+- 插件：`candlescope-plugin-pyne==0.3.0.dev0`
 - SDK：`candlescope-plugin-sdk==0.2.0`
-- 引擎：`pyne-runtime==0.2.0rc1`
+- 引擎：`pyne-runtime==0.3.0rc2`
 - Python：`>=3.11,<3.14`
 - Runtime ID：`candlescope.pyne`
 
-`release/release-lock.json` 固定官方 Pyne wheel 的 Release URL 与 SHA-256。版本、wheel
-内容、descriptor 或确定性 probe 任一不匹配都会 fail closed，不再靠手工同步适配层。
+未发布引擎候选由 `release/release-lock.candidate.json` 固定；该锁没有公开 URL，不能
+冒充已发布 artifact。`release/release-lock.json` 保持不变，继续描述已发布的 `0.2.0`
+桥和 `0.2.0rc1` 引擎。版本、wheel 内容、descriptor 或确定性 probe 任一不匹配都会
+fail closed，不再靠手工同步适配层。
 
 ## 已发布开发包
 

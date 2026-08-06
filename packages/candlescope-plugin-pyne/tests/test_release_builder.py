@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from scripts.build_bundle import (
+    CANDIDATE_LOCK_PATH,
     DEFAULT_LOCK_PATH,
     ReleaseLockError,
     build_locked_bundle,
@@ -79,6 +80,16 @@ def _wheelhouse(tmp_path: Path) -> tuple[Path, ...]:
     )
 
 
+def _candidate_wheelhouse(tmp_path: Path) -> tuple[Path, ...]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    return (
+        _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.3.0.dev0"),
+        _fake_wheel(tmp_path, "candlescope-plugin-sdk", "0.2.0"),
+        _fake_wheel(tmp_path, "pyne-runtime", "0.3.0rc2"),
+        _fake_wheel(tmp_path, "numpy", "2.3.3"),
+    )
+
+
 def test_wheel_metadata_is_read_from_the_archive_not_the_filename(tmp_path: Path) -> None:
     wheel = _fake_wheel(tmp_path, "candlescope-plugin-pyne", "0.2.0")
     renamed = wheel.with_name("untrusted-name.whl")
@@ -125,6 +136,28 @@ def test_builder_generates_audited_platform_bundle_from_one_locked_wheel_set(
     ]
     assert bundle.manifest.probe.analysis_sha256 == lock["probe"]["analysisSha256"]
     assert bundle.manifest.probe.execution_sha256 == lock["probe"]["executionSha256"]
+
+
+def test_builder_accepts_the_explicit_local_candidate_lock(tmp_path: Path) -> None:
+    wheels = _candidate_wheelhouse(tmp_path / "wheelhouse")
+    lock = json.loads(CANDIDATE_LOCK_PATH.read_text(encoding="utf-8"))
+    lock["wheels"]["pyne-runtime"]["sha256"] = inspect_wheel(wheels[2]).sha256
+    lock_path = tmp_path / "release-lock.candidate.json"
+    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+
+    bundle = build_locked_bundle(
+        wheels,
+        tmp_path / "candlescope-pyne-0.3.0.dev0.cspkg",
+        lock_path=lock_path,
+    )
+
+    assert bundle.manifest.version == "0.3.0.dev0"
+    assert [wheel.version for wheel in bundle.manifest.wheels] == [
+        "0.3.0.dev0",
+        "0.2.0",
+        "0.3.0rc2",
+        "2.3.3",
+    ]
 
 
 def test_cli_reports_lock_failures_without_a_traceback(

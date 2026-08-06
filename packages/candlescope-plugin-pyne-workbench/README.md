@@ -40,8 +40,9 @@ Binance/OKX, spot/perpetual, BTCUSDT/ETHUSDT/SOLUSDT, and six common intervals.
 Expand those scopes intentionally; they are authorization ceilings, not market
 discovery.
 
-This source package intentionally depends on the future `0.3` development
-lines of the Pyne bridge and runtime. The already published `0.2.0` bridge and
+This source package intentionally depends on the `0.3` development lines of
+the Pyne bridge and runtime. The already published `0.2.0` bridge and
 `0.2.0rc1` runtime do not contain the native-v2 methods used here. Local
-cross-repository tests use the checked-out sources; installation stays blocked
-until matching prerelease wheels are built and pinned.
+cross-repository and installed-wheel acceptance use the unpublished
+`0.3.0.dev0` bridge plus `0.3.0rc2` runtime candidate lock; publishing remains
+a separate decision.

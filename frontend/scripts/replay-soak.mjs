@@ -2669,7 +2669,38 @@ async function main() {
       throw error;
     }
     const created = await keyboardActivateButton(replay.cdp, { text: "确认时间并创建 Run" }, args.timeoutMs);
-    const selectedMarket = await chooseReplayMarket(replay.cdp, formalTrainingPlan, args.timeoutMs);
+    let selectedMarket;
+    try {
+      selectedMarket = await chooseReplayMarket(
+        replay.cdp,
+        formalTrainingPlan,
+        args.timeoutMs,
+      );
+    } catch (error) {
+      await replayCapture.settle();
+      phaseDiagnostics = {
+        phase: "market-picker-readiness",
+        page: await evaluate(replay.cdp, `({
+          url: location.href,
+          text: (document.body?.innerText || "").slice(-8000),
+          inputs: [...document.querySelectorAll("input")].map((input) => ({
+            value: input.value,
+            placeholder: input.placeholder,
+            disabled: input.disabled,
+          })),
+          buttons: [...document.querySelectorAll("button")].map((button) => ({
+            text: button.textContent?.trim() || "",
+            disabled: button.disabled,
+          })),
+        })`).catch(() => null),
+        apiRequests: replayCapture.requests.filter((item) => item.url.includes("/api/")).slice(-50),
+        apiResponses: replayCapture.responses.filter((item) => item.url.includes("/api/")).slice(-50),
+        responseBodies: replayCapture.responseBodies.slice(-50),
+        consoleErrors: replayCapture.consoleErrors,
+        exceptions: replayCapture.exceptions,
+      };
+      throw error;
+    }
     const hubKeyboard = { opened, created, selectedMarket };
     let initial;
     try {

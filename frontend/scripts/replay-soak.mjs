@@ -2395,8 +2395,8 @@ function finalizedBoundaryMatches(matchesByBoundary) {
 }
 
 function createStreamingBoundaryAudit(label) {
-  const digest = createHash("sha256");
-  const matchesByBoundary = new Map();
+  let digest = createHash("sha256");
+  let matchesByBoundary = new Map();
   let bytes = 0;
   let itemCount = 0;
   let result = null;
@@ -2415,6 +2415,15 @@ function createStreamingBoundaryAudit(label) {
       itemCount += 1;
       collectForbiddenBoundaryMatches(text, matchesByBoundary);
       return true;
+    },
+    reset() {
+      if (result) {
+        throw new Error(`${label} boundary audit cannot reset after finish`);
+      }
+      digest = createHash("sha256");
+      matchesByBoundary = new Map();
+      bytes = 0;
+      itemCount = 0;
     },
     finish() {
       if (result) return result;
@@ -3011,6 +3020,13 @@ async function main() {
       "formal replay.v3 training POST was not bound to the exact HEDGE input set",
       { formalTrainingBinding, v2CreatePayload, v2MarketPayload },
     );
+    // The blind boundary begins after the user-selected start and public source
+    // coverage have been bound into an initialized Run. Creation-time MANUAL
+    // input and the non-blind Training Hub catalog are deliberately outside the
+    // blind runtime contract; every subsequent replay request/frame is audited.
+    await replayCapture.settle();
+    replayCapture.boundaryAudits.http.reset();
+    replayCapture.boundaryAudits.websocket.reset();
     const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({
       backendOrigin,
       cdp: replay.cdp,

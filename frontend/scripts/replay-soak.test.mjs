@@ -522,6 +522,24 @@ test("replay soak streaming blind audit covers every item without aggregate seri
   assert.equal(audit.finish(), result);
 });
 
+test("replay soak streaming blind audit resets creation-time public inputs", () => {
+  const audit = createStreamingBoundaryAudit("http");
+  audit.add({
+    phase: "training-hub",
+    requested_start_ms: 1_700_160_666_666,
+    latest_source_open_ms: 1_700_260_666_666,
+  });
+
+  audit.reset();
+  audit.add({ phase: "blind-runtime", public_time: "D+2 03:04:00" });
+  const result = audit.finish();
+
+  assert.equal(result.itemCount, 1);
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.forbiddenMatches, []);
+  assert.throws(() => audit.reset(), /cannot reset after finish/);
+});
+
 test("replay soak reconnect accepts an already-ready controller", async () => {
   const cdp = reconnectCdp({ recovery: "ready" });
   assert.equal(await restoreCommandReadinessAfterReconnect(cdp, 1_000, true), "ready");

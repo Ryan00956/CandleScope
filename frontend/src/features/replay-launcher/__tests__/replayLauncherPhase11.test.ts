@@ -160,7 +160,7 @@ test("Phase 11 live launcher is lazy, modal, and has no v1 fallback", () => {
     /useMarketDataRuntime|useWatchlistRuntime|ReplayRuntime|replayBars|WebSocket/,
   );
   assert.doesNotMatch(trainingHub, /data-training-field="market-identity"/);
-  assert.match(trainingHub, /创建 Run 并选择商品/);
+  assert.match(trainingHub, /确认时间并创建 Run/);
   assert.match(watchlist, /launch_context\?\.watchlist_snapshot\.groups/);
   assert.doesNotMatch(watchlist, /localStorage|candlescope-watchlists/);
 });

@@ -39,7 +39,16 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 报告 JSON 导出断言复用当前 `REPLAY_TRAINING_PROTOCOL="replay.v3"`，不再把已经退役的 wire protocol `replay.v2` 当成期望值；`replay.v2` 仅保留为产品/发布代际名称。
 - 新增 22 项 HEDGE 最低验收矩阵及校验器；release manifest v3 纳入逐轨 HEDGE benchmark、浏览器 exact binding 和账户连续性。
 
-### 2.4 盲测公开输入时间域
+### 2.4 完整构建回滚演练修复
+
+- 回滚工具只给当前 backend 注入仓库内 bundled plugin SDK；历史基线的 `PYTHONPATH` 严格限制在 detached worktree，禁止借用当前 SDK 或当前 `app` 包。
+- 当前 enabled 段使用默认 HEDGE、exact public/L2 archive 和单一 deterministic private simulation；disabled 段不构造 replay service、不打开 replay persistence；历史基线段不加载任何 replay-only source。
+- 回滚流程跟随当前两阶段产品合同：先创建空 Run，再在 Run 内选品并绑定 exact refs；URL 使用 `?run=`，持久化身份使用 Run 的 `adapter_session_id`，训练 archive wire protocol 使用 `replay.v3`。
+- 紧急停机后，正常构建的入口保持可见但不可点击，并显示后端 capability 不可用；Run API 以 `replay.v3` / `REPLAY_TRAINING_UNAVAILABLE` 失败，浏览器显示“无法打开回放”、零 canvas 且不新建 replay WebSocket。该运维停止态不是灰度发布，也不改变正常默认启用合同。
+- cross-root 历史基线使用当前 QA 启动壳灌入最近已闭合的 live K 线，但显式跳过 replay archive seed；若误带 aggTrade、历史盘口或 HEDGE source 参数则直接拒绝，保证前回放基线不导入当前 `app.replay`。
+- 候选诊断在 `249478decc2d0fc4b6e28e491a7aeca543ec6735` 完整通过：enabled Run 以 `shutdown_pause` 持久化，disabled restart 与旧构建都未改变 replay.db 字节摘要或 Phase 18 存储语义，旧 backend replay capability route 为 404。由于本结果文档提交会产生新 HEAD，该诊断不作为最终 release manifest 输入，正式 rollback 必须在最终 clean HEAD 重跑。
+
+### 2.5 盲测公开输入时间域
 
 - 真实浏览器 HIDE_ALL smoke 发现 `/tracks` 曾把 HEDGE 内部真实时间、模拟时间和含真实时间的原始 projection state 同时公开；严格前端解析器因此正确 fail closed。
 - 内部 `replay.hedge-input-view.v1` 保持不变，继续承载真实时间、原始 state、component hash 和 auditor/checkpoint 证明，避免破坏既有审计链。
@@ -47,7 +56,7 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 公开 projection 删除 `as_of_actual_time_ms`、`as_of_virtual_time_ms` 和原始 `state`，仅返回 `as_of_time_ms`、`state_hash`、`input_chain_hash` 与 `source_component_hash`；auditor 原始 differences 同样改为计数和逐项哈希，防止错误详情夹带真实时间。
 - 后端同时验证 dataset origin、HEDGE binding range 与 actor virtual timeline 的偏移一致性；任一混合时间域、越界时间或缺失元数据均以 storage degraded fail closed。
 
-### 2.5 终态报告交接与 actor 回收
+### 2.6 终态报告交接与 actor 回收
 
 - 真实浏览器诊断在完成 HEDGE 动作周期和 archive lifecycle 后，发现 reaper 回收 `ENDED` actor 时会重复提交一份 `shutdown` checkpoint；大状态写入超过 5 秒后，已持久化的终态 actor 被错误改成 `ERROR`，报告页随即收到 `INVALID_STATE_TRANSITION`。
 - `END_SESSION` 和数据耗尽的终态现在都在原命令/源事件原子提交中持久化 checkpoint，并把终态 checkpoint 记入 actor ring；只有提交成功后才对调用方确认 `ENDED`。
@@ -103,6 +112,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 
 冻结上限保持不变：normal p95 `500 ms`；liquidation p95 `2000 ms`、max `5000 ms`。
 
+### 3.6 回滚修复增量验证
+
+- replay rollback/soak Node 定向集：`33 passed, 0 failed`。
+- Run-centric replay API 契约与 smoke fixture 定向集：`42 passed`。
+- ESLint 与 `git diff --check`：通过。
+- 完整构建候选诊断：通过；历史基线 `c9a1ddbfe316c68c91787b69c783baeeb0670a9f` 的 replay route 为 404，live K 线与设置保持健康，replay.db SHA-256 为 `20b7631626b10c259de44e788a064ce532078a23b6db296b5ccf20a97faff5b7` 且三阶段一致。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：
@@ -115,4 +131,4 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 6. 完整构建 rollback drill；
 7. 22 项 HEDGE matrix、默认启用静态审计和最终 release manifest。
 
-只有外部 `release-manifest.json` 为 PASS 且工作树仍为同一 clean HEAD，Phase 9 才算完成。任何失败先修复并形成新候选提交，再从第 1 项重跑；不继承旧证据。
+只有外部 `release-manifest.json` 为 PASS 且工作树仍为同一 clean HEAD，Phase 9 才算完成。任何失败先修复并形成新候选提交，再从第 1 项重跑；不继承旧证据。本文件不回填会改变 HEAD 的易变运行数值；最终测试计数、来源摘要、性能分布、4 小时遥测和回滚 acceptance map 以该 HEAD 外部 manifest 及其绑定 artifacts 为唯一权威记录。

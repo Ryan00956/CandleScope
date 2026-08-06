@@ -626,10 +626,13 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         });
       };
       const projectionRequestScheduler = createReplayViewerProjectionRequestScheduler(refresh);
-      refresh();
       const unsubscribe = sourceStore.subscribe(() => {
         projectionRequestScheduler.schedule();
       });
+      // Subscribe before the first projection request. The atomic replay
+      // snapshot may arrive between render and this effect; refreshing after
+      // the subscription observes that snapshot and cannot miss a later one.
+      refresh();
       return () => {
         disposed = true;
         unsubscribe();
@@ -678,12 +681,14 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
         setError(cause instanceof Error ? cause.message : "展示周期重建失败");
       }
     };
-    rebuild();
     const projectionScheduler = createReplayViewerProjectionScheduler(rebuild);
     const unsubscribe = sourceStore.subscribe((delta) => {
       pendingSourceDeltas.push(delta);
       projectionScheduler.schedule();
     });
+    // Subscribe before the initial rebuild so an atomic snapshot published
+    // during effect setup is either read by rebuild or queued as a delta.
+    rebuild();
     return () => {
       unsubscribe();
       projectionScheduler.cancel();

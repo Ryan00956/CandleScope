@@ -285,6 +285,14 @@ test("viewer projection subscription is stable across equivalent runtime snapsho
   assert.match(runtime, /displayProjectionBySession/);
   assert.match(runtime, /replaceReplayViewerSeriesFromServer/);
   assert.match(runtime, /sourceStore\.subscribe/);
+  assert.match(
+    runtime,
+    /const projectionRequestScheduler = createReplayViewerProjectionRequestScheduler\(refresh\);\s*const unsubscribe = sourceStore\.subscribe[\s\S]*?refresh\(\);/,
+  );
+  assert.match(
+    runtime,
+    /const projectionScheduler = createReplayViewerProjectionScheduler\(rebuild\);\s*const unsubscribe = sourceStore\.subscribe[\s\S]*?rebuild\(\);/,
+  );
   assert.doesNotMatch(runtime, /\[config, seriesStore, sourceStore, viewerState\]/);
 });
 

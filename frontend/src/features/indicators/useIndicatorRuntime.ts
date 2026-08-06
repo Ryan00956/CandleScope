@@ -6,6 +6,7 @@ import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js"
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { IndicatorRangeEvent } from "../market-data/klineContracts.js";
 import { useActiveIndicatorStore } from "./activeIndicatorStore.js";
+import type { ActiveIndicatorPersistence } from "./activeIndicatorStore.js";
 import { resolveRealtimeHistogramColor } from "./indicatorRealtimeColor.js";
 import {
   applyRealtimeIndicatorValuesToLines,
@@ -166,6 +167,7 @@ interface UseIndicatorRuntimeOptions {
   savedVisibleRange?: unknown;
   symbol?: string;
   onIndicatorRemoved?: (indicatorId: string) => void;
+  indicatorPersistence?: ActiveIndicatorPersistence | null;
 }
 
 interface ResolvedIndicatorRuntimeInputs {
@@ -592,7 +594,12 @@ export function useIndicatorRuntime(
     toggleVisibility,
     updateIndicatorParams,
     updateIndicatorScript,
-  } = useActiveIndicatorStore({ onRequireCompute: requireIndicatorCompute });
+  } = useActiveIndicatorStore({
+    onRequireCompute: requireIndicatorCompute,
+    ...(options.indicatorPersistence === undefined
+      ? {}
+      : { persistence: options.indicatorPersistence }),
+  });
 
   const [outputState, outputDispatch] = useReducer(
     indicatorOutputReducer,

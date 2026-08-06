@@ -47,6 +47,7 @@ import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 import { getClientInstanceId } from "../../services/api.js";
+import { useMarketDataWorkspaceResources } from "./marketDataWorkspaceContext.js";
 
 let chartDemandScopeSequence = 0;
 const chartDemandScopeRuntimeId = [
@@ -138,6 +139,7 @@ export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
   realtimePriceRef: MutableRefObject<number | null>;
   foregroundPreloadGate?: ForegroundPreloadGate;
+  backgroundPrefetchEnabled?: boolean;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -146,7 +148,9 @@ export function useMarketDataRuntime({
   session,
   realtimePriceRef,
   foregroundPreloadGate,
+  backgroundPrefetchEnabled = true,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
+  const workspaceResources = useMarketDataWorkspaceResources();
   const {
     symbol,
     exchange,
@@ -181,6 +185,13 @@ export function useMarketDataRuntime({
   }
   const backgroundPrefetchPriority = foregroundPreloadGate
     || defaultForegroundPreloadGateRef.current;
+  const inactivePrefetchGateRef = useRef<ChartBackgroundPrefetchPriorityGate | null>(null);
+  if (inactivePrefetchGateRef.current == null) {
+    inactivePrefetchGateRef.current = new ChartBackgroundPrefetchPriorityGate();
+  }
+  const chartBackgroundPrefetchPriority = backgroundPrefetchEnabled
+    ? backgroundPrefetchPriority
+    : inactivePrefetchGateRef.current;
   const publishIndicatorWindowRange = useCallback((meta: IndicatorWindowMeta) => {
     requestIndicatorRangeForWindowMeta((start, end, reason) => {
       if (!reason) return false;
@@ -214,6 +225,7 @@ export function useMarketDataRuntime({
     symbol,
     interval,
     onIndicatorWindowMeta: publishIndicatorWindowRange,
+    ...(workspaceResources ? { windowRegistry: workspaceResources.windowRegistry } : {}),
   });
 
   const [loading, setLoading] = useState(true);
@@ -356,6 +368,9 @@ export function useMarketDataRuntime({
       commitMergedChartData,
       commitPatchedChartData,
       patchCacheTick,
+      ...(workspaceResources
+        ? { streamFactory: workspaceResources.streamCoordinator.subscribe }
+        : {}),
     });
   }, [
     backgroundPrefetchPriority,
@@ -369,6 +384,7 @@ export function useMarketDataRuntime({
     patchCacheTick,
     seriesDataFeed,
     symbol,
+    workspaceResources,
   ]);
 
   const resolveInitialRows = useCallback(
@@ -449,7 +465,8 @@ export function useMarketDataRuntime({
     nativeIntervalValues,
   );
   useActiveChartHistoryHydration({
-    enabled: activeChartReady
+    enabled: backgroundPrefetchEnabled
+      && activeChartReady
       && marketDataReady
       && !loading
       && !initialHistoryPending,
@@ -461,7 +478,7 @@ export function useMarketDataRuntime({
     historyRepairPending: chartDataMeta.historyRepairPending === true,
     validatedCountBack: chartDataMeta.historyValidatedCountBack ?? null,
     seriesDataFeed,
-    priorityGate: backgroundPrefetchPriority,
+    priorityGate: chartBackgroundPrefetchPriority,
     commitMergedChartData,
   });
 
@@ -736,7 +753,8 @@ export function useMarketDataRuntime({
     isForegroundBusy: isForegroundBusyForPrefetch,
     // Background interval warming must yield while the active chart is still
     // loading history, extending left, or waiting for indicator coverage.
-    enabled: activeChartReady
+    enabled: backgroundPrefetchEnabled
+      && activeChartReady
       && marketDataReady
       && !loading
       && !loadingMoreLeft

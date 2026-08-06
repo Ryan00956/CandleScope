@@ -178,9 +178,11 @@ import {
   buildDisplaySourceTimeIndex,
   buildSurfaceViewportSnapshot,
   createProjector,
+  findDisplayIndexForAxisAnchor,
   getChartTypeDescriptor,
   isOrdinalAxisTime,
   isLastDisplayTargetForSourceTime,
+  mapSourceTimeRangeToDisplayLogicalRange,
   planSurfaceViewportRestore,
   preserveBoundSurfaceViewportSourceAnchor,
   ProjectionStore,
@@ -207,7 +209,11 @@ import type {
   MainSeriesHandle,
   NormalizedIndicatorSeriesEntry,
 } from "../chart-adapter/chartAdapterTypes.js";
-import type { ChartSurfaceHandle, ChartSurfaceVisibleRange } from "../chart-adapter/useChartSurfaceRuntime.js";
+import type {
+  ChartSurfaceHandle,
+  ChartSurfaceLinkedTimeRange,
+  ChartSurfaceVisibleRange,
+} from "../chart-adapter/useChartSurfaceRuntime.js";
 import type { ViewportController } from "../chart-adapter/viewportController.js";
 import type {
   AxisTime,
@@ -250,6 +256,7 @@ export interface SingleChartPanesProps {
   seriesStore?: SeriesWindowStore | null;
   symbol: string;
   drawingKeyBase?: string;
+  paneLayoutScope?: string | null;
   interval: IntervalString;
   loading?: boolean;
   onCrosshairMove?: ((value: MainSeriesCrosshairValue | null) => void) | null;
@@ -1216,6 +1223,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   seriesStore = null,
   symbol,
   drawingKeyBase = "",
+  paneLayoutScope = null,
   interval,
   loading = false,
   onCrosshairMove,
@@ -1624,7 +1632,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   >(() => new Set());
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuState | null>(null);
   const [paneOrder, setPaneOrder] = useState<string[]>(() => {
-    const stored = loadPaneOrder();
+    const stored = loadPaneOrder(paneLayoutScope);
     return stored.includes("main") ? stored : ["main", ...stored];
   });
   const [collapsedPaneIds, setCollapsedPaneIds] = useState<string[]>([]);
@@ -1966,8 +1974,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     return buildDisplaySourceTimeIndex(auxiliaryDisplayState.rows);
   }, [auxiliaryDisplayState, datasetKey, surfaceConfigKey, usesDerivedAxis]);
   useEffect(() => {
-    savePaneOrder(paneOrder);
-  }, [paneOrder]);
+    savePaneOrder(paneOrder, paneLayoutScope);
+  }, [paneLayoutScope, paneOrder]);
   const activePaneIds = useMemo(
     () => reconcilePaneOrder(paneOrder, ["main", ...subPanes.map((pane) => pane.id)]),
     [paneOrder, subPanes],
@@ -2057,8 +2065,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }
   }, [activePaneIds.length, activePaneIdsKey, desiredMainPaneIndex, notifyDrawingFrameInvalidation, seriesReady]);
   const paneHeightStorageKey = useMemo(
-    () => `${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
-    [activeSubPanes],
+    () => `${paneLayoutScope ? `${paneLayoutScope}:` : ""}${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
+    [activeSubPanes, paneLayoutScope],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
   useLayoutEffect(() => {
@@ -2481,6 +2489,81 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       onVisibleRangeChangeRef.current?.(range);
     }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
   }, [captureVisibleRange]);
+
+  const setLinkedCrosshairTime = useCallback((time: number | null): boolean => {
+    const chart = chartRef.current;
+    const series = mainSeriesRef.current;
+    if (!chart || !series) return false;
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (time === null || !Number.isFinite(time)) {
+        chart.clearCrosshairPosition();
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+        return true;
+      }
+      const displayIndex = findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
+      const displayRow = displayRowsRef.current[displayIndex] ?? null;
+      if (!displayRow) {
+        chart.clearCrosshairPosition();
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+        return false;
+      }
+      const sourceTime = resolveSourceTime(displayRow.time, displayRow);
+      const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
+      const price = Number(displayRow.close ?? displayRow.value ?? sourceRow?.close);
+      if (!Number.isFinite(price)) {
+        chart.clearCrosshairPosition();
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+        return false;
+      }
+      chart.setCrosshairPosition(price, displayRow.time, series);
+      paneCrosshairStore.publish(sourceTime);
+      const includeVolume = !isOrdinalAxisTime(displayRow.time)
+        || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
+      publishMainLegendCrosshair(buildMainSeriesCrosshairValue(
+        sourceTime,
+        displayRow || sourceRow,
+        { includeVolume, volumeRow: sourceRow },
+      ));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+  }, [paneCrosshairStore, publishMainLegendCrosshair]);
+
+  const setLinkedVisibleTimeRange = useCallback((
+    range: ChartSurfaceLinkedTimeRange,
+  ): boolean => {
+    const chart = chartRef.current;
+    if (!chart) return false;
+    const logicalRange = mapSourceTimeRangeToDisplayLogicalRange(
+      displayRowsRef.current,
+      range,
+    );
+    if (!logicalRange) return false;
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (!viewportControllerRef.current?.restoreProjectionRange(
+        logicalRange,
+        { immediate: true },
+      )) return false;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+    const visibleRange = captureVisibleRange();
+    publishViewportRangeChange(visibleRange);
+    scheduleVisibleRangeSave(visibleRange);
+    return true;
+  }, [captureVisibleRange, publishViewportRangeChange, scheduleVisibleRangeSave]);
 
   const updateMainSeriesReference = useCallback((
     series: MainSeriesHandle | null,
@@ -4858,6 +4941,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useImperativeHandle(ref, () => ({
     getVisibleRange: captureVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeRange,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -4924,6 +5009,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     prepareDrawingExport,
     resetAutoScale,
     seriesReady,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeRange,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
   ]);

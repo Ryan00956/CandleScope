@@ -16,8 +16,15 @@ export interface ChartSurfaceVisibleRange {
   time?: { from: number; to: number };
 }
 
+export interface ChartSurfaceLinkedTimeRange {
+  from: number;
+  to: number;
+}
+
 export interface ChartSurfaceHandle {
   getVisibleRange(): ChartSurfaceVisibleRange | null;
+  setLinkedCrosshairTime(time: number | null): boolean;
+  setLinkedVisibleTimeRange(range: ChartSurfaceLinkedTimeRange): boolean;
   captureViewportTransfer(): SurfaceViewportSnapshot | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
@@ -31,6 +38,14 @@ export function useChartSurfaceRuntime() {
 
   const getVisibleRange = useCallback(() => (
     callChartSurface(ref, "getVisibleRange", null)
+  ), []);
+
+  const setLinkedCrosshairTime = useCallback((time: number | null) => (
+    callChartSurface(ref, "setLinkedCrosshairTime", false, time)
+  ), []);
+
+  const setLinkedVisibleTimeRange = useCallback((range: ChartSurfaceLinkedTimeRange) => (
+    callChartSurface(ref, "setLinkedVisibleTimeRange", false, range)
   ), []);
 
   const captureViewportTransfer = useCallback(() => (
@@ -64,6 +79,8 @@ export function useChartSurfaceRuntime() {
 
   const actions = useMemo(() => ({
     getVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeRange,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -75,6 +92,8 @@ export function useChartSurfaceRuntime() {
     clearAllDrawings,
     getExportSnapshot,
     getVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeRange,
     prepareExport,
     setDrawingsHidden,
     updateSelectedDrawingStyle,

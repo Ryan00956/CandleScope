@@ -1,0 +1,135 @@
+import type { ChartSession } from "../chart-session/chartSessionTypes.js";
+import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
+import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
+
+export const CHART_WORKSPACE_SCHEMA_VERSION = 2 as const;
+export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
+export const CHART_CELL_IDS = ["cell-1", "cell-2", "cell-3", "cell-4"] as const;
+export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
+
+export type ChartCellId = (typeof CHART_CELL_IDS)[number];
+export type ChartLinkGroupId = (typeof CHART_LINK_GROUP_IDS)[number];
+
+export type ChartWorkspaceLayout =
+  | "single"
+  | "split-vertical"
+  | "split-horizontal"
+  | "quad";
+
+export type ChartWorkspaceId = string;
+export type ChartWorkspaceTemplateId = ChartWorkspaceLayout;
+
+export const CELL_CHART_SETTING_KEYS = [
+  "chartType",
+  "renkoBoxSizeMode",
+  "renkoAtrLength",
+  "renkoBoxSize",
+  "pointFigureBoxSizeMode",
+  "pointFigureAtrLength",
+  "pointFigureBoxSize",
+  "pointFigureReversalAmount",
+  "kagiReversalMode",
+  "kagiAtrLength",
+  "kagiReversalAmount",
+  "lineBreakNumberOfLines",
+] as const satisfies readonly (keyof ChartSettings)[];
+
+export type CellChartSettingKey = (typeof CELL_CHART_SETTING_KEYS)[number];
+export type ChartCellChartSettings = Pick<ChartSettings, CellChartSettingKey>;
+
+export interface ChartCellPriceScale {
+  invertScale: boolean;
+  priceScaleMode: number;
+}
+
+export interface ChartLinkGroupSettings {
+  market: boolean;
+  interval: boolean;
+  crosshair: boolean;
+  timeRange: boolean;
+}
+
+export interface ChartWorkspaceLayoutRatios {
+  splitVertical: number;
+  splitHorizontal: number;
+  quadColumns: number;
+  quadRows: number;
+}
+
+export interface ChartCellState {
+  id: ChartCellId;
+  linkGroup: ChartLinkGroupId | null;
+  session: ChartSession;
+  chartSettings: ChartCellChartSettings;
+  priceScale: ChartCellPriceScale;
+  indicators: IndicatorDefinition[];
+}
+
+export interface ChartWorkspaceDocument {
+  schemaVersion: typeof CHART_WORKSPACE_SCHEMA_VERSION;
+  layout: ChartWorkspaceLayout;
+  activeCellId: ChartCellId;
+  maximizedCellId: ChartCellId | null;
+  layoutRatios: ChartWorkspaceLayoutRatios;
+  linkGroups: Record<ChartLinkGroupId, ChartLinkGroupSettings>;
+  cells: Record<ChartCellId, ChartCellState>;
+}
+
+export interface ChartWorkspaceRecord {
+  schemaVersion: typeof CHART_WORKSPACE_RECORD_SCHEMA_VERSION;
+  id: ChartWorkspaceId;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  document: ChartWorkspaceDocument;
+}
+
+export interface ChartWorkspaceSummary {
+  id: ChartWorkspaceId;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  layout: ChartWorkspaceLayout;
+}
+
+export interface ChartWorkspaceLibrarySnapshot {
+  activeWorkspaceId: ChartWorkspaceId;
+  workspaces: ChartWorkspaceRecord[];
+}
+
+export const DEFAULT_CHART_LINK_GROUP_SETTINGS: ChartLinkGroupSettings = Object.freeze({
+  market: true,
+  interval: false,
+  crosshair: true,
+  timeRange: true,
+});
+
+export const DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS: ChartWorkspaceLayoutRatios = Object.freeze({
+  splitVertical: 0.5,
+  splitHorizontal: 0.5,
+  quadColumns: 0.5,
+  quadRows: 0.5,
+});
+
+export const CHART_WORKSPACE_LAYOUTS: readonly ChartWorkspaceLayout[] = [
+  "single",
+  "split-vertical",
+  "split-horizontal",
+  "quad",
+];
+
+export const CHART_WORKSPACE_TEMPLATE_IDS: readonly ChartWorkspaceTemplateId[] = [
+  ...CHART_WORKSPACE_LAYOUTS,
+];
+
+export function visibleCellIds(
+  layout: ChartWorkspaceLayout,
+  maximizedCellId: ChartCellId | null = null,
+): ChartCellId[] {
+  if (maximizedCellId) return [maximizedCellId];
+  if (layout === "single") return ["cell-1"];
+  if (layout === "split-vertical" || layout === "split-horizontal") {
+    return ["cell-1", "cell-2"];
+  }
+  return [...CHART_CELL_IDS];
+}

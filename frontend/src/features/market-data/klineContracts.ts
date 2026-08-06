@@ -214,6 +214,11 @@ export type PatchCacheTick = (
   meta: FeedCacheMeta,
 ) => void;
 
+export type KlineStreamFactory = (
+  series: Pick<MarketSeries, "exchange" | "marketType" | "symbol">,
+  options?: KlineStreamOptions,
+) => KlineStreamController;
+
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
   foregroundPreloadGate?: ForegroundPreloadGate | null;
@@ -224,6 +229,7 @@ export interface SeriesDataFeedConfig {
   commitMergedChartData?: CommitChartData;
   commitPatchedChartData?: CommitChartData;
   patchCacheTick?: PatchCacheTick;
+  streamFactory?: KlineStreamFactory | null;
 }
 
 export interface AppliedKlineResult extends KlineFetchResult {

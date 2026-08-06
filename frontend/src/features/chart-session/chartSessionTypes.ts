@@ -159,6 +159,10 @@ export type CreateCustomIntervalResult =
 
 export interface UseChartSessionOptions {
   chartSurfaceActions?: Pick<ChartSurfaceActions, "getVisibleRange"> | null;
+  initialSession?: Partial<ChartSession> | null;
+  controlledSession?: ChartSession | null;
+  onSessionChange?: ((session: ChartSession) => void) | null;
+  visibleRangeScope?: string | null;
 }
 
 export interface ChartSessionView {

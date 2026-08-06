@@ -149,6 +149,7 @@ interface UseChartDataRuntimeOptions {
   symbol: SymbolCode;
   interval: IntervalString;
   onIndicatorWindowMeta?: (meta: ChartDataCommitMeta) => void;
+  windowRegistry?: SeriesWindowRegistry | null;
 }
 
 export interface ChartDataRuntime {
@@ -252,6 +253,7 @@ export function useChartDataRuntime({
   symbol,
   interval,
   onIndicatorWindowMeta,
+  windowRegistry: configuredWindowRegistry,
 }: UseChartDataRuntimeOptions): ChartDataRuntime {
   const [chartData, setChartData] = useState<KlineBar[]>([]);
   const chartDataRef = useRef<KlineBar[]>([]);
@@ -273,7 +275,7 @@ export function useChartDataRuntime({
   if (windowRegistryRef.current == null) {
     windowRegistryRef.current = new SeriesWindowRegistry({ maxBars: MAX_SERIES_BARS });
   }
-  const windowRegistry = windowRegistryRef.current;
+  const windowRegistry = configuredWindowRegistry || windowRegistryRef.current;
   const chartDataVersionRef = useRef(0);
   const chartDataCommitMetaRef = useRef<ChartDataCommitMeta | null>(null);
   const pendingInitialHistoryRef = useRef<PendingInitialSeries | null>(null);

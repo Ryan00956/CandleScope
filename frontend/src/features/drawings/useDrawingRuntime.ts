@@ -80,11 +80,26 @@ export function shouldSynchronizeDrawingVisibility(
   return previous === null ? next : previous !== next;
 }
 
+export function indicatorDrawingScopeKeys(
+  drawingScopeBase: string,
+  indicatorId: string | null | undefined,
+): string[] {
+  const base = drawingScopeBase.trim();
+  const id = indicatorId?.trim() || "";
+  if (!base || !id) return [];
+  return [
+    `${base}__separate-${id}`,
+    `${base}__volume-${id}`,
+  ];
+}
+
 export function useDrawingRuntime({
   chartSurfaceActions,
+  drawingScopeBase,
   session,
 }: {
   chartSurfaceActions: ChartSurfaceActions | null | undefined;
+  drawingScopeBase?: string | null;
   session: ChartSessionRuntime | null | undefined;
 }): DrawingRuntime {
   const toolState = useDrawingToolState();
@@ -123,11 +138,14 @@ export function useDrawingRuntime({
 
   const handleIndicatorRemoved = useCallback((indicatorId: string | null | undefined) => {
     const sessionView = session?.view;
-    if (!sessionView || !indicatorId) return;
-    const storageKeyBase = `${sessionView.exchange}:${sessionView.marketType}:${sessionView.symbol}`;
-    clearDrawingScopeAuthoritatively(`${storageKeyBase}-separate-${indicatorId}`);
-    clearDrawingScopeAuthoritatively(`${storageKeyBase}-volume-${indicatorId}`);
-  }, [session]);
+    const storageKeyBase = drawingScopeBase?.trim()
+      || (sessionView
+        ? `${sessionView.exchange}:${sessionView.marketType}:${sessionView.symbol}`
+        : "");
+    for (const scopeKey of indicatorDrawingScopeKeys(storageKeyBase, indicatorId)) {
+      clearDrawingScopeAuthoritatively(scopeKey);
+    }
+  }, [drawingScopeBase, session]);
 
   const actions: DrawingRuntimeActions = {
     ...toolState.actions,

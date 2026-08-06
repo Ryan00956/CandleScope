@@ -37,11 +37,14 @@ function buildVisibleRangeStorageKey(
   interval: IntervalString,
   marketType: MarketType = "spot",
   exchange: ExchangeId = "binance",
+  scope: string | null = null,
 ): string {
   const canonicalInterval = canonicalizeIntervalValue(interval);
-  return canonicalInterval
+  const identity = canonicalInterval
     ? `${exchange}::${marketType}::${symbol}::${canonicalInterval}`
     : "";
+  const normalizedScope = String(scope || "").trim();
+  return identity && normalizedScope ? `${normalizedScope}::${identity}` : identity;
 }
 
 function persistVisibleRanges(ranges: Record<string, unknown>): void {
@@ -87,11 +90,12 @@ export function saveVisibleRangeForInterval(
   marketType: MarketType = "spot",
   exchange: ExchangeId = "binance",
   dataMeta: unknown = null,
+  scope: string | null = null,
 ): void {
   void dataMeta;
   const rangeRecord = isRecord(range) ? range : {};
   const normalized = normalizeVisibleRange({ ...rangeRecord, savedAt: Date.now() });
-  const storageKey = buildVisibleRangeStorageKey(symbol, interval, marketType, exchange);
+  const storageKey = buildVisibleRangeStorageKey(symbol, interval, marketType, exchange, scope);
   if (!symbol || !storageKey || !normalized) return;
   const ranges = loadVisibleRanges();
   ranges[storageKey] = normalized;
@@ -103,6 +107,7 @@ export function getVisibleRangeForInterval(
   interval: IntervalString,
   marketType: MarketType = "spot",
   exchange: ExchangeId = "binance",
+  scope: string | null = null,
 ): VisibleRangeSnapshot | null {
   const canonicalInterval = canonicalizeIntervalValue(interval);
   if (!symbol || !canonicalInterval) return null;
@@ -112,12 +117,27 @@ export function getVisibleRangeForInterval(
     canonicalInterval,
     marketType,
     exchange,
+    scope,
   );
   if (Object.prototype.hasOwnProperty.call(ranges, canonicalKey)) {
     return normalizeVisibleRange(ranges[canonicalKey]);
   }
 
-  const identityPrefix = `${exchange}::${marketType}::${symbol}::`;
+  if (scope) {
+    const legacyKey = buildVisibleRangeStorageKey(
+      symbol,
+      canonicalInterval,
+      marketType,
+      exchange,
+    );
+    const legacy = normalizeVisibleRange(ranges[legacyKey]);
+    if (legacy) return legacy;
+  }
+
+  const normalizedScope = String(scope || "").trim();
+  const identityPrefix = normalizedScope
+    ? `${normalizedScope}::${exchange}::${marketType}::${symbol}::`
+    : `${exchange}::${marketType}::${symbol}::`;
   const rawInterval = String(interval).trim();
   const rawCompositeKey = `${identityPrefix}${rawInterval}`;
   const candidateKeys: string[] = [];

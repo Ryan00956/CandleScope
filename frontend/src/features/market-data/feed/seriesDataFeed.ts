@@ -14,6 +14,7 @@ import type {
   KlineFetchResult,
   KlineHistoryIntent,
   KlineStreamController,
+  KlineStreamFactory,
   KlineStreamOptions,
   MergeCacheData,
   PatchCacheTick,
@@ -711,6 +712,7 @@ export class SeriesDataFeed {
   private realtimeFenceBySeries: Map<SeriesKey, RealtimeFenceState>;
   private requestDemandBySeries: Map<SeriesKey, KlineRequestDemand>;
   private foregroundPreloadGate: ForegroundPreloadGate | null;
+  private streamFactory: KlineStreamFactory | null;
 
   constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
@@ -740,6 +742,7 @@ export class SeriesDataFeed {
     this.realtimeFenceBySeries = new Map();
     this.requestDemandBySeries = new Map();
     this.foregroundPreloadGate = null;
+    this.streamFactory = null;
     this.configure(config);
   }
 
@@ -747,6 +750,9 @@ export class SeriesDataFeed {
     this.api = config.api || this.api || null;
     if (config.foregroundPreloadGate !== undefined) {
       this.foregroundPreloadGate = config.foregroundPreloadGate;
+    }
+    if (config.streamFactory !== undefined) {
+      this.streamFactory = config.streamFactory;
     }
     this.canRequestSeries = config.canRequestSeries || this.canRequestSeries || (() => true);
     this.getActiveSeries = config.getActiveSeries || this.getActiveSeries || (() => null);
@@ -1034,6 +1040,7 @@ export class SeriesDataFeed {
     options: KlineStreamOptions = {},
   ): KlineStreamController {
     if (!this.isSeriesRequestAllowed(series)) return disabledStreamController;
+    if (this.streamFactory) return this.streamFactory(series, options);
     const api = this.resolveSyncApi();
     if (typeof api.getMultiStreamUrl !== "function") {
       throw new Error("SeriesDataFeed API adapter must provide getMultiStreamUrl for subscribeBars");

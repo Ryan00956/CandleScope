@@ -4,7 +4,7 @@
 
 ## Public Contract
 
-`useDrawingRuntime({ chartSurfaceActions, session })` exposes:
+`useDrawingRuntime({ chartSurfaceActions, drawingScopeBase?, session })` exposes:
 
 ```ts
 {

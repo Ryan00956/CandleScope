@@ -56,15 +56,24 @@ function normalizePaneOrder(value: unknown): string[] {
   return normalized;
 }
 
-export function loadPaneOrder(): string[] {
+function paneOrderStorageKey(scope?: string | null): string {
+  const normalizedScope = typeof scope === "string" ? scope.trim() : "";
+  return normalizedScope ? `${PANE_ORDER_KEY}:${normalizedScope}` : PANE_ORDER_KEY;
+}
+
+export function loadPaneOrder(scope?: string | null): string[] {
   try {
-    const raw = localStorage.getItem(PANE_ORDER_KEY);
+    const raw = localStorage.getItem(paneOrderStorageKey(scope))
+      || (scope ? localStorage.getItem(PANE_ORDER_KEY) : null);
     return raw ? normalizePaneOrder(JSON.parse(raw)) : [];
   } catch {
     return [];
   }
 }
 
-export function savePaneOrder(order: unknown): void {
-  localStorage.setItem(PANE_ORDER_KEY, JSON.stringify(normalizePaneOrder(order)));
+export function savePaneOrder(order: unknown, scope?: string | null): void {
+  localStorage.setItem(
+    paneOrderStorageKey(scope),
+    JSON.stringify(normalizePaneOrder(order)),
+  );
 }

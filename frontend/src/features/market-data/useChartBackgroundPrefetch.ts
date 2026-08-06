@@ -196,7 +196,7 @@ export function useChartBackgroundPrefetch({
   nativeIntervals,
   hasCache,
   seriesDataFeed,
-  enabled = true,
+  enabled,
   priorityGate,
   isForegroundBusy,
 }: UseChartBackgroundPrefetchOptions & {

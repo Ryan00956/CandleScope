@@ -612,6 +612,7 @@ test("formal HEDGE soak binds both exact public/L2 archives and one simulation m
     symbol: "BTCUSDT",
     secondarySymbol: "ETHUSDT",
     interval: "1m",
+    timeDisclosurePolicy: "HIDE_ALL",
     requestedStartMs: rangeStartMs + 200 * 60_000,
     forwardCacheMs: 2_592_000_000,
     warmupBars: 200,

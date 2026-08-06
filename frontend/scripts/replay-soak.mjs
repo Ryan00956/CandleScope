@@ -191,6 +191,7 @@ export function selectFormalV2HedgeTrainingPlan(fixture) {
     symbol: "BTCUSDT",
     secondarySymbol: "ETHUSDT",
     interval: "1m",
+    timeDisclosurePolicy: "HIDE_ALL",
     requestedStartMs,
     forwardCacheMs: FORMAL_V2_FORWARD_CACHE_MS,
     warmupBars: FORMAL_V2_WARMUP_BARS,
@@ -666,6 +667,32 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
     timeoutMs,
     "formal replay.v2 requested start selection",
   );
+  const timeDisclosurePolicy = await evaluate(cdp, `(() => {
+    const select = document.querySelector('[data-training-field="time-disclosure-policy"]');
+    if (!(select instanceof HTMLSelectElement)) {
+      return { configured: false, reason: "time-disclosure-control-missing" };
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    if (typeof setter !== "function") {
+      return { configured: false, reason: "time-disclosure-setter-missing" };
+    }
+    setter.call(select, ${JSON.stringify(plan.timeDisclosurePolicy)});
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return { configured: true, value: select.value };
+  })()`, { userGesture: true });
+  assert(
+    timeDisclosurePolicy?.configured === true
+      && timeDisclosurePolicy.value === plan.timeDisclosurePolicy,
+    "formal replay.v2 time disclosure selection failed",
+    timeDisclosurePolicy,
+  );
+  await waitForValue(
+    cdp,
+    `document.querySelector('[data-training-field="time-disclosure-policy"]')?.value === ${JSON.stringify(plan.timeDisclosurePolicy)}`,
+    timeoutMs,
+    "formal replay.v2 time disclosure selection",
+  );
   const horizonValue = String(plan.forwardCacheMs);
   const horizon = await evaluate(cdp, `(() => {
     const input = document.querySelector('[data-training-field="forward-cache-ms"]');
@@ -697,6 +724,7 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
   return {
     requestedStartMs: plan.requestedStartMs,
     start,
+    timeDisclosurePolicy,
     forwardCacheMs: plan.forwardCacheMs,
     horizon,
   };
@@ -2940,6 +2968,7 @@ async function main() {
     assert(
       v2CreatePayload?.protocol === REPLAY_TRAINING_PROTOCOL
         && v2CreatePayload?.position_mode === "HEDGE"
+        && v2CreatePayload?.time_disclosure_policy === formalTrainingPlan.timeDisclosurePolicy
         && v2CreatePayload?.account_data_mode === "DETERMINISTIC_SIMULATION"
         && v2CreatePayload?.book_mode === "BOOK_ASSISTED_REQUIRED"
         && v2CreatePayload?.funding_mode === "HISTORICAL_EXACT"
@@ -2964,6 +2993,7 @@ async function main() {
         && v2MarketPayload?.symbol === formalTrainingPlan.symbol
         && v2MarketPayload?.base_interval === formalTrainingPlan.interval
         && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
+        && v2CreatePayload?.time_disclosure_policy === formalTrainingPlan.timeDisclosurePolicy
         && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
         && v2MarketPayload?.hedge_public_history_ref?.archive_id
           === formalTrainingPlan.publicRefs.BTCUSDT.archive_id

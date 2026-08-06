@@ -234,6 +234,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <label>
           时间披露
           <select
+            data-training-field="time-disclosure-policy"
             value={draft.timeDisclosurePolicy}
             onChange={(event) => patchDraft(runtime, {
               timeDisclosurePolicy: event.target.value as TrainingRunDraft["timeDisclosurePolicy"],

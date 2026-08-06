@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -33,8 +34,6 @@ from app.replay.training.account import (
 )
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import (
-    HEDGE_ACCOUNT_FIDELITY,
-    HEDGE_INSURANCE_ADL_FIDELITY,
     POLICY_MUTATION_VALUES,
     ReplayV2CommandType,
     TrainingRunCreateRequest,
@@ -45,6 +44,7 @@ from tests.fixtures.replay.bar_builder_fakes import (
 )
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, request
 from tests.fixtures.replay.fakes import FixtureIdentity, make_bar
+from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -861,16 +861,22 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
 async def _risk_service(path: Path) -> ReplayService:
     repository = ImmutableReplayHistoryFake()
     prices = ["100", "101", "102", "103", "104", "50"] + ["50"] * 14
-    repository.add_rows(
-        FixtureIdentity("binance", "spot", "BTCUSDT"),
-        "1m",
-        [
-            make_bar(START_MS + index * INTERVAL_MS, price=price)
-            for index, price in enumerate(prices)
-        ],
-    )
+    rows = [
+        make_bar(START_MS + index * INTERVAL_MS, price=price)
+        for index, price in enumerate(prices)
+    ]
+    for market_type in ("spot", "futures"):
+        repository.add_rows(
+            FixtureIdentity("binance", market_type, "BTCUSDT"),
+            "1m",
+            rows,
+        )
     service = ReplayService(
-        settings=replay_settings(path),
+        settings=replace(
+            replay_settings(path),
+            replay_historical_book_enabled=True,
+            replay_historical_book_max_archive_bytes=64 * 1024 * 1024,
+        ),
         store=ReplaySQLiteStore(path, now_ms=lambda: NOW_MS),
         repository=repository,
         now_ms=lambda: NOW_MS,
@@ -962,35 +968,22 @@ async def test_cross_hedge_liquidation_closes_and_records_each_leg(
 ) -> None:
     service = await _risk_service(tmp_path / "hedge-liquidation.db")
     try:
-        request_payload = _sandbox_request(
-            await _request(service),
-            initial_equity="100",
-        ).to_dict()
-        request_payload.update(
-            {
-                "position_mode": "HEDGE",
-                "account_data_mode": "DETERMINISTIC_SIMULATION",
-                "account_history_ref": None,
-                "hedge_public_history_ref": {
-                    "schema_version": "replay.hedge-public-history-ref.v1",
-                    "archive_id": "phase1-public-btcusdt-v1",
-                    "dataset_epoch": "sha256:" + "2" * 64,
-                    "checksum_sha256": "sha256:" + "3" * 64,
-                },
-                "simulation_manifest_ref": {
-                    "schema_version": "replay.hedge-simulation-manifest-ref.v1",
-                    "manifest_id": "phase0-btcusdt-v1",
-                    "dataset_epoch": "sha256:" + "1" * 64,
-                    "checksum_sha256": "sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236",
-                    "contract_hash": "sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b",
-                    "model_version": "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1",
-                },
-                "account_fidelity": HEDGE_ACCOUNT_FIDELITY,
-                "insurance_adl_fidelity": HEDGE_INSURANCE_ADL_FIDELITY,
-            }
+        request_value = replace(
+            _sandbox_request(
+                await _request(service),
+                initial_equity="100",
+            ),
+            market_type="futures",
+        )
+        request_value = await prepare_hedge_request(
+            service,
+            request_value,
+            root=tmp_path,
+            prefix="phase3-hedge-risk",
+            mark_prices=["104", "50"] + ["50"] * 11,
         )
         created = await service.training.create_run(  # type: ignore[union-attr]
-            TrainingRunCreateRequest.from_dict(request_payload)
+            request_value
         )
         run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])
@@ -1037,7 +1030,9 @@ async def test_cross_hedge_liquidation_closes_and_records_each_leg(
             command_type=ReplayV2CommandType.STEP_BASE,
             payload={"count": 1},
         )
-        assert crashed["data"]["simulated_account_liquidations"] == 1
+        assert [
+            item["event_phase"] for item in crashed["data"]["stable_order"]
+        ] == [30, 40, 20]
         portfolio = (
             await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
         )["portfolio"]

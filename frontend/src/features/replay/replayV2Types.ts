@@ -378,6 +378,7 @@ export interface ReplayTrainingContractPortfolio {
   readonly next_funding_time_ms: number | null;
   readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly hedge_state: Readonly<Record<string, ReplayV2Json>>;
+  readonly hedge_inputs: ReplayHedgeInputView | null;
   readonly account_history: ReplayAccountHistoryProjection;
   readonly liquidation_channels: {
     readonly simulated_account: ReplayLiquidationChannelProjection;
@@ -1147,6 +1148,23 @@ export function parseReplayAccountHistoryRef(
   };
 }
 
+export interface ReplayHedgeInputView {
+  readonly schema_version: "replay.hedge-input-view.v1";
+  readonly status: "ACTIVE" | "PAUSED" | "QUARANTINED";
+  readonly degraded_reason: string | null;
+  readonly input_proof_hash: `sha256:${string}`;
+  readonly bound_range_start_ms: number;
+  readonly bound_range_end_ms: number;
+  readonly public: Readonly<Record<string, ReplayV2Json>>;
+  readonly simulation: Readonly<Record<string, ReplayV2Json>>;
+  readonly projections: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly auditor: {
+    readonly status: "NOT_RUN" | "PASS" | "FAIL";
+    readonly proof_hash: `sha256:${string}` | null;
+    readonly differences: readonly Readonly<Record<string, ReplayV2Json>>[];
+  };
+}
+
 export function parseReplayHedgePublicHistoryRef(
   value: unknown,
   fieldName = "hedge_public_history_ref",
@@ -1462,6 +1480,180 @@ function parseReplayLiquidationChannels(
   };
 }
 
+function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null {
+  if (value === null) return null;
+  const input = exactObject(value, "portfolio.hedge_inputs", [
+    "schema_version",
+    "status",
+    "degraded_reason",
+    "input_proof_hash",
+    "bound_range_start_ms",
+    "bound_range_end_ms",
+    "public",
+    "simulation",
+    "projections",
+    "auditor",
+  ]);
+  if (input.schema_version !== "replay.hedge-input-view.v1") {
+    throw new TypeError("portfolio.hedge_inputs schema is unsupported");
+  }
+  const status = enumValue(
+    input.status,
+    ["ACTIVE", "PAUSED", "QUARANTINED"] as const,
+    "portfolio.hedge_inputs.status",
+  );
+  if (
+    input.degraded_reason !== null
+    && (typeof input.degraded_reason !== "string" || input.degraded_reason.length === 0)
+  ) {
+    throw new TypeError("portfolio.hedge_inputs.degraded_reason is invalid");
+  }
+  if (
+    (status === "ACTIVE" && input.degraded_reason !== null)
+    || (status !== "ACTIVE" && input.degraded_reason === null)
+  ) {
+    throw new TypeError("portfolio.hedge_inputs status and reason are inconsistent");
+  }
+  const rangeStart = timestamp(
+    input.bound_range_start_ms,
+    "portfolio.hedge_inputs.bound_range_start_ms",
+  );
+  const rangeEnd = timestamp(
+    input.bound_range_end_ms,
+    "portfolio.hedge_inputs.bound_range_end_ms",
+  );
+  if (rangeEnd < rangeStart) {
+    throw new TypeError("portfolio.hedge_inputs range is reversed");
+  }
+  const parseObjectReceipt = (
+    raw: unknown,
+    sourceKind: "public" | "simulation",
+  ): Readonly<Record<string, ReplayV2Json>> => {
+    const idField = sourceKind === "public" ? "archive_id" : "manifest_id";
+    const expected = sourceKind === "public"
+      ? [
+          "archive_id",
+          "generation",
+          "dataset_epoch",
+          "checksum_sha256",
+          "event_chain_tail",
+          "proof_hash",
+          "health",
+        ]
+      : [
+          "manifest_id",
+          "generation",
+          "dataset_epoch",
+          "checksum_sha256",
+          "contract_hash",
+          "model_version",
+          "proof_hash",
+          "health",
+        ];
+    const receipt = exactObject(
+      raw,
+      `portfolio.hedge_inputs.${sourceKind}`,
+      expected,
+    );
+    identifier(receipt[idField], `portfolio.hedge_inputs.${sourceKind}.${idField}`);
+    const generation = counter(
+      receipt.generation,
+      `portfolio.hedge_inputs.${sourceKind}.generation`,
+    );
+    if (generation < 1) {
+      throw new TypeError(`portfolio.hedge_inputs.${sourceKind}.generation must be positive`);
+    }
+    digest(receipt.dataset_epoch, `portfolio.hedge_inputs.${sourceKind}.dataset_epoch`);
+    digest(receipt.checksum_sha256, `portfolio.hedge_inputs.${sourceKind}.checksum_sha256`);
+    digest(receipt.proof_hash, `portfolio.hedge_inputs.${sourceKind}.proof_hash`);
+    enumValue(
+      receipt.health,
+      ["READY", "EVICTED", "QUARANTINED"] as const,
+      `portfolio.hedge_inputs.${sourceKind}.health`,
+    );
+    if (sourceKind === "public") {
+      digest(receipt.event_chain_tail, "portfolio.hedge_inputs.public.event_chain_tail");
+    } else {
+      digest(receipt.contract_hash, "portfolio.hedge_inputs.simulation.contract_hash");
+      identifier(receipt.model_version, "portfolio.hedge_inputs.simulation.model_version");
+    }
+    return jsonObject(receipt, `portfolio.hedge_inputs.${sourceKind}`);
+  };
+  if (!Array.isArray(input.projections) || input.projections.length !== 2) {
+    throw new TypeError("portfolio.hedge_inputs.projections must contain both sources");
+  }
+  const projections = input.projections.map((raw, index) => {
+    const field = `portfolio.hedge_inputs.projections[${index}]`;
+    const projection = exactObject(raw, field, [
+      "schema_version",
+      "source_kind",
+      "last_event_sequence",
+      "as_of_actual_time_ms",
+      "as_of_virtual_time_ms",
+      "state",
+      "input_chain_hash",
+      "component_hash",
+    ]);
+    if (projection.schema_version !== "replay.hedge-input-projection.v1") {
+      throw new TypeError(`${field}.schema_version is unsupported`);
+    }
+    enumValue(projection.source_kind, ["PUBLIC", "SIMULATION"] as const, `${field}.source_kind`);
+    counter(projection.last_event_sequence, `${field}.last_event_sequence`);
+    timestamp(projection.as_of_actual_time_ms, `${field}.as_of_actual_time_ms`);
+    timestamp(projection.as_of_virtual_time_ms, `${field}.as_of_virtual_time_ms`);
+    jsonObject(projection.state, `${field}.state`);
+    digest(projection.input_chain_hash, `${field}.input_chain_hash`);
+    digest(projection.component_hash, `${field}.component_hash`);
+    return jsonObject(projection, field);
+  });
+  const sourceKinds = projections.map((projection) => projection.source_kind);
+  if (sourceKinds[0] !== "PUBLIC" || sourceKinds[1] !== "SIMULATION") {
+    throw new TypeError("portfolio.hedge_inputs projections are not canonical");
+  }
+  const rawAuditor = exactObject(input.auditor, "portfolio.hedge_inputs.auditor", [
+    "status",
+    "proof_hash",
+    "differences",
+  ]);
+  const auditorStatus = enumValue(
+    rawAuditor.status,
+    ["NOT_RUN", "PASS", "FAIL"] as const,
+    "portfolio.hedge_inputs.auditor.status",
+  );
+  const auditorProof = rawAuditor.proof_hash === null
+    ? null
+    : digest(rawAuditor.proof_hash, "portfolio.hedge_inputs.auditor.proof_hash");
+  if (
+    (auditorStatus === "NOT_RUN" && auditorProof !== null)
+    || (auditorStatus !== "NOT_RUN" && auditorProof === null)
+    || !Array.isArray(rawAuditor.differences)
+  ) {
+    throw new TypeError("portfolio.hedge_inputs auditor is inconsistent");
+  }
+  return {
+    schema_version: "replay.hedge-input-view.v1",
+    status,
+    degraded_reason: input.degraded_reason as string | null,
+    input_proof_hash: digest(
+      input.input_proof_hash,
+      "portfolio.hedge_inputs.input_proof_hash",
+    ),
+    bound_range_start_ms: rangeStart,
+    bound_range_end_ms: rangeEnd,
+    public: parseObjectReceipt(input.public, "public"),
+    simulation: parseObjectReceipt(input.simulation, "simulation"),
+    projections,
+    auditor: {
+      status: auditorStatus,
+      proof_hash: auditorProof,
+      differences: rawAuditor.differences.map((item, index) => jsonObject(
+        item,
+        `portfolio.hedge_inputs.auditor.differences[${index}]`,
+      )),
+    },
+  };
+}
+
 export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
   if (
     typeof value === "object"
@@ -1506,6 +1698,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       "next_funding_time_ms",
       "liquidations",
       "hedge_state",
+      "hedge_inputs",
       "account_history",
       "liquidation_channels",
       "ledger",
@@ -1678,6 +1871,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         : counter(portfolio.next_funding_time_ms, "portfolio.next_funding_time_ms"),
       liquidations: objectArray(rawLiquidations, "portfolio.liquidations"),
       hedge_state: jsonObject(portfolio.hedge_state, "portfolio.hedge_state"),
+      hedge_inputs: parseReplayHedgeInputView(portfolio.hedge_inputs),
       account_history: accountHistory,
       liquidation_channels: liquidationChannels,
       ledger: jsonObject(portfolio.ledger, "portfolio.ledger"),

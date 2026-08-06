@@ -37,6 +37,13 @@ from .historical_book import (
     PreparedHistoricalBookBinding,
     bind_historical_book_archive,
 )
+from .hedge_inputs import (
+    HEDGE_INPUT_PROOF_SCHEMA_VERSION,
+    HedgeInputEvent,
+    PreparedHedgeInputBinding,
+    bind_hedge_inputs,
+    runtime_hedge_rule,
+)
 from .disclosure import project_public_time
 from .account import (
     CONFIGURED_FEE_FIDELITY,
@@ -951,6 +958,7 @@ class TrainingRunStore:
         source_fingerprint: str,
         historical_book_binding: PreparedHistoricalBookBinding | None = None,
         account_history_binding: PreparedAccountHistoryBinding | None = None,
+        hedge_input_binding: PreparedHedgeInputBinding | None = None,
         existing_shell: bool = False,
         preparation_id: str | None = None,
     ) -> Callable[[sqlite3.Connection, int], None]:
@@ -1290,6 +1298,39 @@ class TrainingRunStore:
                     binding=historical_book_binding,
                     bound_range_start_ms=actual_replay_start_ms,
                     bound_range_end_ms=actual_replay_end_ms,
+                    now_ms=now_ms,
+                )
+            if request.position_mode.value == "HEDGE":
+                if hedge_input_binding is None:
+                    raise TypeError(
+                        "HEDGE run is missing its verified public/simulation binding"
+                    )
+                bind_hedge_inputs(
+                    connection,
+                    run_id=run_id,
+                    track_id="track-1",
+                    source_kind=request.source_kind.value,
+                    settlement_asset=request.settlement_asset,
+                    binding=hedge_input_binding,
+                    bound_range_start_ms=hedge_input_binding.bound_range_start_ms,
+                    bound_range_end_ms=hedge_input_binding.bound_range_end_ms,
+                    virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    now_ms=now_ms,
+                )
+                self._apply_hedge_mark_projection(
+                    connection,
+                    run_id=run_id,
+                    now_ms=now_ms,
+                )
+                self._detect_contract_liquidations(
+                    connection,
+                    run_id=run_id,
+                    now_ms=now_ms,
+                    trigger_virtual_time_ms=int(cursor["virtual_time_ms"]),
+                )
+                self._refresh_contract_current_equity(
+                    connection,
+                    run_id=run_id,
                     now_ms=now_ms,
                 )
             start_time_known = request.start_mode.value == "MANUAL"
@@ -1903,6 +1944,539 @@ class TrainingRunStore:
             return stable_market_event_order(stable)
 
         return await self.base_store.run_extension_write(write)
+
+    @classmethod
+    def _apply_hedge_mark_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        now_ms: int,
+    ) -> None:
+        """Overlay the pinned HEDGE mark on every leg before risk evaluation."""
+
+        binding = connection.execute(
+            """
+            SELECT binding.status, projection.*
+            FROM replay_hedge_input_binding AS binding
+            JOIN replay_hedge_input_projection AS projection
+              ON projection.run_id = binding.run_id
+             AND projection.source_kind = 'PUBLIC'
+            WHERE binding.run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if binding is None or binding["status"] != "ACTIVE":
+            raise TrainingRunError(
+                "HEDGE_INPUT_PAUSED",
+                "pinned HEDGE public input is not active",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        try:
+            state = json.loads(str(binding["state_json"]))
+            projection_payload = {
+                "schema_version": "replay.hedge-input-projection.v1",
+                "source_kind": str(binding["source_kind"]),
+                "last_event_sequence": int(binding["last_event_sequence"]),
+                "as_of_actual_time_ms": int(binding["as_of_actual_time_ms"]),
+                "as_of_virtual_time_ms": int(binding["as_of_virtual_time_ms"]),
+                "state": state,
+                "input_chain_hash": str(binding["input_chain_hash"]),
+            }
+            if canonical_sha256(projection_payload) != binding["component_hash"]:
+                raise ValueError("HEDGE input projection hash is invalid")
+            mark_state = state["mark_index"]
+            mark = Decimal(str(mark_state["mark_price"]))
+            if mark <= 0:
+                raise ValueError("mark must be positive")
+        except (InvalidOperation, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "HEDGE_PINNED_MARK_UNAVAILABLE",
+                "pinned HEDGE mark is unavailable",
+                status_code=409,
+                details={"fallback_applied": False},
+            ) from exc
+        run = connection.execute(
+            """
+            SELECT initial_equity FROM replay_training_run WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        contract_account = connection.execute(
+            """
+            SELECT overlay_cash FROM replay_training_contract_account
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None or contract_account is None:
+            raise TypeError("HEDGE contract account is missing")
+        tracks = connection.execute(
+            """
+            SELECT * FROM replay_training_market_track
+            WHERE run_id = ? AND subscription_tier = 'FULL'
+            ORDER BY stable_ordinal, track_id
+            """,
+            (run_id,),
+        ).fetchall()
+        for track in tracks:
+            try:
+                position = json.loads(str(track["position_json"]))
+                account = json.loads(str(track["account_json"]))
+                orders = json.loads(str(track["open_orders_json"]))
+            except json.JSONDecodeError as exc:
+                raise TypeError("HEDGE track projection JSON is invalid") from exc
+            if (
+                not isinstance(position, dict)
+                or position.get("position_mode") != "HEDGE"
+                or not isinstance(account, dict)
+                or not isinstance(orders, list)
+            ):
+                raise TypeError("HEDGE track projection is invalid")
+            rule_row = connection.execute(
+                """
+                SELECT revision, rule_json FROM replay_training_instrument_rule
+                WHERE run_id = ? AND track_id = ?
+                  AND effective_virtual_time_ms <= COALESCE(?, 0)
+                ORDER BY effective_virtual_time_ms DESC, revision DESC LIMIT 1
+                """,
+                (run_id, track["track_id"], track["virtual_time_ms"]),
+            ).fetchone()
+            if rule_row is None:
+                raise TypeError("HEDGE pinned instrument rule is missing")
+            rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
+            total_unrealized = Decimal(0)
+            total_initial = Decimal(0)
+            for leg_name, side in (("long", "LONG"), ("short", "SHORT")):
+                leg = position.get(leg_name)
+                if not isinstance(leg, dict):
+                    raise TypeError("HEDGE position leg is missing")
+                quantity = abs(Decimal(str(leg.get("quantity", "0"))))
+                entry_raw = leg.get("entry_price")
+                entry = None if entry_raw is None else Decimal(str(entry_raw))
+                contract_size = Decimal(rule.contract_size)
+                notional = quantity * mark * contract_size
+                unrealized = (
+                    Decimal(0)
+                    if quantity == 0 or entry is None
+                    else (
+                        (mark - entry) * quantity * contract_size
+                        if side == "LONG"
+                        else (entry - mark) * quantity * contract_size
+                    )
+                )
+                leverage = Decimal(str(leg.get("leverage", rule.max_leverage)))
+                initial = rule.initial_margin(notional, leverage)
+                total_unrealized += unrealized
+                total_initial += initial
+                leg.update(
+                    {
+                        "mark_price": decimal_to_string(
+                            mark, field_name="pinned hedge mark"
+                        ),
+                        "notional": decimal_to_string(
+                            notional, field_name="pinned hedge notional"
+                        ),
+                        "unrealized_pnl": decimal_to_string(
+                            unrealized, field_name="pinned hedge unrealized pnl"
+                        ),
+                    }
+                )
+            reserved = sum(
+                (
+                    Decimal(str(order.get("reserved_margin", "0")))
+                    for order in orders
+                    if isinstance(order, Mapping)
+                    and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                    and order.get("reduce_only") is not True
+                ),
+                Decimal(0),
+            )
+            cash = Decimal(str(account.get("cash_balance", run["initial_equity"])))
+            equity = cash + total_unrealized + Decimal(
+                str(contract_account["overlay_cash"])
+            )
+            account.update(
+                {
+                    "equity": decimal_to_string(
+                        equity, field_name="pinned hedge equity"
+                    ),
+                    "available_equity": decimal_to_string(
+                        equity - total_initial - reserved,
+                        field_name="pinned hedge available equity",
+                    ),
+                    "margin_used": decimal_to_string(
+                        total_initial, field_name="pinned hedge initial margin"
+                    ),
+                    "reserved_margin": decimal_to_string(
+                        reserved, field_name="pinned hedge reserved margin"
+                    ),
+                    "unrealized_pnl": decimal_to_string(
+                        total_unrealized,
+                        field_name="pinned hedge account unrealized pnl",
+                    ),
+                }
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_market_track
+                SET position_json = ?, account_json = ?, public_price = ?,
+                    updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (
+                    canonical_json(position),
+                    canonical_json(account),
+                    decimal_to_string(mark, field_name="pinned public price"),
+                    now_ms,
+                    run_id,
+                    track["track_id"],
+                ),
+            )
+
+    async def apply_hedge_input_events(
+        self,
+        run_id: str,
+        *,
+        events: Sequence[HedgeInputEvent],
+        virtual_time_ms: int,
+    ) -> tuple[StableMarketEvent, ...]:
+        """Apply one ordered HEDGE input phase with durable idempotency."""
+
+        materialized = tuple(events)
+        if not materialized:
+            return ()
+
+        def write(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
+            binding = connection.execute(
+                "SELECT * FROM replay_hedge_input_binding WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if binding is None or binding["status"] != "ACTIVE":
+                raise TrainingRunError(
+                    "HEDGE_INPUT_PAUSED",
+                    "pinned HEDGE inputs are not active",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            now_ms = self.base_store._validated_now_ms()
+            stable: list[StableMarketEvent] = []
+            for event in materialized:
+                stable.append(
+                    StableMarketEvent(
+                        actual_event_time_ms=event.event_time_ms,
+                        event_phase=event.event_phase,
+                        market_track_stable_id=event.stable_track_id,
+                        source_sequence=event.event_sequence,
+                    )
+                )
+                existing = connection.execute(
+                    """
+                    SELECT 1 FROM replay_hedge_input_applied_event
+                    WHERE run_id = ? AND source_kind = ? AND event_sequence = ?
+                    """,
+                    (run_id, event.source_kind, event.event_sequence),
+                ).fetchone()
+                if existing is not None:
+                    continue
+                projection = connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_input_projection
+                    WHERE run_id = ? AND source_kind = ?
+                    """,
+                    (run_id, event.source_kind),
+                ).fetchone()
+                if projection is None:
+                    raise TrainingRunError(
+                        "HEDGE_INPUT_PROJECTION_MISSING",
+                        "HEDGE input projection is missing",
+                        status_code=409,
+                        details={"fallback_applied": False},
+                    )
+                expected = int(projection["last_event_sequence"]) + 1
+                if event.event_sequence != expected:
+                    raise TrainingRunError(
+                        "HEDGE_INPUT_EVENT_GAP",
+                        "HEDGE input event sequence is not contiguous",
+                        status_code=409,
+                        details={
+                            "expected_sequence": expected,
+                            "actual_sequence": event.event_sequence,
+                            "fallback_applied": False,
+                        },
+                    )
+                if event.previous_hash != projection["input_chain_hash"]:
+                    raise TrainingRunError(
+                        "HEDGE_INPUT_EVENT_CHAIN_MISMATCH",
+                        "HEDGE input event no longer follows the pinned chain",
+                        status_code=409,
+                        details={"fallback_applied": False},
+                    )
+                state = json.loads(str(projection["state_json"]))
+                if not isinstance(state, dict):
+                    raise TypeError("HEDGE input projection state is invalid")
+                if event.event_kind == "RULE":
+                    state["rule"] = dict(event.payload)
+                    track = connection.execute(
+                        """
+                        SELECT track_id, source_kind FROM replay_training_market_track
+                        WHERE run_id = ? AND subscription_tier = 'FULL'
+                        ORDER BY stable_ordinal, track_id LIMIT 1
+                        """,
+                        (run_id,),
+                    ).fetchone()
+                    if track is None:
+                        raise TypeError("HEDGE FULL track is missing")
+                    revision = int(
+                        connection.execute(
+                            """
+                            SELECT COALESCE(MAX(revision), 0) + 1
+                            FROM replay_training_instrument_rule
+                            WHERE run_id = ? AND track_id = ?
+                            """,
+                            (run_id, track["track_id"]),
+                        ).fetchone()[0]
+                    )
+                    rule = runtime_hedge_rule(
+                        event.payload,
+                        track_id=str(track["track_id"]),
+                        source_kind=str(track["source_kind"]),
+                        effective_virtual_time_ms=virtual_time_ms,
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO replay_training_instrument_rule(
+                            run_id, track_id, revision,
+                            effective_virtual_time_ms, rule_json, rule_hash,
+                            fidelity, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?,
+                                  'PINNED_HISTORICAL_EXCHANGE_RULE', ?)
+                        """,
+                        (
+                            run_id,
+                            track["track_id"],
+                            revision,
+                            virtual_time_ms,
+                            canonical_json(rule),
+                            canonical_sha256(rule),
+                            now_ms,
+                        ),
+                    )
+                elif event.event_kind == "FEE_POLICY":
+                    state["fee_policy"] = dict(event.payload)
+                    revision = int(
+                        connection.execute(
+                            """
+                            SELECT COALESCE(MAX(revision), 0) + 1
+                            FROM replay_training_fee_policy WHERE run_id = ?
+                            """,
+                            (run_id,),
+                        ).fetchone()[0]
+                    )
+                    policy = {
+                        "schema_version": "replay.training.fee-policy.v1",
+                        "run_id": run_id,
+                        "revision": revision,
+                        "effective_virtual_time_ms": virtual_time_ms,
+                        **dict(event.payload),
+                        "fidelity": "PINNED_HISTORICAL_FEE_POLICY",
+                    }
+                    connection.execute(
+                        """
+                        INSERT INTO replay_training_fee_policy(
+                            run_id, revision, effective_virtual_time_ms,
+                            maker_fee_bps, taker_fee_bps, policy_hash,
+                            fidelity, reason, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?,
+                                  'PINNED_HISTORICAL_FEE_POLICY',
+                                  'HEDGE public input event', ?)
+                        """,
+                        (
+                            run_id,
+                            revision,
+                            virtual_time_ms,
+                            event.payload["maker_fee_bps"],
+                            event.payload["taker_fee_bps"],
+                            canonical_sha256(policy),
+                            now_ms,
+                        ),
+                    )
+                elif event.event_kind == "MARK_INDEX":
+                    state["mark_index"] = dict(event.payload)
+                elif event.event_kind == "FUNDING":
+                    state["funding"] = dict(event.payload)
+                elif event.event_kind == "INSURANCE_INPUT":
+                    state["insurance"] = dict(event.payload)
+                    connection.execute(
+                        """
+                        UPDATE replay_training_insurance_fund
+                        SET current_balance = ?, ledger_tail_hash = ?,
+                            revision = revision + 1, updated_at_ms = ?
+                        WHERE run_id = ?
+                        """,
+                        (
+                            event.payload["balance_after"],
+                            event.event_hash,
+                            now_ms,
+                            run_id,
+                        ),
+                    )
+                elif event.event_kind == "ADL_COHORT_INPUT":
+                    snapshots = dict(state.get("adl_snapshots", {}))
+                    snapshots[str(event.payload["symbol"])] = dict(event.payload)
+                    state["adl_snapshots"] = snapshots
+                else:
+                    raise TrainingRunError(
+                        "HEDGE_INPUT_EVENT_UNSUPPORTED",
+                        "HEDGE input event kind is unsupported",
+                        status_code=409,
+                    )
+                projection_payload = {
+                    "schema_version": "replay.hedge-input-projection.v1",
+                    "source_kind": event.source_kind,
+                    "last_event_sequence": event.event_sequence,
+                    "as_of_actual_time_ms": event.event_time_ms,
+                    "as_of_virtual_time_ms": virtual_time_ms,
+                    "state": state,
+                    "input_chain_hash": event.event_hash,
+                }
+                connection.execute(
+                    """
+                    UPDATE replay_hedge_input_projection
+                    SET last_event_sequence = ?, as_of_actual_time_ms = ?,
+                        as_of_virtual_time_ms = ?, state_json = ?,
+                        input_chain_hash = ?, component_hash = ?, updated_at_ms = ?
+                    WHERE run_id = ? AND source_kind = ?
+                    """,
+                    (
+                        event.event_sequence,
+                        event.event_time_ms,
+                        virtual_time_ms,
+                        canonical_json(state),
+                        event.event_hash,
+                        canonical_sha256(projection_payload),
+                        now_ms,
+                        run_id,
+                        event.source_kind,
+                    ),
+                )
+                applied_hash = canonical_sha256(
+                    {
+                        "run_id": run_id,
+                        "virtual_time_ms": virtual_time_ms,
+                        "source_kind": event.source_kind,
+                        "source_id": event.source_id,
+                        "event_sequence": event.event_sequence,
+                        "event_hash": event.event_hash,
+                        "payload": dict(event.payload),
+                    }
+                )
+                connection.execute(
+                    """
+                    INSERT INTO replay_hedge_input_applied_event(
+                        run_id, source_kind, event_sequence, event_time_ms,
+                        event_phase, event_kind, component_sequence,
+                        applied_virtual_time_ms,
+                        source_event_hash, payload_json,
+                        applied_payload_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        event.source_kind,
+                        event.event_sequence,
+                        event.event_time_ms,
+                        event.event_phase,
+                        event.event_kind,
+                        event.component_sequence,
+                        virtual_time_ms,
+                        event.event_hash,
+                        canonical_json(event.payload),
+                        applied_hash,
+                        now_ms,
+                    ),
+                )
+            return stable_market_event_order(stable)
+
+        return await self.base_store.run_extension_write(write)
+
+    async def pending_hedge_input_global_events(
+        self, run_id: str
+    ) -> tuple[StableMarketEvent, ...]:
+        def read(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
+            rows = connection.execute(
+                """
+                SELECT applied.*,
+                       CASE applied.source_kind
+                           WHEN 'PUBLIC' THEN binding.public_archive_id
+                           ELSE binding.simulation_manifest_id
+                       END AS source_id
+                FROM replay_hedge_input_applied_event AS applied
+                JOIN replay_hedge_input_binding AS binding USING(run_id)
+                LEFT JOIN replay_training_global_event AS global_event
+                  ON global_event.run_id = applied.run_id
+                 AND global_event.track_id =
+                     'hedge-' || lower(applied.source_kind) || ':' ||
+                     CASE applied.source_kind
+                         WHEN 'PUBLIC' THEN binding.public_archive_id
+                         ELSE binding.simulation_manifest_id
+                     END
+                 AND global_event.source_sequence = applied.event_sequence
+                WHERE applied.run_id = ? AND global_event.global_sequence IS NULL
+                ORDER BY applied.event_time_ms, applied.event_phase,
+                         applied.source_kind, applied.event_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+            return tuple(
+                StableMarketEvent(
+                    actual_event_time_ms=int(row["event_time_ms"]),
+                    event_phase=int(row["event_phase"]),
+                    market_track_stable_id=(
+                        f"hedge-{str(row['source_kind']).lower()}:{row['source_id']}"
+                    ),
+                    source_sequence=int(row["event_sequence"]),
+                )
+                for row in rows
+            )
+
+        return await self.base_store.run_extension_read(read)
+
+    async def finalize_hedge_inputs(
+        self,
+        run_id: str,
+        *,
+        risk_virtual_time_ms: int | None = None,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            run = connection.execute(
+                """
+                SELECT position_mode FROM replay_training_run WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None or run["position_mode"] != "HEDGE":
+                return
+            now_ms = self.base_store._validated_now_ms()
+            self._apply_hedge_mark_projection(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
+            self._detect_contract_liquidations(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+                trigger_virtual_time_ms=risk_virtual_time_ms,
+            )
+            self._refresh_contract_current_equity(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
 
     @classmethod
     def _settle_exact_funding_event(
@@ -3668,6 +4242,13 @@ class TrainingRunStore:
                     run_id=child_run_id,
                     account_data_mode=str(parent["account_data_mode"]),
                     fidelity=str(parent["history_fidelity"]),
+                    now_ms=now_ms,
+                )
+            if str(parent["position_mode"]) == "HEDGE":
+                self._copy_hedge_input_binding(
+                    connection,
+                    parent_run_id=parent_run_id,
+                    child_run_id=child_run_id,
                     now_ms=now_ms,
                 )
             self._copy_launch_context(
@@ -10686,6 +11267,146 @@ class TrainingRunStore:
         return current_equity
 
     @classmethod
+    def _hedge_input_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        binding = connection.execute(
+            "SELECT * FROM replay_hedge_input_binding WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if binding is None:
+            return None
+        public = connection.execute(
+            "SELECT * FROM replay_hedge_public_archive WHERE archive_id = ?",
+            (binding["public_archive_id"],),
+        ).fetchone()
+        simulation = connection.execute(
+            "SELECT * FROM replay_hedge_simulation_manifest WHERE manifest_id = ?",
+            (binding["simulation_manifest_id"],),
+        ).fetchone()
+        if public is None or simulation is None:
+            raise TypeError("HEDGE input catalog binding is missing")
+        expected_proof = canonical_sha256(
+            {
+                "schema_version": HEDGE_INPUT_PROOF_SCHEMA_VERSION,
+                "public": {
+                    "archive_id": str(public["archive_id"]),
+                    "generation": int(public["generation"]),
+                    "dataset_epoch": str(public["dataset_epoch"]),
+                    "checksum_sha256": str(public["checksum_sha256"]),
+                    "event_chain_tail": str(public["event_chain_tail"]),
+                    "proof_hash": str(public["proof_hash"]),
+                },
+                "simulation": {
+                    "manifest_id": str(simulation["manifest_id"]),
+                    "generation": int(simulation["generation"]),
+                    "dataset_epoch": str(simulation["dataset_epoch"]),
+                    "checksum_sha256": str(simulation["checksum_sha256"]),
+                    "contract_hash": str(simulation["contract_hash"]),
+                    "proof_hash": str(simulation["proof_hash"]),
+                },
+                "bound_range_start_ms": int(binding["bound_range_start_ms"]),
+                "bound_range_end_ms": int(binding["bound_range_end_ms"]),
+            }
+        )
+        pinned_fields = (
+            int(binding["public_generation"]) == int(public["generation"])
+            and str(binding["public_dataset_epoch"]) == str(public["dataset_epoch"])
+            and str(binding["public_checksum_sha256"])
+            == str(public["checksum_sha256"])
+            and str(binding["public_event_chain_tail"])
+            == str(public["event_chain_tail"])
+            and int(binding["simulation_generation"])
+            == int(simulation["generation"])
+            and str(binding["simulation_dataset_epoch"])
+            == str(simulation["dataset_epoch"])
+            and str(binding["simulation_checksum_sha256"])
+            == str(simulation["checksum_sha256"])
+            and str(binding["simulation_contract_hash"])
+            == str(simulation["contract_hash"])
+        )
+        if not pinned_fields or expected_proof != binding["input_proof_hash"]:
+            raise TypeError("HEDGE input binding proof is invalid")
+        projections: list[dict[str, object]] = []
+        for row in connection.execute(
+            """
+            SELECT * FROM replay_hedge_input_projection
+            WHERE run_id = ? ORDER BY source_kind
+            """,
+            (run_id,),
+        ).fetchall():
+            state = json.loads(str(row["state_json"]))
+            payload = {
+                "schema_version": "replay.hedge-input-projection.v1",
+                "source_kind": str(row["source_kind"]),
+                "last_event_sequence": int(row["last_event_sequence"]),
+                "as_of_actual_time_ms": int(row["as_of_actual_time_ms"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "state": state,
+                "input_chain_hash": str(row["input_chain_hash"]),
+            }
+            if canonical_sha256(payload) != row["component_hash"]:
+                raise TypeError("HEDGE input projection component hash is invalid")
+            projections.append(
+                {
+                    **payload,
+                    "component_hash": str(row["component_hash"]),
+                }
+            )
+        if [item["source_kind"] for item in projections] != [
+            "PUBLIC",
+            "SIMULATION",
+        ]:
+            raise TypeError("HEDGE input projections are incomplete")
+        audit = connection.execute(
+            """
+            SELECT * FROM replay_hedge_input_audit
+            WHERE run_id = ? ORDER BY audit_sequence DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        return {
+            "schema_version": "replay.hedge-input-view.v1",
+            "status": str(binding["status"]),
+            "degraded_reason": binding["degraded_reason"],
+            "input_proof_hash": str(binding["input_proof_hash"]),
+            "bound_range_start_ms": int(binding["bound_range_start_ms"]),
+            "bound_range_end_ms": int(binding["bound_range_end_ms"]),
+            "public": {
+                "archive_id": str(public["archive_id"]),
+                "generation": int(public["generation"]),
+                "dataset_epoch": str(public["dataset_epoch"]),
+                "checksum_sha256": str(public["checksum_sha256"]),
+                "event_chain_tail": str(public["event_chain_tail"]),
+                "proof_hash": str(public["proof_hash"]),
+                "health": str(public["health"]),
+            },
+            "simulation": {
+                "manifest_id": str(simulation["manifest_id"]),
+                "generation": int(simulation["generation"]),
+                "dataset_epoch": str(simulation["dataset_epoch"]),
+                "checksum_sha256": str(simulation["checksum_sha256"]),
+                "contract_hash": str(simulation["contract_hash"]),
+                "model_version": str(simulation["model_version"]),
+                "proof_hash": str(simulation["proof_hash"]),
+                "health": str(simulation["health"]),
+            },
+            "projections": projections,
+            "auditor": {
+                "status": "NOT_RUN" if audit is None else str(audit["status"]),
+                "proof_hash": None if audit is None else str(audit["proof_hash"]),
+                "differences": (
+                    []
+                    if audit is None
+                    else json.loads(str(audit["differences_json"]))
+                ),
+            },
+        }
+
+    @classmethod
     def _contract_portfolio_projection(
         cls,
         connection: sqlite3.Connection,
@@ -10742,6 +11463,23 @@ class TrainingRunStore:
             initial_equity=initial_equity,
             tracks=tracks,
         )
+        try:
+            hedge_inputs = cls._hedge_input_projection(
+                connection,
+                run_id=run_id,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "HEDGE input proof or projection is invalid",
+                status_code=503,
+            ) from exc
+        if base["position_mode"] == "HEDGE" and hedge_inputs is None:
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "HEDGE run is missing its pinned input proof",
+                status_code=503,
+            )
         order_rows = tuple(
             connection.execute(
                 """
@@ -11387,6 +12125,7 @@ class TrainingRunStore:
             "next_funding_time_ms": account["next_funding_time_ms"],
             "liquidations": liquidations,
             "hedge_state": hedge_state,
+            "hedge_inputs": hedge_inputs,
             "account_history": {
                 "mode": account_data_mode,
                 "status": (
@@ -11479,13 +12218,19 @@ class TrainingRunStore:
                     if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "AVAILABLE_APPROX_SIMULATION_RULES"
                 ),
-                "fees": CONFIGURED_FEE_FIDELITY,
+                "fees": (
+                    "PINNED_HISTORICAL_FEE_POLICY"
+                    if account_data_mode == "DETERMINISTIC_SIMULATION"
+                    else CONFIGURED_FEE_FIDELITY
+                ),
                 "funding": (
                     "OFF"
                     if str(account["funding_mode"]) == "OFF"
                     else (
                         "HISTORICAL_EXACT_ARCHIVE_FUNDING"
                         if exact_account
+                        else "PINNED_HISTORICAL_FUNDING"
+                        if account_data_mode == "DETERMINISTIC_SIMULATION"
                         else SANDBOX_FUNDING_FIDELITY
                     )
                 ),
@@ -12345,6 +13090,129 @@ class TrainingRunStore:
                 """,
                 (parent_account["fidelity"], now_ms, child_run_id),
             )
+
+    @staticmethod
+    def _copy_hedge_input_binding(
+        connection: sqlite3.Connection,
+        *,
+        parent_run_id: str,
+        child_run_id: str,
+        now_ms: int,
+    ) -> None:
+        binding = connection.execute(
+            "SELECT * FROM replay_hedge_input_binding WHERE run_id = ?",
+            (parent_run_id,),
+        ).fetchone()
+        if binding is None or binding["status"] != "ACTIVE":
+            raise TypeError("review fork HEDGE input binding is unavailable")
+        connection.execute(
+            """
+            INSERT INTO replay_hedge_input_binding(
+                run_id, public_archive_id, public_generation,
+                public_dataset_epoch, public_checksum_sha256,
+                public_event_chain_tail, simulation_manifest_id,
+                simulation_generation, simulation_dataset_epoch,
+                simulation_checksum_sha256, simulation_contract_hash,
+                bound_range_start_ms, bound_range_end_ms, status,
+                degraded_reason, input_proof_hash, created_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL,
+                      ?, ?, ?)
+            """,
+            (
+                child_run_id,
+                binding["public_archive_id"],
+                binding["public_generation"],
+                binding["public_dataset_epoch"],
+                binding["public_checksum_sha256"],
+                binding["public_event_chain_tail"],
+                binding["simulation_manifest_id"],
+                binding["simulation_generation"],
+                binding["simulation_dataset_epoch"],
+                binding["simulation_checksum_sha256"],
+                binding["simulation_contract_hash"],
+                binding["bound_range_start_ms"],
+                binding["bound_range_end_ms"],
+                binding["input_proof_hash"],
+                now_ms,
+                now_ms,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_hedge_input_projection(
+                run_id, source_kind, last_event_sequence,
+                as_of_actual_time_ms, as_of_virtual_time_ms, state_json,
+                input_chain_hash, component_hash, updated_at_ms
+            )
+            SELECT ?, source_kind, last_event_sequence,
+                   as_of_actual_time_ms, as_of_virtual_time_ms, state_json,
+                   input_chain_hash, component_hash, ?
+            FROM replay_hedge_input_projection WHERE run_id = ?
+            """,
+            (child_run_id, now_ms, parent_run_id),
+        )
+        applied_rows = connection.execute(
+            """
+            SELECT * FROM replay_hedge_input_applied_event
+            WHERE run_id = ? ORDER BY source_kind, event_sequence
+            """,
+            (parent_run_id,),
+        ).fetchall()
+        source_ids = {
+            "PUBLIC": str(binding["public_archive_id"]),
+            "SIMULATION": str(binding["simulation_manifest_id"]),
+        }
+        for row in applied_rows:
+            payload = json.loads(str(row["payload_json"]))
+            applied_hash = canonical_sha256(
+                {
+                    "run_id": child_run_id,
+                    "virtual_time_ms": int(row["applied_virtual_time_ms"]),
+                    "source_kind": str(row["source_kind"]),
+                    "source_id": source_ids[str(row["source_kind"])],
+                    "event_sequence": int(row["event_sequence"]),
+                    "event_hash": str(row["source_event_hash"]),
+                    "payload": payload,
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_hedge_input_applied_event(
+                    run_id, source_kind, event_sequence, event_time_ms,
+                    event_phase, event_kind, component_sequence,
+                    applied_virtual_time_ms, source_event_hash, payload_json,
+                    applied_payload_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_run_id,
+                    row["source_kind"],
+                    row["event_sequence"],
+                    row["event_time_ms"],
+                    row["event_phase"],
+                    row["event_kind"],
+                    row["component_sequence"],
+                    row["applied_virtual_time_ms"],
+                    row["source_event_hash"],
+                    row["payload_json"],
+                    applied_hash,
+                    now_ms,
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE replay_hedge_public_archive
+            SET last_used_at_ms = ?, updated_at_ms = ? WHERE archive_id = ?
+            """,
+            (now_ms, now_ms, binding["public_archive_id"]),
+        )
+        connection.execute(
+            """
+            UPDATE replay_hedge_simulation_manifest
+            SET last_used_at_ms = ?, updated_at_ms = ? WHERE manifest_id = ?
+            """,
+            (now_ms, now_ms, binding["simulation_manifest_id"]),
+        )
 
     @staticmethod
     def _copy_hedge_relational_state(

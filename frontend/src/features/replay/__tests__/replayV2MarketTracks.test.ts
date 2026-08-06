@@ -207,9 +207,7 @@ test("Phase 13 global clock parser freezes basis, rate, limits, and display bind
 
 test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation domains strict", () => {
   const payload = marketTracksResponse();
-  const parsed = parseReplayMarketTracksResponse({
-    ...payload,
-    portfolio: {
+  const contractPortfolio = {
       schema_version: "replay.training.portfolio.v2",
       account_model: "TOUCH_OR_TAPE_V2",
       execution_model: "TOUCH_OR_TAPE_V2",
@@ -272,6 +270,7 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         schema_version: "replay.hedge-relational-state.v1",
         state_hash: `sha256:${"d".repeat(64)}`,
       },
+      hedge_inputs: null,
       account_history: {
         mode: "APPROX_PROXY",
         status: "ACTIVE",
@@ -308,7 +307,10 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         mark: "REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK",
         liquidation: "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
       },
-    },
+  };
+  const parsed = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: contractPortfolio,
   });
   assert.equal(parsed.portfolio.schema_version, "replay.training.portfolio.v2");
   if (parsed.portfolio.schema_version !== "replay.training.portfolio.v2") {
@@ -317,6 +319,73 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
   assert.equal(parsed.portfolio.margin_mode, "ISOLATED");
   assert.equal(parsed.portfolio.ledger.reconciliation_delta, "0");
   assert.equal(parsed.portfolio.liquidations.length, 1);
+  const hedgeProof = `sha256:${"9".repeat(64)}`;
+  const parsedHedge = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        schema_version: "replay.hedge-input-view.v1",
+        status: "ACTIVE",
+        degraded_reason: null,
+        input_proof_hash: hedgeProof,
+        bound_range_start_ms: 1_710_000_000_000,
+        bound_range_end_ms: 1_710_000_600_000,
+        public: {
+          archive_id: "hedge-public-1",
+          generation: 1,
+          dataset_epoch: `sha256:${"1".repeat(64)}`,
+          checksum_sha256: `sha256:${"2".repeat(64)}`,
+          event_chain_tail: `sha256:${"3".repeat(64)}`,
+          proof_hash: `sha256:${"4".repeat(64)}`,
+          health: "READY",
+        },
+        simulation: {
+          manifest_id: "hedge-simulation-1",
+          generation: 1,
+          dataset_epoch: `sha256:${"5".repeat(64)}`,
+          checksum_sha256: `sha256:${"6".repeat(64)}`,
+          contract_hash: `sha256:${"7".repeat(64)}`,
+          model_version: "HEDGE_MODEL_V1",
+          proof_hash: `sha256:${"8".repeat(64)}`,
+          health: "READY",
+        },
+        projections: ["PUBLIC", "SIMULATION"].map((sourceKind, index) => ({
+          schema_version: "replay.hedge-input-projection.v1",
+          source_kind: sourceKind,
+          last_event_sequence: index + 1,
+          as_of_actual_time_ms: 1_710_000_000_000,
+          as_of_virtual_time_ms: 1_710_000_000_000,
+          state: {},
+          input_chain_hash: `sha256:${String(index + 1).repeat(64)}`,
+          component_hash: `sha256:${String(index + 3).repeat(64)}`,
+        })),
+        auditor: {
+          status: "PASS",
+          proof_hash: `sha256:${"a".repeat(64)}`,
+          differences: [],
+        },
+      },
+    },
+  });
+  assert.equal(parsedHedge.portfolio.position_mode, "HEDGE");
+  if (parsedHedge.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("HEDGE contract portfolio did not survive parsing");
+  }
+  const parsedHedgeInputs = parsedHedge.portfolio.hedge_inputs;
+  assert.equal(parsedHedgeInputs?.input_proof_hash, hedgeProof);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        ...parsedHedgeInputs,
+        input_proof_hash: "not-a-proof",
+      },
+    },
+  }), /SHA-256/);
   assert.throws(() => parseReplayMarketTracksResponse({
     ...payload,
     portfolio: { ...payload.portfolio, account_model: "TOUCH_OR_TAPE_V2" },

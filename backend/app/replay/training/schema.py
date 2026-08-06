@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 14
+TRAINING_SCHEMA_VERSION = 15
 TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
@@ -1953,6 +1953,186 @@ CREATE TABLE IF NOT EXISTS replay_training_adl_selection (
 """
 
 
+TRAINING_SCHEMA_V15_HEDGE_INPUTS = """
+CREATE TABLE IF NOT EXISTS replay_hedge_public_archive (
+    archive_id TEXT PRIMARY KEY,
+    protocol TEXT NOT NULL CHECK (protocol = 'replay.hedge-public-history.archive.v1'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'replay.hedge-public-history.v1'),
+    exchange TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    settlement_asset TEXT NOT NULL,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    dataset_epoch TEXT NOT NULL UNIQUE CHECK (
+        length(dataset_epoch) = 71 AND dataset_epoch GLOB 'sha256:[0-9a-f]*'
+    ),
+    checksum_sha256 TEXT NOT NULL CHECK (
+        length(checksum_sha256) = 71 AND checksum_sha256 GLOB 'sha256:[0-9a-f]*'
+    ),
+    event_chain_tail TEXT NOT NULL CHECK (
+        length(event_chain_tail) = 71 AND event_chain_tail GLOB 'sha256:[0-9a-f]*'
+    ),
+    proof_hash TEXT NOT NULL CHECK (
+        length(proof_hash) = 71 AND proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    l2_archive_id TEXT NOT NULL,
+    l2_dataset_epoch TEXT NOT NULL,
+    l2_checksum_sha256 TEXT NOT NULL,
+    event_count INTEGER NOT NULL CHECK (event_count >= 1),
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 1),
+    health TEXT NOT NULL CHECK (health IN ('READY', 'EVICTED', 'QUARANTINED')),
+    local_path TEXT,
+    trusted_source_path TEXT NOT NULL,
+    trusted_origin TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    quarantine_reason TEXT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((health = 'READY' AND local_path IS NOT NULL AND quarantine_reason IS NULL)
+        OR (health = 'EVICTED' AND local_path IS NULL)
+        OR (health = 'QUARANTINED' AND local_path IS NULL AND quarantine_reason IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_hedge_public_archive_lookup
+ON replay_hedge_public_archive(
+    exchange, market_type, symbol, settlement_asset,
+    range_start_ms, range_end_ms, health
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_simulation_manifest (
+    manifest_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL CHECK (schema_version = 'replay.hedge-simulation-manifest.v1'),
+    model_version TEXT NOT NULL,
+    contract_hash TEXT NOT NULL CHECK (
+        length(contract_hash) = 71 AND contract_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    settlement_asset TEXT NOT NULL,
+    required_symbols_json TEXT NOT NULL,
+    range_start_ms INTEGER NOT NULL CHECK (range_start_ms >= 0),
+    range_end_ms INTEGER NOT NULL CHECK (range_end_ms >= range_start_ms),
+    dataset_epoch TEXT NOT NULL UNIQUE CHECK (
+        length(dataset_epoch) = 71 AND dataset_epoch GLOB 'sha256:[0-9a-f]*'
+    ),
+    checksum_sha256 TEXT NOT NULL CHECK (
+        length(checksum_sha256) = 71 AND checksum_sha256 GLOB 'sha256:[0-9a-f]*'
+    ),
+    proof_hash TEXT NOT NULL CHECK (
+        length(proof_hash) = 71 AND proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    event_count INTEGER NOT NULL CHECK (event_count >= 1),
+    byte_size INTEGER NOT NULL CHECK (byte_size >= 1),
+    health TEXT NOT NULL CHECK (health IN ('READY', 'EVICTED', 'QUARANTINED')),
+    local_path TEXT,
+    trusted_source_path TEXT NOT NULL,
+    trusted_origin TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    quarantine_reason TEXT,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((health = 'READY' AND local_path IS NOT NULL AND quarantine_reason IS NULL)
+        OR (health = 'EVICTED' AND local_path IS NULL)
+        OR (health = 'QUARANTINED' AND local_path IS NULL AND quarantine_reason IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_hedge_simulation_manifest_lookup
+ON replay_hedge_simulation_manifest(
+    settlement_asset, range_start_ms, range_end_ms, health
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_input_binding (
+    run_id TEXT PRIMARY KEY REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    public_archive_id TEXT NOT NULL
+        REFERENCES replay_hedge_public_archive(archive_id) ON DELETE RESTRICT,
+    public_generation INTEGER NOT NULL CHECK (public_generation >= 1),
+    public_dataset_epoch TEXT NOT NULL,
+    public_checksum_sha256 TEXT NOT NULL,
+    public_event_chain_tail TEXT NOT NULL,
+    simulation_manifest_id TEXT NOT NULL
+        REFERENCES replay_hedge_simulation_manifest(manifest_id) ON DELETE RESTRICT,
+    simulation_generation INTEGER NOT NULL CHECK (simulation_generation >= 1),
+    simulation_dataset_epoch TEXT NOT NULL,
+    simulation_checksum_sha256 TEXT NOT NULL,
+    simulation_contract_hash TEXT NOT NULL,
+    bound_range_start_ms INTEGER NOT NULL CHECK (bound_range_start_ms >= 0),
+    bound_range_end_ms INTEGER NOT NULL CHECK (bound_range_end_ms >= bound_range_start_ms),
+    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'QUARANTINED')),
+    degraded_reason TEXT,
+    input_proof_hash TEXT NOT NULL CHECK (
+        length(input_proof_hash) = 71 AND input_proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    CHECK ((status = 'ACTIVE' AND degraded_reason IS NULL)
+        OR (status != 'ACTIVE' AND degraded_reason IS NOT NULL))
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_input_projection (
+    run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('PUBLIC', 'SIMULATION')),
+    last_event_sequence INTEGER NOT NULL CHECK (last_event_sequence >= 0),
+    as_of_actual_time_ms INTEGER NOT NULL CHECK (as_of_actual_time_ms >= 0),
+    as_of_virtual_time_ms INTEGER NOT NULL CHECK (as_of_virtual_time_ms >= 0),
+    state_json TEXT NOT NULL,
+    input_chain_hash TEXT NOT NULL CHECK (
+        length(input_chain_hash) = 71 AND input_chain_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, source_kind)
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_input_applied_event (
+    run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('PUBLIC', 'SIMULATION')),
+    event_sequence INTEGER NOT NULL CHECK (event_sequence >= 1),
+    event_time_ms INTEGER NOT NULL CHECK (event_time_ms >= 0),
+    event_phase INTEGER NOT NULL CHECK (event_phase IN (10, 30, 40, 70)),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN (
+            'RULE', 'FEE_POLICY', 'MARK_INDEX', 'FUNDING',
+            'INSURANCE_INPUT', 'ADL_COHORT_INPUT'
+        )
+    ),
+    component_sequence INTEGER NOT NULL CHECK (component_sequence >= 1),
+    applied_virtual_time_ms INTEGER NOT NULL CHECK (applied_virtual_time_ms >= 0),
+    source_event_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    applied_payload_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, source_kind, event_sequence),
+    UNIQUE (run_id, source_kind, source_event_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_hedge_input_applied_order
+ON replay_hedge_input_applied_event(
+    run_id, event_time_ms, event_phase, source_kind, event_sequence
+);
+
+CREATE TABLE IF NOT EXISTS replay_hedge_input_audit (
+    run_id TEXT NOT NULL REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    audit_sequence INTEGER NOT NULL CHECK (audit_sequence >= 1),
+    schema_version TEXT NOT NULL CHECK (
+        schema_version = 'replay.hedge-input-audit.v1'
+    ),
+    status TEXT NOT NULL CHECK (status IN ('PASS', 'FAIL')),
+    proof_hash TEXT NOT NULL CHECK (
+        length(proof_hash) = 71 AND proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    differences_json TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, audit_sequence)
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -2106,6 +2286,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE,
         TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE,
         TRAINING_SCHEMA_V14_HEDGE,
+        TRAINING_SCHEMA_V15_HEDGE_INPUTS,
     ):
         _execute_script(connection, script)
     connection.execute(

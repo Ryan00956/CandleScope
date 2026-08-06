@@ -229,6 +229,7 @@ function exactPortfolioRaw() {
       schema_version: "replay.hedge-relational-state.v1",
       state_hash: replayDigest("7"),
     },
+    hedge_inputs: null,
     account_history: {
       mode: "HISTORICAL_EXACT",
       status: "ACTIVE",

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from app.replay.training.models import (
-    HEDGE_ACCOUNT_FIDELITY,
-    HEDGE_INSURANCE_ADL_FIDELITY,
     ReplayV2CommandType,
     TrainingCursor,
-    TrainingRunCreateRequest,
 )
+from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.test_replay_v2_training_phase5 import _command, _request, _service
+from tests.test_replay_v2_training_phase6 import _risk_service
 
 
 pytestmark = pytest.mark.anyio
@@ -22,33 +22,14 @@ pytestmark = pytest.mark.anyio
 async def test_hedge_legs_are_projected_as_two_independent_trade_results(
     tmp_path: Path,
 ) -> None:
-    service = await _service(tmp_path / "p2-hedge-training-results.db")
+    service = await _risk_service(tmp_path / "p2-hedge-training-results.db")
     try:
-        payload = (await _request(service)).to_dict()
-        payload.update(
-            {
-                "position_mode": "HEDGE",
-                "account_data_mode": "DETERMINISTIC_SIMULATION",
-                "account_history_ref": None,
-                "hedge_public_history_ref": {
-                    "schema_version": "replay.hedge-public-history-ref.v1",
-                    "archive_id": "phase1-public-btcusdt-v1",
-                    "dataset_epoch": "sha256:" + "2" * 64,
-                    "checksum_sha256": "sha256:" + "3" * 64,
-                },
-                "simulation_manifest_ref": {
-                    "schema_version": "replay.hedge-simulation-manifest-ref.v1",
-                    "manifest_id": "phase0-btcusdt-v1",
-                    "dataset_epoch": "sha256:" + "1" * 64,
-                    "checksum_sha256": "sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236",
-                    "contract_hash": "sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b",
-                    "model_version": "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1",
-                },
-                "account_fidelity": HEDGE_ACCOUNT_FIDELITY,
-                "insurance_adl_fidelity": HEDGE_INSURANCE_ADL_FIDELITY,
-            }
+        request = await prepare_hedge_request(
+            service,
+            replace(await _request(service), market_type="futures"),
+            root=tmp_path,
+            prefix="p2-training-results",
         )
-        request = TrainingRunCreateRequest.from_dict(payload)
         created = await service.training.create_run(request)  # type: ignore[union-attr]
         run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])

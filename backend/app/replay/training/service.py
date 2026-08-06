@@ -75,6 +75,7 @@ from .account_history import (
     AccountHistoryArchiveManager,
 )
 from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
+from .hedge_inputs import HedgeInputArchiveManager, PreparedHedgeInputBinding
 from .account import isolated_margin_key, round_to_step
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
@@ -299,6 +300,7 @@ class TrainingRunService:
                 replay_service.settings.replay_account_history_max_archive_bytes
             ),
         )
+        self.hedge_inputs = HedgeInputArchiveManager(replay_service.store)
         self.storage_governance = ReplayStorageGovernance(
             replay_service.store,
             settings=replay_service.settings,
@@ -341,6 +343,7 @@ class TrainingRunService:
         await self.segments.start()
         await self.historical_books.start()
         await self.account_history.start()
+        await self.hedge_inputs.start()
 
     async def shutdown(self) -> frozenset[str]:
         """Stop server-owned ordered playback before replay.v1 actors close."""
@@ -760,6 +763,7 @@ class TrainingRunService:
 
     async def audit_account(self, run_id: str) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")
+        hedge_input_audit = await self.hedge_inputs.audit_run(normalized)
         projection = await self.store.get_market_tracks(normalized)
         portfolio = projection.get("portfolio")
         authoritative: Mapping[str, Mapping[str, object]] | None = None
@@ -777,10 +781,11 @@ class TrainingRunService:
                     track for track in raw_tracks if isinstance(track, Mapping)
                 ),
             )
-        return await self.store.audit_account(
+        account_audit = await self.store.audit_account(
             normalized,
             authoritative_projections=authoritative,
         )
+        return {**account_audit, "hedge_input_audit": hedge_input_audit}
 
     async def list_data_segments(
         self, *, run_id: str | None = None
@@ -2351,6 +2356,10 @@ class TrainingRunService:
             if (
                 isinstance(history, Mapping)
                 and history.get("mode") == "HISTORICAL_EXACT"
+                or (
+                    isinstance(portfolio, Mapping)
+                    and portfolio.get("position_mode") == "HEDGE"
+                )
             ):
                 account_audit = await self.audit_account(child_run_id)
                 if account_audit.get("status") != "PASS":
@@ -2361,6 +2370,28 @@ class TrainingRunService:
                         details={
                             "fallback_applied": False,
                             "differences": account_audit.get("differences", []),
+                        },
+                    )
+                hedge_audit = account_audit.get("hedge_input_audit")
+                if (
+                    isinstance(portfolio, Mapping)
+                    and portfolio.get("position_mode") == "HEDGE"
+                    and (
+                        not isinstance(hedge_audit, Mapping)
+                        or hedge_audit.get("status") != "PASS"
+                    )
+                ):
+                    raise TrainingRunError(
+                        "REVIEW_FORK_HEDGE_INPUT_AUDIT_FAILED",
+                        "HEDGE child failed its pinned input audit",
+                        status_code=409,
+                        details={
+                            "fallback_applied": False,
+                            "differences": (
+                                hedge_audit.get("differences", [])
+                                if isinstance(hedge_audit, Mapping)
+                                else []
+                            ),
                         },
                     )
         except BaseException:
@@ -2511,6 +2542,39 @@ class TrainingRunService:
                 actual_time_ms=request.requested_start_ms,
                 virtual_time_ms=request.requested_start_ms,
             )
+        hedge_input_binding: PreparedHedgeInputBinding | None = None
+        if request.position_mode.value == "HEDGE":
+            if request.start_mode is not StartMode.MANUAL:
+                raise TrainingRunError(
+                    "HEDGE_INPUT_MANUAL_START_REQUIRED",
+                    "pinned HEDGE inputs require an exact manual start",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            if request.book_mode is not BookMode.BOOK_ASSISTED_REQUIRED:
+                raise TrainingRunError(
+                    "HEDGE_HISTORICAL_BOOK_REQUIRED",
+                    "HEDGE deterministic simulation requires historical L2",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            if request.funding_mode is not FundingMode.HISTORICAL_EXACT:
+                raise TrainingRunError(
+                    "HEDGE_HISTORICAL_FUNDING_REQUIRED",
+                    "HEDGE deterministic simulation requires pinned historical funding",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            hedge_input_binding = await self.hedge_inputs.prepare_binding(
+                request=request,
+                bound_range_start_ms=history_policy.actual_replay_start_ms,
+                bound_range_end_ms=(
+                    history_policy.actual_replay_start_ms
+                    + history_policy.forward_cache_ms
+                ),
+                virtual_time_ms=history_policy.actual_replay_start_ms,
+                historical_book_binding=historical_book_binding,
+            )
         run_id = self._identifier(
             (
                 _existing_shell_run_id
@@ -2587,6 +2651,7 @@ class TrainingRunService:
         ):
             bound_book = historical_book_binding
             bound_account = account_history_binding
+            bound_hedge = hedge_input_binding
             if bound_book is not None:
                 cursor = session_state.get("cursor")
                 if not isinstance(cursor, Mapping):
@@ -2611,6 +2676,21 @@ class TrainingRunService:
                         as_of_virtual_time_ms=int(cursor["virtual_time_ms"]),
                     ),
                 )
+            if bound_hedge is not None:
+                cursor = session_state.get("cursor")
+                if not isinstance(cursor, Mapping):
+                    raise TypeError("training adapter cursor must be an object")
+                bound_hedge = replace(
+                    bound_hedge,
+                    public_projection=replace(
+                        bound_hedge.public_projection,
+                        as_of_virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    ),
+                    simulation_projection=replace(
+                        bound_hedge.simulation_projection,
+                        as_of_virtual_time_ms=int(cursor["virtual_time_ms"]),
+                    ),
+                )
             return self.store.initial_run_writer(
                 run_id=run_id,
                 request=request,
@@ -2626,6 +2706,7 @@ class TrainingRunService:
                 source_fingerprint=str(selection["source_fingerprint"]),
                 historical_book_binding=bound_book,
                 account_history_binding=bound_account,
+                hedge_input_binding=bound_hedge,
                 existing_shell=_existing_shell_run_id is not None,
                 preparation_id=preparation_id,
             )
@@ -3898,10 +3979,12 @@ class TrainingRunService:
         exact_account_clock = (
             binding.get("account_data_mode") == AccountDataMode.HISTORICAL_EXACT.value
         )
+        hedge_input_clock = binding.get("position_mode") == "HEDGE"
         multi_track_command = (
             len(full_tracks) > 1
             or (contract_clock and command.type in contract_ordered_types)
             or (exact_account_clock and command.type in exact_account_ordered_types)
+            or (hedge_input_clock and command.type in exact_account_ordered_types)
             or (command.type is ReplayV2CommandType.END and len(all_tracks) > 1)
         )
         if multi_track_command and command.type in {
@@ -6512,6 +6595,9 @@ class TrainingRunService:
                 )
                 plan["target_virtual_time_ms"] = target
             control_plan = dict(plan)
+            control_plan["mode"] = "GLOBAL_ORDERED_INPUT_CLOCK"
+            if binding.get("position_mode") == "HEDGE":
+                control_plan["input_clock"] = "PINNED_HEDGE_PUBLIC_SIMULATION"
             if not isinstance(target, int):
                 raise TrainingRunError(
                     "REPLAY_CONTROL_UNSUPPORTED",
@@ -7184,17 +7270,24 @@ class TrainingRunService:
         stop_event: asyncio.Event | None = None,
         allow_final_state_batch: bool = False,
     ) -> tuple[StableMarketEvent, ...]:
-        await self.account_history.guard_run(
-            run_id=command.run_id,
-            tracks=tracks,
-        )
+        hedge_mode = str(binding.get("position_mode")) == "HEDGE"
+        if not hedge_mode:
+            await self.account_history.guard_run(
+                run_id=command.run_id,
+                tracks=tracks,
+            )
         pending_account_events = await self.store.pending_account_global_events(
             command.run_id
         )
-        if pending_account_events:
+        pending_hedge_events = await self.store.pending_hedge_input_global_events(
+            command.run_id
+        )
+        if pending_account_events or pending_hedge_events:
             await self.store.record_global_events(
                 command.run_id,
-                pending_account_events,
+                stable_market_event_order(
+                    (*pending_account_events, *pending_hedge_events)
+                ),
             )
         prepared_book: tuple[tuple[str, HistoricalBookProjection], ...] = ()
         if (
@@ -7221,7 +7314,7 @@ class TrainingRunService:
         async def cancel_at_committed_barrier() -> tuple[StableMarketEvent, ...]:
             if job is not None:
                 job["status"] = "CANCELLED"
-            await self.store.audit_account(command.run_id)
+            await self.audit_account(command.run_id)
             return tuple(all_events)
 
         for _wave_index in range(10_000):
@@ -7326,6 +7419,14 @@ class TrainingRunService:
                 target_actual_time_ms=target_actual_time_ms,
                 guarded=True,
             )
+            next_hedge_actual = (
+                await self.hedge_inputs.next_event_time(
+                    run_id=command.run_id,
+                    target_actual_time_ms=target_actual_time_ms,
+                )
+                if hedge_mode
+                else None
+            )
             next_account_virtual = (
                 None
                 if next_account_actual is None
@@ -7334,6 +7435,11 @@ class TrainingRunService:
                     next_account_actual,
                 )
             )
+            next_hedge_virtual = (
+                None
+                if next_hedge_actual is None
+                else self._virtual_event_time_ms(binding, next_hedge_actual)
+            )
             if next_account_virtual is not None and next_account_virtual < current:
                 raise TrainingRunError(
                     "ACCOUNT_HISTORY_CURSOR_BEHIND_MARKET",
@@ -7341,8 +7447,21 @@ class TrainingRunService:
                     status_code=409,
                     details={"fallback_applied": False},
                 )
+            if next_hedge_virtual is not None and next_hedge_virtual < current:
+                await self.hedge_inputs.pause_run(
+                    command.run_id,
+                    reason="HEDGE_INPUT_CURSOR_BEHIND_MARKET",
+                )
+                raise TrainingRunError(
+                    "HEDGE_INPUT_CURSOR_BEHIND_MARKET",
+                    "HEDGE input timeline fell behind the committed market cursor",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
             if current >= target_virtual_time_ms and (
                 next_account_virtual is None or next_account_virtual > current
+            ) and (
+                next_hedge_virtual is None or next_hedge_virtual > current
             ):
                 if pending_global_events:
                     raise TrainingRunError(
@@ -7358,11 +7477,13 @@ class TrainingRunService:
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
-                await self.store.audit_account(command.run_id)
+                await self.audit_account(command.run_id)
                 return tuple(all_events)
             candidate_times = [*next_times, target_virtual_time_ms]
             if next_account_virtual is not None:
                 candidate_times.append(next_account_virtual)
+            if next_hedge_virtual is not None:
+                candidate_times.append(next_hedge_virtual)
             wave_time = min(candidate_times)
             market_barrier = (
                 wave_time == target_virtual_time_ms or wave_time in next_times
@@ -7375,6 +7496,14 @@ class TrainingRunService:
                 actual_time_ms=actual_wave_time,
                 guarded=True,
             )
+            hedge_events = (
+                await self.hedge_inputs.events_at(
+                    run_id=command.run_id,
+                    actual_time_ms=actual_wave_time,
+                )
+                if hedge_mode
+                else ()
+            )
             pre_account_events = tuple(
                 item
                 for item in account_events
@@ -7384,6 +7513,15 @@ class TrainingRunService:
                 item
                 for item in account_events
                 if item[1].event_phase in {MARK_INDEX_EVENT_PHASE, FUNDING_EVENT_PHASE}
+            )
+            pre_hedge_events = tuple(
+                item for item in hedge_events if item.event_phase == 10
+            )
+            post_hedge_events = tuple(
+                item for item in hedge_events if item.event_phase in {30, 40}
+            )
+            simulation_hedge_events = tuple(
+                item for item in hedge_events if item.event_phase == 70
             )
             failed_track: Mapping[str, object] = tracks[0]
 
@@ -7485,6 +7623,13 @@ class TrainingRunService:
                         virtual_time_ms=wave_time,
                     )
                 )
+                wave_events.extend(
+                    await self.store.apply_hedge_input_events(
+                        command.run_id,
+                        events=pre_hedge_events,
+                        virtual_time_ms=wave_time,
+                    )
+                )
                 if market_barrier:
                     await advance_market_barrier()
                 wave_events.extend(
@@ -7494,10 +7639,28 @@ class TrainingRunService:
                         virtual_time_ms=wave_time,
                     )
                 )
+                wave_events.extend(
+                    await self.store.apply_hedge_input_events(
+                        command.run_id,
+                        events=post_hedge_events,
+                        virtual_time_ms=wave_time,
+                    )
+                )
                 await self.store.finalize_account_history(
                     command.run_id,
                     write_audit=False,
                     risk_virtual_time_ms=wave_time,
+                )
+                await self.store.finalize_hedge_inputs(
+                    command.run_id,
+                    risk_virtual_time_ms=wave_time,
+                )
+                wave_events.extend(
+                    await self.store.apply_hedge_input_events(
+                        command.run_id,
+                        events=simulation_hedge_events,
+                        virtual_time_ms=wave_time,
+                    )
                 )
                 pending_liquidations = await self.store.pending_liquidations(
                     command.run_id
@@ -7720,6 +7883,18 @@ class TrainingRunService:
         )
         if next_account_actual is not None:
             candidates.append(self._virtual_event_time_ms(binding, next_account_actual))
+        if str(binding.get("position_mode")) == "HEDGE":
+            next_hedge_actual = await self.hedge_inputs.next_event_time(
+                run_id=run_id,
+                target_actual_time_ms=_stored_counter(
+                    binding["actual_replay_end_ms"],
+                    field_name="actual_replay_end_ms",
+                ),
+            )
+            if next_hedge_actual is not None:
+                candidates.append(
+                    self._virtual_event_time_ms(binding, next_hedge_actual)
+                )
         if not candidates:
             raise TrainingRunError(
                 "REPLAY_CONTROL_UNAVAILABLE",

@@ -66,6 +66,7 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
         "errors.py",
         "events.py",
         "fast_forward.py",
+        "hedge_inputs.py",
         "hedge_simulation_contract.py",
         "historical_book.py",
         "history.py",

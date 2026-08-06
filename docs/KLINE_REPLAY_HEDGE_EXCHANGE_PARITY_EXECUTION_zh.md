@@ -391,6 +391,15 @@ ledger、position legs 与 active orders 独立重算并对篡改 fail-closed。
 
 预估：5–8 个工程日；真实数据准备另计。
 
+状态：`COMPLETE`。新增 replay-owned public/simulation catalog、不可变 importer、
+原子 Run binding、T0 no-lookahead projection、全局 phase 10/20/30/40/70 输入时钟、
+pinned mark no-fallback、runtime guard、显式 trusted-source rehydration 与独立 input
+auditor。HEDGE 单 track 同样使用全局输入时钟；Review fork 固定同一 generation/proof
+并为 child 重算 applied receipt。portfolio 与前端严格 parser 已暴露并验证不含本地路径的
+input proof。完整 replay 后端 `851 passed`，前端 replay `326 passed`，typecheck、lint、
+build、Ruff、compile 与 diff check 全部通过。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE3_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE3_RESULT_20260806_zh.md)。
+
 ### Phase 4：双向资金费、手续费与账本审计
 
 工作内容：

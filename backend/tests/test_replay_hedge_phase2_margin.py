@@ -19,13 +19,9 @@ from app.replay.broker.models import (
 from app.replay.errors import ReplayDomainError
 from app.replay.training.account import InstrumentRule, MaintenanceTier
 from app.replay.training.errors import TrainingRunError
-from app.replay.training.models import (
-    HEDGE_ACCOUNT_FIDELITY,
-    HEDGE_INSURANCE_ADL_FIDELITY,
-    ReplayV2CommandType,
-    TrainingRunCreateRequest,
-)
+from app.replay.training.models import ReplayV2CommandType
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, make_broker, request
+from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.test_replay_v2_training_phase5 import _acquire, _request
 from tests.test_replay_v2_training_phase6 import (
     _risk_service,
@@ -42,44 +38,6 @@ def _rounded_margin(notional: str, leverage: str) -> Decimal:
         Decimal(CONFIG.instrument.quote_step),
         rounding="ROUND_CEILING",
     )
-
-
-def _hedge_request(
-    base: TrainingRunCreateRequest,
-    *,
-    margin_mode: str,
-) -> TrainingRunCreateRequest:
-    payload = _sandbox_request(base, margin_mode=margin_mode).to_dict()
-    payload.update(
-        {
-            "position_mode": "HEDGE",
-            "account_data_mode": "DETERMINISTIC_SIMULATION",
-            "account_history_ref": None,
-            "hedge_public_history_ref": {
-                "schema_version": "replay.hedge-public-history-ref.v1",
-                "archive_id": "phase2-public-btcusdt-v1",
-                "dataset_epoch": "sha256:" + "2" * 64,
-                "checksum_sha256": "sha256:" + "3" * 64,
-            },
-            "simulation_manifest_ref": {
-                "schema_version": "replay.hedge-simulation-manifest-ref.v1",
-                "manifest_id": "phase2-margin-v1",
-                "dataset_epoch": "sha256:" + "1" * 64,
-                "checksum_sha256": (
-                    "sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236"
-                ),
-                "contract_hash": (
-                    "sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b"
-                ),
-                "model_version": (
-                    "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1"
-                ),
-            },
-            "account_fidelity": HEDGE_ACCOUNT_FIDELITY,
-            "insurance_adl_fidelity": HEDGE_INSURANCE_ADL_FIDELITY,
-        }
-    )
-    return TrainingRunCreateRequest.from_dict(payload)
 
 
 def test_rule_adapter_rounds_initial_and_maintenance_margin_upward() -> None:
@@ -208,11 +166,20 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
     run_id = ""
     session_id = ""
     try:
+        hedge_request = await prepare_hedge_request(
+            service,
+            replace(
+                _sandbox_request(
+                    await _request(service),
+                    margin_mode="ISOLATED",
+                ),
+                market_type="futures",
+            ),
+            root=tmp_path,
+            prefix="phase2-margin",
+        )
         created = await service.training.create_run(  # type: ignore[union-attr]
-            _hedge_request(
-                await _request(service),
-                margin_mode="ISOLATED",
-            )
+            hedge_request
         )
         run_id = str(created["run"]["run_id"])
         session_id = str(created["run"]["adapter_session_id"])
@@ -374,6 +341,10 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
         child = await service.training.get_market_tracks(  # type: ignore[union-attr]
             str(forked["run"]["run_id"])
         )
+        assert child["portfolio"]["hedge_inputs"]["input_proof_hash"] == (
+            adjusted["data"]["portfolio"]["hedge_inputs"]["input_proof_hash"]
+        )
+        assert child["portfolio"]["hedge_inputs"]["auditor"]["status"] == "PASS"
         child_legs = {
             leg["position_side"]: leg
             for leg in child["portfolio"]["hedge_state"]["position_legs"]

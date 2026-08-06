@@ -126,6 +126,16 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - Windows sandbox CPU quota 用例成功终止目标进程，但在受载全量中记录 `8171 ms`，超过冻结的 `8000 ms` 上限 `171 ms`。空闲串行重跑三次均通过（约 `7.78 / 6.40 / 6.65 s`），因此不放宽安全时限；最终全量仍须在新 clean HEAD 重跑并自然通过。
 - 由于本修复和记录都会生成新 HEAD，`0208a746` 的真实来源 PASS 也只保留为失败轮诊断，不进入最终 manifest。
 
+### 3.8 formal benchmark 首轮失败处置
+
+- `d1e8d60c6ecf49adb41af094d24dcba25d87df07` 的真实来源校验、全量 release checks（backend `3242 passed`、frontend Node `2950 passed` 及 architecture/typecheck/lint/build）、完整构建 rollback 和真实浏览器短 smoke 均通过；formal benchmark 依次完成 core、multi-track、segments、fast-forward 与 historical-book 后，在 account-history 组件 fail closed，未进入 HEDGE 组件，也未生成顶层 `benchmark.json` 或 manifest。
+- 第一处确定性错误是账户历史与 period-summary 基准仍发送已退役的训练 wire `replay.v2`。两个脚本现统一复用 `REPLAY_V2_PROTOCOL`，实际值为 `replay.v3`；旧账户历史容量负载明确声明 `position_mode=ONE_WAY`，继续只验证私有账户历史归档能力，不把它伪装成 HEDGE。HEDGE 仍由独立 `hedge-exchange-parity-v3` 基准按默认 `DETERMINISTIC_SIMULATION`、exact public inputs 和双腿强平合同验证。
+- 第二处是账户归档夹具仅提交事务但未真正关闭源 SQLite connection，导致 Windows 临时目录回收报共享冲突。夹具改为 transaction context 与 `closing()` 双层生命周期，并用创建后立即 `unlink()` 的 Windows 回归用例锁定。
+- 协议修复后，新的 BAR 不可变分页合同继续拒绝无 source revision 的旧内存仓库。容量基准现使用 `ImmutableReplayHistoryFake` 生成内容哈希修订并绑定 selection，不跳过 dataset commitment。
+- 资金费实际已经写入 `replay_training_funding_settlement` 与权威合约账本，但展示投影自当前 schema 起有意返回空的 `portfolio.ledger.entries`，旧基准因此误报未结算。验收改为同时检查权威 `portfolio.funding_cashflow` 非零和持久化 settlement 行数不少于 track 数；未删除资金费门禁。
+- 修复后定向集 `15 passed`，Ruff 通过；基线一致的 Python `3.13.9`、1/2/4/8 FULL、每轨持仓、20 次迭代实跑全部 PASS。8 轨 normal p95 `191.464 ms`，低于冻结 `500 ms` 上限；所有 case 的 auditor、账本对账、资金费累计、持久化结算、SQLite quick/foreign-key checks 均通过。
+- 本节提交会再次生成新 HEAD，因此 `d1e8d60c` 的全部 PASS/FAIL artifacts 只作为诊断记录，不能进入最终 manifest；新 HEAD 仍须从真实来源、全量 checks、rollback、smoke、formal benchmark 到 4 小时 soak 全部重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

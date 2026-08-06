@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from pathlib import Path
 
 from app.replay.canonical import canonical_json, canonical_sha256
@@ -287,7 +288,7 @@ def build_account_history_archive(
         "event_chain_tail": previous,
         "created_at_ms": range_end_ms + 1,
     }
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(
             """
             PRAGMA journal_mode = DELETE;

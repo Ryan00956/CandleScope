@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ from app.replay.canonical import canonical_sha256  # noqa: E402
 from app.replay.service import ReplayService  # noqa: E402
 from app.replay.storage import ReplaySQLiteStore  # noqa: E402
 from app.replay.training.models import (  # noqa: E402
+    REPLAY_V2_PROTOCOL,
     ReplayV2CommandType,
     TrainingRunCreateRequest,
 )
@@ -31,13 +33,13 @@ from tests.fixtures.replay.account_history import (  # noqa: E402
     build_account_history_archive,
 )
 from tests.fixtures.replay.fakes import (  # noqa: E402
-    FakeKlinesRepo,
     FixtureIdentity,
     make_bar,
 )
 from tests.fixtures.replay.service_fakes import (  # noqa: E402
     INTERVAL_MS,
     START_MS,
+    ImmutableReplayHistoryFake,
     SessionIdFactory,
     replay_settings,
 )
@@ -117,8 +119,10 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _repository(symbols: tuple[str, ...], *, row_count: int) -> FakeKlinesRepo:
-    repository = FakeKlinesRepo()
+def _repository(
+    symbols: tuple[str, ...], *, row_count: int
+) -> ImmutableReplayHistoryFake:
+    repository = ImmutableReplayHistoryFake()
     for symbol_index, symbol in enumerate(symbols):
         price_base = 100 * (symbol_index + 1)
         repository.add_rows(
@@ -143,7 +147,7 @@ def _request(
 ) -> TrainingRunCreateRequest:
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": REPLAY_V2_PROTOCOL,
             "catalog_epoch": catalog_epoch,
             "name": "Phase 16 positioned capacity",
             "source_kind": "BAR",
@@ -167,6 +171,7 @@ def _request(
             "time_disclosure_policy": "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
             "funding_mode": "HISTORICAL_EXACT",
             "account_data_mode": "HISTORICAL_EXACT",
             "account_history_ref": account_history_ref,
@@ -374,9 +379,9 @@ async def _run_case(root: Path, *, track_count: int, iterations: int) -> dict[st
             "ledger_reconciles": (
                 projection["portfolio"]["ledger"]["reconciliation_delta"] == "0"
             ),
-            "funding_exercised": any(
-                entry["kind"] == "FUNDING_SETTLEMENT"
-                for entry in projection["portfolio"]["ledger"]["entries"]
+            "funding_exercised": (
+                Decimal(str(projection["portfolio"]["funding_cashflow"]))
+                != Decimal(0)
             ),
             "global_events_recorded": bool(global_events),
         }
@@ -387,11 +392,22 @@ async def _run_case(root: Path, *, track_count: int, iterations: int) -> dict[st
                 int(connection.execute("PRAGMA page_count").fetchone()[0])
                 * int(connection.execute("PRAGMA page_size").fetchone()[0])
             )
-        connection.close()
+            funding_settlement_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM replay_training_funding_settlement
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
         checks.update(
             {
                 "sqlite_quick_check": quick_check == ("ok",),
                 "sqlite_foreign_keys": foreign_keys == [],
+                "funding_settlements_persisted": (
+                    funding_settlement_count >= track_count
+                ),
             }
         )
         rss_after = _rss_bytes()

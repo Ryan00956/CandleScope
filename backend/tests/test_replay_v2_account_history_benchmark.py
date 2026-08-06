@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 
 from app.replay.canonical import canonical_sha256
+from app.replay.training.models import REPLAY_V2_PROTOCOL
+from scripts.benchmark_replay_account_history import _request
+from tests.fixtures.replay.account_history import build_account_history_archive
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +16,40 @@ BASELINE = (
     / "perf-baselines"
     / "replay-v2-account-history-20260726.json"
 )
+
+
+def test_account_history_benchmark_uses_current_training_wire_protocol() -> None:
+    request = _request(
+        catalog_epoch="sha256:" + "0" * 64,
+        forward_cache_ms=60_000,
+        account_history_ref=None,
+    )
+
+    assert request.protocol == REPLAY_V2_PROTOCOL == "replay.v3"
+    assert request.position_mode.value == "ONE_WAY"
+
+
+def test_account_history_fixture_releases_its_sqlite_source(tmp_path: Path) -> None:
+    archive = tmp_path / "account-history.sqlite3"
+    range_start_ms = 1_700_000_040_000
+    build_account_history_archive(
+        archive,
+        range_start_ms=range_start_ms,
+        range_end_ms=range_start_ms + 10 * 60_000,
+    )
+
+    archive.unlink()
+    assert not archive.exists()
+
+
+def test_account_history_benchmark_checks_authoritative_funding_state() -> None:
+    source = (
+        ROOT / "backend" / "scripts" / "benchmark_replay_account_history.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'projection["portfolio"]["funding_cashflow"]' in source
+    assert "replay_training_funding_settlement" in source
+    assert 'projection["portfolio"]["ledger"]["entries"]' not in source
 
 
 def test_positioned_exact_account_capacity_evidence_covers_1_2_4_8_full_tracks(

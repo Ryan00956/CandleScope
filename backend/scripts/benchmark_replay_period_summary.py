@@ -35,6 +35,7 @@ from app.replay.service import ReplayService  # noqa: E402
 from app.replay.storage import ReplaySQLiteStore  # noqa: E402
 from app.replay.training.commands import ReplayV2Command  # noqa: E402
 from app.replay.training.models import (  # noqa: E402
+    REPLAY_V2_PROTOCOL,
     ReplayV2CommandType,
     TrainingCursor,
     TrainingRunCreateRequest,
@@ -794,7 +795,7 @@ async def _create_run(
     )
     request = TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": REPLAY_V2_PROTOCOL,
             "catalog_epoch": catalog["catalog_epoch"],
             "name": f"Phase 15 real {source_kind} benchmark",
             "source_kind": source_kind,
@@ -934,7 +935,7 @@ def _v2_command(
         raise TypeError("benchmark adapter cursor is invalid")
     revision = int(snapshot["revision"])
     return ReplayV2Command(
-        protocol="replay.v2",
+        protocol=REPLAY_V2_PROTOCOL,
         run_id=run_id,
         command_id=command_id,
         client_instance_id=CLIENT_ID,

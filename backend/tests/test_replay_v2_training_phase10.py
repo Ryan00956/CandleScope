@@ -196,6 +196,17 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
     assert "replay-v1-smoke" not in verifier
 
 
+def test_release_benchmarks_use_the_current_training_wire_protocol() -> None:
+    for relative in (
+        "backend/scripts/benchmark_replay_account_history.py",
+        "backend/scripts/benchmark_replay_period_summary.py",
+    ):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert "REPLAY_V2_PROTOCOL" in source
+        assert '"protocol": "replay.v2"' not in source
+        assert 'protocol="replay.v2"' not in source
+
+
 def test_formal_fast_forward_refreshes_controller_lease_between_chunks() -> None:
     controller_ttl_seconds = 0.5
     result = asyncio.run(

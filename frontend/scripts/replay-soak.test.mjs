@@ -48,6 +48,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.doesNotMatch(soak, /\/api\/v1\/replay\/sessions(?:\/|\$\{)/);
   assert.match(soak, /packages", "candlescope-plugin-sdk", "src"/);
   assert.match(soak, /process\.env\.PYTHONPATH/);
+  assert.match(soak, /确认时间并创建 Run/);
+  assert.doesNotMatch(soak, /创建 Run 并选择商品/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {

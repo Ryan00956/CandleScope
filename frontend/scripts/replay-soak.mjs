@@ -657,7 +657,7 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
     cdp,
     `(() => {
       const button = [...document.querySelectorAll("button")]
-        .find((item) => item.textContent?.trim() === "创建 Run 并选择商品");
+        .find((item) => item.textContent?.trim() === "确认时间并创建 Run");
       return button instanceof HTMLButtonElement && !button.disabled;
     })()`,
     timeoutMs,
@@ -2634,7 +2634,7 @@ async function main() {
     await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "新建训练"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "Training Hub readiness");
     const opened = await keyboardActivateButton(replay.cdp, { text: "新建训练" }, args.timeoutMs);
     try {
-      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "创建 Run 并选择商品"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "create Run readiness");
+      await waitForValue(replay.cdp, `(() => { const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.trim() === "确认时间并创建 Run"); return button instanceof HTMLButtonElement && !button.disabled; })()`, args.timeoutMs, "create Run readiness");
       if (formalTrainingPlan !== null) {
         await configureFormalV2TrainingPlan(
           replay.cdp,
@@ -2662,7 +2662,7 @@ async function main() {
       };
       throw error;
     }
-    const created = await keyboardActivateButton(replay.cdp, { text: "创建 Run 并选择商品" }, args.timeoutMs);
+    const created = await keyboardActivateButton(replay.cdp, { text: "确认时间并创建 Run" }, args.timeoutMs);
     const selectedMarket = await chooseReplayMarket(replay.cdp, formalTrainingPlan, args.timeoutMs);
     const hubKeyboard = { opened, created, selectedMarket };
     let initial;

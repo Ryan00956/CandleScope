@@ -12,6 +12,10 @@ import {
   createDefaultChartWorkspace,
 } from "../chartWorkspaceStorage.js";
 import { createChartWorkspaceRecord } from "../chartWorkspaceLibrary.js";
+import {
+  createChartWorkspaceLayoutTree,
+  detectChartWorkspaceLayout,
+} from "../chartWorkspaceLayout.js";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -25,7 +29,7 @@ function memoryStorage(initial: Record<string, string> = {}) {
 
 test("repository migrates the legacy single workspace into the named local library", async () => {
   const legacy = createDefaultChartWorkspace();
-  legacy.layout = "quad";
+  legacy.layoutTree = createChartWorkspaceLayoutTree("quad");
   legacy.activeCellId = "cell-3";
   const { storage, values } = memoryStorage({
     [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacy),
@@ -41,7 +45,7 @@ test("repository migrates the legacy single workspace into the named local libra
   assert.equal(loaded.persistenceMode, "local-storage");
   assert.equal(loaded.workspaces.length, 1);
   assert.equal(loaded.workspaces[0]!.name, "默认工作区");
-  assert.equal(loaded.workspaces[0]!.document.layout, "quad");
+  assert.equal(detectChartWorkspaceLayout(loaded.workspaces[0]!.document.layoutTree), "quad");
   assert.equal(loaded.workspaces[0]!.document.activeCellId, "cell-3");
   assert.ok(values.has(CHART_WORKSPACE_BOOTSTRAP_KEY));
 });
@@ -51,7 +55,7 @@ test("local fallback restores multiple workspaces and their active selection", a
   const repository = createChartWorkspaceRepository({ indexedDB: null, storage, now: () => 100 });
   const first = createChartWorkspaceRecord({ id: "one", name: "盘中", createdAt: 1, updatedAt: 1 });
   const second = createChartWorkspaceRecord({ id: "two", name: "波段", createdAt: 2, updatedAt: 2 });
-  second.document.layout = "split-horizontal";
+  second.document.layoutTree = createChartWorkspaceLayoutTree("split-horizontal");
 
   await repository.saveLibrary({ activeWorkspaceId: second.id, workspaces: [first, second] });
   assert.ok(values.has(CHART_WORKSPACE_FALLBACK_LIBRARY_KEY));
@@ -63,7 +67,10 @@ test("local fallback restores multiple workspaces and their active selection", a
   }).loadLibrary();
   assert.equal(reloaded.activeWorkspaceId, second.id);
   assert.deepEqual(reloaded.workspaces.map((workspace) => workspace.name), ["盘中", "波段"]);
-  assert.equal(reloaded.workspaces[1]!.document.layout, "split-horizontal");
+  assert.equal(
+    detectChartWorkspaceLayout(reloaded.workspaces[1]!.document.layoutTree),
+    "split-horizontal",
+  );
 });
 
 test("bootstrap journal recovers a change newer than the debounced library save", async () => {

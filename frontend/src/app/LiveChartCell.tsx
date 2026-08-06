@@ -23,6 +23,7 @@ import type {
   ChartCellId,
   ChartCellState,
   ChartLinkGroupId,
+  ChartWorkspaceCellRole,
   ChartWorkspaceId,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
@@ -90,6 +91,7 @@ export interface ActiveChartEnvironment {
 export interface LiveChartCellProps {
   workspaceId: ChartWorkspaceId;
   cell: ChartCellState;
+  layoutRole: ChartWorkspaceCellRole | null;
   active: boolean;
   maximized: boolean;
   pageExportRef: RefObject<HTMLDivElement | null>;
@@ -115,6 +117,7 @@ export interface LiveChartCellProps {
 function LiveChartCell({
   workspaceId,
   cell,
+  layoutRole,
   active,
   maximized,
   pageExportRef,
@@ -466,11 +469,17 @@ function LiveChartCell({
         className={`multi-chart-cell${active ? " active" : ""}${maximized ? " maximized" : ""}`}
         data-chart-cell-id={cell.id}
         data-active={active ? "true" : "false"}
+        data-layout-role={layoutRole ?? "standard"}
         data-link-group={cell.linkGroup ?? "none"}
         onPointerDown={activate}
       >
         <header className="multi-chart-cell-header" onDoubleClick={toggleMaximize}>
           <span className={`multi-chart-cell-status ${marketData.view.wsStatus}`} aria-hidden="true" />
+          {layoutRole && (
+            <span className={`multi-chart-cell-role role-${layoutRole}`}>
+              {layoutRole === "main" ? "主图" : "确认图"}
+            </span>
+          )}
           <strong>{chartSession.view.symbol}</strong>
           <span>{chartSession.view.interval}</span>
           <span className="multi-chart-cell-market">

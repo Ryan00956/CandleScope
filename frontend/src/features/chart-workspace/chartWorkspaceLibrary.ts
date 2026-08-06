@@ -14,6 +14,10 @@ import {
   createDefaultChartWorkspace,
   normalizeChartWorkspace,
 } from "./chartWorkspaceStorage.js";
+import {
+  createChartWorkspaceLayoutTree,
+  detectChartWorkspaceLayout,
+} from "./chartWorkspaceLayout.js";
 
 export const DEFAULT_CHART_WORKSPACE_ID = "workspace-default";
 export const DEFAULT_CHART_WORKSPACE_NAME = "默认工作区";
@@ -23,6 +27,7 @@ export const CHART_WORKSPACE_TEMPLATE_NAMES: Record<ChartWorkspaceTemplateId, st
   single: "单图工作区",
   "split-vertical": "左右双图",
   "split-horizontal": "上下双图",
+  "main-confirmation": "主图与确认图",
   quad: "四图工作区",
 };
 
@@ -113,6 +118,7 @@ export function createTemplateChartWorkspaceDocument(
 ): ChartWorkspaceDocument {
   const document = createDefaultChartWorkspace();
   const anchor = source.cells[source.activeCellId];
+  const mainConfirmationIntervals = [anchor.session.interval, "4h", "1d", "15m"];
   const copyCellPreferences = (cell: ChartCellState, index: number): ChartCellState => ({
     ...cell,
     session: {
@@ -120,7 +126,9 @@ export function createTemplateChartWorkspaceDocument(
       exchange: anchor.session.exchange,
       marketType: anchor.session.marketType,
       symbol: anchor.session.symbol,
-      interval: index === 0 ? anchor.session.interval : cell.session.interval,
+      interval: templateId === "main-confirmation"
+        ? mainConfirmationIntervals[index] ?? cell.session.interval
+        : index === 0 ? anchor.session.interval : cell.session.interval,
     },
     chartSettings: cloneSerializable(anchor.chartSettings),
     priceScale: cloneSerializable(anchor.priceScale),
@@ -130,7 +138,7 @@ export function createTemplateChartWorkspaceDocument(
     cellId,
     copyCellPreferences(document.cells[cellId], index),
   ])) as ChartWorkspaceDocument["cells"];
-  document.layout = templateId;
+  document.layoutTree = createChartWorkspaceLayoutTree(templateId);
   document.activeCellId = "cell-1";
   document.maximizedCellId = null;
   return document;
@@ -246,7 +254,7 @@ export function summarizeChartWorkspaces(
     name: workspace.name,
     createdAt: workspace.createdAt,
     updatedAt: workspace.updatedAt,
-    layout: workspace.document.layout,
+    layout: detectChartWorkspaceLayout(workspace.document.layoutTree),
   }));
 }
 

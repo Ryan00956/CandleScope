@@ -2,7 +2,7 @@ import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 
-export const CHART_WORKSPACE_SCHEMA_VERSION = 2 as const;
+export const CHART_WORKSPACE_SCHEMA_VERSION = 3 as const;
 export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
 export const CHART_CELL_IDS = ["cell-1", "cell-2", "cell-3", "cell-4"] as const;
 export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
@@ -10,14 +10,36 @@ export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
 export type ChartCellId = (typeof CHART_CELL_IDS)[number];
 export type ChartLinkGroupId = (typeof CHART_LINK_GROUP_IDS)[number];
 
-export type ChartWorkspaceLayout =
+export type ChartWorkspaceTemplateId =
   | "single"
   | "split-vertical"
   | "split-horizontal"
+  | "main-confirmation"
   | "quad";
 
 export type ChartWorkspaceId = string;
-export type ChartWorkspaceTemplateId = ChartWorkspaceLayout;
+export type ChartWorkspaceLayout = ChartWorkspaceTemplateId | "custom";
+export type ChartWorkspaceSplitDirection = "columns" | "rows";
+export type ChartWorkspaceCellRole = "main" | "confirmation";
+
+export interface ChartWorkspaceCellLayoutNode {
+  kind: "cell";
+  cellId: ChartCellId;
+  role?: ChartWorkspaceCellRole;
+}
+
+export interface ChartWorkspaceSplitLayoutNode {
+  kind: "split";
+  id: string;
+  direction: ChartWorkspaceSplitDirection;
+  ratio: number;
+  first: ChartWorkspaceLayoutNode;
+  second: ChartWorkspaceLayoutNode;
+}
+
+export type ChartWorkspaceLayoutNode =
+  | ChartWorkspaceCellLayoutNode
+  | ChartWorkspaceSplitLayoutNode;
 
 export const CELL_CHART_SETTING_KEYS = [
   "chartType",
@@ -67,10 +89,9 @@ export interface ChartCellState {
 
 export interface ChartWorkspaceDocument {
   schemaVersion: typeof CHART_WORKSPACE_SCHEMA_VERSION;
-  layout: ChartWorkspaceLayout;
+  layoutTree: ChartWorkspaceLayoutNode;
   activeCellId: ChartCellId;
   maximizedCellId: ChartCellId | null;
-  layoutRatios: ChartWorkspaceLayoutRatios;
   linkGroups: Record<ChartLinkGroupId, ChartLinkGroupSettings>;
   cells: Record<ChartCellId, ChartCellState>;
 }
@@ -115,21 +136,15 @@ export const CHART_WORKSPACE_LAYOUTS: readonly ChartWorkspaceLayout[] = [
   "single",
   "split-vertical",
   "split-horizontal",
+  "main-confirmation",
   "quad",
+  "custom",
 ];
 
 export const CHART_WORKSPACE_TEMPLATE_IDS: readonly ChartWorkspaceTemplateId[] = [
-  ...CHART_WORKSPACE_LAYOUTS,
+  "single",
+  "split-vertical",
+  "split-horizontal",
+  "main-confirmation",
+  "quad",
 ];
-
-export function visibleCellIds(
-  layout: ChartWorkspaceLayout,
-  maximizedCellId: ChartCellId | null = null,
-): ChartCellId[] {
-  if (maximizedCellId) return [maximizedCellId];
-  if (layout === "single") return ["cell-1"];
-  if (layout === "split-vertical" || layout === "split-horizontal") {
-    return ["cell-1", "cell-2"];
-  }
-  return [...CHART_CELL_IDS];
-}

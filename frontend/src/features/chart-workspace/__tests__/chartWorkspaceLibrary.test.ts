@@ -12,6 +12,11 @@ import {
   uniqueChartWorkspaceName,
 } from "../chartWorkspaceLibrary.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import {
+  detectChartWorkspaceLayout,
+  findChartWorkspaceCellRole,
+  visibleCellIds,
+} from "../chartWorkspaceLayout.js";
 
 test("workspace templates inherit the active market and chart preferences without sharing objects", () => {
   const source = createDefaultChartWorkspace();
@@ -26,7 +31,7 @@ test("workspace templates inherit the active market and chart preferences withou
 
   const document = createTemplateChartWorkspaceDocument("quad", source);
 
-  assert.equal(document.layout, "quad");
+  assert.equal(detectChartWorkspaceLayout(document.layoutTree), "quad");
   assert.equal(document.activeCellId, "cell-1");
   assert.equal(document.maximizedCellId, null);
   assert.deepEqual(
@@ -45,6 +50,23 @@ test("workspace templates inherit the active market and chart preferences withou
   assert.deepEqual(document.cells["cell-1"].indicators, source.cells["cell-2"].indicators);
   assert.notEqual(document.cells["cell-1"].indicators, source.cells["cell-2"].indicators);
   assert.notEqual(document.cells["cell-1"].indicators[0]?.params, source.cells["cell-2"].indicators[0]?.params);
+});
+
+test("main and confirmation template uses one primary and two higher-timeframe confirmation cells", () => {
+  const source = createDefaultChartWorkspace();
+  source.cells["cell-1"].session.interval = "30m";
+  const document = createTemplateChartWorkspaceDocument("main-confirmation", source);
+
+  assert.equal(detectChartWorkspaceLayout(document.layoutTree), "main-confirmation");
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+  assert.deepEqual([
+    document.cells["cell-1"].session.interval,
+    document.cells["cell-2"].session.interval,
+    document.cells["cell-3"].session.interval,
+  ], ["30m", "4h", "1d"]);
+  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-1"), "main");
+  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-2"), "confirmation");
+  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-3"), "confirmation");
 });
 
 test("library normalization repairs one malformed cell without discarding valid siblings", () => {

@@ -13,11 +13,10 @@ import {
   CELL_CHART_SETTING_KEYS,
   CHART_CELL_IDS,
   CHART_LINK_GROUP_IDS,
-  CHART_WORKSPACE_LAYOUTS,
   CHART_WORKSPACE_SCHEMA_VERSION,
+  CHART_WORKSPACE_TEMPLATE_IDS,
   DEFAULT_CHART_LINK_GROUP_SETTINGS,
   DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS,
-  visibleCellIds,
   type ChartCellChartSettings,
   type ChartCellId,
   type ChartCellPriceScale,
@@ -25,10 +24,15 @@ import {
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
   type ChartWorkspaceDocument,
-  type ChartWorkspaceLayout,
   type ChartWorkspaceLayoutRatios,
+  type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
-import { normalizeChartSplitRatio } from "./chartWorkspaceLayout.js";
+import {
+  createChartWorkspaceLayoutTree,
+  normalizeChartSplitRatio,
+  normalizeChartWorkspaceLayoutTree,
+  visibleCellIds,
+} from "./chartWorkspaceLayout.js";
 
 export const CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v2";
 export const LEGACY_CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v1";
@@ -172,10 +176,9 @@ export function createDefaultChartWorkspace(): ChartWorkspaceDocument {
   ) as Record<ChartCellId, ChartCellState>;
   return {
     schemaVersion: CHART_WORKSPACE_SCHEMA_VERSION,
-    layout: "single",
+    layoutTree: createChartWorkspaceLayoutTree("single"),
     activeCellId: "cell-1",
     maximizedCellId: null,
-    layoutRatios: { ...DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS },
     linkGroups: Object.fromEntries(CHART_LINK_GROUP_IDS.map((group) => [
       group,
       { ...DEFAULT_CHART_LINK_GROUP_SETTINGS },
@@ -184,9 +187,9 @@ export function createDefaultChartWorkspace(): ChartWorkspaceDocument {
   };
 }
 
-function normalizeLayout(value: unknown): ChartWorkspaceLayout {
-  return CHART_WORKSPACE_LAYOUTS.includes(value as ChartWorkspaceLayout)
-    ? value as ChartWorkspaceLayout
+function normalizeLegacyLayout(value: unknown): ChartWorkspaceTemplateId {
+  return CHART_WORKSPACE_TEMPLATE_IDS.includes(value as ChartWorkspaceTemplateId)
+    ? value as ChartWorkspaceTemplateId
     : "single";
 }
 
@@ -200,7 +203,7 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
   const sourceCells = isRecord(value.cells) ? value.cells : {};
   const sourceSchemaVersion = Number(value.schemaVersion);
   const hasLinkGroups = Number.isInteger(sourceSchemaVersion)
-    && sourceSchemaVersion >= CHART_WORKSPACE_SCHEMA_VERSION;
+    && sourceSchemaVersion >= 2;
   const cells = Object.fromEntries(CHART_CELL_IDS.map((id) => {
     const defaultValue = fallback.cells[id];
     const source = isRecord(sourceCells[id]) ? sourceCells[id] : {};
@@ -215,12 +218,17 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
       indicators: normalizeIndicators(source.indicators),
     } satisfies ChartCellState];
   })) as Record<ChartCellId, ChartCellState>;
-  const layout = normalizeLayout(value.layout);
+  const legacyLayout = normalizeLegacyLayout(value.layout);
+  const legacyRatios = normalizeLayoutRatios(value.layoutRatios);
+  const legacyTree = createChartWorkspaceLayoutTree(legacyLayout, legacyRatios);
+  const layoutTree = sourceSchemaVersion >= CHART_WORKSPACE_SCHEMA_VERSION
+    ? normalizeChartWorkspaceLayoutTree(value.layoutTree, legacyTree)
+    : legacyTree;
   const requestedActiveCellId = normalizeCellId(value.activeCellId, "cell-1");
   const maximizedCellId = value.maximizedCellId == null
     ? null
     : normalizeCellId(value.maximizedCellId, requestedActiveCellId);
-  const layoutCellIds = visibleCellIds(layout);
+  const layoutCellIds = visibleCellIds(layoutTree);
   const activeCellId = maximizedCellId
     ?? (layoutCellIds.includes(requestedActiveCellId)
       ? requestedActiveCellId
@@ -232,10 +240,9 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
   ])) as Record<ChartLinkGroupId, ChartLinkGroupSettings>;
   return {
     schemaVersion: CHART_WORKSPACE_SCHEMA_VERSION,
-    layout,
+    layoutTree,
     activeCellId,
     maximizedCellId,
-    layoutRatios: normalizeLayoutRatios(value.layoutRatios),
     linkGroups,
     cells,
   };

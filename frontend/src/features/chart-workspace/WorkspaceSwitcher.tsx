@@ -21,6 +21,7 @@ const TEMPLATE_OPTIONS: ReadonlyArray<{
   { id: "single", label: "单图", description: "一个主图表", glyph: "□" },
   { id: "split-vertical", label: "左右双图", description: "并排比较", glyph: "▯▯" },
   { id: "split-horizontal", label: "上下双图", description: "上下确认", glyph: "▭" },
+  { id: "main-confirmation", label: "主图 / 确认图", description: "左主图 + 右双确认", glyph: "◧" },
   { id: "quad", label: "四图", description: "多周期工作台", glyph: "▦" },
 ];
 
@@ -28,7 +29,9 @@ const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], string> = {
   single: "单图",
   "split-vertical": "左右双图",
   "split-horizontal": "上下双图",
+  "main-confirmation": "主图 / 确认图",
   quad: "四图",
+  custom: "自定义布局",
 };
 
 function saveStateLabel(state: ChartWorkspaceSaveState): string {

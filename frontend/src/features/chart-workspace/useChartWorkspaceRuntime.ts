@@ -27,7 +27,6 @@ import {
 } from "./chartWorkspaceRepository.js";
 import {
   CELL_CHART_SETTING_KEYS,
-  visibleCellIds,
   type ChartCellChartSettings,
   type ChartCellId,
   type ChartCellPriceScale,
@@ -36,12 +35,16 @@ import {
   type ChartWorkspaceDocument,
   type ChartWorkspaceId,
   type ChartWorkspaceLayout,
-  type ChartWorkspaceLayoutRatios,
   type ChartWorkspaceLibrarySnapshot,
   type ChartWorkspaceSummary,
   type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
-import { normalizeChartSplitRatio } from "./chartWorkspaceLayout.js";
+import {
+  createChartWorkspaceLayoutTree,
+  detectChartWorkspaceLayout,
+  updateChartWorkspaceSplitRatio,
+  visibleCellIds,
+} from "./chartWorkspaceLayout.js";
 import {
   applyLinkedSessionUpdate,
   assignCellLinkGroup,
@@ -56,6 +59,7 @@ export interface ChartWorkspaceRuntime {
     activeWorkspaceName: string;
     runtimeKey: string;
     workspaces: ChartWorkspaceSummary[];
+    layout: ChartWorkspaceLayout;
     activeCellId: ChartCellId;
     activeCell: ChartWorkspaceDocument["cells"][ChartCellId];
     visibleCellIds: ChartCellId[];
@@ -67,7 +71,7 @@ export interface ChartWorkspaceRuntime {
     duplicateWorkspace(workspaceId?: ChartWorkspaceId): void;
     renameWorkspace(workspaceId: ChartWorkspaceId, name: string): void;
     deleteWorkspace(workspaceId: ChartWorkspaceId): void;
-    setLayout(layout: ChartWorkspaceLayout): void;
+    setLayout(layout: ChartWorkspaceTemplateId): void;
     setActiveCell(cellId: ChartCellId): void;
     toggleMaximize(cellId: ChartCellId): void;
     setCellLinkGroup(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
@@ -75,7 +79,7 @@ export interface ChartWorkspaceRuntime {
       group: ChartLinkGroupId,
       patch: Partial<ChartLinkGroupSettings>,
     ): void;
-    setLayoutRatio(key: keyof ChartWorkspaceLayoutRatios, ratio: number): void;
+    setLayoutRatio(splitId: string, ratio: number): void;
     updateCellSession(cellId: ChartCellId, session: ChartSession): void;
     updateCellChartSettings(cellId: ChartCellId, settings: ChartSettings | ChartCellChartSettings): void;
     updateCellPriceScale(cellId: ChartCellId, priceScale: ChartCellPriceScale): void;
@@ -332,14 +336,18 @@ export function useChartWorkspaceRuntime(
     setLibrary((current) => removeChartWorkspace(current, workspaceId));
   }, []);
 
-  const setLayout = useCallback((layout: ChartWorkspaceLayout) => {
+  const setLayout = useCallback((layout: ChartWorkspaceTemplateId) => {
     updateActiveDocument((current) => {
-      const nextVisible = visibleCellIds(layout);
-      return current.layout === layout && current.maximizedCellId === null
+      const currentLayout = detectChartWorkspaceLayout(current.layoutTree);
+      const nextTree = currentLayout === layout
+        ? current.layoutTree
+        : createChartWorkspaceLayoutTree(layout);
+      const nextVisible = visibleCellIds(nextTree);
+      return current.layoutTree === nextTree && current.maximizedCellId === null
         ? current
         : {
             ...current,
-            layout,
+            layoutTree: nextTree,
             maximizedCellId: null,
             activeCellId: nextVisible.includes(current.activeCellId)
               ? current.activeCellId
@@ -391,15 +399,15 @@ export function useChartWorkspaceRuntime(
   }, [updateActiveDocument]);
 
   const setLayoutRatio = useCallback((
-    key: keyof ChartWorkspaceLayoutRatios,
+    splitId: string,
     ratio: number,
   ) => {
     updateActiveDocument((current) => {
-      const normalized = normalizeChartSplitRatio(ratio, current.layoutRatios[key]);
-      if (current.layoutRatios[key] === normalized) return current;
+      const layoutTree = updateChartWorkspaceSplitRatio(current.layoutTree, splitId, ratio);
+      if (layoutTree === current.layoutTree) return current;
       return {
         ...current,
-        layoutRatios: { ...current.layoutRatios, [key]: normalized },
+        layoutTree,
       };
     });
   }, [updateActiveDocument]);
@@ -450,10 +458,14 @@ export function useChartWorkspaceRuntime(
 
   const workspace = activeWorkspace(library);
   const document = workspace.document;
+  const layout = useMemo(
+    () => detectChartWorkspaceLayout(document.layoutTree),
+    [document.layoutTree],
+  );
   const activeCell = document.cells[document.activeCellId];
   const renderedCellIds = useMemo(
-    () => visibleCellIds(document.layout, document.maximizedCellId),
-    [document.layout, document.maximizedCellId],
+    () => visibleCellIds(document.layoutTree, document.maximizedCellId),
+    [document.layoutTree, document.maximizedCellId],
   );
   const workspaceSummaries = useMemo(
     () => summarizeChartWorkspaces(library.workspaces),
@@ -467,6 +479,7 @@ export function useChartWorkspaceRuntime(
       activeWorkspaceName: workspace.name,
       runtimeKey: `${workspace.id}:${ready ? "ready" : "bootstrap"}`,
       workspaces: workspaceSummaries,
+      layout,
       activeCellId: document.activeCellId,
       activeCell,
       visibleCellIds: renderedCellIds,

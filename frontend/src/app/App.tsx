@@ -7,7 +7,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
 } from "react";
 import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { MarketDataWorkspaceProvider } from "../features/market-data/MarketDataWorkspaceProvider.js";
@@ -17,10 +16,11 @@ import type {
   ChartLinkGroupId,
   ChartLinkGroupSettings,
   ChartWorkspaceLayout,
+  ChartWorkspaceTemplateId,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
-import WorkspaceSplitHandles from "../features/chart-workspace/WorkspaceSplitHandles.js";
+import WorkspaceLayoutTree from "../features/chart-workspace/WorkspaceLayoutTree.js";
 import WorkspaceSwitcher from "../features/chart-workspace/WorkspaceSwitcher.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime.js";
@@ -45,13 +45,14 @@ import "../features/plugins/pluginTrustUx.css";
 const ReplayLauncherDialog = lazy(loadReplayLauncherDialog);
 
 const LAYOUT_OPTIONS: ReadonlyArray<{
-  id: ChartWorkspaceLayout;
+  id: ChartWorkspaceTemplateId;
   label: string;
   glyph: string;
 }> = [
   { id: "single", label: "单图", glyph: "□" },
   { id: "split-vertical", label: "左右双图", glyph: "▯▯" },
   { id: "split-horizontal", label: "上下双图", glyph: "▭" },
+  { id: "main-confirmation", label: "主图与确认图", glyph: "◧" },
   { id: "quad", label: "四图", glyph: "▦" },
 ];
 
@@ -62,7 +63,7 @@ function WorkspaceLayoutControls({
 }: {
   layout: ChartWorkspaceLayout;
   disabled?: boolean;
-  onChange(layout: ChartWorkspaceLayout): void;
+  onChange(layout: ChartWorkspaceTemplateId): void;
 }) {
   return (
     <div className="workspace-layout-controls" role="group" aria-label="图表布局">
@@ -158,7 +159,6 @@ function LiveWorkspaceApp() {
   const replayEntry = useReplayEntryCapability();
   const marketRailLayout = useMarketRailLayout();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
-  const gridRef = useRef<HTMLDivElement | null>(null);
   const [linkCoordinator] = useState(
     () => new ChartLinkCoordinator(workspace.view.document),
   );
@@ -301,7 +301,7 @@ function LiveWorkspaceApp() {
         onDelete={workspace.actions.deleteWorkspace}
       />
       <WorkspaceLayoutControls
-        layout={workspace.view.document.layout}
+        layout={workspace.view.layout}
         disabled={!workspace.view.ready}
         onChange={workspace.actions.setLayout}
       />
@@ -332,26 +332,16 @@ function LiveWorkspaceApp() {
     workspace.view.activeCellId,
     workspace.view.activeWorkspaceId,
     workspace.view.activeWorkspaceName,
-    workspace.view.document.layout,
+    workspace.view.layout,
     workspace.view.document.linkGroups,
     workspace.view.ready,
     workspace.view.workspaces,
   ]);
   const gridClassName = [
     "multi-chart-grid",
-    `layout-${workspace.view.document.layout}`,
+    `layout-${workspace.view.layout}`,
     workspace.view.document.maximizedCellId ? "has-maximized-cell" : "",
   ].filter(Boolean).join(" ");
-  const columnRatio = workspace.view.document.layout === "quad"
-    ? workspace.view.document.layoutRatios.quadColumns
-    : workspace.view.document.layoutRatios.splitVertical;
-  const rowRatio = workspace.view.document.layout === "quad"
-    ? workspace.view.document.layoutRatios.quadRows
-    : workspace.view.document.layoutRatios.splitHorizontal;
-  const gridStyle = useMemo(() => ({
-    "--workspace-column-ratio": `${columnRatio * 100}%`,
-    "--workspace-row-ratio": `${rowRatio * 100}%`,
-  }) as CSSProperties, [columnRatio, rowRatio]);
 
   return (
     <>
@@ -365,51 +355,45 @@ function LiveWorkspaceApp() {
             exportOverlay={null}
             chart={(
               <div
-                ref={gridRef}
                 className={gridClassName}
-                data-workspace-layout={workspace.view.document.layout}
+                data-workspace-layout={workspace.view.layout}
                 data-workspace-id={workspace.view.activeWorkspaceId}
                 aria-busy={!workspace.view.ready}
-                data-column-ratio={columnRatio.toFixed(3)}
-                data-row-ratio={rowRatio.toFixed(3)}
-                style={gridStyle}
               >
-                {workspace.view.visibleCellIds.map((cellId) => (
-                  <LiveChartCell
-                    key={`${workspace.view.runtimeKey}:${cellId}`}
-                    workspaceId={workspace.view.activeWorkspaceId}
-                    cell={workspace.view.document.cells[cellId]}
-                    active={workspace.view.activeCellId === cellId}
-                    maximized={workspace.view.document.maximizedCellId === cellId}
-                    pageExportRef={pageExportRef}
-                    foregroundPreloadGate={foregroundPreloadGate}
-                    globalSettings={settings}
-                    watchlist={watchlist}
-                    marketRail={marketRail}
-                    replayEntry={replayEntry}
-                    portalHosts={portalHosts}
-                    workspaceControls={workspaceControls}
-                    linkCoordinator={linkCoordinator}
-                    onActivate={workspace.actions.setActiveCell}
-                    onLinkGroupChange={workspace.actions.setCellLinkGroup}
-                    onToggleMaximize={workspace.actions.toggleMaximize}
-                    onSessionChange={workspace.actions.updateCellSession}
-                    onChartSettingsChange={workspace.actions.updateCellChartSettings}
-                    onPriceScaleChange={workspace.actions.updateCellPriceScale}
-                    onIndicatorsChange={workspace.actions.updateCellIndicators}
-                    onOpenReplayLauncher={openReplayLauncher}
-                    onActiveEnvironmentChange={handleActiveEnvironmentChange}
-                  />
-                ))}
-                {!workspace.view.document.maximizedCellId && (
-                  <WorkspaceSplitHandles
-                    containerRef={gridRef}
-                    layout={workspace.view.document.layout}
-                    ratios={workspace.view.document.layoutRatios}
-                    disabled={!workspace.view.ready}
-                    onCommit={workspace.actions.setLayoutRatio}
-                  />
-                )}
+                <WorkspaceLayoutTree
+                  tree={workspace.view.document.layoutTree}
+                  maximizedCellId={workspace.view.document.maximizedCellId}
+                  disabled={!workspace.view.ready}
+                  onSplitRatioChange={workspace.actions.setLayoutRatio}
+                  renderCell={(cellId, layoutRole) => (
+                    <LiveChartCell
+                      key={`${workspace.view.runtimeKey}:${cellId}`}
+                      workspaceId={workspace.view.activeWorkspaceId}
+                      cell={workspace.view.document.cells[cellId]}
+                      layoutRole={layoutRole}
+                      active={workspace.view.activeCellId === cellId}
+                      maximized={workspace.view.document.maximizedCellId === cellId}
+                      pageExportRef={pageExportRef}
+                      foregroundPreloadGate={foregroundPreloadGate}
+                      globalSettings={settings}
+                      watchlist={watchlist}
+                      marketRail={marketRail}
+                      replayEntry={replayEntry}
+                      portalHosts={portalHosts}
+                      workspaceControls={workspaceControls}
+                      linkCoordinator={linkCoordinator}
+                      onActivate={workspace.actions.setActiveCell}
+                      onLinkGroupChange={workspace.actions.setCellLinkGroup}
+                      onToggleMaximize={workspace.actions.toggleMaximize}
+                      onSessionChange={workspace.actions.updateCellSession}
+                      onChartSettingsChange={workspace.actions.updateCellChartSettings}
+                      onPriceScaleChange={workspace.actions.updateCellPriceScale}
+                      onIndicatorsChange={workspace.actions.updateCellIndicators}
+                      onOpenReplayLauncher={openReplayLauncher}
+                      onActiveEnvironmentChange={handleActiveEnvironmentChange}
+                    />
+                  )}
+                />
               </div>
             )}
             rightRail={<div className="workspace-portal-host" ref={setRightRailHost} />}

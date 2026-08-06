@@ -58,6 +58,18 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /data-replay-action="place-order"/);
   assert.match(soak, /data-side="\$\{side\}"/);
   assert.doesNotMatch(soak, /\.replay-order-ticket/);
+  const endConfirmationOffset = soak.indexOf("soak session end");
+  const integrityDrawerOffset = soak.indexOf(
+    'data-replay-action="toggle-integrity"',
+    endConfirmationOffset,
+  );
+  const reportPanelOffset = soak.indexOf(
+    'data-replay-panel=\\"report\\"',
+    integrityDrawerOffset,
+  );
+  assert.ok(endConfirmationOffset >= 0);
+  assert.ok(integrityDrawerOffset > endConfirmationOffset);
+  assert.ok(reportPanelOffset > integrityDrawerOffset);
   assert.match(soak, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
   const accountProofSource = soak.slice(
     soak.indexOf("async function readServerAccountProof"),

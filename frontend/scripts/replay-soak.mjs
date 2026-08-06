@@ -3353,6 +3353,29 @@ async function main() {
         exceptions: replayCapture.exceptions,
       })}`);
     }
+    await waitForValue(
+      replay.cdp,
+      `(() => {
+        if (document.querySelector('[data-replay-panel="integrity"]') !== null) return true;
+        const button = document.querySelector('[data-replay-action="toggle-integrity"]');
+        return button instanceof HTMLButtonElement && !button.disabled;
+      })()`,
+      args.timeoutMs,
+      "ended integrity drawer readiness",
+    );
+    const integrityAlreadyOpen = await evaluate(
+      replay.cdp,
+      "document.querySelector('[data-replay-panel=\"integrity\"]') !== null",
+    );
+    if (!integrityAlreadyOpen) {
+      await click(replay.cdp, '[data-replay-action="toggle-integrity"]');
+    }
+    await waitForValue(
+      replay.cdp,
+      "document.querySelector('[data-replay-panel=\"integrity\"]') !== null",
+      args.timeoutMs,
+      "ended integrity drawer",
+    );
     try {
       await waitForValue(
         replay.cdp,

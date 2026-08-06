@@ -69,6 +69,7 @@ function inventoryRaw() {
     },
     feature_flags: {
       replay_enabled: true,
+      agg_trade_enabled: false,
       segment_download_worker_enabled: false,
       segment_auto_gc_enabled: false,
       fast_forward_optimization_enabled: false,
@@ -244,6 +245,7 @@ function baseApi(
 test("Phase 18 inventory parser accepts the frozen shape and rejects private fields", () => {
   const parsed = parseReplayStorageInventory(inventoryRaw());
   assert.equal(parsed.decision.state, "HOLD");
+  assert.equal(parsed.feature_flags.agg_trade_enabled, false);
   assert.equal(parsed.categories.segments.items[0]?.object_id, "segment-one");
   assert.equal(parsed.categories.review_evidence.gc_protocol, null);
   assert.equal(parsed.support_matrix.length, 4);

@@ -418,6 +418,16 @@ build、Ruff、compile 与 diff check 全部通过。阶段证据见
 
 预估：3–5 个工程日。
 
+状态：`COMPLETE`。training schema v16 已新增完整 fee-policy extension 与逐腿
+funding settlement；FUNDING 按结算前 LONG/SHORT 快照分别产生现金与不可变事实，
+fill fee 绑定成交时刻生效的完整公开策略。HEDGE position/margin/accounting mutation
+均进入同一 hash-chained ledger，portfolio/report/account-record export/Review fork 已暴露
+并重建 child-owned 逐腿证据。account auditor 以 `(track_id, position_side)` 重演 fills、
+funding、fees、最终两腿和账户，正常/重试/重启/fork 零差异，篡改结算前数量、逐腿累计
+或 ledger hash 均返回精确字段。完整 replay 后端 `855 passed`，前端 replay `326 passed`，
+typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE4_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE4_RESULT_20260806_zh.md)。
+
 ### Phase 5：完整强平、破产、保险基金与 ADL
 
 工作内容：

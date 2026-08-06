@@ -390,9 +390,7 @@ def build_hedge_public_history_archive(
         "settlement_asset": _identity(settlement_asset, "settlement_asset"),
         "range_start_ms": _counter(range_start_ms, "range_start_ms"),
         "range_end_ms": _counter(range_end_ms, "range_end_ms"),
-        "max_mark_gap_ms": _counter(
-            max_mark_gap_ms, "max_mark_gap_ms", positive=True
-        ),
+        "max_mark_gap_ms": _counter(max_mark_gap_ms, "max_mark_gap_ms", positive=True),
         "source_identity": _identity(source_identity, "source_identity"),
         "capture_receipt": _identity(capture_receipt, "capture_receipt"),
         "historical_l2_ref": _l2_ref(historical_l2_ref),
@@ -575,8 +573,7 @@ def bind_hedge_inputs(
         or int(public_row["generation"]) != binding.public_generation
         or int(simulation_row["generation"]) != binding.simulation_generation
         or public_row["checksum_sha256"] != binding.public.checksum_sha256
-        or simulation_row["checksum_sha256"]
-        != binding.simulation.checksum_sha256
+        or simulation_row["checksum_sha256"] != binding.simulation.checksum_sha256
     ):
         raise TrainingRunError(
             "HEDGE_INPUT_CHANGED_BEFORE_BIND",
@@ -662,8 +659,10 @@ def bind_hedge_inputs(
     rule = public_state.get("rule")
     fee = public_state.get("fee_policy")
     mark = public_state.get("mark_index")
-    if not isinstance(rule, Mapping) or not isinstance(fee, Mapping) or not isinstance(
-        mark, Mapping
+    if (
+        not isinstance(rule, Mapping)
+        or not isinstance(fee, Mapping)
+        or not isinstance(mark, Mapping)
     ):
         raise TypeError("HEDGE public start projection is incomplete")
     runtime_rule = runtime_hedge_rule(
@@ -722,6 +721,35 @@ def bind_hedge_inputs(
             fee["maker_fee_bps"],
             fee["taker_fee_bps"],
             canonical_sha256(fee_policy),
+            now_ms,
+        ),
+    )
+    fee_extension = {
+        "schema_version": "replay.training.fee-policy-extension.v1",
+        "run_id": run_id,
+        "revision": 1,
+        "policy_version": fee["policy_version"],
+        "account_tier": fee["account_tier"],
+        "liquidation_fee_bps": fee["liquidation_fee_bps"],
+        "source_kind": "PUBLIC",
+        "source_id": binding.public.archive_id,
+        "source_event_sequence": 0,
+    }
+    connection.execute(
+        """
+        INSERT INTO replay_training_fee_policy_extension(
+            run_id, revision, policy_version, account_tier,
+            liquidation_fee_bps, source_kind, source_id,
+            source_event_sequence, component_hash, created_at_ms
+        ) VALUES (?, 1, ?, ?, ?, 'PUBLIC', ?, 0, ?, ?)
+        """,
+        (
+            run_id,
+            fee["policy_version"],
+            fee["account_tier"],
+            fee["liquidation_fee_bps"],
+            binding.public.archive_id,
+            canonical_sha256(fee_extension),
             now_ms,
         ),
     )
@@ -1002,9 +1030,7 @@ def build_hedge_simulation_manifest(
             raise ValueError("insurance builder event fields are invalid")
         kind = str(raw["kind"])
         amount = Decimal(
-            _canonical_decimal(
-                raw["amount"], "insurance.amount", nonnegative=True
-            )
+            _canonical_decimal(raw["amount"], "insurance.amount", nonnegative=True)
         )
         if sequence == 1:
             if kind != "OPENING_BALANCE":
@@ -1095,9 +1121,7 @@ def build_hedge_simulation_manifest(
     payload = {
         "schema_version": SIMULATION_MANIFEST_SCHEMA_VERSION,
         "model_version": MODEL_VERSION,
-        "manifest_id": validate_identifier(
-            manifest_id, field_name="manifest_id"
-        ),
+        "manifest_id": validate_identifier(manifest_id, field_name="manifest_id"),
         "dataset_epoch": canonical_sha256(epoch_payload),
         "range_start_ms": _counter(range_start_ms, "range_start_ms"),
         "range_end_ms": _counter(range_end_ms, "range_end_ms"),
@@ -1174,9 +1198,13 @@ def _read_simulation_events(path: Path) -> tuple[HedgeInputEvent, ...]:
         }
     )
     result: list[HedgeInputEvent] = []
-    for sequence, (event_time, kind, component_sequence, source_hash, body) in enumerate(
-        materialized, start=1
-    ):
+    for sequence, (
+        event_time,
+        kind,
+        component_sequence,
+        source_hash,
+        body,
+    ) in enumerate(materialized, start=1):
         event_hash = canonical_sha256(
             {
                 "schema_version": SIMULATION_EVENT_SCHEMA_VERSION,
@@ -1333,8 +1361,7 @@ class HedgeInputArchiveManager:
                     and (
                         not isinstance(descriptor, HedgeSimulationDescriptor)
                         or (
-                            str(existing["contract_hash"])
-                            == descriptor.contract_hash
+                            str(existing["contract_hash"]) == descriptor.contract_hash
                             and str(existing["model_version"])
                             == descriptor.model_version
                             and str(existing["settlement_asset"])
@@ -1489,7 +1516,9 @@ class HedgeInputArchiveManager:
                 details={"fallback_applied": False},
             )
 
-        def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
             return (
                 connection.execute(
                     "SELECT * FROM replay_hedge_public_archive WHERE archive_id = ?",
@@ -1586,9 +1615,7 @@ class HedgeInputArchiveManager:
         )
         if not {"rule", "fee_policy", "mark_index"}.issubset(
             public_projection.state
-        ) or not {"insurance", "adl_snapshots"}.issubset(
-            simulation_projection.state
-        ):
+        ) or not {"insurance", "adl_snapshots"}.issubset(simulation_projection.state):
             raise TrainingRunError(
                 "HEDGE_INPUT_INITIAL_STATE_MISSING",
                 "pinned HEDGE inputs lack a complete no-lookahead start projection",
@@ -1630,9 +1657,7 @@ class HedgeInputArchiveManager:
             input_proof_hash=proof,
         )
 
-    async def _guard_catalog_row(
-        self, row: sqlite3.Row, *, source_kind: str
-    ) -> Path:
+    async def _guard_catalog_row(self, row: sqlite3.Row, *, source_kind: str) -> Path:
         if row["health"] != "READY" or not isinstance(row["local_path"], str):
             raise TrainingRunError(
                 "HEDGE_INPUT_QUARANTINED",
@@ -1650,8 +1675,12 @@ class HedgeInputArchiveManager:
             )
         return path
 
-    async def _binding_rows(self, run_id: str) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
-        def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row | None, sqlite3.Row | None, sqlite3.Row | None]:
+    async def _binding_rows(
+        self, run_id: str
+    ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row | None, sqlite3.Row | None, sqlite3.Row | None]:
             binding = connection.execute(
                 "SELECT * FROM replay_hedge_input_binding WHERE run_id = ?",
                 (run_id,),
@@ -1690,7 +1719,9 @@ class HedgeInputArchiveManager:
                 details={"fallback_applied": False},
             )
         try:
-            public_path = await self._guard_catalog_row(public_row, source_kind="PUBLIC")
+            public_path = await self._guard_catalog_row(
+                public_row, source_kind="PUBLIC"
+            )
             simulation_path = await self._guard_catalog_row(
                 simulation_row, source_kind="SIMULATION"
             )
@@ -1698,8 +1729,7 @@ class HedgeInputArchiveManager:
                 int(binding["public_generation"]) != int(public_row["generation"])
                 or int(binding["simulation_generation"])
                 != int(simulation_row["generation"])
-                or binding["public_checksum_sha256"]
-                != public_row["checksum_sha256"]
+                or binding["public_checksum_sha256"] != public_row["checksum_sha256"]
                 or binding["simulation_checksum_sha256"]
                 != simulation_row["checksum_sha256"]
             ):
@@ -1825,9 +1855,7 @@ class HedgeInputArchiveManager:
         differences: list[dict[str, object]] = []
 
         def difference(field: str, expected: object, actual: object) -> None:
-            differences.append(
-                {"field": field, "expected": expected, "actual": actual}
-            )
+            differences.append({"field": field, "expected": expected, "actual": actual})
 
         binding, public_row, simulation_row = await self._binding_rows(run_id)
         sources: dict[str, tuple[HedgeInputEvent, ...]] = {}
@@ -1839,9 +1867,7 @@ class HedgeInputArchiveManager:
                 simulation_row, source_kind="SIMULATION"
             )
             sources = {
-                "PUBLIC": await asyncio.to_thread(
-                    _read_public_events, public_path
-                ),
+                "PUBLIC": await asyncio.to_thread(_read_public_events, public_path),
                 "SIMULATION": await asyncio.to_thread(
                     _read_simulation_events, simulation_path
                 ),
@@ -1910,9 +1936,7 @@ class HedgeInputArchiveManager:
             if str(actual) != str(expected):
                 difference(f"binding.{field}", expected, actual)
 
-        projection_rows = {
-            str(row["source_kind"]): row for row in rows["projections"]
-        }
+        projection_rows = {str(row["source_kind"]): row for row in rows["projections"]}
         applied_rows: dict[str, list[sqlite3.Row]] = {
             "PUBLIC": [],
             "SIMULATION": [],
@@ -1927,21 +1951,15 @@ class HedgeInputArchiveManager:
         for source_kind in ("PUBLIC", "SIMULATION"):
             projection_row = projection_rows.get(source_kind)
             if projection_row is None:
-                difference(
-                    f"projection.{source_kind}", "PRESENT", "MISSING"
-                )
+                difference(f"projection.{source_kind}", "PRESENT", "MISSING")
                 continue
             try:
                 state = json.loads(str(projection_row["state_json"]))
                 payload = {
                     "schema_version": "replay.hedge-input-projection.v1",
                     "source_kind": source_kind,
-                    "last_event_sequence": int(
-                        projection_row["last_event_sequence"]
-                    ),
-                    "as_of_actual_time_ms": int(
-                        projection_row["as_of_actual_time_ms"]
-                    ),
+                    "last_event_sequence": int(projection_row["last_event_sequence"]),
+                    "as_of_actual_time_ms": int(projection_row["as_of_actual_time_ms"]),
                     "as_of_virtual_time_ms": int(
                         projection_row["as_of_virtual_time_ms"]
                     ),
@@ -1994,7 +2012,8 @@ class HedgeInputArchiveManager:
                     expected_applied = [
                         event
                         for event in source_events
-                        if initial_sequence < event.event_sequence
+                        if initial_sequence
+                        < event.event_sequence
                         <= int(projection_row["last_event_sequence"])
                     ]
                     actual_applied = applied_rows.get(source_kind, [])
@@ -2022,9 +2041,7 @@ class HedgeInputArchiveManager:
                         expected_applied_hash = canonical_sha256(
                             {
                                 "run_id": run_id,
-                                "virtual_time_ms": int(
-                                    row["applied_virtual_time_ms"]
-                                ),
+                                "virtual_time_ms": int(row["applied_virtual_time_ms"]),
                                 "source_kind": source_kind,
                                 "source_id": source_ids[source_kind],
                                 "event_sequence": event.event_sequence,
@@ -2040,8 +2057,7 @@ class HedgeInputArchiveManager:
                             != event.component_sequence
                             or str(row["source_event_hash"]) != event.event_hash
                             or stored_payload != dict(event.payload)
-                            or str(row["applied_payload_hash"])
-                            != expected_applied_hash
+                            or str(row["applied_payload_hash"]) != expected_applied_hash
                         ):
                             difference(
                                 f"applied.{source_kind}.{event.event_sequence}",
@@ -2060,13 +2076,9 @@ class HedgeInputArchiveManager:
                         "as_of_virtual_time_ms": int(
                             projection_row["as_of_virtual_time_ms"]
                         ),
-                        "input_chain_hash": str(
-                            projection_row["input_chain_hash"]
-                        ),
+                        "input_chain_hash": str(projection_row["input_chain_hash"]),
                         "component_hash": str(projection_row["component_hash"]),
-                        "applied_event_count": len(
-                            applied_rows.get(source_kind, [])
-                        ),
+                        "applied_event_count": len(applied_rows.get(source_kind, [])),
                     }
                 )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -2163,7 +2175,9 @@ class HedgeInputArchiveManager:
             descriptor.checksum_sha256 != row["checksum_sha256"]
             or descriptor.dataset_epoch != row["dataset_epoch"]
         ):
-            await self._quarantine_catalog(source_kind, object_id, "REHYDRATION_MISMATCH")
+            await self._quarantine_catalog(
+                source_kind, object_id, "REHYDRATION_MISMATCH"
+            )
             raise TrainingRunError(
                 "HEDGE_INPUT_REHYDRATION_MISMATCH",
                 "trusted HEDGE input no longer matches its pinned receipt",

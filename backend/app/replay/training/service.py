@@ -184,7 +184,10 @@ def _position_mark(value: object, *, position_side: object = None) -> object:
     if isinstance(value, Mapping) and value.get("position_mode") == "HEDGE":
         for name in ("long", "short"):
             candidate = value.get(name)
-            if isinstance(candidate, Mapping) and candidate.get("mark_price") is not None:
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("mark_price") is not None
+            ):
                 return candidate.get("mark_price")
     return None
 
@@ -243,9 +246,7 @@ def _hedge_leg_leverage(
         return Decimal(str(position["leverage"]))
     hedge_state = portfolio.get("hedge_state")
     legs = (
-        hedge_state.get("position_legs")
-        if isinstance(hedge_state, Mapping)
-        else None
+        hedge_state.get("position_legs") if isinstance(hedge_state, Mapping) else None
     )
     if not isinstance(legs, list):
         return None
@@ -317,9 +318,7 @@ class TrainingRunService:
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
         self._period_summary_builds: set[str] = set()
         self._run_actors: dict[str, TrainingRunActor] = {}
-        self._display_source_grid_anchors: dict[
-            tuple[str, str, str, str], int
-        ] = {}
+        self._display_source_grid_anchors: dict[tuple[str, str, str, str], int] = {}
         self._native_display_pin_proofs: OrderedDict[
             _NativeDisplayPinProofKey,
             _NativeDisplayPinProof,
@@ -332,10 +331,7 @@ class TrainingRunService:
     ) -> None:
         self._native_display_pin_proofs[key] = proof
         self._native_display_pin_proofs.move_to_end(key)
-        if (
-            len(self._native_display_pin_proofs)
-            > _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE
-        ):
+        if len(self._native_display_pin_proofs) > _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE:
             self._native_display_pin_proofs.popitem(last=False)
 
     async def start(self) -> None:
@@ -595,7 +591,9 @@ class TrainingRunService:
             for entry in cast(list[Mapping[str, object]], internal_catalog["entries"])
         }
         for entry in cast(list[dict[str, object]], catalog["entries"]):
-            internal_entry = internal_by_identity.get(self._catalog_identity_key(entry), entry)
+            internal_entry = internal_by_identity.get(
+                self._catalog_identity_key(entry), entry
+            )
             entry["start_compatibility"] = self._market_start_compatibility(
                 internal_entry,
                 int(commitment["committed_start_ms"]),
@@ -1055,9 +1053,9 @@ class TrainingRunService:
                         "selected position quantity is invalid",
                         status_code=503,
                     ) from exc
-                if position_quantity != 0 and (
-                    position_quantity > 0
-                ) != (payload.get("side") == "BUY"):
+                if position_quantity != 0 and (position_quantity > 0) != (
+                    payload.get("side") == "BUY"
+                ):
                     raise TrainingRunError(
                         "ORDER_REJECTED",
                         "OPEN cannot reduce or reverse the current position",
@@ -1350,9 +1348,9 @@ class TrainingRunService:
                         "selected position quantity is invalid",
                         status_code=503,
                     ) from exc
-                if position_quantity != 0 and (
-                    position_quantity > 0
-                ) != (payload.get("side") == "BUY"):
+                if position_quantity != 0 and (position_quantity > 0) != (
+                    payload.get("side") == "BUY"
+                ):
                     raise TrainingRunError(
                         "ORDER_REJECTED",
                         "OPEN cannot reduce or reverse the current position",
@@ -2079,10 +2077,13 @@ class TrainingRunService:
         market_projection = await self.store.get_market_tracks(normalized)
         portfolio = market_projection.get("portfolio")
         account_audit = None
-        if (
-            isinstance(portfolio, Mapping)
-            and isinstance(portfolio.get("account_history"), Mapping)
-            and portfolio["account_history"].get("mode") == "HISTORICAL_EXACT"  # type: ignore[union-attr]
+        if isinstance(portfolio, Mapping) and (
+            portfolio.get("position_mode") == "HEDGE"
+            or (
+                isinstance(portfolio.get("account_history"), Mapping)
+                and portfolio["account_history"].get("mode")  # type: ignore[union-attr]
+                == "HISTORICAL_EXACT"
+            )
         ):
             account_audit = await self.audit_account(normalized)
             market_projection = await self.store.get_market_tracks(normalized)
@@ -3095,14 +3096,17 @@ class TrainingRunService:
             track_id=track_id,
             interval=requested_interval,
         )
-        candidate_proof: tuple[
-            str,
-            int,
-            int,
-            int,
-            str,
-            int,
-        ] | None = None
+        candidate_proof: (
+            tuple[
+                str,
+                int,
+                int,
+                int,
+                str,
+                int,
+            ]
+            | None
+        ) = None
         if display_pin is None:
             repository = self.replay_service.history_repository
             get_bounds = getattr(repository, "get_bounds", None)
@@ -3768,9 +3772,7 @@ class TrainingRunService:
             portfolio = await self.store.allocate_isolated_margin(
                 run_id=normalized_run,
                 track_id=track_id,
-                position_side=(
-                    None if position_side is None else str(position_side)
-                ),
+                position_side=(None if position_side is None else str(position_side)),
                 amount=amount,
                 command_id=command.command_id,
                 virtual_time_ms=_stored_counter(
@@ -3782,9 +3784,7 @@ class TrainingRunService:
                     field_name="source_sequence",
                 ),
             )
-            checkpoint = await self.store.checkpoint_market_tracks(
-                normalized_run
-            )
+            checkpoint = await self.store.checkpoint_market_tracks(normalized_run)
             refreshed = await self.store.get_market_tracks(normalized_run)
             portfolio = cast(dict[str, object], refreshed["portfolio"])
             viewer = await self.store.get_viewer_state(normalized_run)
@@ -5168,7 +5168,9 @@ class TrainingRunService:
             ),
             None,
         )
-        if not isinstance(active, Mapping) or not isinstance(active.get("rule"), Mapping):
+        if not isinstance(active, Mapping) or not isinstance(
+            active.get("rule"), Mapping
+        ):
             raise TrainingRunError(
                 "TRADE_PLAN_RULE_UNAVAILABLE",
                 "trade-plan sizing requires an active instrument rule",
@@ -5204,10 +5206,10 @@ class TrainingRunService:
                     "unknown": sorted(set(draft) - expected),
                 },
             )
-        if (
-            payload.get("reduce_only") is not False
-            or payload.get("order_type") not in {"MARKET", "LIMIT"}
-        ):
+        if payload.get("reduce_only") is not False or payload.get("order_type") not in {
+            "MARKET",
+            "LIMIT",
+        }:
             raise TrainingRunError(
                 "TRADE_PLAN_INVALID",
                 "trade plans require a non-reduce-only market or limit order",
@@ -5331,10 +5333,9 @@ class TrainingRunService:
         maximum_quantity = decimal_value(rule.get("max_quantity"), "maximum quantity")
         risk_per_unit = abs(entry - invalidation) * contract_size
         raw_quantity = risk_budget / risk_per_unit
-        quantity = (
-            (raw_quantity / quantity_step).to_integral_value(rounding=ROUND_FLOOR)
-            * quantity_step
-        )
+        quantity = (raw_quantity / quantity_step).to_integral_value(
+            rounding=ROUND_FLOOR
+        ) * quantity_step
         quantity = min(quantity, maximum_quantity)
         if quantity < minimum_quantity or quantity <= 0:
             raise TrainingRunError(
@@ -5342,7 +5343,9 @@ class TrainingRunService:
                 "risk budget is too small for the active minimum quantity",
                 status_code=422,
                 details={
-                    "minimum_quantity": decimal_text(minimum_quantity, "minimum quantity"),
+                    "minimum_quantity": decimal_text(
+                        minimum_quantity, "minimum quantity"
+                    ),
                     "quantity_step": decimal_text(quantity_step, "quantity step"),
                 },
             )
@@ -5533,7 +5536,10 @@ class TrainingRunService:
                 status_code=503,
             )
         history = portfolio.get("account_history")
-        if not isinstance(history, Mapping) or history.get("mode") != "HISTORICAL_EXACT":
+        if (
+            not isinstance(history, Mapping)
+            or history.get("mode") != "HISTORICAL_EXACT"
+        ):
             return
         if history.get("status") != "ACTIVE":
             raise TrainingRunError(
@@ -5639,23 +5645,25 @@ class TrainingRunService:
             minimum_quantity = Decimal(0)
             minimum_notional = Decimal(0)
             rules = portfolio.get("instrument_rules")
-            active = next(
-                (
-                    item
-                    for item in rules
-                    if isinstance(rules, list)
-                    and isinstance(item, Mapping)
-                    and item.get("track_id") == selected_track.get("track_id")
-                    and isinstance(item.get("rule"), Mapping)
-                ),
-                None,
-            ) if isinstance(rules, list) else None
+            active = (
+                next(
+                    (
+                        item
+                        for item in rules
+                        if isinstance(rules, list)
+                        and isinstance(item, Mapping)
+                        and item.get("track_id") == selected_track.get("track_id")
+                        and isinstance(item.get("rule"), Mapping)
+                    ),
+                    None,
+                )
+                if isinstance(rules, list)
+                else None
+            )
             if isinstance(active, Mapping):
                 rule = cast(Mapping[str, object], active["rule"])
                 contract_size = Decimal(str(rule.get("contract_size", "1")))
-                rule_max_leverage = Decimal(
-                    str(rule.get("max_leverage", leverage))
-                )
+                rule_max_leverage = Decimal(str(rule.get("max_leverage", leverage)))
                 if (
                     leverage > rule_max_leverage
                     and raw_leverage is None
@@ -5684,7 +5692,9 @@ class TrainingRunService:
             if portfolio.get("margin_mode") == "ISOLATED":
                 allocations = portfolio.get("isolated_allocations")
                 account = selected_track.get("account")
-                if not isinstance(allocations, Mapping) or not isinstance(account, Mapping):
+                if not isinstance(allocations, Mapping) or not isinstance(
+                    account, Mapping
+                ):
                     raise TypeError("isolated account projection is invalid")
                 position_side = payload.get("position_side")
                 allocation_key = isolated_margin_key(
@@ -5733,14 +5743,19 @@ class TrainingRunService:
                     available = Decimal(0)
             else:
                 available = Decimal(str(portfolio["available_equity"]))
-            shared_maximum = max(Decimal(0), available) * leverage / (price * contract_size)
+            shared_maximum = (
+                max(Decimal(0), available) * leverage / (price * contract_size)
+            )
             maximum = min(maximum, shared_maximum)
             if quantity_step is not None:
-                maximum = (
-                    maximum / quantity_step
-                ).to_integral_value(rounding=ROUND_FLOOR) * quantity_step
+                maximum = (maximum / quantity_step).to_integral_value(
+                    rounding=ROUND_FLOOR
+                ) * quantity_step
             maximum = max(Decimal(0), maximum)
-            if maximum < minimum_quantity or maximum * price * contract_size < minimum_notional:
+            if (
+                maximum < minimum_quantity
+                or maximum * price * contract_size < minimum_notional
+            ):
                 maximum = Decimal(0)
             return decimal_to_string(maximum, field_name="max_quantity")
         except TrainingRunError:
@@ -5828,7 +5843,10 @@ class TrainingRunService:
                         status_code=409,
                     )
                 close_sides: tuple[str | None, ...] = (None,)
-                if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+                if (
+                    isinstance(position, Mapping)
+                    and position.get("position_mode") == "HEDGE"
+                ):
                     close_sides = tuple(
                         side
                         for side, leg in (
@@ -7458,10 +7476,10 @@ class TrainingRunService:
                     status_code=409,
                     details={"fallback_applied": False},
                 )
-            if current >= target_virtual_time_ms and (
-                next_account_virtual is None or next_account_virtual > current
-            ) and (
-                next_hedge_virtual is None or next_hedge_virtual > current
+            if (
+                current >= target_virtual_time_ms
+                and (next_account_virtual is None or next_account_virtual > current)
+                and (next_hedge_virtual is None or next_hedge_virtual > current)
             ):
                 if pending_global_events:
                     raise TrainingRunError(
@@ -10449,7 +10467,9 @@ class TrainingRunService:
                 "message": "本局固定开始时间无法对齐该商品的基础周期。",
             }
         bounds = entry.get("bounds")
-        earliest = bounds.get("earliest_open_ms") if isinstance(bounds, Mapping) else None
+        earliest = (
+            bounds.get("earliest_open_ms") if isinstance(bounds, Mapping) else None
+        )
         if isinstance(earliest, int) and committed_start_ms < earliest:
             return {
                 "state": "UNSUPPORTED",

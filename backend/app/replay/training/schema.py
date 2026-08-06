@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 15
+TRAINING_SCHEMA_VERSION = 16
 TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
@@ -2133,6 +2133,66 @@ CREATE TABLE IF NOT EXISTS replay_hedge_input_audit (
 """
 
 
+TRAINING_SCHEMA_V16_HEDGE_ACCOUNTING = """
+CREATE TABLE IF NOT EXISTS replay_training_fee_policy_extension (
+    run_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    policy_version TEXT NOT NULL,
+    account_tier TEXT NOT NULL,
+    liquidation_fee_bps TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('PUBLIC', 'CONFIGURED')),
+    source_id TEXT NOT NULL,
+    source_event_sequence INTEGER NOT NULL CHECK (source_event_sequence >= 0),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, revision),
+    FOREIGN KEY (run_id, revision)
+        REFERENCES replay_training_fee_policy(run_id, revision) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_hedge_funding_settlement (
+    run_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    position_side TEXT NOT NULL CHECK (position_side IN ('LONG', 'SHORT')),
+    settlement_time_ms INTEGER NOT NULL CHECK (settlement_time_ms >= 0),
+    actual_settlement_time_ms INTEGER NOT NULL CHECK (actual_settlement_time_ms >= 0),
+    source_kind TEXT NOT NULL CHECK (source_kind = 'PUBLIC'),
+    source_id TEXT NOT NULL,
+    source_event_sequence INTEGER NOT NULL CHECK (source_event_sequence >= 1),
+    source_event_hash TEXT NOT NULL CHECK (
+        length(source_event_hash) = 71 AND source_event_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    pre_settlement_signed_quantity TEXT NOT NULL,
+    pre_settlement_absolute_quantity TEXT NOT NULL,
+    mark_price TEXT NOT NULL,
+    funding_rate TEXT NOT NULL,
+    contract_size TEXT NOT NULL,
+    cash_delta TEXT NOT NULL,
+    rounding TEXT NOT NULL CHECK (rounding = 'ABS_CEILING_QUOTE_STEP_THEN_SIGN'),
+    fidelity TEXT NOT NULL CHECK (fidelity = 'PINNED_HISTORICAL_HEDGE_FUNDING'),
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    ledger_sequence INTEGER NOT NULL CHECK (ledger_sequence >= 1),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, position_side, settlement_time_ms),
+    UNIQUE (run_id, source_kind, source_id, source_event_sequence, position_side),
+    UNIQUE (run_id, ledger_sequence),
+    FOREIGN KEY (run_id, track_id, position_side)
+        REFERENCES replay_training_position_leg(run_id, track_id, position_side)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_hedge_funding_event
+ON replay_training_hedge_funding_settlement(
+    run_id, source_event_sequence, position_side
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -2287,6 +2347,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE,
         TRAINING_SCHEMA_V14_HEDGE,
         TRAINING_SCHEMA_V15_HEDGE_INPUTS,
+        TRAINING_SCHEMA_V16_HEDGE_ACCOUNTING,
     ):
         _execute_script(connection, script)
     connection.execute(

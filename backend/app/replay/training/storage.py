@@ -206,7 +206,11 @@ def _safe_name(value: str | None, *, fallback: str) -> str:
             status_code=422,
         )
     normalized = value.strip()
-    if not normalized or len(normalized) > 80 or any(ord(char) < 32 for char in normalized):
+    if (
+        not normalized
+        or len(normalized) > 80
+        or any(ord(char) < 32 for char in normalized)
+    ):
         raise TrainingRunError(
             "TRAINING_RUN_INVALID",
             "training name must contain 1-80 display-safe characters",
@@ -221,7 +225,9 @@ def _phase1_capabilities(source_kind: str) -> dict[str, str]:
         for kind in CapabilityKind
     }
     capabilities[CapabilityKind.OHLCV.value] = CapabilityState.AVAILABLE_EXACT.value
-    capabilities[CapabilityKind.INDICATORS.value] = CapabilityState.AVAILABLE_EXACT.value
+    capabilities[CapabilityKind.INDICATORS.value] = (
+        CapabilityState.AVAILABLE_EXACT.value
+    )
     capabilities[CapabilityKind.SIMULATED_LIQUIDATION.value] = (
         CapabilityState.AVAILABLE_APPROX.value
     )
@@ -366,6 +372,7 @@ class TrainingRunStore:
 
     async def start(self) -> None:
         now = self.base_store._validated_now_ms()
+
         def migrate(connection: sqlite3.Connection) -> None:
             migrate_training_schema(connection, now_ms=now)
             connection.execute(
@@ -695,7 +702,10 @@ class TrainingRunStore:
         range_end = setup["random_range_end_ms"]
         seed_source = "SERVER" if start_mode == "RANDOM" else "MANUAL"
         if start_mode == "MANUAL":
-            if committed_start != setup["requested_start_ms"] or random_seed is not None:
+            if (
+                committed_start != setup["requested_start_ms"]
+                or random_seed is not None
+            ):
                 raise ValueError("manual time commitment does not match the setup")
         else:
             random_seed = validate_v2_counter(
@@ -967,7 +977,9 @@ class TrainingRunStore:
             if not isinstance(cursor, Mapping):
                 raise TypeError("training adapter cursor must be an object")
             account = component_state.get("account")
-            if not isinstance(account, Mapping) or not isinstance(account.get("equity"), str):
+            if not isinstance(account, Mapping) or not isinstance(
+                account.get("equity"), str
+            ):
                 raise TypeError("training adapter account equity is missing")
             name = _safe_name(
                 request.name,
@@ -984,59 +996,59 @@ class TrainingRunStore:
                 actual_replay_end_ms=actual_replay_end_ms,
             )
             run_values = {
-                    "run_id": run_id,
-                    "adapter_session_id": adapter_session_id,
-                    "name": name,
-                    "state": str(session_state["state"]),
-                    "source_kind": request.source_kind.value,
-                    "start_mode": request.start_mode.value,
-                    "integrity_mode": request.integrity_mode.value,
-                    "time_disclosure_policy": request.time_disclosure_policy.value,
-                    "book_mode": request.book_mode.value,
-                    "margin_mode": request.margin_mode.value,
-                    "position_mode": request.position_mode.value,
-                    "funding_mode": request.funding_mode.value,
-                    "account_data_mode": request.account_data_mode.value,
-                    "hedge_public_history_ref_json": (
-                        None
-                        if request.hedge_public_history_ref is None
-                        else canonical_json(request.hedge_public_history_ref.to_dict())
-                    ),
-                    "simulation_manifest_ref_json": (
-                        None
-                        if request.simulation_manifest_ref is None
-                        else canonical_json(request.simulation_manifest_ref.to_dict())
-                    ),
-                    "simulation_contract_hash": (
-                        None
-                        if request.simulation_manifest_ref is None
-                        else request.simulation_manifest_ref.contract_hash
-                    ),
-                    "simulation_model_version": (
-                        None
-                        if request.simulation_manifest_ref is None
-                        else request.simulation_manifest_ref.model_version
-                    ),
-                    "account_fidelity": request.account_fidelity,
-                    "insurance_adl_fidelity": request.insurance_adl_fidelity,
-                    "allow_rule_changes": int(request.allow_rule_changes),
-                    "exchange": request.exchange,
-                    "market_type": request.market_type,
-                    "last_symbol": request.symbol,
-                    "settlement_asset": request.settlement_asset,
-                    "base_interval": request.base_interval,
-                    "display_interval": request.display_interval,
-                    "initial_equity": request.initial_equity,
-                    "current_equity": str(account["equity"]),
-                    "summary_revision": int(session_state["revision"]),
-                    "revision": int(session_state["revision"]),
-                    "source_sequence": int(session_state["source_sequence"]),
-                    "virtual_time_ms": int(cursor["virtual_time_ms"]),
-                    "catalog_epoch": request.catalog_epoch,
-                    "dataset_epoch": str(session_state["data_epoch"]),
-                    "compatibility": "READY",
-                    "now_ms": now_ms,
-                }
+                "run_id": run_id,
+                "adapter_session_id": adapter_session_id,
+                "name": name,
+                "state": str(session_state["state"]),
+                "source_kind": request.source_kind.value,
+                "start_mode": request.start_mode.value,
+                "integrity_mode": request.integrity_mode.value,
+                "time_disclosure_policy": request.time_disclosure_policy.value,
+                "book_mode": request.book_mode.value,
+                "margin_mode": request.margin_mode.value,
+                "position_mode": request.position_mode.value,
+                "funding_mode": request.funding_mode.value,
+                "account_data_mode": request.account_data_mode.value,
+                "hedge_public_history_ref_json": (
+                    None
+                    if request.hedge_public_history_ref is None
+                    else canonical_json(request.hedge_public_history_ref.to_dict())
+                ),
+                "simulation_manifest_ref_json": (
+                    None
+                    if request.simulation_manifest_ref is None
+                    else canonical_json(request.simulation_manifest_ref.to_dict())
+                ),
+                "simulation_contract_hash": (
+                    None
+                    if request.simulation_manifest_ref is None
+                    else request.simulation_manifest_ref.contract_hash
+                ),
+                "simulation_model_version": (
+                    None
+                    if request.simulation_manifest_ref is None
+                    else request.simulation_manifest_ref.model_version
+                ),
+                "account_fidelity": request.account_fidelity,
+                "insurance_adl_fidelity": request.insurance_adl_fidelity,
+                "allow_rule_changes": int(request.allow_rule_changes),
+                "exchange": request.exchange,
+                "market_type": request.market_type,
+                "last_symbol": request.symbol,
+                "settlement_asset": request.settlement_asset,
+                "base_interval": request.base_interval,
+                "display_interval": request.display_interval,
+                "initial_equity": request.initial_equity,
+                "current_equity": str(account["equity"]),
+                "summary_revision": int(session_state["revision"]),
+                "revision": int(session_state["revision"]),
+                "source_sequence": int(session_state["source_sequence"]),
+                "virtual_time_ms": int(cursor["virtual_time_ms"]),
+                "catalog_epoch": request.catalog_epoch,
+                "dataset_epoch": str(session_state["data_epoch"]),
+                "compatibility": "READY",
+                "now_ms": now_ms,
+            }
             if existing_shell:
                 updated = connection.execute(
                     """
@@ -1183,15 +1195,15 @@ class TrainingRunStore:
                     now_ms=now_ms,
                 )
             initialized_viewer = ViewerState(
-                    run_id=run_id,
-                    selected_track_id="track-1",
-                    display_interval=request.display_interval,
-                    chart_type="candles",
-                    visible_range=None,
-                    pane_layout={},
-                    rail_layout={},
-                    semantic_view_revision=1 if existing_shell else 0,
-                )
+                run_id=run_id,
+                selected_track_id="track-1",
+                display_interval=request.display_interval,
+                chart_type="candles",
+                visible_range=None,
+                pane_layout={},
+                rail_layout={},
+                semantic_view_revision=1 if existing_shell else 0,
+            )
             if existing_shell:
                 viewer_payload = initialized_viewer.to_dict()
                 viewer_update = connection.execute(
@@ -1290,7 +1302,9 @@ class TrainingRunStore:
             )
             if request.book_mode.value == "BOOK_ASSISTED_REQUIRED":
                 if historical_book_binding is None:
-                    raise TypeError("book-assisted run is missing its verified L2 binding")
+                    raise TypeError(
+                        "book-assisted run is missing its verified L2 binding"
+                    )
                 bind_historical_book_archive(
                     connection,
                     run_id=run_id,
@@ -1458,10 +1472,7 @@ class TrainingRunStore:
             """,
             (run_id, track_id),
         ).fetchone()
-        if (
-            projection is None
-            or projection["account_data_mode"] != "HISTORICAL_EXACT"
-        ):
+        if projection is None or projection["account_data_mode"] != "HISTORICAL_EXACT":
             return
         if (
             projection["history_status"] != "ACTIVE"
@@ -1576,7 +1587,9 @@ class TrainingRunStore:
             for raw in open_orders:
                 if not isinstance(raw, Mapping) or raw.get("status") in terminal:
                     continue
-                order_quantity = Decimal(str(raw.get("remaining_quantity") or raw.get("quantity") or "0"))
+                order_quantity = Decimal(
+                    str(raw.get("remaining_quantity") or raw.get("quantity") or "0")
+                )
                 reference = raw.get("limit_price") or raw.get("stop_price") or mark
                 reserved += (
                     abs(order_quantity)
@@ -1585,9 +1598,7 @@ class TrainingRunStore:
                     / leverage
                 )
             cash = (
-                Decimal(str(run_row["initial_equity"]))
-                + exact_realized
-                - broker_fees
+                Decimal(str(run_row["initial_equity"])) + exact_realized - broker_fees
             )
             equity = cash + unrealized
             available = equity - margin_used - reserved
@@ -1617,9 +1628,7 @@ class TrainingRunStore:
                 "cash_balance": decimal_to_string(
                     cash, field_name="exact account cash"
                 ),
-                "equity": decimal_to_string(
-                    equity, field_name="exact account equity"
-                ),
+                "equity": decimal_to_string(equity, field_name="exact account equity"),
                 "available_equity": decimal_to_string(
                     available, field_name="exact account available"
                 ),
@@ -1825,9 +1834,7 @@ class TrainingRunStore:
                             track_id=track_id,
                             event=event,
                             virtual_time_ms=virtual_time_ms,
-                            source_sequence=int(
-                                projection["source_sequence"] or 0
-                            ),
+                            source_sequence=int(projection["source_sequence"] or 0),
                             settlement_asset=str(account["settlement_asset"]),
                             now_ms=now_ms,
                         )
@@ -1990,7 +1997,13 @@ class TrainingRunStore:
             mark = Decimal(str(mark_state["mark_price"]))
             if mark <= 0:
                 raise ValueError("mark must be positive")
-        except (InvalidOperation, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            InvalidOperation,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise TrainingRunError(
                 "HEDGE_PINNED_MARK_UNAVAILABLE",
                 "pinned HEDGE mark is unavailable",
@@ -2094,8 +2107,8 @@ class TrainingRunStore:
                 Decimal(0),
             )
             cash = Decimal(str(account.get("cash_balance", run["initial_equity"])))
-            equity = cash + total_unrealized + Decimal(
-                str(contract_account["overlay_cash"])
+            equity = (
+                cash + total_unrealized + Decimal(str(contract_account["overlay_cash"]))
             )
             account.update(
                 {
@@ -2302,9 +2315,47 @@ class TrainingRunStore:
                             now_ms,
                         ),
                     )
+                    extension = {
+                        "schema_version": "replay.training.fee-policy-extension.v1",
+                        "run_id": run_id,
+                        "revision": revision,
+                        "policy_version": event.payload["policy_version"],
+                        "account_tier": event.payload["account_tier"],
+                        "liquidation_fee_bps": event.payload["liquidation_fee_bps"],
+                        "source_kind": "PUBLIC",
+                        "source_id": event.source_id,
+                        "source_event_sequence": event.event_sequence,
+                    }
+                    connection.execute(
+                        """
+                        INSERT INTO replay_training_fee_policy_extension(
+                            run_id, revision, policy_version, account_tier,
+                            liquidation_fee_bps, source_kind, source_id,
+                            source_event_sequence, component_hash, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, 'PUBLIC', ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            revision,
+                            event.payload["policy_version"],
+                            event.payload["account_tier"],
+                            event.payload["liquidation_fee_bps"],
+                            event.source_id,
+                            event.event_sequence,
+                            canonical_sha256(extension),
+                            now_ms,
+                        ),
+                    )
                 elif event.event_kind == "MARK_INDEX":
                     state["mark_index"] = dict(event.payload)
                 elif event.event_kind == "FUNDING":
+                    self._settle_hedge_funding_event(
+                        connection,
+                        run_id=run_id,
+                        event=event,
+                        virtual_time_ms=virtual_time_ms,
+                        now_ms=now_ms,
+                    )
                     state["funding"] = dict(event.payload)
                 elif event.event_kind == "INSURANCE_INPUT":
                     state["insurance"] = dict(event.payload)
@@ -2400,6 +2451,467 @@ class TrainingRunStore:
             return stable_market_event_order(stable)
 
         return await self.base_store.run_extension_write(write)
+
+    @classmethod
+    def _settle_hedge_funding_event(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        event: HedgeInputEvent,
+        virtual_time_ms: int,
+        now_ms: int,
+    ) -> None:
+        """Settle both HEDGE legs from one immutable pre-settlement snapshot."""
+
+        if event.source_kind != "PUBLIC":
+            raise TypeError("HEDGE funding must originate from the public archive")
+        run = connection.execute(
+            """
+            SELECT run.position_mode, run.settlement_asset,
+                   account.account_model, account.funding_mode
+            FROM replay_training_run AS run
+            JOIN replay_training_contract_account AS account USING(run_id)
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None or str(run["account_model"]) != CONTRACT_ACCOUNT_MODEL:
+            raise TypeError("HEDGE funding contract account is missing")
+        if str(run["position_mode"]) != "HEDGE":
+            raise TypeError("HEDGE funding cannot settle a one-way run")
+        if str(run["funding_mode"]) != "HISTORICAL_EXACT":
+            raise TrainingRunError(
+                "HEDGE_FUNDING_MODE_MISMATCH",
+                "HEDGE public funding requires HISTORICAL_EXACT mode",
+                status_code=409,
+            )
+        track = connection.execute(
+            """
+            SELECT track_id, source_sequence
+            FROM replay_training_market_track
+            WHERE run_id = ? AND subscription_tier = 'FULL'
+            ORDER BY stable_ordinal, track_id LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if track is None:
+            raise TypeError("HEDGE funding FULL track is missing")
+        track_id = str(track["track_id"])
+        existing = tuple(
+            connection.execute(
+                """
+                SELECT position_side
+                FROM replay_training_hedge_funding_settlement
+                WHERE run_id = ? AND track_id = ? AND settlement_time_ms = ?
+                ORDER BY position_side
+                """,
+                (run_id, track_id, virtual_time_ms),
+            ).fetchall()
+        )
+        if len(existing) == 2:
+            return
+        if existing:
+            raise TrainingRunError(
+                "HEDGE_FUNDING_PARTIAL_SETTLEMENT",
+                "HEDGE funding has only one durable leg settlement",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        legs = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_position_leg
+                WHERE run_id = ? AND track_id = ?
+                ORDER BY CASE position_side WHEN 'LONG' THEN 0 ELSE 1 END
+                """,
+                (run_id, track_id),
+            ).fetchall()
+        )
+        if tuple(str(row["position_side"]) for row in legs) != (
+            "LONG",
+            "SHORT",
+        ):
+            raise TrainingRunError(
+                "HEDGE_FUNDING_POSITION_SNAPSHOT_MISSING",
+                "both HEDGE position legs must exist before funding settlement",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        rule_row = connection.execute(
+            """
+            SELECT revision, rule_json
+            FROM replay_training_instrument_rule
+            WHERE run_id = ? AND track_id = ?
+              AND effective_virtual_time_ms <= ?
+            ORDER BY effective_virtual_time_ms DESC, revision DESC LIMIT 1
+            """,
+            (run_id, track_id, virtual_time_ms),
+        ).fetchone()
+        if rule_row is None:
+            raise TypeError("HEDGE funding effective instrument rule is missing")
+        rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
+        mark = Decimal(str(event.payload["mark_price"]))
+        rate = Decimal(str(event.payload["funding_rate"]))
+        overlay_delta = Decimal(0)
+        for leg in legs:
+            position_side = str(leg["position_side"])
+            signed_quantity = Decimal(str(leg["signed_quantity"]))
+            absolute_quantity = Decimal(str(leg["absolute_quantity"]))
+            raw = -(signed_quantity * mark * Decimal(rule.contract_size) * rate)
+            rounded = round_to_step(
+                abs(raw),
+                Decimal(rule.quote_step),
+                upward=True,
+            )
+            cash_delta = rounded.copy_sign(raw) if raw else Decimal(0)
+            component = {
+                "schema_version": "replay.training.hedge-funding-settlement.v1",
+                "run_id": run_id,
+                "track_id": track_id,
+                "position_side": position_side,
+                "settlement_time_ms": virtual_time_ms,
+                "actual_settlement_time_ms": event.event_time_ms,
+                "source_kind": event.source_kind,
+                "source_id": event.source_id,
+                "source_event_sequence": event.event_sequence,
+                "source_event_hash": event.event_hash,
+                "pre_settlement_signed_quantity": decimal_to_string(
+                    signed_quantity,
+                    field_name="funding signed quantity",
+                ),
+                "pre_settlement_absolute_quantity": decimal_to_string(
+                    absolute_quantity,
+                    field_name="funding absolute quantity",
+                ),
+                "mark_price": decimal_to_string(mark, field_name="funding mark"),
+                "funding_rate": decimal_to_string(
+                    rate,
+                    field_name="funding rate",
+                ),
+                "contract_size": rule.contract_size,
+                "cash_delta": decimal_to_string(
+                    cash_delta,
+                    field_name="funding cash delta",
+                ),
+                "rounding": "ABS_CEILING_QUOTE_STEP_THEN_SIGN",
+                "fidelity": "PINNED_HISTORICAL_HEDGE_FUNDING",
+                "rule_revision": int(rule_row["revision"]),
+            }
+            ledger_sequence = cls._append_contract_ledger(
+                connection,
+                run_id=run_id,
+                posting_id=(
+                    f"hedge-funding:{event.source_id}:"
+                    f"{event.event_sequence}:{track_id}:{position_side}"
+                ),
+                track_id=track_id,
+                kind="FUNDING_SETTLEMENT",
+                cash_delta=cash_delta,
+                asset=str(run["settlement_asset"]),
+                virtual_time_ms=virtual_time_ms,
+                source_sequence=int(track["source_sequence"] or 0),
+                fidelity="PINNED_HISTORICAL_HEDGE_FUNDING",
+                rule_revision=int(rule_row["revision"]),
+                reference_type="HEDGE_PUBLIC_EVENT",
+                reference_id=f"{event.source_id}:{event.event_sequence}",
+                metadata={
+                    "position_side": position_side,
+                    "actual_settlement_time_ms": event.event_time_ms,
+                    "source_event_hash": event.event_hash,
+                    "pre_settlement_signed_quantity": component[
+                        "pre_settlement_signed_quantity"
+                    ],
+                    "pre_settlement_absolute_quantity": component[
+                        "pre_settlement_absolute_quantity"
+                    ],
+                    "rate": component["funding_rate"],
+                    "mark_price": component["mark_price"],
+                    "contract_size": rule.contract_size,
+                    "rounding": component["rounding"],
+                },
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                INSERT INTO replay_training_hedge_funding_settlement(
+                    run_id, track_id, position_side, settlement_time_ms,
+                    actual_settlement_time_ms, source_kind, source_id,
+                    source_event_sequence, source_event_hash,
+                    pre_settlement_signed_quantity,
+                    pre_settlement_absolute_quantity, mark_price, funding_rate,
+                    contract_size, cash_delta, rounding, fidelity,
+                    rule_revision, ledger_sequence, component_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'PUBLIC', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'ABS_CEILING_QUOTE_STEP_THEN_SIGN',
+                          'PINNED_HISTORICAL_HEDGE_FUNDING', ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    track_id,
+                    position_side,
+                    virtual_time_ms,
+                    event.event_time_ms,
+                    event.source_id,
+                    event.event_sequence,
+                    event.event_hash,
+                    component["pre_settlement_signed_quantity"],
+                    component["pre_settlement_absolute_quantity"],
+                    component["mark_price"],
+                    component["funding_rate"],
+                    rule.contract_size,
+                    component["cash_delta"],
+                    int(rule_row["revision"]),
+                    ledger_sequence,
+                    canonical_sha256(component),
+                    now_ms,
+                ),
+            )
+            overlay_delta += cash_delta
+        account = connection.execute(
+            """
+            SELECT overlay_cash FROM replay_training_contract_account
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if account is None:
+            raise TypeError("HEDGE funding account disappeared")
+        overlay = Decimal(str(account["overlay_cash"])) + overlay_delta
+        connection.execute(
+            """
+            UPDATE replay_training_contract_account
+            SET overlay_cash = ?, updated_at_ms = ? WHERE run_id = ?
+            """,
+            (
+                decimal_to_string(overlay, field_name="HEDGE funding overlay cash"),
+                now_ms,
+                run_id,
+            ),
+        )
+        cls._refresh_hedge_leg_accounting(
+            connection,
+            run_id=run_id,
+            track_id=track_id,
+            virtual_time_ms=virtual_time_ms,
+            source_sequence=int(track["source_sequence"] or 0),
+            now_ms=now_ms,
+            reason="FUNDING_SETTLEMENT",
+        )
+
+    @staticmethod
+    def _hedge_leg_accounting_totals(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        position_side: str,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        funding = sum(
+            (
+                Decimal(str(row["cash_delta"]))
+                for row in connection.execute(
+                    """
+                    SELECT cash_delta
+                    FROM replay_training_hedge_funding_settlement
+                    WHERE run_id = ? AND track_id = ? AND position_side = ?
+                    """,
+                    (run_id, track_id, position_side),
+                ).fetchall()
+            ),
+            Decimal(0),
+        )
+        trading_fees = Decimal(0)
+        for row in connection.execute(
+            """
+            SELECT fill_json, configured_fee
+            FROM replay_training_contract_fill
+            WHERE run_id = ? AND track_id = ?
+            """,
+            (run_id, track_id),
+        ).fetchall():
+            fill = json.loads(str(row["fill_json"]))
+            if not isinstance(fill, Mapping):
+                raise TypeError("contract fill accounting payload is invalid")
+            if fill.get("position_side") == position_side:
+                trading_fees += Decimal(str(row["configured_fee"]))
+        liquidation_fees = Decimal(0)
+        for row in connection.execute(
+            """
+            SELECT cash_delta, metadata_json
+            FROM replay_training_contract_ledger
+            WHERE run_id = ? AND track_id = ? AND kind = 'LIQUIDATION_FEE'
+            """,
+            (run_id, track_id),
+        ).fetchall():
+            metadata = json.loads(str(row["metadata_json"]))
+            if not isinstance(metadata, Mapping):
+                raise TypeError("liquidation fee ledger metadata is invalid")
+            if metadata.get("position_side") == position_side:
+                liquidation_fees -= Decimal(str(row["cash_delta"]))
+        return funding, trading_fees, liquidation_fees
+
+    @staticmethod
+    def _position_leg_component(
+        row: Mapping[str, object],
+        *,
+        accumulated_funding: str,
+        trading_fees: str,
+        liquidation_fees: str,
+    ) -> dict[str, object]:
+        protection = json.loads(str(row["protection_json"]))
+        if not isinstance(protection, Mapping):
+            raise TypeError("position leg protection is invalid")
+        return {
+            "schema_version": "replay.position-leg.v1",
+            "track_id": str(row["track_id"]),
+            "position_side": str(row["position_side"]),
+            "signed_quantity": str(row["signed_quantity"]),
+            "absolute_quantity": str(row["absolute_quantity"]),
+            "entry_price": row["entry_price"],
+            "mark_price": row["mark_price"],
+            "notional": str(row["notional"]),
+            "realized_pnl": str(row["realized_pnl"]),
+            "unrealized_pnl": str(row["unrealized_pnl"]),
+            "initial_margin": str(row["initial_margin"]),
+            "maintenance_margin": str(row["maintenance_margin"]),
+            "leverage": str(row["leverage"]),
+            "margin_mode": str(row["margin_mode"]),
+            "isolated_wallet": str(row["isolated_wallet"]),
+            "liquidation_price": row["liquidation_price"],
+            "bankruptcy_price": row["bankruptcy_price"],
+            "accumulated_funding": accumulated_funding,
+            "trading_fees": trading_fees,
+            "liquidation_fees": liquidation_fees,
+            "risk_tier": int(row["risk_tier"]),
+            "rule_revision": int(row["rule_revision"]),
+            "protection": dict(protection),
+        }
+
+    @classmethod
+    def _refresh_hedge_leg_accounting(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        virtual_time_ms: int,
+        source_sequence: int,
+        now_ms: int,
+        reason: str,
+    ) -> None:
+        run = connection.execute(
+            "SELECT position_mode, settlement_asset FROM replay_training_run WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run is None or str(run["position_mode"]) != "HEDGE":
+            return
+        rows = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_position_leg
+                WHERE run_id = ? AND track_id = ?
+                ORDER BY CASE position_side WHEN 'LONG' THEN 0 ELSE 1 END
+                """,
+                (run_id, track_id),
+            ).fetchall()
+        )
+        if not rows:
+            # Review forks synchronize fills before rebuilding their selected
+            # checkpoint position projection.  The subsequent detector derives
+            # the same accounting totals once both legs exist.
+            return
+        if tuple(str(row["position_side"]) for row in rows) != ("LONG", "SHORT"):
+            raise TrainingRunError(
+                "HEDGE_POSITION_ACCOUNTING_INCOMPLETE",
+                "both HEDGE legs are required for accounting refresh",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        for row in rows:
+            position_side = str(row["position_side"])
+            funding, trading_fees, liquidation_fees = cls._hedge_leg_accounting_totals(
+                connection,
+                run_id=run_id,
+                track_id=track_id,
+                position_side=position_side,
+            )
+            funding_value = decimal_to_string(
+                funding,
+                field_name="leg accumulated funding",
+            )
+            trading_value = decimal_to_string(
+                trading_fees,
+                field_name="leg trading fees",
+            )
+            liquidation_value = decimal_to_string(
+                liquidation_fees,
+                field_name="leg liquidation fees",
+            )
+            component = cls._position_leg_component(
+                row,
+                accumulated_funding=funding_value,
+                trading_fees=trading_value,
+                liquidation_fees=liquidation_value,
+            )
+            component_hash = canonical_sha256(component)
+            if (
+                str(row["component_hash"]) == component_hash
+                and str(row["accumulated_funding"]) == funding_value
+                and str(row["trading_fees"]) == trading_value
+                and str(row["liquidation_fees"]) == liquidation_value
+            ):
+                continue
+            next_revision = int(row["component_revision"]) + 1
+            connection.execute(
+                """
+                UPDATE replay_training_position_leg
+                SET accumulated_funding = ?, trading_fees = ?,
+                    liquidation_fees = ?, component_revision = ?,
+                    component_hash = ?, updated_at_ms = ?
+                WHERE run_id = ? AND track_id = ? AND position_side = ?
+                """,
+                (
+                    funding_value,
+                    trading_value,
+                    liquidation_value,
+                    next_revision,
+                    component_hash,
+                    now_ms,
+                    run_id,
+                    track_id,
+                    position_side,
+                ),
+            )
+            cls._append_contract_ledger(
+                connection,
+                run_id=run_id,
+                posting_id=(
+                    f"position-accounting:{track_id}:{position_side}:"
+                    f"{next_revision}:{component_hash}"
+                ),
+                track_id=track_id,
+                kind="POSITION_ACCOUNTING_MUTATION",
+                cash_delta=Decimal(0),
+                asset=str(run["settlement_asset"]),
+                virtual_time_ms=virtual_time_ms,
+                source_sequence=source_sequence,
+                fidelity="DERIVED_FROM_HASH_CHAINED_LEDGER",
+                rule_revision=int(row["rule_revision"]),
+                reference_type="POSITION_LEG",
+                reference_id=f"{track_id}:{position_side}",
+                metadata={
+                    "position_side": position_side,
+                    "reason": reason,
+                    "previous_component_hash": str(row["component_hash"]),
+                    "component_hash": component_hash,
+                    "component_revision": next_revision,
+                    "accumulated_funding": funding_value,
+                    "trading_fees": trading_value,
+                    "liquidation_fees": liquidation_value,
+                },
+                now_ms=now_ms,
+            )
 
     async def pending_hedge_input_global_events(
         self, run_id: str
@@ -2635,9 +3147,7 @@ class TrainingRunStore:
         self,
         run_id: str,
         *,
-        authoritative_projections: (
-            Mapping[str, Mapping[str, object]] | None
-        ) = None,
+        authoritative_projections: (Mapping[str, Mapping[str, object]] | None) = None,
     ) -> dict[str, object]:
         def write(connection: sqlite3.Connection) -> dict[str, object]:
             return self._write_account_audit(
@@ -2766,9 +3276,7 @@ class TrainingRunStore:
         for row in rule_rows:
             key = (str(row["track_id"]), int(row["revision"]))
             try:
-                rule = InstrumentRule.from_mapping(
-                    json.loads(str(row["rule_json"]))
-                )
+                rule = InstrumentRule.from_mapping(json.loads(str(row["rule_json"])))
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 add_difference(
                     f"instrument_rule[{key[0]}:{key[1]}]",
@@ -2800,9 +3308,7 @@ class TrainingRunStore:
                 "schema_version": "replay.training.fee-policy.v1",
                 "run_id": run_id,
                 "revision": revision,
-                "effective_virtual_time_ms": int(
-                    row["effective_virtual_time_ms"]
-                ),
+                "effective_virtual_time_ms": int(row["effective_virtual_time_ms"]),
                 "maker_fee_bps": str(row["maker_fee_bps"]),
                 "taker_fee_bps": str(row["taker_fee_bps"]),
                 "fidelity": str(row["fidelity"]),
@@ -2815,12 +3321,8 @@ class TrainingRunStore:
                     row["policy_hash"],
                 )
 
-        ledger_by_posting = {
-            str(row["posting_id"]): row for row in ledger_rows
-        }
-        ledger_by_sequence = {
-            int(row["ledger_sequence"]): row for row in ledger_rows
-        }
+        ledger_by_posting = {str(row["posting_id"]): row for row in ledger_rows}
+        ledger_by_sequence = {int(row["ledger_sequence"]): row for row in ledger_rows}
         expected_postings: set[str] = set()
         initial = Decimal(str(run["initial_equity"]))
         settlement_asset = str(run["settlement_asset"])
@@ -2923,9 +3425,7 @@ class TrainingRunStore:
                         new_entry = price
             state["quantity"] = new_quantity
             state["entry_price"] = new_entry
-            state["realized_pnl"] = (
-                cast(Decimal, state["realized_pnl"]) + realized
-            )
+            state["realized_pnl"] = cast(Decimal, state["realized_pnl"]) + realized
             return realized
 
         for row, raw in fills:
@@ -2988,8 +3488,7 @@ class TrainingRunStore:
                 configured_fees += configured_fee
                 broker_fee = Decimal(str(raw["fee"]))
                 broker_fees_by_track[track_id] = (
-                    broker_fees_by_track.get(track_id, Decimal(0))
-                    + broker_fee
+                    broker_fees_by_track.get(track_id, Decimal(0)) + broker_fee
                 )
                 state = position_state.setdefault(
                     track_id,
@@ -3038,9 +3537,7 @@ class TrainingRunStore:
                         int(fee_posting["rule_revision"]),
                     )
 
-        realized_ledger_by_fill: dict[
-            tuple[str, str], list[sqlite3.Row]
-        ] = {}
+        realized_ledger_by_fill: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for row in ledger_rows:
             if row["kind"] != "BROKER_REALIZED_PNL":
                 continue
@@ -3048,11 +3545,7 @@ class TrainingRunStore:
                 metadata = json.loads(str(row["metadata_json"]))
             except json.JSONDecodeError:
                 metadata = None
-            fill_id = (
-                metadata.get("fill_id")
-                if isinstance(metadata, Mapping)
-                else None
-            )
+            fill_id = metadata.get("fill_id") if isinstance(metadata, Mapping) else None
             if isinstance(fill_id, str) and isinstance(row["track_id"], str):
                 realized_ledger_by_fill.setdefault(
                     (str(row["track_id"]), fill_id),
@@ -3094,9 +3587,7 @@ class TrainingRunStore:
         ).fetchall()
         for row in funding_rows:
             track_id = str(row["track_id"])
-            field_prefix = (
-                f"funding[{track_id}:{int(row['settlement_time_ms'])}]"
-            )
+            field_prefix = f"funding[{track_id}:{int(row['settlement_time_ms'])}]"
             ledger = ledger_by_sequence.get(int(row["ledger_sequence"]))
             if ledger is None:
                 add_difference(
@@ -3119,18 +3610,14 @@ class TrainingRunStore:
                 quantity = Decimal(str(row["position_quantity"]))
                 mark = Decimal(str(row["mark_price"]))
                 rate = Decimal(str(row["funding_rate"]))
-                raw_delta = (
-                    -quantity * mark * Decimal(rule.contract_size) * rate
-                )
+                raw_delta = -quantity * mark * Decimal(rule.contract_size) * rate
                 rounded = round_to_step(
                     abs(raw_delta),
                     Decimal(rule.quote_step),
                     upward=True,
                 )
                 expected_delta = (
-                    rounded.copy_sign(raw_delta)
-                    if raw_delta
-                    else Decimal(0)
+                    rounded.copy_sign(raw_delta) if raw_delta else Decimal(0)
                 )
             except (InvalidOperation, TypeError, ValueError) as exc:
                 add_difference(
@@ -3224,9 +3711,7 @@ class TrainingRunStore:
             liquidation_id = str(row["case_id"])
             track_id = str(row["track_id"])
             position_side = str(row["position_side"])
-            field_prefix = (
-                f"liquidation[{liquidation_id}].leg[{position_side}]"
-            )
+            field_prefix = f"liquidation[{liquidation_id}].leg[{position_side}]"
             rule_candidates = [
                 (key, rule)
                 for key, rule in rules.items()
@@ -3325,9 +3810,10 @@ class TrainingRunStore:
                     Decimal(0),
                     row["cash_delta"],
                 )
-            if posting_id not in expected_postings and Decimal(
-                str(row["cash_delta"])
-            ) != 0:
+            if (
+                posting_id not in expected_postings
+                and Decimal(str(row["cash_delta"])) != 0
+            ):
                 add_difference(
                     f"ledger[{posting_id}].source_link",
                     "SOURCE_BACKED_POSTING",
@@ -3447,21 +3933,11 @@ class TrainingRunStore:
                 }:
                     continue
                 order_quantity = Decimal(
-                    str(
-                        order.get("remaining_quantity")
-                        or order.get("quantity")
-                        or "0"
-                    )
+                    str(order.get("remaining_quantity") or order.get("quantity") or "0")
                 )
-                reference = (
-                    order.get("limit_price")
-                    or order.get("stop_price")
-                    or mark
-                )
+                reference = order.get("limit_price") or order.get("stop_price") or mark
                 order_notional = (
-                    abs(order_quantity)
-                    * Decimal(str(reference))
-                    * contract_size
+                    abs(order_quantity) * Decimal(str(reference)) * contract_size
                 )
                 order_leverage = min(
                     Decimal(str(order.get("leverage") or leverage)),
@@ -3478,9 +3954,7 @@ class TrainingRunStore:
             expected_reserved += reserved
             expected_maintenance += maintenance
             expected_track_cash = (
-                initial
-                + realized
-                - broker_fees_by_track.get(track_id, Decimal(0))
+                initial + realized - broker_fees_by_track.get(track_id, Decimal(0))
             )
             position = json.loads(str(track["position_json"]))
             track_account = json.loads(str(track["account_json"]))
@@ -3504,8 +3978,7 @@ class TrainingRunStore:
                 else decimal_to_string(entry, field_name="audited entry")
             )
             if (
-                position.get("entry_price") is not None
-                or expected_entry is not None
+                position.get("entry_price") is not None or expected_entry is not None
             ) and str(position.get("entry_price")) != str(expected_entry):
                 add_difference(
                     f"track[{track_id}].position.entry_price",
@@ -3543,10 +4016,7 @@ class TrainingRunStore:
                 ),
                 (
                     "available_equity",
-                    expected_track_cash
-                    + unrealized
-                    - broker_margin
-                    - broker_reserved,
+                    expected_track_cash + unrealized - broker_margin - broker_reserved,
                     track_account.get("available_equity"),
                 ),
                 (
@@ -3577,9 +4047,7 @@ class TrainingRunStore:
                         quantity, field_name="audited quantity"
                     ),
                     "entry_price": expected_entry,
-                    "mark_price": decimal_to_string(
-                        mark, field_name="audited mark"
-                    ),
+                    "mark_price": decimal_to_string(mark, field_name="audited mark"),
                     "realized_pnl": decimal_to_string(
                         realized, field_name="audited realized pnl"
                     ),
@@ -3609,8 +4077,7 @@ class TrainingRunStore:
         expected_available = (
             expected_equity - expected_margin - expected_reserved
             if account["margin_mode"] == "CROSS"
-            else expected_equity
-            - sum(allocation_state.values(), Decimal(0))
+            else expected_equity - sum(allocation_state.values(), Decimal(0))
         )
         expected_overlay = (
             sum(broker_fees_by_track.values(), Decimal(0))
@@ -3681,9 +4148,7 @@ class TrainingRunStore:
             "cash_balance": decimal_to_string(
                 expected_cash, field_name="audited cash balance"
             ),
-            "equity": decimal_to_string(
-                expected_equity, field_name="audited equity"
-            ),
+            "equity": decimal_to_string(expected_equity, field_name="audited equity"),
             "available_equity": decimal_to_string(
                 expected_available, field_name="audited available equity"
             ),
@@ -3726,15 +4191,634 @@ class TrainingRunStore:
         }
 
     @classmethod
+    def _audit_hedge_account_state(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run: sqlite3.Row,
+        account: sqlite3.Row,
+        ledger_rows: Sequence[sqlite3.Row],
+        portfolio: Mapping[str, object],
+        differences: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Rebuild both HEDGE legs from fills and pinned public settlements."""
+
+        run_id = str(run["run_id"])
+
+        def add_difference(field: str, expected: object, actual: object) -> None:
+            differences.append({"field": field, "expected": expected, "actual": actual})
+
+        def compare_decimal(field: str, expected: Decimal, actual: object) -> None:
+            expected_value = decimal_to_string(expected, field_name=field)
+            try:
+                value = Decimal(str(actual))
+            except (InvalidOperation, TypeError, ValueError):
+                add_difference(field, expected_value, actual)
+                return
+            if value != expected:
+                add_difference(field, expected_value, actual)
+
+        rules: dict[tuple[str, int], InstrumentRule] = {}
+        for row in connection.execute(
+            """
+            SELECT * FROM replay_training_instrument_rule
+            WHERE run_id = ? ORDER BY track_id, revision
+            """,
+            (run_id,),
+        ).fetchall():
+            key = (str(row["track_id"]), int(row["revision"]))
+            try:
+                rule = InstrumentRule.from_mapping(json.loads(str(row["rule_json"])))
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                add_difference(
+                    f"instrument_rule[{key[0]}:{key[1]}]",
+                    "VALID_VERSIONED_RULE",
+                    f"INVALID:{type(exc).__name__}",
+                )
+                continue
+            rules[key] = rule
+            if rule.rule_hash != row["rule_hash"]:
+                add_difference(
+                    f"instrument_rule[{key[0]}:{key[1]}].rule_hash",
+                    rule.rule_hash,
+                    row["rule_hash"],
+                )
+
+        policies: dict[int, sqlite3.Row] = {}
+        for row in connection.execute(
+            """
+            SELECT policy.*, extension.policy_version,
+                   extension.account_tier, extension.liquidation_fee_bps,
+                   extension.source_kind, extension.source_id,
+                   extension.source_event_sequence,
+                   extension.component_hash AS extension_hash
+            FROM replay_training_fee_policy AS policy
+            LEFT JOIN replay_training_fee_policy_extension AS extension
+              ON extension.run_id = policy.run_id
+             AND extension.revision = policy.revision
+            WHERE policy.run_id = ? ORDER BY policy.revision
+            """,
+            (run_id,),
+        ).fetchall():
+            revision = int(row["revision"])
+            policies[revision] = row
+            if row["policy_version"] is None:
+                add_difference(
+                    f"fee_policy[{revision}].extension",
+                    "PRESENT",
+                    "MISSING",
+                )
+                continue
+            policy_payload = {
+                "schema_version": "replay.training.fee-policy.v1",
+                "run_id": run_id,
+                "revision": revision,
+                "effective_virtual_time_ms": int(row["effective_virtual_time_ms"]),
+                "maker_fee_bps": str(row["maker_fee_bps"]),
+                "taker_fee_bps": str(row["taker_fee_bps"]),
+                "liquidation_fee_bps": str(row["liquidation_fee_bps"]),
+                "policy_version": str(row["policy_version"]),
+                "account_tier": str(row["account_tier"]),
+                "fidelity": str(row["fidelity"]),
+            }
+            expected_policy_hash = canonical_sha256(policy_payload)
+            if expected_policy_hash != row["policy_hash"]:
+                add_difference(
+                    f"fee_policy[{revision}].policy_hash",
+                    expected_policy_hash,
+                    row["policy_hash"],
+                )
+            extension_payload = {
+                "schema_version": "replay.training.fee-policy-extension.v1",
+                "run_id": run_id,
+                "revision": revision,
+                "policy_version": str(row["policy_version"]),
+                "account_tier": str(row["account_tier"]),
+                "liquidation_fee_bps": str(row["liquidation_fee_bps"]),
+                "source_kind": str(row["source_kind"]),
+                "source_id": str(row["source_id"]),
+                "source_event_sequence": int(row["source_event_sequence"]),
+            }
+            expected_extension_hash = canonical_sha256(extension_payload)
+            if expected_extension_hash != row["extension_hash"]:
+                add_difference(
+                    f"fee_policy[{revision}].extension_hash",
+                    expected_extension_hash,
+                    row["extension_hash"],
+                )
+
+        ledger_by_sequence = {int(row["ledger_sequence"]): row for row in ledger_rows}
+        ledger_by_posting = {str(row["posting_id"]): row for row in ledger_rows}
+        fill_events: dict[int, tuple[sqlite3.Row, Mapping[str, object]]] = {}
+        configured_fee_by_leg: dict[tuple[str, str], Decimal] = {}
+        broker_fee_total = Decimal(0)
+        configured_fee_total = Decimal(0)
+        for row in connection.execute(
+            """
+            SELECT * FROM replay_training_contract_fill
+            WHERE run_id = ? ORDER BY track_id, fill_id
+            """,
+            (run_id,),
+        ).fetchall():
+            track_id = str(row["track_id"])
+            fill_id = str(row["fill_id"])
+            prefix = f"fill[{track_id}:{fill_id}]"
+            try:
+                raw = json.loads(str(row["fill_json"]))
+            except json.JSONDecodeError as exc:
+                add_difference(prefix, "VALID_FILL", f"INVALID:{type(exc).__name__}")
+                continue
+            if not isinstance(raw, Mapping):
+                add_difference(prefix, "JSON_OBJECT", type(raw).__name__)
+                continue
+            position_side = raw.get("position_side")
+            if position_side not in {"LONG", "SHORT"}:
+                add_difference(
+                    f"{prefix}.position_side",
+                    "LONG_OR_SHORT",
+                    position_side,
+                )
+                continue
+            rule = rules.get((track_id, int(row["rule_revision"])))
+            policy = policies.get(int(row["fee_policy_revision"]))
+            if rule is None or policy is None or policy["policy_version"] is None:
+                add_difference(
+                    f"{prefix}.effective_policy",
+                    "EXISTING_COMPLETE_RULE_AND_FEE_POLICY",
+                    "MISSING",
+                )
+                continue
+            try:
+                quantity = Decimal(str(raw["quantity"]))
+                price = Decimal(str(raw["price"]))
+                notional = quantity * price * Decimal(rule.contract_size)
+                expected_fee = fee_for_notional(
+                    notional=notional,
+                    liquidity=str(raw["liquidity"]),
+                    maker_bps=str(policy["maker_fee_bps"]),
+                    taker_bps=str(policy["taker_fee_bps"]),
+                    quote_step=rule.quote_step,
+                )
+                compare_decimal(
+                    f"{prefix}.configured_fee", expected_fee, row["configured_fee"]
+                )
+                broker_fee_total += Decimal(str(raw["fee"]))
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                add_difference(
+                    prefix, "VALID_HEDGE_FILL", f"INVALID:{type(exc).__name__}"
+                )
+                continue
+            configured_fee_total += expected_fee
+            leg_key = (track_id, str(position_side))
+            configured_fee_by_leg[leg_key] = (
+                configured_fee_by_leg.get(leg_key, Decimal(0)) + expected_fee
+            )
+            posting_id = f"fee:{track_id}:{fill_id}"
+            posting = ledger_by_posting.get(posting_id)
+            if posting is None:
+                add_difference(f"ledger[{posting_id}]", "PRESENT", "MISSING")
+                continue
+            compare_decimal(
+                f"ledger[{posting_id}].cash_delta",
+                -expected_fee,
+                posting["cash_delta"],
+            )
+            try:
+                metadata = json.loads(str(posting["metadata_json"]))
+            except json.JSONDecodeError:
+                metadata = None
+            for field, expected in (
+                ("position_side", position_side),
+                ("fee_policy_revision", int(row["fee_policy_revision"])),
+                ("fee_policy_version", policy["policy_version"]),
+                ("account_tier", policy["account_tier"]),
+                ("liquidation_fee_bps", policy["liquidation_fee_bps"]),
+            ):
+                actual = metadata.get(field) if isinstance(metadata, Mapping) else None
+                if actual != expected:
+                    add_difference(
+                        f"ledger[{posting_id}].{field}",
+                        expected,
+                        actual,
+                    )
+            fill_events[int(posting["ledger_sequence"])] = (row, raw)
+
+        funding_rows = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_hedge_funding_settlement
+                WHERE run_id = ? ORDER BY ledger_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        funding_by_sequence = {int(row["ledger_sequence"]): row for row in funding_rows}
+        state: dict[tuple[str, str], dict[str, Decimal | None]] = {}
+        funding_by_leg: dict[tuple[str, str], Decimal] = {}
+        realized_total = Decimal(0)
+
+        def leg_state(track_id: str, position_side: str) -> dict[str, Decimal | None]:
+            return state.setdefault(
+                (track_id, position_side),
+                {
+                    "quantity": Decimal(0),
+                    "entry_price": None,
+                    "realized_pnl": Decimal(0),
+                },
+            )
+
+        def apply_fill(
+            target: dict[str, Decimal | None],
+            *,
+            position_side: str,
+            side: str,
+            quantity: Decimal,
+            price: Decimal,
+            contract_size: Decimal,
+        ) -> Decimal:
+            signed_delta = quantity if side == "BUY" else -quantity
+            old_quantity = cast(Decimal, target["quantity"])
+            if position_side == "LONG" and signed_delta < 0:
+                signed_delta = -min(abs(signed_delta), abs(old_quantity))
+            if position_side == "SHORT" and signed_delta > 0:
+                signed_delta = min(signed_delta, abs(old_quantity))
+            new_quantity = old_quantity + signed_delta
+            old_entry = cast(Decimal | None, target["entry_price"])
+            realized = Decimal(0)
+            with localcontext() as context:
+                context.prec = 60
+                if old_quantity == 0:
+                    new_entry = price if signed_delta else None
+                elif old_quantity * signed_delta > 0:
+                    if old_entry is None:
+                        raise TypeError("non-flat HEDGE leg has no entry")
+                    new_entry = (
+                        abs(old_quantity) * old_entry + abs(signed_delta) * price
+                    ) / abs(new_quantity)
+                else:
+                    if old_entry is None:
+                        raise TypeError("non-flat HEDGE leg has no entry")
+                    closed = min(abs(old_quantity), abs(signed_delta))
+                    realized = (
+                        (price - old_entry)
+                        * closed
+                        * (Decimal(1) if old_quantity > 0 else Decimal(-1))
+                        * contract_size
+                    )
+                    new_entry = None if new_quantity == 0 else old_entry
+            target["quantity"] = new_quantity
+            target["entry_price"] = new_entry
+            target["realized_pnl"] = cast(Decimal, target["realized_pnl"]) + realized
+            return realized
+
+        ordered_fills = sorted(
+            fill_events.values(),
+            key=lambda item: (
+                int(str(item[1].get("event_time_ms", 0))),
+                int(str(item[1].get("source_sequence", 0))),
+                str(item[0]["track_id"]),
+                str(item[0]["fill_id"]),
+            ),
+        )
+        for fill_row, raw in ordered_fills:
+            track_id = str(fill_row["track_id"])
+            position_side = str(raw["position_side"])
+            rule = rules[(track_id, int(fill_row["rule_revision"]))]
+            try:
+                realized_total += apply_fill(
+                    leg_state(track_id, position_side),
+                    position_side=position_side,
+                    side=str(raw["side"]),
+                    quantity=Decimal(str(raw["quantity"])),
+                    price=Decimal(str(raw["price"])),
+                    contract_size=Decimal(rule.contract_size),
+                )
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                add_difference(
+                    f"fill[{track_id}:{fill_row['fill_id']}].position_replay",
+                    "VALID_PER_LEG_TRANSITION",
+                    f"INVALID:{type(exc).__name__}",
+                )
+
+        for sequence in sorted(funding_by_sequence):
+            row = funding_by_sequence[sequence]
+            track_id = str(row["track_id"])
+            position_side = str(row["position_side"])
+            prefix = (
+                f"hedge_funding[{track_id}:{position_side}:"
+                f"{int(row['settlement_time_ms'])}]"
+            )
+            rule = rules.get((track_id, int(row["rule_revision"])))
+            ledger = ledger_by_sequence.get(sequence)
+            if rule is None or ledger is None:
+                add_difference(f"{prefix}.source_link", "RULE_AND_LEDGER", "MISSING")
+                continue
+            pre_state: dict[str, Decimal | None] = {
+                "quantity": Decimal(0),
+                "entry_price": None,
+                "realized_pnl": Decimal(0),
+            }
+            funding_boundary = (
+                int(row["actual_settlement_time_ms"]),
+                int(ledger["source_sequence"]),
+            )
+            for fill_row, raw in ordered_fills:
+                if (
+                    str(fill_row["track_id"]) != track_id
+                    or str(raw["position_side"]) != position_side
+                    or (
+                        int(str(raw.get("event_time_ms", 0))),
+                        int(str(raw.get("source_sequence", 0))),
+                    )
+                    >= funding_boundary
+                ):
+                    continue
+                fill_rule = rules[(track_id, int(fill_row["rule_revision"]))]
+                apply_fill(
+                    pre_state,
+                    position_side=position_side,
+                    side=str(raw["side"]),
+                    quantity=Decimal(str(raw["quantity"])),
+                    price=Decimal(str(raw["price"])),
+                    contract_size=Decimal(fill_rule.contract_size),
+                )
+            expected_pre = cast(Decimal, pre_state["quantity"])
+            compare_decimal(
+                f"{prefix}.pre_settlement_signed_quantity",
+                expected_pre,
+                row["pre_settlement_signed_quantity"],
+            )
+            compare_decimal(
+                f"{prefix}.pre_settlement_absolute_quantity",
+                abs(expected_pre),
+                row["pre_settlement_absolute_quantity"],
+            )
+            applied = connection.execute(
+                """
+                SELECT * FROM replay_hedge_input_applied_event
+                WHERE run_id = ? AND source_kind = 'PUBLIC'
+                  AND event_sequence = ?
+                """,
+                (run_id, int(row["source_event_sequence"])),
+            ).fetchone()
+            if applied is None or applied["event_kind"] != "FUNDING":
+                add_difference(f"{prefix}.public_event", "APPLIED_FUNDING", "MISSING")
+                continue
+            payload = json.loads(str(applied["payload_json"]))
+            if not isinstance(payload, Mapping):
+                add_difference(
+                    f"{prefix}.public_payload", "JSON_OBJECT", type(payload).__name__
+                )
+                continue
+            for field, expected, actual in (
+                (
+                    "source_event_hash",
+                    applied["source_event_hash"],
+                    row["source_event_hash"],
+                ),
+                ("mark_price", payload.get("mark_price"), row["mark_price"]),
+                ("funding_rate", payload.get("funding_rate"), row["funding_rate"]),
+            ):
+                if str(expected) != str(actual):
+                    add_difference(f"{prefix}.{field}", expected, actual)
+            mark = Decimal(str(payload["mark_price"]))
+            rate = Decimal(str(payload["funding_rate"]))
+            raw_delta = -expected_pre * mark * Decimal(rule.contract_size) * rate
+            rounded = round_to_step(
+                abs(raw_delta), Decimal(rule.quote_step), upward=True
+            )
+            expected_delta = rounded.copy_sign(raw_delta) if raw_delta else Decimal(0)
+            compare_decimal(f"{prefix}.cash_delta", expected_delta, row["cash_delta"])
+            compare_decimal(
+                f"ledger[{ledger['posting_id']}].cash_delta",
+                expected_delta,
+                ledger["cash_delta"],
+            )
+            component = {
+                "schema_version": "replay.training.hedge-funding-settlement.v1",
+                "run_id": run_id,
+                "track_id": track_id,
+                "position_side": position_side,
+                "settlement_time_ms": int(row["settlement_time_ms"]),
+                "actual_settlement_time_ms": int(row["actual_settlement_time_ms"]),
+                "source_kind": str(row["source_kind"]),
+                "source_id": str(row["source_id"]),
+                "source_event_sequence": int(row["source_event_sequence"]),
+                "source_event_hash": str(row["source_event_hash"]),
+                "pre_settlement_signed_quantity": str(
+                    row["pre_settlement_signed_quantity"]
+                ),
+                "pre_settlement_absolute_quantity": str(
+                    row["pre_settlement_absolute_quantity"]
+                ),
+                "mark_price": str(row["mark_price"]),
+                "funding_rate": str(row["funding_rate"]),
+                "contract_size": str(row["contract_size"]),
+                "cash_delta": str(row["cash_delta"]),
+                "rounding": str(row["rounding"]),
+                "fidelity": str(row["fidelity"]),
+                "rule_revision": int(row["rule_revision"]),
+            }
+            expected_component_hash = canonical_sha256(component)
+            if expected_component_hash != row["component_hash"]:
+                add_difference(
+                    f"{prefix}.component_hash",
+                    expected_component_hash,
+                    row["component_hash"],
+                )
+            leg_key = (track_id, position_side)
+            funding_by_leg[leg_key] = (
+                funding_by_leg.get(leg_key, Decimal(0)) + expected_delta
+            )
+
+        liquidation_by_leg: dict[tuple[str, str], Decimal] = {}
+        liquidation_total = Decimal(0)
+        for ledger in ledger_rows:
+            if ledger["kind"] != "LIQUIDATION_FEE":
+                continue
+            metadata = json.loads(str(ledger["metadata_json"]))
+            if not isinstance(metadata, Mapping):
+                add_difference(
+                    f"ledger[{ledger['posting_id']}].metadata",
+                    "JSON_OBJECT",
+                    type(metadata).__name__,
+                )
+                continue
+            position_side = metadata.get("position_side")
+            track_id = ledger["track_id"]
+            fee = -Decimal(str(ledger["cash_delta"]))
+            liquidation_total += fee
+            if position_side in {"LONG", "SHORT"} and isinstance(track_id, str):
+                liquidation_by_leg[(track_id, str(position_side))] = (
+                    liquidation_by_leg.get((track_id, str(position_side)), Decimal(0))
+                    + fee
+                )
+
+        positions: list[dict[str, object]] = []
+        expected_unrealized = Decimal(0)
+        expected_margin = Decimal(0)
+        expected_maintenance = Decimal(0)
+        for row in connection.execute(
+            """
+            SELECT * FROM replay_training_position_leg
+            WHERE run_id = ? ORDER BY track_id, position_side
+            """,
+            (run_id,),
+        ).fetchall():
+            track_id = str(row["track_id"])
+            position_side = str(row["position_side"])
+            leg_key = (track_id, position_side)
+            target = leg_state(track_id, position_side)
+            expected_quantity = cast(Decimal, target["quantity"])
+            compare_decimal(
+                f"position_leg[{track_id}:{position_side}].signed_quantity",
+                expected_quantity,
+                row["signed_quantity"],
+            )
+            compare_decimal(
+                f"position_leg[{track_id}:{position_side}].absolute_quantity",
+                abs(expected_quantity),
+                row["absolute_quantity"],
+            )
+            expected_funding = funding_by_leg.get(leg_key, Decimal(0))
+            expected_fees = configured_fee_by_leg.get(leg_key, Decimal(0))
+            expected_liquidation = liquidation_by_leg.get(leg_key, Decimal(0))
+            compare_decimal(
+                f"position_leg[{track_id}:{position_side}].accumulated_funding",
+                expected_funding,
+                row["accumulated_funding"],
+            )
+            compare_decimal(
+                f"position_leg[{track_id}:{position_side}].trading_fees",
+                expected_fees,
+                row["trading_fees"],
+            )
+            compare_decimal(
+                f"position_leg[{track_id}:{position_side}].liquidation_fees",
+                expected_liquidation,
+                row["liquidation_fees"],
+            )
+            component = cls._position_leg_component(
+                row,
+                accumulated_funding=str(row["accumulated_funding"]),
+                trading_fees=str(row["trading_fees"]),
+                liquidation_fees=str(row["liquidation_fees"]),
+            )
+            expected_hash = canonical_sha256(component)
+            if expected_hash != row["component_hash"]:
+                add_difference(
+                    f"position_leg[{track_id}:{position_side}].component_hash",
+                    expected_hash,
+                    row["component_hash"],
+                )
+            unrealized = Decimal(str(row["unrealized_pnl"]))
+            expected_unrealized += unrealized
+            expected_margin += Decimal(str(row["initial_margin"]))
+            expected_maintenance += Decimal(str(row["maintenance_margin"]))
+            positions.append(
+                {
+                    "track_id": track_id,
+                    "position_side": position_side,
+                    "signed_quantity": decimal_to_string(
+                        expected_quantity,
+                        field_name="audited HEDGE signed quantity",
+                    ),
+                    "realized_pnl": decimal_to_string(
+                        cast(Decimal, target["realized_pnl"]),
+                        field_name="audited HEDGE realized pnl",
+                    ),
+                    "accumulated_funding": decimal_to_string(
+                        expected_funding,
+                        field_name="audited HEDGE funding",
+                    ),
+                    "trading_fees": decimal_to_string(
+                        expected_fees,
+                        field_name="audited HEDGE fees",
+                    ),
+                }
+            )
+
+        funding_total = sum(funding_by_leg.values(), Decimal(0))
+        expected_cash = (
+            Decimal(str(run["initial_equity"]))
+            + realized_total
+            - configured_fee_total
+            + funding_total
+            - liquidation_total
+        )
+        expected_equity = expected_cash + expected_unrealized
+        compare_decimal(
+            "portfolio.cash_balance", expected_cash, portfolio.get("cash_balance")
+        )
+        compare_decimal("portfolio.equity", expected_equity, portfolio.get("equity"))
+        compare_decimal(
+            "portfolio.fees_paid", configured_fee_total, portfolio.get("fees_paid")
+        )
+        compare_decimal(
+            "portfolio.funding_cashflow",
+            funding_total,
+            portfolio.get("funding_cashflow"),
+        )
+        compare_decimal(
+            "portfolio.liquidation_fees_paid",
+            liquidation_total,
+            portfolio.get("liquidation_fees_paid"),
+        )
+        expected_overlay = (
+            broker_fee_total - configured_fee_total + funding_total - liquidation_total
+        )
+        compare_decimal(
+            "contract_account.overlay_cash",
+            expected_overlay,
+            account["overlay_cash"],
+        )
+        return {
+            "schema_version": "replay.training.hedge-account-audit.v1",
+            "cash_balance": decimal_to_string(
+                expected_cash,
+                field_name="audited HEDGE cash balance",
+            ),
+            "equity": decimal_to_string(
+                expected_equity,
+                field_name="audited HEDGE equity",
+            ),
+            "configured_fees": decimal_to_string(
+                configured_fee_total,
+                field_name="audited HEDGE configured fees",
+            ),
+            "funding_cashflow": decimal_to_string(
+                funding_total,
+                field_name="audited HEDGE funding cashflow",
+            ),
+            "liquidation_fees_paid": decimal_to_string(
+                liquidation_total,
+                field_name="audited HEDGE liquidation fees",
+            ),
+            "margin_used": decimal_to_string(
+                expected_margin,
+                field_name="audited HEDGE margin",
+            ),
+            "maintenance_margin": decimal_to_string(
+                expected_maintenance,
+                field_name="audited HEDGE maintenance",
+            ),
+            "positions": positions,
+            "source_counts": {
+                "fills": len(fill_events),
+                "funding_settlements": len(funding_rows),
+                "fee_policies": len(policies),
+                "ledger_entries": len(ledger_rows),
+            },
+        }
+
+    @classmethod
     def _write_account_audit(
         cls,
         connection: sqlite3.Connection,
         *,
         run_id: str,
         now_ms: int,
-        authoritative_projections: (
-            Mapping[str, Mapping[str, object]] | None
-        ) = None,
+        authoritative_projections: (Mapping[str, Mapping[str, object]] | None) = None,
     ) -> dict[str, object]:
         run = connection.execute(
             """
@@ -3853,7 +4937,17 @@ class TrainingRunStore:
             )
         independent_state: dict[str, object] | None = None
         projection_verification = "NOT_APPLICABLE"
-        if run["account_data_mode"] == "HISTORICAL_EXACT":
+        if run["position_mode"] == "HEDGE":
+            projection_verification = "VERIFIED_PINNED_HEDGE_INPUTS"
+            independent_state = cls._audit_hedge_account_state(
+                connection,
+                run=run,
+                account=account,
+                ledger_rows=ledger_rows,
+                portfolio=portfolio,
+                differences=differences,
+            )
+        elif run["account_data_mode"] == "HISTORICAL_EXACT":
             projection_verification = (
                 "VERIFIED_PINNED_ARCHIVE"
                 if authoritative_projections is not None
@@ -3888,10 +4982,7 @@ class TrainingRunStore:
                     }
                 )
             for projection in projections:
-                if (
-                    projection["status"] != "READY"
-                    or projection["health"] != "READY"
-                ):
+                if projection["status"] != "READY" or projection["health"] != "READY":
                     differences.append(
                         {
                             "field": f"projection[{projection['track_id']}].status",
@@ -3961,17 +5052,15 @@ class TrainingRunStore:
                     differences.append(
                         {
                             "field": (
-                                f"projection[{projection['track_id']}]."
-                                "input_chain_hash"
+                                f"projection[{projection['track_id']}].input_chain_hash"
                             ),
                             "expected": applied["event_hash"],
                             "actual": projection["input_chain_hash"],
                         }
                     )
-            if (
-                authoritative_projections is not None
-                and len(authoritative_projections) != len(projections)
-            ):
+            if authoritative_projections is not None and len(
+                authoritative_projections
+            ) != len(projections):
                 differences.append(
                     {
                         "field": "authoritative_projection_count",
@@ -4009,6 +5098,33 @@ class TrainingRunStore:
                     "field": "funding_ledger_links",
                     "expected": 0,
                     "actual": funding_orphans,
+                }
+            )
+        hedge_funding_orphans = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM replay_training_hedge_funding_settlement AS funding
+                LEFT JOIN replay_training_contract_ledger AS ledger
+                  ON ledger.run_id = funding.run_id
+                 AND ledger.ledger_sequence = funding.ledger_sequence
+                WHERE funding.run_id = ? AND (
+                    ledger.ledger_sequence IS NULL
+                    OR ledger.kind != 'FUNDING_SETTLEMENT'
+                    OR ledger.cash_delta != funding.cash_delta
+                    OR json_extract(ledger.metadata_json, '$.position_side')
+                       != funding.position_side
+                )
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        if hedge_funding_orphans:
+            differences.append(
+                {
+                    "field": "hedge_funding_ledger_links",
+                    "expected": 0,
+                    "actual": hedge_funding_orphans,
                 }
             )
         snapshot = {
@@ -4517,10 +5633,9 @@ class TrainingRunStore:
                 if parent_anchor_set_hash is None
                 else parent_anchor_set_hash
             )
-            if (
-                effective_timeline != int(event["timeline_sequence"])
-                or effective_anchor_set_hash != str(event["anchor_set_hash"])
-            ):
+            if effective_timeline != int(
+                event["timeline_sequence"]
+            ) or effective_anchor_set_hash != str(event["anchor_set_hash"]):
                 raise TrainingRunError(
                     "REVIEW_FORK_MISMATCH",
                     "review lineage changed before fork commit",
@@ -4540,9 +5655,7 @@ class TrainingRunStore:
                     parent_event_id,
                     effective_timeline,
                     effective_anchor_set_hash,
-                    canonical_sha256(
-                        json.loads(str(event["projection_json"]))
-                    ),
+                    canonical_sha256(json.loads(str(event["projection_json"]))),
                     now_ms,
                 ),
             )
@@ -4604,7 +5717,10 @@ class TrainingRunStore:
                     child_run_id,
                     canonical_json(public_time),
                     canonical_json(
-                        {"parent_run_id": parent_run_id, "parent_event_id": parent_event_id}
+                        {
+                            "parent_run_id": parent_run_id,
+                            "parent_event_id": parent_event_id,
+                        }
                     ),
                     canonical_json({"result_label": result_label}),
                     session_state["state_hash"],
@@ -4674,16 +5790,24 @@ class TrainingRunStore:
         source_kind: str | None,
         compatibility: str | None,
     ) -> dict[str, object]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _LIST_LIMIT_MAX:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= _LIST_LIMIT_MAX
+        ):
             raise TrainingRunError(
                 "TRAINING_RUN_INVALID",
                 f"limit must be between 1 and {_LIST_LIMIT_MAX}",
                 status_code=422,
             )
         if state is not None and state not in _STATES:
-            raise TrainingRunError("TRAINING_RUN_INVALID", "state filter is invalid", status_code=422)
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID", "state filter is invalid", status_code=422
+            )
         if source_kind is not None and source_kind not in _SOURCES:
-            raise TrainingRunError("TRAINING_RUN_INVALID", "source filter is invalid", status_code=422)
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID", "source filter is invalid", status_code=422
+            )
         if compatibility is not None and compatibility not in _COMPATIBILITY_FILTERS:
             raise TrainingRunError(
                 "TRAINING_RUN_INVALID",
@@ -4693,7 +5817,9 @@ class TrainingRunStore:
         decoded_cursor = _cursor_payload(cursor)
 
         def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
-            sql = _CARD_CTE + """
+            sql = (
+                _CARD_CTE
+                + """
             SELECT * FROM cards
             WHERE (:state IS NULL OR state = :state)
               AND (:source_kind IS NULL OR source_kind = :source_kind)
@@ -4712,6 +5838,7 @@ class TrainingRunStore:
             ORDER BY updated_at_ms DESC, run_id DESC, kind DESC
             LIMIT :row_limit
             """
+            )
             params = {
                 "state": state,
                 "source_kind": source_kind,
@@ -4726,7 +5853,9 @@ class TrainingRunStore:
         rows = await self.base_store.run_extension_read(read)
         visible = rows[:limit]
         items = [self._card_from_row(row) for row in visible]
-        next_cursor = _encode_cursor(visible[-1]) if len(rows) > limit and visible else None
+        next_cursor = (
+            _encode_cursor(visible[-1]) if len(rows) > limit and visible else None
+        )
         return {
             "protocol": REPLAY_V2_PROTOCOL,
             "schema_version": TRAINING_SCHEMA_ID,
@@ -5012,7 +6141,11 @@ class TrainingRunStore:
         }
 
     async def training_results(self, run_id: str, *, limit: int) -> dict[str, object]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2_000:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 2_000
+        ):
             raise TrainingRunError(
                 "TRAINING_RESULTS_INVALID",
                 "training-results limit must be between 1 and 2000",
@@ -5089,7 +6222,9 @@ class TrainingRunStore:
             )
             return run, rows, plans, metrics
 
-        run, rows, plan_rows, metric_rows = await self.base_store.run_extension_read(read)
+        run, rows, plan_rows, metric_rows = await self.base_store.run_extension_read(
+            read
+        )
         previous_plan_hash = "sha256:" + ("0" * 64)
         for expected_sequence, plan_row in enumerate(plan_rows, start=1):
             try:
@@ -5301,7 +6436,9 @@ class TrainingRunStore:
                     )
                 ),
                 "average_holding_duration_ms": (
-                    0 if not holding_values else sum(holding_values) // len(holding_values)
+                    0
+                    if not holding_values
+                    else sum(holding_values) // len(holding_values)
                 ),
                 "planned_trade_count": sum(
                     1 for row in metric_rows if row["initial_risk_amount"] is not None
@@ -5568,9 +6705,7 @@ class TrainingRunStore:
             "integrity_mode": str(row["integrity_mode"]),
             "time_disclosure_policy": str(row["time_disclosure_policy"]),
             "allow_rule_changes": bool(row["allow_rule_changes"]),
-            "allowed_mutations": tuple(
-                json.loads(str(row["allowed_mutations_json"]))
-            ),
+            "allowed_mutations": tuple(json.loads(str(row["allowed_mutations_json"]))),
             "revealed": bool(row["revealed"]),
             "strict_eligible": bool(row["strict_eligible"]),
             "start_time_known": bool(row["start_time_known"]),
@@ -5684,19 +6819,18 @@ class TrainingRunStore:
                 actual_start_ms=int(row["selection_actual_start_ms"]),
                 actual_end_ms=int(row["selection_actual_end_ms"]),
             )
-            disclose_seed = (
-                row["selection_random_seed"] is not None
-                and (configured_policy == "NONE" or revealed)
+            disclose_seed = row["selection_random_seed"] is not None and (
+                configured_policy == "NONE" or revealed
             )
             return {
                 "protocol": REPLAY_V2_PROTOCOL,
                 "run_id": str(row["run_id"]),
                 "integrity_mode": str(row["integrity_mode"]),
-                "configured_time_disclosure_policy": str(
-                    row["time_disclosure_policy"]
-                ),
+                "configured_time_disclosure_policy": str(row["time_disclosure_policy"]),
                 "effective_time_disclosure_policy": (
-                    "NONE" if bool(row["revealed"]) else str(row["time_disclosure_policy"])
+                    "NONE"
+                    if bool(row["revealed"])
+                    else str(row["time_disclosure_policy"])
                 ),
                 "strict_eligible": bool(row["strict_eligible"]),
                 "start_time_known": bool(row["start_time_known"]),
@@ -5712,9 +6846,7 @@ class TrainingRunStore:
                     "seed_source": str(row["selection_seed_source"]),
                     "seed_disclosed": disclose_seed,
                     "random_seed": (
-                        int(row["selection_random_seed"])
-                        if disclose_seed
-                        else None
+                        int(row["selection_random_seed"]) if disclose_seed else None
                     ),
                     "dataset_epoch": str(row["selection_dataset_epoch"]),
                     "parent_selection_hash": row["parent_selection_hash"],
@@ -5839,10 +6971,7 @@ class TrainingRunStore:
                 - 1
             )
             current_public_cursor = int(row["virtual_time_ms"])
-            if (
-                current_public_cursor < 0
-                or current_public_cursor > 253_402_300_799_999
-            ):
+            if current_public_cursor < 0 or current_public_cursor > 253_402_300_799_999:
                 raise TrainingRunError(
                     "TRAINING_RUN_STORAGE_DEGRADED",
                     "training public cursor is invalid",
@@ -5904,7 +7033,11 @@ class TrainingRunStore:
                 "equity resolution is unsupported",
                 status_code=422,
             )
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5_000:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 5_000
+        ):
             raise TrainingRunError(
                 "TRAINING_RUN_INVALID",
                 "equity limit must be between 1 and 5000",
@@ -5959,9 +7092,7 @@ class TrainingRunStore:
                 "resolution": selected,
                 "samples": samples,
                 "bounded": True,
-                "limits": {
-                    item[0]: item[2] for item in _EQUITY_RESOLUTIONS
-                },
+                "limits": {item[0]: item[2] for item in _EQUITY_RESOLUTIONS},
             }
 
         result = await self.base_store.run_extension_read(read)
@@ -6157,15 +7288,11 @@ class TrainingRunStore:
                 "protocol": REPLAY_V2_PROTOCOL,
                 "schema_version": "replay.review.drawing-current.v1",
                 "run_id": run_id,
-                "document_hash": (
-                    None if row is None else str(row["document_hash"])
-                ),
+                "document_hash": (None if row is None else str(row["document_hash"])),
                 "revision": 0 if row is None else int(row["revision"]),
                 "entity_count": 0 if row is None else int(row["entity_count"]),
                 "document": (
-                    None
-                    if row is None
-                    else json.loads(str(row["document_json"]))
+                    None if row is None else json.loads(str(row["document_json"]))
                 ),
                 "budget": self._review_budget(connection, run_id),
             }
@@ -6435,7 +7562,9 @@ class TrainingRunStore:
                 now_ms=now_ms,
             )
             if len(created) != 1:
-                raise TypeError("review marker did not create exactly one timeline event")
+                raise TypeError(
+                    "review marker did not create exactly one timeline event"
+                )
             event = connection.execute(
                 """
                 SELECT timeline_sequence FROM replay_review_timeline_event
@@ -6696,9 +7825,7 @@ class TrainingRunStore:
                 source_sequence=int(run["source_sequence"]),
             )
             selected_row = next(
-                row
-                for row in rows
-                if str(row["event_id"]) == selected["event_id"]
+                row for row in rows if str(row["event_id"]) == selected["event_id"]
             )
             selected_projection = json.loads(str(selected_row["projection_json"]))
             if not isinstance(selected_projection, dict):
@@ -6872,9 +7999,7 @@ class TrainingRunStore:
                 "immutability_proof": {
                     "original_account_hash": current_projection["account_hash"],
                     "original_ledger_tail_hash": str(run["ledger_tail_hash"]),
-                    "original_viewer_revision": int(
-                        run["semantic_view_revision"]
-                    ),
+                    "original_viewer_revision": int(run["semantic_view_revision"]),
                     "original_viewer_hash": current_projection["viewer_hash"],
                     "verified": True,
                 },
@@ -6897,7 +8022,9 @@ class TrainingRunStore:
         run_id: str,
         event_id: str,
     ) -> dict[str, object]:
-        def read(connection: sqlite3.Connection) -> tuple[sqlite3.Row, tuple[sqlite3.Row, ...]] | None:
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row, tuple[sqlite3.Row, ...]] | None:
             event = connection.execute(
                 """
                 SELECT event.*, run.dataset_epoch, run.adapter_session_id
@@ -6965,11 +8092,7 @@ class TrainingRunStore:
                     },
                 ) from exc
         primary = next(
-            (
-                anchor
-                for anchor in anchors
-                if str(anchor["track_id"]) == "track-1"
-            ),
+            (anchor for anchor in anchors if str(anchor["track_id"]) == "track-1"),
             anchors[0],
         )
         return {
@@ -7120,9 +8243,7 @@ class TrainingRunStore:
                     target_sequence = int(target["timeline_sequence"])
                 state = (
                     "PLAYING"
-                    if action == "NEXT"
-                    and state == "PLAYING"
-                    and target is not None
+                    if action == "NEXT" and state == "PLAYING" and target is not None
                     else "PAUSED"
                 )
             elif action == "PLAY":
@@ -7222,18 +8343,12 @@ class TrainingRunStore:
                 "projection": self._public_review_projection(projection),
                 "drawing_document": drawing,
                 "immutability_proof": {
-                    "original_account_hash": str(
-                        review["original_account_hash"]
-                    ),
+                    "original_account_hash": str(review["original_account_hash"]),
                     "original_ledger_tail_hash": str(
                         review["original_ledger_tail_hash"]
                     ),
-                    "original_viewer_revision": int(
-                        review["original_viewer_revision"]
-                    ),
-                    "original_viewer_hash": str(
-                        review["original_viewer_hash"]
-                    ),
+                    "original_viewer_revision": int(review["original_viewer_revision"]),
+                    "original_viewer_hash": str(review["original_viewer_hash"]),
                     "verified": True,
                 },
                 "budget": self._review_budget(connection, run_id),
@@ -7561,9 +8676,7 @@ class TrainingRunStore:
             raise ValueError("period summary build proof does not match metadata")
         total_compressed = 0
         total_raw = 0
-        normalized: list[
-            tuple[str, int, int, int, str, str, bytes, int, str]
-        ] = []
+        normalized: list[tuple[str, int, int, int, str, str, bytes, int, str]] = []
         previous_end = -1
         common_fields = (
             "run_id",
@@ -7598,8 +8711,7 @@ class TrainingRunStore:
             if summary.summary_id in candidate_ids:
                 raise ValueError("period summary candidate IDs are not unique")
             observed_common = {
-                field_name: getattr(summary, field_name)
-                for field_name in common_fields
+                field_name: getattr(summary, field_name) for field_name in common_fields
             }
             if common_reference is None:
                 common_reference = observed_common
@@ -7613,7 +8725,9 @@ class TrainingRunStore:
             total_compressed += len(component_blob)
             total_raw += raw_bytes
             if total_compressed > MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES:
-                raise ValueError("period summary set exceeds its compressed byte budget")
+                raise ValueError(
+                    "period summary set exceeds its compressed byte budget"
+                )
             normalized.append(
                 (
                     summary.summary_id,
@@ -7652,22 +8766,17 @@ class TrainingRunStore:
             "execution_version": common_reference["execution_version"],
             "rule_revision": common_reference["rule_revision"],
             "rule_hash": common_reference["rule_hash"],
-            "base_source_sequence": common_reference[
-                "base_source_sequence"
-            ],
+            "base_source_sequence": common_reference["base_source_sequence"],
             "base_domain_command_position": (
                 common_reference["base_domain_command_position"]
             ),
-            "base_event_chain_hash": common_reference[
-                "base_event_chain_hash"
-            ],
+            "base_event_chain_hash": common_reference["base_event_chain_hash"],
             "base_component_state_hash": (
                 common_reference["base_component_state_hash"]
             ),
             "candidate_summary_hashes": candidate_hashes,
             "source_event_count": (
-                normalized[-1][1]
-                - int(common_reference["base_source_sequence"])
+                normalized[-1][1] - int(common_reference["base_source_sequence"])
             ),
             "candidate_count": len(normalized),
             "compressed_bytes": total_compressed,
@@ -7945,22 +9054,18 @@ class TrainingRunStore:
                 str(candidate["summary_hash"]) for candidate in generation
             ]
             generation_sequences = [
-                int(candidate["end_source_sequence"])
-                for candidate in generation
+                int(candidate["end_source_sequence"]) for candidate in generation
             ]
             generation_compressed_bytes = sum(
-                int(candidate["component_blob_bytes"])
-                for candidate in generation
+                int(candidate["component_blob_bytes"]) for candidate in generation
             )
             generation_raw_bytes = sum(
-                int(candidate["component_raw_bytes"])
-                for candidate in generation
+                int(candidate["component_raw_bytes"]) for candidate in generation
             )
             if (
                 not isinstance(set_metadata, dict)
                 or canonical_sha256(set_metadata) != str(row["build_proof_hash"])
-                or str(row["set_algorithm_version"])
-                != PERIOD_SUMMARY_ALGORITHM_VERSION
+                or str(row["set_algorithm_version"]) != PERIOD_SUMMARY_ALGORITHM_VERSION
                 or not 1
                 <= int(row["set_candidate_count"])
                 <= MAX_PERIOD_SUMMARY_CANDIDATES
@@ -7975,8 +9080,7 @@ class TrainingRunStore:
                 or not 1
                 <= int(row["set_compressed_bytes"])
                 <= MAX_PERIOD_SUMMARY_TOTAL_COMPRESSED_BYTES
-                or generation_compressed_bytes
-                != int(row["set_compressed_bytes"])
+                or generation_compressed_bytes != int(row["set_compressed_bytes"])
                 or generation_raw_bytes != int(row["set_raw_state_bytes"])
                 or set_metadata.get("algorithm_version")
                 != str(row["set_algorithm_version"])
@@ -7988,8 +9092,7 @@ class TrainingRunStore:
                 != int(row["set_source_event_count"])
                 or set_metadata.get("compressed_bytes")
                 != int(row["set_compressed_bytes"])
-                or set_metadata.get("candidate_summary_hashes")
-                != generation_hashes
+                or set_metadata.get("candidate_summary_hashes") != generation_hashes
             ):
                 raise ValueError("period summary set proof is invalid")
             metadata = json.loads(str(row["metadata_json"]))
@@ -8013,10 +9116,9 @@ class TrainingRunStore:
             ):
                 raise ValueError("period summary indexed fields changed")
             summary_hashes = generation_hashes
-            if (
-                summary.summary_hash not in summary_hashes
-                or len(set(summary_hashes)) != len(summary_hashes)
-            ):
+            if summary.summary_hash not in summary_hashes or len(
+                set(summary_hashes)
+            ) != len(summary_hashes):
                 raise ValueError("period summary build proof omitted its candidate")
             set_identity = {
                 "session_id": set_metadata.get("session_id"),
@@ -8027,15 +9129,11 @@ class TrainingRunStore:
                 "execution_version": set_metadata.get("execution_version"),
                 "rule_revision": set_metadata.get("rule_revision"),
                 "rule_hash": set_metadata.get("rule_hash"),
-                "base_source_sequence": set_metadata.get(
-                    "base_source_sequence"
-                ),
+                "base_source_sequence": set_metadata.get("base_source_sequence"),
                 "base_domain_command_position": set_metadata.get(
                     "base_domain_command_position"
                 ),
-                "base_event_chain_hash": set_metadata.get(
-                    "base_event_chain_hash"
-                ),
+                "base_event_chain_hash": set_metadata.get("base_event_chain_hash"),
                 "base_component_state_hash": set_metadata.get(
                     "base_component_state_hash"
                 ),
@@ -8050,13 +9148,9 @@ class TrainingRunStore:
                 "rule_revision": summary.rule_revision,
                 "rule_hash": summary.rule_hash,
                 "base_source_sequence": summary.base_source_sequence,
-                "base_domain_command_position": (
-                    summary.base_domain_command_position
-                ),
+                "base_domain_command_position": (summary.base_domain_command_position),
                 "base_event_chain_hash": summary.base_event_chain_hash,
-                "base_component_state_hash": (
-                    summary.base_component_state_hash
-                ),
+                "base_component_state_hash": (summary.base_component_state_hash),
             }
             if set_identity != summary_identity:
                 raise ValueError(
@@ -8228,14 +9322,8 @@ class TrainingRunStore:
     ) -> None:
         for field_name in ("virtual_time_ms", "source_sequence"):
             value = cursor.get(field_name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
-            ):
-                raise ValueError(
-                    f"advance intent cursor {field_name} is invalid"
-                )
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"advance intent cursor {field_name} is invalid")
         cursor_json = canonical_json(cursor)
         now_ms = self.base_store._validated_now_ms()
 
@@ -8377,20 +9465,13 @@ class TrainingRunStore:
         def valid_cursor(value: Mapping[str, object]) -> bool:
             for field_name in ("virtual_time_ms", "source_sequence"):
                 field = value.get(field_name)
-                if (
-                    isinstance(field, bool)
-                    or not isinstance(field, int)
-                    or field < 0
-                ):
+                if isinstance(field, bool) or not isinstance(field, int) or field < 0:
                     return False
             revision = value.get("revision")
-            return (
-                revision is None
-                or (
-                    not isinstance(revision, bool)
-                    and isinstance(revision, int)
-                    and revision >= 0
-                )
+            return revision is None or (
+                not isinstance(revision, bool)
+                and isinstance(revision, int)
+                and revision >= 0
             )
 
         command = object_json("command_json", "command")
@@ -8398,9 +9479,7 @@ class TrainingRunStore:
         latest_cursor = object_json("latest_cursor_json", "latest cursor")
         plan = object_json("plan_json", "plan")
         result = (
-            None
-            if row["result_json"] is None
-            else object_json("result_json", "result")
+            None if row["result_json"] is None else object_json("result_json", "result")
         )
         command_hash = str(row["command_hash"])
         summary_id = row["summary_id"]
@@ -8410,17 +9489,11 @@ class TrainingRunStore:
             and command_hash.startswith("sha256:")
             and all(value in "0123456789abcdef" for value in command_hash[7:])
         )
-        summary_digest_valid = (
-            summary_hash is None
-            or (
-                isinstance(summary_hash, str)
-                and len(summary_hash) == 71
-                and summary_hash.startswith("sha256:")
-                and all(
-                    value in "0123456789abcdef"
-                    for value in summary_hash[7:]
-                )
-            )
+        summary_digest_valid = summary_hash is None or (
+            isinstance(summary_hash, str)
+            and len(summary_hash) == 71
+            and summary_hash.startswith("sha256:")
+            and all(value in "0123456789abcdef" for value in summary_hash[7:])
         )
         decoded: dict[str, object] = {
             "schema_version": str(row["schema_version"]),
@@ -8459,10 +9532,7 @@ class TrainingRunStore:
                 )
             )
             or not summary_digest_valid
-            or (
-                decoded["status"] in {"COMPLETED", "CANCELLED"}
-                and result is None
-            )
+            or (decoded["status"] in {"COMPLETED", "CANCELLED"} and result is None)
             or (
                 decoded["status"] not in {"COMPLETED", "CANCELLED"}
                 and result is not None
@@ -8478,13 +9548,16 @@ class TrainingRunStore:
     async def get_market_tracks(self, run_id: str) -> dict[str, object]:
         def read(
             connection: sqlite3.Connection,
-            ) -> tuple[
+        ) -> (
+            tuple[
                 sqlite3.Row,
                 tuple[sqlite3.Row, ...],
                 dict[str, object],
                 dict[str, sqlite3.Row],
                 dict[str, object] | None,
-            ] | None:
+            ]
+            | None
+        ):
             run = connection.execute(
                 """
                 SELECT r.run_id, r.state AS run_state, r.initial_equity,
@@ -8640,7 +9713,10 @@ class TrainingRunStore:
                 """,
                 (run_id,),
             ).fetchone()
-            if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
+            if (
+                account is None
+                or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL
+            ):
                 raise TrainingRunError(
                     "CONTRACT_ACCOUNT_UNAVAILABLE",
                     "isolated margin requires a current v2 contract account",
@@ -8687,18 +9763,12 @@ class TrainingRunStore:
                     (run_id, track_id, position_side),
                 ).fetchone()
                 position_margin = (
-                    Decimal(0)
-                    if leg is None
-                    else Decimal(str(leg["initial_margin"]))
+                    Decimal(0) if leg is None else Decimal(str(leg["initial_margin"]))
                 )
                 reserved_margin = sum(
                     (
                         Decimal(
-                            str(
-                                json.loads(str(row["order_json"]))[
-                                    "reserved_margin"
-                                ]
-                            )
+                            str(json.loads(str(row["order_json"]))["reserved_margin"])
                         )
                         for row in connection.execute(
                             """
@@ -8869,7 +9939,10 @@ class TrainingRunStore:
                 """,
                 (run_id,),
             ).fetchone()
-            if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
+            if (
+                account is None
+                or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL
+            ):
                 raise TrainingRunError(
                     "CONTRACT_ACCOUNT_UNAVAILABLE",
                     "policy revision requires a current v2 contract account",
@@ -8910,7 +9983,9 @@ class TrainingRunStore:
                 if (
                     str(replayed["event_type"]) != command_type.upper()
                     or str(replayed["reason"]) != str(payload["reason"])
-                    or any(new_value.get(key) != value for key, value in expected.items())
+                    or any(
+                        new_value.get(key) != value for key, value in expected.items()
+                    )
                 ):
                     raise TrainingRunError(
                         "COMMAND_ID_REUSED",
@@ -8946,9 +10021,7 @@ class TrainingRunStore:
                         (run_id, revision, policy_hash),
                     ).fetchone()
                     replay_source_sequence = (
-                        0
-                        if policy_row is None
-                        else int(policy_row["source_sequence"])
+                        0 if policy_row is None else int(policy_row["source_sequence"])
                     )
                 if policy_row is None:
                     raise TypeError("stored policy command row is missing")
@@ -8956,9 +10029,7 @@ class TrainingRunStore:
                     "revision": revision,
                     "policy_hash": policy_hash,
                     "effective_cursor": {
-                        "virtual_time_ms": int(
-                            policy_row["effective_virtual_time_ms"]
-                        ),
+                        "virtual_time_ms": int(policy_row["effective_virtual_time_ms"]),
                         "source_sequence": replay_source_sequence,
                     },
                     "deduplicated": True,
@@ -9211,9 +10282,7 @@ class TrainingRunStore:
                     "policy_hash": policy_hash,
                     "reason": payload["reason"],
                     "policy": {
-                        key: value
-                        for key, value in payload.items()
-                        if key != "reason"
+                        key: value for key, value in payload.items() if key != "reason"
                     },
                 },
                 now_ms=now_ms,
@@ -9343,15 +10412,9 @@ class TrainingRunStore:
                         "liquidation_id": str(row["case_id"]),
                         "track_id": str(row["track_id"]),
                         "state": str(row["state"]),
-                        "trigger_virtual_time_ms": int(
-                            row["trigger_virtual_time_ms"]
-                        ),
-                        "trigger_source_sequence": int(
-                            row["trigger_source_sequence"]
-                        ),
-                        "account_equity_before": str(
-                            row["account_equity_before"]
-                        ),
+                        "trigger_virtual_time_ms": int(row["trigger_virtual_time_ms"]),
+                        "trigger_source_sequence": int(row["trigger_source_sequence"]),
+                        "account_equity_before": str(row["account_equity_before"]),
                         "fidelity": str(row["fidelity"]),
                         "reason": str(row["reason"]),
                         "adapter_session_id": row["adapter_session_id"],
@@ -10264,7 +11327,9 @@ class TrainingRunStore:
                         "command_id was reused with a different viewer command",
                         status_code=409,
                     )
-                return ViewerState.from_dict(json.loads(str(replayed["viewer_state_json"])))
+                return ViewerState.from_dict(
+                    json.loads(str(replayed["viewer_state_json"]))
+                )
             viewer_row = connection.execute(
                 "SELECT * FROM replay_training_viewer_state WHERE run_id = ?",
                 (run_id,),
@@ -10592,7 +11657,11 @@ class TrainingRunStore:
                     status_code=404,
                 )
             reasons = self._reason_list(row)
-            if viewer is not None and viewer["selected_track_id"] == track_id or reasons:
+            if (
+                viewer is not None
+                and viewer["selected_track_id"] == track_id
+                or reasons
+            ):
                 raise TrainingRunError(
                     "MARKET_TRACK_FORCED_FULL",
                     "owned market track cannot be removed",
@@ -10683,7 +11752,9 @@ class TrainingRunStore:
         if (
             len(source_revision) != 71
             or not source_revision.startswith("sha256:")
-            or any(character not in "0123456789abcdef" for character in source_revision[7:])
+            or any(
+                character not in "0123456789abcdef" for character in source_revision[7:]
+            )
             or not exchange
             or not market_type
             or not symbol
@@ -10918,8 +11989,7 @@ class TrainingRunStore:
     ) -> dict[str, object]:
         if row is None:
             required = (
-                book_mode == "BOOK_ASSISTED_REQUIRED"
-                and subscription_tier == "FULL"
+                book_mode == "BOOK_ASSISTED_REQUIRED" and subscription_tier == "FULL"
             )
             return {
                 "mode": book_mode,
@@ -11031,9 +12101,7 @@ class TrainingRunStore:
                 "source_sequence": validate_v2_counter(
                     row["source_sequence"], field_name="source_sequence"
                 ),
-                "revision": validate_v2_counter(
-                    row["revision"], field_name="revision"
-                ),
+                "revision": validate_v2_counter(row["revision"], field_name="revision"),
             }
         return {
             "run_id": str(row["run_id"]),
@@ -11095,7 +12163,10 @@ class TrainingRunStore:
                     unrealized += Decimal(str(account["unrealized_pnl"]))
                     fees += Decimal(str(account["fees_paid"]))
                 position = track.get("position")
-                if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+                if (
+                    isinstance(position, Mapping)
+                    and position.get("position_mode") == "HEDGE"
+                ):
                     position_mode = "HEDGE"
                     for leg_name, side in (("long", "LONG"), ("short", "SHORT")):
                         leg = position.get(leg_name)
@@ -11315,12 +12386,10 @@ class TrainingRunStore:
         pinned_fields = (
             int(binding["public_generation"]) == int(public["generation"])
             and str(binding["public_dataset_epoch"]) == str(public["dataset_epoch"])
-            and str(binding["public_checksum_sha256"])
-            == str(public["checksum_sha256"])
+            and str(binding["public_checksum_sha256"]) == str(public["checksum_sha256"])
             and str(binding["public_event_chain_tail"])
             == str(public["event_chain_tail"])
-            and int(binding["simulation_generation"])
-            == int(simulation["generation"])
+            and int(binding["simulation_generation"]) == int(simulation["generation"])
             and str(binding["simulation_dataset_epoch"])
             == str(simulation["dataset_epoch"])
             and str(binding["simulation_checksum_sha256"])
@@ -11399,9 +12468,7 @@ class TrainingRunStore:
                 "status": "NOT_RUN" if audit is None else str(audit["status"]),
                 "proof_hash": None if audit is None else str(audit["proof_hash"]),
                 "differences": (
-                    []
-                    if audit is None
-                    else json.loads(str(audit["differences_json"]))
+                    [] if audit is None else json.loads(str(audit["differences_json"]))
                 ),
             },
         }
@@ -11504,7 +12571,7 @@ class TrainingRunStore:
         ledger_rows = tuple(
             connection.execute(
                 """
-                SELECT kind, cash_delta FROM replay_training_contract_ledger
+                SELECT * FROM replay_training_contract_ledger
                 WHERE run_id = ? ORDER BY ledger_sequence
                 """,
                 (run_id,),
@@ -11519,9 +12586,7 @@ class TrainingRunStore:
             position_items = list(base["positions"])  # type: ignore[arg-type]
             realized = Decimal(str(base["realized_pnl"]))
             if base["position_mode"] == "HEDGE":
-                track_by_id = {
-                    str(track["track_id"]): track for track in tracks
-                }
+                track_by_id = {str(track["track_id"]): track for track in tracks}
                 position_items = []
                 realized = Decimal(0)
                 relation_rows = connection.execute(
@@ -11581,9 +12646,7 @@ class TrainingRunStore:
                                 "leverage": str(row["leverage"]),
                             },
                             "initial_margin": str(row["initial_margin"]),
-                            "maintenance_margin": str(
-                                row["maintenance_margin"]
-                            ),
+                            "maintenance_margin": str(row["maintenance_margin"]),
                             "risk_tier": int(row["risk_tier"]),
                             "position_leg_hash": str(row["component_hash"]),
                         }
@@ -11651,7 +12714,9 @@ class TrainingRunStore:
                 ).fetchone()
                 if rule_row is None:
                     raise TypeError("active instrument rule is missing")
-                rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
+                rule = InstrumentRule.from_mapping(
+                    json.loads(str(rule_row["rule_json"]))
+                )
                 notional = Decimal(str(position["notional"]))
                 leverage = Decimal(
                     str(position.get("leverage") or configured_max_leverage)
@@ -11670,11 +12735,7 @@ class TrainingRunStore:
                         ("maintenance_margin", maintenance),
                         ("risk_tier", Decimal(risk_tier)),
                     ):
-                        actual_value = Decimal(
-                            str(
-                                item.get(field_name)
-                            )
-                        )
+                        actual_value = Decimal(str(item.get(field_name)))
                         if actual_value != expected_value:
                             raise TypeError(
                                 f"hedge position leg {field_name} is invalid"
@@ -11690,9 +12751,7 @@ class TrainingRunStore:
                     ),
                 )
                 allocation = isolated.get(allocation_key, Decimal(0))
-                isolated_equity = allocation + Decimal(
-                    str(position["unrealized_pnl"])
-                )
+                isolated_equity = allocation + Decimal(str(position["unrealized_pnl"]))
                 denominator = (
                     equity
                     if str(account["margin_mode"]) == "CROSS"
@@ -11800,8 +12859,16 @@ class TrainingRunStore:
         )
         active_policy = connection.execute(
             """
-            SELECT * FROM replay_training_fee_policy
-            WHERE run_id = ? ORDER BY revision DESC LIMIT 1
+            SELECT policy.*, extension.policy_version,
+                   extension.account_tier, extension.liquidation_fee_bps,
+                   extension.source_kind, extension.source_id,
+                   extension.source_event_sequence,
+                   extension.component_hash AS extension_hash
+            FROM replay_training_fee_policy AS policy
+            LEFT JOIN replay_training_fee_policy_extension AS extension
+              ON extension.run_id = policy.run_id
+             AND extension.revision = policy.revision
+            WHERE policy.run_id = ? ORDER BY policy.revision DESC LIMIT 1
             """,
             (run_id,),
         ).fetchone()
@@ -11938,18 +13005,77 @@ class TrainingRunStore:
                 (run_id,),
             ).fetchall()
         ]
+        position_leg_rows = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_position_leg
+                WHERE run_id = ? ORDER BY track_id, position_side
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        leg_accounting: list[dict[str, object]] = []
+        for leg in position_leg_rows:
+            track_id = str(leg["track_id"])
+            position_side = str(leg["position_side"])
+            matching_entries: list[sqlite3.Row] = []
+            fee_entries = 0
+            mutation_entries = 0
+            for entry in ledger_rows:
+                if entry["track_id"] != track_id:
+                    continue
+                metadata = json.loads(str(entry["metadata_json"]))
+                if not isinstance(metadata, Mapping):
+                    raise TypeError("contract ledger metadata is invalid")
+                if metadata.get("position_side") != position_side:
+                    continue
+                matching_entries.append(entry)
+                if entry["kind"] == "TRADING_FEE":
+                    fee_entries += 1
+                if entry["kind"] in {
+                    "POSITION_MUTATION",
+                    "POSITION_ACCOUNTING_MUTATION",
+                    "MARGIN_MUTATION",
+                }:
+                    mutation_entries += 1
+            funding_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM replay_training_hedge_funding_settlement
+                    WHERE run_id = ? AND track_id = ? AND position_side = ?
+                    """,
+                    (run_id, track_id, position_side),
+                ).fetchone()[0]
+            )
+            last_entry = matching_entries[-1] if matching_entries else None
+            leg_accounting.append(
+                {
+                    "schema_version": "replay.hedge-leg-accounting.v1",
+                    "track_id": track_id,
+                    "position_side": position_side,
+                    "accumulated_funding": str(leg["accumulated_funding"]),
+                    "trading_fees": str(leg["trading_fees"]),
+                    "liquidation_fees": str(leg["liquidation_fees"]),
+                    "funding_settlement_count": funding_count,
+                    "fee_entry_count": fee_entries,
+                    "mutation_entry_count": mutation_entries,
+                    "ledger_entry_count": len(matching_entries),
+                    "last_ledger_sequence": (
+                        None
+                        if last_entry is None
+                        else int(last_entry["ledger_sequence"])
+                    ),
+                    "last_ledger_hash": (
+                        None if last_entry is None else str(last_entry["entry_hash"])
+                    ),
+                    "position_component_hash": str(leg["component_hash"]),
+                }
+            )
         hedge_state_payload = {
             "schema_version": "replay.hedge-relational-state.v1",
-            "position_legs": [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT * FROM replay_training_position_leg
-                    WHERE run_id = ? ORDER BY track_id, position_side
-                    """,
-                    (run_id,),
-                ).fetchall()
-            ],
+            "position_legs": [dict(row) for row in position_leg_rows],
+            "leg_accounting": leg_accounting,
             "margin_buckets": [
                 dict(row)
                 for row in connection.execute(
@@ -12113,6 +13239,13 @@ class TrainingRunStore:
                     ),
                     "maker_fee_bps": str(active_policy["maker_fee_bps"]),
                     "taker_fee_bps": str(active_policy["taker_fee_bps"]),
+                    "liquidation_fee_bps": active_policy["liquidation_fee_bps"],
+                    "policy_version": active_policy["policy_version"],
+                    "account_tier": active_policy["account_tier"],
+                    "source_kind": active_policy["source_kind"],
+                    "source_id": active_policy["source_id"],
+                    "source_event_sequence": active_policy["source_event_sequence"],
+                    "extension_hash": active_policy["extension_hash"],
                     "policy_hash": str(active_policy["policy_hash"]),
                     "fidelity": str(active_policy["fidelity"]),
                 }
@@ -12433,9 +13566,7 @@ class TrainingRunStore:
     ) -> None:
         interval = request.funding_interval_ms
         next_funding = (
-            None
-            if interval is None
-            else ((virtual_time_ms // interval) + 1) * interval
+            None if interval is None else ((virtual_time_ms // interval) + 1) * interval
         )
         root_hash = initial_ledger_hash(
             run_id=run_id,
@@ -12770,10 +13901,13 @@ class TrainingRunStore:
             "replay_training_leverage_policy",
             "replay_training_funding_policy",
         ):
-            if connection.execute(
-                f"SELECT 1 FROM {table} WHERE run_id = ? LIMIT 1",
-                (child_run_id,),
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    f"SELECT 1 FROM {table} WHERE run_id = ? LIMIT 1",
+                    (child_run_id,),
+                ).fetchone()
+                is None
+            ):
                 raise TypeError(f"forked run has no {table} history")
 
     @staticmethod
@@ -12905,9 +14039,10 @@ class TrainingRunStore:
             raise TypeError("review projection must be an object")
         projection = raw_projection
         history = projection.get("_account_history_internal")
-        if not isinstance(history, Mapping) or history.get(
-            "account_data_mode"
-        ) != "HISTORICAL_EXACT":
+        if (
+            not isinstance(history, Mapping)
+            or history.get("account_data_mode") != "HISTORICAL_EXACT"
+        ):
             raise TrainingRunError(
                 "ACCOUNT_HISTORY_REVIEW_FORK_UNAVAILABLE",
                 "review event has no exact account input snapshot",
@@ -13385,9 +14520,7 @@ class TrainingRunStore:
             ).fetchall()
         )
         insert_rows("replay_training_adl_snapshot", adl_snapshot_rows)
-        adl_snapshot_ids = tuple(
-            str(row["snapshot_id"]) for row in adl_snapshot_rows
-        )
+        adl_snapshot_ids = tuple(str(row["snapshot_id"]) for row in adl_snapshot_rows)
         if adl_snapshot_ids:
             adl_placeholders = ", ".join("?" for _ in adl_snapshot_ids)
             candidate_rows = tuple(
@@ -13569,10 +14702,9 @@ class TrainingRunStore:
             track_id = entry["track_id"]
             if kind == "POLICY_REVISION":
                 policy = metadata.get("policy")
-                if (
-                    metadata.get("command_type") == "change_funding_policy"
-                    and isinstance(policy, Mapping)
-                ):
+                if metadata.get(
+                    "command_type"
+                ) == "change_funding_policy" and isinstance(policy, Mapping):
                     funding_mode = str(policy.get("funding_mode", funding_mode))
                     fixed_rate = policy.get("fixed_funding_rate")
                     funding_interval = policy.get("funding_interval_ms")
@@ -13751,6 +14883,71 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
+            extension_row = connection.execute(
+                """
+                SELECT * FROM replay_training_fee_policy_extension
+                WHERE run_id = ? AND revision = ?
+                """,
+                (parent_run_id, int(row["revision"])),
+            ).fetchone()
+            if extension_row is not None:
+                complete_policy = {
+                    "schema_version": "replay.training.fee-policy.v1",
+                    "run_id": child_run_id,
+                    "revision": int(row["revision"]),
+                    "effective_virtual_time_ms": effective_virtual_time_ms,
+                    "maker_fee_bps": str(row["maker_fee_bps"]),
+                    "taker_fee_bps": str(row["taker_fee_bps"]),
+                    "liquidation_fee_bps": str(extension_row["liquidation_fee_bps"]),
+                    "policy_version": str(extension_row["policy_version"]),
+                    "account_tier": str(extension_row["account_tier"]),
+                    "fidelity": str(row["fidelity"]),
+                }
+                connection.execute(
+                    """
+                    UPDATE replay_training_fee_policy SET policy_hash = ?
+                    WHERE run_id = ? AND revision = ?
+                    """,
+                    (
+                        canonical_sha256(complete_policy),
+                        child_run_id,
+                        int(row["revision"]),
+                    ),
+                )
+                extension = {
+                    "schema_version": "replay.training.fee-policy-extension.v1",
+                    "run_id": child_run_id,
+                    "revision": int(row["revision"]),
+                    "policy_version": str(extension_row["policy_version"]),
+                    "account_tier": str(extension_row["account_tier"]),
+                    "liquidation_fee_bps": str(extension_row["liquidation_fee_bps"]),
+                    "source_kind": str(extension_row["source_kind"]),
+                    "source_id": str(extension_row["source_id"]),
+                    "source_event_sequence": int(
+                        extension_row["source_event_sequence"]
+                    ),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_fee_policy_extension(
+                        run_id, revision, policy_version, account_tier,
+                        liquidation_fee_bps, source_kind, source_id,
+                        source_event_sequence, component_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        child_run_id,
+                        int(row["revision"]),
+                        extension_row["policy_version"],
+                        extension_row["account_tier"],
+                        extension_row["liquidation_fee_bps"],
+                        extension_row["source_kind"],
+                        extension_row["source_id"],
+                        extension_row["source_event_sequence"],
+                        canonical_sha256(extension),
+                        now_ms,
+                    ),
+                )
 
         cls._append_contract_ledger(
             connection,
@@ -13879,6 +15076,113 @@ class TrainingRunStore:
             now_ms=now_ms,
             trigger_virtual_time_ms=virtual_time_ms,
         )
+        if str(parent["position_mode"]) == "HEDGE":
+            parent_settlements = tuple(
+                connection.execute(
+                    """
+                    SELECT settlement.*, ledger.posting_id
+                    FROM replay_training_hedge_funding_settlement AS settlement
+                    JOIN replay_training_contract_ledger AS ledger
+                      ON ledger.run_id = settlement.run_id
+                     AND ledger.ledger_sequence = settlement.ledger_sequence
+                    WHERE settlement.run_id = ?
+                    ORDER BY settlement.settlement_time_ms,
+                             CASE settlement.position_side
+                                 WHEN 'LONG' THEN 0 ELSE 1 END
+                    """,
+                    (parent_run_id,),
+                ).fetchall()
+            )
+            copied_settlements = 0
+            for settlement in parent_settlements:
+                child_ledger = connection.execute(
+                    """
+                    SELECT ledger_sequence
+                    FROM replay_training_contract_ledger
+                    WHERE run_id = ? AND posting_id = ?
+                    """,
+                    (
+                        child_run_id,
+                        f"fork:{parent_run_id}:{settlement['posting_id']}",
+                    ),
+                ).fetchone()
+                if child_ledger is None:
+                    continue
+                component = {
+                    "schema_version": ("replay.training.hedge-funding-settlement.v1"),
+                    "run_id": child_run_id,
+                    "track_id": "track-1",
+                    "position_side": str(settlement["position_side"]),
+                    "settlement_time_ms": int(settlement["settlement_time_ms"]),
+                    "actual_settlement_time_ms": int(
+                        settlement["actual_settlement_time_ms"]
+                    ),
+                    "source_kind": str(settlement["source_kind"]),
+                    "source_id": str(settlement["source_id"]),
+                    "source_event_sequence": int(settlement["source_event_sequence"]),
+                    "source_event_hash": str(settlement["source_event_hash"]),
+                    "pre_settlement_signed_quantity": str(
+                        settlement["pre_settlement_signed_quantity"]
+                    ),
+                    "pre_settlement_absolute_quantity": str(
+                        settlement["pre_settlement_absolute_quantity"]
+                    ),
+                    "mark_price": str(settlement["mark_price"]),
+                    "funding_rate": str(settlement["funding_rate"]),
+                    "contract_size": str(settlement["contract_size"]),
+                    "cash_delta": str(settlement["cash_delta"]),
+                    "rounding": str(settlement["rounding"]),
+                    "fidelity": str(settlement["fidelity"]),
+                    "rule_revision": int(settlement["rule_revision"]),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_hedge_funding_settlement(
+                        run_id, track_id, position_side, settlement_time_ms,
+                        actual_settlement_time_ms, source_kind, source_id,
+                        source_event_sequence, source_event_hash,
+                        pre_settlement_signed_quantity,
+                        pre_settlement_absolute_quantity, mark_price,
+                        funding_rate, contract_size, cash_delta, rounding,
+                        fidelity, rule_revision, ledger_sequence,
+                        component_hash, created_at_ms
+                    ) VALUES (?, 'track-1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        child_run_id,
+                        settlement["position_side"],
+                        settlement["settlement_time_ms"],
+                        settlement["actual_settlement_time_ms"],
+                        settlement["source_kind"],
+                        settlement["source_id"],
+                        settlement["source_event_sequence"],
+                        settlement["source_event_hash"],
+                        settlement["pre_settlement_signed_quantity"],
+                        settlement["pre_settlement_absolute_quantity"],
+                        settlement["mark_price"],
+                        settlement["funding_rate"],
+                        settlement["contract_size"],
+                        settlement["cash_delta"],
+                        settlement["rounding"],
+                        settlement["fidelity"],
+                        settlement["rule_revision"],
+                        child_ledger["ledger_sequence"],
+                        canonical_sha256(component),
+                        now_ms,
+                    ),
+                )
+                copied_settlements += 1
+            if copied_settlements:
+                cls._refresh_hedge_leg_accounting(
+                    connection,
+                    run_id=child_run_id,
+                    track_id="track-1",
+                    virtual_time_ms=virtual_time_ms,
+                    source_sequence=source_sequence,
+                    now_ms=now_ms,
+                    reason="REVIEW_FORK",
+                )
         has_pending_liquidation = (
             connection.execute(
                 """
@@ -13901,11 +15205,7 @@ class TrainingRunStore:
             (child_run_id,),
         ).fetchone()
         overlay = Decimal(str(current["overlay_cash"])) + extra_cash
-        status = (
-            "LIQUIDATING"
-            if has_pending_liquidation
-            else "ACTIVE"
-        )
+        status = "LIQUIDATING" if has_pending_liquidation else "ACTIVE"
         connection.execute(
             """
             UPDATE replay_training_contract_account
@@ -13932,7 +15232,7 @@ class TrainingRunStore:
     ) -> None:
         account = connection.execute(
             """
-            SELECT account.*, run.settlement_asset
+            SELECT account.*, run.settlement_asset, run.position_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -14080,7 +15380,9 @@ class TrainingRunStore:
         return sequence
 
     @staticmethod
-    def _insert_run(connection: sqlite3.Connection, values: Mapping[str, object]) -> None:
+    def _insert_run(
+        connection: sqlite3.Connection, values: Mapping[str, object]
+    ) -> None:
         connection.execute(
             """
             INSERT INTO replay_training_run(
@@ -14243,9 +15545,7 @@ class TrainingRunStore:
                 "training selection preparation payload is unreadable",
                 status_code=503,
             ) from exc
-        seed_source = (
-            "SERVER" if request.start_mode.value == "RANDOM" else "MANUAL"
-        )
+        seed_source = "SERVER" if request.start_mode.value == "RANDOM" else "MANUAL"
         expected_request = request.to_dict(redact_hidden_start=False)
         if request.launch_context is not None:
             expected_request["launch_context"] = request.launch_context.to_dict()
@@ -14254,27 +15554,20 @@ class TrainingRunStore:
             or not isinstance(stored_request, Mapping)
             or not isinstance(stored_selection, Mapping)
             or canonical_sha256(stored_request) != str(row["request_hash"])
-            or canonical_sha256(stored_selection)
-            != str(row["selection_json_hash"])
+            or canonical_sha256(stored_selection) != str(row["selection_json_hash"])
             or dict(stored_request) != expected_request
-            or str(stored_selection.get("catalog_epoch"))
-            != request.catalog_epoch
-            or str(stored_selection.get("source_fingerprint"))
-            != source_fingerprint
+            or str(stored_selection.get("catalog_epoch")) != request.catalog_epoch
+            or str(stored_selection.get("source_fingerprint")) != source_fingerprint
             or int(stored_selection.get("selected_start_ms", -1))
             != history_policy.actual_replay_start_ms
-            or str(row["schema_version"])
-            != SELECTION_PREPARATION_SCHEMA_VERSION
+            or str(row["schema_version"]) != SELECTION_PREPARATION_SCHEMA_VERSION
             or str(row["start_mode"]) != request.start_mode.value
             or str(row["seed_source"]) != seed_source
-            or (
-                None if row["random_seed"] is None else int(row["random_seed"])
-            )
+            or (None if row["random_seed"] is None else int(row["random_seed"]))
             != request.random_seed
             or str(row["catalog_epoch"]) != request.catalog_epoch
             or str(row["source_fingerprint"]) != source_fingerprint
-            or int(row["selected_start_ms"])
-            != history_policy.actual_replay_start_ms
+            or int(row["selected_start_ms"]) != history_policy.actual_replay_start_ms
             or int(row["required_start_ms"]) != required_start_ms
             or int(row["required_end_ms"]) != required_end_ms
             or int(row["interval_ms"]) != history_policy.interval_ms
@@ -14313,13 +15606,10 @@ class TrainingRunStore:
             raise TypeError("manual start selection cannot persist a random seed")
         if start_mode == "RANDOM" and random_seed is None:
             raise TypeError("random start selection must persist its private seed")
-        if (
-            random_seed is not None
-            and (
-                isinstance(random_seed, bool)
-                or not isinstance(random_seed, int)
-                or not 0 <= random_seed <= 9_007_199_254_740_991
-            )
+        if random_seed is not None and (
+            isinstance(random_seed, bool)
+            or not isinstance(random_seed, int)
+            or not 0 <= random_seed <= 9_007_199_254_740_991
         ):
             raise TypeError("training start selection seed is invalid")
         if (
@@ -14617,8 +15907,8 @@ class TrainingRunStore:
         component_state: Mapping[str, object] | None,
         now_ms: int,
     ) -> None:
-        position, account, open_orders, public_price = TrainingRunStore._track_components(
-            component_state
+        position, account, open_orders, public_price = (
+            TrainingRunStore._track_components(component_state)
         )
         connection.execute(
             """
@@ -14851,11 +16141,7 @@ class TrainingRunStore:
         dataset_epoch: str,
         now_ms: int,
     ) -> None:
-        pin_id = (
-            "primary-dataset"
-            if track_id == "track-1"
-            else f"{track_id}-dataset"
-        )
+        pin_id = "primary-dataset" if track_id == "track-1" else f"{track_id}-dataset"
         connection.execute(
             """
             INSERT INTO replay_training_pin(
@@ -14991,7 +16277,7 @@ class TrainingRunStore:
     ) -> None:
         account = connection.execute(
             """
-            SELECT account.*, run.settlement_asset
+            SELECT account.*, run.settlement_asset, run.position_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -15016,7 +16302,9 @@ class TrainingRunStore:
         raw_orders = component_state.get("orders")
         if isinstance(raw_orders, (list, tuple)):
             for raw in raw_orders:
-                if not isinstance(raw, Mapping) or not isinstance(raw.get("order_id"), str):
+                if not isinstance(raw, Mapping) or not isinstance(
+                    raw.get("order_id"), str
+                ):
                     raise TypeError("contract order projection is invalid")
                 connection.execute(
                     """
@@ -15041,9 +16329,12 @@ class TrainingRunStore:
 
         raw_fills = component_state.get("fills")
         overlay_delta = Decimal(0)
+        hedge_fee_changed = False
         if isinstance(raw_fills, (list, tuple)):
             for raw in raw_fills:
-                if not isinstance(raw, Mapping) or not isinstance(raw.get("fill_id"), str):
+                if not isinstance(raw, Mapping) or not isinstance(
+                    raw.get("fill_id"), str
+                ):
                     raise TypeError("contract fill projection is invalid")
                 fill_id = str(raw["fill_id"])
                 exists = connection.execute(
@@ -15055,17 +16346,49 @@ class TrainingRunStore:
                 ).fetchone()
                 if exists is not None:
                     continue
+                position_side = raw.get("position_side")
+                if str(account["position_mode"]) == "HEDGE" and position_side not in {
+                    "LONG",
+                    "SHORT",
+                }:
+                    raise TrainingRunError(
+                        "HEDGE_FILL_POSITION_SIDE_REQUIRED",
+                        "a HEDGE fill must identify LONG or SHORT",
+                        status_code=409,
+                        details={"fill_id": fill_id, "fallback_applied": False},
+                    )
                 event_time_ms = int(raw.get("event_time_ms", virtual_time_ms))
                 policy = connection.execute(
                     """
-                    SELECT * FROM replay_training_fee_policy
-                    WHERE run_id = ? AND effective_virtual_time_ms <= ?
-                    ORDER BY effective_virtual_time_ms DESC, revision DESC LIMIT 1
+                    SELECT policy.*, extension.policy_version,
+                           extension.account_tier,
+                           extension.liquidation_fee_bps,
+                           extension.source_kind AS policy_source_kind,
+                           extension.source_id AS policy_source_id,
+                           extension.source_event_sequence
+                    FROM replay_training_fee_policy AS policy
+                    LEFT JOIN replay_training_fee_policy_extension AS extension
+                      ON extension.run_id = policy.run_id
+                     AND extension.revision = policy.revision
+                    WHERE policy.run_id = ?
+                      AND policy.effective_virtual_time_ms <= ?
+                    ORDER BY policy.effective_virtual_time_ms DESC,
+                             policy.revision DESC LIMIT 1
                     """,
                     (run_id, event_time_ms),
                 ).fetchone()
                 if policy is None:
                     raise TypeError("versioned fee policy is missing")
+                if (
+                    str(account["position_mode"]) == "HEDGE"
+                    and policy["policy_version"] is None
+                ):
+                    raise TrainingRunError(
+                        "HEDGE_FEE_POLICY_EXTENSION_MISSING",
+                        "the effective HEDGE fee policy is incomplete",
+                        status_code=409,
+                        details={"fallback_applied": False},
+                    )
                 broker_notional = Decimal(str(raw["notional"]))
                 notional = broker_notional * Decimal(rule.contract_size)
                 configured_fee = fee_for_notional(
@@ -15122,12 +16445,22 @@ class TrainingRunStore:
                     reference_id=fill_id,
                     metadata={
                         "fee_policy_revision": int(policy["revision"]),
+                        "fee_policy_version": policy["policy_version"],
+                        "account_tier": policy["account_tier"],
+                        "liquidation_fee_bps": policy["liquidation_fee_bps"],
+                        "policy_source_kind": policy["policy_source_kind"],
+                        "policy_source_id": policy["policy_source_id"],
+                        "policy_source_event_sequence": policy["source_event_sequence"],
+                        "position_side": position_side,
                         "broker_fee": str(raw["fee"]),
                         "liquidity": str(raw["liquidity"]),
                     },
                     now_ms=now_ms,
                 )
                 overlay_delta += broker_fee - configured_fee
+                hedge_fee_changed = (
+                    hedge_fee_changed or str(account["position_mode"]) == "HEDGE"
+                )
 
         raw_ledger = component_state.get("ledger")
         entries = raw_ledger.get("entries") if isinstance(raw_ledger, Mapping) else None
@@ -15142,8 +16475,7 @@ class TrainingRunStore:
                 cash_delta = Decimal(str(raw["amount"]))
                 if (
                     kind == "REALIZED_PNL"
-                    and rule.rule_fidelity
-                    == "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE"
+                    and rule.rule_fidelity == "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE"
                 ):
                     cash_delta *= Decimal(rule.contract_size)
                 cls._append_contract_ledger(
@@ -15189,6 +16521,16 @@ class TrainingRunStore:
                     run_id,
                 ),
             )
+        if hedge_fee_changed:
+            cls._refresh_hedge_leg_accounting(
+                connection,
+                run_id=run_id,
+                track_id=track_id,
+                virtual_time_ms=virtual_time_ms,
+                source_sequence=source_sequence,
+                now_ms=now_ms,
+                reason="TRADING_FEE",
+            )
         if str(account["margin_mode"]) == "ISOLATED":
             position = component_state.get("position")
             orders = component_state.get("orders")
@@ -15197,7 +16539,10 @@ class TrainingRunStore:
             if not isinstance(allocations, dict):
                 raise TypeError("isolated margin allocation is invalid")
             scopes: tuple[tuple[str | None, Mapping[str, object]], ...]
-            if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+            if (
+                isinstance(position, Mapping)
+                and position.get("position_mode") == "HEDGE"
+            ):
                 scopes = tuple(
                     (side, leg)
                     for side, leg in (
@@ -15338,7 +16683,9 @@ class TrainingRunStore:
                 if not isinstance(position, dict):
                     raise TypeError("funding position projection is invalid")
                 quantity = Decimal(str(position.get("quantity", "0")))
-                mark = Decimal(str(position.get("mark_price", track["public_price"] or "0")))
+                mark = Decimal(
+                    str(position.get("mark_price", track["public_price"] or "0"))
+                )
                 if quantity and mark <= 0:
                     raise TrainingRunError(
                         "HISTORICAL_MARK_UNAVAILABLE",
@@ -15444,7 +16791,8 @@ class TrainingRunStore:
     ) -> None:
         account = connection.execute(
             """
-            SELECT account.*, run.initial_equity, run.settlement_asset
+            SELECT account.*, run.initial_equity, run.settlement_asset,
+                   run.position_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -15590,6 +16938,31 @@ class TrainingRunStore:
                 position_side if raw_position_side is not None else None,
             )
             isolated_wallet = Decimal(str(isolated.get(allocation_key, "0")))
+            if raw_position_side is not None:
+                funding_total, trading_fee_total, liquidation_fee_total = (
+                    cls._hedge_leg_accounting_totals(
+                        connection,
+                        run_id=run_id,
+                        track_id=str(track["track_id"]),
+                        position_side=position_side,
+                    )
+                )
+                accumulated_funding = decimal_to_string(
+                    funding_total,
+                    field_name="position accumulated funding",
+                )
+                trading_fees = decimal_to_string(
+                    trading_fee_total,
+                    field_name="position trading fees",
+                )
+                liquidation_fees = decimal_to_string(
+                    liquidation_fee_total,
+                    field_name="position liquidation fees",
+                )
+            else:
+                accumulated_funding = str(leg.get("accumulated_funding", "0"))
+                trading_fees = str(leg.get("trading_fees", "0"))
+                liquidation_fees = str(leg.get("liquidation_fees", "0"))
             component = {
                 "schema_version": "replay.position-leg.v1",
                 "track_id": str(track["track_id"]),
@@ -15623,14 +16996,22 @@ class TrainingRunStore:
                 ),
                 "liquidation_price": leg.get("liquidation_price"),
                 "bankruptcy_price": leg.get("bankruptcy_price"),
-                "accumulated_funding": str(leg.get("accumulated_funding", "0")),
-                "trading_fees": str(leg.get("trading_fees", "0")),
-                "liquidation_fees": str(leg.get("liquidation_fees", "0")),
+                "accumulated_funding": accumulated_funding,
+                "trading_fees": trading_fees,
+                "liquidation_fees": liquidation_fees,
                 "risk_tier": risk_tier,
                 "rule_revision": rule_revision,
                 "protection": leg.get("protection", {}),
             }
             component_hash = canonical_sha256(component)
+            prior_component = connection.execute(
+                """
+                SELECT component_revision, component_hash
+                FROM replay_training_position_leg
+                WHERE run_id = ? AND track_id = ? AND position_side = ?
+                """,
+                (run_id, track["track_id"], position_side),
+            ).fetchone()
             connection.execute(
                 """
                 INSERT INTO replay_training_position_leg(
@@ -15668,6 +17049,8 @@ class TrainingRunStore:
                     component_revision = replay_training_position_leg.component_revision + 1,
                     component_hash = excluded.component_hash,
                     updated_at_ms = excluded.updated_at_ms
+                WHERE replay_training_position_leg.component_hash
+                      <> excluded.component_hash
                 """,
                 (
                     run_id,
@@ -15698,6 +17081,48 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
+            if raw_position_side is not None and (
+                prior_component is None
+                or str(prior_component["component_hash"]) != component_hash
+            ):
+                next_component_revision = (
+                    1
+                    if prior_component is None
+                    else int(prior_component["component_revision"]) + 1
+                )
+                cls._append_contract_ledger(
+                    connection,
+                    run_id=run_id,
+                    posting_id=(
+                        f"position-mutation:{track['track_id']}:{position_side}:"
+                        f"{next_component_revision}:{component_hash}"
+                    ),
+                    track_id=str(track["track_id"]),
+                    kind="POSITION_MUTATION",
+                    cash_delta=Decimal(0),
+                    asset=str(account["settlement_asset"]),
+                    virtual_time_ms=(
+                        int(trigger_virtual_time_ms)
+                        if trigger_virtual_time_ms is not None
+                        else int(track["virtual_time_ms"] or 0)
+                    ),
+                    source_sequence=int(track["source_sequence"] or 0),
+                    fidelity="RELATIONAL_HEDGE_POSITION_EXACT",
+                    rule_revision=rule_revision,
+                    reference_type="POSITION_LEG",
+                    reference_id=f"{track['track_id']}:{position_side}",
+                    metadata={
+                        "position_side": position_side,
+                        "previous_component_hash": (
+                            None
+                            if prior_component is None
+                            else str(prior_component["component_hash"])
+                        ),
+                        "component_hash": component_hash,
+                        "component_revision": next_component_revision,
+                    },
+                    now_ms=now_ms,
+                )
             bucket = {
                 "schema_version": "replay.margin-bucket.v1",
                 "bucket_id": f"position:{track['track_id']}:{position_side}",
@@ -15711,6 +17136,15 @@ class TrainingRunStore:
                 "reserved_margin": "0",
                 "available_balance": "0",
             }
+            bucket_hash = canonical_sha256(bucket)
+            prior_bucket = connection.execute(
+                """
+                SELECT component_revision, component_hash
+                FROM replay_training_margin_bucket
+                WHERE run_id = ? AND bucket_id = ?
+                """,
+                (run_id, bucket["bucket_id"]),
+            ).fetchone()
             connection.execute(
                 """
                 INSERT INTO replay_training_margin_bucket(
@@ -15726,6 +17160,8 @@ class TrainingRunStore:
                     component_revision = replay_training_margin_bucket.component_revision + 1,
                     component_hash = excluded.component_hash,
                     updated_at_ms = excluded.updated_at_ms
+                WHERE replay_training_margin_bucket.component_hash
+                      <> excluded.component_hash
                 """,
                 (
                     run_id,
@@ -15735,19 +17171,58 @@ class TrainingRunStore:
                     account["settlement_asset"],
                     bucket["initial_margin"],
                     bucket["maintenance_margin"],
-                    canonical_sha256(bucket),
+                    bucket_hash,
                     now_ms,
                 ),
             )
-            if str(account["margin_mode"]) == "ISOLATED":
-                isolated_available = (
-                    isolated_wallet - initial_margin - reserved_margin
+            if raw_position_side is not None and (
+                prior_bucket is None
+                or str(prior_bucket["component_hash"]) != bucket_hash
+            ):
+                next_bucket_revision = (
+                    1
+                    if prior_bucket is None
+                    else int(prior_bucket["component_revision"]) + 1
                 )
+                cls._append_contract_ledger(
+                    connection,
+                    run_id=run_id,
+                    posting_id=(
+                        f"margin-mutation:{bucket['bucket_id']}:"
+                        f"{next_bucket_revision}:{bucket_hash}"
+                    ),
+                    track_id=str(track["track_id"]),
+                    kind="MARGIN_MUTATION",
+                    cash_delta=Decimal(0),
+                    asset=str(account["settlement_asset"]),
+                    virtual_time_ms=(
+                        int(trigger_virtual_time_ms)
+                        if trigger_virtual_time_ms is not None
+                        else int(track["virtual_time_ms"] or 0)
+                    ),
+                    source_sequence=int(track["source_sequence"] or 0),
+                    fidelity="RELATIONAL_MARGIN_BUCKET_EXACT",
+                    rule_revision=rule_revision,
+                    reference_type="MARGIN_BUCKET",
+                    reference_id=str(bucket["bucket_id"]),
+                    metadata={
+                        "position_side": position_side,
+                        "bucket_kind": "POSITION",
+                        "previous_component_hash": (
+                            None
+                            if prior_bucket is None
+                            else str(prior_bucket["component_hash"])
+                        ),
+                        "component_hash": bucket_hash,
+                        "component_revision": next_bucket_revision,
+                    },
+                    now_ms=now_ms,
+                )
+            if str(account["margin_mode"]) == "ISOLATED":
+                isolated_available = isolated_wallet - initial_margin - reserved_margin
                 isolated_bucket = {
                     "schema_version": "replay.margin-bucket.v1",
-                    "bucket_id": (
-                        f"isolated:{track['track_id']}:{position_side}"
-                    ),
+                    "bucket_id": (f"isolated:{track['track_id']}:{position_side}"),
                     "bucket_kind": "ISOLATED_LEG",
                     "track_id": str(track["track_id"]),
                     "position_side": position_side,
@@ -15767,6 +17242,15 @@ class TrainingRunStore:
                         field_name="isolated available balance",
                     ),
                 }
+                isolated_bucket_hash = canonical_sha256(isolated_bucket)
+                prior_isolated_bucket = connection.execute(
+                    """
+                    SELECT component_revision, component_hash
+                    FROM replay_training_margin_bucket
+                    WHERE run_id = ? AND bucket_id = ?
+                    """,
+                    (run_id, isolated_bucket["bucket_id"]),
+                ).fetchone()
                 connection.execute(
                     """
                     INSERT INTO replay_training_margin_bucket(
@@ -15785,6 +17269,8 @@ class TrainingRunStore:
                         component_revision = replay_training_margin_bucket.component_revision + 1,
                         component_hash = excluded.component_hash,
                         updated_at_ms = excluded.updated_at_ms
+                    WHERE replay_training_margin_bucket.component_hash
+                          <> excluded.component_hash
                     """,
                     (
                         run_id,
@@ -15797,15 +17283,57 @@ class TrainingRunStore:
                         isolated_bucket["maintenance_margin"],
                         isolated_bucket["reserved_margin"],
                         isolated_bucket["available_balance"],
-                        canonical_sha256(isolated_bucket),
+                        isolated_bucket_hash,
                         now_ms,
                     ),
                 )
+                if raw_position_side is not None and (
+                    prior_isolated_bucket is None
+                    or str(prior_isolated_bucket["component_hash"])
+                    != isolated_bucket_hash
+                ):
+                    next_isolated_revision = (
+                        1
+                        if prior_isolated_bucket is None
+                        else int(prior_isolated_bucket["component_revision"]) + 1
+                    )
+                    cls._append_contract_ledger(
+                        connection,
+                        run_id=run_id,
+                        posting_id=(
+                            f"margin-mutation:{isolated_bucket['bucket_id']}:"
+                            f"{next_isolated_revision}:{isolated_bucket_hash}"
+                        ),
+                        track_id=str(track["track_id"]),
+                        kind="MARGIN_MUTATION",
+                        cash_delta=Decimal(0),
+                        asset=str(account["settlement_asset"]),
+                        virtual_time_ms=(
+                            int(trigger_virtual_time_ms)
+                            if trigger_virtual_time_ms is not None
+                            else int(track["virtual_time_ms"] or 0)
+                        ),
+                        source_sequence=int(track["source_sequence"] or 0),
+                        fidelity="RELATIONAL_MARGIN_BUCKET_EXACT",
+                        rule_revision=rule_revision,
+                        reference_type="MARGIN_BUCKET",
+                        reference_id=str(isolated_bucket["bucket_id"]),
+                        metadata={
+                            "position_side": position_side,
+                            "bucket_kind": "ISOLATED_LEG",
+                            "previous_component_hash": (
+                                None
+                                if prior_isolated_bucket is None
+                                else str(prior_isolated_bucket["component_hash"])
+                            ),
+                            "component_hash": isolated_bucket_hash,
+                            "component_revision": next_isolated_revision,
+                        },
+                        now_ms=now_ms,
+                    )
         if position_components and str(account["margin_mode"]) == "CROSS":
             wallet_balance = equity - total_unrealized
-            available_balance = (
-                equity - total_initial_margin - total_reserved_margin
-            )
+            available_balance = equity - total_initial_margin - total_reserved_margin
             cross_bucket = {
                 "schema_version": "replay.margin-bucket.v1",
                 "bucket_id": f"cross:{account['settlement_asset']}",
@@ -15832,6 +17360,15 @@ class TrainingRunStore:
                     field_name="cross available balance",
                 ),
             }
+            cross_bucket_hash = canonical_sha256(cross_bucket)
+            prior_cross_bucket = connection.execute(
+                """
+                SELECT component_revision, component_hash
+                FROM replay_training_margin_bucket
+                WHERE run_id = ? AND bucket_id = ?
+                """,
+                (run_id, cross_bucket["bucket_id"]),
+            ).fetchone()
             connection.execute(
                 """
                 INSERT INTO replay_training_margin_bucket(
@@ -15849,6 +17386,8 @@ class TrainingRunStore:
                     component_revision = replay_training_margin_bucket.component_revision + 1,
                     component_hash = excluded.component_hash,
                     updated_at_ms = excluded.updated_at_ms
+                WHERE replay_training_margin_bucket.component_hash
+                      <> excluded.component_hash
                 """,
                 (
                     run_id,
@@ -15859,10 +17398,59 @@ class TrainingRunStore:
                     cross_bucket["maintenance_margin"],
                     cross_bucket["reserved_margin"],
                     cross_bucket["available_balance"],
-                    canonical_sha256(cross_bucket),
+                    cross_bucket_hash,
                     now_ms,
                 ),
             )
+            if str(account["position_mode"]) == "HEDGE" and (
+                prior_cross_bucket is None
+                or str(prior_cross_bucket["component_hash"]) != cross_bucket_hash
+            ):
+                next_cross_revision = (
+                    1
+                    if prior_cross_bucket is None
+                    else int(prior_cross_bucket["component_revision"]) + 1
+                )
+                cross_rule_revision = max(item[5] for item in position_components)
+                cls._append_contract_ledger(
+                    connection,
+                    run_id=run_id,
+                    posting_id=(
+                        f"margin-mutation:{cross_bucket['bucket_id']}:"
+                        f"{next_cross_revision}:{cross_bucket_hash}"
+                    ),
+                    track_id=None,
+                    kind="MARGIN_MUTATION",
+                    cash_delta=Decimal(0),
+                    asset=str(account["settlement_asset"]),
+                    virtual_time_ms=(
+                        int(trigger_virtual_time_ms)
+                        if trigger_virtual_time_ms is not None
+                        else max(
+                            int(item[0]["virtual_time_ms"] or 0)
+                            for item in position_components
+                        )
+                    ),
+                    source_sequence=max(
+                        int(item[0]["source_sequence"] or 0)
+                        for item in position_components
+                    ),
+                    fidelity="RELATIONAL_MARGIN_BUCKET_EXACT",
+                    rule_revision=cross_rule_revision,
+                    reference_type="MARGIN_BUCKET",
+                    reference_id=str(cross_bucket["bucket_id"]),
+                    metadata={
+                        "bucket_kind": "CROSS",
+                        "previous_component_hash": (
+                            None
+                            if prior_cross_bucket is None
+                            else str(prior_cross_bucket["component_hash"])
+                        ),
+                        "component_hash": cross_bucket_hash,
+                        "component_revision": next_cross_revision,
+                    },
+                    now_ms=now_ms,
+                )
         if not positions:
             pending = connection.execute(
                 """
@@ -15928,13 +17516,16 @@ class TrainingRunStore:
             track = group[0][0]
             sequence = int(track["source_sequence"] or 0)
             liquidation_id = f"liq-{track_id}-{sequence:010d}"
-            if connection.execute(
-                """
+            if (
+                connection.execute(
+                    """
                 SELECT 1 FROM replay_training_liquidation_case
                 WHERE run_id = ? AND case_id = ?
                 """,
-                (run_id, liquidation_id),
-            ).fetchone() is not None:
+                    (run_id, liquidation_id),
+                ).fetchone()
+                is not None
+            ):
                 continue
             virtual_time_ms = (
                 int(track["virtual_time_ms"] or 0)
@@ -16058,11 +17649,7 @@ class TrainingRunStore:
                 "track_id": track_id,
                 "leg_sides": [
                     item[4]
-                    or (
-                        "LONG"
-                        if Decimal(str(item[1]["quantity"])) > 0
-                        else "SHORT"
-                    )
+                    or ("LONG" if Decimal(str(item[1]["quantity"])) > 0 else "SHORT")
                     for item in group
                 ],
             }
@@ -16089,7 +17676,9 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
-            allocation = equity if str(account["margin_mode"]) == "CROSS" else Decimal(0)
+            allocation = (
+                equity if str(account["margin_mode"]) == "CROSS" else Decimal(0)
+            )
             for leg_sequence, item in enumerate(group, start=1):
                 _track, leg, rule, maintenance, raw_side, _revision = item
                 quantity = Decimal(str(leg["quantity"]))
@@ -16111,11 +17700,8 @@ class TrainingRunStore:
                     )
                 )
                 bankruptcy = entry - (
-                    leg_allocation
-                    / (absolute_quantity * Decimal(rule.contract_size))
-                ) * (
-                    Decimal(1) if position_side == "LONG" else Decimal(-1)
-                )
+                    leg_allocation / (absolute_quantity * Decimal(rule.contract_size))
+                ) * (Decimal(1) if position_side == "LONG" else Decimal(-1))
                 bankruptcy = max(Decimal(0), bankruptcy)
                 fee = rule.liquidation_fee(notional)
                 leg_id = f"{liquidation_id}-{position_side.lower()}"
@@ -16311,7 +17897,9 @@ class TrainingRunStore:
                 else int(row["entry_source_sequence"])
             )
             highest_mark = (
-                None if row["highest_mark"] is None else Decimal(str(row["highest_mark"]))
+                None
+                if row["highest_mark"] is None
+                else Decimal(str(row["highest_mark"]))
             )
             lowest_mark = (
                 None if row["lowest_mark"] is None else Decimal(str(row["lowest_mark"]))
@@ -16332,7 +17920,9 @@ class TrainingRunStore:
             current_mark = Decimal(str(position["mark_price"]))
         if episode_id is not None and current_mark is not None:
             highest_mark = (
-                current_mark if highest_mark is None else max(highest_mark, current_mark)
+                current_mark
+                if highest_mark is None
+                else max(highest_mark, current_mark)
             )
             lowest_mark = (
                 current_mark if lowest_mark is None else min(lowest_mark, current_mark)
@@ -16351,17 +17941,21 @@ class TrainingRunStore:
             )
 
         raw_closed = component_state.get("closed_trades")
-        closed_by_fill = {
-            str(item["fill_id"]): item
-            for item in raw_closed
+        closed_by_fill = (
+            {
+                str(item["fill_id"]): item
+                for item in raw_closed
+                if isinstance(raw_closed, (list, tuple))
+                and isinstance(item, Mapping)
+                and isinstance(item.get("fill_id"), str)
+                and (
+                    required_position_side is None
+                    or item.get("position_side") == required_position_side
+                )
+            }
             if isinstance(raw_closed, (list, tuple))
-            and isinstance(item, Mapping)
-            and isinstance(item.get("fill_id"), str)
-            and (
-                required_position_side is None
-                or item.get("position_side") == required_position_side
-            )
-        } if isinstance(raw_closed, (list, tuple)) else {}
+            else {}
+        )
 
         fill_rows = connection.execute(
             """
@@ -16415,7 +18009,9 @@ class TrainingRunStore:
 
             if episode_id is not None:
                 highest_mark = (
-                    fill_price if highest_mark is None else max(highest_mark, fill_price)
+                    fill_price
+                    if highest_mark is None
+                    else max(highest_mark, fill_price)
                 )
                 lowest_mark = (
                     fill_price if lowest_mark is None else min(lowest_mark, fill_price)
@@ -16490,7 +18086,8 @@ class TrainingRunStore:
             closed = closed_by_fill.get(fill_id)
             trade_id = (
                 str(closed["trade_id"])
-                if isinstance(closed, Mapping) and isinstance(closed.get("trade_id"), str)
+                if isinstance(closed, Mapping)
+                and isinstance(closed.get("trade_id"), str)
                 else f"trade-{fill_ordinal:010d}"
             )
             connection.execute(
@@ -16528,7 +18125,9 @@ class TrainingRunStore:
                     (
                         None
                         if r_multiple is None
-                        else decimal_to_string(r_multiple, field_name="trade r multiple")
+                        else decimal_to_string(
+                            r_multiple, field_name="trade r multiple"
+                        )
                     ),
                     max(0, fill_time_ms - entry_time_ms),
                     entry_time_ms,
@@ -16576,7 +18175,9 @@ class TrainingRunStore:
 
         if episode_id is not None and current_mark is not None:
             highest_mark = (
-                current_mark if highest_mark is None else max(highest_mark, current_mark)
+                current_mark
+                if highest_mark is None
+                else max(highest_mark, current_mark)
             )
             lowest_mark = (
                 current_mark if lowest_mark is None else min(lowest_mark, current_mark)
@@ -16626,14 +18227,18 @@ class TrainingRunStore:
                 (
                     None
                     if entry_price is None
-                    else decimal_to_string(entry_price, field_name="projected entry price")
+                    else decimal_to_string(
+                        entry_price, field_name="projected entry price"
+                    )
                 ),
                 entry_time_ms,
                 entry_source_sequence,
                 (
                     None
                     if highest_mark is None
-                    else decimal_to_string(highest_mark, field_name="projected high mark")
+                    else decimal_to_string(
+                        highest_mark, field_name="projected high mark"
+                    )
                 ),
                 (
                     None
@@ -16773,7 +18378,9 @@ class TrainingRunStore:
             not isinstance(reason, str) for reason in stored_reasons
         ):
             raise TypeError("track forced_full_reasons are invalid")
-        reasons = {reason for reason in stored_reasons if reason not in automatic_reasons}
+        reasons = {
+            reason for reason in stored_reasons if reason not in automatic_reasons
+        }
         if selected:
             reasons.add("VIEWED")
         quantity = position.get("quantity")
@@ -16788,8 +18395,10 @@ class TrainingRunStore:
             ):
                 reasons.add("CONDITIONAL_ORDER")
         tier = "FULL" if reasons else str(track["subscription_tier"])
-        track_state = "ERROR" if state["state"] == "ERROR" else (
-            "DORMANT" if tier == "NONE" else "READY"
+        track_state = (
+            "ERROR"
+            if state["state"] == "ERROR"
+            else ("DORMANT" if tier == "NONE" else "READY")
         )
         connection.execute(
             """
@@ -16860,8 +18469,7 @@ class TrainingRunStore:
             latest_mutation is not None
             and latest_mutation["kind"] == "source_event"
             and latest_mutation["source_sequence"] is not None
-            and int(latest_mutation["source_sequence"])
-            == int(state["source_sequence"])
+            and int(latest_mutation["source_sequence"]) == int(state["source_sequence"])
         ):
             source_row = connection.execute(
                 """
@@ -16882,7 +18490,9 @@ class TrainingRunStore:
                     revealed_event_low = Decimal(str(raw_low))
                     revealed_event_high = Decimal(str(raw_high))
                 except InvalidOperation as exc:
-                    raise TypeError("revealed source event price range is invalid") from exc
+                    raise TypeError(
+                        "revealed source event price range is invalid"
+                    ) from exc
                 if (
                     not revealed_event_low.is_finite()
                     or not revealed_event_high.is_finite()
@@ -17010,9 +18620,7 @@ class TrainingRunStore:
                 raise TypeError("accepted trade plan is missing its command result")
             result_data = result.get("data")
             raw_orders = (
-                result_data.get("orders")
-                if isinstance(result_data, Mapping)
-                else None
+                result_data.get("orders") if isinstance(result_data, Mapping) else None
             )
             if not isinstance(raw_orders, list):
                 raise TypeError("accepted trade plan result has no order projection")
@@ -17234,11 +18842,7 @@ class TrainingRunStore:
 
     @staticmethod
     def _required_synthetic_origin(value: object) -> int:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value < 0
-        ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise TrainingRunError(
                 "TRAINING_RUN_STORAGE_DEGRADED",
                 "hidden training synthetic origin is missing",
@@ -17288,15 +18892,11 @@ class TrainingRunStore:
             project_public_time(
                 actual_time_ms=actual_time_ms,
                 public_time_ms=(
-                    actual_time_ms
-                    if effective_policy == "NONE"
-                    else public_time_ms
+                    actual_time_ms if effective_policy == "NONE" else public_time_ms
                 ),
                 actual_origin_ms=actual_origin_ms,
                 public_origin_ms=(
-                    actual_origin_ms
-                    if effective_policy == "NONE"
-                    else public_origin_ms
+                    actual_origin_ms if effective_policy == "NONE" else public_origin_ms
                 ),
                 policy=effective_policy,
                 sequence=sequence,
@@ -17467,9 +19067,7 @@ class TrainingRunStore:
                     resolution,
                     bucket_id,
                     source_sequence,
-                    validate_v2_counter(
-                        state["revision"], field_name="revision"
-                    ),
+                    validate_v2_counter(state["revision"], field_name="revision"),
                     canonical_json(public_time),
                     account["equity"],
                     account["cash_balance"],

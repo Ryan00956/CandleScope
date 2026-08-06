@@ -853,13 +853,23 @@ async function main() {
     const replayStreamsBeforeDisabledDocument = replayCapture.webSockets.filter((url) => /\/api\/v1\/stream\/replay\//.test(url)).length;
     const transitionRejectedReplaySocketAttempts = replayStreamsBeforeDisabledDocument - replayStreamsBeforeRestart;
     await replay.cdp.send("Page.navigate", { url: sessionUrl });
-    await waitForValue(replay.cdp, `document.querySelector('[data-replay-state="error"][data-replay-error="REPLAY_DISABLED"]') !== null`, args.timeoutMs, "open replay page disabled state");
+    await waitForValue(
+      replay.cdp,
+      `document.querySelector('[data-replay-state="error"][data-replay-error="REPLAY_TRAINING_UNAVAILABLE"]') !== null`,
+      args.timeoutMs,
+      "open replay training unavailable state",
+    );
     const disabledReplay = await evaluate(replay.cdp, `({
       error: document.querySelector('[data-replay-state="error"]')?.getAttribute("data-replay-error") || "",
       canvasCount: document.querySelectorAll("canvas").length,
       text: (document.body?.innerText || "").slice(0, 500),
     })`);
-    assert(disabledReplay.error === "REPLAY_DISABLED" && disabledReplay.canvasCount === 0, "open replay page did not fail closed", disabledReplay);
+    assert(
+      disabledReplay.error === "REPLAY_TRAINING_UNAVAILABLE"
+        && disabledReplay.canvasCount === 0,
+      "open replay page did not fail closed",
+      disabledReplay,
+    );
     await wait(300);
     const replayStreamsAfterDisabledDocument = replayCapture.webSockets.filter((url) => /\/api\/v1\/stream\/replay\//.test(url)).length;
     assert(replayStreamsAfterDisabledDocument === replayStreamsBeforeDisabledDocument, "disabled replay document opened a replay WebSocket", replayCapture.webSockets);
@@ -974,7 +984,9 @@ async function main() {
       disabled_entry_failed_closed:
         liveAfterDisable.replayEntryState === "disabled"
         && liveAfterDisable.replayEntryDisabled === true,
-      open_replay_failed_closed: disabledReplay.error === "REPLAY_DISABLED" && disabledReplay.canvasCount === 0,
+      open_replay_training_failed_closed:
+        disabledReplay.error === "REPLAY_TRAINING_UNAVAILABLE"
+        && disabledReplay.canvasCount === 0,
       live_identity_preserved: liveAfterDisable.symbol === liveBefore.symbol && liveAfterDisable.interval === liveBefore.interval && liveAfterDisable.prefs === liveBefore.prefs,
       live_data_and_settings_preserved: currentKlines.count > 0 && currentSettings.mode === "none",
       disabled_restart_preserved_replay_db: sameDigest(digestAfterGracefulShutdown, digestAfterDisabledShutdown),

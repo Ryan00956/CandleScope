@@ -1,8 +1,8 @@
 # CandleScope 回放训练 v2 产品合同
 
-状态：`RUN_CENTRIC_HEDGE_DEV_CUTOVER_2026_08_06`。用户明确将产品语义修订为“先创建一局回放，再在局内选择 BTC 等商品”，并加入 Run 级不可变的单向/双向持仓模式。Phase 11 的 live/replay 运行时隔离与服务端权威语义保持不变；回放后端与实时页入口总闸仍默认关闭。
+状态：`RUN_CENTRIC_HEDGE_DETERMINISTIC_SIMULATION_CUTOVER_2026_08_06`。用户明确将产品语义修订为“先创建一局回放，再在局内选择 BTC 等商品”，加入 Run 级不可变的单向/双向持仓模式，并于 2026-08-06 接受保险基金与 ADL 私有状态使用版本化确定性近似。Phase 11 的 live/replay 运行时隔离与服务端权威语义保持不变；本轮最终 hard cutover 要求回放入口和所需能力默认启用。
 
-合同版本：`replay.product.v2`
+合同版本：`replay.product.v2.hedge-simulation-v1`
 
 Phase 0 父提交：`2346dba32c0ce9e35dd6941bc4445366da4362a7`（2026-07-21）
 
@@ -194,7 +194,7 @@ flowchart LR
 | 前向缓存长度 | 表示创建时优先准备的未来历史窗口，不等于训练强制结束时间；用量与预计磁盘占用必须可见。 |
 | 初始金额 | 使用结算资产的 Decimal 字符串；创建后只可通过已授权“入金/出金”事件改变。 |
 | 最大杠杆 | 是训练级上限；实际商品上限取训练上限、商品规则上限和风险模型上限的最小值。 |
-| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。`HEDGE` 首版仅允许 `APPROX_PROXY + CROSS + funding OFF + TOUCH_OR_TAPE_V2`；exact account、逐仓、资金费和 book-assisted 组合必须 fail closed。 |
+| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。新 Run 默认 `HEDGE`；HEDGE 唯一允许 `DETERMINISTIC_SIMULATION`，支持 CROSS、逐腿 ISOLATED、历史 funding 与 `BOOK_ASSISTED_REQUIRED`，旧 `APPROX_PROXY` HEDGE payload 必须拒绝。 |
 | 手续费 | 至少区分 maker/taker；必须写入版本化 fee policy，不能只保存在前端。 |
 | 资金费 | `OFF`、`HISTORICAL_EXACT` 或明确标为沙盒的自定义模型；历史数据不完整时不得宣称 exact。 |
 | 保证金模式 | 可允许 `CROSS`、`ISOLATED` 或两者；具体订单/仓位必须记录选择。 |
@@ -481,7 +481,9 @@ flowchart LR
 
 `HEDGE` 的每个开仓、平仓和保护命令都必须显式携带 `position_side=LONG|SHORT`：`BUY/LONG` 开多、`SELL/LONG + reduce-only` 平多、`SELL/SHORT` 开空、`BUY/SHORT + reduce-only` 平空。风险与保证金按两腿 gross notional 求和；等量多空不是空仓。双向模式禁止“反手”快捷动作，必须分别管理两条腿。
 
-首版双向模式只使用 `APPROX_PROXY + CROSS + funding OFF + TOUCH_OR_TAPE_V2`。`HISTORICAL_EXACT`、`ISOLATED`、资金费和 `BOOK_ASSISTED_REQUIRED` 尚未建立逐腿可信合同，组合选择必须在创建时拒绝，不能静默降级。组合保证金和期权 Greeks 仍不属于闭环。
+双向模式只使用 `DETERMINISTIC_SIMULATION`：公开 mark/index、funding、规则、fee 和历史 L2 必须由 Run pin；不可观测的保险基金和 ADL cohort 必须在运行前物化并标记为 `VERSIONED_DETERMINISTIC_SIMULATION`。HEDGE 支持 CROSS、逐腿 ISOLATED、历史资金费与 `BOOK_ASSISTED_REQUIRED`，但不得宣称历史交易所 insurance/ADL exact 或 L2 queue-exact。旧 `APPROX_PROXY` HEDGE 组合必须拒绝，不能静默降级。组合保证金和期权 Greeks 仍不属于闭环。
+
+产品统一命名为“交易所规则级确定性模拟”。Hub、工作台、强平时间线、报告、Review 和导出必须同时显示 public-input fidelity 与 private-state simulation model/version；不能只在帮助文档中披露。冻结公式、总序、保险基金和 ADL 规则见 [`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md)。
 
 ### 12.2 未开启历史盘口时
 
@@ -661,7 +663,7 @@ flowchart LR
 - 在没有连续历史 L2 时模拟 queue position；
 - 跨交易所、跨结算资产或现货与合约的统一保证金；
 - 同一个 TrainingRun 混用 BAR 与 AGG_TRADE source；
-- 期权、组合保证金和 ADL 的完整交易所复刻；
+- 期权、组合保证金，以及保险基金和 ADL 私有状态的历史交易所 exact 复刻；
 - 用 live 数据填补任意历史能力；
 - 为了快进而近似跳过可能触发订单、资金费或爆仓的事件。
 
@@ -671,6 +673,6 @@ flowchart LR
 2. 模拟交易 dock 在右栏中的最终 tab 顺序和紧凑布局；无论视觉方案如何，自选不得消失。
 3. `WARM` 的默认前向窗口和资源预算；必须通过真实数据测量后冻结，不在文档里拍脑袋定值。
 4. 交易所 fee tier、维护保证金阶梯和 mark/funding 数据的首批支持清单。
-5. 是否为同商品 hedge mode 增加 historical exact、逐仓、资金费和 book-assisted 支持；这些能力未冻结前保持 fail closed。
+5. 是否在取得权威私有数据后新增 insurance/ADL historical exact 模式；这必须升级产品合同和数据版本，不能原地改变 deterministic simulation v1。
 
 这些问题未决时必须保持相应 capability 关闭或近似标识，不能阻止已冻结的存档大厅、完整工作台、BAR/AGG 控制、多商品时钟和按需加载主线。

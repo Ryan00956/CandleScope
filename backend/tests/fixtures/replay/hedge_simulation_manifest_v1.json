@@ -1,0 +1,73 @@
+{
+  "schema_version": "replay.hedge-simulation-manifest.v1",
+  "model_version": "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1",
+  "manifest_id": "phase0-btcusdt-v1",
+  "dataset_epoch": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "range_start_ms": 1000,
+  "range_end_ms": 2000,
+  "settlement_asset": "USDT",
+  "required_symbols": [
+    "BTCUSDT"
+  ],
+  "insurance_events": [
+    {
+      "sequence": 1,
+      "effective_time_ms": 900,
+      "kind": "OPENING_BALANCE",
+      "amount": "100",
+      "balance_after": "100",
+      "previous_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "event_hash": "sha256:c3f14a6e6e089a58242611882919237c9bdea8f76b1c0f665d4fb862f824a815"
+    },
+    {
+      "sequence": 2,
+      "effective_time_ms": 1500,
+      "kind": "DEBIT",
+      "amount": "25",
+      "balance_after": "75",
+      "previous_hash": "sha256:c3f14a6e6e089a58242611882919237c9bdea8f76b1c0f665d4fb862f824a815",
+      "event_hash": "sha256:6af3e5f1574eda420e93901068a453cf3358f44c8d714d9ba172954c6d2b01d7"
+    }
+  ],
+  "adl_snapshots": [
+    {
+      "sequence": 1,
+      "symbol": "BTCUSDT",
+      "effective_time_ms": 900,
+      "valid_until_ms": 2000,
+      "candidates": [
+        {
+          "candidate_id": "short-a",
+          "symbol": "BTCUSDT",
+          "position_side": "SHORT",
+          "quantity": "0.4",
+          "entry_price": "110",
+          "mark_price": "100",
+          "initial_margin": "10",
+          "margin_balance": "15"
+        },
+        {
+          "candidate_id": "short-b",
+          "symbol": "BTCUSDT",
+          "position_side": "SHORT",
+          "quantity": "0.8",
+          "entry_price": "105",
+          "mark_price": "100",
+          "initial_margin": "5",
+          "margin_balance": "10"
+        },
+        {
+          "candidate_id": "long-a",
+          "symbol": "BTCUSDT",
+          "position_side": "LONG",
+          "quantity": "1",
+          "entry_price": "90",
+          "mark_price": "100",
+          "initial_margin": "10",
+          "margin_balance": "20"
+        }
+      ],
+      "snapshot_hash": "sha256:e822ac1a25e06263d3605840bf4e1a330c011bf6dffb1965e4db8739a7e88bcf"
+    }
+  ]
+}

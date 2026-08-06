@@ -31,6 +31,8 @@ from app.replay.training.models import (
 
 ROOT = Path(__file__).parents[2]
 GOLDEN_PATH = Path(__file__).parent / "fixtures" / "replay" / "v2_contract_golden.json"
+
+
 def _golden() -> dict[str, object]:
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
@@ -54,28 +56,29 @@ def test_replay_v2_golden_matches_python_enum_and_schema_registry() -> None:
 def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
     training_root = ROOT / "backend" / "app" / "replay" / "training"
     assert {path.name for path in training_root.glob("*.py")} == {
-            "__init__.py",
-            "account.py",
-            "account_history.py",
-            "anchor_codec.py",
+        "__init__.py",
+        "account.py",
+        "account_history.py",
+        "anchor_codec.py",
         "commands.py",
         "control.py",
         "disclosure.py",
         "errors.py",
         "events.py",
         "fast_forward.py",
+        "hedge_simulation_contract.py",
         "historical_book.py",
         "history.py",
         "models.py",
         "multitrack.py",
         "review.py",
         "schema.py",
-            "segments.py",
-            "service.py",
-            "storage.py",
-            "storage_governance.py",
-            "trade_flow.py",
-        }
+        "segments.py",
+        "service.py",
+        "storage.py",
+        "storage_governance.py",
+        "trade_flow.py",
+    }
 
 
 def test_replay_v2_run_track_command_and_event_golden_round_trip() -> None:

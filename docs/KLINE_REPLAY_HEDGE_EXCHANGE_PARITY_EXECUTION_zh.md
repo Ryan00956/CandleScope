@@ -1,6 +1,6 @@
-# CandleScope K 线回放交易所级双向持仓与强平硬切换执行文档
+# CandleScope K 线回放交易所规则级双向持仓与强平硬切换执行文档
 
-状态：`PHASE_0_BLOCKED_DATA_CONTRACT / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
+状态：`PHASE_0_COMPLETE_DETERMINISTIC_SIMULATION / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
 
 日期：2026-08-06
 
@@ -12,23 +12,23 @@
 
 本文不是完成声明。它冻结下一轮实现范围、顺序、硬门禁和最终启用方式。只有本文最后的全部验收门禁在同一 clean HEAD 上通过后，才能把“交易所级双向持仓与强平”标记为完成。
 
-Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md`](KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md)。当前 Binance USD-M 官方公开与 USER_DATA 合同不能提供任意历史区间的保险基金逐变动账本或全市场 ADL 参与队列，因此按本文第 8 节 Phase 0 硬门禁停止，未进入 Phase 1。
+Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md`](KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md)。用户于 2026-08-06 明确接受近似后，Phase 0 已按 [`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md) 冻结为“历史公开输入 pinned + 私有保险基金/ADL 状态版本化确定性模拟”。这解除数据合同阻塞，但不授权宣称历史交易所 insurance/ADL exact。
 
 ---
 
 ## 1. 决策摘要
 
-本轮把当前 HEDGE 基础实现升级为交易所规则等价的双向合约账户。最终产品必须同时满足：
+本轮把当前 HEDGE 基础实现升级为交易所规则级确定性模拟的双向合约账户。最终产品必须同时满足：
 
 1. 同一商品的 `LONG`、`SHORT` 两条腿可独立开仓、加仓、减仓、止盈止损、调整保证金和强平。
 2. `CROSS` 与 `ISOLATED` 都支持双向持仓，不再把 HEDGE 限制为全仓。
-3. HEDGE 使用权威 mark/index、版本化风险限额和维护保证金阶梯，不能绑定 `APPROX_PROXY`。
+3. HEDGE 使用 pinned mark/index、版本化风险限额和维护保证金阶梯，不能绑定旧 `APPROX_PROXY`。
 4. 资金费按结算时刻分别对两条腿入账，不能通过净仓位抵消后漏记。
 5. 强平覆盖撤单释放保证金、重新评估、阶梯降档、部分强平、全部强平、破产结算、强平费、保险基金和 ADL。
 6. 强平执行必须留下完整订单、成交、账本和状态机证据，不能直接改写仓位数量。
 7. 正常构建默认开放回放入口、默认启用所需账户与盘口能力，新建 Run 默认选择 `HEDGE`；`ONE_WAY` 仍可由用户主动选择。
 8. 不增加 HEDGE 灰度比例、实验组、双引擎或默认关闭开关；最终上线是整版硬切换。
-9. 任一权威数据缺失时明确拒绝创建或暂停 Run，不回退到 bar/trade proxy、固定资金费或 Touch/Tape 继续伪装成完整模式。
+9. 任一 required public input 或物化 simulation input 缺失时明确拒绝创建或暂停 Run，不回退到 bar/trade proxy、固定资金费、无限保险基金、运行时随机 cohort 或 Touch/Tape。
 10. 回滚只允许回滚完整构建和相应数据版本，不允许运行时切回旧 HEDGE 账户模型。
 
 ### 1.1 “完整”的冻结边界
@@ -39,11 +39,11 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 - 线性、quote-settled 永续合约；
 - 单结算资产的全仓与逐仓账户；
 - `ONE_WAY` 与 `HEDGE`；
-- 交易所规则等价的保证金、资金费和强平生命周期；
-- 版本化保险基金和 ADL 模型；
+- Binance USD-M 规则级确定性模拟的保证金、资金费和强平生命周期；
+- 版本化、物化并由 Run pin 的保险基金和 ADL cohort 模型；
 - 有连续历史 L2 时的确定性强平执行。
 
-“完整”指上述账户与风险生命周期完整，不代表重建历史交易所中不可观测的其他用户私有订单排队。若最终要求历史成交逐笔 queue-exact，则必须另行取得带订单身份和队列位置的 L3 数据；仅有 L2 时不得作此声明。这是数据边界，不是允许降级的灰度路径。
+“完整”指上述模拟账户与风险生命周期完整，不代表重建历史交易所中不可观测的保险基金账本、ADL 私有队列或其他用户订单排队。产品固定显示“交易所规则级确定性模拟”。若最终要求历史成交逐笔 queue-exact 或 insurance/ADL historical exact，必须另行取得权威私有数据并升级合同；仅有 L2 和合成 cohort 时不得作此声明。
 
 本轮仍不包含：
 
@@ -51,7 +51,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 - inverse、期权、Greeks；
 - multi-assets 或 portfolio margin；
 - 跨交易所统一保证金；
-- 在缺少权威保险基金或 ADL 输入时伪造“历史 exact”结果。
+- 把确定性模拟保险基金或 ADL 结果伪装成“历史交易所 exact”。
 
 ---
 
@@ -69,11 +69,11 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 
 | 当前限制 | 位置 | 最终要求 |
 |---|---|---|
-| HEDGE 只能 `APPROX_PROXY` | `training/models.py` 创建合同 | HEDGE 只接受权威、版本化 exact account 输入 |
+| HEDGE 只能 `APPROX_PROXY` | `training/models.py` 创建合同 | HEDGE 只接受版本化 `DETERMINISTIC_SIMULATION` manifest；公开输入与模拟私有状态分别标记 |
 | HEDGE 只能 `CROSS` | 创建合同和 Hub 禁用项 | 同时支持 CROSS 与逐腿 ISOLATED |
 | HEDGE 强制 funding OFF | 创建合同和 Hub 禁用项 | 支持历史 exact funding，逐腿独立入账 |
 | HEDGE 强制 book OFF | 创建合同和 Hub 禁用项 | 完整模式要求连续历史 L2，不允许 Touch/Tape 回退 |
-| account-history 固定 ONE_WAY | `account_history.py` archive contract | 新 archive 版本支持 HEDGE |
+| account-history 固定 ONE_WAY | `account_history.py` archive contract | 新 archive 版本支持 HEDGE 与 simulation input refs |
 | 保证金主要按 gross notional / max leverage | broker/training account projection | 使用交易所适配器冻结的逐腿初始保证金和维持保证金公式 |
 | 两腿一起强平时破产价为 null | liquidation detection | 每条腿和每一步都有可审计的破产/接管价格或明确的公式不适用原因 |
 | 一个 track/sequence 只能有一个 liquidation event | training schema | 一个 case 下可有多 leg、多 step、多 order、多 fill |
@@ -82,7 +82,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 | 新 Run 默认 ONE_WAY | Hub draft 和后端默认值 | 新 Run 默认 HEDGE，用户可主动选 ONE_WAY |
 | replay/entry/account/book 默认关闭 | backend/frontend config | 正常构建默认启用；前端入口不再由默认关闭旗标隐藏 |
 
-当前 `APPROX_PROXY` 可以继续服务明确标注的 ONE_WAY 沙盒训练，但不得再成为完整 HEDGE 的可选项、隐式默认或失败回退。
+当前 `APPROX_PROXY` 可以继续服务明确标注的 ONE_WAY 沙盒训练，但不得再成为 HEDGE 的可选项、隐式默认或失败回退。HEDGE 的唯一模型是 Phase 0 冻结的 `DETERMINISTIC_SIMULATION`。
 
 ---
 
@@ -98,7 +98,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 - exact mark 缺失后改用 last、trade、bar close 或前一条 mark；
 - funding 缺失后按 0 结算；
 - book gap 后退回 Touch/Tape；
-- ADL/保险基金缺数据后仅在 UI 隐藏该环节并继续宣称完整；
+- ADL cohort/保险基金 simulation manifest 缺数据后仅在 UI 隐藏该环节并继续执行；
 - 同一数据库中让相同模型版本由两个不同公式解释；
 - 把阶段性代码通过隐藏入口部署到正常构建中等待放量。
 
@@ -106,7 +106,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 
 - 各 Phase 可在独立开发分支上提交；阶段提交不是运行时灰度。
 - 最终合并前，正常发布构建不得包含可被用户创建的半成品 HEDGE Run。
-- 数据不满足 exact 合同时，能力保持默认启用，但具体 dataset/Run 返回明确的 `UNAVAILABLE`、`QUARANTINED` 或 `PAUSED`；这不是 feature disabled。
+- 数据不满足 pinned-public + materialized-simulation 合同时，能力保持默认启用，但具体 dataset/Run 返回明确的 `UNAVAILABLE`、`QUARANTINED` 或 `PAUSED`；这不是 feature disabled。
 - 运维可以通过回滚完整构建处理事故，但不能在新构建中静默切换旧公式。
 - 非产品正确性开关，例如 GC、预下载并发或性能优化，可以独立配置；关闭它们不得改变账户、成交或强平结果。
 
@@ -116,7 +116,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 
 - 后端 replay capability 正常构建默认启用；若保留 `REPLAY_ENABLED`，默认值改为 `1`。
 - 前端移除 `VITE_REPLAY_ENTRY_ENABLED` 对入口可见性的依赖；入口默认显示，再由后端 capability 返回数据可用性。
-- exact account 与 historical book 能力默认启用；若保留对应环境变量，默认值必须为 `1`。
+- pinned account-history/simulation manifest 与 historical book 能力默认启用；若保留对应环境变量，默认值必须为 `1`。
 - 禁止增加新的 HEDGE、liquidation、insurance fund 或 ADL 默认关闭开关。
 - 前端新建 Run 的 `positionMode` 默认值为 `HEDGE`。
 - 后端省略 `position_mode` 时的规范化默认值改为 `HEDGE`；canonical/hash 合同同步升级，不能用旧默认值保持新旧语义混合。
@@ -124,9 +124,9 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 
 ---
 
-## 4. 权威数据合同
+## 4. Pinned 公开输入与物化模拟输入合同
 
-完整 HEDGE 不允许依赖通用代理规则。每个 Run 必须 pin 一个不可变的 exchange account dataset manifest，至少包含下列时间线：
+HEDGE 不允许依赖旧通用代理规则。每个 Run 必须 pin 一个不可变的 exchange simulation dataset manifest，至少包含下列时间线：
 
 | 数据 | 必需字段 | 连续性要求 | 缺失行为 |
 |---|---|---|---|
@@ -134,13 +134,13 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 | mark/index | event time、sequence、mark、index、来源 | 严格单调、无未解释 gap、同毫秒总序冻结 | 暂停，不使用 last/trade 代理 |
 | funding | settlement time、rate、settlement mark、规则版本 | 覆盖所有结算点，幂等键唯一 | 暂停，不按 0 跳过 |
 | 历史 L2 | snapshot、增量、exchange sequence、gap/resync | 每个强制 FULL track 连续 | 整个 Run 暂停，不回退 Touch/Tape |
-| 保险基金 | 资产、余额、变动、effective time、来源版本 | 能重建每次接管前后的余额 | 禁止宣称完整强平 |
-| ADL | 排名公式版本、参与集合或权威队列输入、effective time | 能确定性重建选择顺序 | 禁止执行或宣称历史 exact ADL |
+| 保险基金模拟 | 资产、非负初值、变动、effective time、simulation model version | 能重建每次接管前后的余额；manifest 标记 simulated | 暂停，不使用无限或固定运行时 fallback |
+| ADL cohort 模拟 | model version、物化参与集合、方向、数量、margin/position 输入、effective time | 能按冻结公式确定性重建选择顺序；manifest 标记 simulated | 暂停，不生成运行时随机候选 |
 | 手续费 | maker/taker/liquidation fee policy、账户 tier、生效时间 | 覆盖每个 fill | 暂停，不使用当前配置替代历史策略 |
 
 所有输入必须：
 
-1. 由 operator importer 导入 replay-owned object store；
+1. 由 operator importer 或版本化离线 simulation builder 物化后导入 replay-owned object store；
 2. 记录 source identity、schema、时间范围、checksum、行数、连续性证明和 capture receipt；
 3. 通过 quarantine 后才能绑定 Run；
 4. 被 Run manifest pin，后续 catalog 刷新不能改变既有 Run；
@@ -148,7 +148,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 6. 有独立 component hash、event chain hash 和最终 dataset hash；
 7. 缺失、重复、回退、越界或被篡改时 fail closed。
 
-Phase 0 必须从目标交易所的权威规则或已验证 capture 冻结公式版本。实现代码不能把当前规则网页内容散落成无版本常量。
+公开规则和行情仍必须来自目标交易所的版本化规则或已验证 capture。保险基金与 ADL 私有状态按 `BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1` 物化；产品和 API 必须显式携带 fidelity。实现代码不能把规则网页内容或合成参数散落成无版本常量。
 
 ---
 
@@ -244,7 +244,7 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 
 每次风险检查必须执行完整流程：
 
-1. 用权威 mark、active rule revision 和当前订单/仓位构造不可变 `RiskSnapshot`。
+1. 用 pinned mark、active rule revision 和当前订单/仓位构造不可变 `RiskSnapshot`。
 2. 按 exchange adapter 分别计算 CROSS account 与各条 ISOLATED leg 的风险。
 3. 命中阈值后创建唯一 `LiquidationCase`，冻结普通增仓命令。
 4. 取消规则要求取消的活动订单，逐笔记录并释放订单保证金。
@@ -254,7 +254,7 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 8. 每次 fill 后更新腿、账户、tier 和风险快照；达到安全阈值立即停止继续减仓。
 9. 无法通过部分强平恢复时进入全平；两条腿是否同时处理、先后顺序和共享保证金释放由适配器规则决定。
 10. 计算每条腿的接管价/破产价、账户缺口和 liquidation fee，禁止仅保存净数量。
-11. 缺口先进入保险基金账本；基金不足时按冻结的 ADL 排名规则执行 ADL。
+11. 缺口先进入版本化模拟保险基金账本；基金不足时按冻结的物化 ADL cohort 和排名规则执行 ADL。
 12. 最终原子提交 case、steps、orders、fills、ledger、account、positions、report projection 和 state hash。
 
 任何一步缺数据、违反数量/价格 filter、盘口断档或不能确定 ADL 顺序，都进入 `FAILED_CLOSED`，不得直接把 quantity 清零。
@@ -269,10 +269,10 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 - per-leg margin/leverage/risk tier；
 - cross 与 isolated margin buckets；
 - exchange rule adapter/version；
-- HEDGE account-history ref；
+- HEDGE public-history ref 与 simulation manifest ref；
 - liquidation case/leg/step/order/fill；
 - insurance fund balance/posting；
-- ADL queue snapshot/event；
+- materialized ADL cohort snapshot/event；
 - risk snapshot 和 audit proof。
 
 协议与 canonical 变更要求：
@@ -299,23 +299,33 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 - 修改产品合同，删除 HEDGE 的 `APPROX_PROXY + CROSS + funding OFF + book OFF` 首版限制。
 - 从非目标中移除本轮要求覆盖的保险基金和 ADL。
 - 冻结首个 exchange adapter、合约类型、结算资产、保证金和强平公式版本。
-- 冻结权威数据 manifest、连续性、quarantine 和缺失行为。
+- 冻结 pinned public input 与 materialized simulation manifest、连续性、quarantine、fidelity 和缺失行为。
 - 冻结强平总序、状态机、部分强平算法、保险基金和 ADL 输入合同。
 - 生成当前 replay 数据盘点和可恢复备份清单。
 
 硬门禁：
 
 - 不存在“稍后决定”的保证金、强平或 ADL 公式。
-- 每个 required source 都有真实样本、来源证明和 gap 测试。
-- 若保险基金或 ADL 权威数据不可获得，Phase 0 直接 `BLOCKED_DATA_CONTRACT`，不得转写成近似实现。
+- 每个公开 required source 都有来源/连续性合同；每个模拟 required source 都有物化样本、模型版本、golden hash 和 gap/fail-closed 测试。
+- 产品、API、报告和导出固定披露 insurance/ADL 属于确定性模拟，不得宣称历史交易所 exact。
 
-预估：3–5 个工程日，不包含外部数据获取等待。
+完成证据：
+
+- 机器合同：`backend/app/replay/training/hedge_simulation_contract.py`；
+- 合同 hash：`sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b`；
+- simulation manifest 黄金样本：`backend/tests/fixtures/replay/hedge_simulation_manifest_v1.json`，hash `sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236`；
+- 人类合同：[`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md)；
+- 数据盘点：[`evidence/KLINE_REPLAY_HEDGE_PHASE0_DATA_INVENTORY_20260806.json`](evidence/KLINE_REPLAY_HEDGE_PHASE0_DATA_INVENTORY_20260806.json)；
+- 当前盘点为 training schema 13、1 个 legacy-unspecified Run、0 个显式 HEDGE rule；未复制、删除或重建数据。
+
+状态：`COMPLETE`。Phase 1 从本合同升级协议与 schema，不得修改 v1 公式原义。
 
 ### Phase 1：协议、canonical 与 schema
 
 工作内容：
 
 - 升级 replay/training 协议和 training schema。
+- 新增唯一 HEDGE account mode `DETERMINISTIC_SIMULATION`，并把 public/simulated fidelity 写入 canonical；拒绝旧 HEDGE `APPROX_PROXY` payload。
 - 落地 per-leg position、margin bucket、risk snapshot、liquidation case/step/fill、insurance、ADL 表。
 - 更新 API/parser/types/canonical/checkpoint/fork/review/export。
 - 后端和前端默认 `position_mode=HEDGE`。
@@ -348,15 +358,15 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 
 预估：5–7 个工程日。
 
-### Phase 3：HEDGE exact archive 与权威时间线
+### Phase 3：HEDGE pinned public archive 与 simulation manifest
 
 工作内容：
 
-- 新增 HEDGE account-history archive schema 和 importer。
-- 导入并 pin mark/index、funding、rule/risk tier、fee、insurance 和 ADL 时间线。
+- 新增 HEDGE public-history archive、simulation manifest schema 和 importer/builder。
+- 导入并 pin mark/index、funding、rule/risk tier、fee、模拟 insurance 和物化 ADL cohort 时间线。
 - 把 account-only event 纳入全局虚拟时钟。
 - 实现 source sequence、same-ms phase、checksum、quarantine 和 rehydration。
-- 删除 HEDGE 对 `APPROX_PROXY` 的依赖和可选入口。
+- 删除 HEDGE 对 `APPROX_PROXY` 的依赖和可选入口，只保留 `DETERMINISTIC_SIMULATION`。
 
 硬门禁：
 
@@ -472,8 +482,8 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 
 硬门禁：
 
-- 8 FULL positioned tracks 普通 exact-account wave 的真实 p95 不超过现有 500 ms 冻结上限。
-- 强平波单独报告 p50/p95/max，不与普通推进平均；阈值在 Phase 0 用真实样本冻结后不得为过门禁临时放宽。
+- 8 FULL positioned tracks 普通 simulation-account wave 的真实 p95 不超过 500 ms 冻结上限。
+- 强平波单独报告 p50/p95/max，不与普通推进平均；Phase 0 冻结 p95 `2000 ms`、max `5000 ms`，不得为过门禁临时放宽。
 - 内存、数据库、WAL、archive 和浏览器无单调泄漏。
 - 全量 backend、frontend、architecture、typecheck、lint、build 全通过。
 - 4 小时 soak、故障注入、审计和回滚全部通过。
@@ -494,7 +504,7 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 硬门禁：
 
 - 不设置任何 replay/HEDGE 环境变量，启动后入口可见、后端 capability enabled、新建 Run 默认 HEDGE。
-- 缺 exact dataset 时显示数据不可用原因，而不是 feature disabled 或 proxy fallback。
+- 缺 pinned-public/simulation dataset 时显示数据不可用原因，而不是 feature disabled 或 proxy fallback。
 - 搜索代码、文档、脚本和测试，不存在 HEDGE 默认关闭、百分比灰度或旧 proxy fallback。
 - rollback 只能把整个构建和 schema 恢复到上一已知版本；回滚演练通过。
 
@@ -570,13 +580,13 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 
 ## 12. 总工期与关键路径
 
-在权威数据已经可用的前提下，预计 6–9 个工程周。关键路径是：
+在所需公开 archive 与物化 simulation manifest 可构建的前提下，预计 6–9 个工程周。关键路径是：
 
 ```text
 规则/数据合同
   -> schema 与 canonical
   -> 双向保证金账户
-  -> exact mark/funding/book
+  -> pinned mark/funding/book
   -> 部分强平/破产
   -> 保险基金/ADL
   -> 恢复与审计
@@ -584,7 +594,7 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
   -> 默认启用 hard cutover
 ```
 
-数据获取不包含在上述代码工期中。若保险基金或 ADL 的权威历史输入不可获得，项目必须停在 Phase 0 的数据门禁；不能为了保持进度把它改成近似模型后继续宣称“交易所级完整”。
+保险基金与 ADL 权威历史输入不可获得的事实已在 Phase 0 审计保留。用户明确接受近似后，项目使用已冻结的版本化确定性模拟继续；任何界面、API、报告或发布说明都必须保留该 fidelity，不能继续宣称“历史交易所 exact”。
 
 ---
 
@@ -598,7 +608,7 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 - 全量测试、审计、性能、4 小时 soak、浏览器和 rollback 全部通过；
 - clean HEAD release manifest 为 PASS；
 - 正常构建无环境变量启动即默认启用，入口可见，新 Run 默认 HEDGE；
-- 任一数据缺失都 fail closed，且没有 proxy、Touch/Tape 或 0 funding fallback；
+- 任一 required public/simulation input 缺失都 fail closed，且没有旧 `APPROX_PROXY`、Touch/Tape、0 funding、无限基金或运行时随机 cohort fallback；
 - 没有 HEDGE 灰度、双引擎、默认关闭开关或阶段性完成声明；
 - 所有订单、成交、资金费、保证金、强平、保险基金和 ADL 都能从不可变输入与 hash-chained ledger 独立重算；
 - 用户未授权的工作区文件没有被暂存、提交、覆盖或删除。

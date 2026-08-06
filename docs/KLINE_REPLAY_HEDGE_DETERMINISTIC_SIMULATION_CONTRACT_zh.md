@@ -1,0 +1,178 @@
+# CandleScope HEDGE 交易所规则级确定性模拟合同 v1
+
+状态：`FROZEN / PHASE_0_COMPLETE / HARD_CUTOVER_INPUT`
+
+日期：2026-08-06
+
+机器真值：`backend/app/replay/training/hedge_simulation_contract.py`
+
+合同 hash：`sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b`
+
+用户于 2026-08-06 明确接受近似后，本合同替代“必须取得交易所历史全量保险基金账本和 ADL 私有队列”的阻塞条件。近似范围只覆盖不可观测的交易所私有状态；产品必须显示“交易所规则级确定性模拟”，不得改写成“历史交易所 exact”。
+
+---
+
+## 1. 身份与版本
+
+| 项目 | 冻结值 |
+|---|---|
+| schema | `replay.hedge-simulation-contract.v1` |
+| 总模型 | `BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1` |
+| 账户公式 | `CANDLESCOPE_HEDGE_ACCOUNT_V1` |
+| 强平公式 | `CANDLESCOPE_HEDGE_LIQUIDATION_V1` |
+| 保险基金 | `CANDLESCOPE_INSURANCE_FUND_SIMULATION_V1` |
+| ADL | `CANDLESCOPE_ADL_COHORT_SIMULATION_V1` |
+| 交易所规则族 | Binance USD-M |
+| 合约 | 线性 USDT 本位永续 |
+| 保证金资产 | 单结算资产 USDT |
+| 持仓模式 | `ONE_WAY`、`HEDGE` |
+| 保证金模式 | `CROSS`、逐腿 `ISOLATED` |
+
+正常运行只允许一个总模型版本。不得按 Run、用户、symbol 或流量选择新旧 HEDGE 引擎。
+
+## 2. 真实性边界
+
+### 2.1 仍要求 pinned 的历史公开输入
+
+- 商品 filter、风险阶梯、维护保证金率与 deduction、强平费和生效时刻；
+- mark/index 时间线；
+- funding 结算时刻、费率与 settlement mark；
+- maker/taker/liquidation fee policy；
+- 连续历史 L2 snapshot/delta/sequence/gap proof。
+
+这些输入缺失时 Run 暂停，不得退回 last/trade/bar close、0 funding 或 Touch/Tape。
+
+### 2.2 明确属于确定性模拟的私有状态
+
+- 保险基金初值、余额和 posting 时间线；
+- ADL cohort snapshot、候选 margin/position 输入、排名和 selection。
+
+二者必须在 Run 创建前物化、版本化、校验、hash 并由 manifest pin。运行时禁止随机生成、重新采样或回退固定无限基金。相同 manifest、命令和事件链必须得到相同 hash。
+
+### 2.3 禁止宣称
+
+- 历史交易所保险基金余额 exact；
+- 历史全市场 ADL 队列 exact；
+- 仅凭 L2 得到 queue-exact fill；
+- 当前模拟账户结果就是某个真实 Binance 账户当时必然发生的结果。
+
+## 3. Decimal、舍入与保证金
+
+所有账户输入使用 Decimal canonical string，禁止 float。
+
+- notional：`abs(quantity) × mark_price × contract_size`；
+- initial margin：`notional ÷ active_leverage`，按 quote step 向上；
+- maintenance margin：`max(0, notional × tier_rate - tier_deduction)`，按 quote step 向上；
+- LONG unrealized PnL：`(mark - entry) × quantity × contract_size`；
+- SHORT unrealized PnL：`(entry - mark) × quantity × contract_size`；
+- HEDGE 不做两腿保证金抵扣，两腿 initial/maintenance margin 分别计算后求和；
+- CROSS breach：`cross wallet + Σ unrealized PnL <= Σ maintenance margin`；
+- ISOLATED breach：`isolated wallet + leg unrealized PnL <= leg maintenance margin`。
+
+费用和保证金按 quote step 向上；下单价格使用 adverse price tick；部分强平数量按 quantity step 向上且不超过仓位。
+
+## 4. 同一虚拟时刻总序
+
+| phase | 事件 |
+|---:|---|
+| 10 | 规则与风险限额生效 |
+| 20 | 市场事件与已有订单成交 |
+| 30 | mark/index 更新 |
+| 40 | funding settlement |
+| 50 | 条件单触发与订单状态变化 |
+| 60 | risk snapshot 与 breach detection |
+| 70 | 强平、保险基金与 ADL |
+| 80 | ledger、projection、checkpoint 与 hash 原子提交 |
+
+用户命令只按服务端 accepted sequence 进入尚未提交的时刻，不能插回已提交事件之前。
+
+## 5. 强平规则
+
+状态顺序固定为：
+
+```text
+ACTIVE -> RISK_BREACH_DETECTED -> CANCELING_ORDERS -> RISK_RECHECK
+-> PARTIAL_LIQUIDATION (0..N) -> FULL_LIQUIDATION
+-> BANKRUPTCY_TRANSFER -> INSURANCE_FUND_SETTLEMENT -> ADL
+-> ACTIVE | BANKRUPT | FAILED_CLOSED
+```
+
+1. 先撤销 breach margin scope 中全部非 reduce-only 活动订单并释放保证金。
+2. 撤单后立即重算；恢复安全则记录 `RECOVERED_AFTER_CANCEL`。
+3. 仍不安全时，选腿顺序固定为 maintenance margin 降序、绝对 notional 降序、track ID 升序、同 track 下 LONG 先于 SHORT。
+4. 每张部分强平单最多下降一个 risk tier；第一档目标为零仓位。
+5. 强平单只按连续历史 L2 可见深度逐档成交，每个 fill 后重算；恢复安全立即停止。
+6. L2 gap、深度耗尽、filter 冲突或价格越界均暂停 Run，不清零剩余数量。
+7. liquidation price 是 adverse tick grid 上第一个满足 scope equity 小于等于 maintenance margin 的价格。
+8. bankruptcy/takeover price 是 adverse tick grid 上 scope equity 到零的根；CROSS 的逐腿证明固定其他腿 mark 不变，并明确标记为 counterfactual leg proof。
+
+## 6. 保险基金模拟
+
+manifest 必须给出非负 opening balance。posting 顺序固定为：
+
+1. 强平费流入；
+2. 破产缺口扣款。
+
+公式：
+
+```text
+available = opening_balance + liquidation_fee_inflow
+coverage = min(available, bankruptcy_deficit)
+closing_balance = available - coverage
+uncovered_deficit = bankruptcy_deficit - coverage
+```
+
+基金永不透支。`uncovered_deficit > 0` 必须进入 ADL；所有 posting 使用幂等键和 hash chain。
+
+## 7. ADL cohort 模拟
+
+ADL 只读取已物化并 pin 的 cohort snapshot。候选必须具有 candidate ID、symbol、position side、quantity、entry、mark、initial margin 和 margin balance。
+
+资格条件：
+
+- 与破产腿方向相反；
+- quantity 大于零；
+- unrealized PnL 大于零。
+
+评分：
+
+```text
+profit_ratio = positive_unrealized_pnl / max(initial_margin, quote_step)
+effective_leverage = notional / max(margin_balance, quote_step)
+score = profit_ratio * effective_leverage
+```
+
+排序依次为 `score DESC`、`profit_ratio DESC`、`effective_leverage DESC`、`candidate_id ASC`。按顺序消费候选 quantity，成交价为 bankruptcy takeover price，直到 takeover quantity 为零。cohort 耗尽仍有剩余时进入 `FAILED_CLOSED_COHORT_EXHAUSTED`，不得新增运行时随机候选。
+
+## 8. 输入、连续性与失败行为
+
+simulation manifest 必须覆盖 Run 全区间：
+
+- 首个 insurance balance 在 Run start 前或同刻生效；
+- insurance posting sequence 严格单调且相邻 hash 连续；
+- 每个可能进入 ADL 的时刻有 active cohort snapshot；
+- candidate ID 在 snapshot 内唯一，所有数量符合 symbol step；
+- component hash、event-chain hash 与 dataset hash 完整。
+
+删除、重复、回退、时间倒序、hash 篡改、覆盖 gap 或 schema/version 不匹配均暂停整个 Run。
+
+## 9. 性能预算
+
+- 8 个 FULL positioned tracks 普通 wave：p95 不超过 500 ms；
+- 8 个 FULL positioned tracks 强平 wave：p95 不超过 2,000 ms、max 不超过 5,000 ms；
+- 进程 RSS 增量不超过 64 MiB。
+
+Phase 9 可基于新证据收紧，但不得为过门禁放宽。
+
+## 10. Phase 0 黄金样本
+
+机器测试冻结以下结果：
+
+- simulation manifest 黄金样本 hash 为 `sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236`；
+- `notional=25000, leverage=20` 的 initial margin 为 `1250`；
+- `notional=75000, rate=0.01, deduction=250` 的 maintenance margin 为 `500`；
+- fund `50`、fee inflow `5`、deficit `80` 后 coverage `55`、closing `0`、uncovered `25`；
+- ADL 样本对破产 LONG 只选择盈利 SHORT，顺序 `short-b -> short-a`；
+- cohort quantity 不足时结果必须是 `FAILED_CLOSED_COHORT_EXHAUSTED`。
+
+任何公式、字段、顺序、预算或真实性命名变更，都必须升级合同版本和 golden hash，不允许原地修改 v1 语义。

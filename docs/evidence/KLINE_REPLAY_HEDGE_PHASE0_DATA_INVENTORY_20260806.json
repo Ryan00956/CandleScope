@@ -1,0 +1,137 @@
+{
+  "archive_roots": [
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 2322,
+      "label": "HISTORY",
+      "metadata_inventory_sha256": "sha256:b012cfc2f885fd29d792bd173e127a5accdb0ea67d57ee0a061d059716c33c82",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay-history",
+      "size_bytes": 616169412
+    },
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 39,
+      "label": "AGG_TRADE",
+      "metadata_inventory_sha256": "sha256:37c53375f4cfe4fcfd3ab66f819a07be9cdf9536ef00b87313925ef6dd75539c",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay-agg-trades",
+      "size_bytes": 36728073
+    },
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 0,
+      "label": "ACCOUNT_HISTORY",
+      "metadata_inventory_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay-account-history",
+      "size_bytes": 0
+    },
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 0,
+      "label": "HISTORICAL_BOOK",
+      "metadata_inventory_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay-historical-books",
+      "size_bytes": 0
+    },
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 1,
+      "label": "DATASETS",
+      "metadata_inventory_sha256": "sha256:6b3d5ef3652beab21f8f6c7f7887f39bea3e6da025b962a46d86d4800b026442",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay.db.datasets",
+      "size_bytes": 93350
+    },
+    {
+      "content_hash_scope": "PATH_SIZE_MTIME_ONLY",
+      "exists": true,
+      "file_count": 3,
+      "label": "RESET_BACKUPS",
+      "metadata_inventory_sha256": "sha256:6667330424c660e30780911a1b8716eed0f9c9b827e592e83b794cf8d4789ca5",
+      "path": "H:\\program\\CandleScope\\backend\\data\\replay-reset-backups",
+      "size_bytes": 1046296
+    }
+  ],
+  "captured_at": "2026-08-06T12:20:00+08:00",
+  "inventory_sha256": "sha256:e8571d9b7967e156d592f57ca2e738bfbf97411120a314b997dfa6ce1545b23d",
+  "migration_gate": {
+    "explicit_hedge_rule_count": 0,
+    "formal_hedge_runs_require_explicit_migration": true
+  },
+  "read_only": true,
+  "recovery_scope": {
+    "archive_roots": [
+      "H:\\program\\CandleScope\\backend\\data\\replay-history",
+      "H:\\program\\CandleScope\\backend\\data\\replay-agg-trades",
+      "H:\\program\\CandleScope\\backend\\data\\replay-account-history",
+      "H:\\program\\CandleScope\\backend\\data\\replay-historical-books",
+      "H:\\program\\CandleScope\\backend\\data\\replay.db.datasets",
+      "H:\\program\\CandleScope\\backend\\data\\replay-reset-backups"
+    ],
+    "database_backup_method": "STOP_WRITERS_THEN_SQLITE_BACKUP_API_AND_SHA256",
+    "database_files": [
+      "H:\\program\\CandleScope\\backend\\data\\replay.db",
+      "H:\\program\\CandleScope\\backend\\data\\replay.db-wal",
+      "H:\\program\\CandleScope\\backend\\data\\replay.db-shm"
+    ],
+    "phase0_action": "INVENTORY_ONLY_NO_COPY_NO_DELETE",
+    "restore_checks": [
+      "SHA256_MATCH",
+      "SQLITE_QUICK_CHECK_OK",
+      "SQLITE_FOREIGN_KEY_CHECK_EMPTY",
+      "TRAINING_SCHEMA_VERSION_MATCH",
+      "RUN_AND_ARCHIVE_REF_COUNTS_MATCH"
+    ]
+  },
+  "replay_database": {
+    "exists": true,
+    "kind": "file",
+    "modified_at_ns": 1785982847496379800,
+    "path": "H:\\program\\CandleScope\\backend\\data\\replay.db",
+    "sha256": "sha256:e56330e7b635515caeff4cf35c8b8004799d68a23e2501789c1787a7ecc3ff68",
+    "sidecars": [
+      {
+        "exists": true,
+        "kind": "file",
+        "modified_at_ns": 1785984287899108200,
+        "path": "H:\\program\\CandleScope\\backend\\data\\replay.db-wal",
+        "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_bytes": 0
+      },
+      {
+        "exists": true,
+        "kind": "file",
+        "modified_at_ns": 1785985633947466500,
+        "path": "H:\\program\\CandleScope\\backend\\data\\replay.db-shm",
+        "sha256": "sha256:fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+        "size_bytes": 32768
+      }
+    ],
+    "size_bytes": 221843456,
+    "sqlite": {
+      "explicit_hedge_rule_count": 0,
+      "foreign_key_violation_count": 0,
+      "position_mode_rule_counts": {
+        "LEGACY_UNSPECIFIED": 1
+      },
+      "quick_check": [
+        "ok"
+      ],
+      "run_count": 1,
+      "runs": [
+        {
+          "created_at_ms": 1785927801173,
+          "name": "回放训练",
+          "run_id": "ffeef08c503c4153a4865f0067615a41",
+          "state": "PAUSED"
+        }
+      ],
+      "session_count": 1,
+      "training_schema_version": 13
+    }
+  },
+  "schema_version": "replay.hedge-phase0.data-inventory.v1"
+}

@@ -1,6 +1,6 @@
 # CandleScope HEDGE 交易所等价回放 Phase 0 数据合同审计
 
-状态：`BLOCKED_DATA_CONTRACT`
+状态：`UNBLOCKED_BY_USER_APPROVED_DETERMINISTIC_SIMULATION`
 
 审计日期：2026-08-06
 
@@ -10,7 +10,18 @@
 
 执行合同：[`KLINE_REPLAY_HEDGE_EXCHANGE_PARITY_EXECUTION_zh.md`](KLINE_REPLAY_HEDGE_EXCHANGE_PARITY_EXECUTION_zh.md)
 
-本文件记录 Phase 0 的数据可得性门禁。它不是实现完成声明，也不授权把缺失的保险基金或 ADL 输入替换成近似模型。
+本文件记录 Phase 0 的数据可得性门禁和原始阻塞证据。用户已于 2026-08-06 明确接受近似；后续实现必须遵守本文件新增的确定性模拟边界，不能反向把模拟结果宣传成历史交易所 exact。
+
+## 0. 解除阻塞决策
+
+用户选择了原第 6 节路径 C：接受“版本化确定性模拟 ADL/保险基金”，继续完成双向账户、强平、保险基金、ADL、默认启用和 hard cutover。冻结合同为：
+
+- 人类真值：[`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md)；
+- 机器真值：`backend/app/replay/training/hedge_simulation_contract.py`；
+- 模型：`BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1`；
+- 合同 hash：`sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b`。
+
+公开 mark/index、funding、规则、fee 和 L2 仍要求 pinned、连续和 fail closed。近似只覆盖不可观测的保险基金和 ADL 私有状态；它们必须在运行前物化、版本化、hash 并由 Run pin，禁止运行时随机生成或无限基金 fallback。
 
 ---
 
@@ -32,7 +43,7 @@
 - 可确定重建的 ADL 候选与选择顺序；
 - 无近似、无灰度、无 fallback。
 
-根据执行合同 Phase 0 的硬门禁，本阶段必须停在 `BLOCKED_DATA_CONTRACT`。在解除条件满足前，不进入 schema、账户或强平算法实现。
+该结论仍证明历史交易所 exact 不可实现。它不再阻塞用户已批准的“交易所规则级确定性模拟”；Phase 1 可以按第 0 节冻结合同进入 schema、账户和强平实现。
 
 ---
 
@@ -223,7 +234,7 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 
 ## 6. 解除阻塞的必要条件
 
-至少满足以下一种路径后，才能重新进入 Phase 0：
+以下路径曾是解除原始阻塞的选择；本轮已选择路径 C：
 
 ### 路径 A：交易所或授权数据商提供完整历史输入
 
@@ -241,7 +252,7 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 
 ### 路径 C：用户显式修改产品合同
 
-若用户主动接受“版本化确定性模拟 ADL，而非交易所历史 exact”，可以另写合同并实现模拟 participant cohort。但这会改变本轮已经明确的“无近似模型”目标，不能由实现者自行决定。
+用户已明确接受“版本化确定性模拟 ADL/保险基金，而非交易所历史 exact”。本轮已另写合同并冻结 materialized participant cohort；实现者仍不得自行扩大近似范围或隐藏 fidelity。
 
 ### 路径 D：切换到全状态透明的目标交易场所
 
@@ -249,7 +260,7 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 
 ---
 
-## 7. 停止点
+## 7. 原停止点与当前继续点
 
 本次 Phase 0 已完成以下只读工作：
 
@@ -259,7 +270,7 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 - 核对 Binance 官方公共下载数据；
 - 排除单账户/多账户持续采集、公共强平快照、sampling、proxy、synthetic cohort 和普通成交反推方案。
 
-未执行：
+原始阻塞审计时未执行：
 
 - 未修改产品合同降低标准；
 - 未设计 approximate ADL；
@@ -267,4 +278,4 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 - 未修改账户、强平、前端或默认启用代码；
 - 未导入或删除任何 replay 数据。
 
-下一步不是继续编码，而是取得第 6 节的一条权威输入路径或由用户明确修订目标。
+当前继续点：用户已修订目标，Phase 0 机器合同、黄金样本和数据盘点完成后进入 Phase 1。若后续 simulation manifest 缺失或 hash/连续性失败，具体 Run 仍必须 fail closed；这不等于重新启用旧 `APPROX_PROXY`。

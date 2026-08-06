@@ -39,7 +39,7 @@ BUILD_REPORT_PATH = ADAPTER_ROOT / "evidence" / "build-report.json"
 GATE_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase9-gate/1"
 CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase9-contract/1"
 EXPECTED_BUNDLE_SHA256 = (
-    "sha256:9fbb59299b2f3d900b4d8a2bd1c677f36b801eb27cfd39c2dca73efa44bcc249"
+    "sha256:5abcacccf9411550443c24d4b812c653e20bfe5b0176a30a616e006287181f92"
 )
 TEMPLATE_KINDS = [
     "java-library",

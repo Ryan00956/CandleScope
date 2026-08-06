@@ -41,8 +41,8 @@
     {
       "path": "scripts/build_release.py",
       "root": "adapter",
-      "sha256": "sha256:f062e0cafb9fe0893704c500d3139d9be25945fe354ebe99ec903cb271d2c336",
-      "size": 6800
+      "sha256": "sha256:70e65b0cc5c271f789a9f11be32c99582da09ece1603f467510e1b5664c995db",
+      "size": 7588
     },
     {
       "path": "src/main.rs",
@@ -72,8 +72,8 @@
   "networkAccessDuringBuild": false,
   "releaseArtifact": {
     "path": "runtime/adapter.exe",
-    "sha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d",
-    "size": 427008
+    "sha256": "sha256:293b93c79129e357570731f53f73978a8089c43a4a0d88189538a08eb37e24c1",
+    "size": 426496
   },
   "schemaVersion": "candlescope.aho-corasick-build-lock/1",
   "sourceDateEpoch": 1767225600,

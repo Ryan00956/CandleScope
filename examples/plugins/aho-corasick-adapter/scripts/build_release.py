@@ -22,6 +22,8 @@ TARGET = "x86_64-pc-windows-msvc"
 BINARY_NAME = "candlescope-aho-corasick-adapter.exe"
 EXPECTED_RUSTC = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
 EXPECTED_CARGO = "cargo 1.97.1 (c980f4866 2026-06-30)"
+CANONICAL_REPOSITORY_ROOT = "/candlescope/source"
+CANONICAL_CARGO_HOME = "/cargo/home"
 
 
 def digest(path: Path) -> tuple[str, int]:
@@ -96,15 +98,32 @@ def verify_inputs(lock: dict[str, Any]) -> None:
     verify_registry_cache(lock)
 
 
-def build_once(cargo: str, target_dir: Path) -> Path:
+def build_environment() -> dict[str, str]:
     environment = os.environ.copy()
+    # Host-provided flags would invalidate the reviewed build. Cargo's encoded
+    # form preserves each argument without shell parsing, retains MSVC /Brepro,
+    # and removes checkout/user paths from panic-location strings.
+    environment.pop("RUSTFLAGS", None)
+    environment.pop("CARGO_ENCODED_RUSTFLAGS", None)
+    rustflags = [
+        "-C",
+        "link-arg=/Brepro",
+        f"--remap-path-prefix={REPOSITORY_ROOT}={CANONICAL_REPOSITORY_ROOT}",
+        f"--remap-path-prefix={cargo_home()}={CANONICAL_CARGO_HOME}",
+    ]
     environment.update(
         {
             "CARGO_INCREMENTAL": "0",
+            "CARGO_ENCODED_RUSTFLAGS": "\x1f".join(rustflags),
             "CARGO_NET_OFFLINE": "true",
             "SOURCE_DATE_EPOCH": "1767225600",
         }
     )
+    return environment
+
+
+def build_once(cargo: str, target_dir: Path) -> Path:
+    environment = build_environment()
     subprocess.run(
         [
             cargo,

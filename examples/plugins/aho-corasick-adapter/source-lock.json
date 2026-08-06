@@ -1,10 +1,10 @@
 {
   "adapter": {
     "buildReceipt": "build-receipt.json",
-    "buildReceiptSha256": "sha256:f82f4c4f1e2e50493e14cf39335e40c492e7ceafc08d4ea970239c3e445e3d00",
+    "buildReceiptSha256": "sha256:bd8a532ed41c3d841560ca08aafce8eb6fdd1285a5b1d1cf1559112f2bf271f6",
     "conformanceTranscriptSha256": "sha256:c9ad3a65cbfcd24dd820a881dea38c02212cb7f816000d480874630478cf5e08",
     "entryArtifact": "runtime/adapter.exe",
-    "entryArtifactSha256": "sha256:dc2a213ff9bb2ef7db8a9c499a583655e2bb32bdd47d9234c5f63a779ab5924d"
+    "entryArtifactSha256": "sha256:293b93c79129e357570731f53f73978a8089c43a4a0d88189538a08eb37e24c1"
   },
   "artifactPins": [
     {
@@ -75,8 +75,8 @@
   "pluginId": "candlescope.aho-corasick",
   "review": {
     "capabilities": [],
-    "confirmedAt": "2026-08-03T21:05:17Z",
-    "confirmedBy": "codex-phase9-reviewed-build",
+    "confirmedAt": "2026-08-06T17:09:15Z",
+    "confirmedBy": "codex-phase9-reproducible-build",
     "generatedSourceContainsHostInternalImports": false,
     "marketplaceApproved": false,
     "stablePublicApi": true,

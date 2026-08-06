@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+from types import ModuleType
+
+import pytest
 
 from scripts import plugin_platform_multi_runtime_phase9 as phase9
 
@@ -69,3 +73,41 @@ def test_phase9_reference_is_a_thin_public_api_adapter() -> None:
     assert "import app." not in source.casefold()
     assert "backend/app/" not in source.casefold()
     assert phase9.capture_contract()["referenceAdapter"]["upstreamAlgorithmCopied"] is False
+
+
+def _build_release_module() -> ModuleType:
+    path = (
+        REPOSITORY_ROOT
+        / "examples"
+        / "plugins"
+        / "aho-corasick-adapter"
+        / "scripts"
+        / "build_release.py"
+    )
+    spec = importlib.util.spec_from_file_location("aho_corasick_build_release", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_phase9_reference_build_remaps_host_paths_and_ignores_host_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RUSTFLAGS", "--cfg injected_by_host")
+    monkeypatch.setenv("CARGO_ENCODED_RUSTFLAGS", "injected\x1fflags")
+    build_release = _build_release_module()
+
+    environment = build_release.build_environment()
+    encoded = environment["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
+
+    assert "injected_by_host" not in environment["CARGO_ENCODED_RUSTFLAGS"]
+    assert encoded[:2] == ["-C", "link-arg=/Brepro"]
+    assert (
+        f"--remap-path-prefix={build_release.REPOSITORY_ROOT}="
+        f"{build_release.CANONICAL_REPOSITORY_ROOT}"
+    ) in encoded
+    assert (
+        f"--remap-path-prefix={build_release.cargo_home()}="
+        f"{build_release.CANONICAL_CARGO_HOME}"
+    ) in encoded

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.replay.broker.models import (
@@ -7,10 +9,13 @@ from app.replay.broker.models import (
     OrderSide,
     OrderStatus,
     OrderType,
+    PositionBook,
+    PositionMode,
+    PositionSide,
     TOUCH_OR_TAPE_EXECUTION_MODE,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
-from tests.fixtures.replay.broker_fakes import bar, make_broker, request
+from tests.fixtures.replay.broker_fakes import CONFIG, bar, make_broker, request
 
 
 def _long_broker(*, touch: bool = False):
@@ -167,6 +172,86 @@ def test_market_position_intents_reject_ambiguous_open_and_reverse_atomically() 
     assert reversed_orders[0].reduce_only is True
     assert reversed_orders[1].side is OrderSide.SELL
     assert reversed_orders[1].reduce_only is False
+
+
+def test_hedge_mode_keeps_long_and_short_legs_independent_across_restore() -> None:
+    config = replace(CONFIG, position_mode=PositionMode.HEDGE)
+    broker = make_broker(
+        config=config,
+        execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
+    )
+
+    long_order = broker.execute_position_intent(
+        intent="OPEN",
+        side="BUY",
+        quantity="1",
+        position_side=PositionSide.LONG,
+        command_id="open-long",
+    )[0]
+    broker.apply_bar(bar(0, 100))
+    short_order = broker.execute_position_intent(
+        intent="OPEN",
+        side="SELL",
+        quantity="2",
+        position_side=PositionSide.SHORT,
+        command_id="open-short",
+    )[0]
+
+    assert long_order.position_side is PositionSide.LONG
+    assert short_order.position_side is PositionSide.SHORT
+    assert isinstance(broker.position, PositionBook)
+    assert broker.position.long.quantity == "1"
+    assert broker.position.short.quantity == "-2"
+    assert broker.position.quantity == "-1"
+    assert broker.position.notional == "302.7"
+    assert broker.account.margin_used == "60.54"
+
+    broker.set_position_protection(
+        quantity=None,
+        stop_loss_price="90",
+        take_profit_price=None,
+        position_side=PositionSide.LONG,
+        command_id="protect-long",
+    )
+    broker.set_position_protection(
+        quantity=None,
+        stop_loss_price="120",
+        take_profit_price=None,
+        position_side=PositionSide.SHORT,
+        command_id="protect-short",
+    )
+    assert {order.position_side for order in broker.open_orders} == {
+        PositionSide.LONG,
+        PositionSide.SHORT,
+    }
+
+    checkpoint = broker.snapshot()
+    restored = make_broker(
+        config=config,
+        execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
+    )
+    restored.restore(checkpoint)
+    assert restored.state_hash == broker.state_hash
+
+    closed = restored.close_position(
+        command_id="close-long",
+        position_side=PositionSide.LONG,
+    )
+    assert closed.position_side is PositionSide.LONG
+    assert isinstance(restored.position, PositionBook)
+    assert restored.position.long.quantity == "0"
+    assert restored.position.short.quantity == "-2"
+    assert {order.position_side for order in restored.open_orders} == {
+        PositionSide.SHORT,
+    }
+
+    with pytest.raises(ReplayDomainError, match="position_side is required"):
+        restored.execute_position_intent(
+            intent="CLOSE",
+            side=None,
+            quantity=None,
+            command_id="ambiguous-close",
+        )
 
 
 def test_replace_order_is_atomic_and_preserves_execution_semantics() -> None:

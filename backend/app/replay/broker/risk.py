@@ -13,6 +13,10 @@ from .models import (
     OrderRequest,
     OrderSide,
     Position,
+    PositionBook,
+    PositionMode,
+    PositionSide,
+    PositionState,
     ReplayOrder,
     canonical_decimal,
     decimal_to_string,
@@ -25,6 +29,33 @@ class OrderRiskContext(Protocol):
     limit_price: str | None
     stop_price: str | None
     leverage: str | None
+    position_side: PositionSide | None
+
+
+def position_for_order(
+    *,
+    config: BrokerConfig,
+    request: OrderRiskContext,
+    position: PositionState,
+) -> Position:
+    if config.position_mode is PositionMode.ONE_WAY:
+        if request.position_side is not None:
+            _order_rejected("position_side is only valid in HEDGE mode")
+        if not isinstance(position, Position):
+            raise TypeError("ONE_WAY broker requires a net position")
+        return position
+    if request.position_side is None:
+        _order_rejected("position_side is required in HEDGE mode")
+    if not isinstance(position, PositionBook):
+        raise TypeError("HEDGE broker requires a position book")
+    expected_side = (
+        request.position_side.closing_order_side
+        if request.reduce_only
+        else request.position_side.opening_order_side
+    )
+    if request.side is not expected_side:
+        _order_rejected("order side does not match the selected hedge leg")
+    return position.leg(request.position_side)
 
 
 def decimal_multiple(value: Decimal, step: Decimal) -> bool:
@@ -110,12 +141,17 @@ def validate_order_risk(
     *,
     config: BrokerConfig,
     request: OrderRequest,
-    position: Position,
+    position: PositionState,
     account: Account,
     open_orders: Iterable[ReplayOrder],
 ) -> str:
     """Validate one request and return its conservative margin reservation."""
 
+    target_position = position_for_order(
+        config=config,
+        request=request,
+        position=position,
+    )
     quantity = Decimal(request.quantity)
     filters = config.instrument
     limits = config.limits
@@ -146,7 +182,7 @@ def validate_order_risk(
         _order_rejected("order notional is outside instrument bounds")
 
     if request.reduce_only:
-        position_quantity = Decimal(position.quantity)
+        position_quantity = Decimal(target_position.quantity)
         if position_quantity == 0:
             _order_rejected("reduce-only order requires an open position")
         expected_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
@@ -156,7 +192,7 @@ def validate_order_risk(
             _order_rejected("reduce-only quantity exceeds the position")
         return "0"
 
-    existing_exposure = abs(Decimal(position.quantity)) * Decimal(position.mark_price)
+    existing_exposure = Decimal(position.notional)
     for order in open_orders:
         if order.reduce_only or order.status.terminal:
             continue
@@ -178,7 +214,7 @@ def build_order_capacity(
     *,
     config: BrokerConfig,
     request: OrderCapacityRequest,
-    position: Position,
+    position: PositionState,
     account: Account,
     orders: Iterable[ReplayOrder],
 ) -> dict[str, object]:
@@ -209,10 +245,15 @@ def build_order_capacity(
         ):
             _order_rejected(f"{field_name} is not aligned to instrument tick")
 
+    target_position = position_for_order(
+        config=config,
+        request=request,
+        position=position,
+    )
     reference = order_reference_price(request, position.mark_price)
     leverage = effective_order_leverage(request, config)
     if request.reduce_only:
-        position_quantity = Decimal(position.quantity)
+        position_quantity = Decimal(target_position.quantity)
         if position_quantity == 0:
             _order_rejected("reduce-only order requires an open position")
         expected_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
@@ -220,9 +261,7 @@ def build_order_capacity(
             _order_rejected("reduce-only side would increase the position")
         maximum = abs(position_quantity)
     else:
-        existing_exposure = abs(Decimal(position.quantity)) * Decimal(
-            position.mark_price
-        )
+        existing_exposure = Decimal(position.notional)
         for order in open_orders:
             if order.reduce_only:
                 continue
@@ -267,7 +306,7 @@ def build_order_preview(
     *,
     config: BrokerConfig,
     request: OrderRequest,
-    position: Position,
+    position: PositionState,
     account: Account,
     orders: Iterable[ReplayOrder],
 ) -> dict[str, object]:
@@ -298,6 +337,7 @@ def build_order_preview(
             limit_price=request.limit_price,
             stop_price=request.stop_price,
             leverage=request.leverage,
+            position_side=request.position_side,
         ),
         position=position,
         account=account,
@@ -345,7 +385,12 @@ def build_order_preview(
     }
 
 
-def mark_position(position: Position, mark_price: str) -> Position:
+def mark_position(position: PositionState, mark_price: str) -> PositionState:
+    if isinstance(position, PositionBook):
+        long = mark_position(position.long, mark_price)
+        short = mark_position(position.short, mark_price)
+        assert isinstance(long, Position) and isinstance(short, Position)
+        return PositionBook(long=long, short=short)
     mark = Decimal(
         canonical_decimal(mark_price, field_name="mark_price", positive=True)
     )
@@ -374,7 +419,7 @@ def mark_position(position: Position, mark_price: str) -> Position:
 def build_account(
     *,
     config: BrokerConfig,
-    position: Position,
+    position: PositionState,
     realized_pnl: str,
     fees_paid: str,
     reserved_margin: str,
@@ -418,7 +463,7 @@ def build_account(
 def validate_trigger_position_notional(
     *,
     config: BrokerConfig,
-    position: Position,
+    position: PositionState,
 ) -> None:
     notional = Decimal(position.notional)
     if notional > Decimal(config.instrument.max_notional) or notional > Decimal(

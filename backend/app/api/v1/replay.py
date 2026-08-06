@@ -34,6 +34,7 @@ from app.replay.training.models import (
     FundingMode,
     IntegrityMode,
     MarginMode,
+    PositionMode,
     ReplaySource,
     StartMode,
     TimeDisclosurePolicy,
@@ -273,6 +274,7 @@ class TrainingRunPreparationPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
     account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_history_ref: AccountHistoryRefPayload | None = None
@@ -308,6 +310,7 @@ class TrainingRunSetupPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
     account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
@@ -358,6 +361,7 @@ class ReplayOrderRequestPayload(_StrictModel):
     limit_price: str | None = Field(default=None, min_length=1, max_length=128)
     stop_price: str | None = Field(default=None, min_length=1, max_length=128)
     leverage: str | None = Field(default=None, min_length=1, max_length=128)
+    position_side: Literal["LONG", "SHORT"] | None = None
 
 
 class ReplayTradePlanDraftPayload(_StrictModel):
@@ -390,6 +394,7 @@ class ReplayOrderCapacityContextPayload(_StrictModel):
     limit_price: str | None = Field(default=None, min_length=1, max_length=128)
     stop_price: str | None = Field(default=None, min_length=1, max_length=128)
     leverage: str | None = Field(default=None, min_length=1, max_length=128)
+    position_side: Literal["LONG", "SHORT"] | None = None
 
 
 class ReplayOrderCapacityPayload(_StrictModel):

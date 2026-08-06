@@ -1,0 +1,602 @@
+# CandleScope K 线回放交易所级双向持仓与强平硬切换执行文档
+
+状态：`DRAFT_FOR_EXECUTION / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
+
+日期：2026-08-06
+
+适用工作区：`H:\program\CandleScope`
+
+产品真值：[`KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md`](KLINE_REPLAY_TRAINING_PRODUCT_CONTRACT_zh.md)
+
+现有总执行文档：[`KLINE_REPLAY_TRAINING_EXECUTION_zh.md`](KLINE_REPLAY_TRAINING_EXECUTION_zh.md)
+
+本文不是完成声明。它冻结下一轮实现范围、顺序、硬门禁和最终启用方式。只有本文最后的全部验收门禁在同一 clean HEAD 上通过后，才能把“交易所级双向持仓与强平”标记为完成。
+
+---
+
+## 1. 决策摘要
+
+本轮把当前 HEDGE 基础实现升级为交易所规则等价的双向合约账户。最终产品必须同时满足：
+
+1. 同一商品的 `LONG`、`SHORT` 两条腿可独立开仓、加仓、减仓、止盈止损、调整保证金和强平。
+2. `CROSS` 与 `ISOLATED` 都支持双向持仓，不再把 HEDGE 限制为全仓。
+3. HEDGE 使用权威 mark/index、版本化风险限额和维护保证金阶梯，不能绑定 `APPROX_PROXY`。
+4. 资金费按结算时刻分别对两条腿入账，不能通过净仓位抵消后漏记。
+5. 强平覆盖撤单释放保证金、重新评估、阶梯降档、部分强平、全部强平、破产结算、强平费、保险基金和 ADL。
+6. 强平执行必须留下完整订单、成交、账本和状态机证据，不能直接改写仓位数量。
+7. 正常构建默认开放回放入口、默认启用所需账户与盘口能力，新建 Run 默认选择 `HEDGE`；`ONE_WAY` 仍可由用户主动选择。
+8. 不增加 HEDGE 灰度比例、实验组、双引擎或默认关闭开关；最终上线是整版硬切换。
+9. 任一权威数据缺失时明确拒绝创建或暂停 Run，不回退到 bar/trade proxy、固定资金费或 Touch/Tape 继续伪装成完整模式。
+10. 回滚只允许回滚完整构建和相应数据版本，不允许运行时切回旧 HEDGE 账户模型。
+
+### 1.1 “完整”的冻结边界
+
+首个交付目标锁定为：
+
+- 单一交易所规则适配器；首选与现有 archive/book 路径一致的 Binance USD-M；
+- 线性、quote-settled 永续合约；
+- 单结算资产的全仓与逐仓账户；
+- `ONE_WAY` 与 `HEDGE`；
+- 交易所规则等价的保证金、资金费和强平生命周期；
+- 版本化保险基金和 ADL 模型；
+- 有连续历史 L2 时的确定性强平执行。
+
+“完整”指上述账户与风险生命周期完整，不代表重建历史交易所中不可观测的其他用户私有订单排队。若最终要求历史成交逐笔 queue-exact，则必须另行取得带订单身份和队列位置的 L3 数据；仅有 L2 时不得作此声明。这是数据边界，不是允许降级的灰度路径。
+
+本轮仍不包含：
+
+- 实盘 API key、真实资金或实盘下单；
+- inverse、期权、Greeks；
+- multi-assets 或 portfolio margin；
+- 跨交易所统一保证金；
+- 在缺少权威保险基金或 ADL 输入时伪造“历史 exact”结果。
+
+---
+
+## 2. 当前基线与必须移除的限制
+
+当前工作区已经有真正的双腿仓位容器和显式 `position_side`，但它只是本轮底座：
+
+- `PositionBook.long` 与 `PositionBook.short` 独立保存；
+- 开平仓、保护单和成交显式携带 `LONG|SHORT`；
+- 风险敞口按两腿 gross notional 求和；
+- 基础跨仓强平可撤单并依次关闭两条腿；
+- UI、持久化、报告已能区分两条腿。
+
+以下现状必须在最终交付中消失：
+
+| 当前限制 | 位置 | 最终要求 |
+|---|---|---|
+| HEDGE 只能 `APPROX_PROXY` | `training/models.py` 创建合同 | HEDGE 只接受权威、版本化 exact account 输入 |
+| HEDGE 只能 `CROSS` | 创建合同和 Hub 禁用项 | 同时支持 CROSS 与逐腿 ISOLATED |
+| HEDGE 强制 funding OFF | 创建合同和 Hub 禁用项 | 支持历史 exact funding，逐腿独立入账 |
+| HEDGE 强制 book OFF | 创建合同和 Hub 禁用项 | 完整模式要求连续历史 L2，不允许 Touch/Tape 回退 |
+| account-history 固定 ONE_WAY | `account_history.py` archive contract | 新 archive 版本支持 HEDGE |
+| 保证金主要按 gross notional / max leverage | broker/training account projection | 使用交易所适配器冻结的逐腿初始保证金和维持保证金公式 |
+| 两腿一起强平时破产价为 null | liquidation detection | 每条腿和每一步都有可审计的破产/接管价格或明确的公式不适用原因 |
+| 一个 track/sequence 只能有一个 liquidation event | training schema | 一个 case 下可有多 leg、多 step、多 order、多 fill |
+| liquidation 只保存第一个 close order id | service/storage | 保存全部撤单、部分强平和最终平仓订单与成交 |
+| 无保险基金和 ADL | replay domain 不存在 | 形成独立账本、状态机、审计和 UI |
+| 新 Run 默认 ONE_WAY | Hub draft 和后端默认值 | 新 Run 默认 HEDGE，用户可主动选 ONE_WAY |
+| replay/entry/account/book 默认关闭 | backend/frontend config | 正常构建默认启用；前端入口不再由默认关闭旗标隐藏 |
+
+当前 `APPROX_PROXY` 可以继续服务明确标注的 ONE_WAY 沙盒训练，但不得再成为完整 HEDGE 的可选项、隐式默认或失败回退。
+
+---
+
+## 3. 非灰度与默认启用合同
+
+### 3.1 禁止的实现方式
+
+不得新增或保留以下行为：
+
+- `HEDGE_ENABLED=0`、`HEDGE_EXPERIMENT_PERCENT` 或同类产品开关；
+- 按用户、Run、symbol、机器或流量比例选择新旧 HEDGE 引擎；
+- 新模型失败后自动调用旧 `APPROX_PROXY` 强平；
+- exact mark 缺失后改用 last、trade、bar close 或前一条 mark；
+- funding 缺失后按 0 结算；
+- book gap 后退回 Touch/Tape；
+- ADL/保险基金缺数据后仅在 UI 隐藏该环节并继续宣称完整；
+- 同一数据库中让相同模型版本由两个不同公式解释；
+- 把阶段性代码通过隐藏入口部署到正常构建中等待放量。
+
+### 3.2 允许的开发与故障边界
+
+- 各 Phase 可在独立开发分支上提交；阶段提交不是运行时灰度。
+- 最终合并前，正常发布构建不得包含可被用户创建的半成品 HEDGE Run。
+- 数据不满足 exact 合同时，能力保持默认启用，但具体 dataset/Run 返回明确的 `UNAVAILABLE`、`QUARANTINED` 或 `PAUSED`；这不是 feature disabled。
+- 运维可以通过回滚完整构建处理事故，但不能在新构建中静默切换旧公式。
+- 非产品正确性开关，例如 GC、预下载并发或性能优化，可以独立配置；关闭它们不得改变账户、成交或强平结果。
+
+### 3.3 最终默认值
+
+最终 hard-cutover commit 必须满足：
+
+- 后端 replay capability 正常构建默认启用；若保留 `REPLAY_ENABLED`，默认值改为 `1`。
+- 前端移除 `VITE_REPLAY_ENTRY_ENABLED` 对入口可见性的依赖；入口默认显示，再由后端 capability 返回数据可用性。
+- exact account 与 historical book 能力默认启用；若保留对应环境变量，默认值必须为 `1`。
+- 禁止增加新的 HEDGE、liquidation、insurance fund 或 ADL 默认关闭开关。
+- 前端新建 Run 的 `positionMode` 默认值为 `HEDGE`。
+- 后端省略 `position_mode` 时的规范化默认值改为 `HEDGE`；canonical/hash 合同同步升级，不能用旧默认值保持新旧语义混合。
+- `.env.example`、README、测试服务器、发布校验器和回滚脚本使用同一默认值。
+
+---
+
+## 4. 权威数据合同
+
+完整 HEDGE 不允许依赖通用代理规则。每个 Run 必须 pin 一个不可变的 exchange account dataset manifest，至少包含下列时间线：
+
+| 数据 | 必需字段 | 连续性要求 | 缺失行为 |
+|---|---|---|---|
+| 商品与账户规则 | symbol filters、contract size、leverage bracket、risk limit、maintenance rate/deduction、liquidation fee、effective time | 覆盖 Run 全区间，规则变更有单调序号 | 拒绝创建或暂停 |
+| mark/index | event time、sequence、mark、index、来源 | 严格单调、无未解释 gap、同毫秒总序冻结 | 暂停，不使用 last/trade 代理 |
+| funding | settlement time、rate、settlement mark、规则版本 | 覆盖所有结算点，幂等键唯一 | 暂停，不按 0 跳过 |
+| 历史 L2 | snapshot、增量、exchange sequence、gap/resync | 每个强制 FULL track 连续 | 整个 Run 暂停，不回退 Touch/Tape |
+| 保险基金 | 资产、余额、变动、effective time、来源版本 | 能重建每次接管前后的余额 | 禁止宣称完整强平 |
+| ADL | 排名公式版本、参与集合或权威队列输入、effective time | 能确定性重建选择顺序 | 禁止执行或宣称历史 exact ADL |
+| 手续费 | maker/taker/liquidation fee policy、账户 tier、生效时间 | 覆盖每个 fill | 暂停，不使用当前配置替代历史策略 |
+
+所有输入必须：
+
+1. 由 operator importer 导入 replay-owned object store；
+2. 记录 source identity、schema、时间范围、checksum、行数、连续性证明和 capture receipt；
+3. 通过 quarantine 后才能绑定 Run；
+4. 被 Run manifest pin，后续 catalog 刷新不能改变既有 Run；
+5. 以 Decimal canonical string 保存，禁止 float 进入账户公式；
+6. 有独立 component hash、event chain hash 和最终 dataset hash；
+7. 缺失、重复、回退、越界或被篡改时 fail closed。
+
+Phase 0 必须从目标交易所的权威规则或已验证 capture 冻结公式版本。实现代码不能把当前规则网页内容散落成无版本常量。
+
+---
+
+## 5. 目标领域模型
+
+### 5.1 双向仓位
+
+每个 `(run_id, track_id, position_side)` 是独立 `PositionLeg`，至少包含：
+
+- `position_side=LONG|SHORT`；
+- signed quantity 与 absolute quantity；
+- entry price、mark price、notional；
+- realized/unrealized PnL；
+- initial margin、maintenance margin；
+- leverage、margin mode、isolated wallet；
+- liquidation price、bankruptcy price；
+- accumulated funding、fees；
+- active risk tier 和 rule revision；
+- protection/order references；
+- component revision 和 hash。
+
+等量 LONG/SHORT 不是空仓。是否允许初始保证金抵扣、维持保证金抵扣或共享风险限额，只能由版本化 exchange adapter 决定，不能统一写死为 gross 或 net。
+
+### 5.2 保证金账户
+
+账户至少拆分：
+
+- settlement cash；
+- cross wallet balance；
+- 每条逐仓腿的 isolated wallet；
+- open-order initial margin；
+- position initial margin；
+- maintenance margin；
+- available balance；
+- realized/unrealized PnL；
+- funding、trading fee、liquidation fee；
+- insurance transfer 与 ADL posting；
+- account status 与 risk snapshot hash。
+
+调整逐仓保证金必须是领域命令和账本事件，不能直接修改 JSON allocation。切换 margin mode、position mode 或影响历史公式的参数在 Run 创建后不可变，除非产品合同明确允许并记录版本化 mutation。
+
+### 5.3 强平 case、step 与 fill
+
+现有单行 liquidation event 升级为：
+
+- `LiquidationCase`：一次账户风险破口；
+- `LiquidationLeg`：case 涉及的 LONG/SHORT 腿；
+- `LiquidationStep`：撤单、重评估、部分强平、全平、破产接管、保险基金或 ADL；
+- `LiquidationOrder`：每一步产生的全部订单；
+- `LiquidationFill`：订单的逐次成交；
+- `InsuranceFundPosting`：基金流入流出；
+- `ADLEvent`：候选排名、选中对象、数量、价格和账本影响。
+
+一个 case 可以覆盖多个 track 和多条腿。数据库不得继续用 `(run_id, track_id, trigger_source_sequence)` 唯一约束压扁账户级事件。
+
+---
+
+## 6. 强平状态机与原子顺序
+
+### 6.1 状态机
+
+```text
+ACTIVE
+  -> RISK_BREACH_DETECTED
+  -> CANCELING_ORDERS
+  -> RISK_RECHECK
+  -> PARTIAL_LIQUIDATION (0..N)
+  -> FULL_LIQUIDATION (必要时)
+  -> BANKRUPTCY_TRANSFER (出现账户缺口时)
+  -> INSURANCE_FUND_SETTLEMENT
+  -> ADL (保险基金不足且规则要求时)
+  -> ACTIVE | BANKRUPT | FAILED_CLOSED
+```
+
+`FAILED_CLOSED` 必须暂停整个 Run，并保存失败前最后一个已提交的原子状态。重启后从 durable step 恢复，不得重复撤单、成交、收费、保险基金扣款或 ADL。
+
+### 6.2 同一虚拟时刻的总序
+
+Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
+
+1. 规则/风险限额生效；
+2. 市场 trade/book 事件与已有订单成交；
+3. mark/index 更新；
+4. funding settlement；
+5. 条件单触发和挂单状态变化；
+6. 账户风险快照与强平检测；
+7. 强平撤单、部分平仓、全平、破产、保险基金和 ADL；
+8. ledger、projection、checkpoint 与 hash 提交。
+
+用户命令按服务端 accepted sequence 排序，只能影响接受之后的状态，不能插回已提交的同毫秒事件之前。
+
+### 6.3 强平算法
+
+每次风险检查必须执行完整流程：
+
+1. 用权威 mark、active rule revision 和当前订单/仓位构造不可变 `RiskSnapshot`。
+2. 按 exchange adapter 分别计算 CROSS account 与各条 ISOLATED leg 的风险。
+3. 命中阈值后创建唯一 `LiquidationCase`，冻结普通增仓命令。
+4. 取消规则要求取消的活动订单，逐笔记录并释放订单保证金。
+5. 使用撤单后的账户状态重新计算；若恢复安全，记录 `RECOVERED_AFTER_CANCEL` 并结束 case。
+6. 若仍不安全，按照 risk tier 和交易所降档规则计算最小部分强平数量。
+7. 通过强平订单走历史 L2 执行，保存全部 partial fills、滑点、费用和未成交量。
+8. 每次 fill 后更新腿、账户、tier 和风险快照；达到安全阈值立即停止继续减仓。
+9. 无法通过部分强平恢复时进入全平；两条腿是否同时处理、先后顺序和共享保证金释放由适配器规则决定。
+10. 计算每条腿的接管价/破产价、账户缺口和 liquidation fee，禁止仅保存净数量。
+11. 缺口先进入保险基金账本；基金不足时按冻结的 ADL 排名规则执行 ADL。
+12. 最终原子提交 case、steps、orders、fills、ledger、account、positions、report projection 和 state hash。
+
+任何一步缺数据、违反数量/价格 filter、盘口断档或不能确定 ADL 顺序，都进入 `FAILED_CLOSED`，不得直接把 quantity 清零。
+
+---
+
+## 7. Schema、协议与兼容策略
+
+当前 training schema 为 v13。本轮必须升级到下一版本，并为以下数据提供一等结构，不能继续只塞入单个 `position_json` 或 liquidation 单行：
+
+- per-leg position state；
+- per-leg margin/leverage/risk tier；
+- cross 与 isolated margin buckets；
+- exchange rule adapter/version；
+- HEDGE account-history ref；
+- liquidation case/leg/step/order/fill；
+- insurance fund balance/posting；
+- ADL queue snapshot/event；
+- risk snapshot 和 audit proof。
+
+协议与 canonical 变更要求：
+
+- `position_mode` 省略默认值从 ONE_WAY 改为 HEDGE，协议版本必须同步升级；
+- 所有 open/close/protection/margin 命令在 HEDGE 下要求 `position_side`；
+- liquidation 返回数组化 order/fill/leg，不保留“只记录第一个 close order”的兼容解释；
+- state hash、component hash、report hash 覆盖新字段；
+- checkpoint、fork、review、export/import 和 recovery 使用同一模型版本；
+- 旧 HEDGE Run 不得被新公式静默解释。
+
+本项目既有开发期 cutover 已允许清空训练数据。本轮执行时仍必须先生成数据库路径、schema、size、checksum 和 Run 数量清单，再进行一次性开发数据重建；不得删除 live 数据库、行情 archive 或用户未授权的其他目录。若发现已存在需要保留的正式 HEDGE Run，必须停止并另写显式迁移合同。
+
+---
+
+## 8. 分阶段执行计划
+
+各 Phase 在独立分支上连续完成。每个 Phase 只提交显式路径，不能 `git add -A`，不能带入当前工作区无关的 design QA 或 preview 文件。任一 Phase 未通过自己的门禁，不进入下一阶段。
+
+### Phase 0：合同、交易所规则与数据可得性冻结
+
+工作内容：
+
+- 修改产品合同，删除 HEDGE 的 `APPROX_PROXY + CROSS + funding OFF + book OFF` 首版限制。
+- 从非目标中移除本轮要求覆盖的保险基金和 ADL。
+- 冻结首个 exchange adapter、合约类型、结算资产、保证金和强平公式版本。
+- 冻结权威数据 manifest、连续性、quarantine 和缺失行为。
+- 冻结强平总序、状态机、部分强平算法、保险基金和 ADL 输入合同。
+- 生成当前 replay 数据盘点和可恢复备份清单。
+
+硬门禁：
+
+- 不存在“稍后决定”的保证金、强平或 ADL 公式。
+- 每个 required source 都有真实样本、来源证明和 gap 测试。
+- 若保险基金或 ADL 权威数据不可获得，Phase 0 直接 `BLOCKED_DATA_CONTRACT`，不得转写成近似实现。
+
+预估：3–5 个工程日，不包含外部数据获取等待。
+
+### Phase 1：协议、canonical 与 schema
+
+工作内容：
+
+- 升级 replay/training 协议和 training schema。
+- 落地 per-leg position、margin bucket、risk snapshot、liquidation case/step/fill、insurance、ADL 表。
+- 更新 API/parser/types/canonical/checkpoint/fork/review/export。
+- 后端和前端默认 `position_mode=HEDGE`。
+- 对旧 HEDGE payload 明确拒绝，不做静默 canonical 兼容。
+
+硬门禁：
+
+- schema foreign-key、unique、restart 和 corruption 测试通过。
+- 同一 payload 在 Python/TypeScript 解析和 canonical hash 上一致。
+- 无单行 liquidation event 压扁多腿结果的路径。
+
+预估：4–6 个工程日。
+
+### Phase 2：双向账户、杠杆与保证金核心
+
+工作内容：
+
+- 把 PositionBook 升级为完整 per-leg risk state。
+- 实现逐腿 leverage、initial margin、maintenance margin 和 risk tier。
+- 实现 CROSS 与逐腿 ISOLATED；支持增加/减少逐仓保证金。
+- 按 exchange adapter 实现 HEDGE 下的保证金抵扣或不抵扣规则。
+- 重构 order capacity、reserved margin、reduce-only 和 close capacity。
+- 所有 Decimal rounding 从 rule adapter 读取。
+
+硬门禁：
+
+- LONG/SHORT 同时存在时，任何 account 字段都可从 ledger 和 position legs 独立重算。
+- 等量双腿不会被当成 flat，也不会错误释放全部保证金。
+- CROSS 和 ISOLATED 的一条腿变化不会串改另一条腿。
+
+预估：5–7 个工程日。
+
+### Phase 3：HEDGE exact archive 与权威时间线
+
+工作内容：
+
+- 新增 HEDGE account-history archive schema 和 importer。
+- 导入并 pin mark/index、funding、rule/risk tier、fee、insurance 和 ADL 时间线。
+- 把 account-only event 纳入全局虚拟时钟。
+- 实现 source sequence、same-ms phase、checksum、quarantine 和 rehydration。
+- 删除 HEDGE 对 `APPROX_PROXY` 的依赖和可选入口。
+
+硬门禁：
+
+- 任一源删除、篡改、重复、gap 或时间倒退都会暂停 Run。
+- 关闭网络后可完全从 pinned archive 重放并得到同一 hash。
+- 不存在 mark/funding/book fallback。
+
+预估：5–8 个工程日；真实数据准备另计。
+
+### Phase 4：双向资金费、手续费与账本审计
+
+工作内容：
+
+- funding 按结算前持仓快照分别结算 LONG/SHORT。
+- maker/taker/liquidation fee 使用对应 effective policy revision。
+- 所有 position/margin/funding/fee mutation 形成 hash-chained ledger entry。
+- 更新 portfolio、report、review 和 export 的逐腿账本。
+- 扩展 account auditor，从初始权益完整重算两条腿和账户。
+
+硬门禁：
+
+- 相同数量的 LONG/SHORT 仍分别产生方向相反的 funding cash flow。
+- response loss、重试和重启不会重复结算。
+- auditor 对正常样本零差异，对任一篡改明确失败字段。
+
+预估：3–5 个工程日。
+
+### Phase 5：完整强平、破产、保险基金与 ADL
+
+工作内容：
+
+- 实现本文第 6 节的完整状态机。
+- 撤单释放保证金后重新评估。
+- 实现 risk-tier step-down、部分强平、多次 fill 和必要时全平。
+- 实现逐腿 liquidation/bankruptcy/takeover 价格。
+- 实现 insurance fund posting、余额约束和不足处理。
+- 实现 ADL ranking、selection、position reduction、counterparty ledger 和 audit proof。
+- 支持多 track cross account 的账户级 liquidation case。
+
+硬门禁：
+
+- 不存在直接清零 quantity 的捷径。
+- 一个 case 的所有 legs、steps、orders、fills 和 postings 可完整查询。
+- 在每个 durable step 注入崩溃后，恢复结果与无崩溃参考路径 hash 相同。
+- 保险基金不能透支；不足时必须进入 ADL 或 fail closed。
+
+预估：8–12 个工程日。
+
+### Phase 6：历史 L2 强平执行
+
+工作内容：
+
+- HEDGE 完整模式强制 `BOOK_ASSISTED_REQUIRED` 数据合同。
+- 强平订单按历史 L2 的可见深度逐档成交，产生 partial fills。
+- 冻结无法观测 queue position 时的保守执行规则，并在产品命名中保持数据边界。
+- book gap、深度不足、price band/filter 冲突进入暂停或下一条交易所规则分支。
+- 快进 planner 将 position、orders、funding、risk、insurance 和 ADL 视为路径依赖。
+
+硬门禁：
+
+- book gap 永不回退 Touch/Tape。
+- optimized path 与逐事件 reference path 的 account/liquidation/report hash 一致。
+- 不宣称仅凭 L2 得到历史 queue-exact fill。
+
+预估：4–7 个工程日。
+
+### Phase 7：API、右栏、报告与默认体验
+
+工作内容：
+
+- 新建 Run 默认 HEDGE，ONE_WAY 为显式可选项。
+- 去掉 HEDGE 对 exact/isolated/funding/book 的 disabled UI。
+- 右栏分别展示两腿 quantity、entry、mark、leverage、margin、MM、liquidation price、bankruptcy price、funding 和保护单。
+- 强平时间线展示 case、partial steps、orders/fills、fee、insurance 和 ADL。
+- 报告、ReviewMode、导出保持相同字段和命名。
+- 前端入口默认显示，不依赖 Vite 默认关闭旗标。
+
+硬门禁：
+
+- 1440×900 与项目支持的最小尺寸无截断、遮挡和不可操作项。
+- 刷新、切 symbol、切 interval 不丢失任一腿或强平步骤。
+- DOM/ARIA、日志、URL 和导出中不存在未来时间泄漏。
+
+预估：4–6 个工程日。
+
+### Phase 8：恢复、审计与故障注入
+
+工作内容：
+
+- 覆盖 command retry、response loss、process kill、SQLite busy、WAL recovery、archive rehydrate。
+- 在 liquidation 每个状态转换前后注入崩溃。
+- 从 ledger、rules、marks、funding、fills、insurance 和 ADL 完整重建账户。
+- 验证 fork/review 不改变父 Run hash。
+- 验证多 FULL track 同一全局时钟和强平顺序。
+
+硬门禁：
+
+- 所有 reference/optimized/recovered 路径最终 hash 一致。
+- 所有幂等键在重启和重试后唯一。
+- 任一证据链断裂都 fail closed，不沿用旧 projection。
+
+预估：4–6 个工程日。
+
+### Phase 9：性能、长稳与发布验收
+
+工作内容：
+
+- 测量 `track 数 × 双腿持仓 × 订单/成交历史 × mark/funding 频率 × liquidation steps`。
+- 使用真实 ReplayService、SQLite、Decimal、archive 和浏览器，不用空仓微基准替代。
+- 完成 1/2/4/8 FULL tracks 的普通 mark wave 和强平波测试。
+- 完成 4 小时 soak、100 次生命周期循环、1,000,000 projection events。
+- 生成绑定 clean HEAD 的外部 release manifest 和完整 rollback drill。
+
+硬门禁：
+
+- 8 FULL positioned tracks 普通 exact-account wave 的真实 p95 不超过现有 500 ms 冻结上限。
+- 强平波单独报告 p50/p95/max，不与普通推进平均；阈值在 Phase 0 用真实样本冻结后不得为过门禁临时放宽。
+- 内存、数据库、WAL、archive 和浏览器无单调泄漏。
+- 全量 backend、frontend、architecture、typecheck、lint、build 全通过。
+- 4 小时 soak、故障注入、审计和回滚全部通过。
+
+预估：4–6 个工程日，不含 4 小时机器运行时间和问题修复。
+
+### Phase 10：整版 hard cutover
+
+工作内容：
+
+- 合并全部 Phase 到一个已验收 HEAD。
+- 修改最终默认值并删除前端入口旗标依赖。
+- 删除旧 HEDGE proxy 创建合同、UI 选项、fallback 和测试 fixture。
+- 重建允许清空的开发 replay 数据并保留盘点/备份证据。
+- 更新 README、产品合同、执行文档、运维说明和 release manifest。
+- 从全新进程和全新浏览器 profile 验证默认入口和默认 HEDGE。
+
+硬门禁：
+
+- 不设置任何 replay/HEDGE 环境变量，启动后入口可见、后端 capability enabled、新建 Run 默认 HEDGE。
+- 缺 exact dataset 时显示数据不可用原因，而不是 feature disabled 或 proxy fallback。
+- 搜索代码、文档、脚本和测试，不存在 HEDGE 默认关闭、百分比灰度或旧 proxy fallback。
+- rollback 只能把整个构建和 schema 恢复到上一已知版本；回滚演练通过。
+
+预估：2–3 个工程日。
+
+---
+
+## 9. 最低验收矩阵
+
+以下场景必须使用真实 service、SQLite 和 Decimal 执行，不能只测纯函数：
+
+1. 同商品同时开 LONG/SHORT，分别加仓、部分平仓、保护和平仓。
+2. 等量双腿下 gross、net、initial margin、maintenance 和 available balance 符合适配器规则。
+3. CROSS 中一条腿亏损影响共享权益，但不会错误改写另一条腿数量。
+4. ISOLATED LONG 被强平而 SHORT 保持活动；反向场景同样通过。
+5. 两条腿在同一 funding 时刻分别结算，重启后不重复。
+6. 规则和 risk tier 在同毫秒变更时按冻结总序生效。
+7. 撤销挂单释放保证金后账户恢复安全，不再错误强平。
+8. 部分强平降低 risk tier 后恢复安全，不继续全平。
+9. 部分强平多次 partial fill 后才恢复安全。
+10. 盘口深度不足时不直接把剩余仓位清零。
+11. 全平到破产价后缺口由保险基金覆盖。
+12. 保险基金不足触发 ADL，并能审计候选排序和最终选择。
+13. 多商品 CROSS 账户一次 risk breach 形成一个账户级 case，不重复收费。
+14. 两条腿同时进入强平时分别记录价格、订单、成交和账本，不保存为一个净仓事件。
+15. mark/index、funding、rule、book、insurance、ADL 任一 gap 都暂停，不回退代理数据。
+16. 每个 liquidation state 前后 process kill，恢复结果与 reference path 相同。
+17. command response 丢失与重试不产生重复订单、fill、fee、funding、insurance 或 ADL。
+18. fork/review/export/import 保留完整双腿和 liquidation case。
+19. 快进 reference 与 optimization 的 component/account/report hash 一致。
+20. 无环境变量全新启动时，入口默认可见、新 Run 默认 HEDGE、exact/book capability 默认启用。
+21. 主动选择 ONE_WAY 时既有单向账户语义和测试不回归。
+22. 浏览器刷新、断线恢复、切商品和切周期不改变 server-authoritative account state。
+
+---
+
+## 10. 发布级门禁
+
+最终 release manifest 必须绑定同一 clean HEAD，并至少包含：
+
+- Git HEAD、tree cleanliness、submodule/依赖锁定状态；
+- backend 全量测试结果；
+- frontend 全量测试、typecheck、lint、build；
+- schema/canonical golden hash；
+- 22 项最低验收矩阵结果；
+- source manifest/checksum/continuity/quarantine 证据；
+- account auditor 与 liquidation auditor 结果；
+- 1/2/4/8 track 性能分布；
+- 4 小时 soak；
+- 故障注入和恢复等价性；
+- 无默认关闭/灰度/fallback 的静态审计；
+- 全新进程、全新数据库、全新浏览器的默认启用验证；
+- 完整构建 rollback 和数据恢复演练。
+
+任何旧 HEAD 的 benchmark、soak、浏览器截图或 manifest 都不能继承到新 HEAD。不得为了通过发布门禁临时修改性能阈值、减少场景、关闭强平分支或改用 fixture-only 证据。
+
+---
+
+## 11. 回滚策略
+
+本轮不使用运行时灰度，因此回滚单位是完整构建：
+
+1. 暂停所有 active TrainingRun 并持久化 checkpoint。
+2. 导出 replay schema/version、Run 清单、archive refs 和数据库 checksum。
+3. 停止新构建进程。
+4. 恢复上一已验证构建及其匹配的 replay 数据版本或备份。
+5. 运行 SQLite quick check、foreign key check、hash audit 和最小 smoke。
+6. 验证 live 行情运行时未被 replay 回滚影响。
+
+禁止通过设置某个 HEDGE flag，让同一新 schema 数据重新进入旧强平公式。若旧构建不能读取新 schema，就必须恢复匹配的数据备份，不能“尽量兼容”。
+
+---
+
+## 12. 总工期与关键路径
+
+在权威数据已经可用的前提下，预计 6–9 个工程周。关键路径是：
+
+```text
+规则/数据合同
+  -> schema 与 canonical
+  -> 双向保证金账户
+  -> exact mark/funding/book
+  -> 部分强平/破产
+  -> 保险基金/ADL
+  -> 恢复与审计
+  -> 真实性能/4h soak
+  -> 默认启用 hard cutover
+```
+
+数据获取不包含在上述代码工期中。若保险基金或 ADL 的权威历史输入不可获得，项目必须停在 Phase 0 的数据门禁；不能为了保持进度把它改成近似模型后继续宣称“交易所级完整”。
+
+---
+
+## 13. Definition of Done
+
+只有同时满足以下条件，任务才完成：
+
+- 产品合同已经反映完整 HEDGE、强平、保险基金、ADL 和默认启用决策；
+- 当前 HEDGE 的四项首版限制全部删除；
+- 22 项最低验收矩阵全部通过；
+- 全量测试、审计、性能、4 小时 soak、浏览器和 rollback 全部通过；
+- clean HEAD release manifest 为 PASS；
+- 正常构建无环境变量启动即默认启用，入口可见，新 Run 默认 HEDGE；
+- 任一数据缺失都 fail closed，且没有 proxy、Touch/Tape 或 0 funding fallback；
+- 没有 HEDGE 灰度、双引擎、默认关闭开关或阶段性完成声明；
+- 所有订单、成交、资金费、保证金、强平、保险基金和 ADL 都能从不可变输入与 hash-chained ledger 独立重算；
+- 用户未授权的工作区文件没有被暂存、提交、覆盖或删除。

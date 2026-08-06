@@ -327,6 +327,28 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           />
         </label>
         <label>
+          持仓模式
+          <select
+            value={draft.positionMode}
+            onChange={(event) => {
+              const positionMode = event.target.value as TrainingRunDraft["positionMode"];
+              patchDraft(runtime, {
+                positionMode,
+                ...(positionMode === "HEDGE" ? {
+                  marginMode: "CROSS",
+                  accountDataMode: "APPROX_PROXY",
+                  fundingMode: "OFF",
+                  bookMode: "OFF",
+                } : {}),
+              });
+            }}
+          >
+            <option value="ONE_WAY">ONE_WAY · 单向净持仓</option>
+            <option value="HEDGE">HEDGE · 多空双向持仓</option>
+          </select>
+          <small>双向模式下多仓和空仓独立；首版仅支持近似账户、全仓、资金费关闭和 Touch/Tape 撮合。</small>
+        </label>
+        <label>
           保证金模式
           <select
             value={draft.marginMode}
@@ -335,7 +357,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="CROSS">CROSS · 共享结算权益</option>
-            <option value="ISOLATED">ISOLATED · 按轨道显式分配</option>
+            <option value="ISOLATED" disabled={draft.positionMode === "HEDGE"}>ISOLATED · 按轨道显式分配</option>
           </select>
         </label>
         <label>
@@ -353,7 +375,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             }}
           >
             <option value="APPROX_PROXY">APPROX_PROXY · 已揭示价格代理模拟账户</option>
-            <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
+            <option value="HISTORICAL_EXACT" disabled={draft.positionMode === "HEDGE"}>HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
           </select>
           <small>Exact 必须手动起点，并由服务端返回不可变 archive ref；不会接受公开 K 线代理。</small>
         </label>
@@ -366,12 +388,12 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="OFF">OFF</option>
-            <option value="SANDBOX_FIXED" disabled={draft.integrityMode !== "SANDBOX"}>
+            <option value="SANDBOX_FIXED" disabled={draft.integrityMode !== "SANDBOX" || draft.positionMode === "HEDGE"}>
               SANDBOX_FIXED · 近似练习
             </option>
             <option
               value="HISTORICAL_EXACT"
-              disabled={draft.accountDataMode !== "HISTORICAL_EXACT"}
+              disabled={draft.accountDataMode !== "HISTORICAL_EXACT" || draft.positionMode === "HEDGE"}
             >
               HISTORICAL_EXACT · 归档结算
             </option>
@@ -386,7 +408,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="OFF">OFF · Touch/Tape</option>
-            <option value="BOOK_ASSISTED_REQUIRED">
+            <option value="BOOK_ASSISTED_REQUIRED" disabled={draft.positionMode === "HEDGE"}>
               BOOK_ASSISTED_REQUIRED · 连续历史 L2
             </option>
           </select>

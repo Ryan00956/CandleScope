@@ -4961,6 +4961,7 @@ class TrainingRunStore:
                 "training run does not exist",
                 status_code=404,
             )
+        adapter_config = json.loads(str(row["config_json"]))
         return {
             "run_id": str(row["run_id"]),
             "adapter_session_id": str(row["adapter_session_id"]),
@@ -4969,7 +4970,8 @@ class TrainingRunStore:
             "base_interval": str(row["base_interval"]),
             "display_interval": str(row["display_interval"]),
             "compatibility": str(row["compatibility"]),
-            "adapter_config": json.loads(str(row["config_json"])),
+            "adapter_config": adapter_config,
+            "position_mode": str(adapter_config.get("position_mode", "ONE_WAY")),
             "exchange": str(row["exchange"]),
             "market_type": str(row["market_type"]),
             "settlement_asset": str(row["settlement_asset"]),
@@ -8761,13 +8763,27 @@ class TrainingRunStore:
                 tracks=[self._market_track_from_row(row) for row in track_rows],
             )
             equity_after = Decimal(str(portfolio["equity"]))
+            another_pending = connection.execute(
+                """
+                SELECT 1 FROM replay_training_liquidation_event
+                WHERE run_id = ? AND state = 'PENDING' AND liquidation_id != ?
+                LIMIT 1
+                """,
+                (run_id, liquidation_id),
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE replay_training_contract_account
                 SET status = ?, updated_at_ms = ? WHERE run_id = ?
                 """,
                 (
-                    "BANKRUPT" if equity_after < 0 else "ACTIVE",
+                    (
+                        "LIQUIDATING"
+                        if another_pending is not None
+                        else "BANKRUPT"
+                        if equity_after < 0
+                        else "ACTIVE"
+                    ),
                     now_ms,
                     run_id,
                 ),
@@ -10234,6 +10250,7 @@ class TrainingRunStore:
             unrealized = Decimal(0)
             fees = Decimal(0)
             positions: list[dict[str, object]] = []
+            position_mode = "ONE_WAY"
             for track in tracks:
                 account = track.get("account")
                 if isinstance(account, Mapping) and isinstance(
@@ -10248,7 +10265,23 @@ class TrainingRunStore:
                     unrealized += Decimal(str(account["unrealized_pnl"]))
                     fees += Decimal(str(account["fees_paid"]))
                 position = track.get("position")
-                if isinstance(position, Mapping) and position.get("quantity") not in {
+                if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+                    position_mode = "HEDGE"
+                    for leg_name, side in (("long", "LONG"), ("short", "SHORT")):
+                        leg = position.get(leg_name)
+                        if isinstance(leg, Mapping) and leg.get("quantity") not in {
+                            None,
+                            "0",
+                        }:
+                            positions.append(
+                                {
+                                    "track_id": track["track_id"],
+                                    "symbol": track["symbol"],
+                                    "position_side": side,
+                                    "position": dict(leg),
+                                }
+                            )
+                elif isinstance(position, Mapping) and position.get("quantity") not in {
                     None,
                     "0",
                 }:
@@ -10269,6 +10302,7 @@ class TrainingRunStore:
             "schema_version": "replay.training.portfolio.v1",
             "fidelity": "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
             "settlement_account_shared": True,
+            "position_mode": position_mode,
             "initial_equity": decimal_to_string(initial, field_name="initial_equity"),
             "equity": decimal_to_string(equity, field_name="equity"),
             "cash_balance": decimal_to_string(cash, field_name="cash_balance"),
@@ -10701,6 +10735,7 @@ class TrainingRunStore:
             "execution_model": "TOUCH_OR_TAPE_V2",
             "execution_fidelity": execution_fidelity,
             "settlement_account_shared": str(account["margin_mode"]) == "CROSS",
+            "position_mode": str(base["position_mode"]),
             "margin_mode": str(account["margin_mode"]),
             "funding_mode": str(account["funding_mode"]),
             "status": str(account["status"]),
@@ -13645,7 +13680,15 @@ class TrainingRunStore:
         )
         initial = Decimal(str(account["initial_equity"]))
         equity = initial + Decimal(str(account["overlay_cash"]))
-        positions: list[tuple[sqlite3.Row, dict[str, object], InstrumentRule, Decimal]] = []
+        positions: list[
+            tuple[
+                sqlite3.Row,
+                dict[str, object],
+                InstrumentRule,
+                Decimal,
+                str | None,
+            ]
+        ] = []
         total_maintenance = Decimal(0)
         for track in tracks:
             track_account = json.loads(str(track["account_json"]))
@@ -13654,8 +13697,24 @@ class TrainingRunStore:
                 equity += Decimal(str(track_account["equity"])) - initial
             if not isinstance(position, dict):
                 continue
-            quantity = Decimal(str(position.get("quantity", "0")))
-            if quantity == 0:
+            legs: tuple[tuple[str | None, dict[str, object]], ...]
+            if position.get("position_mode") == "HEDGE":
+                legs = tuple(
+                    (side, leg)
+                    for side, leg in (
+                        ("LONG", position.get("long")),
+                        ("SHORT", position.get("short")),
+                    )
+                    if isinstance(leg, dict)
+                    and Decimal(str(leg.get("quantity", "0"))) != 0
+                )
+            else:
+                legs = (
+                    ((None, position),)
+                    if Decimal(str(position.get("quantity", "0"))) != 0
+                    else ()
+                )
+            if not legs:
                 continue
             rule_row = connection.execute(
                 """
@@ -13667,9 +13726,12 @@ class TrainingRunStore:
             if rule_row is None:
                 raise TypeError("liquidation instrument rule is missing")
             rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
-            maintenance = rule.maintenance_margin(Decimal(str(position["notional"])))
-            total_maintenance += maintenance
-            positions.append((track, position, rule, maintenance))
+            for position_side, leg in legs:
+                maintenance = rule.maintenance_margin(
+                    Decimal(str(leg["notional"]))
+                )
+                total_maintenance += maintenance
+                positions.append((track, leg, rule, maintenance, position_side))
         if not positions:
             pending = connection.execute(
                 """
@@ -13696,28 +13758,53 @@ class TrainingRunStore:
                 affected = positions
         else:
             for item in positions:
-                track, position, _rule, maintenance = item
+                track, position, _rule, maintenance, _position_side = item
                 allocated = Decimal(str(isolated.get(str(track["track_id"]), "0")))
                 isolated_equity = allocated + Decimal(str(position["unrealized_pnl"]))
                 if isolated_equity <= maintenance:
                     affected.append(item)
-        for track, position, rule, maintenance in affected:
+        grouped: dict[
+            str,
+            list[
+                tuple[
+                    sqlite3.Row,
+                    dict[str, object],
+                    InstrumentRule,
+                    Decimal,
+                    str | None,
+                ]
+            ],
+        ] = {}
+        for item in affected:
+            grouped.setdefault(str(item[0]["track_id"]), []).append(item)
+        for track_id, group in grouped.items():
+            track = group[0][0]
+            rule = group[0][2]
             sequence = int(track["source_sequence"] or 0)
-            liquidation_id = f"liq-{track['track_id']}-{sequence:010d}"
-            quantity = Decimal(str(position["quantity"]))
-            entry = Decimal(str(position["entry_price"]))
-            notional = Decimal(str(position["notional"]))
+            liquidation_id = f"liq-{track_id}-{sequence:010d}"
+            quantity = sum(
+                (Decimal(str(item[1]["quantity"])) for item in group),
+                Decimal(0),
+            )
+            notional = sum(
+                (Decimal(str(item[1]["notional"])) for item in group),
+                Decimal(0),
+            )
+            maintenance = sum((item[3] for item in group), Decimal(0))
             allocation = (
                 equity
                 if str(account["margin_mode"]) == "CROSS"
-                else Decimal(str(isolated.get(str(track["track_id"]), "0")))
+                else Decimal(str(isolated.get(track_id, "0")))
             )
-            bankruptcy = entry - (
-                allocation / (abs(quantity) * Decimal(rule.contract_size))
-            ) * (
-                Decimal(1) if quantity > 0 else Decimal(-1)
-            )
-            bankruptcy = max(Decimal(0), bankruptcy)
+            bankruptcy: Decimal | None = None
+            if len(group) == 1 and quantity != 0:
+                entry = Decimal(str(group[0][1]["entry_price"]))
+                bankruptcy = entry - (
+                    allocation / (abs(quantity) * Decimal(rule.contract_size))
+                ) * (
+                    Decimal(1) if quantity > 0 else Decimal(-1)
+                )
+                bankruptcy = max(Decimal(0), bankruptcy)
             fee = rule.liquidation_fee(notional)
             connection.execute(
                 """
@@ -13742,12 +13829,16 @@ class TrainingRunStore:
                         else trigger_virtual_time_ms
                     ),
                     sequence,
-                    position["mark_price"],
-                    position["quantity"],
-                    position["notional"],
+                    group[0][1]["mark_price"],
+                    decimal_to_string(quantity, field_name="liquidation net quantity"),
+                    decimal_to_string(notional, field_name="liquidation gross notional"),
                     decimal_to_string(maintenance, field_name="maintenance margin"),
                     decimal_to_string(equity, field_name="account equity"),
-                    decimal_to_string(bankruptcy, field_name="bankruptcy price"),
+                    (
+                        None
+                        if bankruptcy is None
+                        else decimal_to_string(bankruptcy, field_name="bankruptcy price")
+                    ),
                     decimal_to_string(fee, field_name="liquidation fee"),
                     rule.mark_fidelity,
                     now_ms,
@@ -13777,12 +13868,57 @@ class TrainingRunStore:
     ) -> None:
         """Incrementally project fills into immutable, reviewable trade results."""
 
+        position = component_state.get("position")
+        if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+            for leg in ("LONG", "SHORT"):
+                leg_component_state = dict(component_state)
+                leg_component_state["position"] = position.get(leg.lower())
+                cls._sync_trade_results_projection_leg(
+                    connection,
+                    run_id=run_id,
+                    track_id=track_id,
+                    projection_track_id=f"{track_id}#{leg}",
+                    required_position_side=leg,
+                    component_state=leg_component_state,
+                    revealed_event_low=revealed_event_low,
+                    revealed_event_high=revealed_event_high,
+                    now_ms=now_ms,
+                )
+            return
+        cls._sync_trade_results_projection_leg(
+            connection,
+            run_id=run_id,
+            track_id=track_id,
+            projection_track_id=track_id,
+            required_position_side=None,
+            component_state=component_state,
+            revealed_event_low=revealed_event_low,
+            revealed_event_high=revealed_event_high,
+            now_ms=now_ms,
+        )
+
+    @classmethod
+    def _sync_trade_results_projection_leg(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        track_id: str,
+        projection_track_id: str,
+        required_position_side: str | None,
+        component_state: Mapping[str, object],
+        revealed_event_low: Decimal | None,
+        revealed_event_high: Decimal | None,
+        now_ms: int,
+    ) -> None:
+        """Project one netted position stream or one independent hedge leg."""
+
         row = connection.execute(
             """
             SELECT * FROM replay_training_trade_projection
             WHERE run_id = ? AND track_id = ?
             """,
-            (run_id, track_id),
+            (run_id, projection_track_id),
         ).fetchone()
         if row is None:
             last_fill_ordinal = 0
@@ -13862,6 +13998,10 @@ class TrainingRunStore:
             if isinstance(raw_closed, (list, tuple))
             and isinstance(item, Mapping)
             and isinstance(item.get("fill_id"), str)
+            and (
+                required_position_side is None
+                or item.get("position_side") == required_position_side
+            )
         } if isinstance(raw_closed, (list, tuple)) else {}
 
         fill_rows = connection.execute(
@@ -13900,6 +14040,12 @@ class TrainingRunStore:
                 fill_ordinal = int(fill_id.rsplit("-", 1)[1])
             except (IndexError, ValueError) as exc:
                 raise TypeError("contract fill identifier is invalid") from exc
+            if (
+                required_position_side is not None
+                and raw.get("position_side") != required_position_side
+            ):
+                last_fill_ordinal = fill_ordinal
+                continue
             fill_side = str(raw["side"])
             side_sign = Decimal(1) if fill_side == "BUY" else Decimal(-1)
             fill_quantity = Decimal(str(raw["quantity"]))
@@ -14112,7 +14258,7 @@ class TrainingRunStore:
             """,
             (
                 run_id,
-                track_id,
+                projection_track_id,
                 last_fill_ordinal,
                 episode_sequence,
                 episode_id,

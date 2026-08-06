@@ -62,6 +62,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   ),
   book_mode: enumValues("OFF", "BOOK_ASSISTED_REQUIRED"),
   margin_mode: enumValues("CROSS", "ISOLATED"),
+  position_mode: enumValues("ONE_WAY", "HEDGE"),
   funding_mode: enumValues("OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"),
   account_data_mode: enumValues("APPROX_PROXY", "HISTORICAL_EXACT"),
   execution_model: enumValues("TOUCH_OR_TAPE_V2"),
@@ -143,6 +144,7 @@ export type ReplayV2AdvanceBasis = EnumValue<typeof REPLAY_V2_ENUMS.advance_basi
 export type ReplayV2CommandType = EnumValue<typeof REPLAY_V2_ENUMS.command_type>;
 export type ReplayV2EventType = EnumValue<typeof REPLAY_V2_ENUMS.event_type>;
 export type ReplayV2MarginMode = EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+export type ReplayV2PositionMode = EnumValue<typeof REPLAY_V2_ENUMS.position_mode>;
 export type ReplayV2FundingMode = EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
 export type ReplayV2AccountDataMode = EnumValue<
   typeof REPLAY_V2_ENUMS.account_data_mode
@@ -280,6 +282,7 @@ export interface ReplayTrainingPortfolioV1 {
   readonly schema_version: "replay.training.portfolio.v1";
   readonly fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER";
   readonly settlement_account_shared: true;
+  readonly position_mode: ReplayV2PositionMode;
   readonly initial_equity: string;
   readonly equity: string;
   readonly cash_balance: string;
@@ -300,6 +303,7 @@ export interface ReplayTrainingContractPortfolio {
     | "NO_BOOK_TOUCH_OR_TAPE_APPROX"
     | "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE";
   readonly settlement_account_shared: boolean;
+  readonly position_mode: ReplayV2PositionMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly status: "ACTIVE" | "LIQUIDATING" | "BANKRUPT";
@@ -361,6 +365,7 @@ export interface ReplayAccountRecordPage {
 export interface ReplayTrainingPortfolioPosition {
   readonly track_id: string;
   readonly symbol: string;
+  readonly position_side?: "LONG" | "SHORT";
   readonly position: Readonly<Record<string, ReplayV2Json>>;
   readonly maintenance_margin?: string;
   readonly isolated_margin?: string;
@@ -505,6 +510,7 @@ export interface ReplayOrderRequest {
   readonly stop_price: string | null;
   /** Effective leverage ≤ session max; omitted when using max. */
   readonly leverage?: string | null;
+  readonly position_side?: "LONG" | "SHORT" | null;
 }
 
 export interface ReplayOrderCapacityContext {
@@ -514,6 +520,7 @@ export interface ReplayOrderCapacityContext {
   readonly limit_price: string | null;
   readonly stop_price: string | null;
   readonly leverage?: string | null;
+  readonly position_side?: "LONG" | "SHORT" | null;
 }
 
 export interface ReplayOrderCapacityRequest {
@@ -1325,6 +1332,11 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       "execution_model",
       "execution_fidelity",
       "settlement_account_shared",
+      ...(
+        Object.hasOwn(value as object, "position_mode")
+          ? ["position_mode"]
+          : []
+      ),
       "margin_mode",
       "funding_mode",
       "status",
@@ -1415,6 +1427,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       const item = exactObject(position, field, [
         "track_id",
         "symbol",
+        ...(Object.hasOwn(position as object, "position_side") ? ["position_side"] : []),
         "position",
         "maintenance_margin",
         "isolated_margin",
@@ -1427,6 +1440,15 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       return {
         track_id: identifier(item.track_id, `${field}.track_id`),
         symbol: identifier(item.symbol, `${field}.symbol`),
+        ...(Object.hasOwn(item, "position_side")
+          ? {
+              position_side: enumValue(
+                item.position_side,
+                ["LONG", "SHORT"] as const,
+                `${field}.position_side`,
+              ),
+            }
+          : {}),
         position: jsonObject(item.position, `${field}.position`),
         maintenance_margin: canonicalDecimal(
           item.maintenance_margin,
@@ -1451,6 +1473,9 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       execution_model: "TOUCH_OR_TAPE_V2",
       execution_fidelity: portfolio.execution_fidelity,
       settlement_account_shared: portfolio.settlement_account_shared,
+      position_mode: Object.hasOwn(portfolio, "position_mode")
+        ? enumValue(portfolio.position_mode, REPLAY_V2_ENUMS.position_mode, "portfolio.position_mode")
+        : "ONE_WAY",
       margin_mode: enumValue(portfolio.margin_mode, REPLAY_V2_ENUMS.margin_mode, "portfolio.margin_mode"),
       funding_mode: enumValue(portfolio.funding_mode, REPLAY_V2_ENUMS.funding_mode, "portfolio.funding_mode"),
       status: portfolio.status as "ACTIVE" | "LIQUIDATING" | "BANKRUPT",
@@ -1495,6 +1520,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
     "schema_version",
     "fidelity",
     "settlement_account_shared",
+    ...(Object.hasOwn(value as object, "position_mode") ? ["position_mode"] : []),
     "initial_equity",
     "equity",
     "cash_balance",
@@ -1520,6 +1546,9 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
     schema_version: "replay.training.portfolio.v1",
     fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
     settlement_account_shared: true,
+    position_mode: Object.hasOwn(portfolio, "position_mode")
+      ? enumValue(portfolio.position_mode, REPLAY_V2_ENUMS.position_mode, "portfolio.position_mode")
+      : "ONE_WAY",
     initial_equity: positiveDecimal(portfolio.initial_equity, "portfolio.initial_equity"),
     equity: canonicalDecimal(portfolio.equity, "portfolio.equity"),
     cash_balance: canonicalDecimal(portfolio.cash_balance, "portfolio.cash_balance"),
@@ -1534,10 +1563,24 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
     fees_paid: canonicalDecimal(portfolio.fees_paid, "portfolio.fees_paid"),
     positions: portfolio.positions.map((position, index) => {
       const field = `portfolio.positions[${index}]`;
-      const item = exactObject(position, field, ["track_id", "symbol", "position"]);
+      const item = exactObject(position, field, [
+        "track_id",
+        "symbol",
+        "position",
+        ...(Object.hasOwn(position as object, "position_side") ? ["position_side"] : []),
+      ]);
       return {
         track_id: identifier(item.track_id, `${field}.track_id`),
         symbol: identifier(item.symbol, `${field}.symbol`),
+        ...(Object.hasOwn(item, "position_side")
+          ? {
+              position_side: enumValue(
+                item.position_side,
+                ["LONG", "SHORT"] as const,
+                `${field}.position_side`,
+              ),
+            }
+          : {}),
         position: jsonObject(item.position, `${field}.position`),
       };
     }),
@@ -2123,7 +2166,9 @@ function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrder
     }
   }
   const unknown = Object.keys(raw).filter((key) => (
-    !(required as readonly string[]).includes(key) && key !== "leverage"
+    !(required as readonly string[]).includes(key)
+      && key !== "leverage"
+      && key !== "position_side"
   ));
   if (unknown.length > 0) {
     throw new TypeError(`${fieldName} has unknown ${unknown.join(", ")}`);
@@ -2148,6 +2193,9 @@ function parseReplayOrderRequest(value: unknown, fieldName: string): ReplayOrder
       ? null
       : positiveDecimal(raw.stop_price, `${fieldName}.stop_price`),
     leverage,
+    position_side: !Object.hasOwn(raw, "position_side") || raw.position_side === null
+      ? null
+      : enumValue(raw.position_side, ["LONG", "SHORT"] as const, `${fieldName}.position_side`),
   };
 }
 
@@ -2167,7 +2215,9 @@ function parseReplayOrderCapacityContext(
     if (!Object.hasOwn(raw, key)) throw new TypeError(`${fieldName} missing ${key}`);
   }
   const unknown = Object.keys(raw).filter((key) => (
-    !(required as readonly string[]).includes(key) && key !== "leverage"
+    !(required as readonly string[]).includes(key)
+      && key !== "leverage"
+      && key !== "position_side"
   ));
   if (unknown.length > 0) throw new TypeError(`${fieldName} has unknown ${unknown.join(", ")}`);
   return {
@@ -2187,6 +2237,9 @@ function parseReplayOrderCapacityContext(
     leverage: !Object.hasOwn(raw, "leverage") || raw.leverage === null || raw.leverage === undefined
       ? null
       : positiveDecimal(raw.leverage, `${fieldName}.leverage`),
+    position_side: !Object.hasOwn(raw, "position_side") || raw.position_side === null
+      ? null
+      : enumValue(raw.position_side, ["LONG", "SHORT"] as const, `${fieldName}.position_side`),
   };
 }
 
@@ -2693,6 +2746,7 @@ export interface TrainingRunCreatePayload {
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly book_mode: ReplayV2BookMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+  readonly position_mode: ReplayV2PositionMode;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly account_data_mode: ReplayV2AccountDataMode;
   readonly fixed_funding_rate: string | null;
@@ -2748,6 +2802,7 @@ export interface TrainingRunPreparationPayload {
   readonly time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
   readonly book_mode: ReplayV2BookMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
+  readonly position_mode: ReplayV2PositionMode;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly account_data_mode: ReplayV2AccountDataMode;
   readonly account_history_ref: ReplayAccountHistoryRef | null;

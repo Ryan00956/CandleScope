@@ -51,6 +51,7 @@
     ],
     "book_mode": ["OFF", "BOOK_ASSISTED_REQUIRED"],
     "margin_mode": ["CROSS", "ISOLATED"],
+    "position_mode": ["ONE_WAY", "HEDGE"],
     "funding_mode": ["OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"],
     "account_data_mode": ["APPROX_PROXY", "HISTORICAL_EXACT"],
     "execution_model": ["TOUCH_OR_TAPE_V2"],

@@ -135,6 +135,7 @@ export interface ReplaySlippageModel {
 
 export interface ReplaySessionConfig {
   readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly position_mode: "ONE_WAY" | "HEDGE";
   readonly source_kind: ReplaySourceKind;
   readonly exchange: string;
   readonly market_type: string;
@@ -384,6 +385,7 @@ export interface ReplayOrder {
   readonly status_reason: string | null;
   readonly status_history: readonly string[];
   readonly model_version: string;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayFill {
@@ -402,6 +404,7 @@ export interface ReplayFill {
   readonly synthetic: boolean;
   readonly historical_execution: boolean;
   readonly model_version: string;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayClosedTrade {
@@ -414,6 +417,7 @@ export interface ReplayClosedTrade {
   readonly exit_price: ReplayDecimalString;
   readonly realized_pnl: ReplayDecimalString;
   readonly source_sequence: ReplaySequence;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayWarning {
@@ -450,9 +454,17 @@ export interface ReplayProjection {
   readonly orders: readonly ReplayOrder[];
   readonly fills: readonly ReplayFill[];
   readonly warnings: readonly ReplayWarning[];
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
 }
+
+export interface ReplayHedgePositionBook {
+  readonly position_mode: "HEDGE";
+  readonly long: ReplayPosition;
+  readonly short: ReplayPosition;
+}
+
+export type ReplayPositionState = ReplayPosition | ReplayHedgePositionBook;
 
 export interface ReplayFinalStateSeriesPatch {
   readonly schema_version: "replay-series-tail-patch.v1";
@@ -470,7 +482,7 @@ export interface ReplayFinalStateProjection {
   readonly fills: readonly ReplayFill[];
   readonly closed_trades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
 }
 
@@ -574,7 +586,7 @@ export interface ReplayBrokerSnapshot {
   readonly closed_trades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
   readonly ledger: Readonly<Record<string, ReplayJson>>;
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
   readonly next_order: number;
   readonly next_fill: number;

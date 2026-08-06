@@ -573,6 +573,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
+  assert.equal(request.position_mode, "ONE_WAY");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
 });
@@ -604,6 +605,25 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
   );
   assert.equal(exact.canSubmit, false);
   assert.match(exact.errors.join("\n"), /精确资金费.*精确账户历史/);
+});
+
+test("HEDGE create mode is explicit and fails closed outside its first-release matrix", () => {
+  const capabilities = parseReplayCapabilities(enabledCapabilities());
+  const catalog = blindCatalog();
+  const base = createTrainingRunDraft(catalog);
+  const hedge = { ...base, positionMode: "HEDGE" as const };
+  const evaluation = evaluateTrainingRunSetupDraft(hedge, capabilities);
+  assert.equal(evaluation.canSubmit, true);
+  assert.equal(buildTrainingRunCreateRequest(hedge, evaluation).position_mode, "HEDGE");
+
+  for (const invalid of [
+    { ...hedge, marginMode: "ISOLATED" as const },
+    { ...hedge, fundingMode: "SANDBOX_FIXED" as const, integrityMode: "SANDBOX" as const },
+    { ...hedge, bookMode: "BOOK_ASSISTED_REQUIRED" as const },
+    { ...hedge, accountDataMode: "HISTORICAL_EXACT" as const },
+  ]) {
+    assert.equal(evaluateTrainingRunSetupDraft(invalid, capabilities).canSubmit, false);
+  }
 });
 
 test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {

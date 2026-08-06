@@ -60,6 +60,10 @@ def _canonical_value(value: object, *, path: str = "$") -> object:
                 path=f"{path}.{field.name}",
             )
             for field in fields(value)
+            if not (
+                "canonical_omit_value" in field.metadata
+                and getattr(value, field.name) == field.metadata["canonical_omit_value"]
+            )
         }
     if isinstance(value, Mapping):
         result: dict[str, object] = {}

@@ -44,8 +44,9 @@ from .broker.models import (
     OrderCapacityRequest,
     OrderRequest,
     PAPER_LINEAR_EXECUTION_MODE,
-    Position,
+    PositionMode,
     ReplayOrder,
+    position_state_from_dict,
 )
 from .broker.risk import build_order_capacity, build_order_preview
 from .canonical import canonical_json_bytes, canonical_sha256
@@ -1205,7 +1206,7 @@ class ReplayService:
                 preview = build_order_preview(
                     config=handle.broker_config,
                     request=request,
-                    position=Position.from_dict(raw_position),
+                    position=position_state_from_dict(raw_position),
                     account=Account(**raw_account),  # type: ignore[arg-type]
                     orders=(ReplayOrder.from_dict(item) for item in raw_orders),
                 )
@@ -1259,7 +1260,7 @@ class ReplayService:
                 capacity = build_order_capacity(
                     config=handle.broker_config,
                     request=request,
-                    position=Position.from_dict(raw_position),
+                    position=position_state_from_dict(raw_position),
                     account=Account(**raw_account),  # type: ignore[arg-type]
                     orders=(ReplayOrder.from_dict(item) for item in raw_orders),
                 )
@@ -3703,6 +3704,7 @@ class ReplayService:
             taker_bps=config.fee_model.taker_bps,
             market_slippage_bps=config.slippage_model.market_bps,
             initial_mark_price=first.open,
+            position_mode=PositionMode(config.position_mode),
             instrument=InstrumentFilters(
                 price_tick=tick,
                 quantity_step="0.00000001",

@@ -359,6 +359,7 @@ test("create contract exposes all seven policies and explicit integrity allowlis
     makerFeeBps: "2",
     takerFeeBps: "5",
     marketSlippageBps: "1",
+    positionMode: "ONE_WAY" as const,
     marginMode: "CROSS" as const,
     fundingMode: "OFF" as const,
     accountDataMode: "APPROX_PROXY" as const,

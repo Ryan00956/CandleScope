@@ -945,3 +945,77 @@ async def test_simulated_liquidation_closes_normally_and_stays_distinct(
         )
     finally:
         await service.shutdown(step_timeout=1.0)
+
+
+async def test_cross_hedge_liquidation_closes_and_records_each_leg(
+    tmp_path: Path,
+) -> None:
+    service = await _risk_service(tmp_path / "hedge-liquidation.db")
+    try:
+        request_payload = _sandbox_request(
+            await _request(service),
+            initial_equity="100",
+        ).to_dict()
+        request_payload["position_mode"] = "HEDGE"
+        created = await service.training.create_run(  # type: ignore[union-attr]
+            TrainingRunCreateRequest.from_dict(request_payload)
+        )
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="hedge-risk-acquire",
+        )
+        for side, position_side, quantity in (
+            ("BUY", "LONG", "2.4"),
+            ("SELL", "SHORT", "0.4"),
+        ):
+            await _send(
+                service,
+                run_id=run_id,
+                session_id=session_id,
+                command_id=f"hedge-risk-entry-{position_side.lower()}",
+                command_type=ReplayV2CommandType.PLACE_ORDER,
+                payload={
+                    "client_order_id": f"hedge-risk-entry-{position_side.lower()}",
+                    "side": side,
+                    "position_side": position_side,
+                    "order_type": "MARKET",
+                    "quantity": quantity,
+                    "reduce_only": False,
+                    "limit_price": None,
+                    "stop_price": None,
+                },
+            )
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="hedge-risk-before-crash",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 1},
+        )
+        crashed = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="hedge-risk-crash",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 1},
+        )
+        assert crashed["data"]["simulated_account_liquidations"] == 1
+        portfolio = (
+            await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        )["portfolio"]
+        assert portfolio["positions"] == []
+        events = portfolio["liquidations"]
+        assert len(events) == 1
+        assert events[0]["position_quantity"] == "2"
+        assert events[0]["position_notional"] == "141.4"
+        assert events[0]["bankruptcy_price"] is None
+        assert all(item["state"] == "COMPLETED" for item in events)
+        assert all(item["close_order_id"] is not None for item in events)
+    finally:
+        await service.shutdown(step_timeout=1.0)

@@ -408,7 +408,14 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const symbol = selectedTrack?.symbol ?? config?.symbol ?? "--";
   const quantityAsset = baseAsset(symbol, settlementAsset);
   const rule = selectedRule(contract, selectedTrackId);
-  const selectedPosition = portfolio?.positions.find((item) => item.track_id === selectedTrackId) ?? null;
+  const positionMode = portfolio?.position_mode ?? "ONE_WAY";
+  const activePositionSide: "LONG" | "SHORT" = reduceOnly
+    ? side === "BUY" ? "SHORT" : "LONG"
+    : side === "BUY" ? "LONG" : "SHORT";
+  const selectedPosition = portfolio?.positions.find((item) => (
+    item.track_id === selectedTrackId
+    && (positionMode !== "HEDGE" || item.position_side === activePositionSide)
+  )) ?? null;
   const positionQty = finiteNumber(selectedPosition?.position.quantity) ?? 0;
   const previewSide = replayOrderContextSide(positionQty, side, reduceOnly);
   const maxLeverage = Math.max(1, finiteNumber(config?.max_leverage) ?? 1);
@@ -544,6 +551,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           ? price
           : null,
         leverage: String(leverage),
+        ...(positionMode === "HEDGE" ? { position_side: activePositionSide } : {}),
       };
       setCapacityState({
         key: maxQuantityContextKey,
@@ -591,6 +599,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     maxQuantitySizingKey,
     orderCapacity,
     orderType,
+    positionMode,
+    activePositionSide,
     previewSide,
     previewPositionIntent,
     price,
@@ -648,6 +658,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           ? price
           : null,
         leverage: String(leverage),
+        ...(positionMode === "HEDGE" ? { position_side: activePositionSide } : {}),
       };
       setPreviewState({
         key: previewKey,
@@ -686,6 +697,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     clientOrderId,
     leverage,
     orderType,
+    positionMode,
+    activePositionSide,
     previewOrder,
     previewPositionIntent,
     price,
@@ -770,6 +783,16 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       : "名义金额";
 
   const ctaEnabled = (nextSide: "BUY" | "SELL"): { enabled: boolean; title: string } => {
+    if (positionMode === "HEDGE") {
+      if (!reduceOnly) return { enabled: true, title: "" };
+      const targetSide = nextSide === "BUY" ? "SHORT" : "LONG";
+      const target = portfolio?.positions.find((item) => (
+        item.track_id === selectedTrackId && item.position_side === targetSide
+      ));
+      return target === undefined
+        ? { enabled: false, title: targetSide === "LONG" ? "无多仓可平" : "无空仓可平" }
+        : { enabled: true, title: "" };
+    }
     if (reduceOnly) {
       if (positionSide === "flat") {
         return { enabled: false, title: "无持仓可平" };
@@ -813,6 +836,9 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       setNotice({ tone: "error", message: `杠杆须在 1–${maxLeverage}x 之间` });
       return;
     }
+    const targetPositionSide: "LONG" | "SHORT" = reduceOnly
+      ? nextSide === "BUY" ? "SHORT" : "LONG"
+      : nextSide === "BUY" ? "LONG" : "SHORT";
     const order: ReplayOrderRequest = {
       client_order_id: clientOrderId,
       side: nextSide,
@@ -822,12 +848,15 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       limit_price: orderType === "LIMIT" ? price : null,
       stop_price: orderType === "STOP_MARKET" || orderType === "TAKE_PROFIT_MARKET" ? price : null,
       leverage: String(leverage),
+      ...(positionMode === "HEDGE" ? { position_side: targetPositionSide } : {}),
     };
     const intent = orderType === "MARKET" && !reduceOnly ? "OPEN" : "NET";
     const planForSide = tradePlanEnabled && tradePlanEligible && !reduceOnly
       ? tradePlanDraft
       : null;
-    const sideForContext = replayOrderContextSide(positionQty, nextSide, reduceOnly);
+    const sideForContext = positionMode === "HEDGE"
+      ? nextSide
+      : replayOrderContextSide(positionQty, nextSide, reduceOnly);
     const sideContext: ReplayOrderCapacityContext = {
       side: sideForContext,
       order_type: orderType,
@@ -837,6 +866,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         ? price
         : null,
       leverage: String(leverage),
+      ...(positionMode === "HEDGE" ? { position_side: targetPositionSide } : {}),
     };
     const sideSizingKey = JSON.stringify([
       selectedTrackId,
@@ -915,6 +945,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           side: nextSide,
           quantity,
           leverage: String(leverage),
+          ...(positionMode === "HEDGE" ? { position_side: targetPositionSide } : {}),
         });
       } else {
         await viewer.actions.submitTrade("place_order", { ...order });
@@ -955,6 +986,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           <strong>{formatDecimal(portfolio?.equity ?? store.account?.equity, 4)} {settlementAsset}</strong>
         </div>
         <div className="replay-ticket-locks" aria-label="保证金与杠杆">
+          <span>{positionMode === "HEDGE" ? "双向" : "单向"}</span>
           <span>{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</span>
           <label className="replay-leverage-control">
             <span className="sr-only">杠杆</span>
@@ -1202,14 +1234,20 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     quantity: string;
     price: string;
   }> | null>(null);
-  const [closeDraft, setCloseDraft] = useState<Readonly<{ trackId: string; value: string }> | null>(null);
+  const [closeDraft, setCloseDraft] = useState<Readonly<{
+    trackId: string;
+    positionSide?: "LONG" | "SHORT";
+    value: string;
+  }> | null>(null);
   const [protectionDraft, setProtectionDraft] = useState<Readonly<{
     trackId: string;
+    positionSide?: "LONG" | "SHORT";
     stopLoss: string;
     takeProfit: string;
   }> | null>(null);
   const [positionPanel, setPositionPanel] = useState<Readonly<{
     trackId: string;
+    positionSide?: "LONG" | "SHORT";
     kind: "close" | "protection";
   }> | null>(null);
   const [filterSelectedTrackOnly, setFilterSelectedTrackOnly] = useState(false);
@@ -1301,12 +1339,6 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
   const closeQuantity = closeDraft?.trackId === selectedTrackId
     ? closeDraft.value
     : defaultCloseQuantity;
-  const stopLossPrice = protectionDraft?.trackId === selectedTrackId
-    ? protectionDraft.stopLoss
-    : "";
-  const takeProfitPrice = protectionDraft?.trackId === selectedTrackId
-    ? protectionDraft.takeProfit
-    : "";
   const warningCount = store.warnings.length;
 
   const time = (value: number) => formatTime?.(value)
@@ -1337,11 +1369,17 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     return () => globalThis.clearTimeout(timer);
   }, [positionPanel, selectedTrackId]);
 
-  const togglePositionPanel = (trackId: string, kind: "close" | "protection") => {
+  const togglePositionPanel = (
+    trackId: string,
+    kind: "close" | "protection",
+    positionSide?: "LONG" | "SHORT",
+  ) => {
     setPositionPanel((current) => (
-      current?.trackId === trackId && current.kind === kind
+      current?.trackId === trackId
+        && current.kind === kind
+        && current.positionSide === positionSide
         ? null
-        : { trackId, kind }
+        : { trackId, kind, ...(positionSide === undefined ? {} : { positionSide }) }
     ));
   };
 
@@ -1363,14 +1401,6 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     } catch (error) {
       setNotice({ tone: "error", message: commandErrorMessage(error) });
     }
-  };
-
-  const setCloseShare = (share: number) => {
-    if (selectedPositionQuantity <= 0) return;
-    setCloseDraft({
-      trackId: selectedTrackId,
-      value: quantityForStep(selectedPositionQuantity * share, quantityStep),
-    });
   };
 
   const selectedTrackOpenOrders = openOrders.filter((order) => (
@@ -1486,14 +1516,31 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
             ) : visiblePositions.map((item) => {
               const quantityValue = finiteNumber(item.position.quantity) ?? 0;
               const positionSide = quantityValue >= 0 ? "long" : "short";
+              const hedgePositionSide = item.position_side;
               const selected = item.track_id === selectedTrackId;
-              const showClose = selected && positionPanel?.trackId === item.track_id && positionPanel.kind === "close";
-              const showProtection = selected && positionPanel?.trackId === item.track_id && positionPanel.kind === "protection";
+              const samePanelLeg = positionPanel?.positionSide === hedgePositionSide;
+              const showClose = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "close";
+              const showProtection = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "protection";
               const uPnl = finiteNumber(item.position.unrealized_pnl) ?? 0;
               const marginLabel = item.margin_equity ?? item.isolated_margin ?? null;
               const itemQtyAsset = baseAsset(item.symbol, settlementAsset);
+              const itemCloseQuantity = closeDraft?.trackId === item.track_id
+                && closeDraft.positionSide === hedgePositionSide
+                ? closeDraft.value
+                : quantityForStep(Math.abs(quantityValue), quantityStep);
+              const itemStopLossPrice = protectionDraft?.trackId === item.track_id
+                && protectionDraft.positionSide === hedgePositionSide
+                ? protectionDraft.stopLoss
+                : "";
+              const itemTakeProfitPrice = protectionDraft?.trackId === item.track_id
+                && protectionDraft.positionSide === hedgePositionSide
+                ? protectionDraft.takeProfit
+                : "";
+              const legPayload = hedgePositionSide === undefined
+                ? {}
+                : { position_side: hedgePositionSide };
               return (
-                <article className="replay-position-card" key={item.track_id} data-position-side={positionSide} data-selected-track={selected ? "true" : "false"}>
+                <article className="replay-position-card" key={`${item.track_id}:${hedgePositionSide ?? "NET"}`} data-position-side={positionSide} data-selected-track={selected ? "true" : "false"}>
                   <header>
                     <div>
                       <strong>{item.symbol}</strong>
@@ -1531,13 +1578,13 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                           type="button"
                           className={`replay-pill-btn${showProtection ? " active" : ""}`}
                           aria-expanded={showProtection}
-                          onClick={() => togglePositionPanel(item.track_id, "protection")}
+                          onClick={() => togglePositionPanel(item.track_id, "protection", hedgePositionSide)}
                         >止盈止损</button>
                         <button
                           type="button"
                           className={`replay-pill-btn${showClose ? " active" : ""}`}
                           aria-expanded={showClose}
-                          onClick={() => togglePositionPanel(item.track_id, "close")}
+                          onClick={() => togglePositionPanel(item.track_id, "close", hedgePositionSide)}
                         >平仓</button>
                         <button
                           type="button"
@@ -1545,37 +1592,38 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                           data-variant="danger"
                           data-replay-action="close-position"
                           disabled={!commandReady}
-                          onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: null }, "正在提交全部平仓命令…", "全部平仓命令已受理")}
+                          onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: null, ...legPayload }, "正在提交全部平仓命令…", "全部平仓命令已受理")}
                         >市价全平</button>
                       </div>
                       {showClose && (
                         <section className="replay-position-actions">
                           <header><strong>平仓数量</strong><small>确认后按已揭示参考价提交</small></header>
-                          <label>数量 <span><input ref={closeQtyInputRef} value={closeQuantity} inputMode="decimal" onChange={(event) => setCloseDraft({ trackId: selectedTrackId, value: event.target.value })} aria-label="平仓数量" /><b>{itemQtyAsset}</b></span></label>
-                          <div>{[0.25, 0.5, 1].map((share) => <button type="button" key={share} onClick={() => setCloseShare(share)}>{share * 100}%</button>)}</div>
+                          <label>数量 <span><input ref={closeQtyInputRef} value={itemCloseQuantity} inputMode="decimal" onChange={(event) => setCloseDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), value: event.target.value })} aria-label="平仓数量" /><b>{itemQtyAsset}</b></span></label>
+                          <div>{[0.25, 0.5, 1].map((share) => <button type="button" key={share} onClick={() => setCloseDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), value: quantityForStep(Math.abs(quantityValue) * share, quantityStep) })}>{share * 100}%</button>)}</div>
                           <button
                             type="button"
                             data-replay-action="close-partial"
-                            disabled={!commandReady || !closeQuantity.trim()}
-                            onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: closeQuantity }, "正在提交平仓命令…", "平仓命令已受理，组合已刷新")}
+                            disabled={!commandReady || !itemCloseQuantity.trim()}
+                            onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: itemCloseQuantity, ...legPayload }, "正在提交平仓命令…", "平仓命令已受理，组合已刷新")}
                           >确认平仓</button>
                         </section>
                       )}
                       {showProtection && (
                         <section className="replay-position-actions">
                           <header><strong>仓位保护</strong><small>止盈止损价格</small></header>
-                          <label>止损价 <span><input value={stopLossPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, stopLoss: event.target.value, takeProfit: takeProfitPrice })} aria-label="止损价格" /><b>{settlementAsset}</b></span></label>
-                          <label>止盈价 <span><input value={takeProfitPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, stopLoss: stopLossPrice, takeProfit: event.target.value })} aria-label="止盈价格" /><b>{settlementAsset}</b></span></label>
+                          <label>止损价 <span><input value={itemStopLossPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: event.target.value, takeProfit: itemTakeProfitPrice })} aria-label="止损价格" /><b>{settlementAsset}</b></span></label>
+                          <label>止盈价 <span><input value={itemTakeProfitPrice} inputMode="decimal" onChange={(event) => setProtectionDraft({ trackId: selectedTrackId, ...(hedgePositionSide === undefined ? {} : { positionSide: hedgePositionSide }), stopLoss: itemStopLossPrice, takeProfit: event.target.value })} aria-label="止盈价格" /><b>{settlementAsset}</b></span></label>
                           <button
                             type="button"
                             data-replay-action="set-position-protection"
-                            disabled={!commandReady || (!stopLossPrice.trim() && !takeProfitPrice.trim())}
+                            disabled={!commandReady || (!itemStopLossPrice.trim() && !itemTakeProfitPrice.trim())}
                             onClick={() => void runTrade(
                               "set_position_protection",
                               {
                                 quantity: null,
-                                stop_loss_price: stopLossPrice.trim() || null,
-                                take_profit_price: takeProfitPrice.trim() || null,
+                                stop_loss_price: itemStopLossPrice.trim() || null,
+                                take_profit_price: itemTakeProfitPrice.trim() || null,
+                                ...legPayload,
                               },
                               "正在原子替换止盈止损…",
                               "仓位保护已更新",
@@ -1587,14 +1635,14 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             disabled={!commandReady}
                             onClick={() => void runTrade(
                               "set_position_protection",
-                              { quantity: null, stop_loss_price: null, take_profit_price: null },
+                              { quantity: null, stop_loss_price: null, take_profit_price: null, ...legPayload },
                               "正在清除仓位保护…",
                               "仓位保护已清除",
                             )}
                           >清除止盈止损</button>
                         </section>
                       )}
-                      <details className="replay-position-disclosure">
+                      {contract?.position_mode !== "HEDGE" && <details className="replay-position-disclosure">
                         <summary>更多操作</summary>
                         <section className="replay-position-actions">
                           <button
@@ -1613,7 +1661,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             )}
                           >反手为{selectedPositionSignedQuantity > 0 ? "空" : "多"}</button>
                         </section>
-                      </details>
+                      </details>}
                     </>
                   )}
                 </article>

@@ -766,25 +766,29 @@ export default function ReplayTrainingPageShell({
   const replayTradeHlines = useMemo<IndicatorHLine[]>(() => {
     const selectedTrackId = viewer.viewerState?.selected_track_id;
     const portfolio = viewer.marketTracks?.portfolio;
-    const selectedPosition = selectedTrackId === undefined
-      ? undefined
-      : portfolio?.positions.find((item) => item.track_id === selectedTrackId);
-    const position = selectedPosition?.position;
+    const selectedPositions = selectedTrackId === undefined
+      ? []
+      : (portfolio?.positions.filter((item) => item.track_id === selectedTrackId) ?? []);
     const lines: IndicatorHLine[] = [];
-    const entryPrice = Number(position?.entry_price ?? Number.NaN);
-    const quantity = Number(position?.quantity ?? 0);
-    if (quantity !== 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
-      lines.push({
-        id: "replay-position-average",
-        pane: "main",
-        price: entryPrice,
-        title: `持仓均价 ${entryPrice}`,
-        color: "#2563eb",
-        linestyle: "solid",
-        linewidth: 1,
-      });
-    }
-    if (quantity !== 0 && selectedPosition !== undefined) {
+    for (const selectedPosition of selectedPositions) {
+      const position = selectedPosition.position;
+      const entryPrice = Number(position.entry_price ?? Number.NaN);
+      const quantity = Number(position.quantity ?? 0);
+      const positionSide = selectedPosition.position_side;
+      const sideLabel = positionSide === "LONG" ? "多仓" : positionSide === "SHORT" ? "空仓" : "持仓";
+      const lineSuffix = positionSide?.toLowerCase() ?? "net";
+      if (quantity !== 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
+        lines.push({
+          id: "replay-position-average" + (positionSide === undefined ? "" : `-${lineSuffix}`),
+          pane: "main",
+          price: entryPrice,
+          title: `${sideLabel}均价 ${entryPrice}`,
+          color: positionSide === "SHORT" ? "#7c3aed" : "#2563eb",
+          linestyle: "solid",
+          linewidth: 1,
+        });
+      }
+      if (quantity === 0 || portfolio?.position_mode === "HEDGE") continue;
       const mark = Number(position?.mark_price ?? Number.NaN);
       const marginEquity = Number(selectedPosition.margin_equity ?? Number.NaN);
       const maintenance = Number(selectedPosition.maintenance_margin ?? Number.NaN);
@@ -812,7 +816,7 @@ export default function ReplayTrainingPageShell({
         && riskPrice > 0
       ) {
         lines.push({
-          id: "replay-position-risk-reference",
+          id: "replay-position-risk-reference" + (positionSide === undefined ? "" : `-${lineSuffix}`),
           pane: "main",
           price: riskPrice,
           title: `风险参考≈ ${riskPrice.toFixed(6)}`,

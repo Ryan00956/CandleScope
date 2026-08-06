@@ -539,6 +539,10 @@ test("replay watchlist searches the Run catalog and adds products through track 
   assert.match(watchlist, /搜索当前 Run 可用商品/);
   assert.match(watchlist, /Run 不绑定单一商品/);
   assert.match(watchlist, /selectTrack|addAndSelectTrack/);
+  assert.match(
+    watchlist,
+    /const pending = viewer\.viewerPending \|\| viewer\.controlPending !== null/,
+  );
   assert.match(watchlist, /forced_full_reasons/);
   assert.doesNotMatch(
     watchlist,

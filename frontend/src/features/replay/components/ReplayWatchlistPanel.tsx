@@ -157,7 +157,7 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
     const tier: ReplaySubscriptionTier = track?.subscription_tier ?? "NONE";
     const last = selected ? runtime.store.lastPrice?.close ?? null : track?.public_price ?? null;
     const forced = track?.forced_full_reasons ?? [];
-    const pending = viewer.viewerPending;
+    const pending = viewer.viewerPending || viewer.controlPending !== null;
     const activate = () => {
       if (pending || selected || !sameScope) return;
       const action = track === null

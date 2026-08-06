@@ -63,6 +63,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /async function waitForServerSelectedMarket/);
   assert.match(soak, /authoritative HEDGE market selection/);
   assert.match(soak, /HEDGE market selection command failed/);
+  assert.match(soak, /registered HEDGE market \$\{symbol\} readiness/);
+  assert.match(soak, /trackId !== 'unregistered'/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {

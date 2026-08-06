@@ -901,10 +901,23 @@ async function waitForServerSelectedMarket(backendOrigin, runId, cdp, symbol, ti
 }
 
 async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs) {
-  const clicked = await evaluate(cdp, `(() => {
+  const registeredTrackId = await waitForValue(cdp, `(() => {
     const expected = ${JSON.stringify(symbol)};
     const row = [...document.querySelectorAll('.replay-watchlist-row')]
       .find((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    const trackId = row?.getAttribute('data-replay-track-id');
+    const button = row?.querySelector('button.replay-watchlist-market');
+    return trackId && trackId !== 'unregistered'
+      && button instanceof HTMLButtonElement && !button.disabled
+      ? trackId
+      : null;
+  })()`, timeoutMs, `registered HEDGE market ${symbol} readiness`);
+  const clicked = await evaluate(cdp, `(() => {
+    const expected = ${JSON.stringify(symbol)};
+    const registeredTrackId = ${JSON.stringify(registeredTrackId)};
+    const row = [...document.querySelectorAll('.replay-watchlist-row')]
+      .find((item) => item.querySelector('strong')?.textContent?.trim() === expected
+        && item.getAttribute('data-replay-track-id') === registeredTrackId);
     const button = row?.querySelector('button.replay-watchlist-market');
     if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
     button.click();
@@ -917,6 +930,11 @@ async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs)
     cdp,
     symbol,
     timeoutMs,
+  );
+  assert(
+    authoritative.selectedTrackId === registeredTrackId,
+    `tracked HEDGE market ${symbol} switched to an unexpected identity`,
+    { registeredTrackId, authoritative },
   );
   try {
     await waitForValue(cdp, `(() => {

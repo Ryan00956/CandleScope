@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 16
+TRAINING_SCHEMA_VERSION = 17
 TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
@@ -342,7 +342,9 @@ CREATE TABLE IF NOT EXISTS replay_training_contract_account (
         CHECK (next_funding_time_ms IS NULL OR next_funding_time_ms >= 0),
     overlay_cash TEXT NOT NULL,
     isolated_margin_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'LIQUIDATING', 'BANKRUPT')),
+    status TEXT NOT NULL CHECK (
+        status IN ('ACTIVE', 'LIQUIDATING', 'BANKRUPT', 'FAILED_CLOSED')
+    ),
     fidelity TEXT NOT NULL,
     ledger_tail_hash TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
@@ -1713,6 +1715,7 @@ CREATE TABLE IF NOT EXISTS replay_training_liquidation_leg (
     trigger_quantity TEXT NOT NULL,
     trigger_notional TEXT NOT NULL,
     maintenance_margin TEXT NOT NULL,
+    liquidation_price TEXT,
     bankruptcy_price TEXT,
     takeover_price TEXT,
     liquidation_fee TEXT NOT NULL,
@@ -2193,6 +2196,63 @@ ON replay_training_hedge_funding_settlement(
 """
 
 
+TRAINING_SCHEMA_V17_HEDGE_LIQUIDATION = """
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_leg_price_proof (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    liquidation_leg_id TEXT NOT NULL,
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    price_tick TEXT NOT NULL,
+    mark_price TEXT NOT NULL,
+    scope_equity TEXT NOT NULL,
+    scope_maintenance_margin TEXT NOT NULL,
+    liquidation_price TEXT NOT NULL,
+    bankruptcy_price TEXT NOT NULL,
+    takeover_price TEXT NOT NULL,
+    formula_version TEXT NOT NULL,
+    proof_hash TEXT NOT NULL CHECK (
+        length(proof_hash) = 71 AND proof_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, liquidation_leg_id),
+    UNIQUE (run_id, proof_hash),
+    FOREIGN KEY (run_id, case_id, liquidation_leg_id)
+        REFERENCES replay_training_liquidation_leg(
+            run_id, case_id, liquidation_leg_id
+        ) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_adl_counterparty_ledger (
+    run_id TEXT NOT NULL,
+    adl_event_id TEXT NOT NULL,
+    ledger_sequence INTEGER NOT NULL CHECK (ledger_sequence >= 1),
+    candidate_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    position_side TEXT NOT NULL CHECK (position_side IN ('LONG', 'SHORT')),
+    quantity_before TEXT NOT NULL,
+    quantity_delta TEXT NOT NULL,
+    quantity_after TEXT NOT NULL,
+    takeover_price TEXT NOT NULL,
+    cash_delta TEXT NOT NULL,
+    previous_hash TEXT NOT NULL CHECK (
+        length(previous_hash) = 71 AND previous_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    entry_hash TEXT NOT NULL CHECK (
+        length(entry_hash) = 71 AND entry_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, adl_event_id, ledger_sequence),
+    UNIQUE (run_id, adl_event_id, candidate_id),
+    UNIQUE (run_id, entry_hash),
+    FOREIGN KEY (run_id, adl_event_id)
+        REFERENCES replay_training_adl_event(run_id, adl_event_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, snapshot_id, candidate_id)
+        REFERENCES replay_training_adl_candidate(run_id, snapshot_id, candidate_id)
+        ON DELETE RESTRICT
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -2348,6 +2408,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_V14_HEDGE,
         TRAINING_SCHEMA_V15_HEDGE_INPUTS,
         TRAINING_SCHEMA_V16_HEDGE_ACCOUNTING,
+        TRAINING_SCHEMA_V17_HEDGE_LIQUIDATION,
     ):
         _execute_script(connection, script)
     connection.execute(

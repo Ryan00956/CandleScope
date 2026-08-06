@@ -44,6 +44,13 @@ from .hedge_inputs import (
     bind_hedge_inputs,
     runtime_hedge_rule,
 )
+from .hedge_simulation_contract import (
+    ADL_MODEL_VERSION,
+    LIQUIDATION_FORMULA_VERSION,
+    rank_adl_candidates,
+    select_adl_candidates,
+    settle_insurance_fund,
+)
 from .disclosure import project_public_time
 from .account import (
     CONFIGURED_FEE_FIDELITY,
@@ -2955,6 +2962,1536 @@ class TrainingRunStore:
 
         return await self.base_store.run_extension_read(read)
 
+    async def commit_liquidation_cancellation(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+        canceled_orders: Sequence[Mapping[str, object]],
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "CANCEL_ORDERS":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "liquidation cancellation step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            now_ms = self.base_store._validated_now_ms()
+            legs = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg
+                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+            )
+            if not legs:
+                raise TypeError("liquidation cancellation has no legs")
+            for index, raw in enumerate(canceled_orders, start=1):
+                track_id = str(raw["track_id"])
+                order_id = str(raw["order_id"])
+                leg = next(
+                    (item for item in legs if str(item["track_id"]) == track_id),
+                    legs[0],
+                )
+                payload = {
+                    "case_id": liquidation_id,
+                    "step_sequence": step_sequence,
+                    "order_id": order_id,
+                    "track_id": track_id,
+                    "state": "CANCELED",
+                }
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO replay_training_liquidation_order(
+                        run_id, case_id, step_sequence, order_id,
+                        liquidation_leg_id, order_sequence, side, order_type,
+                        requested_quantity, filled_quantity, remaining_quantity,
+                        average_price, state, order_hash, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'BUY', 'LIMIT', '0', '0', '0',
+                              NULL, 'CANCELED', ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        step_sequence,
+                        order_id,
+                        leg["liquidation_leg_id"],
+                        index,
+                        canonical_sha256(payload),
+                        now_ms,
+                        now_ms,
+                    ),
+                )
+            after_snapshot_id, _risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="CANCELED",
+                account_status="CANCELING_ORDERS",
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = 'RISK_RECHECK', updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (now_ms, run_id, liquidation_id),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type="RISK_RECHECK",
+                before_snapshot_id=after_snapshot_id,
+                plan={"recompute_after_margin_release": True},
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def commit_liquidation_adl(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "ADL":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "ADL step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            reason = json.loads(str(step["reason"]))
+            plan = cast(
+                Mapping[str, object], cast(Mapping[str, object], reason)["plan"]
+            )
+            projection = connection.execute(
+                """
+                SELECT * FROM replay_hedge_input_projection
+                WHERE run_id = ? AND source_kind = 'SIMULATION'
+                """,
+                (run_id,),
+            ).fetchone()
+            if projection is None:
+                raise TrainingRunError(
+                    "LIQUIDATION_ADL_INPUT_MISSING",
+                    "materialized ADL simulation projection is unavailable",
+                    status_code=409,
+                )
+            state = json.loads(str(projection["state_json"]))
+            snapshots = (
+                state.get("adl_snapshots") if isinstance(state, Mapping) else None
+            )
+            raw_snapshot = (
+                snapshots.get(str(plan["symbol"]))
+                if isinstance(snapshots, Mapping)
+                else None
+            )
+            if not isinstance(raw_snapshot, Mapping):
+                raise TrainingRunError(
+                    "LIQUIDATION_ADL_INPUT_MISSING",
+                    "materialized ADL cohort for the bankrupt symbol is unavailable",
+                    status_code=409,
+                )
+            case = connection.execute(
+                """
+                SELECT trigger_virtual_time_ms, trigger_source_sequence
+                FROM replay_training_liquidation_case
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, liquidation_id),
+            ).fetchone()
+            if case is None:
+                raise TypeError("ADL liquidation case is missing")
+            trigger_time = int(case["trigger_virtual_time_ms"])
+            if not (
+                int(raw_snapshot["effective_time_ms"])
+                <= trigger_time
+                <= int(raw_snapshot["valid_until_ms"])
+            ):
+                raise TrainingRunError(
+                    "LIQUIDATION_ADL_INPUT_GAP",
+                    "materialized ADL cohort does not cover the liquidation time",
+                    status_code=409,
+                )
+            raw_candidates = raw_snapshot.get("candidates")
+            if not isinstance(raw_candidates, list):
+                raise TypeError("ADL candidate projection is invalid")
+            ranked = rank_adl_candidates(
+                raw_candidates,
+                bankrupt_position_side=str(plan["bankrupt_position_side"]),
+                quote_step=plan["quote_step"],
+            )
+            selection = select_adl_candidates(
+                raw_candidates,
+                bankrupt_position_side=str(plan["bankrupt_position_side"]),
+                takeover_quantity=plan["takeover_quantity"],
+                quote_step=plan["quote_step"],
+            )
+            if selection["status"] != "COMPLETED":
+                raise TrainingRunError(
+                    "LIQUIDATION_ADL_COHORT_EXHAUSTED",
+                    "materialized ADL cohort cannot absorb the uncovered bankruptcy quantity",
+                    status_code=409,
+                    details={"remaining_quantity": selection["remaining_quantity"]},
+                )
+            now_ms = self.base_store._validated_now_ms()
+            snapshot_id = f"adl-{liquidation_id}-{step_sequence:03d}"
+            snapshot_payload = {
+                "snapshot_id": snapshot_id,
+                "case_id": liquidation_id,
+                "step_sequence": step_sequence,
+                "symbol": plan["symbol"],
+                "model_version": ADL_MODEL_VERSION,
+                "source_snapshot_hash": raw_snapshot["snapshot_hash"],
+                "input_chain_hash": projection["input_chain_hash"],
+                "ranked_candidate_ids": [item["candidate_id"] for item in ranked],
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_adl_snapshot(
+                    run_id, snapshot_id, case_id, step_sequence, symbol,
+                    cohort_sequence, model_version, input_hash, snapshot_hash,
+                    created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    snapshot_id,
+                    liquidation_id,
+                    step_sequence,
+                    plan["symbol"],
+                    ADL_MODEL_VERSION,
+                    canonical_sha256(
+                        {
+                            "source_snapshot_hash": raw_snapshot["snapshot_hash"],
+                            "input_chain_hash": projection["input_chain_hash"],
+                        }
+                    ),
+                    canonical_sha256(snapshot_payload),
+                    now_ms,
+                ),
+            )
+            ranked_by_id = {str(item["candidate_id"]): item for item in ranked}
+            for rank, candidate in enumerate(ranked, start=1):
+                payload = {
+                    "snapshot_id": snapshot_id,
+                    "candidate_id": candidate["candidate_id"],
+                    "rank": rank,
+                    "position_side": candidate["position_side"],
+                    "quantity": candidate["quantity"],
+                    "entry_price": candidate["entry_price"],
+                    "mark_price": candidate["mark_price"],
+                    "profit_ratio": candidate["profit_ratio"],
+                    "effective_leverage": candidate["effective_leverage"],
+                    "score": candidate["score"],
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_adl_candidate(
+                        run_id, snapshot_id, candidate_id, rank, position_side,
+                        quantity, entry_price, mark_price, profit_ratio,
+                        effective_leverage, score, candidate_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        snapshot_id,
+                        candidate["candidate_id"],
+                        rank,
+                        candidate["position_side"],
+                        candidate["quantity"],
+                        candidate["entry_price"],
+                        candidate["mark_price"],
+                        candidate["profit_ratio"],
+                        candidate["effective_leverage"],
+                        candidate["score"],
+                        canonical_sha256(payload),
+                    ),
+                )
+            adl_event_id = f"adl-event-{liquidation_id}-{step_sequence:03d}"
+            takeover_price = Decimal(str(plan["takeover_price"]))
+            completed_notional = (
+                Decimal(str(plan["takeover_quantity"]))
+                * takeover_price
+                * Decimal(str(plan["contract_size"]))
+            )
+            event_payload = {
+                "adl_event_id": adl_event_id,
+                "case_id": liquidation_id,
+                "step_sequence": step_sequence,
+                "snapshot_id": snapshot_id,
+                "required_notional": plan["uncovered_deficit"],
+                "completed_notional": decimal_to_string(
+                    completed_notional, field_name="ADL completed notional"
+                ),
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_adl_event(
+                    run_id, adl_event_id, case_id, step_sequence, snapshot_id,
+                    required_notional, completed_notional, state, event_hash,
+                    created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    adl_event_id,
+                    liquidation_id,
+                    step_sequence,
+                    snapshot_id,
+                    plan["uncovered_deficit"],
+                    event_payload["completed_notional"],
+                    canonical_sha256(event_payload),
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            previous_hash = "sha256:" + "0" * 64
+            selected = cast(list[dict[str, str]], selection["selected"])
+            for sequence, item in enumerate(selected, start=1):
+                candidate = ranked_by_id[item["candidate_id"]]
+                quantity = Decimal(str(item["quantity"]))
+                entry = Decimal(str(candidate["entry_price"]))
+                cash_delta = (
+                    (takeover_price - entry) * quantity
+                    if candidate["position_side"] == "LONG"
+                    else (entry - takeover_price) * quantity
+                ) * Decimal(str(plan["contract_size"]))
+                notional = (
+                    quantity * takeover_price * Decimal(str(plan["contract_size"]))
+                )
+                selection_payload = {
+                    "adl_event_id": adl_event_id,
+                    "selection_sequence": sequence,
+                    "candidate_id": item["candidate_id"],
+                    "quantity": item["quantity"],
+                    "price": plan["takeover_price"],
+                    "notional": decimal_to_string(
+                        notional, field_name="ADL selection notional"
+                    ),
+                    "cash_delta": decimal_to_string(
+                        cash_delta, field_name="ADL cash delta"
+                    ),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_adl_selection(
+                        run_id, adl_event_id, selection_sequence, candidate_id,
+                        snapshot_id, quantity, price, notional, cash_delta,
+                        selection_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        adl_event_id,
+                        sequence,
+                        item["candidate_id"],
+                        snapshot_id,
+                        item["quantity"],
+                        plan["takeover_price"],
+                        selection_payload["notional"],
+                        selection_payload["cash_delta"],
+                        canonical_sha256(selection_payload),
+                        now_ms,
+                    ),
+                )
+                quantity_before = Decimal(str(candidate["quantity"]))
+                quantity_after = quantity_before - quantity
+                ledger_payload = {
+                    "adl_event_id": adl_event_id,
+                    "ledger_sequence": sequence,
+                    "candidate_id": item["candidate_id"],
+                    "position_side": candidate["position_side"],
+                    "quantity_before": candidate["quantity"],
+                    "quantity_delta": decimal_to_string(
+                        -quantity, field_name="ADL quantity delta"
+                    ),
+                    "quantity_after": decimal_to_string(
+                        quantity_after, field_name="ADL quantity after"
+                    ),
+                    "takeover_price": plan["takeover_price"],
+                    "cash_delta": selection_payload["cash_delta"],
+                }
+                entry_hash = ledger_chain_hash(
+                    previous_hash=previous_hash,
+                    ledger_sequence=sequence,
+                    posting=ledger_payload,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_adl_counterparty_ledger(
+                        run_id, adl_event_id, ledger_sequence, candidate_id,
+                        snapshot_id, position_side, quantity_before,
+                        quantity_delta, quantity_after, takeover_price,
+                        cash_delta, previous_hash, entry_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        adl_event_id,
+                        sequence,
+                        item["candidate_id"],
+                        snapshot_id,
+                        candidate["position_side"],
+                        ledger_payload["quantity_before"],
+                        ledger_payload["quantity_delta"],
+                        ledger_payload["quantity_after"],
+                        plan["takeover_price"],
+                        ledger_payload["cash_delta"],
+                        previous_hash,
+                        entry_hash,
+                        now_ms,
+                    ),
+                )
+                previous_hash = entry_hash
+            after_snapshot_id, _risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="ADL",
+                account_status="ADL",
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = 'ADL', updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (now_ms, run_id, liquidation_id),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type="COMPLETE",
+                before_snapshot_id=after_snapshot_id,
+                plan={
+                    "terminal_state": "BANKRUPT",
+                    "bankruptcy": True,
+                    "adl_event_id": adl_event_id,
+                },
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def commit_liquidation_complete(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "COMPLETE":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "liquidation completion step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            now_ms = self.base_store._validated_now_ms()
+            reason = json.loads(str(step["reason"]))
+            plan = cast(
+                Mapping[str, object], cast(Mapping[str, object], reason)["plan"]
+            )
+            after_snapshot_id, risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="COMPLETE",
+                account_status=str(plan["terminal_state"]),
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            terminal = str(plan["terminal_state"])
+            case_state = (
+                "RECOVERED_AFTER_CANCEL"
+                if terminal == "RECOVERED_AFTER_CANCEL"
+                else "COMPLETED"
+            )
+            steps = [
+                {
+                    "step_sequence": int(row["step_sequence"]),
+                    "step_type": str(row["step_type"]),
+                    "state": str(row["state"]),
+                    "step_hash": str(row["step_hash"]),
+                    "after_snapshot_id": row["after_snapshot_id"],
+                }
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_step
+                    WHERE run_id = ? AND case_id = ? ORDER BY step_sequence
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+            ]
+            component_hash = canonical_sha256(
+                {
+                    "schema_version": "replay.liquidation-case.v2",
+                    "case_id": liquidation_id,
+                    "terminal_state": terminal,
+                    "final_snapshot_id": after_snapshot_id,
+                    "steps": steps,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = ?, final_snapshot_id = ?, component_hash = ?,
+                    updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    case_state,
+                    after_snapshot_id,
+                    component_hash,
+                    now_ms,
+                    run_id,
+                    liquidation_id,
+                ),
+            )
+            another = connection.execute(
+                """
+                SELECT 1 FROM replay_training_liquidation_case
+                WHERE run_id = ? AND case_id != ?
+                  AND state NOT IN ('COMPLETED', 'BANKRUPT', 'FAILED_CLOSED', 'RECOVERED_AFTER_CANCEL')
+                LIMIT 1
+                """,
+                (run_id, liquidation_id),
+            ).fetchone()
+            account_status = (
+                "LIQUIDATING"
+                if another is not None
+                else "BANKRUPT"
+                if bool(plan.get("bankruptcy")) or cast(Decimal, risk["equity"]) < 0
+                else "ACTIVE"
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_contract_account
+                SET status = ?, updated_at_ms = ? WHERE run_id = ?
+                """,
+                (account_status, now_ms, run_id),
+            )
+            adapter = connection.execute(
+                """
+                SELECT track.adapter_session_id
+                FROM replay_training_liquidation_leg AS leg
+                JOIN replay_training_market_track AS track
+                  ON track.run_id = leg.run_id AND track.track_id = leg.track_id
+                WHERE leg.run_id = ? AND leg.case_id = ?
+                ORDER BY leg.leg_sequence LIMIT 1
+                """,
+                (run_id, liquidation_id),
+            ).fetchone()
+            if adapter is not None and isinstance(adapter["adapter_session_id"], str):
+                self._append_review_timeline_event(
+                    connection,
+                    run_id=run_id,
+                    session_id=str(adapter["adapter_session_id"]),
+                    context={
+                        "kind": "DIRECT",
+                        "category": "LIQUIDATION",
+                        "event_type": "LIQUIDATION",
+                        "command_id": f"liquidation-complete:{liquidation_id}",
+                    },
+                    state=None,
+                    checkpoint=None,
+                    now_ms=now_ms,
+                )
+
+        await self.base_store.run_extension_write(write)
+
+    async def fail_liquidation_case(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        failure_code: str,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            now_ms = self.base_store._validated_now_ms()
+            pending = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND state = 'PENDING'
+                ORDER BY step_sequence LIMIT 1
+                """,
+                (run_id, liquidation_id),
+            ).fetchone()
+            if pending is not None:
+                connection.execute(
+                    """
+                    UPDATE replay_training_liquidation_step
+                    SET state = 'FAILED_CLOSED', reason = ?, committed_at_ms = ?
+                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                    """,
+                    (
+                        canonical_json(
+                            {"cause": "FAILED_CLOSED", "failure_code": failure_code}
+                        ),
+                        now_ms,
+                        run_id,
+                        liquidation_id,
+                        pending["step_sequence"],
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = 'FAILED_CLOSED', reason = ?, updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (failure_code, now_ms, run_id, liquidation_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_leg
+                SET state = 'FAILED_CLOSED'
+                WHERE run_id = ? AND case_id = ? AND state NOT IN ('CLOSED', 'TRANSFERRED')
+                """,
+                (run_id, liquidation_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_contract_account
+                SET status = 'FAILED_CLOSED', updated_at_ms = ? WHERE run_id = ?
+                """,
+                (now_ms, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET state = 'PAUSED', compatibility = 'DEGRADED',
+                    updated_at_ms = ?, saved_at_ms = ? WHERE run_id = ?
+                """,
+                (now_ms, now_ms, run_id),
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def commit_liquidation_bankruptcy(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "BANKRUPTCY_TRANSFER":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "bankruptcy transfer step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            now_ms = self.base_store._validated_now_ms()
+            reason = json.loads(str(step["reason"]))
+            plan = cast(
+                Mapping[str, object], cast(Mapping[str, object], reason)["plan"]
+            )
+            deficit = Decimal(str(plan["bankruptcy_deficit"]))
+            legs = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg
+                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+            )
+            if deficit <= 0 or not legs:
+                raise TrainingRunError(
+                    "LIQUIDATION_BANKRUPTCY_INVALID",
+                    "bankruptcy transfer requires a positive deficit and durable legs",
+                    status_code=409,
+                )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_leg
+                SET state = 'TRANSFERRED', takeover_price = bankruptcy_price
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, liquidation_id),
+            )
+            after_snapshot_id, _risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="BANKRUPTCY",
+                account_status="BANKRUPTCY_TRANSFER",
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = 'INSURANCE_FUND_SETTLEMENT', updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (now_ms, run_id, liquidation_id),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type="INSURANCE_FUND_SETTLEMENT",
+                before_snapshot_id=after_snapshot_id,
+                plan={
+                    "bankruptcy_deficit": str(plan["bankruptcy_deficit"]),
+                    "recovered": False,
+                },
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    @staticmethod
+    def _append_insurance_posting(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        asset: str,
+        case_id: str,
+        step_sequence: int,
+        cash_delta: Decimal,
+        reason: str,
+        now_ms: int,
+    ) -> str:
+        fund = connection.execute(
+            """
+            SELECT * FROM replay_training_insurance_fund
+            WHERE run_id = ? AND asset = ?
+            """,
+            (run_id, asset),
+        ).fetchone()
+        if fund is None:
+            raise TrainingRunError(
+                "LIQUIDATION_SIMULATION_INPUT_MISSING",
+                "insurance fund simulation state is unavailable",
+                status_code=409,
+            )
+        current = Decimal(str(fund["current_balance"]))
+        balance_after = current + cash_delta
+        if balance_after < 0:
+            raise TrainingRunError(
+                "LIQUIDATION_INSURANCE_OVERDRAFT",
+                "insurance fund posting would overdraw the pinned simulation balance",
+                status_code=409,
+            )
+        sequence = int(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(posting_sequence), 0) + 1
+                FROM replay_training_insurance_posting
+                WHERE run_id = ? AND asset = ?
+                """,
+                (run_id, asset),
+            ).fetchone()[0]
+        )
+        posting_id = f"insurance:{case_id}:{step_sequence}:{reason.lower()}"
+        previous_hash = str(fund["ledger_tail_hash"])
+        payload = {
+            "posting_id": posting_id,
+            "case_id": case_id,
+            "step_sequence": step_sequence,
+            "cash_delta": decimal_to_string(
+                cash_delta, field_name="insurance cash delta"
+            ),
+            "balance_after": decimal_to_string(
+                balance_after, field_name="insurance balance"
+            ),
+            "reason": reason,
+        }
+        posting_hash = ledger_chain_hash(
+            previous_hash=previous_hash,
+            ledger_sequence=sequence,
+            posting=payload,
+        )
+        connection.execute(
+            """
+            INSERT INTO replay_training_insurance_posting(
+                run_id, asset, posting_sequence, posting_id, case_id,
+                step_sequence, cash_delta, balance_after, reason,
+                previous_hash, posting_hash, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                asset,
+                sequence,
+                posting_id,
+                case_id,
+                step_sequence,
+                payload["cash_delta"],
+                payload["balance_after"],
+                reason,
+                previous_hash,
+                posting_hash,
+                now_ms,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE replay_training_insurance_fund
+            SET current_balance = ?, ledger_tail_hash = ?, revision = revision + 1,
+                updated_at_ms = ?
+            WHERE run_id = ? AND asset = ?
+            """,
+            (payload["balance_after"], posting_hash, now_ms, run_id, asset),
+        )
+        return posting_hash
+
+    async def commit_liquidation_insurance(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "INSURANCE_FUND_SETTLEMENT":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "insurance settlement step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            reason = json.loads(str(step["reason"]))
+            plan = cast(
+                Mapping[str, object], cast(Mapping[str, object], reason)["plan"]
+            )
+            deficit = Decimal(str(plan.get("bankruptcy_deficit", "0")))
+            now_ms = self.base_store._validated_now_ms()
+            run = connection.execute(
+                "SELECT settlement_asset FROM replay_training_run WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            fund = connection.execute(
+                """
+                SELECT * FROM replay_training_insurance_fund
+                WHERE run_id = ? AND asset = ?
+                """,
+                (run_id, run["settlement_asset"] if run is not None else ""),
+            ).fetchone()
+            if run is None or fund is None:
+                raise TrainingRunError(
+                    "LIQUIDATION_SIMULATION_INPUT_MISSING",
+                    "pinned insurance fund state is unavailable",
+                    status_code=409,
+                )
+            asset = str(run["settlement_asset"])
+            fee_rows = connection.execute(
+                """
+                SELECT liquidation_fee
+                FROM replay_training_liquidation_fill
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, liquidation_id),
+            ).fetchall()
+            fee_inflow = sum(
+                (Decimal(str(row["liquidation_fee"])) for row in fee_rows),
+                Decimal(0),
+            )
+            settlement = settle_insurance_fund(
+                balance=fund["current_balance"],
+                deficit=decimal_to_string(deficit, field_name="insurance deficit"),
+                liquidation_fee_inflow=decimal_to_string(
+                    fee_inflow,
+                    field_name="insurance liquidation fee inflow",
+                ),
+            )
+            if fee_inflow > 0:
+                self._append_insurance_posting(
+                    connection,
+                    run_id=run_id,
+                    asset=asset,
+                    case_id=liquidation_id,
+                    step_sequence=step_sequence,
+                    cash_delta=fee_inflow,
+                    reason="LIQUIDATION_FEE_INFLOW",
+                    now_ms=now_ms,
+                )
+            coverage = Decimal(str(settlement["coverage"]))
+            if coverage > 0:
+                self._append_insurance_posting(
+                    connection,
+                    run_id=run_id,
+                    asset=asset,
+                    case_id=liquidation_id,
+                    step_sequence=step_sequence,
+                    cash_delta=-coverage,
+                    reason="BANKRUPTCY_DEFICIT_DEBIT",
+                    now_ms=now_ms,
+                )
+            uncovered = Decimal(str(settlement["uncovered_deficit"]))
+            after_snapshot_id, _risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="INSURANCE",
+                account_status="INSURANCE_FUND_SETTLEMENT",
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            if uncovered > 0:
+                adl_legs = connection.execute(
+                    """
+                SELECT leg.*, track.symbol, proof.takeover_price AS proof_takeover_price,
+                       proof.price_tick, proof.rule_revision AS proof_rule_revision
+                    FROM replay_training_liquidation_leg AS leg
+                    JOIN replay_training_market_track AS track
+                      ON track.run_id = leg.run_id AND track.track_id = leg.track_id
+                    JOIN replay_training_liquidation_leg_price_proof AS proof
+                     ON proof.run_id = leg.run_id AND proof.case_id = leg.case_id
+                     AND proof.liquidation_leg_id = leg.liquidation_leg_id
+                    WHERE leg.run_id = ? AND leg.case_id = ?
+                    ORDER BY leg.leg_sequence
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+                if not adl_legs:
+                    raise TrainingRunError(
+                        "LIQUIDATION_ADL_INPUT_MISSING",
+                        "bankruptcy leg price proof is unavailable for ADL",
+                        status_code=409,
+                    )
+                leg = max(
+                    adl_legs,
+                    key=lambda candidate: (
+                        Decimal(str(candidate["trigger_notional"])),
+                        -int(candidate["leg_sequence"]),
+                    ),
+                )
+                takeover_price = Decimal(str(leg["proof_takeover_price"]))
+                rule_row = connection.execute(
+                    """
+                    SELECT rule_json FROM replay_training_instrument_rule
+                    WHERE run_id = ? AND track_id = ? AND revision = ?
+                    """,
+                    (run_id, leg["track_id"], leg["proof_rule_revision"]),
+                ).fetchone()
+                if rule_row is None or takeover_price <= 0:
+                    raise TrainingRunError(
+                        "LIQUIDATION_ADL_INPUT_MISSING",
+                        "ADL quantity cannot be reconstructed from the pinned rule",
+                        status_code=409,
+                    )
+                rule = InstrumentRule.from_mapping(
+                    json.loads(str(rule_row["rule_json"]))
+                )
+                takeover_quantity = round_to_step(
+                    uncovered / (takeover_price * Decimal(rule.contract_size)),
+                    Decimal(rule.quantity_step),
+                    upward=True,
+                )
+                next_type = "ADL"
+                next_plan: dict[str, object] = {
+                    "uncovered_deficit": decimal_to_string(
+                        uncovered, field_name="ADL uncovered deficit"
+                    ),
+                    "symbol": str(leg["symbol"]),
+                    "bankrupt_position_side": str(leg["position_side"]),
+                    "takeover_price": decimal_to_string(
+                        takeover_price, field_name="ADL takeover price"
+                    ),
+                    "takeover_quantity": decimal_to_string(
+                        takeover_quantity, field_name="ADL takeover quantity"
+                    ),
+                    "quote_step": rule.quote_step,
+                    "contract_size": rule.contract_size,
+                    "rule_revision": int(leg["proof_rule_revision"]),
+                    "track_id": str(leg["track_id"]),
+                }
+            else:
+                next_type = "COMPLETE"
+                next_plan = {
+                    "terminal_state": "BANKRUPT" if deficit > 0 else "ACTIVE",
+                    "bankruptcy": deficit > 0,
+                }
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = ?, updated_at_ms = ? WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    "INSURANCE_FUND_SETTLEMENT"
+                    if next_type == "COMPLETE"
+                    else next_type,
+                    now_ms,
+                    run_id,
+                    liquidation_id,
+                ),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type=next_type,
+                before_snapshot_id=after_snapshot_id,
+                plan=next_plan,
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
+    async def commit_liquidation_recheck(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) != "RISK_RECHECK":
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "liquidation risk recheck step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            now_ms = self.base_store._validated_now_ms()
+            after_snapshot_id, risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="RECHECKED",
+                account_status="RISK_RECHECK",
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            next_plan = self._next_liquidation_trade_plan(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+            )
+            if next_plan is None:
+                next_type = "COMPLETE"
+                plan: dict[str, object] = {
+                    "terminal_state": "RECOVERED_AFTER_CANCEL",
+                    "bankruptcy": False,
+                }
+            else:
+                next_type, plan = next_plan
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = ?, updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    "RISK_RECHECK" if next_type == "COMPLETE" else next_type,
+                    now_ms,
+                    run_id,
+                    liquidation_id,
+                ),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type=next_type,
+                before_snapshot_id=after_snapshot_id,
+                plan=plan,
+                now_ms=now_ms,
+            )
+            if not bool(risk["breached"]):
+                connection.execute(
+                    """
+                    UPDATE replay_training_contract_account
+                    SET status = 'ACTIVE', updated_at_ms = ? WHERE run_id = ?
+                    """,
+                    (now_ms, run_id),
+                )
+
+        await self.base_store.run_extension_write(write)
+
+    async def commit_liquidation_execution(
+        self,
+        *,
+        run_id: str,
+        liquidation_id: str,
+        step_sequence: int,
+        order_id: str,
+    ) -> None:
+        def write(connection: sqlite3.Connection) -> None:
+            step = connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, liquidation_id, step_sequence),
+            ).fetchone()
+            if step is None or str(step["step_type"]) not in {
+                "PARTIAL_LIQUIDATION",
+                "FULL_LIQUIDATION",
+            }:
+                raise TrainingRunError(
+                    "LIQUIDATION_STATE_CONFLICT",
+                    "liquidation execution step is unavailable",
+                    status_code=409,
+                )
+            if str(step["state"]) == "APPLIED":
+                return
+            reason = json.loads(str(step["reason"]))
+            if not isinstance(reason, Mapping) or not isinstance(
+                reason.get("plan"), Mapping
+            ):
+                raise TypeError("liquidation execution plan is invalid")
+            plan = cast(Mapping[str, object], reason["plan"])
+            track_id = str(plan["track_id"])
+            order_row = connection.execute(
+                """
+                SELECT * FROM replay_training_contract_order
+                WHERE run_id = ? AND track_id = ? AND order_id = ?
+                """,
+                (run_id, track_id, order_id),
+            ).fetchone()
+            if order_row is None:
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "liquidation broker order is not durable",
+                    status_code=409,
+                )
+            raw_order = json.loads(str(order_row["order_json"]))
+            if not isinstance(raw_order, Mapping):
+                raise TypeError("liquidation broker order projection is invalid")
+            if str(raw_order.get("quantity")) != str(plan["quantity"]):
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "liquidation broker order quantity differs from the durable plan",
+                    status_code=409,
+                )
+            fill_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_contract_fill
+                    WHERE run_id = ? AND track_id = ?
+                      AND json_extract(fill_json, '$.order_id') = ?
+                    ORDER BY fill_id
+                    """,
+                    (run_id, track_id, order_id),
+                ).fetchall()
+            )
+            if not fill_rows:
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "liquidation broker order has no durable fill",
+                    status_code=409,
+                )
+            now_ms = self.base_store._validated_now_ms()
+            requested = Decimal(str(plan["quantity"]))
+            filled = sum(
+                (
+                    Decimal(str(json.loads(str(row["fill_json"]))["quantity"]))
+                    for row in fill_rows
+                ),
+                Decimal(0),
+            )
+            remaining = max(Decimal(0), requested - filled)
+            average = (
+                sum(
+                    (
+                        Decimal(str(json.loads(str(row["fill_json"]))["price"]))
+                        * Decimal(str(json.loads(str(row["fill_json"]))["quantity"]))
+                        for row in fill_rows
+                    ),
+                    Decimal(0),
+                )
+                / filled
+            )
+            order_payload = {
+                "case_id": liquidation_id,
+                "step_sequence": step_sequence,
+                "order_id": order_id,
+                "plan": dict(plan),
+                "broker_order": dict(raw_order),
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_liquidation_order(
+                    run_id, case_id, step_sequence, order_id,
+                    liquidation_leg_id, order_sequence, side, order_type,
+                    requested_quantity, filled_quantity, remaining_quantity,
+                    average_price, state, order_hash, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, 'MARKET', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    liquidation_id,
+                    step_sequence,
+                    order_id,
+                    plan["liquidation_leg_id"],
+                    plan["side"],
+                    plan["quantity"],
+                    decimal_to_string(filled, field_name="liquidation filled quantity"),
+                    decimal_to_string(
+                        remaining, field_name="liquidation remaining quantity"
+                    ),
+                    decimal_to_string(average, field_name="liquidation average price"),
+                    "FILLED" if remaining == 0 else "PARTIALLY_FILLED",
+                    canonical_sha256(order_payload),
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            total_liquidation_fee = Decimal(0)
+            for fill_sequence, row in enumerate(fill_rows, start=1):
+                raw = json.loads(str(row["fill_json"]))
+                quantity = Decimal(str(raw["quantity"]))
+                price = Decimal(str(raw["price"]))
+                notional = quantity * price * Decimal(str(plan["contract_size"]))
+                liquidation_fee = round_to_step(
+                    notional
+                    * Decimal(str(plan["liquidation_fee_bps"]))
+                    / Decimal(10_000),
+                    Decimal(str(plan["quote_step"])),
+                    upward=True,
+                )
+                total_liquidation_fee += liquidation_fee
+                fill_payload = {
+                    "case_id": liquidation_id,
+                    "order_id": order_id,
+                    "fill_id": str(raw["fill_id"]),
+                    "price": str(raw["price"]),
+                    "quantity": str(raw["quantity"]),
+                    "notional": decimal_to_string(
+                        notional, field_name="liquidation notional"
+                    ),
+                    "trading_fee": str(row["configured_fee"]),
+                    "liquidation_fee": decimal_to_string(
+                        liquidation_fee,
+                        field_name="liquidation fee",
+                    ),
+                    "source_sequence": int(raw["source_sequence"]),
+                    "event_time_ms": int(raw["event_time_ms"]),
+                    "model_version": raw.get("model_version"),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_fill(
+                        run_id, case_id, order_id, fill_id, fill_sequence,
+                        price, quantity, notional, trading_fee, liquidation_fee,
+                        book_level, virtual_time_ms, source_sequence, fill_hash,
+                        created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        order_id,
+                        raw["fill_id"],
+                        fill_sequence,
+                        raw["price"],
+                        raw["quantity"],
+                        fill_payload["notional"],
+                        row["configured_fee"],
+                        fill_payload["liquidation_fee"],
+                        raw["event_time_ms"],
+                        raw["source_sequence"],
+                        canonical_sha256(fill_payload),
+                        now_ms,
+                    ),
+                )
+            account = connection.execute(
+                """
+                SELECT account.overlay_cash, run.settlement_asset
+                FROM replay_training_contract_account AS account
+                JOIN replay_training_run AS run USING(run_id)
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if account is None:
+                raise TypeError("liquidation account is missing")
+            connection.execute(
+                """
+                UPDATE replay_training_contract_account
+                SET overlay_cash = ?, updated_at_ms = ? WHERE run_id = ?
+                """,
+                (
+                    decimal_to_string(
+                        Decimal(str(account["overlay_cash"])) - total_liquidation_fee,
+                        field_name="liquidation overlay cash",
+                    ),
+                    now_ms,
+                    run_id,
+                ),
+            )
+            self._append_contract_ledger(
+                connection,
+                run_id=run_id,
+                posting_id=f"liquidation-fee:{liquidation_id}:{order_id}",
+                track_id=track_id,
+                kind="LIQUIDATION_FEE",
+                cash_delta=-total_liquidation_fee,
+                asset=str(account["settlement_asset"]),
+                virtual_time_ms=max(
+                    int(json.loads(str(row["fill_json"]))["event_time_ms"])
+                    for row in fill_rows
+                ),
+                source_sequence=max(
+                    int(json.loads(str(row["fill_json"]))["source_sequence"])
+                    for row in fill_rows
+                ),
+                fidelity="PINNED_RULE_REAL_BROKER_FILL",
+                rule_revision=int(plan["rule_revision"]),
+                reference_type="LIQUIDATION_ORDER",
+                reference_id=order_id,
+                metadata={
+                    "case_id": liquidation_id,
+                    "position_side": plan["position_side"],
+                    "liquidation_leg_id": plan["liquidation_leg_id"],
+                    "step_sequence": step_sequence,
+                },
+                now_ms=now_ms,
+            )
+            leg = connection.execute(
+                """
+                SELECT completed_quantity, target_quantity
+                FROM replay_training_liquidation_leg
+                WHERE run_id = ? AND case_id = ? AND liquidation_leg_id = ?
+                """,
+                (run_id, liquidation_id, plan["liquidation_leg_id"]),
+            ).fetchone()
+            if leg is None:
+                raise TypeError("liquidation execution leg is missing")
+            completed = min(
+                Decimal(str(leg["target_quantity"])),
+                Decimal(str(leg["completed_quantity"])) + filled,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_leg
+                SET completed_quantity = ?, state = ?
+                WHERE run_id = ? AND case_id = ? AND liquidation_leg_id = ?
+                """,
+                (
+                    decimal_to_string(
+                        completed, field_name="completed liquidation quantity"
+                    ),
+                    "CLOSED"
+                    if completed >= Decimal(str(leg["target_quantity"]))
+                    else "PARTIAL",
+                    run_id,
+                    liquidation_id,
+                    plan["liquidation_leg_id"],
+                ),
+            )
+            self._detect_contract_liquidations(connection, run_id=run_id, now_ms=now_ms)
+            after_snapshot_id, risk = self._capture_liquidation_risk_snapshot(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_sequence=step_sequence,
+                label="EXECUTED",
+                account_status=str(step["step_type"]),
+                now_ms=now_ms,
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', after_snapshot_id = ?, committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
+            )
+            next_plan = self._next_liquidation_trade_plan(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                require_breach=str(step["step_type"]) != "FULL_LIQUIDATION",
+            )
+            if next_plan is not None:
+                next_type, next_payload = next_plan
+            else:
+                remaining_case_quantity = sum(
+                    (
+                        Decimal(str(row["absolute_quantity"]))
+                        for row in cast(list[dict[str, object]], risk["active_legs"])
+                        if connection.execute(
+                            """
+                            SELECT 1 FROM replay_training_liquidation_leg
+                            WHERE run_id = ? AND case_id = ?
+                              AND track_id = ? AND position_side = ?
+                            """,
+                            (
+                                run_id,
+                                liquidation_id,
+                                row["track_id"],
+                                row["position_side"],
+                            ),
+                        ).fetchone()
+                        is not None
+                    ),
+                    Decimal(0),
+                )
+                run_contract = connection.execute(
+                    """
+                    SELECT position_mode, account_data_mode
+                    FROM replay_training_run WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if remaining_case_quantity > 0:
+                    next_type = "INSURANCE_FUND_SETTLEMENT"
+                    next_payload = {"bankruptcy_deficit": "0", "recovered": True}
+                elif (
+                    run_contract is not None
+                    and str(run_contract["position_mode"]) != "HEDGE"
+                ):
+                    deficit = max(Decimal(0), -cast(Decimal, risk["equity"]))
+                    next_type = "COMPLETE"
+                    next_payload = {
+                        "terminal_state": "BANKRUPT" if deficit > 0 else "ACTIVE",
+                        "bankruptcy": deficit > 0,
+                    }
+                else:
+                    deficit = max(Decimal(0), -cast(Decimal, risk["equity"]))
+                    next_type = (
+                        "BANKRUPTCY_TRANSFER"
+                        if deficit > 0
+                        else "INSURANCE_FUND_SETTLEMENT"
+                    )
+                    next_payload = {
+                        "bankruptcy_deficit": decimal_to_string(
+                            deficit, field_name="bankruptcy deficit"
+                        ),
+                        "recovered": deficit == 0,
+                    }
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_case
+                SET state = ?, updated_at_ms = ? WHERE run_id = ? AND case_id = ?
+                """,
+                (
+                    str(step["step_type"]) if next_type == "COMPLETE" else next_type,
+                    now_ms,
+                    run_id,
+                    liquidation_id,
+                ),
+            )
+            self._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type=next_type,
+                before_snapshot_id=after_snapshot_id,
+                plan=next_payload,
+                now_ms=now_ms,
+            )
+
+        await self.base_store.run_extension_write(write)
+
     async def finalize_hedge_inputs(
         self,
         run_id: str,
@@ -3767,9 +5304,7 @@ class TrainingRunStore:
                     "PER_LEG_CANONICAL_DECIMAL",
                     f"INVALID:{type(exc).__name__}",
                 )
-            case_fees[liquidation_id] = (
-                case_fees.get(liquidation_id, Decimal(0)) + expected_fee
-            )
+            case_fees.setdefault(liquidation_id, Decimal(0))
             if row["state"] not in {
                 "COMPLETED",
                 "BANKRUPT",
@@ -3779,7 +5314,7 @@ class TrainingRunStore:
                 pending_case_ids.add(liquidation_id)
             bankrupt = bankrupt or row["state"] == "BANKRUPT"
 
-        for liquidation_id, expected_fee in case_fees.items():
+        for liquidation_id in case_fees:
             state = next(
                 str(row["state"])
                 for row in liquidation_rows
@@ -3787,17 +5322,40 @@ class TrainingRunStore:
             )
             if state != "COMPLETED":
                 continue
-            posting_id = f"liquidation-fee:{liquidation_id}"
-            posting = ledger_by_posting.get(posting_id)
-            if posting is None:
-                add_difference(f"ledger[{posting_id}]", "PRESENT", "MISSING")
-            else:
-                expected_postings.add(posting_id)
-                compare_decimal(
-                    f"ledger[{posting_id}].cash_delta",
-                    -expected_fee,
-                    posting["cash_delta"],
+            fill_fees = [
+                Decimal(str(row["liquidation_fee"]))
+                for row in connection.execute(
+                    """
+                    SELECT liquidation_fee
+                    FROM replay_training_liquidation_fill
+                    WHERE run_id = ? AND case_id = ?
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+            ]
+            expected_fee = sum(fill_fees, Decimal(0))
+            matching_postings = [
+                row
+                for posting_id, row in ledger_by_posting.items()
+                if posting_id == f"liquidation-fee:{liquidation_id}"
+                or posting_id.startswith(f"liquidation-fee:{liquidation_id}:")
+            ]
+            if not matching_postings and expected_fee != 0:
+                add_difference(
+                    f"ledger[liquidation-fee:{liquidation_id}]",
+                    "PRESENT",
+                    "MISSING",
                 )
+            actual_fee = Decimal(0)
+            for posting in matching_postings:
+                posting_id = str(posting["posting_id"])
+                expected_postings.add(posting_id)
+                actual_fee -= Decimal(str(posting["cash_delta"]))
+            compare_decimal(
+                f"ledger[liquidation-fee:{liquidation_id}].cash_delta",
+                expected_fee,
+                actual_fee,
+            )
             liquidation_total -= expected_fee
         pending_liquidations = len(pending_case_ids)
 
@@ -10374,349 +11932,536 @@ class TrainingRunStore:
         result["portfolio"] = (await self.get_market_tracks(run_id))["portfolio"]
         return result
 
+    @classmethod
+    def _liquidation_risk_state(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+    ) -> dict[str, object]:
+        account = connection.execute(
+            """
+            SELECT account.*, run.initial_equity, run.settlement_asset,
+                   run.position_mode
+            FROM replay_training_contract_account AS account
+            JOIN replay_training_run AS run USING(run_id)
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if account is None:
+            raise TypeError("liquidation account is missing")
+        initial = Decimal(str(account["initial_equity"]))
+        equity = initial + Decimal(str(account["overlay_cash"]))
+        track_rows = tuple(
+            connection.execute(
+                """
+                SELECT track_id, stable_ordinal, account_json, open_orders_json,
+                       position_json, virtual_time_ms, source_sequence, symbol,
+                       adapter_session_id
+                FROM replay_training_market_track
+                WHERE run_id = ? AND subscription_tier = 'FULL'
+                ORDER BY stable_ordinal, track_id
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        tracks = {str(row["track_id"]): row for row in track_rows}
+        reserved = Decimal(0)
+        for track in track_rows:
+            raw_account = json.loads(str(track["account_json"]))
+            if (
+                isinstance(raw_account, Mapping)
+                and raw_account.get("equity") is not None
+            ):
+                equity += Decimal(str(raw_account["equity"])) - initial
+            raw_orders = json.loads(str(track["open_orders_json"]))
+            if not isinstance(raw_orders, list):
+                raise TypeError("liquidation open-order projection is invalid")
+            reserved += sum(
+                (
+                    Decimal(str(order.get("reserved_margin", "0")))
+                    for order in raw_orders
+                    if isinstance(order, Mapping)
+                    and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                    and order.get("reduce_only") is not True
+                ),
+                Decimal(0),
+            )
+        leg_rows = tuple(
+            connection.execute(
+                """
+                SELECT leg.*, rule.rule_json
+                FROM replay_training_position_leg AS leg
+                JOIN replay_training_instrument_rule AS rule
+                  ON rule.run_id = leg.run_id
+                 AND rule.track_id = leg.track_id
+                 AND rule.revision = leg.rule_revision
+                WHERE leg.run_id = ?
+                ORDER BY leg.track_id, leg.position_side
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        isolated = json.loads(str(account["isolated_margin_json"]))
+        if not isinstance(isolated, dict):
+            raise TypeError("liquidation isolated margin projection is invalid")
+        total_initial = Decimal(0)
+        total_maintenance = Decimal(0)
+        active_legs: list[dict[str, object]] = []
+        for row in leg_rows:
+            quantity = Decimal(str(row["absolute_quantity"]))
+            track_id = str(row["track_id"])
+            track = tracks.get(track_id)
+            if track is None:
+                raise TypeError("liquidation leg lost its FULL market track")
+            current_position = json.loads(str(track["position_json"]))
+            if not isinstance(current_position, Mapping):
+                raise TypeError("liquidation position projection is invalid")
+            if current_position.get("position_mode") == "HEDGE":
+                current_leg = current_position.get(str(row["position_side"]).lower())
+                current_quantity = (
+                    abs(Decimal(str(current_leg.get("quantity", "0"))))
+                    if isinstance(current_leg, Mapping)
+                    else Decimal(0)
+                )
+            else:
+                current_quantity = abs(
+                    Decimal(str(current_position.get("quantity", "0")))
+                )
+            if quantity <= 0 or current_quantity <= 0:
+                continue
+            rule = InstrumentRule.from_mapping(json.loads(str(row["rule_json"])))
+            initial_margin = Decimal(str(row["initial_margin"]))
+            maintenance = Decimal(str(row["maintenance_margin"]))
+            total_initial += initial_margin
+            total_maintenance += maintenance
+            isolated_equity = Decimal(str(row["isolated_wallet"])) + Decimal(
+                str(row["unrealized_pnl"])
+            )
+            active_legs.append(
+                {
+                    **dict(row),
+                    "rule": rule,
+                    "track": track,
+                    "isolated_equity": isolated_equity,
+                }
+            )
+        cross_breached = bool(active_legs) and equity <= total_maintenance
+        affected = (
+            list(active_legs)
+            if str(account["margin_mode"]) == "CROSS" and cross_breached
+            else [
+                leg
+                for leg in active_legs
+                if str(account["margin_mode"]) == "ISOLATED"
+                and Decimal(str(leg["isolated_equity"]))
+                <= Decimal(str(leg["maintenance_margin"]))
+            ]
+        )
+        return {
+            "account": account,
+            "equity": equity,
+            "available_balance": equity - total_initial - reserved,
+            "total_initial_margin": total_initial,
+            "total_maintenance_margin": total_maintenance,
+            "reserved_margin": reserved,
+            "active_legs": active_legs,
+            "affected_legs": affected,
+            "breached": bool(affected),
+        }
+
+    @classmethod
+    def _capture_liquidation_risk_snapshot(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        case_id: str,
+        step_sequence: int,
+        label: str,
+        account_status: str,
+        now_ms: int,
+    ) -> tuple[str, dict[str, object]]:
+        snapshot_id = f"risk-{case_id}-{step_sequence:03d}-{label.lower()}"
+        existing = connection.execute(
+            """
+            SELECT * FROM replay_training_risk_snapshot
+            WHERE run_id = ? AND snapshot_id = ?
+            """,
+            (run_id, snapshot_id),
+        ).fetchone()
+        risk = cls._liquidation_risk_state(connection, run_id=run_id)
+        if existing is not None:
+            return snapshot_id, risk
+        active_legs = cast(list[dict[str, object]], risk["active_legs"])
+        trigger_time = max(
+            (
+                int(cast(sqlite3.Row, leg["track"])["virtual_time_ms"] or 0)
+                for leg in active_legs
+            ),
+            default=0,
+        )
+        source_sequence = max(
+            (
+                int(cast(sqlite3.Row, leg["track"])["source_sequence"] or 0)
+                for leg in active_legs
+            ),
+            default=0,
+        )
+        rule_revision = max(
+            (int(leg["rule_revision"]) for leg in active_legs),
+            default=1,
+        )
+        snapshot_sequence = int(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(snapshot_sequence), 0) + 1
+                FROM replay_training_risk_snapshot WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        equity = cast(Decimal, risk["equity"])
+        maintenance = cast(Decimal, risk["total_maintenance_margin"])
+        input_rows = tuple(
+            connection.execute(
+                """
+                SELECT source_kind, input_chain_hash
+                FROM replay_hedge_input_projection
+                WHERE run_id = ? ORDER BY source_kind
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        stored_account_status = (
+            account_status
+            if account_status
+            in {
+                "ACTIVE",
+                "RISK_BREACH_DETECTED",
+                "LIQUIDATING",
+                "BANKRUPT",
+                "FAILED_CLOSED",
+            }
+            else "LIQUIDATING"
+        )
+        payload = {
+            "schema_version": "replay.risk-snapshot.v2",
+            "snapshot_id": snapshot_id,
+            "case_id": case_id,
+            "step_sequence": step_sequence,
+            "label": label,
+            "account_status": stored_account_status,
+            "liquidation_state": account_status,
+            "equity": decimal_to_string(equity, field_name="liquidation equity"),
+            "available_balance": decimal_to_string(
+                cast(Decimal, risk["available_balance"]),
+                field_name="liquidation available balance",
+            ),
+            "total_initial_margin": decimal_to_string(
+                cast(Decimal, risk["total_initial_margin"]),
+                field_name="liquidation total initial margin",
+            ),
+            "total_maintenance_margin": decimal_to_string(
+                maintenance,
+                field_name="liquidation total maintenance margin",
+            ),
+            "position_hashes": [str(leg["component_hash"]) for leg in active_legs],
+            "input_chain_hashes": [
+                {
+                    "source_kind": str(row["source_kind"]),
+                    "hash": str(row["input_chain_hash"]),
+                }
+                for row in input_rows
+            ],
+        }
+        connection.execute(
+            """
+            INSERT INTO replay_training_risk_snapshot(
+                run_id, snapshot_id, snapshot_sequence, virtual_time_ms,
+                source_sequence, account_status, equity, available_balance,
+                total_initial_margin, total_maintenance_margin, risk_ratio,
+                active_rule_revision, public_input_hash, component_hash,
+                created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                snapshot_id,
+                snapshot_sequence,
+                trigger_time,
+                source_sequence,
+                stored_account_status,
+                payload["equity"],
+                payload["available_balance"],
+                payload["total_initial_margin"],
+                payload["total_maintenance_margin"],
+                (
+                    None
+                    if maintenance == 0
+                    else decimal_to_string(
+                        equity / maintenance, field_name="risk ratio"
+                    )
+                ),
+                rule_revision,
+                canonical_sha256(payload["input_chain_hashes"]),
+                canonical_sha256(payload),
+                now_ms,
+            ),
+        )
+        return snapshot_id, risk
+
+    @staticmethod
+    def _insert_liquidation_step(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        case_id: str,
+        step_type: str,
+        before_snapshot_id: str,
+        plan: Mapping[str, object],
+        now_ms: int,
+    ) -> int:
+        sequence = int(
+            connection.execute(
+                """
+                SELECT COALESCE(MAX(step_sequence), 0) + 1
+                FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, case_id),
+            ).fetchone()[0]
+        )
+        reason = canonical_json(
+            {"cause": "MAINTENANCE_MARGIN_BREACH", "plan": dict(plan)}
+        )
+        payload = {
+            "schema_version": "replay.liquidation-step.v2",
+            "case_id": case_id,
+            "step_sequence": sequence,
+            "step_type": step_type,
+            "before_snapshot_id": before_snapshot_id,
+            "reason": reason,
+        }
+        connection.execute(
+            """
+            INSERT INTO replay_training_liquidation_step(
+                run_id, case_id, step_sequence, step_type, state,
+                before_snapshot_id, after_snapshot_id, reason,
+                idempotency_key, step_hash, created_at_ms, committed_at_ms
+            ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL, ?, ?, ?, ?, NULL)
+            """,
+            (
+                run_id,
+                case_id,
+                sequence,
+                step_type,
+                before_snapshot_id,
+                reason,
+                f"{case_id}:{sequence}:{step_type}",
+                canonical_sha256(payload),
+                now_ms,
+            ),
+        )
+        return sequence
+
+    @classmethod
+    def _next_liquidation_trade_plan(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        case_id: str,
+        require_breach: bool = True,
+    ) -> tuple[str, dict[str, object]] | None:
+        risk = cls._liquidation_risk_state(connection, run_id=run_id)
+        if require_breach and not bool(risk["breached"]):
+            return None
+        case_legs = {
+            (str(row["track_id"]), str(row["position_side"])): row
+            for row in connection.execute(
+                """
+                SELECT * FROM replay_training_liquidation_leg
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, case_id),
+            ).fetchall()
+        }
+        risk_legs = (
+            cast(list[dict[str, object]], risk["affected_legs"])
+            if bool(risk["breached"])
+            else cast(list[dict[str, object]], risk["active_legs"])
+        )
+        candidates = [
+            leg
+            for leg in risk_legs
+            if (str(leg["track_id"]), str(leg["position_side"])) in case_legs
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda leg: (
+                -Decimal(str(leg["maintenance_margin"])),
+                -Decimal(str(leg["notional"])),
+                str(leg["track_id"]),
+                0 if str(leg["position_side"]) == "LONG" else 1,
+            )
+        )
+        leg = candidates[0]
+        rule = cast(InstrumentRule, leg["rule"])
+        quantity = Decimal(str(leg["absolute_quantity"]))
+        mark = Decimal(str(leg["mark_price"]))
+        notional = Decimal(str(leg["notional"]))
+        tier_index, _tier = rule.active_maintenance_tier(notional)
+        close_quantity = quantity
+        step_type = "FULL_LIQUIDATION"
+        if require_breach and tier_index > 1:
+            previous_cap = Decimal(rule.maintenance_tiers[tier_index - 2].notional_cap)
+            target_quantity = previous_cap / (mark * Decimal(rule.contract_size))
+            raw_close = max(Decimal(0), quantity - target_quantity)
+            close_quantity = min(
+                quantity,
+                round_to_step(raw_close, Decimal(rule.quantity_step), upward=True),
+            )
+            if close_quantity > 0 and close_quantity < quantity:
+                step_type = "PARTIAL_LIQUIDATION"
+        if close_quantity <= 0:
+            raise TrainingRunError(
+                "LIQUIDATION_PLAN_INVALID",
+                "liquidation tier step produced a non-positive close quantity",
+                status_code=409,
+            )
+        case_leg = case_legs[(str(leg["track_id"]), str(leg["position_side"]))]
+        return step_type, {
+            "liquidation_leg_id": str(case_leg["liquidation_leg_id"]),
+            "track_id": str(leg["track_id"]),
+            "adapter_session_id": str(
+                cast(sqlite3.Row, leg["track"])["adapter_session_id"]
+            ),
+            "position_side": str(leg["position_side"]),
+            "position_mode": str(cast(sqlite3.Row, risk["account"])["position_mode"]),
+            "side": "SELL" if str(leg["position_side"]) == "LONG" else "BUY",
+            "quantity": decimal_to_string(
+                close_quantity, field_name="liquidation close quantity"
+            ),
+            "rule_revision": int(leg["rule_revision"]),
+            "quantity_step": rule.quantity_step,
+            "quote_step": rule.quote_step,
+            "contract_size": rule.contract_size,
+            "liquidation_fee_bps": rule.liquidation_fee_bps,
+            "tier_before": tier_index,
+            "target": "PREVIOUS_TIER_CAP"
+            if step_type == "PARTIAL_LIQUIDATION"
+            else "ZERO",
+        }
+
     async def pending_liquidations(self, run_id: str) -> tuple[dict[str, object], ...]:
         def read(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
-            rows = connection.execute(
+            cases = connection.execute(
                 """
-                SELECT case_row.*, leg.*, snapshot.equity AS account_equity_before,
-                       track.adapter_session_id, track.open_orders_json,
-                       position.mark_price
+                SELECT case_row.*, snapshot.equity AS account_equity_before
                 FROM replay_training_liquidation_case AS case_row
-                JOIN replay_training_liquidation_leg AS leg
-                  ON leg.run_id = case_row.run_id AND leg.case_id = case_row.case_id
                 JOIN replay_training_risk_snapshot AS snapshot
                   ON snapshot.run_id = case_row.run_id
                  AND snapshot.snapshot_id = case_row.trigger_snapshot_id
-                JOIN replay_training_market_track AS track
-                  ON track.run_id = leg.run_id AND track.track_id = leg.track_id
-                JOIN replay_training_position_leg AS position
-                  ON position.run_id = leg.run_id
-                 AND position.track_id = leg.track_id
-                 AND position.position_side = leg.position_side
                 WHERE case_row.run_id = ?
                   AND case_row.state NOT IN (
                       'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
                       'RECOVERED_AFTER_CANCEL'
                   )
-                ORDER BY track.stable_ordinal, case_row.case_sequence,
-                         leg.leg_sequence
+                ORDER BY case_row.case_sequence
                 """,
                 (run_id,),
             ).fetchall()
-            grouped: dict[tuple[str, str], dict[str, object]] = {}
-            for row in rows:
-                key = (str(row["case_id"]), str(row["track_id"]))
-                item = grouped.setdefault(
-                    key,
+            result: list[dict[str, object]] = []
+            for case in cases:
+                case_id = str(case["case_id"])
+                legs = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT leg.*, position.mark_price,
+                               track.adapter_session_id, track.symbol,
+                               track.stable_ordinal
+                        FROM replay_training_liquidation_leg AS leg
+                        JOIN replay_training_market_track AS track
+                          ON track.run_id = leg.run_id
+                         AND track.track_id = leg.track_id
+                        LEFT JOIN replay_training_position_leg AS position
+                          ON position.run_id = leg.run_id
+                         AND position.track_id = leg.track_id
+                         AND position.position_side = leg.position_side
+                        WHERE leg.run_id = ? AND leg.case_id = ?
+                        ORDER BY leg.leg_sequence
+                        """,
+                        (run_id, case_id),
+                    ).fetchall()
+                ]
+                tracks: list[dict[str, object]] = []
+                seen_tracks: set[str] = set()
+                for leg in legs:
+                    track_id = str(leg["track_id"])
+                    if track_id in seen_tracks:
+                        continue
+                    seen_tracks.add(track_id)
+                    track = connection.execute(
+                        """
+                        SELECT track_id, adapter_session_id, open_orders_json,
+                               stable_ordinal, symbol
+                        FROM replay_training_market_track
+                        WHERE run_id = ? AND track_id = ?
+                        """,
+                        (run_id, track_id),
+                    ).fetchone()
+                    if track is None:
+                        raise TypeError("liquidation market track is missing")
+                    tracks.append(
+                        {
+                            "track_id": track_id,
+                            "adapter_session_id": track["adapter_session_id"],
+                            "open_orders": json.loads(str(track["open_orders_json"])),
+                            "stable_ordinal": int(track["stable_ordinal"]),
+                            "symbol": str(track["symbol"]),
+                        }
+                    )
+                pending_step = connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_step
+                    WHERE run_id = ? AND case_id = ? AND state = 'PENDING'
+                    ORDER BY step_sequence LIMIT 1
+                    """,
+                    (run_id, case_id),
+                ).fetchone()
+                if pending_step is None:
+                    raise TypeError(
+                        "active liquidation case has no pending durable step"
+                    )
+                reason = json.loads(str(pending_step["reason"]))
+                if not isinstance(reason, Mapping) or not isinstance(
+                    reason.get("plan"), Mapping
+                ):
+                    raise TypeError("liquidation step plan is invalid")
+                result.append(
                     {
-                        "liquidation_id": str(row["case_id"]),
-                        "track_id": str(row["track_id"]),
-                        "state": str(row["state"]),
-                        "trigger_virtual_time_ms": int(row["trigger_virtual_time_ms"]),
-                        "trigger_source_sequence": int(row["trigger_source_sequence"]),
-                        "account_equity_before": str(row["account_equity_before"]),
-                        "fidelity": str(row["fidelity"]),
-                        "reason": str(row["reason"]),
-                        "adapter_session_id": row["adapter_session_id"],
-                        "open_orders": json.loads(str(row["open_orders_json"])),
-                        "legs": [],
-                    },
-                )
-                legs = item["legs"]
-                if not isinstance(legs, list):
-                    raise TypeError("liquidation leg projection is invalid")
-                legs.append(
-                    {
-                        "liquidation_leg_id": str(row["liquidation_leg_id"]),
-                        "position_side": str(row["position_side"]),
-                        "mark_price": row["mark_price"],
-                        "position_quantity": str(row["trigger_quantity"]),
-                        "position_notional": str(row["trigger_notional"]),
-                        "maintenance_margin": str(row["maintenance_margin"]),
-                        "bankruptcy_price": row["bankruptcy_price"],
-                        "liquidation_fee": str(row["liquidation_fee"]),
+                        "liquidation_id": case_id,
+                        "state": str(case["state"]),
+                        "trigger_virtual_time_ms": int(case["trigger_virtual_time_ms"]),
+                        "trigger_source_sequence": int(case["trigger_source_sequence"]),
+                        "account_equity_before": str(case["account_equity_before"]),
+                        "fidelity": str(case["fidelity"]),
+                        "reason": str(case["reason"]),
+                        "legs": legs,
+                        "tracks": tracks,
+                        "pending_step": {
+                            **dict(pending_step),
+                            "plan": dict(cast(Mapping[str, object], reason["plan"])),
+                        },
                     }
                 )
-            return tuple(grouped.values())
+            return tuple(result)
 
         return await self.base_store.run_extension_read(read)
-
-    async def complete_liquidation(
-        self,
-        *,
-        run_id: str,
-        liquidation_id: str,
-        canceled_order_ids: Sequence[str],
-        close_order_ids: Sequence[str],
-    ) -> dict[str, object]:
-        def write(connection: sqlite3.Connection) -> None:
-            case_row = connection.execute(
-                """
-                SELECT case_row.*, run.settlement_asset
-                FROM replay_training_liquidation_case AS case_row
-                JOIN replay_training_run AS run USING(run_id)
-                WHERE case_row.run_id = ? AND case_row.case_id = ?
-                """,
-                (run_id, liquidation_id),
-            ).fetchone()
-            if case_row is None:
-                raise TrainingRunError(
-                    "LIQUIDATION_NOT_FOUND",
-                    "simulated account liquidation case does not exist",
-                    status_code=404,
-                )
-            if str(case_row["state"]) == "COMPLETED":
-                return
-            if str(case_row["state"]) in {"BANKRUPT", "FAILED_CLOSED"}:
-                raise TrainingRunError(
-                    "LIQUIDATION_STATE_CONFLICT",
-                    "simulated account liquidation cannot be completed",
-                    status_code=409,
-                )
-            legs = tuple(
-                connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_leg
-                    WHERE run_id = ? AND case_id = ?
-                    ORDER BY leg_sequence
-                    """,
-                    (run_id, liquidation_id),
-                ).fetchall()
-            )
-            if not legs or len(close_order_ids) != len(legs):
-                raise TrainingRunError(
-                    "LIQUIDATION_ORDER_COUNT_MISMATCH",
-                    "each liquidation leg requires one durable close order",
-                    status_code=409,
-                )
-            now_ms = self.base_store._validated_now_ms()
-            fee = sum(
-                (Decimal(str(leg["liquidation_fee"])) for leg in legs),
-                Decimal(0),
-            )
-            account = connection.execute(
-                """
-                SELECT account.overlay_cash, account.isolated_margin_json,
-                       run.position_mode
-                FROM replay_training_contract_account AS account
-                JOIN replay_training_run AS run USING(run_id)
-                WHERE account.run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            overlay = Decimal(str(account["overlay_cash"])) - fee
-            allocations = json.loads(str(account["isolated_margin_json"]))
-            if isinstance(allocations, dict):
-                for leg in legs:
-                    allocations.pop(
-                        isolated_margin_key(
-                            str(leg["track_id"]),
-                            (
-                                str(leg["position_side"])
-                                if account["position_mode"] == "HEDGE"
-                                else None
-                            ),
-                        ),
-                        None,
-                    )
-            rule = connection.execute(
-                """
-                SELECT revision FROM replay_training_instrument_rule
-                WHERE run_id = ? AND track_id = ? ORDER BY revision DESC LIMIT 1
-                """,
-                (run_id, legs[0]["track_id"]),
-            ).fetchone()
-            self._append_contract_ledger(
-                connection,
-                run_id=run_id,
-                posting_id=f"liquidation-fee:{liquidation_id}",
-                track_id=str(legs[0]["track_id"]),
-                kind="LIQUIDATION_FEE",
-                cash_delta=-fee,
-                asset=str(case_row["settlement_asset"]),
-                virtual_time_ms=int(case_row["trigger_virtual_time_ms"]),
-                source_sequence=int(case_row["trigger_source_sequence"]),
-                fidelity=str(case_row["fidelity"]),
-                rule_revision=int(rule["revision"]),
-                reference_type="LIQUIDATION",
-                reference_id=liquidation_id,
-                metadata={"close_order_ids": list(close_order_ids)},
-                now_ms=now_ms,
-            )
-            connection.execute(
-                """
-                UPDATE replay_training_contract_account
-                SET overlay_cash = ?, isolated_margin_json = ?, updated_at_ms = ?
-                WHERE run_id = ?
-                """,
-                (
-                    decimal_to_string(overlay, field_name="overlay_cash"),
-                    canonical_json(allocations),
-                    now_ms,
-                    run_id,
-                ),
-            )
-            run = connection.execute(
-                "SELECT initial_equity FROM replay_training_run WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            track_rows = tuple(
-                connection.execute(
-                    """
-                    SELECT * FROM replay_training_market_track
-                    WHERE run_id = ? ORDER BY stable_ordinal, track_id
-                    """,
-                    (run_id,),
-                ).fetchall()
-            )
-            if run is None:
-                raise TypeError("liquidation run is missing")
-            portfolio = self._contract_portfolio_projection(
-                connection,
-                run_id=run_id,
-                initial_equity=str(run["initial_equity"]),
-                tracks=[self._market_track_from_row(row) for row in track_rows],
-            )
-            equity_after = Decimal(str(portfolio["equity"]))
-            another_pending = connection.execute(
-                """
-                SELECT 1 FROM replay_training_liquidation_case
-                WHERE run_id = ?
-                  AND state NOT IN (
-                      'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
-                      'RECOVERED_AFTER_CANCEL'
-                  )
-                  AND case_id != ?
-                LIMIT 1
-                """,
-                (run_id, liquidation_id),
-            ).fetchone()
-            connection.execute(
-                """
-                UPDATE replay_training_contract_account
-                SET status = ?, updated_at_ms = ? WHERE run_id = ?
-                """,
-                (
-                    (
-                        "LIQUIDATING"
-                        if another_pending is not None
-                        else "BANKRUPT"
-                        if equity_after < 0
-                        else "ACTIVE"
-                    ),
-                    now_ms,
-                    run_id,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE replay_training_liquidation_case
-                SET state = 'COMPLETED', updated_at_ms = ?
-                WHERE run_id = ? AND case_id = ?
-                """,
-                (now_ms, run_id, liquidation_id),
-            )
-            for index, (leg, close_order_id) in enumerate(
-                zip(legs, close_order_ids, strict=True),
-                start=1,
-            ):
-                connection.execute(
-                    """
-                    INSERT INTO replay_training_liquidation_order(
-                        run_id, case_id, step_sequence, order_id,
-                        liquidation_leg_id, order_sequence, side, order_type,
-                        requested_quantity, filled_quantity, remaining_quantity,
-                        average_price, state, order_hash, created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, 2, ?, ?, ?, ?, 'MARKET', ?, ?, '0', NULL,
-                              'FILLED', ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        liquidation_id,
-                        close_order_id,
-                        leg["liquidation_leg_id"],
-                        index,
-                        "SELL" if leg["position_side"] == "LONG" else "BUY",
-                        leg["trigger_quantity"],
-                        leg["trigger_quantity"],
-                        canonical_sha256(
-                            {
-                                "case_id": liquidation_id,
-                                "order_id": close_order_id,
-                                "liquidation_leg_id": leg["liquidation_leg_id"],
-                            }
-                        ),
-                        now_ms,
-                        now_ms,
-                    ),
-                )
-            for index, canceled_order_id in enumerate(canceled_order_ids, start=1):
-                connection.execute(
-                    """
-                    INSERT INTO replay_training_liquidation_order(
-                        run_id, case_id, step_sequence, order_id,
-                        liquidation_leg_id, order_sequence, side, order_type,
-                        requested_quantity, filled_quantity, remaining_quantity,
-                        average_price, state, order_hash, created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, 1, ?, ?, ?, 'BUY', 'LIMIT', '0', '0', '0',
-                              NULL, 'CANCELED', ?, ?, ?)
-                    """,
-                    (
-                        run_id,
-                        liquidation_id,
-                        canceled_order_id,
-                        legs[0]["liquidation_leg_id"],
-                        index,
-                        canonical_sha256(
-                            {
-                                "case_id": liquidation_id,
-                                "canceled_order_id": canceled_order_id,
-                            }
-                        ),
-                        now_ms,
-                        now_ms,
-                    ),
-                )
-            connection.execute(
-                """
-                UPDATE replay_training_liquidation_leg
-                SET state = 'CLOSED', completed_quantity = target_quantity
-                WHERE run_id = ? AND case_id = ?
-                """,
-                (run_id, liquidation_id),
-            )
-            connection.execute(
-                """
-                UPDATE replay_training_liquidation_step
-                SET state = 'APPLIED', committed_at_ms = ?
-                WHERE run_id = ? AND case_id = ? AND step_sequence IN (1, 2)
-                """,
-                (now_ms, run_id, liquidation_id),
-            )
-            adapter = connection.execute(
-                """
-                SELECT adapter_session_id FROM replay_training_market_track
-                WHERE run_id = ? AND track_id = ?
-                """,
-                (run_id, legs[0]["track_id"]),
-            ).fetchone()
-            self._append_review_timeline_event(
-                connection,
-                run_id=run_id,
-                session_id=str(adapter["adapter_session_id"]),
-                context={
-                    "kind": "DIRECT",
-                    "category": "LIQUIDATION",
-                    "event_type": "LIQUIDATION",
-                    "command_id": close_order_ids[0],
-                },
-                state=None,
-                checkpoint=None,
-                now_ms=now_ms,
-            )
-
-        await self.base_store.run_extension_write(write)
-        return (await self.get_market_tracks(run_id))["portfolio"]  # type: ignore[return-value]
 
     async def reserve_market_track(
         self,
@@ -13096,6 +14841,16 @@ class TrainingRunStore:
                     (run_id,),
                 ).fetchall()
             ],
+            "liquidation_leg_price_proofs": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg_price_proof
+                    WHERE run_id = ? ORDER BY case_id, liquidation_leg_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
             "insurance_funds": [
                 dict(row)
                 for row in connection.execute(
@@ -13152,6 +14907,16 @@ class TrainingRunStore:
                     """
                     SELECT * FROM replay_training_adl_selection
                     WHERE run_id = ? ORDER BY adl_event_id, selection_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "adl_counterparty_ledger": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_counterparty_ledger
+                    WHERE run_id = ? ORDER BY adl_event_id, ledger_sequence
                     """,
                     (run_id,),
                 ).fetchall()
@@ -13256,7 +15021,16 @@ class TrainingRunStore:
                 for key, value in sorted(isolated.items())
             },
             "next_funding_time_ms": account["next_funding_time_ms"],
-            "liquidations": liquidations,
+            "liquidations": [
+                item
+                for item in liquidations
+                if item["state"] != "RECOVERED_AFTER_CANCEL"
+            ],
+            "liquidation_recoveries": [
+                item
+                for item in liquidations
+                if item["state"] == "RECOVERED_AFTER_CANCEL"
+            ],
             "hedge_state": hedge_state,
             "hedge_inputs": hedge_inputs,
             "account_history": {
@@ -14422,6 +16196,19 @@ class TrainingRunStore:
             for value in (row["trigger_snapshot_id"], row["final_snapshot_id"])
             if value is not None
         }
+        if case_ids:
+            case_placeholders = ", ".join("?" for _ in case_ids)
+            for row in connection.execute(
+                f"""
+                SELECT before_snapshot_id, after_snapshot_id
+                FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id IN ({case_placeholders})
+                """,
+                (parent_run_id, *case_ids),
+            ).fetchall():
+                risk_ids.add(str(row["before_snapshot_id"]))
+                if row["after_snapshot_id"] is not None:
+                    risk_ids.add(str(row["after_snapshot_id"]))
         if risk_ids:
             placeholders = ", ".join("?" for _ in risk_ids)
             risk_rows = tuple(
@@ -14455,6 +16242,17 @@ class TrainingRunStore:
             leg_rows,
             track_columns=("track_id",),
         )
+        price_proof_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_leg_price_proof
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, liquidation_leg_id
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_liquidation_leg_price_proof", price_proof_rows)
         step_rows = tuple(
             connection.execute(
                 f"""
@@ -14559,6 +16357,17 @@ class TrainingRunStore:
                 ).fetchall()
             )
             insert_rows("replay_training_adl_selection", selection_rows)
+            counterparty_rows = tuple(
+                connection.execute(
+                    f"""
+                    SELECT * FROM replay_training_adl_counterparty_ledger
+                    WHERE run_id = ? AND adl_event_id IN ({event_placeholders})
+                    ORDER BY adl_event_id, ledger_sequence
+                    """,
+                    (parent_run_id, *adl_event_ids),
+                ).fetchall()
+            )
+            insert_rows("replay_training_adl_counterparty_ledger", counterparty_rows)
         return any(
             str(row["state"])
             not in {
@@ -17497,8 +19306,27 @@ class TrainingRunStore:
                 isolated_equity = allocated + Decimal(str(position["unrealized_pnl"]))
                 if isolated_equity <= maintenance:
                     affected.append(item)
-        grouped: dict[
-            str,
+        if not affected:
+            return
+        active_case = connection.execute(
+            """
+            SELECT 1 FROM replay_training_liquidation_case
+            WHERE run_id = ?
+              AND state NOT IN ('COMPLETED', 'BANKRUPT', 'FAILED_CLOSED', 'RECOVERED_AFTER_CANCEL')
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if active_case is not None:
+            connection.execute(
+                """
+                UPDATE replay_training_contract_account
+                SET status = 'LIQUIDATING', updated_at_ms = ? WHERE run_id = ?
+                """,
+                (now_ms, run_id),
+            )
+            return
+        grouped: list[
             list[
                 tuple[
                     sqlite3.Row,
@@ -17508,31 +19336,51 @@ class TrainingRunStore:
                     str | None,
                     int,
                 ]
-            ],
-        ] = {}
-        for item in affected:
-            grouped.setdefault(str(item[0]["track_id"]), []).append(item)
-        for track_id, group in grouped.items():
-            track = group[0][0]
-            sequence = int(track["source_sequence"] or 0)
-            liquidation_id = f"liq-{track_id}-{sequence:010d}"
-            if (
+            ]
+        ]
+        if str(account["margin_mode"]) == "CROSS":
+            grouped = [affected]
+        else:
+            grouped = [[item] for item in affected]
+        for group in grouped:
+            group.sort(
+                key=lambda item: (
+                    -item[3],
+                    -abs(Decimal(str(item[1]["notional"]))),
+                    str(item[0]["track_id"]),
+                    0
+                    if (
+                        item[4]
+                        or (
+                            "LONG" if Decimal(str(item[1]["quantity"])) > 0 else "SHORT"
+                        )
+                    )
+                    == "LONG"
+                    else 1,
+                )
+            )
+            sequence = max(int(item[0]["source_sequence"] or 0) for item in group)
+            case_sequence = int(
                 connection.execute(
                     """
-                SELECT 1 FROM replay_training_liquidation_case
-                WHERE run_id = ? AND case_id = ?
-                """,
-                    (run_id, liquidation_id),
-                ).fetchone()
-                is not None
-            ):
-                continue
+                    SELECT COALESCE(MAX(case_sequence), 0) + 1
+                    FROM replay_training_liquidation_case WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            scope = (
+                "cross"
+                if str(account["margin_mode"]) == "CROSS"
+                else (f"{group[0][0]['track_id']}-{group[0][4] or 'net'}")
+            )
+            liquidation_id = f"liq-{scope}-{sequence:010d}-{case_sequence:04d}"
             virtual_time_ms = (
-                int(track["virtual_time_ms"] or 0)
+                max(int(item[0]["virtual_time_ms"] or 0) for item in group)
                 if trigger_virtual_time_ms is None
                 else trigger_virtual_time_ms
             )
-            snapshot_id = f"risk-{track_id}-{sequence:010d}"
+            snapshot_id = f"risk-{liquidation_id}-trigger"
             snapshot_sequence = int(
                 connection.execute(
                     """
@@ -17562,7 +19410,7 @@ class TrainingRunStore:
                             """,
                             (
                                 run_id,
-                                track_id,
+                                item[0]["track_id"],
                                 item[4]
                                 or (
                                     "LONG"
@@ -17623,7 +19471,13 @@ class TrainingRunStore:
                     risk_payload["active_rule_revision"],
                     canonical_sha256(
                         {
-                            "dataset_epoch": track["dataset_epoch"],
+                            "dataset_epochs": [
+                                {
+                                    "track_id": str(item[0]["track_id"]),
+                                    "dataset_epoch": str(item[0]["dataset_epoch"]),
+                                }
+                                for item in group
+                            ],
                             "virtual_time_ms": virtual_time_ms,
                             "source_sequence": sequence,
                         }
@@ -17632,24 +19486,22 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
-            case_sequence = int(
-                connection.execute(
-                    """
-                    SELECT COALESCE(MAX(case_sequence), 0) + 1
-                    FROM replay_training_liquidation_case WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchone()[0]
-            )
             case_payload = {
-                "schema_version": "replay.liquidation-case.v1",
+                "schema_version": "replay.liquidation-case.v2",
                 "case_id": liquidation_id,
                 "case_sequence": case_sequence,
                 "trigger_snapshot_id": snapshot_id,
-                "track_id": track_id,
-                "leg_sides": [
-                    item[4]
-                    or ("LONG" if Decimal(str(item[1]["quantity"])) > 0 else "SHORT")
+                "margin_scope": "ACCOUNT_CROSS"
+                if str(account["margin_mode"]) == "CROSS"
+                else "ISOLATED_LEG",
+                "legs": [
+                    {
+                        "track_id": str(item[0]["track_id"]),
+                        "position_side": item[4]
+                        or (
+                            "LONG" if Decimal(str(item[1]["quantity"])) > 0 else "SHORT"
+                        ),
+                    }
                     for item in group
                 ],
             }
@@ -17670,46 +19522,77 @@ class TrainingRunStore:
                     snapshot_id,
                     virtual_time_ms,
                     sequence,
-                    group[0][2].mark_fidelity,
+                    "ACCOUNT_CROSS_MULTI_TRACK_DETERMINISTIC"
+                    if str(account["margin_mode"]) == "CROSS"
+                    and str(account["position_mode"]) == "HEDGE"
+                    else group[0][2].mark_fidelity,
                     canonical_sha256(case_payload),
                     now_ms,
                     now_ms,
                 ),
             )
-            allocation = (
-                equity if str(account["margin_mode"]) == "CROSS" else Decimal(0)
-            )
             for leg_sequence, item in enumerate(group, start=1):
-                _track, leg, rule, maintenance, raw_side, _revision = item
+                track, leg, rule, maintenance, raw_side, rule_revision = item
                 quantity = Decimal(str(leg["quantity"]))
                 position_side = raw_side or ("LONG" if quantity > 0 else "SHORT")
                 absolute_quantity = abs(quantity)
                 notional = abs(Decimal(str(leg["notional"])))
-                bankruptcy: Decimal | None = None
-                entry = Decimal(str(leg["entry_price"]))
-                leg_allocation = (
-                    allocation / Decimal(len(group))
+                mark = Decimal(str(leg.get("mark_price", track["public_price"])))
+                direction = Decimal(1) if position_side == "LONG" else Decimal(-1)
+                scope_equity = (
+                    equity
                     if str(account["margin_mode"]) == "CROSS"
                     else Decimal(
                         str(
                             isolated.get(
-                                isolated_margin_key(track_id, position_side),
+                                isolated_margin_key(
+                                    str(track["track_id"]), position_side
+                                ),
                                 "0",
                             )
                         )
                     )
+                    + Decimal(str(leg["unrealized_pnl"]))
                 )
-                bankruptcy = entry - (
-                    leg_allocation / (absolute_quantity * Decimal(rule.contract_size))
-                ) * (Decimal(1) if position_side == "LONG" else Decimal(-1))
-                bankruptcy = max(Decimal(0), bankruptcy)
+                scope_maintenance = (
+                    total_maintenance
+                    if str(account["margin_mode"]) == "CROSS"
+                    else maintenance
+                )
+                denominator = (
+                    direction * absolute_quantity * Decimal(rule.contract_size)
+                )
+                liquidation_raw = (
+                    mark + (scope_maintenance - scope_equity) / denominator
+                )
+                bankruptcy_raw = mark - scope_equity / denominator
+                liquidation_price = max(
+                    Decimal(0),
+                    round_to_step(
+                        max(Decimal(0), liquidation_raw),
+                        Decimal(rule.price_tick),
+                        upward=position_side == "SHORT",
+                    ),
+                )
+                bankruptcy = max(
+                    Decimal(0),
+                    round_to_step(
+                        max(Decimal(0), bankruptcy_raw),
+                        Decimal(rule.price_tick),
+                        upward=position_side == "SHORT",
+                    ),
+                )
+                takeover = bankruptcy
                 fee = rule.liquidation_fee(notional)
-                leg_id = f"{liquidation_id}-{position_side.lower()}"
+                leg_id = (
+                    f"{liquidation_id}-{str(track['track_id']).lower()}-"
+                    f"{position_side.lower()}"
+                )
                 leg_payload = {
-                    "schema_version": "replay.liquidation-leg.v1",
+                    "schema_version": "replay.liquidation-leg.v2",
                     "case_id": liquidation_id,
                     "liquidation_leg_id": leg_id,
-                    "track_id": track_id,
+                    "track_id": str(track["track_id"]),
                     "position_side": position_side,
                     "trigger_quantity": decimal_to_string(
                         absolute_quantity,
@@ -17723,9 +19606,17 @@ class TrainingRunStore:
                         maintenance,
                         field_name="liquidation leg maintenance",
                     ),
+                    "liquidation_price": decimal_to_string(
+                        liquidation_price,
+                        field_name="liquidation price",
+                    ),
                     "bankruptcy_price": decimal_to_string(
                         bankruptcy,
                         field_name="bankruptcy price",
+                    ),
+                    "takeover_price": decimal_to_string(
+                        takeover,
+                        field_name="takeover price",
                     ),
                     "liquidation_fee": decimal_to_string(
                         fee,
@@ -17737,10 +19628,10 @@ class TrainingRunStore:
                     INSERT INTO replay_training_liquidation_leg(
                         run_id, case_id, liquidation_leg_id, leg_sequence,
                         track_id, position_side, trigger_quantity,
-                        trigger_notional, maintenance_margin, bankruptcy_price,
+                        trigger_notional, maintenance_margin, liquidation_price, bankruptcy_price,
                         takeover_price, liquidation_fee, target_quantity,
                         completed_quantity, state, component_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, '0',
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0',
                               'PENDING', ?)
                     """,
                     (
@@ -17748,48 +19639,117 @@ class TrainingRunStore:
                         liquidation_id,
                         leg_id,
                         leg_sequence,
-                        track_id,
+                        track["track_id"],
                         position_side,
                         leg_payload["trigger_quantity"],
                         leg_payload["trigger_notional"],
                         leg_payload["maintenance_margin"],
+                        leg_payload["liquidation_price"],
                         leg_payload["bankruptcy_price"],
+                        leg_payload["takeover_price"],
                         leg_payload["liquidation_fee"],
                         leg_payload["trigger_quantity"],
                         canonical_sha256(leg_payload),
                     ),
                 )
-            for step_sequence, step_type in (
-                (1, "CANCEL_ORDERS"),
-                (2, "FULL_LIQUIDATION"),
-            ):
-                step_payload = {
-                    "schema_version": "replay.liquidation-step.v1",
+                proof = {
+                    "schema_version": "replay.liquidation-leg-price-proof.v1",
                     "case_id": liquidation_id,
-                    "step_sequence": step_sequence,
-                    "step_type": step_type,
-                    "before_snapshot_id": snapshot_id,
+                    "liquidation_leg_id": leg_id,
+                    "rule_revision": rule_revision,
+                    "price_tick": rule.price_tick,
+                    "mark_price": decimal_to_string(
+                        mark, field_name="price proof mark"
+                    ),
+                    "scope_equity": decimal_to_string(
+                        scope_equity, field_name="price proof equity"
+                    ),
+                    "scope_maintenance_margin": decimal_to_string(
+                        scope_maintenance, field_name="price proof maintenance"
+                    ),
+                    "liquidation_price": leg_payload["liquidation_price"],
+                    "bankruptcy_price": leg_payload["bankruptcy_price"],
+                    "takeover_price": leg_payload["takeover_price"],
+                    "formula_version": LIQUIDATION_FORMULA_VERSION,
                 }
                 connection.execute(
                     """
-                    INSERT INTO replay_training_liquidation_step(
-                        run_id, case_id, step_sequence, step_type, state,
-                        before_snapshot_id, after_snapshot_id, reason,
-                        idempotency_key, step_hash, created_at_ms, committed_at_ms
-                    ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL,
-                              'MAINTENANCE_MARGIN_BREACH', ?, ?, ?, NULL)
+                    INSERT INTO replay_training_liquidation_leg_price_proof(
+                        run_id, case_id, liquidation_leg_id, rule_revision,
+                        price_tick, mark_price, scope_equity,
+                        scope_maintenance_margin, liquidation_price,
+                        bankruptcy_price, takeover_price, formula_version,
+                        proof_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
                         liquidation_id,
-                        step_sequence,
-                        step_type,
-                        snapshot_id,
-                        f"{liquidation_id}:{step_sequence}",
-                        canonical_sha256(step_payload),
+                        leg_id,
+                        rule_revision,
+                        proof["price_tick"],
+                        proof["mark_price"],
+                        proof["scope_equity"],
+                        proof["scope_maintenance_margin"],
+                        proof["liquidation_price"],
+                        proof["bankruptcy_price"],
+                        proof["takeover_price"],
+                        proof["formula_version"],
+                        canonical_sha256(proof),
                         now_ms,
                     ),
                 )
+            cancellation_orders: list[dict[str, object]] = []
+            allowed_tracks = {str(item[0]["track_id"]) for item in group}
+            allowed_sides = {
+                (
+                    str(item[0]["track_id"]),
+                    item[4]
+                    or ("LONG" if Decimal(str(item[1]["quantity"])) > 0 else "SHORT"),
+                )
+                for item in group
+            }
+            for track in tracks:
+                if (
+                    str(account["margin_mode"]) != "CROSS"
+                    and str(track["track_id"]) not in allowed_tracks
+                ):
+                    continue
+                raw_orders = json.loads(str(track["open_orders_json"]))
+                if not isinstance(raw_orders, list):
+                    raise TypeError("liquidation cancellation projection is invalid")
+                for order in raw_orders:
+                    if not isinstance(order, Mapping):
+                        continue
+                    if (
+                        order.get("status") not in {"OPEN", "PARTIALLY_FILLED"}
+                        or order.get("reduce_only") is True
+                    ):
+                        continue
+                    if (
+                        str(account["margin_mode"]) == "ISOLATED"
+                        and (str(track["track_id"]), order.get("position_side"))
+                        not in allowed_sides
+                    ):
+                        continue
+                    cancellation_orders.append(
+                        {
+                            "track_id": str(track["track_id"]),
+                            "order_id": str(order["order_id"]),
+                        }
+                    )
+            cls._insert_liquidation_step(
+                connection,
+                run_id=run_id,
+                case_id=liquidation_id,
+                step_type="CANCEL_ORDERS",
+                before_snapshot_id=snapshot_id,
+                plan={
+                    "orders": cancellation_orders,
+                    "scope": case_payload["margin_scope"],
+                },
+                now_ms=now_ms,
+            )
         if affected:
             connection.execute(
                 """

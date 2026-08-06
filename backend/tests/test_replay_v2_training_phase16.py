@@ -665,8 +665,7 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
         assert sum(event["event_phase"] == 20 for event in stable) == 1
         projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
         assert (
-            projection["portfolio"]["account_history"]["auditor"]["status"]
-            == "PASS"
+            projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
         ), projection["portfolio"]["account_history"]["auditor"]
         with sqlite3.connect(database) as connection:
             command_types = [
@@ -1103,11 +1102,19 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
             for snapshot in portfolio["hedge_state"]["risk_snapshots"]
             if snapshot["snapshot_id"] == liquidation["trigger_snapshot_id"]
         )
-        assert Decimal(leg["bankruptcy_price"]) == (
-            Decimal(entry_fill["price"])
-            - Decimal(risk_snapshot["equity"])
-            / (Decimal(leg["trigger_quantity"]) * Decimal("10"))
-        ), liquidation
+        proof = next(
+            item
+            for item in portfolio["hedge_state"]["liquidation_leg_price_proofs"]
+            if item["liquidation_leg_id"] == leg["liquidation_leg_id"]
+        )
+        assert Decimal(leg["bankruptcy_price"]) == Decimal(proof["bankruptcy_price"])
+        raw_bankruptcy = Decimal(proof["mark_price"]) - Decimal(
+            proof["scope_equity"]
+        ) / (Decimal(leg["trigger_quantity"]) * Decimal("10"))
+        assert Decimal(leg["bankruptcy_price"]) <= raw_bankruptcy
+        assert raw_bankruptcy - Decimal(leg["bankruptcy_price"]) < Decimal(
+            proof["price_tick"]
+        ), (entry_fill, risk_snapshot, liquidation)
         assert (
             portfolio["liquidation_channels"]["simulated_account"]["fidelity"]
             == EXACT_ACCOUNT_FIDELITY
@@ -1470,8 +1477,7 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
         assert all(track["position"]["quantity"] == "1" for track in tracks)
         assert len(projection["portfolio"]["account_history"]["bindings"]) == 2
         assert (
-            projection["portfolio"]["account_history"]["auditor"]["status"]
-            == "PASS"
+            projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
         ), projection["portfolio"]["account_history"]["auditor"]
         with sqlite3.connect(database) as connection:
             connection.row_factory = sqlite3.Row

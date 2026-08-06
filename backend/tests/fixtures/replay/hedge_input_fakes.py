@@ -138,6 +138,9 @@ async def prepare_hedge_request(
     root: Path,
     prefix: str,
     mark_prices: list[str] | None = None,
+    insurance_opening_balance: str = "1000000",
+    adl_candidates: list[dict[str, object]] | None = None,
+    maintenance_tiers: list[dict[str, str]] | None = None,
 ) -> TrainingRunCreateRequest:
     training = getattr(service, "training")
     if training is None:
@@ -180,7 +183,8 @@ async def prepare_hedge_request(
                 "contract_size": "1",
                 "max_leverage": "20",
                 "liquidation_fee_bps": "25",
-                "maintenance_tiers": [
+                "maintenance_tiers": maintenance_tiers
+                or [
                     {
                         "notional_cap": "50000",
                         "maintenance_rate": "0.005",
@@ -262,7 +266,7 @@ async def prepare_hedge_request(
             {
                 "effective_time_ms": start,
                 "kind": "OPENING_BALANCE",
-                "amount": "1000000",
+                "amount": insurance_opening_balance,
             }
         ],
         adl_snapshots=[
@@ -270,7 +274,8 @@ async def prepare_hedge_request(
                 "symbol": request.symbol,
                 "effective_time_ms": start,
                 "valid_until_ms": end,
-                "candidates": [
+                "candidates": adl_candidates
+                or [
                     {
                         "candidate_id": f"{prefix}-short-1",
                         "symbol": request.symbol,

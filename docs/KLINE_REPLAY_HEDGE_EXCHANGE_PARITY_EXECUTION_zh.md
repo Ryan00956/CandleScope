@@ -449,6 +449,16 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 预估：8–12 个工程日。
 
+状态：`COMPLETE`。training schema v17 已把 CROSS/ISOLATED 风险检测硬切为账户级/
+逐腿 case，并实现 cancel、recheck、partial/full、bankruptcy、insurance、ADL、complete
+逐 transaction 状态机。所有 close 使用显式数量并绑定真实 broker order/fill；逐腿价格
+proof、基金 posting、ADL selection 与 counterparty hash-chain 均可查询。七个 durable
+commit 点逐一注入崩溃后，恢复路径无重复副作用，最终 case/step hash 与同 seed 无崩溃
+reference 一致。保险基金不透支，cohort 不足时 Run `FAILED_CLOSED/PAUSED`。完整 replay
+后端 `868 passed`，前端 replay `326 passed`，typecheck、lint、build、Ruff、compile 与
+diff check 通过。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE5_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE5_RESULT_20260806_zh.md)。
+
 ### Phase 6：历史 L2 强平执行
 
 工作内容：

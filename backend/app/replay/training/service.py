@@ -5775,154 +5775,239 @@ class TrainingRunService:
         command_id: str,
         pending: Sequence[Mapping[str, object]] | None = None,
     ) -> int:
-        pending_events = (
-            await self.store.pending_liquidations(run_id)
-            if pending is None
-            else tuple(pending)
-        )
-        completed = 0
-        for event in pending_events:
-            liquidation_id = str(event["liquidation_id"])
-            session_id = event.get("adapter_session_id")
-            if not isinstance(session_id, str):
-                raise TrainingRunError(
-                    "LIQUIDATION_EXECUTION_FAILED",
-                    "simulated account liquidation lost its market adapter",
-                    status_code=409,
+        pending_events = tuple(pending) if pending is not None else ()
+        completed_case_ids: set[str] = set()
+        for iteration in range(256):
+            events = (
+                pending_events
+                if iteration == 0 and pending_events
+                else await self.store.pending_liquidations(run_id)
+            )
+            if not events:
+                return len(completed_case_ids)
+            progressed = False
+            for event in events:
+                liquidation_id = str(event["liquidation_id"])
+                pending_step = event.get("pending_step")
+                if not isinstance(pending_step, Mapping):
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "liquidation case lost its durable pending step",
+                        status_code=409,
+                    )
+                step_sequence = _stored_counter(
+                    pending_step.get("step_sequence"),
+                    field_name="liquidation step sequence",
                 )
-            try:
-                await self._ensure_track_controller(
-                    session_id=session_id,
-                    client_instance_id=client_instance_id,
-                    command_id=command_id,
-                )
-                canceled: list[str] = []
-                raw_orders = event.get("open_orders")
-                if isinstance(raw_orders, list):
-                    for raw in raw_orders:
-                        if not isinstance(raw, Mapping) or not isinstance(
-                            raw.get("order_id"),
-                            str,
-                        ):
-                            continue
+                step_type = str(pending_step.get("step_type"))
+                plan = pending_step.get("plan")
+                if not isinstance(plan, Mapping):
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "liquidation step lost its immutable action plan",
+                        status_code=409,
+                    )
+                try:
+                    if step_type == "CANCEL_ORDERS":
+                        canceled: list[dict[str, object]] = []
+                        planned_orders = plan.get("orders")
+                        if not isinstance(planned_orders, list):
+                            raise TrainingRunError(
+                                "LIQUIDATION_EXECUTION_FAILED",
+                                "liquidation cancellation plan is invalid",
+                                status_code=409,
+                            )
+                        track_by_id = {
+                            str(track["track_id"]): track
+                            for track in event.get("tracks", [])
+                            if isinstance(track, Mapping)
+                        }
+                        for raw in planned_orders:
+                            if not isinstance(raw, Mapping):
+                                raise TrainingRunError(
+                                    "LIQUIDATION_EXECUTION_FAILED",
+                                    "liquidation cancellation target is invalid",
+                                    status_code=409,
+                                )
+                            track_id = str(raw["track_id"])
+                            order_id = str(raw["order_id"])
+                            track = track_by_id.get(track_id)
+                            session_id = (
+                                track.get("adapter_session_id")
+                                if track is not None
+                                else None
+                            )
+                            if not isinstance(session_id, str):
+                                raise TrainingRunError(
+                                    "LIQUIDATION_EXECUTION_FAILED",
+                                    "liquidation cancellation lost its market adapter",
+                                    status_code=409,
+                                )
+                            await self._ensure_track_controller(
+                                session_id=session_id,
+                                client_instance_id=client_instance_id,
+                                command_id=command_id,
+                            )
+                            session = await self.replay_service.get_session(session_id)
+                            snapshot = self._snapshot(session)
+                            cancel = ReplayCommand(
+                                protocol=REPLAY_PROTOCOL,
+                                command_id=self._multi_command_id(
+                                    liquidation_id,
+                                    track_id,
+                                    f"step-{step_sequence}-cancel-{order_id}",
+                                    0,
+                                ),
+                                client_instance_id=client_instance_id,
+                                expected_revision=_stored_counter(
+                                    snapshot["revision"], field_name="revision"
+                                ),
+                                type=CommandType.CANCEL_ORDER,
+                                payload={"order_id": order_id},
+                            )
+                            await self.replay_service.command(session_id, cancel)
+                            canceled.append(
+                                {"track_id": track_id, "order_id": order_id}
+                            )
+                        await self.store.commit_liquidation_cancellation(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                            canceled_orders=canceled,
+                        )
+                    elif step_type == "RISK_RECHECK":
+                        await self.store.commit_liquidation_recheck(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                        )
+                    elif step_type in {"PARTIAL_LIQUIDATION", "FULL_LIQUIDATION"}:
+                        session_id = plan.get("adapter_session_id")
+                        if not isinstance(session_id, str):
+                            raise TrainingRunError(
+                                "LIQUIDATION_EXECUTION_FAILED",
+                                "liquidation execution lost its market adapter",
+                                status_code=409,
+                            )
+                        await self._ensure_track_controller(
+                            session_id=session_id,
+                            client_instance_id=client_instance_id,
+                            command_id=command_id,
+                        )
                         session = await self.replay_service.get_session(session_id)
                         snapshot = self._snapshot(session)
-                        cancel = ReplayCommand(
+                        close = ReplayCommand(
                             protocol=REPLAY_PROTOCOL,
                             command_id=self._multi_command_id(
-                                command_id,
-                                str(event["track_id"]),
-                                f"liquidation-cancel-{raw['order_id']}",
-                                _stored_counter(
-                                    snapshot["revision"],
-                                    field_name="revision",
-                                ),
+                                liquidation_id,
+                                str(plan["track_id"]),
+                                f"step-{step_sequence}-close-{plan['position_side']}",
+                                0,
                             ),
                             client_instance_id=client_instance_id,
                             expected_revision=_stored_counter(
-                                snapshot["revision"],
-                                field_name="revision",
+                                snapshot["revision"], field_name="revision"
                             ),
-                            type=CommandType.CANCEL_ORDER,
-                            payload={"order_id": raw["order_id"]},
+                            type=CommandType.CLOSE_POSITION,
+                            payload={
+                                "quantity": str(plan["quantity"]),
+                                **(
+                                    {"position_side": str(plan["position_side"])}
+                                    if plan.get("position_mode") == "HEDGE"
+                                    else {}
+                                ),
+                            },
                         )
-                        await self.replay_service.command(session_id, cancel)
-                        canceled.append(str(raw["order_id"]))
-                session = await self.replay_service.get_session(session_id)
-                snapshot = self._snapshot(session)
-                components = snapshot.get("components")
-                position = (
-                    components.get("position")
-                    if isinstance(components, Mapping)
-                    else None
-                )
-                if not _position_is_open(position):
-                    raise TrainingRunError(
-                        "LIQUIDATION_EXECUTION_FAILED",
-                        "simulated liquidation position disappeared before close",
-                        status_code=409,
-                    )
-                close_sides: tuple[str | None, ...] = (None,)
-                if (
-                    isinstance(position, Mapping)
-                    and position.get("position_mode") == "HEDGE"
-                ):
-                    close_sides = tuple(
-                        side
-                        for side, leg in (
-                            ("LONG", position.get("long")),
-                            ("SHORT", position.get("short")),
+                        closed = await self.replay_service.command(session_id, close)
+                        data = _stored_mapping(
+                            closed.get("data"), field_name="liquidation close data"
                         )
-                        if _position_is_open(leg)
-                    )
-                close_order_ids: list[str] = []
-                for position_side in close_sides:
-                    session = await self.replay_service.get_session(session_id)
-                    close_snapshot = self._snapshot(session)
-                    revision = _stored_counter(
-                        close_snapshot["revision"],
-                        field_name="revision",
-                    )
-                    close = ReplayCommand(
-                        protocol=REPLAY_PROTOCOL,
-                        command_id=self._multi_command_id(
-                            command_id,
-                            str(event["track_id"]),
-                            f"liquidation-close-{position_side or 'NET'}",
-                            revision,
-                        ),
-                        client_instance_id=client_instance_id,
-                        expected_revision=revision,
-                        type=CommandType.CLOSE_POSITION,
-                        payload={
-                            "quantity": None,
-                            **(
-                                {}
-                                if position_side is None
-                                else {"position_side": position_side}
-                            ),
-                        },
-                    )
-                    closed = await self.replay_service.command(session_id, close)
-                    data = _stored_mapping(
-                        closed.get("data"),
-                        field_name="liquidation close data",
-                    )
-                    orders = data.get("orders")
-                    if (
-                        not isinstance(orders, list)
-                        or not orders
-                        or not isinstance(orders[0], Mapping)
-                        or not isinstance(orders[0].get("order_id"), str)
-                    ):
+                        orders = data.get("orders")
+                        if (
+                            not isinstance(orders, list)
+                            or not orders
+                            or not isinstance(orders[0], Mapping)
+                            or not isinstance(orders[0].get("order_id"), str)
+                        ):
+                            raise TrainingRunError(
+                                "LIQUIDATION_EXECUTION_FAILED",
+                                "liquidation close order projection is missing",
+                                status_code=409,
+                            )
+                        await self.store.commit_liquidation_execution(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                            order_id=str(orders[0]["order_id"]),
+                        )
+                    elif step_type == "BANKRUPTCY_TRANSFER":
+                        await self.store.commit_liquidation_bankruptcy(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                        )
+                    elif step_type == "INSURANCE_FUND_SETTLEMENT":
+                        await self.store.commit_liquidation_insurance(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                        )
+                    elif step_type == "ADL":
+                        await self.store.commit_liquidation_adl(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                        )
+                    elif step_type == "COMPLETE":
+                        await self.store.commit_liquidation_complete(
+                            run_id=run_id,
+                            liquidation_id=liquidation_id,
+                            step_sequence=step_sequence,
+                        )
+                        completed_case_ids.add(liquidation_id)
+                    else:
                         raise TrainingRunError(
                             "LIQUIDATION_EXECUTION_FAILED",
-                            "simulated liquidation close order projection is missing",
+                            "liquidation durable step type is unsupported",
                             status_code=409,
+                            details={"step_type": step_type},
                         )
-                    close_order_ids.append(str(orders[0]["order_id"]))
-                await self.store.complete_liquidation(
-                    run_id=run_id,
-                    liquidation_id=liquidation_id,
-                    canceled_order_ids=canceled,
-                    close_order_ids=close_order_ids,
-                )
-                completed += 1
-            except (ReplayDomainError, TrainingRunError) as exc:
-                raise TrainingRunError(
-                    "LIQUIDATION_EXECUTION_FAILED",
-                    "simulated account liquidation failed closed",
-                    status_code=409,
-                    details={
-                        "liquidation_id": event["liquidation_id"],
-                        "reason": (
-                            exc.code.value
-                            if isinstance(exc, ReplayDomainError)
-                            else exc.code
-                        ),
-                    },
-                ) from exc
-        return completed
+                    progressed = True
+                except (
+                    ReplayDomainError,
+                    TrainingRunError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    failure_code = (
+                        exc.code.value
+                        if isinstance(exc, ReplayDomainError)
+                        else exc.code
+                        if isinstance(exc, TrainingRunError)
+                        else type(exc).__name__
+                    )
+                    await self.store.fail_liquidation_case(
+                        run_id=run_id,
+                        liquidation_id=liquidation_id,
+                        failure_code=str(failure_code),
+                    )
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "simulated account liquidation failed closed",
+                        status_code=409,
+                        details={
+                            "liquidation_id": liquidation_id,
+                            "reason": failure_code,
+                        },
+                    ) from exc
+            if not progressed:
+                break
+        raise TrainingRunError(
+            "LIQUIDATION_EXECUTION_FAILED",
+            "liquidation state machine exceeded its deterministic step budget",
+            status_code=409,
+        )
 
     @staticmethod
     def _assert_shared_settlement_reservation(

@@ -616,7 +616,11 @@ async function pressKey(cdp, key, { shift = false } = {}) {
   });
 }
 
-async function keyboardActivateButton(cdp, { action = null, text: buttonText = null }, timeoutMs) {
+async function keyboardActivateButton(
+  cdp,
+  { action = null, railView = null, text: buttonText = null },
+  timeoutMs,
+) {
   await evaluate(cdp, `(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     return true;
@@ -629,11 +633,13 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
       return item instanceof HTMLButtonElement ? {
         action: item.dataset.replayAction || null,
         disabled: item.disabled,
+        railView: item.dataset.railView || null,
         text: item.textContent?.trim() || "",
       } : null;
     })()`);
     if (active && !active.disabled
       && (action === null || active.action === action)
+      && (railView === null || active.railView === railView)
       && (buttonText === null || active.text === buttonText)) {
       // Space activates a focused native button on key-up. Unlike Enter, it
       // does not require a text/char CDP event to reach Chromium's default
@@ -644,7 +650,7 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
     await pressKey(cdp, "Tab");
     tabs += 1;
   }
-  throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, text: buttonText, tabs })}`);
+  throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, railView, text: buttonText, tabs })}`);
 }
 
 async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
@@ -1923,7 +1929,11 @@ async function v2ArchiveLifecycleCycle({ backendOrigin, createPayload, index }) 
 }
 
 async function v2AccessibilityAudit(cdp, timeoutMs) {
-  const paperTabKeyboard = await keyboardActivateButton(cdp, { text: "纸面交易" }, timeoutMs);
+  const paperTabKeyboard = await keyboardActivateButton(
+    cdp,
+    { railView: "replay-paper" },
+    timeoutMs,
+  );
   await waitForValue(
     cdp,
     `(() => { const button = document.querySelector('[data-replay-action="place-order"]'); return button instanceof HTMLButtonElement && !button.disabled; })()`,
@@ -3488,7 +3498,7 @@ async function main() {
       v2_keyboard_accessible: (
         hubKeyboard?.opened?.active?.text === "新建训练"
         && hubKeyboard?.created?.active?.text === "创建并进入训练"
-        && accessibility?.keyboardOnly?.paperTab?.active?.text === "纸面交易"
+        && accessibility?.keyboardOnly?.paperTab?.active?.railView === "replay-paper"
         && accessibility?.keyboardOnly?.order?.active?.action === "place-order"
         && accessibility?.dangerDialog?.initialAction === "cancel-end"
         && accessibility?.dangerDialog?.confirmFocused === true

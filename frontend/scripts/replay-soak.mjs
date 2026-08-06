@@ -1797,8 +1797,6 @@ async function createV2ArchiveRun({
     fixed_funding_rate: createPayload.fixed_funding_rate,
     funding_interval_ms: createPayload.funding_interval_ms,
     position_mode: createPayload.position_mode,
-    hedge_public_history_ref: createPayload.hedge_public_history_ref,
-    simulation_manifest_ref: createPayload.simulation_manifest_ref,
     account_fidelity: createPayload.account_fidelity,
     insurance_adl_fidelity: createPayload.insurance_adl_fidelity,
     allow_rule_changes: createPayload.allow_rule_changes,

@@ -322,6 +322,8 @@ const createPayload = {
   funding_mode: "OFF",
   account_data_mode: "APPROX_PROXY",
   account_history_ref: null,
+  hedge_public_history_ref: { archive_id: "hedge-public-v1" },
+  simulation_manifest_ref: { manifest_id: "simulation-v1" },
   fixed_funding_rate: null,
   funding_interval_ms: null,
   allow_rule_changes: false,
@@ -689,6 +691,11 @@ test("v2 lifecycle refreshes exactly once for catalog epoch drift", async () => 
   const setup = JSON.parse(calls[0].options.body);
   assert.equal(Object.hasOwn(setup, "symbol"), false);
   assert.equal(Object.hasOwn(setup, "catalog_epoch"), false);
+  assert.equal(Object.hasOwn(setup, "hedge_public_history_ref"), false);
+  assert.equal(Object.hasOwn(setup, "simulation_manifest_ref"), false);
+  const selection = JSON.parse(calls[4].options.body);
+  assert.deepEqual(selection.hedge_public_history_ref, createPayload.hedge_public_history_ref);
+  assert.deepEqual(selection.simulation_manifest_ref, createPayload.simulation_manifest_ref);
 });
 
 test("v2 lifecycle does not retry unrelated conflicts", async () => {

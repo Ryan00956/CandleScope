@@ -3422,7 +3422,11 @@ async function main() {
     const exportPath = await waitForDownload(downloadDir, args.timeoutMs);
     const exportedText = fs.readFileSync(exportPath, "utf8");
     const exported = JSON.parse(exportedText);
-    assert(exported.protocol === "replay.v2", "report export protocol drifted", exported);
+    assert(
+      exported.protocol === REPLAY_TRAINING_PROTOCOL,
+      "report export protocol drifted",
+      exported,
+    );
     assert(exported.revealed === false && !Object.hasOwn(exported, "actual_history"), "unrevealed export included actual history", exported);
     const exportedReportHash = exported.report?.report_hash;
     assert(typeof exportedReportHash === "string" && exportedReportHash.startsWith("sha256:"), "report export hash is missing", exported);

@@ -71,6 +71,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.ok(integrityDrawerOffset > endConfirmationOffset);
   assert.ok(reportPanelOffset > integrityDrawerOffset);
   assert.match(soak, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
+  assert.match(soak, /exported\.protocol === REPLAY_TRAINING_PROTOCOL/);
+  assert.doesNotMatch(soak, /exported\.protocol === "replay\.v2"/);
   const accountProofSource = soak.slice(
     soak.indexOf("async function readServerAccountProof"),
     soak.indexOf("async function addAndSelectHedgeSecondaryMarket"),

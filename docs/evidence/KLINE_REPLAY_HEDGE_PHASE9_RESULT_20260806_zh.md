@@ -36,6 +36,7 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 浏览器动作周期按 `data-replay-action="place-order"` + `data-side="BUY|SELL"` 直接选择开多/开空 CTA，不再模拟已移除的 BUY/SELL 方向切换按钮。
 - archive lifecycle 保持产品的两阶段合同：`POST /runs` 只创建 product-independent 空 Run，exact HEDGE public/simulation refs 仅在后续 `/markets` 选品请求绑定；禁止把选品 refs 反向塞回 setup。
 - 结束训练不会擅自打开复盘 drawer；浏览器验收按真实产品交互，在确认 `ENDED` 后使用稳定的 `data-replay-action="toggle-integrity"` 打开“复盘与完整性”，再等待固化报告和导出按钮。验收脚本不再把隐藏 drawer 误报为报告持久化失败。
+- 报告 JSON 导出断言复用当前 `REPLAY_TRAINING_PROTOCOL="replay.v3"`，不再把已经退役的 wire protocol `replay.v2` 当成期望值；`replay.v2` 仅保留为产品/发布代际名称。
 - 新增 22 项 HEDGE 最低验收矩阵及校验器；release manifest v3 纳入逐轨 HEDGE benchmark、浏览器 exact binding 和账户连续性。
 
 ### 2.4 盲测公开输入时间域

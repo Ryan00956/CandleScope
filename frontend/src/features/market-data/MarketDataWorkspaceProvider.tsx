@@ -21,6 +21,7 @@ import {
   MarketDataWorkspaceContext,
   type MarketDataWorkspaceResources,
 } from "./marketDataWorkspaceContext.js";
+import { desktopWindowManager } from "../../desktop/desktopWindowManager.js";
 
 export interface MarketDataWorkspaceProviderProps extends PropsWithChildren {
   brokerEnabled?: boolean;
@@ -79,6 +80,15 @@ export function MarketDataWorkspaceProvider({
     syncVisibility();
     document.addEventListener("visibilitychange", syncVisibility);
     return () => document.removeEventListener("visibilitychange", syncVisibility);
+  }, [resources]);
+
+  useEffect(() => {
+    const scheduler = resources.workScheduler;
+    if (!scheduler) return undefined;
+    return desktopWindowManager.onLifecycle((event) => {
+      if (event.windowId !== desktopWindowManager.windowId) return;
+      scheduler.setWindowVisible(event.visible && !event.minimized && event.state !== "hidden");
+    });
   }, [resources]);
 
   useEffect(() => {

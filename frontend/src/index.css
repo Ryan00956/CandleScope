@@ -10348,6 +10348,28 @@ body {
   min-width: 0;
 }
 
+.workspace-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  padding-right: 6px;
+  border-right: 1px solid var(--border-color);
+}
+
+.workspace-window-status {
+  max-width: 152px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-window-controls[data-desktop-mode="native"] .workspace-window-status {
+  color: var(--accent-blue);
+}
+
 .workspace-link-controls {
   position: relative;
   gap: 4px;

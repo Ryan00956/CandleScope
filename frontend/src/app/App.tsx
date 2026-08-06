@@ -54,6 +54,10 @@ import MarketPageFrame from "./MarketPageFrame.js";
 import MarketWorkspaceFrame from "./MarketWorkspaceFrame.js";
 import { useMarketRailLayout } from "./useMarketRailLayout.js";
 import { loadReplayLauncherDialog } from "./lazySurfaceLoaders.js";
+import {
+  desktopWindowManager,
+  type DesktopBootstrap,
+} from "../desktop/desktopWindowManager.js";
 import "../index.css";
 import "../features/plugins/pluginTrustUx.css";
 
@@ -176,6 +180,67 @@ function isEditableKeyboardTarget(target: EventTarget | null): boolean {
     || target.tagName === "INPUT"
     || target.tagName === "TEXTAREA"
     || target.tagName === "SELECT";
+}
+
+function WorkspaceWindowControls({
+  bootstrap,
+  currentWindowId,
+  windowCount,
+  disabled,
+  error,
+  onCreate,
+  onClose,
+}: {
+  bootstrap: DesktopBootstrap;
+  currentWindowId: string;
+  windowCount: number;
+  disabled: boolean;
+  error: string | null;
+  onCreate(): void;
+  onClose(): void;
+}) {
+  const nativeEnabled = bootstrap.mode === "native" && bootstrap.multiWindowEnabled;
+  const status = bootstrap.mode === "web"
+    ? "Web 单窗口（原生多窗口不可用）"
+    : nativeEnabled
+      ? `${windowCount}/4 窗口 · ${bootstrap.displayCount} 显示器`
+      : "原生多窗口未启用";
+  return (
+    <div
+      className="workspace-window-controls"
+      data-desktop-mode={bootstrap.mode}
+      data-multi-window-enabled={nativeEnabled ? "true" : "false"}
+      title={error || status}
+    >
+      <span className="workspace-window-status" role="status">{error || status}</span>
+      {nativeEnabled && (
+        <>
+          <button
+            type="button"
+            className="workspace-layout-button"
+            onClick={onCreate}
+            disabled={disabled || windowCount >= 4}
+            aria-label="新建原生图表窗口"
+            title="复制当前布局到新的原生窗口"
+          >
+            +屏
+          </button>
+          {currentWindowId !== "main-window" && (
+            <button
+              type="button"
+              className="workspace-layout-button"
+              onClick={onClose}
+              disabled={disabled}
+              aria-label="关闭当前原生图表窗口"
+              title="关闭当前窗口并保留其他窗口"
+            >
+              −屏
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 const LINK_SETTING_OPTIONS: ReadonlyArray<{
@@ -334,7 +399,11 @@ function WorkspaceLinkControls({
 }
 
 function LiveWorkspaceApp() {
-  const workspace = useChartWorkspaceRuntime();
+  const workspace = useChartWorkspaceRuntime({ windowId: desktopWindowManager.windowId });
+  const [desktopBootstrap, setDesktopBootstrap] = useState<DesktopBootstrap>(
+    desktopWindowManager.cachedBootstrap,
+  );
+  const [desktopError, setDesktopError] = useState<string | null>(null);
   const settings = useChartSettingsRuntime();
   const replayEntry = useReplayEntryCapability();
   const marketRailLayout = useMarketRailLayout();
@@ -348,6 +417,60 @@ function LiveWorkspaceApp() {
   const [viewportLinkIssue, setViewportLinkIssue] = useState<ChartLinkViewportIssue | null>(
     () => linkCoordinator.getViewportIssue(),
   );
+  useEffect(() => {
+    let cancelled = false;
+    void desktopWindowManager.getBootstrap().then((bootstrap) => {
+      if (!cancelled) setDesktopBootstrap(bootstrap);
+    }).catch((error: unknown) => {
+      if (!cancelled) setDesktopError(error instanceof Error ? error.message : "桌面壳握手失败");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (!workspace.view.ready
+      || desktopBootstrap.mode !== "native"
+      || !desktopBootstrap.multiWindowEnabled
+      || desktopWindowManager.windowId !== "main-window") return undefined;
+    let cancelled = false;
+    void desktopWindowManager.reconcileWorkspace(
+      workspace.view.activeWorkspaceId,
+      workspace.view.document,
+    ).then((result) => {
+      if (cancelled) return;
+      setDesktopBootstrap(desktopWindowManager.cachedBootstrap);
+      setDesktopError(result.ok ? null : `${result.code}: ${result.message || "窗口拓扑被拒绝"}`);
+    }).catch((error: unknown) => {
+      if (!cancelled) setDesktopError(error instanceof Error ? error.message : "窗口拓扑同步失败");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    desktopBootstrap.mode,
+    desktopBootstrap.multiWindowEnabled,
+    workspace.view.activeWorkspaceId,
+    workspace.view.document,
+    workspace.view.ready,
+  ]);
+  useEffect(() => {
+    if (desktopWindowManager.windowId !== "main-window") return undefined;
+    const unsubscribeClose = desktopWindowManager.onCloseRequested(({ windowId }) => {
+      workspace.actions.closeWindow(windowId);
+    });
+    const unsubscribePlacement = desktopWindowManager.onPlacement((placement) => {
+      workspace.actions.updateWindowPlacement(placement.windowId, placement);
+    });
+    const unsubscribeLifecycle = desktopWindowManager.onLifecycle((event) => {
+      workspace.actions.updateWindowPlacement(event.windowId, event.placement);
+    });
+    return () => {
+      unsubscribeClose();
+      unsubscribePlacement();
+      unsubscribeLifecycle();
+    };
+  }, [workspace.actions]);
   useLayoutEffect(() => {
     linkCoordinator.updateDocument(
       workspace.view.document,
@@ -565,6 +688,15 @@ function LiveWorkspaceApp() {
         onReset={workspace.actions.resetLayout}
         onLockChange={workspace.actions.setLayoutLocked}
       />
+      <WorkspaceWindowControls
+        bootstrap={desktopBootstrap}
+        currentWindowId={workspace.view.window.id}
+        windowCount={Object.keys(workspace.view.document.windows).length}
+        disabled={!workspace.view.ready}
+        error={desktopError}
+        onCreate={workspace.actions.createWindow}
+        onClose={() => workspace.actions.closeWindow(workspace.view.window.id)}
+      />
       <WorkspaceLinkControls
         activeCellId={workspace.view.activeCellId}
         group={workspace.view.activeCell.linkGroup}
@@ -587,23 +719,12 @@ function LiveWorkspaceApp() {
       />
     </div>
   ), [
-    workspace.actions.createWorkspace,
-    workspace.actions.deleteWorkspace,
-    workspace.actions.duplicateWorkspace,
-    workspace.actions.renameWorkspace,
-    workspace.actions.redoLayout,
-    workspace.actions.setCellLinkGroup,
-    workspace.actions.setCellDrawingLayerSet,
-    workspace.actions.setCellLinkRole,
-    workspace.actions.setLayout,
-    workspace.actions.setLayoutLocked,
-    workspace.actions.resetLayout,
-    workspace.actions.switchWorkspace,
-    workspace.actions.updateLinkGroupSettings,
-    workspace.actions.undoLayout,
+    workspace.actions,
     workspace.status.error,
     workspace.status.persistenceMode,
     workspace.status.saveState,
+    desktopBootstrap,
+    desktopError,
     workspace.view.activeCell.linkGroup,
     workspace.view.activeCell.drawingLayerSet,
     workspace.view.activeCell.linkRole,
@@ -619,6 +740,7 @@ function LiveWorkspaceApp() {
     workspace.view.ready,
     workspace.view.visibleCellIds,
     workspace.view.workspaces,
+    workspace.view.window.id,
     viewportLinkIssue,
   ]);
   const gridClassName = [
@@ -642,6 +764,7 @@ function LiveWorkspaceApp() {
                 className={gridClassName}
                 data-workspace-layout={workspace.view.layout}
                 data-workspace-id={workspace.view.activeWorkspaceId}
+                data-window-id={workspace.view.window.id}
                 data-layout-locked={workspace.view.layoutLocked ? "true" : "false"}
                 aria-busy={!workspace.view.ready}
               >

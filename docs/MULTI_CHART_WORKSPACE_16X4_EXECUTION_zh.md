@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_5_COMPLETE`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6～8 尚未完成。当前版本在默认关闭的多图、窗口 broker 和批量 K 线 flags 后实现并真实验收单窗口最多 16 图、稳定挂载、每窗口调度以及有界后端批量订阅/容量治理；默认 UI 仍限制为 4 图且默认继续走旧 K 线 endpoint。本文尚未宣称原生四窗口或 64 图能力，不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_6_IMPLEMENTATION_COMPLETE_HARDWARE_GATE_PENDING`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6 的桌面壳、四原生窗口、单 sidecar、DIP/恢复、生命周期降载和 unpacked 包实现已通过当前单显示器主机的真实 Electron evidence，但“四个真实显示器及混合 DPI 拔插”验收因本机仅暴露 1 个逻辑显示器仍未通过。Phase 7～8 尚未完成。所有多图、窗口 broker、批量 K 线和原生多窗口 flags 仍默认关闭；本文尚未宣称发布支持四屏 64 图，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -888,14 +888,14 @@ Spike 必须证明：
 
 ### 任务
 
-- [ ] 6.1 建立 `DesktopWindowManager` 抽象，Web 单窗口实现和 Native 多窗口实现共用前端合同。
-- [ ] 6.2 单实例锁和单 sidecar 生命周期由 shell 主进程拥有。
-- [ ] 6.3 每个原生窗口通过 `windowId` 打开同一 Workspace 的局部投影。
-- [ ] 6.4 bounds 使用 DIP 保存；恢复时根据 monitor fingerprint、work area 和当前 DPI 转换。
-- [ ] 6.5 显示器缺失时按主屏可见区域夹取，不能恢复到屏幕外。
-- [ ] 6.6 窗口创建/关闭使用 document revision CAS；失败不留下孤儿窗口记录。
-- [ ] 6.7 close/minimize/focus/visibility 事件进入 `ChartWorkScheduler`。
-- [ ] 6.8 浏览器版保持单窗口且明确标注多窗口能力不可用。
+- [x] 6.1 建立 `DesktopWindowManager` 抽象，Web 单窗口实现和 Native 多窗口实现共用前端合同。
+- [x] 6.2 单实例锁和单 sidecar 生命周期由 shell 主进程拥有。
+- [x] 6.3 每个原生窗口通过 `windowId` 打开同一 Workspace 的局部投影。
+- [x] 6.4 bounds 使用 DIP 保存；恢复时根据 monitor fingerprint、work area 和当前 DPI 转换。
+- [x] 6.5 显示器缺失时按主屏可见区域夹取，不能恢复到屏幕外。
+- [x] 6.6 窗口创建/关闭使用 document revision CAS；失败不留下孤儿窗口记录。
+- [x] 6.7 close/minimize/focus/visibility 事件进入 `ChartWorkScheduler`。
+- [x] 6.8 浏览器版保持单窗口且明确标注多窗口能力不可用。
 
 ### 测试
 
@@ -910,14 +910,29 @@ Spike 必须证明：
 ### 验收
 
 - [ ] 四个原生窗口可分别放到四个显示器；
-- [ ] 重启后全部恢复到可见区域；
-- [ ] 始终只有一个 sidecar；
-- [ ] 关闭一个窗口不影响其他窗口的数据 lease；
-- [ ] desktop shell 选型有真实 spike evidence。
+- [x] 重启后全部恢复到可见区域；
+- [x] 始终只有一个 sidecar；
+- [x] 关闭一个窗口不影响其他窗口的数据 lease；
+- [x] desktop shell 选型有真实 spike evidence。
 
 ### 回滚
 
 关闭 `MULTI_WINDOW_ENABLED` 后只打开 `main-window`。其他窗口状态保留在 v6 文档中，不删除；sidecar 继续走原单窗口生命周期。
+
+### Phase 6 实现记录（2026-08-07）
+
+1. 桌面 spike 选择 Electron `43.3.0`。选择不是基于安装包大小：现有 React、Lightweight Charts、Canvas 绘图、指标、右侧 rail 与导出无需更换渲染内核；Electron 主进程直接提供单实例锁、`BrowserWindow` 和以 DIP 表示的 display/workArea/scaleFactor。Tauri 2 候选在本机有 Rust，但官方 Windows 前置条件要求的 Microsoft C++ Build Tools 不可发现，无法形成同等可运行 spike。选型依据同时记录了 Electron 官方 [app 单实例合同](https://www.electronjs.org/docs/latest/api/app)、[screen/display DIP 合同](https://www.electronjs.org/docs/latest/api/screen/) 和 Tauri 官方 [Windows 前置条件](https://v2.tauri.app/start/prerequisites/)。
+2. 新增安全桌面边界：renderer 保持 `sandbox=true`、`contextIsolation=true`、`nodeIntegration=false`，只通过 `preload.cjs` 暴露固定 bootstrap、topology reconcile 和生命周期事件；IPC 拒绝非法 ID、bounds、状态、缺失 active window 和超过四窗口的 payload。Web 环境没有 bridge 时 fail closed 为 `main-window`，界面明确显示“Web 单窗口（原生多窗口不可用）”。
+3. shell 主进程现在拥有 `requestSingleInstanceLock()`、唯一 Python sidecar supervisor、健康等待、日志位置、非零启动失败和退出前异步回收。真实 create、restore 和 packaged 三次探针在采样时均只有一个 supervisor PID；进程退出后对应 PID 与 `15287/18085/18086` 监听均消失。后端日志位于 `userData/logs/backend-sidecar.log`，启动错误独立写入 `desktop-startup-error.log`。
+4. `DesktopShellStateStore` 以原子临时文件重命名保存 Workspace topology cache，并用 `workspaceRevision` CAS 拒绝 stale writer。v6 文档仍是产品状态源；主 renderer 在 Phase 6 作为唯一 topology writer，secondary renderer 只读取 `windowId` 局部投影，避免在 Phase 7 WorkspaceBus 落地前形成多 writer 覆盖。新增窗口复制当前布局及 Cell snapshot，但分配全新 opaque window/Cell ID；关闭窗口只回收其独占 Cell，不删除旧文档中未被当前布局引用的兼容状态。
+5. bounds 全程以 DIP 保存。display fingerprint 使用 display identity 与经 scaleFactor 还原的 native size；恢复优先精确 fingerprint，其次 bounds overlap，最后主屏。窗口尺寸会完整夹取到 workArea。定向测试覆盖负坐标、100%/125%/150%/200% scale、显示器移动、显示器缺失、超大/过小 bounds 和主屏回收；Electron `display-added/removed/metrics-changed` 都触发重新夹取。
+6. 原生 focus/blur/minimize/restore/show/hide 与 placement 事件通过受限 bridge 进入 renderer。真实探针将 `window-2` 最小化后得到 `document.visibilityState=hidden` 且 scheduler `windowVisible=false`，恢复后均回到 visible/true；不是只测试 React 状态。关闭/重建一个 secondary window 时其余 3 个原生窗口继续保有 Canvas，随后原 `windowId` 可重新打开。
+7. 真实 create 探针创建 4 个 `BrowserWindow`，随后同一 shell cache 重启 restore 再创建 4 个；两轮每窗都有 1 个 chart root、9 个 Canvas、右侧 rail 与 export control，单实例锁为真。sidecar 首次健康分别约 `4.6 s` 和 `4.6 s`。当前主机只有一个 `1707×1067 DIP`、DPR `1.5` 的逻辑显示器，四窗因此在一个 workArea 内按四象限验证；证据没有把它写成四物理屏通过。
+8. `electron-builder 26.15.3` 生成并真实启动 `win-unpacked/CandleScope.exe`。包内使用相对静态资源并携带 backend 源码与 plugin SDK；renderer 通过只读 preload 配置连接本机 sidecar。packaged evidence 为 `packaged=true`，4 窗口、Canvas、rail、export、生命周期与关闭隔离全部通过。当前更新策略明确为 `manual-release-artifact`；Python runtime 仍依赖主机，签名 installer、自动升级与固定 Python 分发属于 Phase 8 发布工作，不在本阶段冒充完成。
+9. 新增 14 个 desktop Node 测试和 5 个 TypeScript 窗口模型/bridge 定向测试；覆盖 1～4 window、flag-off 保留 secondary topology、窗口关闭隔离、空/冲突 revision CAS、单 sidecar 成功与失败回收、DIP/offscreen 以及 IPC 投影最小化。前端 typecheck、lint 和依赖审计通过；依赖 lock 在兼容范围更新到 Vite `7.3.6`、Monaco `0.56.0`，并固定 DOMPurify `3.4.13`，`npm audit` 为 0。
+10. 唯一未通过的 Phase 6 验收是“四个原生窗口分别位于四个真实显示器”。机器可读聚合证据因此有意为 `implementation-pass-hardware-pending`，而不是 `pass`。必须在至少四显示器且含混合 DPI/负坐标的主机重跑后，才可勾选该项并进入 Phase 8 的四屏发布结论。
+
+机器可读证据：`docs/perf-baselines/multi-chart-workspace/phase6-desktop-shell-20260807.json`。原始 create/restore/packaged evidence、sidecar 日志、临时数据库与 unpacked 产物保存在忽略版本控制的 `output/playwright/multi-chart-phase6/` 和 `frontend/desktop-dist/`。
 
 ---
 

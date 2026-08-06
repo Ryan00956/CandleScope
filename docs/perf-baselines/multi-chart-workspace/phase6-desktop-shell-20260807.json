@@ -1,0 +1,166 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase6-release/1",
+  "generatedAt": "2026-08-06T20:17:25.929Z",
+  "scope": "native-window-shell-and-display-recovery",
+  "result": "implementation-pass-hardware-pending",
+  "selection": {
+    "selected": "Electron 43.3.0",
+    "rationale": "Existing Chromium renderer compatibility plus native single-instance, BrowserWindow, DIP display, and process supervision APIs",
+    "tauriConstraint": "Microsoft C++ Build Tools were not discoverable on the validation host"
+  },
+  "host": {
+    "electron": "43.3.0",
+    "chrome": "150.0.7871.212",
+    "node": "24.18.1",
+    "appVersion": "0.0.0",
+    "updatePolicy": "manual-release-artifact",
+    "displayCount": 1,
+    "displays": [
+      {
+        "id": 2910142756,
+        "label": "unknown-display",
+        "internal": true,
+        "rotation": 0,
+        "scaleFactor": 1.5,
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "width": 1707,
+          "height": 1067
+        },
+        "workArea": {
+          "x": 0,
+          "y": 0,
+          "width": 1707,
+          "height": 1019
+        },
+        "fingerprint": "display-16c198f78c7b53fe277b47bc"
+      }
+    ]
+  },
+  "gates": {
+    "createFourNativeWindows": "pass",
+    "restoreFourNativeWindows": "pass",
+    "singleInstance": "pass",
+    "singleSidecar": "pass",
+    "minimizeRestoreScheduler": "pass",
+    "closeWindowIsolation": "pass",
+    "dipAndOffscreenFixtures": "pass",
+    "flagOffPreservesSecondaryTopology": "pass",
+    "packagedUnpackedRuntime": "pass",
+    "physicalFourDisplays": "pending"
+  },
+  "measurements": {
+    "createSidecarReadyMs": 4496,
+    "restoreSidecarReadyMs": 4712,
+    "perWindow": [
+      {
+        "windowId": "main-window",
+        "boundsDip": {
+          "x": 0,
+          "y": 0,
+          "width": 822,
+          "height": 490
+        },
+        "canvasCount": 9,
+        "chartRoots": 1,
+        "rightRail": true,
+        "exportControl": true
+      },
+      {
+        "windowId": "window-3",
+        "boundsDip": {
+          "x": 0,
+          "y": 530,
+          "width": 822,
+          "height": 490
+        },
+        "canvasCount": 9,
+        "chartRoots": 1,
+        "rightRail": true,
+        "exportControl": true
+      },
+      {
+        "windowId": "window-4",
+        "boundsDip": {
+          "x": 888,
+          "y": 530,
+          "width": 822,
+          "height": 490
+        },
+        "canvasCount": 9,
+        "chartRoots": 1,
+        "rightRail": true,
+        "exportControl": true
+      },
+      {
+        "windowId": "window-2",
+        "boundsDip": {
+          "x": 888,
+          "y": 0,
+          "width": 822,
+          "height": 490
+        },
+        "canvasCount": 9,
+        "chartRoots": 1,
+        "rightRail": true,
+        "exportControl": true
+      }
+    ],
+    "lifecycle": {
+      "result": "pass",
+      "windowId": "window-2",
+      "minimized": {
+        "native": true,
+        "rendererVisibility": "hidden",
+        "schedulerVisible": false
+      },
+      "restored": {
+        "native": true,
+        "rendererVisibility": "visible",
+        "schedulerVisible": true
+      }
+    },
+    "closeIsolation": {
+      "result": "pass",
+      "removedWindowId": "window-2",
+      "peers": [
+        {
+          "windowId": "main-window",
+          "alive": true,
+          "canvasCount": 9
+        },
+        {
+          "windowId": "window-3",
+          "alive": true,
+          "canvasCount": 9
+        },
+        {
+          "windowId": "window-4",
+          "alive": true,
+          "canvasCount": 9
+        }
+      ],
+      "restoredCanvasCount": 7
+    },
+    "packagedSidecarReadyMs": 5345
+  },
+  "sources": {
+    "create": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase6\\desktop-spike.json",
+      "sha256": "sha256:a4476997537e4486db6d0421f7241f180a64bf6b40d366a1ae077e3ee02d369f"
+    },
+    "restore": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase6\\desktop-restore.json",
+      "sha256": "sha256:2009d34766662038e7ccb6d1173732c7ba071b5d5c6e2377212cdb797116c0a7"
+    },
+    "packaged": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase6\\desktop-packaged.json",
+      "sha256": "sha256:983b1e607ec1eda1ab23a507ed693299e2fb44a669131619b1965b241608da95"
+    }
+  },
+  "limitations": [
+    "Host exposes fewer than four physical displays; placement algorithms use deterministic multi-DPI fixtures, while physical four-display validation remains pending.",
+    "Four physical displays, mixed-DPI cable hotplug, and 64-Cell capacity remain release blockers for Phase 8."
+  ]
+}

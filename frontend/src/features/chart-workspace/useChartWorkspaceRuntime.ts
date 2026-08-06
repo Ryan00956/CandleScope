@@ -35,6 +35,7 @@ import {
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
   type ChartLinkRole,
+  type ChartWindowId,
   type ChartWindowState,
   type ChartWorkspaceDocument,
   type ChartWorkspaceId,
@@ -79,8 +80,14 @@ import {
   activeChartWorkspaceWindow,
   advanceChartWorkspaceRevision,
   chartWorkspaceCell,
+  chartWorkspaceWindow,
   replaceChartWorkspaceWindow,
 } from "./chartWorkspaceDocument.js";
+import {
+  closeChartWorkspaceWindowCandidate,
+  createChartWorkspaceWindowCandidate,
+  updateChartWorkspaceWindowPlacementCandidate,
+} from "./chartWorkspaceWindows.js";
 
 export type ChartWorkspaceSaveState = "loading" | "saving" | "saved" | "error";
 
@@ -136,6 +143,12 @@ export interface ChartWorkspaceRuntime {
     updateCellChartSettings(cellId: ChartCellId, settings: ChartSettings | ChartCellChartSettings): void;
     updateCellPriceScale(cellId: ChartCellId, priceScale: ChartCellPriceScale): void;
     updateCellIndicators(cellId: ChartCellId, indicators: IndicatorDefinition[]): void;
+    createWindow(): void;
+    closeWindow(windowId: ChartWindowId): void;
+    updateWindowPlacement(
+      windowId: ChartWindowId,
+      placement: Pick<ChartWindowState, "boundsDip" | "monitorFingerprint" | "dpiScale" | "windowState">,
+    ): void;
   };
   status: {
     saveState: ChartWorkspaceSaveState;
@@ -150,6 +163,7 @@ export interface UseChartWorkspaceRuntimeOptions {
   now?: () => number;
   createId?: () => ChartWorkspaceId;
   autosaveDelayMs?: number;
+  windowId?: ChartWindowId;
 }
 
 interface PersistenceStatus {
@@ -208,6 +222,7 @@ export function useChartWorkspaceRuntime(
     now: options.now ?? Date.now,
     createId: options.createId ?? createChartWorkspaceId,
     autosaveDelayMs: options.autosaveDelayMs ?? 350,
+    windowId: options.windowId,
     editOptions: {
       allowDynamicCellIds: CHART_WORKSPACE_FEATURE_FLAGS.multiChart16Enabled,
       maxCellsPerWindow: CHART_WORKSPACE_RUNTIME_LIMITS.maxCellsPerWindow,
@@ -345,7 +360,10 @@ export function useChartWorkspaceRuntime(
     const updatedAt = services.now();
     setLibrary((current) => {
       const workspace = activeWorkspace(current);
-      const candidate = updater(workspace.document);
+      const scopedDocument = services.windowId && workspace.document.windows[services.windowId]
+        ? { ...workspace.document, activeWindowId: services.windowId }
+        : workspace.document;
+      const candidate = updater(scopedDocument);
       if (candidate === workspace.document) return current;
       const document = advanceChartWorkspaceRevision(workspace.document, candidate);
       const updated = { ...workspace, document, updatedAt };
@@ -364,8 +382,11 @@ export function useChartWorkspaceRuntime(
     const updatedAt = services.now();
     setRuntimeState((currentState) => {
       const workspace = activeWorkspace(currentState.library);
-      if (activeChartWorkspaceWindow(workspace.document).layoutLocked) return currentState;
-      const result = updater(workspace.document);
+      const scopedDocument = services.windowId && workspace.document.windows[services.windowId]
+        ? { ...workspace.document, activeWindowId: services.windowId }
+        : workspace.document;
+      if (activeChartWorkspaceWindow(scopedDocument).layoutLocked) return currentState;
+      const result = updater(scopedDocument);
       if (result.document === workspace.document) return currentState;
       const committedResult = {
         ...result,
@@ -726,9 +747,36 @@ export function useChartWorkspaceRuntime(
     });
   }, [updateActiveDocument]);
 
+  const createWindow = useCallback(() => {
+    if (!CHART_WORKSPACE_FEATURE_FLAGS.multiWindowEnabled) return;
+    updateActiveDocument((current) => createChartWorkspaceWindowCandidate(current, {
+      sourceWindowId: services.windowId ?? current.activeWindowId,
+    }));
+  }, [services.windowId, updateActiveDocument]);
+
+  const closeWindow = useCallback((windowId: ChartWindowId) => {
+    if (!CHART_WORKSPACE_FEATURE_FLAGS.multiWindowEnabled) return;
+    updateActiveDocument((current) => closeChartWorkspaceWindowCandidate(current, windowId));
+  }, [updateActiveDocument]);
+
+  const updateWindowPlacement = useCallback((
+    windowId: ChartWindowId,
+    placement: Pick<ChartWindowState, "boundsDip" | "monitorFingerprint" | "dpiScale" | "windowState">,
+  ) => {
+    if (!CHART_WORKSPACE_FEATURE_FLAGS.multiWindowEnabled) return;
+    updateActiveDocument((current) => updateChartWorkspaceWindowPlacementCandidate(
+      current,
+      windowId,
+      placement,
+    ));
+  }, [updateActiveDocument]);
+
   const workspace = activeWorkspace(library);
   const document = workspace.document;
-  const persistedActiveWindow = activeChartWorkspaceWindow(document);
+  const persistedActiveWindow = chartWorkspaceWindow(
+    document,
+    services.windowId ?? document.activeWindowId,
+  );
   const activeWindow = useMemo<ChartWindowState>(() => {
     const layoutTree = projectChartWorkspaceLayoutTree(
       persistedActiveWindow.layoutTree,
@@ -817,6 +865,9 @@ export function useChartWorkspaceRuntime(
       updateCellChartSettings,
       updateCellPriceScale,
       updateCellIndicators,
+      createWindow,
+      closeWindow,
+      updateWindowPlacement,
     },
     status: persistence,
   };

@@ -23,6 +23,7 @@ const buildApiProxy = () => ({
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: process.env.VITE_DESKTOP_BUILD === '1' ? './' : '/',
   plugins: [react()],
   build: {
     rollupOptions: {

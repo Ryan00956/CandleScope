@@ -646,7 +646,8 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
 }
 
 async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
-  const requestedStartValue = new Date(plan.requestedStartMs).toISOString().slice(0, 19);
+  // datetime-local normalizes a zero-seconds value to the shortest valid form.
+  const requestedStartValue = new Date(plan.requestedStartMs).toISOString().slice(0, 16);
   const start = await evaluate(cdp, `(() => {
     const input = document.querySelector('[data-training-field="requested-start-utc"]');
     if (!(input instanceof HTMLInputElement)) return { configured: false, reason: "requested-start-control-missing" };

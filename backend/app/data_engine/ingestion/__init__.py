@@ -312,6 +312,7 @@ class MarketDataIngress:
         return {
             "started": self._started,
             "transport": self._transport.snapshot(),
+            "shared_ws": self._shared_ws.snapshot(),
             "pipelines": {
                 key: p.snapshot() for key, p in self._pipelines.items()
             },

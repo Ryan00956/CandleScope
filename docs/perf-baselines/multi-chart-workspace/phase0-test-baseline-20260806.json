@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase-test/1",
+  "generatedAt": "2026-08-06T07:33:24.937Z",
+  "phase": 0,
+  "git": {
+    "branch": "codex/multi-chart-workspace",
+    "implementationBase": "a012935801c83e583d2e9a53c70ed9112d63582d",
+    "preflightWorkspaceCommit": "035762e8",
+    "preflightBaselineCommit": "a0129358"
+  },
+  "capacityRuns": [
+    {
+      "cells": 1,
+      "scenario": "S1",
+      "result": "pass",
+      "evidence": "phase0-1cell-20260806.json"
+    },
+    {
+      "cells": 2,
+      "scenario": "S1",
+      "result": "pass",
+      "evidence": "phase0-2cell-20260806.json"
+    },
+    {
+      "cells": 4,
+      "scenario": "S1",
+      "result": "pass",
+      "evidence": "phase0-4cell-20260806.json"
+    }
+  ],
+  "tests": {
+    "frontendFull": {
+      "command": "npm run check",
+      "result": "pass",
+      "testsPassed": 2990,
+      "testsFailed": 0,
+      "testDurationSeconds": 27.585288,
+      "gateDurationSeconds": 127.0,
+      "included": [
+        "architecture",
+        "plugin-platform-boundary",
+        "typecheck",
+        "eslint",
+        "tests",
+        "production-build"
+      ]
+    },
+    "workspaceTargeted": {
+      "command": "npx tsx --test \"src/features/chart-workspace/__tests__/*.test.{ts,tsx}\"",
+      "result": "pass",
+      "testsPassed": 60,
+      "testsFailed": 0
+    },
+    "backendAffected": {
+      "command": "python -m pytest backend/tests/test_multi_chart_capacity.py backend/tests/test_event_bus_routing_index.py backend/tests/test_ingestion_session_types.py -q",
+      "result": "pass",
+      "testsPassed": 21,
+      "testsFailed": 0,
+      "durationSeconds": 0.61
+    },
+    "backendFull": {
+      "command": "python -m pytest backend/tests -q",
+      "result": "baseline_with_pre_existing_failures",
+      "testsPassed": 3094,
+      "testsFailed": 31,
+      "setupErrors": 8,
+      "warnings": 5,
+      "durationSeconds": 866.19
+    },
+    "cleanBaseFailureReplay": {
+      "base": "a012935801c83e583d2e9a53c70ed9112d63582d",
+      "command": "python -m pytest <39 node ids from current full-run lastfailed cache> -q",
+      "result": "same_failures_reproduced",
+      "nodeIds": 39,
+      "testsFailed": 31,
+      "setupErrors": 8,
+      "durationSeconds": 16.45
+    }
+  },
+  "preExistingFailureGroups": [
+    {
+      "scope": "plugin-platform-and-marketplace",
+      "testsFailed": 30,
+      "setupErrors": 8,
+      "cause": "frozen contract, signed registry, or recorded release evidence drift",
+      "reproducedOnCleanBase": true
+    },
+    {
+      "scope": "replay-history-archive",
+      "testsFailed": 1,
+      "setupErrors": 0,
+      "cause": "expected TRAINING_RUN_CREATE_FAILED but implementation returns MARKET_UNSUPPORTED_AT_COMMITTED_START",
+      "reproducedOnCleanBase": true
+    }
+  ],
+  "result": "pass_with_recorded_pre_existing_baseline_failures"
+}

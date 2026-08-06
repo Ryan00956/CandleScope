@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "capacity:multi-chart": "node scripts/multi-chart-capacity.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "tsx --test \"scripts/*.test.mjs\" \"src/**/*.test.{ts,tsx}\"",

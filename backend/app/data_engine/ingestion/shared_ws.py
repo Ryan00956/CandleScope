@@ -477,6 +477,27 @@ class SharedMultiplexHub:
             return spec.stream_name
         return json.dumps(spec.subscribe_payload or {}, sort_keys=True, separators=(",", ":"))
 
+    def snapshot(self) -> dict[str, object]:
+        """Return connection and logical fan-out state without mutating the hub."""
+
+        descriptor_ids = {
+            self._subscription_identity(subscriber.descriptor)
+            for subscriber in self._subscribers.values()
+        }
+        return {
+            "exchange": self._exchange,
+            "market_type": self._market_type,
+            "scope": self._symbol,
+            "health": self._health.value,
+            "physical_websocket": int(self._conn is not None),
+            "runner_active": self._runner_task is not None
+            and not self._runner_task.done(),
+            "subscriber_count": len(self._subscribers),
+            "descriptor_count": len(descriptor_ids),
+            "descriptors": sorted(descriptor_ids),
+            "consecutive_failures": self._consecutive_failures,
+        }
+
 
 class SharedWsHubRegistry:
     def __init__(self, config: IngestionConfig, transport: TransportLayer) -> None:
@@ -537,6 +558,22 @@ class SharedWsHubRegistry:
         if hub is None:
             return None
         return SharedWsSessionAdapter(hub, descriptor)
+
+    def snapshot(self) -> dict[str, object]:
+        hubs = [
+            hub.snapshot()
+            for _key, hub in sorted(self._hubs.items())
+        ]
+        return {
+            "hub_count": len(hubs),
+            "active_hubs": sum(1 for hub in hubs if hub["runner_active"]),
+            "physical_websockets": sum(
+                int(hub["physical_websocket"]) for hub in hubs
+            ),
+            "subscriber_count": sum(int(hub["subscriber_count"]) for hub in hubs),
+            "descriptor_count": sum(int(hub["descriptor_count"]) for hub in hubs),
+            "hubs": hubs,
+        }
 
 
 # Backward-compatible alias for tests and older imports.

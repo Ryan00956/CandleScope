@@ -137,6 +137,15 @@ class ExchangeIngestionFactory:
             return []
         return [self._ingress.transport]
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return the lazily owned ingress state for read-only diagnostics."""
+
+        return {
+            "initialized": self._ingress is not None,
+            "failed_stream_stops": sorted(self._failed_stream_stops),
+            "ingress": self._ingress.snapshot() if self._ingress is not None else None,
+        }
+
     async def _ensure_ingress(self) -> Any:
         """Lazily create and start the shared MarketDataIngress instance."""
         if self._ingress is not None:

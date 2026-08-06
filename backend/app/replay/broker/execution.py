@@ -105,7 +105,9 @@ def _scaled_decimal(value: str, scale: int) -> int:
     scaled = Decimal(value).scaleb(scale)
     integral = scaled.to_integral_value()
     if scaled != integral:
-        raise ValueError("display bar decimal cannot be represented at its declared scale")
+        raise ValueError(
+            "display bar decimal cannot be represented at its declared scale"
+        )
     return int(integral)
 
 
@@ -115,7 +117,9 @@ def _pack_final_state_bars(
     """Pack exact decimals and monotone times without repeated JSON field names."""
 
     price_scale = _decimal_scale(
-        tuple(value for bar in bars for value in (bar.open, bar.high, bar.low, bar.close))
+        tuple(
+            value for bar in bars for value in (bar.open, bar.high, bar.low, bar.close)
+        )
     )
     volume_scale = _decimal_scale(tuple(bar.volume for bar in bars))
     quote_volume_scale = _decimal_scale(tuple(bar.quote_volume for bar in bars))
@@ -141,17 +145,25 @@ def _pack_final_state_bars(
         span = bar.close_time_ms - bar.open_time_ms + 1
         flags = int(bar.is_closed) | (int(bar.synthetic) << 1)
         fields = (
-            "" if previous_open_ms is None else _base36(bar.open_time_ms - previous_open_ms),
+            ""
+            if previous_open_ms is None
+            else _base36(bar.open_time_ms - previous_open_ms),
             "" if span == default_close_span_ms else _base36(span),
             _base36(open_value - previous_close),
             _base36(high_value - previous_close),
             _base36(low_value - previous_close),
             _base36(close_value - previous_close),
             _base36(_scaled_decimal(bar.volume, volume_scale)),
-            "~" if bar.quote_volume is None else _base36(_scaled_decimal(bar.quote_volume, quote_volume_scale)),
+            "~"
+            if bar.quote_volume is None
+            else _base36(_scaled_decimal(bar.quote_volume, quote_volume_scale)),
             "~" if bar.trades is None else _base36(bar.trades),
-            "~" if bar.taker_buy_base is None else _base36(_scaled_decimal(bar.taker_buy_base, taker_buy_base_scale)),
-            "~" if bar.taker_buy_quote is None else _base36(_scaled_decimal(bar.taker_buy_quote, taker_buy_quote_scale)),
+            "~"
+            if bar.taker_buy_base is None
+            else _base36(_scaled_decimal(bar.taker_buy_base, taker_buy_base_scale)),
+            "~"
+            if bar.taker_buy_quote is None
+            else _base36(_scaled_decimal(bar.taker_buy_quote, taker_buy_quote_scale)),
             _base36(bar.first_base_open_ms - bar.open_time_ms),
             _base36(bar.last_base_open_ms - bar.open_time_ms),
             _base36(bar.component_count),
@@ -161,7 +173,12 @@ def _pack_final_state_bars(
         records.append(",".join(fields))
         previous_open_ms = bar.open_time_ms
         previous_close = close_value
-    return scales, (0 if not bars else bars[0].open_time_ms), default_close_span_ms, ";".join(records)
+    return (
+        scales,
+        (0 if not bars else bars[0].open_time_ms),
+        default_close_span_ms,
+        ";".join(records),
+    )
 
 
 @dataclass(slots=True)
@@ -411,9 +428,7 @@ class ConservativeBarBroker:
                 if bar.open_time_ms >= max(replace_from_open_ms, retained_start)
             ]
         effective_replace_from = None if not suffix else suffix[0].open_time_ms
-        scales, first_open_ms, default_span_ms, packed = _pack_final_state_bars(
-            suffix
-        )
+        scales, first_open_ms, default_span_ms, packed = _pack_final_state_bars(suffix)
         return {
             "schema_version": FINAL_STATE_PROJECTION_SCHEMA_VERSION,
             "series": {
@@ -479,6 +494,7 @@ class ConservativeBarBroker:
         command_id: str,
         accepted_source_sequence: int | None = None,
         created_time_ms: int | None = None,
+        _defer_immediate: bool = False,
     ) -> ReplayOrder:
         del command_id
         if self._ended:
@@ -568,7 +584,9 @@ class ConservativeBarBroker:
         working = self._working_state()
         working.orders = orders
         working.ledger = ledger
-        immediate = self._revealed_reference_trigger(order)
+        immediate = (
+            None if _defer_immediate else self._revealed_reference_trigger(order)
+        )
         if immediate is not None:
             filled = self._fill_working(
                 working,
@@ -590,6 +608,107 @@ class ConservativeBarBroker:
         self._commit_working(working, account=account)
         self._client_order_ids = client_ids
         self._next_order += 1
+        self._has_trading_activity = True
+        return self._orders[order.order_id]
+
+    def execute_historical_book_close(
+        self,
+        *,
+        position_side: str,
+        side: str,
+        quantity: str,
+        levels: Sequence[Mapping[str, object]],
+        command_id: str,
+        accepted_source_sequence: int,
+        created_time_ms: int,
+    ) -> ReplayOrder:
+        """Atomically reduce one HEDGE leg against frozen visible L2 levels."""
+
+        if self.config.position_mode is not PositionMode.HEDGE:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close requires HEDGE position mode",
+            )
+        normalized_position_side = PositionSide(position_side)
+        normalized_side = OrderSide(side)
+        target = self._position_for_side(self._position, normalized_position_side)
+        expected_side = (
+            OrderSide.SELL if Decimal(target.quantity) > 0 else OrderSide.BUY
+        )
+        if Decimal(target.quantity) == 0 or normalized_side is not expected_side:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close does not reduce the selected position leg",
+            )
+        requested = Decimal(quantity)
+        if requested <= 0 or requested > abs(Decimal(target.quantity)):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close quantity exceeds the selected position leg",
+            )
+        prices = [Decimal(str(level["price"])) for level in levels]
+        if len(prices) != len(set(prices)) or any(price <= 0 for price in prices):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close prices must be unique and positive",
+            )
+        if normalized_side is OrderSide.SELL:
+            ordered = all(left > right for left, right in zip(prices, prices[1:]))
+        else:
+            ordered = all(left < right for left, right in zip(prices, prices[1:]))
+        if not ordered and len(prices) > 1:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close prices are not ordered by adverse depth",
+            )
+        mark_before = target.mark_price
+        order = self.place_order(
+            OrderRequest(
+                client_order_id=f"book-close-{self._next_order:010d}",
+                side=normalized_side,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+                reduce_only=True,
+                position_side=normalized_position_side,
+            ),
+            command_id=command_id,
+            accepted_source_sequence=accepted_source_sequence,
+            created_time_ms=created_time_ms,
+            _defer_immediate=True,
+        )
+        working = self._working_state()
+        for level in levels:
+            current = working.orders[order.order_id]
+            filled = self._fill_working(
+                working,
+                current,
+                source_sequence=accepted_source_sequence,
+                event_time_ms=created_time_ms,
+                trigger=(
+                    str(level["price"]),
+                    LiquidityRole.TAKER,
+                    FillReason.HISTORICAL_BOOK_LEVEL,
+                ),
+                historical_execution=True,
+                skip_trigger_risk=True,
+                max_fill_quantity=Decimal(str(level["quantity"])),
+                allow_partial=True,
+                partial_status_reason="HISTORICAL_BOOK_DEPTH_PARTIAL",
+            )
+            if not filled:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close level produced no fill",
+                )
+        final_order = working.orders[order.order_id]
+        if final_order.status is not OrderStatus.FILLED:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close did not fill the durable quantity",
+            )
+        working.position = mark_position(working.position, mark_before)
+        account = self._account_from(working.ledger or self._ledger, working.position)
+        self._commit_working(working, account=account)
         self._has_trading_activity = True
         return self._orders[order.order_id]
 
@@ -750,9 +869,7 @@ class ConservativeBarBroker:
             field_name="close quantity",
         )
         side = (
-            OrderSide.SELL
-            if Decimal(target_position.quantity) > 0
-            else OrderSide.BUY
+            OrderSide.SELL if Decimal(target_position.quantity) > 0 else OrderSide.BUY
         )
         return self.place_order(
             OrderRequest(
@@ -797,9 +914,11 @@ class ConservativeBarBroker:
                         "OPEN requires side and quantity",
                     )
                 normalized_side = OrderSide(side)
-                if self.config.position_mode is PositionMode.ONE_WAY and position_quantity != 0 and (
-                    position_quantity > 0
-                ) != (normalized_side is OrderSide.BUY):
+                if (
+                    self.config.position_mode is PositionMode.ONE_WAY
+                    and position_quantity != 0
+                    and (position_quantity > 0) != (normalized_side is OrderSide.BUY)
+                ):
                     raise ReplayDomainError(
                         ReplayErrorCode.ORDER_REJECTED,
                         "OPEN cannot reduce or reverse the current position",
@@ -1371,9 +1490,7 @@ class ConservativeBarBroker:
                     ReplayErrorCode.DATASET_MISMATCH,
                     "aggregate trade cannot be applied to a BAR broker",
                 )
-            trades = tuple(
-                event for event in events if isinstance(event, ReplayTrade)
-            )
+            trades = tuple(event for event in events if isinstance(event, ReplayTrade))
             self._bar_builder.apply_trades_final_state(trades)
             final_mark = trades[-1].price
         else:
@@ -1421,9 +1538,7 @@ class ConservativeBarBroker:
         return {}
 
     def supports_final_state_batch(self) -> bool:
-        return not any(
-            not order.status.terminal for order in self._orders.values()
-        )
+        return not any(not order.status.terminal for order in self._orders.values())
 
     def can_apply_source_events_final_state(
         self,
@@ -1512,8 +1627,38 @@ class ConservativeBarBroker:
                 source_sequence=source_sequence,
                 event_time_ms=virtual_time_ms,
             ).to_dict()
-        orders: tuple[ReplayOrder, ...]
-        if normalized is CommandType.PLACE_ORDER:
+        if normalized is InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE:
+            if set(values) != {
+                "position_side",
+                "side",
+                "quantity",
+                "levels",
+                "book_hash",
+                "last_update_id",
+                "execution_fidelity",
+                "queue_exact",
+            }:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close payload is invalid",
+                )
+            raw_levels = values["levels"]
+            if not isinstance(raw_levels, (list, tuple)):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close levels are invalid",
+                )
+            order = self.execute_historical_book_close(
+                position_side=str(values["position_side"]),
+                side=str(values["side"]),
+                quantity=str(values["quantity"]),
+                levels=tuple(raw_levels),  # type: ignore[arg-type]
+                command_id=command_id,
+                accepted_source_sequence=source_sequence,
+                created_time_ms=virtual_time_ms,
+            )
+            orders = (order,)
+        elif normalized is CommandType.PLACE_ORDER:
             try:
                 order_values = dict(values)
                 order_values.pop("trade_plan", None)
@@ -2146,6 +2291,7 @@ class ConservativeBarBroker:
                         FillReason.LIMIT_MARKETABLE_REVEALED,
                         FillReason.STOP_REVEALED_TRIGGER,
                         FillReason.TAKE_PROFIT_REVEALED_TRIGGER,
+                        FillReason.HISTORICAL_BOOK_LEVEL,
                     }
                 ):
                     causal = fill.source_sequence == order.accepted_source_sequence
@@ -2627,7 +2773,9 @@ class ConservativeBarBroker:
                 (
                     LiquidityRole.MAKER
                     if self._execution_mode == TOUCH_OR_TAPE_EXECUTION_MODE
-                    else LiquidityRole.TAKER if gapped else LiquidityRole.MAKER
+                    else LiquidityRole.TAKER
+                    if gapped
+                    else LiquidityRole.MAKER
                 ),
                 FillReason.LIMIT_GAP if gapped else FillReason.LIMIT_TOUCH,
             )
@@ -2709,16 +2857,12 @@ class ConservativeBarBroker:
         stop = Decimal(order.stop_price)
         if order.order_type is OrderType.STOP_MARKET:
             triggered = (
-                reference >= stop
-                if order.side is OrderSide.BUY
-                else reference <= stop
+                reference >= stop if order.side is OrderSide.BUY else reference <= stop
             )
             reason = FillReason.STOP_REVEALED_TRIGGER
         else:
             triggered = (
-                reference <= stop
-                if order.side is OrderSide.BUY
-                else reference >= stop
+                reference <= stop if order.side is OrderSide.BUY else reference >= stop
             )
             reason = FillReason.TAKE_PROFIT_REVEALED_TRIGGER
         if not triggered:
@@ -2885,10 +3029,15 @@ class ConservativeBarBroker:
         event_time_ms: int,
     ) -> None:
         for order in sorted(working.orders.values(), key=lambda item: item.ordinal):
-            if order.reduce_only and order.status in {
-                OrderStatus.OPEN,
-                OrderStatus.PARTIALLY_FILLED,
-            } and not self._reduces_position(order, working.position):
+            if (
+                order.reduce_only
+                and order.status
+                in {
+                    OrderStatus.OPEN,
+                    OrderStatus.PARTIALLY_FILLED,
+                }
+                and not self._reduces_position(order, working.position)
+            ):
                 self._terminal_order(
                     working,
                     order,
@@ -2987,7 +3136,9 @@ class ConservativeBarBroker:
         else:
             if not isinstance(working.position, Position):
                 raise AssertionError("ONE_WAY broker gained a position book")
-            if any(order.position_side is not None for order in working.orders.values()):
+            if any(
+                order.position_side is not None for order in working.orders.values()
+            ):
                 raise AssertionError("ONE_WAY order retained position_side")
         legs = (
             (working.position.long, working.position.short)

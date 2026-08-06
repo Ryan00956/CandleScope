@@ -34,6 +34,7 @@ from .account_history import (
 )
 from .historical_book import (
     BOOK_EXECUTION_FIDELITY,
+    HISTORICAL_L2_LIQUIDATION_FIDELITY,
     PreparedHistoricalBookBinding,
     bind_historical_book_archive,
 )
@@ -4069,11 +4070,17 @@ class TrainingRunStore:
                 """,
                 (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
             )
-            next_plan = self._next_liquidation_trade_plan(
-                connection,
-                run_id=run_id,
-                case_id=liquidation_id,
-            )
+            try:
+                next_plan = self._next_liquidation_trade_plan(
+                    connection,
+                    run_id=run_id,
+                    case_id=liquidation_id,
+                )
+            except TrainingRunError as exc:
+                next_plan = (
+                    "FAILED_CLOSED",
+                    {"failure_code": exc.code, "fallback_applied": False},
+                )
             if next_plan is None:
                 next_type = "COMPLETE"
                 plan: dict[str, object] = {
@@ -4089,7 +4096,11 @@ class TrainingRunStore:
                 WHERE run_id = ? AND case_id = ?
                 """,
                 (
-                    "RISK_RECHECK" if next_type == "COMPLETE" else next_type,
+                    (
+                        "RISK_RECHECK"
+                        if next_type in {"COMPLETE", "FAILED_CLOSED"}
+                        else next_type
+                    ),
                     now_ms,
                     run_id,
                     liquidation_id,
@@ -4149,6 +4160,19 @@ class TrainingRunStore:
                 raise TypeError("liquidation execution plan is invalid")
             plan = cast(Mapping[str, object], reason["plan"])
             track_id = str(plan["track_id"])
+            hedge_execution = str(plan.get("position_mode")) == "HEDGE"
+            book_execution_raw = plan.get("book_execution")
+            book_execution = (
+                cast(Mapping[str, object], book_execution_raw)
+                if isinstance(book_execution_raw, Mapping)
+                else None
+            )
+            if hedge_execution and book_execution is None:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "HEDGE liquidation has no frozen historical L2 execution proof",
+                    status_code=409,
+                )
             order_row = connection.execute(
                 """
                 SELECT * FROM replay_training_contract_order
@@ -4165,10 +4189,20 @@ class TrainingRunStore:
             raw_order = json.loads(str(order_row["order_json"]))
             if not isinstance(raw_order, Mapping):
                 raise TypeError("liquidation broker order projection is invalid")
-            if str(raw_order.get("quantity")) != str(plan["quantity"]):
+            if (
+                str(raw_order.get("quantity")) != str(plan["quantity"])
+                or str(raw_order.get("side")) != str(plan["side"])
+                or str(raw_order.get("order_type")) != "MARKET"
+                or raw_order.get("reduce_only") is not True
+                or (
+                    hedge_execution
+                    and str(raw_order.get("position_side"))
+                    != str(plan["position_side"])
+                )
+            ):
                 raise TrainingRunError(
                     "LIQUIDATION_EXECUTION_FAILED",
-                    "liquidation broker order quantity differs from the durable plan",
+                    "liquidation broker order differs from the durable plan",
                     status_code=409,
                 )
             fill_rows = tuple(
@@ -4188,6 +4222,65 @@ class TrainingRunStore:
                     "liquidation broker order has no durable fill",
                     status_code=409,
                 )
+            planned_levels: tuple[Mapping[str, object], ...] = ()
+            if book_execution is not None:
+                raw_planned_levels = book_execution.get("levels")
+                if not isinstance(raw_planned_levels, list) or not all(
+                    isinstance(level, Mapping) for level in raw_planned_levels
+                ):
+                    raise TrainingRunError(
+                        "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                        "historical L2 liquidation levels are invalid",
+                        status_code=409,
+                    )
+                planned_levels = tuple(
+                    cast(Mapping[str, object], level) for level in raw_planned_levels
+                )
+                proof_payload = {
+                    "archive_id": str(book_execution["archive_id"]),
+                    "as_of_virtual_time_ms": int(
+                        book_execution["as_of_virtual_time_ms"]
+                    ),
+                    "last_update_id": int(book_execution["last_update_id"]),
+                    "side": str(book_execution["side"]),
+                    "requested_quantity": str(book_execution["requested_quantity"]),
+                    "visible_quantity": str(book_execution["visible_quantity"]),
+                    "levels": [dict(level) for level in planned_levels],
+                    "book_hash": str(book_execution["book_hash"]),
+                    "execution_fidelity": str(book_execution["execution_fidelity"]),
+                    "queue_exact": False,
+                }
+                if (
+                    book_execution.get("queue_exact") is not False
+                    or str(book_execution.get("execution_fidelity"))
+                    != HISTORICAL_L2_LIQUIDATION_FIDELITY
+                    or str(book_execution.get("execution_plan_hash"))
+                    != canonical_sha256(proof_payload)
+                    or str(book_execution.get("side")) != str(plan["side"])
+                    or str(book_execution.get("requested_quantity"))
+                    != str(plan["quantity"])
+                    or len(planned_levels) != len(fill_rows)
+                ):
+                    raise TrainingRunError(
+                        "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                        "historical L2 liquidation proof does not match the durable plan",
+                        status_code=409,
+                    )
+                for level, row in zip(planned_levels, fill_rows, strict=True):
+                    raw_fill = json.loads(str(row["fill_json"]))
+                    if (
+                        str(raw_fill.get("price")) != str(level["price"])
+                        or str(raw_fill.get("quantity")) != str(level["quantity"])
+                        or str(raw_fill.get("reason")) != "HISTORICAL_BOOK_LEVEL"
+                        or raw_fill.get("historical_execution") is not True
+                        or str(raw_fill.get("position_side"))
+                        != str(plan["position_side"])
+                    ):
+                        raise TrainingRunError(
+                            "LIQUIDATION_EXECUTION_FAILED",
+                            "historical L2 broker fills differ from the frozen level plan",
+                            status_code=409,
+                        )
             now_ms = self.base_store._validated_now_ms()
             requested = Decimal(str(plan["quantity"]))
             filled = sum(
@@ -4198,6 +4291,12 @@ class TrainingRunStore:
                 Decimal(0),
             )
             remaining = max(Decimal(0), requested - filled)
+            if hedge_execution and remaining != 0:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_DEPTH_EXHAUSTED",
+                    "historical L2 liquidation did not fully execute the frozen step",
+                    status_code=409,
+                )
             average = (
                 sum(
                     (
@@ -4244,9 +4343,43 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
+            if book_execution is not None:
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_book_execution(
+                        run_id, case_id, step_sequence, track_id, archive_id,
+                        as_of_virtual_time_ms, last_update_id, side,
+                        requested_quantity, visible_quantity, levels_json,
+                        book_hash, execution_fidelity, queue_exact,
+                        execution_plan_hash, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        step_sequence,
+                        track_id,
+                        book_execution["archive_id"],
+                        book_execution["as_of_virtual_time_ms"],
+                        book_execution["last_update_id"],
+                        book_execution["side"],
+                        book_execution["requested_quantity"],
+                        book_execution["visible_quantity"],
+                        canonical_json([dict(level) for level in planned_levels]),
+                        book_execution["book_hash"],
+                        book_execution["execution_fidelity"],
+                        book_execution["execution_plan_hash"],
+                        now_ms,
+                    ),
+                )
             total_liquidation_fee = Decimal(0)
             for fill_sequence, row in enumerate(fill_rows, start=1):
                 raw = json.loads(str(row["fill_json"]))
+                book_level = (
+                    None
+                    if not planned_levels
+                    else int(planned_levels[fill_sequence - 1]["book_level"])
+                )
                 quantity = Decimal(str(raw["quantity"]))
                 price = Decimal(str(raw["price"]))
                 notional = quantity * price * Decimal(str(plan["contract_size"]))
@@ -4275,6 +4408,21 @@ class TrainingRunStore:
                     "source_sequence": int(raw["source_sequence"]),
                     "event_time_ms": int(raw["event_time_ms"]),
                     "model_version": raw.get("model_version"),
+                    "book_level": book_level,
+                    "book_hash": (
+                        None if book_execution is None else book_execution["book_hash"]
+                    ),
+                    "execution_plan_hash": (
+                        None
+                        if book_execution is None
+                        else book_execution["execution_plan_hash"]
+                    ),
+                    "execution_fidelity": (
+                        None
+                        if book_execution is None
+                        else book_execution["execution_fidelity"]
+                    ),
+                    "queue_exact": False if book_execution is not None else None,
                 }
                 connection.execute(
                     """
@@ -4283,7 +4431,7 @@ class TrainingRunStore:
                         price, quantity, notional, trading_fee, liquidation_fee,
                         book_level, virtual_time_ms, source_sequence, fill_hash,
                         created_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -4296,6 +4444,7 @@ class TrainingRunStore:
                         fill_payload["notional"],
                         row["configured_fee"],
                         fill_payload["liquidation_fee"],
+                        book_level,
                         raw["event_time_ms"],
                         raw["source_sequence"],
                         canonical_sha256(fill_payload),
@@ -4343,7 +4492,11 @@ class TrainingRunStore:
                     int(json.loads(str(row["fill_json"]))["source_sequence"])
                     for row in fill_rows
                 ),
-                fidelity="PINNED_RULE_REAL_BROKER_FILL",
+                fidelity=(
+                    HISTORICAL_L2_LIQUIDATION_FIDELITY
+                    if book_execution is not None
+                    else "PINNED_RULE_REAL_BROKER_FILL"
+                ),
                 rule_revision=int(plan["rule_revision"]),
                 reference_type="LIQUIDATION_ORDER",
                 reference_id=order_id,
@@ -4352,6 +4505,14 @@ class TrainingRunStore:
                     "position_side": plan["position_side"],
                     "liquidation_leg_id": plan["liquidation_leg_id"],
                     "step_sequence": step_sequence,
+                    "book_hash": (
+                        None if book_execution is None else book_execution["book_hash"]
+                    ),
+                    "execution_plan_hash": (
+                        None
+                        if book_execution is None
+                        else book_execution["execution_plan_hash"]
+                    ),
                 },
                 now_ms=now_ms,
             )
@@ -4405,12 +4566,18 @@ class TrainingRunStore:
                 """,
                 (after_snapshot_id, now_ms, run_id, liquidation_id, step_sequence),
             )
-            next_plan = self._next_liquidation_trade_plan(
-                connection,
-                run_id=run_id,
-                case_id=liquidation_id,
-                require_breach=str(step["step_type"]) != "FULL_LIQUIDATION",
-            )
+            try:
+                next_plan = self._next_liquidation_trade_plan(
+                    connection,
+                    run_id=run_id,
+                    case_id=liquidation_id,
+                    require_breach=str(step["step_type"]) != "FULL_LIQUIDATION",
+                )
+            except TrainingRunError as exc:
+                next_plan = (
+                    "FAILED_CLOSED",
+                    {"failure_code": exc.code, "fallback_applied": False},
+                )
             if next_plan is not None:
                 next_type, next_payload = next_plan
             else:
@@ -4474,7 +4641,11 @@ class TrainingRunStore:
                 SET state = ?, updated_at_ms = ? WHERE run_id = ? AND case_id = ?
                 """,
                 (
-                    str(step["step_type"]) if next_type == "COMPLETE" else next_type,
+                    (
+                        str(step["step_type"])
+                        if next_type in {"COMPLETE", "FAILED_CLOSED"}
+                        else next_type
+                    ),
                     now_ms,
                     run_id,
                     liquidation_id,
@@ -6369,6 +6540,297 @@ class TrainingRunStore:
             },
         }
 
+    @staticmethod
+    def _audit_historical_book_liquidations(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        differences: list[dict[str, object]],
+    ) -> int:
+        proofs = connection.execute(
+            """
+            SELECT proof.*, step.reason
+            FROM replay_training_liquidation_book_execution AS proof
+            JOIN replay_training_liquidation_step AS step
+              ON step.run_id = proof.run_id AND step.case_id = proof.case_id
+             AND step.step_sequence = proof.step_sequence
+            WHERE proof.run_id = ? ORDER BY proof.case_id, proof.step_sequence
+            """,
+            (run_id,),
+        ).fetchall()
+
+        def difference(field: str, expected: object, actual: object) -> None:
+            differences.append({"field": field, "expected": expected, "actual": actual})
+
+        snapshots = connection.execute(
+            """
+            SELECT snapshot.*, case_row.trigger_virtual_time_ms
+            FROM replay_training_liquidation_book_snapshot AS snapshot
+            JOIN replay_training_liquidation_case AS case_row
+              ON case_row.run_id = snapshot.run_id
+             AND case_row.case_id = snapshot.case_id
+            WHERE snapshot.run_id = ? ORDER BY snapshot.case_id, snapshot.track_id
+            """,
+            (run_id,),
+        ).fetchall()
+        expected_snapshot_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT leg.case_id, leg.track_id
+                    FROM replay_training_liquidation_leg AS leg
+                    WHERE leg.run_id = ?
+                )
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        if expected_snapshot_count != len(snapshots):
+            difference(
+                "historical_l2_liquidation_snapshot_count",
+                expected_snapshot_count,
+                len(snapshots),
+            )
+        for snapshot in snapshots:
+            prefix = (
+                f"liquidation[{snapshot['case_id']}].book_snapshot"
+                f"[{snapshot['track_id']}]"
+            )
+            try:
+                payload = {
+                    "schema_version": "replay.liquidation-book-snapshot.v1",
+                    "case_id": str(snapshot["case_id"]),
+                    "track_id": str(snapshot["track_id"]),
+                    "archive_id": str(snapshot["archive_id"]),
+                    "as_of_actual_time_ms": int(snapshot["as_of_actual_time_ms"]),
+                    "as_of_virtual_time_ms": int(snapshot["as_of_virtual_time_ms"]),
+                    "last_update_id": int(snapshot["last_update_id"]),
+                    "bids": json.loads(str(snapshot["bids_json"])),
+                    "asks": json.loads(str(snapshot["asks_json"])),
+                    "book_hash": str(snapshot["book_hash"]),
+                    "execution_fidelity": str(snapshot["execution_fidelity"]),
+                    "queue_exact": False,
+                }
+                expected_hash = canonical_sha256(payload)
+                if (
+                    int(snapshot["queue_exact"]) != 0
+                    or int(snapshot["as_of_virtual_time_ms"])
+                    != int(snapshot["trigger_virtual_time_ms"])
+                    or str(snapshot["execution_fidelity"])
+                    != HISTORICAL_L2_LIQUIDATION_FIDELITY
+                    or str(snapshot["snapshot_hash"]) != expected_hash
+                ):
+                    difference(
+                        prefix,
+                        {
+                            "snapshot_hash": expected_hash,
+                            "trigger_virtual_time_ms": int(
+                                snapshot["trigger_virtual_time_ms"]
+                            ),
+                            "queue_exact": False,
+                            "execution_fidelity": HISTORICAL_L2_LIQUIDATION_FIDELITY,
+                        },
+                        {
+                            "snapshot_hash": snapshot["snapshot_hash"],
+                            "as_of_virtual_time_ms": snapshot["as_of_virtual_time_ms"],
+                            "queue_exact": snapshot["queue_exact"],
+                            "execution_fidelity": snapshot["execution_fidelity"],
+                        },
+                    )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                difference(prefix, "VALID_HISTORICAL_L2_SNAPSHOT", type(exc).__name__)
+
+        executed_steps = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM replay_training_liquidation_step AS step
+                JOIN replay_training_liquidation_order AS order_row
+                  ON order_row.run_id = step.run_id
+                 AND order_row.case_id = step.case_id
+                 AND order_row.step_sequence = step.step_sequence
+                WHERE step.run_id = ?
+                  AND step.step_type IN ('PARTIAL_LIQUIDATION', 'FULL_LIQUIDATION')
+                """,
+                (run_id,),
+            ).fetchone()[0]
+        )
+        if executed_steps != len(proofs):
+            difference(
+                "historical_l2_liquidation_proof_count",
+                executed_steps,
+                len(proofs),
+            )
+
+        for proof in proofs:
+            prefix = (
+                f"liquidation[{proof['case_id']}].step[{proof['step_sequence']}].book"
+            )
+            try:
+                levels = json.loads(str(proof["levels_json"]))
+                if not isinstance(levels, list) or not levels:
+                    raise TypeError("levels must be a non-empty list")
+                normalized_levels = []
+                total = Decimal(0)
+                previous_level = 0
+                for raw in levels:
+                    if not isinstance(raw, Mapping):
+                        raise TypeError("level must be an object")
+                    level = int(raw["book_level"])
+                    price = Decimal(str(raw["price"]))
+                    quantity = Decimal(str(raw["quantity"]))
+                    if level <= previous_level or price <= 0 or quantity <= 0:
+                        raise ValueError("level ordering or decimal is invalid")
+                    previous_level = level
+                    total += quantity
+                    normalized_levels.append(
+                        {
+                            "book_level": level,
+                            "price": str(raw["price"]),
+                            "quantity": str(raw["quantity"]),
+                        }
+                    )
+                requested = Decimal(str(proof["requested_quantity"]))
+                visible = Decimal(str(proof["visible_quantity"]))
+                if total != requested or visible < requested:
+                    difference(
+                        f"{prefix}.quantity",
+                        {
+                            "requested": str(proof["requested_quantity"]),
+                            "visible_gte": True,
+                        },
+                        {
+                            "level_sum": decimal_to_string(
+                                total, field_name="book audit sum"
+                            ),
+                            "visible": str(proof["visible_quantity"]),
+                        },
+                    )
+                payload = {
+                    "archive_id": str(proof["archive_id"]),
+                    "as_of_virtual_time_ms": int(proof["as_of_virtual_time_ms"]),
+                    "last_update_id": int(proof["last_update_id"]),
+                    "side": str(proof["side"]),
+                    "requested_quantity": str(proof["requested_quantity"]),
+                    "visible_quantity": str(proof["visible_quantity"]),
+                    "levels": normalized_levels,
+                    "book_hash": str(proof["book_hash"]),
+                    "execution_fidelity": str(proof["execution_fidelity"]),
+                    "queue_exact": False,
+                }
+                expected_hash = canonical_sha256(payload)
+                if expected_hash != proof["execution_plan_hash"]:
+                    difference(
+                        f"{prefix}.execution_plan_hash",
+                        expected_hash,
+                        proof["execution_plan_hash"],
+                    )
+                if (
+                    int(proof["queue_exact"]) != 0
+                    or str(proof["execution_fidelity"])
+                    != HISTORICAL_L2_LIQUIDATION_FIDELITY
+                ):
+                    difference(
+                        f"{prefix}.fidelity",
+                        f"{HISTORICAL_L2_LIQUIDATION_FIDELITY}/queue_exact=false",
+                        f"{proof['execution_fidelity']}/queue_exact={proof['queue_exact']}",
+                    )
+                frozen = connection.execute(
+                    """
+                    SELECT book_hash, last_update_id, as_of_virtual_time_ms
+                    FROM replay_training_liquidation_book_snapshot
+                    WHERE run_id = ? AND case_id = ? AND track_id = ?
+                    """,
+                    (run_id, proof["case_id"], proof["track_id"]),
+                ).fetchone()
+                if frozen is None or (
+                    str(frozen["book_hash"]) != str(proof["book_hash"])
+                    or int(frozen["last_update_id"]) != int(proof["last_update_id"])
+                    or int(frozen["as_of_virtual_time_ms"])
+                    != int(proof["as_of_virtual_time_ms"])
+                ):
+                    difference(
+                        f"{prefix}.frozen_snapshot_link",
+                        (
+                            proof["book_hash"],
+                            proof["last_update_id"],
+                            proof["as_of_virtual_time_ms"],
+                        ),
+                        None
+                        if frozen is None
+                        else (
+                            frozen["book_hash"],
+                            frozen["last_update_id"],
+                            frozen["as_of_virtual_time_ms"],
+                        ),
+                    )
+                reason = json.loads(str(proof["reason"]))
+                durable_book = (
+                    reason.get("plan", {}).get("book_execution")
+                    if isinstance(reason, Mapping)
+                    and isinstance(reason.get("plan"), Mapping)
+                    else None
+                )
+                if not isinstance(durable_book, Mapping) or str(
+                    durable_book.get("execution_plan_hash")
+                ) != str(proof["execution_plan_hash"]):
+                    difference(
+                        f"{prefix}.durable_step_plan",
+                        proof["execution_plan_hash"],
+                        None
+                        if not isinstance(durable_book, Mapping)
+                        else durable_book.get("execution_plan_hash"),
+                    )
+                order = connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_order
+                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                    ORDER BY order_sequence LIMIT 1
+                    """,
+                    (run_id, proof["case_id"], proof["step_sequence"]),
+                ).fetchone()
+                fills = (
+                    []
+                    if order is None
+                    else connection.execute(
+                        """
+                        SELECT * FROM replay_training_liquidation_fill
+                        WHERE run_id = ? AND case_id = ? AND order_id = ?
+                        ORDER BY fill_sequence
+                        """,
+                        (run_id, proof["case_id"], order["order_id"]),
+                    ).fetchall()
+                )
+                if order is None or len(fills) != len(normalized_levels):
+                    difference(
+                        f"{prefix}.fill_count",
+                        len(normalized_levels),
+                        0 if order is None else len(fills),
+                    )
+                    continue
+                for sequence, (level, fill) in enumerate(
+                    zip(normalized_levels, fills, strict=True), start=1
+                ):
+                    expected_fill = (
+                        int(level["book_level"]),
+                        str(level["price"]),
+                        str(level["quantity"]),
+                    )
+                    actual_fill = (
+                        fill["book_level"],
+                        str(fill["price"]),
+                        str(fill["quantity"]),
+                    )
+                    if actual_fill != expected_fill:
+                        difference(
+                            f"{prefix}.fill[{sequence}]",
+                            expected_fill,
+                            actual_fill,
+                        )
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                difference(prefix, "VALID_HISTORICAL_L2_PROOF", type(exc).__name__)
+        return len(proofs)
+
     @classmethod
     def _write_account_audit(
         cls,
@@ -6504,6 +6966,13 @@ class TrainingRunStore:
                 ledger_rows=ledger_rows,
                 portfolio=portfolio,
                 differences=differences,
+            )
+            independent_state["historical_l2_liquidation_proof_count"] = (
+                cls._audit_historical_book_liquidations(
+                    connection,
+                    run_id=run_id,
+                    differences=differences,
+                )
             )
         elif run["account_data_mode"] == "HISTORICAL_EXACT":
             projection_verification = (
@@ -12333,7 +12802,7 @@ class TrainingRunStore:
                 status_code=409,
             )
         case_leg = case_legs[(str(leg["track_id"]), str(leg["position_side"]))]
-        return step_type, {
+        plan: dict[str, object] = {
             "liquidation_leg_id": str(case_leg["liquidation_leg_id"]),
             "track_id": str(leg["track_id"]),
             "adapter_session_id": str(
@@ -12355,6 +12824,283 @@ class TrainingRunStore:
             if step_type == "PARTIAL_LIQUIDATION"
             else "ZERO",
         }
+        if str(cast(sqlite3.Row, risk["account"])["position_mode"]) == "HEDGE":
+            plan["execution_model"] = HISTORICAL_L2_LIQUIDATION_FIDELITY
+            plan["book_execution"] = cls._historical_book_liquidation_plan(
+                connection,
+                run_id=run_id,
+                case_id=case_id,
+                track_id=str(leg["track_id"]),
+                side=str(plan["side"]),
+                quantity=close_quantity,
+                price_tick=Decimal(rule.price_tick),
+                quantity_step=Decimal(rule.quantity_step),
+            )
+        return step_type, plan
+
+    @staticmethod
+    def _historical_book_liquidation_plan(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        case_id: str,
+        track_id: str,
+        side: str,
+        quantity: Decimal,
+        price_tick: Decimal,
+        quantity_step: Decimal,
+    ) -> dict[str, object]:
+        run = connection.execute(
+            "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        case = connection.execute(
+            """
+            SELECT trigger_virtual_time_ms FROM replay_training_liquidation_case
+            WHERE run_id = ? AND case_id = ?
+            """,
+            (run_id, case_id),
+        ).fetchone()
+        projection = connection.execute(
+            """
+            SELECT snapshot.*, archive.health AS archive_health
+            FROM replay_training_liquidation_book_snapshot AS snapshot
+            JOIN replay_historical_book_archive AS archive
+              ON archive.archive_id = snapshot.archive_id
+            WHERE snapshot.run_id = ? AND snapshot.case_id = ?
+              AND snapshot.track_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM replay_historical_book_ref AS ref
+                  WHERE ref.run_id = snapshot.run_id
+                    AND ref.track_id = snapshot.track_id
+                    AND ref.archive_id = snapshot.archive_id
+                    AND ref.active = 1
+              )
+            """,
+            (run_id, case_id, track_id),
+        ).fetchone()
+        if (
+            run is None
+            or str(run["book_mode"]) != "BOOK_ASSISTED_REQUIRED"
+            or case is None
+            or projection is None
+            or str(projection["archive_health"]) != "READY"
+            or int(projection["queue_exact"]) != 0
+            or int(projection["as_of_virtual_time_ms"])
+            != int(case["trigger_virtual_time_ms"])
+        ):
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                "an exact current historical L2 projection is required for HEDGE liquidation",
+                status_code=409,
+            )
+        snapshot_payload = {
+            "schema_version": "replay.liquidation-book-snapshot.v1",
+            "case_id": case_id,
+            "track_id": track_id,
+            "archive_id": str(projection["archive_id"]),
+            "as_of_actual_time_ms": int(projection["as_of_actual_time_ms"]),
+            "as_of_virtual_time_ms": int(projection["as_of_virtual_time_ms"]),
+            "last_update_id": int(projection["last_update_id"]),
+            "bids": json.loads(str(projection["bids_json"])),
+            "asks": json.loads(str(projection["asks_json"])),
+            "book_hash": str(projection["book_hash"]),
+            "execution_fidelity": str(projection["execution_fidelity"]),
+            "queue_exact": False,
+        }
+        if str(
+            projection["execution_fidelity"]
+        ) != HISTORICAL_L2_LIQUIDATION_FIDELITY or canonical_sha256(
+            snapshot_payload
+        ) != str(projection["snapshot_hash"]):
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                "frozen liquidation historical L2 snapshot hash verification failed",
+                status_code=409,
+            )
+        raw_levels = json.loads(
+            str(projection["bids_json"] if side == "SELL" else projection["asks_json"])
+        )
+        if not isinstance(raw_levels, list) or not raw_levels:
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_DEPTH_EXHAUSTED",
+                "historical L2 has no visible depth on the liquidation side",
+                status_code=409,
+            )
+        normalized: list[tuple[int, Decimal, Decimal]] = []
+        previous_price: Decimal | None = None
+        for level_index, raw_level in enumerate(raw_levels, start=1):
+            if (
+                not isinstance(raw_level, list)
+                or len(raw_level) != 2
+                or isinstance(raw_level[0], bool)
+                or isinstance(raw_level[1], bool)
+            ):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "historical L2 contains an invalid visible level",
+                    status_code=409,
+                )
+            try:
+                price = Decimal(str(raw_level[0]))
+                level_quantity = Decimal(str(raw_level[1]))
+            except InvalidOperation as exc:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "historical L2 contains a non-decimal visible level",
+                    status_code=409,
+                ) from exc
+            if (
+                price <= 0
+                or level_quantity <= 0
+                or not price.is_finite()
+                or not level_quantity.is_finite()
+            ):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "historical L2 contains a non-positive visible level",
+                    status_code=409,
+                )
+            if price_tick <= 0 or price % price_tick != 0:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_PRICE_FILTER_CONFLICT",
+                    "historical L2 price conflicts with the pinned instrument price tick",
+                    status_code=409,
+                )
+            if quantity_step <= 0 or level_quantity % quantity_step != 0:
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_QUANTITY_FILTER_CONFLICT",
+                    "historical L2 quantity conflicts with the pinned instrument quantity step",
+                    status_code=409,
+                )
+            if previous_price is not None and (
+                (side == "SELL" and price >= previous_price)
+                or (side == "BUY" and price <= previous_price)
+            ):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "historical L2 visible levels are not in adverse execution order",
+                    status_code=409,
+                )
+            previous_price = price
+            normalized.append((level_index, price, level_quantity))
+
+        expected_hash = canonical_sha256(
+            {
+                "archive_id": str(projection["archive_id"]),
+                "actual_time_ms": int(projection["as_of_actual_time_ms"]),
+                "last_update_id": int(projection["last_update_id"]),
+                "bids": json.loads(str(projection["bids_json"])),
+                "asks": json.loads(str(projection["asks_json"])),
+            }
+        )
+        if expected_hash != str(projection["book_hash"]):
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                "historical L2 projection hash verification failed",
+                status_code=409,
+            )
+
+        consumed: dict[int, Decimal] = {}
+        prior_rows = connection.execute(
+            """
+            SELECT proof.step_sequence, proof.levels_json
+            FROM replay_training_liquidation_book_execution AS proof
+            WHERE proof.run_id = ? AND proof.case_id = ? AND proof.track_id = ?
+              AND proof.side = ? AND proof.book_hash = ?
+            ORDER BY proof.step_sequence
+            """,
+            (run_id, case_id, track_id, side, projection["book_hash"]),
+        ).fetchall()
+        for prior in prior_rows:
+            prior_levels = json.loads(str(prior["levels_json"]))
+            if not isinstance(prior_levels, list):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "prior historical L2 liquidation proof is invalid",
+                    status_code=409,
+                )
+            for level in prior_levels:
+                if not isinstance(level, Mapping):
+                    raise TrainingRunError(
+                        "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                        "prior historical L2 liquidation level proof is invalid",
+                        status_code=409,
+                    )
+                index = int(level["book_level"])
+                consumed[index] = consumed.get(index, Decimal(0)) + Decimal(
+                    str(level["quantity"])
+                )
+
+        remaining_visible = sum(
+            (
+                max(Decimal(0), level_quantity - consumed.get(level_index, Decimal(0)))
+                for level_index, _price, level_quantity in normalized
+            ),
+            Decimal(0),
+        )
+        if remaining_visible < quantity:
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_DEPTH_EXHAUSTED",
+                "historical L2 visible depth cannot fully execute the liquidation step",
+                status_code=409,
+                details={
+                    "requested_quantity": decimal_to_string(
+                        quantity, field_name="historical book requested quantity"
+                    ),
+                    "visible_quantity": decimal_to_string(
+                        remaining_visible,
+                        field_name="historical book visible quantity",
+                    ),
+                },
+            )
+        remaining = quantity
+        levels: list[dict[str, object]] = []
+        for level_index, price, level_quantity in normalized:
+            available = max(
+                Decimal(0), level_quantity - consumed.get(level_index, Decimal(0))
+            )
+            if available <= 0:
+                continue
+            take = min(remaining, available)
+            levels.append(
+                {
+                    "book_level": level_index,
+                    "price": decimal_to_string(
+                        price, field_name="historical book price"
+                    ),
+                    "quantity": decimal_to_string(
+                        take, field_name="historical book execution quantity"
+                    ),
+                }
+            )
+            remaining -= take
+            if remaining == 0:
+                break
+        if remaining != 0:
+            raise TrainingRunError(
+                "HISTORICAL_BOOK_DEPTH_EXHAUSTED",
+                "historical L2 consumption plan is incomplete",
+                status_code=409,
+            )
+        payload: dict[str, object] = {
+            "archive_id": str(projection["archive_id"]),
+            "as_of_virtual_time_ms": int(projection["as_of_virtual_time_ms"]),
+            "last_update_id": int(projection["last_update_id"]),
+            "side": side,
+            "requested_quantity": decimal_to_string(
+                quantity, field_name="historical book requested quantity"
+            ),
+            "visible_quantity": decimal_to_string(
+                remaining_visible, field_name="historical book visible quantity"
+            ),
+            "levels": levels,
+            "book_hash": str(projection["book_hash"]),
+            "execution_fidelity": HISTORICAL_L2_LIQUIDATION_FIDELITY,
+            "queue_exact": False,
+        }
+        payload["execution_plan_hash"] = canonical_sha256(payload)
+        return payload
 
     async def pending_liquidations(self, run_id: str) -> tuple[dict[str, object], ...]:
         def read(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
@@ -14254,6 +15000,36 @@ class TrainingRunStore:
                 "training run execution contract is missing",
                 status_code=503,
             )
+
+        def public_book_execution(row: sqlite3.Row) -> dict[str, object]:
+            return {
+                "case_id": str(row["case_id"]),
+                "step_sequence": int(row["step_sequence"]),
+                "track_id": str(row["track_id"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "last_update_id": int(row["last_update_id"]),
+                "side": str(row["side"]),
+                "requested_quantity": str(row["requested_quantity"]),
+                "visible_quantity": str(row["visible_quantity"]),
+                "levels": json.loads(str(row["levels_json"])),
+                "book_hash": str(row["book_hash"]),
+                "execution_fidelity": str(row["execution_fidelity"]),
+                "queue_exact": int(row["queue_exact"]),
+                "execution_plan_hash": str(row["execution_plan_hash"]),
+            }
+
+        def public_book_snapshot(row: sqlite3.Row) -> dict[str, object]:
+            return {
+                "case_id": str(row["case_id"]),
+                "track_id": str(row["track_id"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "last_update_id": int(row["last_update_id"]),
+                "book_hash": str(row["book_hash"]),
+                "execution_fidelity": str(row["execution_fidelity"]),
+                "queue_exact": int(row["queue_exact"]),
+                "snapshot_hash": str(row["snapshot_hash"]),
+            }
+
         account_history = connection.execute(
             """
             SELECT * FROM replay_training_account_history WHERE run_id = ?
@@ -14669,6 +15445,18 @@ class TrainingRunStore:
             ).fetchall():
                 step = dict(step_row)
                 step_sequence = int(step_row["step_sequence"])
+                book_execution_row = connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_book_execution
+                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                    """,
+                    (run_id, case_id, step_sequence),
+                ).fetchone()
+                step["book_execution"] = (
+                    None
+                    if book_execution_row is None
+                    else public_book_execution(book_execution_row)
+                )
                 step_orders: list[dict[str, object]] = []
                 for order_row in connection.execute(
                     """
@@ -14715,7 +15503,24 @@ class TrainingRunStore:
                     ).fetchall()
                 ]
                 steps.append(step)
-            liquidations.append({**dict(case_row), "legs": legs, "steps": steps})
+            book_snapshots = [
+                public_book_snapshot(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_book_snapshot
+                    WHERE run_id = ? AND case_id = ? ORDER BY track_id
+                    """,
+                    (run_id, case_id),
+                ).fetchall()
+            ]
+            liquidations.append(
+                {
+                    **dict(case_row),
+                    "legs": legs,
+                    "book_snapshots": book_snapshots,
+                    "steps": steps,
+                }
+            )
         archive_bindings = [
             {
                 "track_id": str(row["track_id"]),
@@ -14847,6 +15652,26 @@ class TrainingRunStore:
                     """
                     SELECT * FROM replay_training_liquidation_leg_price_proof
                     WHERE run_id = ? ORDER BY case_id, liquidation_leg_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "liquidation_book_executions": [
+                public_book_execution(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_book_execution
+                    WHERE run_id = ? ORDER BY case_id, step_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "liquidation_book_snapshots": [
+                public_book_snapshot(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_book_snapshot
+                    WHERE run_id = ? ORDER BY case_id, track_id
                     """,
                     (run_id,),
                 ).fetchall()
@@ -16242,6 +17067,21 @@ class TrainingRunStore:
             leg_rows,
             track_columns=("track_id",),
         )
+        book_snapshot_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_book_snapshot
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, track_id
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows(
+            "replay_training_liquidation_book_snapshot",
+            book_snapshot_rows,
+            track_columns=("track_id",),
+        )
         price_proof_rows = tuple(
             connection.execute(
                 f"""
@@ -16264,6 +17104,21 @@ class TrainingRunStore:
             ).fetchall()
         )
         insert_rows("replay_training_liquidation_step", step_rows)
+        book_execution_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_book_execution
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, step_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows(
+            "replay_training_liquidation_book_execution",
+            book_execution_rows,
+            track_columns=("track_id",),
+        )
         order_rows = tuple(
             connection.execute(
                 f"""
@@ -18589,6 +19444,108 @@ class TrainingRunStore:
             (settlement_time, now_ms, run_id),
         )
 
+    @staticmethod
+    def _freeze_liquidation_book_snapshots(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        case_id: str,
+        track_ids: Sequence[str],
+        virtual_time_ms: int,
+        now_ms: int,
+    ) -> None:
+        for track_id in sorted(set(track_ids)):
+            projection = connection.execute(
+                """
+                SELECT projection.*, archive.health AS archive_health
+                FROM replay_historical_book_projection AS projection
+                JOIN replay_historical_book_archive AS archive
+                  ON archive.archive_id = projection.archive_id
+                WHERE projection.run_id = ? AND projection.track_id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM replay_historical_book_ref AS ref
+                      WHERE ref.run_id = projection.run_id
+                        AND ref.track_id = projection.track_id
+                        AND ref.archive_id = projection.archive_id
+                        AND ref.active = 1
+                  )
+                """,
+                (run_id, track_id),
+            ).fetchone()
+            if (
+                projection is None
+                or str(projection["capability_state"]) != "AVAILABLE_EXACT"
+                or str(projection["status"]) != "READY"
+                or str(projection["archive_health"]) != "READY"
+                or int(projection["queue_exact"]) != 0
+                or projection["as_of_actual_ms"] is None
+                or projection["as_of_virtual_ms"] is None
+                or projection["last_update_id"] is None
+                or projection["book_hash"] is None
+                or int(projection["as_of_virtual_ms"]) != virtual_time_ms
+            ):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "liquidation trigger cannot freeze an exact same-time historical L2 snapshot",
+                    status_code=409,
+                )
+            bids = json.loads(str(projection["bids_json"]))
+            asks = json.loads(str(projection["asks_json"]))
+            expected_book_hash = canonical_sha256(
+                {
+                    "archive_id": str(projection["archive_id"]),
+                    "actual_time_ms": int(projection["as_of_actual_ms"]),
+                    "last_update_id": int(projection["last_update_id"]),
+                    "bids": bids,
+                    "asks": asks,
+                }
+            )
+            if expected_book_hash != str(projection["book_hash"]):
+                raise TrainingRunError(
+                    "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                    "liquidation trigger historical L2 hash verification failed",
+                    status_code=409,
+                )
+            payload = {
+                "schema_version": "replay.liquidation-book-snapshot.v1",
+                "case_id": case_id,
+                "track_id": track_id,
+                "archive_id": str(projection["archive_id"]),
+                "as_of_actual_time_ms": int(projection["as_of_actual_ms"]),
+                "as_of_virtual_time_ms": int(projection["as_of_virtual_ms"]),
+                "last_update_id": int(projection["last_update_id"]),
+                "bids": bids,
+                "asks": asks,
+                "book_hash": str(projection["book_hash"]),
+                "execution_fidelity": HISTORICAL_L2_LIQUIDATION_FIDELITY,
+                "queue_exact": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_liquidation_book_snapshot(
+                    run_id, case_id, track_id, archive_id,
+                    as_of_actual_time_ms, as_of_virtual_time_ms,
+                    last_update_id, bids_json, asks_json, book_hash,
+                    execution_fidelity, queue_exact, snapshot_hash, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    run_id,
+                    case_id,
+                    track_id,
+                    projection["archive_id"],
+                    projection["as_of_actual_ms"],
+                    projection["as_of_virtual_ms"],
+                    projection["last_update_id"],
+                    canonical_json(bids),
+                    canonical_json(asks),
+                    projection["book_hash"],
+                    HISTORICAL_L2_LIQUIDATION_FIDELITY,
+                    canonical_sha256(payload),
+                    now_ms,
+                ),
+            )
+
     @classmethod
     def _detect_contract_liquidations(
         cls,
@@ -19531,6 +20488,15 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
+            if str(account["position_mode"]) == "HEDGE":
+                cls._freeze_liquidation_book_snapshots(
+                    connection,
+                    run_id=run_id,
+                    case_id=liquidation_id,
+                    track_ids=[str(item[0]["track_id"]) for item in group],
+                    virtual_time_ms=virtual_time_ms,
+                    now_ms=now_ms,
+                )
             for leg_sequence, item in enumerate(group, start=1):
                 track, leg, rule, maintenance, raw_side, rule_revision = item
                 quantity = Decimal(str(leg["quantity"]))

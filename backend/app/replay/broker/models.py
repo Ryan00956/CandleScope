@@ -117,6 +117,7 @@ class FillReason(_StringEnum):
     LIMIT_MARKETABLE_REVEALED = "LIMIT_MARKETABLE_REVEALED"
     STOP_REVEALED_TRIGGER = "STOP_REVEALED_TRIGGER"
     TAKE_PROFIT_REVEALED_TRIGGER = "TAKE_PROFIT_REVEALED_TRIGGER"
+    HISTORICAL_BOOK_LEVEL = "HISTORICAL_BOOK_LEVEL"
 
 
 class WarningCode(_StringEnum):
@@ -1212,11 +1213,7 @@ class PositionBook:
 
     @property
     def entry_price(self) -> str | None:
-        active = [
-            leg
-            for leg in (self.long, self.short)
-            if Decimal(leg.quantity) != 0
-        ]
+        active = [leg for leg in (self.long, self.short) if Decimal(leg.quantity) != 0]
         return active[0].entry_price if len(active) == 1 else None
 
     @property
@@ -1256,7 +1253,9 @@ class PositionBook:
         side = coerce_enum(PositionSide, position_side, "position_side")
         return self.long if side is PositionSide.LONG else self.short
 
-    def with_leg(self, position_side: PositionSide, position: Position) -> "PositionBook":
+    def with_leg(
+        self, position_side: PositionSide, position: Position
+    ) -> "PositionBook":
         side = coerce_enum(PositionSide, position_side, "position_side")
         return PositionBook(
             long=position if side is PositionSide.LONG else self.long,

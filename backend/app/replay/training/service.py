@@ -5896,6 +5896,14 @@ class TrainingRunService:
                         )
                         session = await self.replay_service.get_session(session_id)
                         snapshot = self._snapshot(session)
+                        hedge_execution = plan.get("position_mode") == "HEDGE"
+                        book_execution = plan.get("book_execution")
+                        if hedge_execution and not isinstance(book_execution, Mapping):
+                            raise TrainingRunError(
+                                "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
+                                "HEDGE liquidation lost its frozen historical L2 plan",
+                                status_code=409,
+                            )
                         close = ReplayCommand(
                             protocol=REPLAY_PROTOCOL,
                             command_id=self._multi_command_id(
@@ -5908,17 +5916,36 @@ class TrainingRunService:
                             expected_revision=_stored_counter(
                                 snapshot["revision"], field_name="revision"
                             ),
-                            type=CommandType.CLOSE_POSITION,
-                            payload={
-                                "quantity": str(plan["quantity"]),
-                                **(
-                                    {"position_side": str(plan["position_side"])}
-                                    if plan.get("position_mode") == "HEDGE"
-                                    else {}
-                                ),
-                            },
+                            type=(
+                                InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE
+                                if hedge_execution
+                                else CommandType.CLOSE_POSITION
+                            ),
+                            payload=(
+                                {
+                                    "position_side": str(plan["position_side"]),
+                                    "side": str(plan["side"]),
+                                    "quantity": str(plan["quantity"]),
+                                    "levels": list(book_execution["levels"]),
+                                    "book_hash": str(book_execution["book_hash"]),
+                                    "last_update_id": _stored_counter(
+                                        book_execution["last_update_id"],
+                                        field_name="historical book last_update_id",
+                                    ),
+                                    "execution_fidelity": str(
+                                        book_execution["execution_fidelity"]
+                                    ),
+                                    "queue_exact": False,
+                                }
+                                if isinstance(book_execution, Mapping)
+                                else {"quantity": str(plan["quantity"])}
+                            ),
                         )
-                        closed = await self.replay_service.command(session_id, close)
+                        closed = await self.replay_service.command(
+                            session_id,
+                            close,
+                            _training_internal=hedge_execution,
+                        )
                         data = _stored_mapping(
                             closed.get("data"), field_name="liquidation close data"
                         )
@@ -5965,6 +5992,14 @@ class TrainingRunService:
                             step_sequence=step_sequence,
                         )
                         completed_case_ids.add(liquidation_id)
+                    elif step_type == "FAILED_CLOSED":
+                        raise TrainingRunError(
+                            str(
+                                plan.get("failure_code", "LIQUIDATION_EXECUTION_FAILED")
+                            ),
+                            "liquidation continuation failed closed before a fallback execution",
+                            status_code=409,
+                        )
                     else:
                         raise TrainingRunError(
                             "LIQUIDATION_EXECUTION_FAILED",
@@ -7392,20 +7427,10 @@ class TrainingRunService:
                     (*pending_account_events, *pending_hedge_events)
                 ),
             )
-        prepared_book: tuple[tuple[str, HistoricalBookProjection], ...] = ()
-        if (
+        book_required = (
             str(binding.get("book_mode", "OFF"))
             == BookMode.BOOK_ASSISTED_REQUIRED.value
-        ):
-            prepared_book = await self.historical_books.prepare_run_projection(
-                run_id=command.run_id,
-                tracks=tracks,
-                actual_time_ms=self._actual_event_time_ms(
-                    binding,
-                    target_virtual_time_ms,
-                ),
-                virtual_time_ms=target_virtual_time_ms,
-            )
+        )
         all_events: list[StableMarketEvent] = []
         pending_global_events: list[StableMarketEvent] = []
         cancel_event = stop_event
@@ -7572,11 +7597,6 @@ class TrainingRunService:
                         "account events reached the target without a market barrier",
                         status_code=409,
                     )
-                if prepared_book:
-                    await self.historical_books.commit_run_projection(
-                        run_id=command.run_id,
-                        prepared=prepared_book,
-                    )
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
@@ -7593,6 +7613,18 @@ class TrainingRunService:
             )
             wave_events: list[StableMarketEvent] = []
             actual_wave_time = self._actual_event_time_ms(binding, wave_time)
+            if book_required:
+                wave_book = await self.historical_books.prepare_run_projection(
+                    run_id=command.run_id,
+                    tracks=tracks,
+                    actual_time_ms=actual_wave_time,
+                    virtual_time_ms=wave_time,
+                )
+                await self.historical_books.commit_run_projection(
+                    run_id=command.run_id,
+                    prepared=wave_book,
+                    event_type="READY",
+                )
             account_events = await self.account_history.events_at(
                 run_id=command.run_id,
                 tracks=tracks,

@@ -42,7 +42,8 @@ ARCHIVE_SOURCE_CONTRACT_URL = (
     "How-to-manage-a-local-order-book-correctly"
 )
 BOOK_EXECUTION_FIDELITY = "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE"
-BOOK_PROJECTION_DEPTH = 20
+HISTORICAL_L2_LIQUIDATION_FIDELITY = "HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1"
+BOOK_PROJECTION_DEPTH = 5_000
 BOOK_PROJECTION_CACHE_MAX_TRACKS = 32
 
 _BookRow = sqlite3.Row | Mapping[str, object]
@@ -273,7 +274,9 @@ def _meta(connection: sqlite3.Connection) -> sqlite3.Row:
     if row["source"] != "BINANCE_USDM_DIFF_DEPTH_CAPTURE":
         raise ValueError("historical book source provenance is unsupported")
     if row["source_contract_url"] != ARCHIVE_SOURCE_CONTRACT_URL:
-        raise ValueError("historical book source contract does not match the frozen URL")
+        raise ValueError(
+            "historical book source contract does not match the frozen URL"
+        )
     if not isinstance(row["symbol"], str) or not row["symbol"]:
         raise ValueError("historical book symbol is missing")
     _counter(row["range_start_ms"], "range_start_ms")
@@ -350,8 +353,13 @@ def _reconstruct_state(
             if kind != "SNAPSHOT":
                 raise ValueError("historical book must begin with a snapshot")
             if event_time > range_start:
-                raise ValueError("historical book snapshot is not aligned before coverage")
-            if row["first_update_id"] is not None or row["previous_final_update_id"] is not None:
+                raise ValueError(
+                    "historical book snapshot is not aligned before coverage"
+                )
+            if (
+                row["first_update_id"] is not None
+                or row["previous_final_update_id"] is not None
+            ):
                 raise ValueError("historical book snapshot sequence fields are invalid")
             previous_u = _counter(row["final_update_id"], "snapshot lastUpdateId")
             bid_updates = _levels(
@@ -371,7 +379,9 @@ def _reconstruct_state(
             snapshot_count = 1
         else:
             if kind != "DELTA" or previous_u is None:
-                raise ValueError("historical book archive cannot contain implicit resync")
+                raise ValueError(
+                    "historical book archive cannot contain implicit resync"
+                )
             first_u = _counter(row["first_update_id"], "delta U")
             final_u = _counter(row["final_update_id"], "delta u")
             previous_final = _counter(row["previous_final_update_id"], "delta pu")
@@ -382,7 +392,9 @@ def _reconstruct_state(
                     f"historical book sequence gap: expected pu={previous_u}, observed pu={previous_final}"
                 )
             if delta_count == 0 and not (first_u <= previous_u <= final_u):
-                raise ValueError("first delta does not bridge the snapshot lastUpdateId")
+                raise ValueError(
+                    "first delta does not bridge the snapshot lastUpdateId"
+                )
             bid_updates = _levels(
                 row["bids_json"],
                 field_name=f"delta[{ordinal}] bids",
@@ -467,7 +479,8 @@ def verify_historical_book_archive(
         not isinstance(trusted_origin, str)
         or not 1 <= len(trusted_origin) <= 128
         or any(
-            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+            character
+            not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
             for character in trusted_origin
         )
     ):
@@ -487,7 +500,9 @@ def verify_historical_book_archive(
             (_counter(meta["range_end_ms"], "range_end_ms"),),
         ).fetchone()[0]
         if int(extra) != 0:
-            raise ValueError("historical book frames exceed the declared immutable range")
+            raise ValueError(
+                "historical book frames exceed the declared immutable range"
+            )
         descriptor_payload = {
             "protocol": ARCHIVE_PROTOCOL,
             "adapter_kind": ARCHIVE_ADAPTER_KIND,
@@ -508,9 +523,7 @@ def verify_historical_book_archive(
         exchange=str(descriptor_payload["exchange"]),
         market_type=str(descriptor_payload["market_type"]),
         symbol=str(descriptor_payload["symbol"]),
-        range_start_ms=_counter(
-            descriptor_payload["range_start_ms"], "range_start_ms"
-        ),
+        range_start_ms=_counter(descriptor_payload["range_start_ms"], "range_start_ms"),
         range_end_ms=_counter(descriptor_payload["range_end_ms"], "range_end_ms"),
         dataset_epoch=str(descriptor_payload["dataset_epoch"]),
         checksum_sha256=checksum,
@@ -538,7 +551,9 @@ def bind_historical_book_archive(
         descriptor.range_start_ms > bound_range_start_ms
         or descriptor.range_end_ms < bound_range_end_ms
     ):
-        raise ValueError("historical book archive no longer covers the frozen run range")
+        raise ValueError(
+            "historical book archive no longer covers the frozen run range"
+        )
     row = connection.execute(
         """
         SELECT health, checksum_sha256 FROM replay_historical_book_archive
@@ -546,7 +561,11 @@ def bind_historical_book_archive(
         """,
         (descriptor.archive_id,),
     ).fetchone()
-    if row is None or row["health"] != "READY" or row["checksum_sha256"] != descriptor.checksum_sha256:
+    if (
+        row is None
+        or row["health"] != "READY"
+        or row["checksum_sha256"] != descriptor.checksum_sha256
+    ):
         raise ValueError("historical book archive is not READY at bind time")
     generation_row = connection.execute(
         """
@@ -677,9 +696,9 @@ class HistoricalBookArchiveManager:
             else store.path.parent / f"{store.path.stem}-historical-books"
         ).resolve()
         self._checksum_cache: dict[tuple[str, int, int], str] = {}
-        self._projection_cache: OrderedDict[
-            tuple[str, str], _ProjectionCacheEntry
-        ] = OrderedDict()
+        self._projection_cache: OrderedDict[tuple[str, str], _ProjectionCacheEntry] = (
+            OrderedDict()
+        )
         self._projection_cache_lock = threading.RLock()
         self._archive_lock = asyncio.Lock()
 
@@ -751,7 +770,10 @@ class HistoricalBookArchiveManager:
         temp = self._owned_path(f".tmp/import-{uuid.uuid4().hex}.part")
         await asyncio.to_thread(shutil.copyfile, descriptor.trusted_source_path, temp)
         copied_checksum = await asyncio.to_thread(_digest_file, temp)
-        if copied_checksum != descriptor.checksum_sha256 or temp.stat().st_size != descriptor.byte_size:
+        if (
+            copied_checksum != descriptor.checksum_sha256
+            or temp.stat().st_size != descriptor.byte_size
+        ):
             temp.unlink(missing_ok=True)
             raise TrainingRunError(
                 "HISTORICAL_BOOK_ARCHIVE_COPY_MISMATCH",
@@ -887,15 +909,14 @@ class HistoricalBookArchiveManager:
             "capability_state": state,
             "reason": reason,
             "source": "BINANCE_USDM_DIFF_DEPTH_CAPTURE_V1",
-            "snapshot_and_ordered_deltas": state == CapabilityState.AVAILABLE_EXACT.value,
+            "snapshot_and_ordered_deltas": state
+            == CapabilityState.AVAILABLE_EXACT.value,
             "continuity_contract": "SNAPSHOT_BRIDGE_AND_U_u_pu",
             "pinnable": state == CapabilityState.AVAILABLE_EXACT.value,
             "queue_exact": False,
             "execution_fidelity": BOOK_EXECUTION_FIDELITY,
             "ready_archive_bytes": (
-                0
-                if archive is None
-                else _counter(archive["byte_size"], "byte_size")
+                0 if archive is None else _counter(archive["byte_size"], "byte_size")
             ),
             "max_archive_bytes": self.max_archive_bytes,
         }
@@ -944,7 +965,9 @@ class HistoricalBookArchiveManager:
                 cache_key=projection_cache_key,
             )
         except Exception as exc:
-            await self._quarantine_archive(str(archive["archive_id"]), type(exc).__name__)
+            await self._quarantine_archive(
+                str(archive["archive_id"]), type(exc).__name__
+            )
             raise TrainingRunError(
                 "HISTORICAL_BOOK_ARCHIVE_DEGRADED",
                 "historical book archive failed immutable continuity validation",
@@ -1013,7 +1036,9 @@ class HistoricalBookArchiveManager:
             except Exception as exc:
                 await self._quarantine_archive(
                     str(row["archive_id"]),
-                    exc.code if isinstance(exc, TrainingRunError) else type(exc).__name__,
+                    exc.code
+                    if isinstance(exc, TrainingRunError)
+                    else type(exc).__name__,
                 )
                 await self._degrade_run(
                     run_id=run_id,
@@ -1151,9 +1176,7 @@ class HistoricalBookArchiveManager:
                     continue
                 reasons = json.loads(str(row["forced_full_reasons_json"]))
                 kept = [
-                    reason
-                    for reason in reasons
-                    if reason != "BOOK_ASSISTED_REQUIRED"
+                    reason for reason in reasons if reason != "BOOK_ASSISTED_REQUIRED"
                 ]
                 connection.execute(
                     """
@@ -1236,9 +1259,7 @@ class HistoricalBookArchiveManager:
             or not isinstance(target_reclaim_bytes, int)
             or not 1 <= target_reclaim_bytes <= 1_000_000_000_000
         ):
-            raise ValueError(
-                "target_reclaim_bytes must be between 1 and 1000000000000"
-            )
+            raise ValueError("target_reclaim_bytes must be between 1 and 1000000000000")
         if (
             isinstance(max_archives, bool)
             or not isinstance(max_archives, int)
@@ -1764,7 +1785,14 @@ class HistoricalBookArchiveManager:
                             book_hash = NULL, message = ?, updated_at_ms = ?
                         WHERE run_id = ? AND track_id = ?
                         """,
-                        (event_type, virtual_time_ms, reason[:500], now, run_id, track_id),
+                        (
+                            event_type,
+                            virtual_time_ms,
+                            reason[:500],
+                            now,
+                            run_id,
+                            track_id,
+                        ),
                     )
                 connection.execute(
                     """
@@ -1777,7 +1805,9 @@ class HistoricalBookArchiveManager:
                         run_id,
                         track_id,
                         archive_id if track_id == failed_track_id else None,
-                        event_type if track_id == failed_track_id or failed_track_id is None else "CLEARED",
+                        event_type
+                        if track_id == failed_track_id or failed_track_id is None
+                        else "CLEARED",
                         virtual_time_ms,
                         reason[:500],
                         canonical_json(
@@ -1835,10 +1865,9 @@ class HistoricalBookArchiveManager:
             source,
             trusted_origin=str(row["trusted_origin"]),
         )
-        if (
-            descriptor.archive_id != str(row["archive_id"])
-            or descriptor.checksum_sha256 != str(row["checksum_sha256"])
-        ):
+        if descriptor.archive_id != str(
+            row["archive_id"]
+        ) or descriptor.checksum_sha256 != str(row["checksum_sha256"]):
             raise TrainingRunError(
                 "HISTORICAL_BOOK_REHYDRATION_MISMATCH",
                 "trusted historical book source no longer matches the pinned checksum",
@@ -1891,11 +1920,12 @@ class HistoricalBookArchiveManager:
     ) -> HistoricalBookProjection:
         with closing(_read_only(path)) as connection:
             meta = _meta(connection)
-            if (
-                str(meta["dataset_epoch"]) != str(row["dataset_epoch"])
-                or str(meta["symbol"]) != str(row["symbol"])
-            ):
-                raise ValueError("historical book object identity does not match registry")
+            if str(meta["dataset_epoch"]) != str(row["dataset_epoch"]) or str(
+                meta["symbol"]
+            ) != str(row["symbol"]):
+                raise ValueError(
+                    "historical book object identity does not match registry"
+                )
             if cache_key is None:
                 state = _reconstruct_state(
                     connection,
@@ -1933,8 +1963,7 @@ class HistoricalBookArchiveManager:
                     )
                     self._projection_cache.move_to_end(cache_key)
                     while (
-                        len(self._projection_cache)
-                        > BOOK_PROJECTION_CACHE_MAX_TRACKS
+                        len(self._projection_cache) > BOOK_PROJECTION_CACHE_MAX_TRACKS
                     ):
                         self._projection_cache.popitem(last=False)
         update_id = state.previous_u
@@ -2107,6 +2136,7 @@ __all__ = [
     "HistoricalBookArchiveDescriptor",
     "HistoricalBookArchiveManager",
     "HistoricalBookProjection",
+    "HISTORICAL_L2_LIQUIDATION_FIDELITY",
     "PreparedHistoricalBookBinding",
     "bind_historical_book_archive",
     "verify_historical_book_archive",

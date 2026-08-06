@@ -497,7 +497,9 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                     ReplayErrorCode.ORDER_REJECTED,
                     f"{field_name} must be a Decimal string or null",
                 )
-        if payload.get("position_side") is not None and payload["position_side"] not in {
+        if payload.get("position_side") is not None and payload[
+            "position_side"
+        ] not in {
             "LONG",
             "SHORT",
         }:
@@ -614,6 +616,138 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
         return ParsedCommand(
             command_type,
             {"kind": kind, "amount": amount, "reason": normalized_reason},
+        )
+    if command_type is InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE:
+        _exact_keys(
+            payload,
+            {
+                "position_side",
+                "side",
+                "quantity",
+                "levels",
+                "book_hash",
+                "last_update_id",
+                "execution_fidelity",
+                "queue_exact",
+            },
+        )
+        if payload["position_side"] not in {"LONG", "SHORT"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close position_side is invalid",
+            )
+        if payload["side"] not in {"BUY", "SELL"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close side is invalid",
+            )
+        try:
+            quantity = normalize_decimal_string(
+                payload["quantity"], field_name="historical book close quantity"
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close quantity is invalid",
+            ) from exc
+        if Decimal(quantity) <= 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close quantity must be positive",
+            )
+        raw_levels = payload["levels"]
+        if not isinstance(raw_levels, (list, tuple)) or not raw_levels:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close levels are unavailable",
+            )
+        levels: list[dict[str, object]] = []
+        total = Decimal(0)
+        previous_level = 0
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, Mapping):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close level is invalid",
+                )
+            _exact_keys(raw_level, {"book_level", "price", "quantity"})
+            book_level = raw_level["book_level"]
+            if (
+                isinstance(book_level, bool)
+                or not isinstance(book_level, int)
+                or book_level <= previous_level
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close levels must be strictly increasing",
+                )
+            previous_level = book_level
+            try:
+                price = normalize_decimal_string(
+                    raw_level["price"], field_name="historical book level price"
+                )
+                level_quantity = normalize_decimal_string(
+                    raw_level["quantity"],
+                    field_name="historical book level quantity",
+                )
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close level decimal is invalid",
+                ) from exc
+            if Decimal(price) <= 0 or Decimal(level_quantity) <= 0:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "historical book close level values must be positive",
+                )
+            total += Decimal(level_quantity)
+            levels.append(
+                {
+                    "book_level": book_level,
+                    "price": price,
+                    "quantity": level_quantity,
+                }
+            )
+        if total != Decimal(quantity):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close levels do not sum to requested quantity",
+            )
+        book_hash = payload["book_hash"]
+        if (
+            not isinstance(book_hash, str)
+            or len(book_hash) != 71
+            or not book_hash.startswith("sha256:")
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close hash is invalid",
+            )
+        if payload["queue_exact"] is not False:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close cannot claim queue-exact execution",
+            )
+        execution_fidelity = payload["execution_fidelity"]
+        if not isinstance(execution_fidelity, str) or not execution_fidelity:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "historical book close fidelity is invalid",
+            )
+        return ParsedCommand(
+            command_type,
+            {
+                "position_side": payload["position_side"],
+                "side": payload["side"],
+                "quantity": quantity,
+                "levels": levels,
+                "book_hash": book_hash,
+                "last_update_id": validate_counter(
+                    payload["last_update_id"], field_name="last_update_id"
+                ),
+                "execution_fidelity": execution_fidelity,
+                "queue_exact": False,
+            },
         )
     if command_type is InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT:
         _exact_keys(payload, {"count", "tail_events"})

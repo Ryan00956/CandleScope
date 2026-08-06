@@ -29,6 +29,8 @@ async def _create_bankrupt_hedge_run(
     adl_candidates: list[dict[str, object]] | None = None,
     initial_equity: str = "100",
     maintenance_tiers: list[dict[str, str]] | None = None,
+    book_level_quantities: list[str] | None = None,
+    book_price_offset: str = "0",
 ) -> tuple[str, str]:
     request = replace(
         _sandbox_request(await _request(service), initial_equity=initial_equity),
@@ -43,6 +45,8 @@ async def _create_bankrupt_hedge_run(
         insurance_opening_balance=insurance_opening_balance,
         adl_candidates=adl_candidates,
         maintenance_tiers=maintenance_tiers,
+        book_level_quantities=book_level_quantities,
+        book_price_offset=book_price_offset,
     )
     created = await service.training.create_run(request)  # type: ignore[union-attr]
     run_id = str(created["run"]["run_id"])
@@ -331,6 +335,38 @@ async def test_cross_margin_breach_creates_one_account_case_across_full_tracks(
                          open_orders_json, degraded_reason, created_at_ms, updated_at_ms
                   FROM replay_training_market_track
                  WHERE run_id = ? AND track_id = 'track-1'
+                """,
+                (run_id,),
+            )
+            connection.execute(  # type: ignore[attr-defined]
+                """
+                INSERT INTO replay_historical_book_ref(
+                    archive_id, run_id, track_id, binding_generation,
+                    bound_range_start_ms, bound_range_end_ms, active,
+                    created_at_ms, released_at_ms
+                )
+                SELECT archive_id, run_id, 'track-2', binding_generation,
+                       bound_range_start_ms, bound_range_end_ms, active,
+                       created_at_ms, released_at_ms
+                FROM replay_historical_book_ref
+                WHERE run_id = ? AND track_id = 'track-1' AND active = 1
+                """,
+                (run_id,),
+            )
+            connection.execute(  # type: ignore[attr-defined]
+                """
+                INSERT INTO replay_historical_book_projection(
+                    run_id, track_id, archive_id, capability_state, status,
+                    execution_fidelity, queue_exact, as_of_actual_ms,
+                    as_of_virtual_ms, last_update_id, bids_json, asks_json,
+                    book_hash, message, updated_at_ms
+                )
+                SELECT run_id, 'track-2', archive_id, capability_state, status,
+                       execution_fidelity, queue_exact, as_of_actual_ms,
+                       as_of_virtual_ms, last_update_id, bids_json, asks_json,
+                       book_hash, message, updated_at_ms
+                FROM replay_historical_book_projection
+                WHERE run_id = ? AND track_id = 'track-1'
                 """,
                 (run_id,),
             )

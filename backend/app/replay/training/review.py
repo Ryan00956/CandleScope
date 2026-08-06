@@ -476,7 +476,9 @@ class ReviewRecorder:
                 "training run does not exist",
                 status_code=404,
             )
-        at_time = int(run["virtual_time_ms"] if virtual_time_ms is None else virtual_time_ms)
+        at_time = int(
+            run["virtual_time_ms"] if virtual_time_ms is None else virtual_time_ms
+        )
         at_sequence = int(
             run["source_sequence"] if source_sequence is None else source_sequence
         )
@@ -495,9 +497,7 @@ class ReviewRecorder:
                 value = json.loads(str(action["new_value_json"]))
             except json.JSONDecodeError:
                 continue
-            if isinstance(value, Mapping) and isinstance(
-                value.get("policy_hash"), str
-            ):
+            if isinstance(value, Mapping) and isinstance(value.get("policy_hash"), str):
                 action_by_hash[str(value["policy_hash"])] = action
 
         def public_time(
@@ -604,9 +604,7 @@ class ReviewRecorder:
                 "revision": int(row["revision"]),
                 "effective_cursor": {
                     "virtual_time_ms": int(row["effective_virtual_time_ms"]),
-                    "source_sequence": int(
-                        effective_public_time.get("sequence", 0)
-                    ),
+                    "source_sequence": int(effective_public_time.get("sequence", 0)),
                 },
                 "public_time": effective_public_time,
                 "maker_fee_bps": str(row["maker_fee_bps"]),
@@ -713,9 +711,7 @@ class ReviewRecorder:
                 {
                     "track_id": track_id,
                     "revision": int(row["revision"]),
-                    "effective_virtual_time_ms": int(
-                        row["effective_virtual_time_ms"]
-                    ),
+                    "effective_virtual_time_ms": int(row["effective_virtual_time_ms"]),
                     "rule": rule,
                     "rule_hash": str(row["rule_hash"]),
                     "fidelity": str(row["fidelity"]),
@@ -875,9 +871,7 @@ class ReviewRecorder:
             "ledger_count": int(counts["ledger_count"]),
             "funding_count": int(counts["funding_count"]),
             "liquidation_count": int(counts["liquidation_count"]),
-            "completed_liquidation_count": int(
-                counts["completed_liquidation_count"]
-            ),
+            "completed_liquidation_count": int(counts["completed_liquidation_count"]),
             "position_hash": canonical_sha256(positions),
             "equity": str(run["current_equity"]),
         }
@@ -962,9 +956,7 @@ class ReviewRecorder:
             {
                 "ledger_sequence": int(row["ledger_sequence"]),
                 "posting_id": str(row["posting_id"]),
-                "track_id": (
-                    None if row["track_id"] is None else str(row["track_id"])
-                ),
+                "track_id": (None if row["track_id"] is None else str(row["track_id"])),
                 "kind": str(row["kind"]),
                 "cash_delta": str(row["cash_delta"]),
                 "asset": str(row["asset"]),
@@ -1008,6 +1000,36 @@ class ReviewRecorder:
             ).fetchall()
         ]
         liquidations: list[dict[str, object]] = []
+
+        def public_book_execution(row: sqlite3.Row) -> dict[str, object]:
+            return {
+                "case_id": str(row["case_id"]),
+                "step_sequence": int(row["step_sequence"]),
+                "track_id": str(row["track_id"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "last_update_id": int(row["last_update_id"]),
+                "side": str(row["side"]),
+                "requested_quantity": str(row["requested_quantity"]),
+                "visible_quantity": str(row["visible_quantity"]),
+                "levels": json.loads(str(row["levels_json"])),
+                "book_hash": str(row["book_hash"]),
+                "execution_fidelity": str(row["execution_fidelity"]),
+                "queue_exact": int(row["queue_exact"]),
+                "execution_plan_hash": str(row["execution_plan_hash"]),
+            }
+
+        def public_book_snapshot(row: sqlite3.Row) -> dict[str, object]:
+            return {
+                "case_id": str(row["case_id"]),
+                "track_id": str(row["track_id"]),
+                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
+                "last_update_id": int(row["last_update_id"]),
+                "book_hash": str(row["book_hash"]),
+                "execution_fidelity": str(row["execution_fidelity"]),
+                "queue_exact": int(row["queue_exact"]),
+                "snapshot_hash": str(row["snapshot_hash"]),
+            }
+
         for case_row in connection.execute(
             """
             SELECT * FROM replay_training_liquidation_case
@@ -1036,6 +1058,18 @@ class ReviewRecorder:
             ).fetchall():
                 step = dict(step_row)
                 step_sequence = int(step_row["step_sequence"])
+                book_execution_row = connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_book_execution
+                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                    """,
+                    (run_id, case_id, step_sequence),
+                ).fetchone()
+                step["book_execution"] = (
+                    None
+                    if book_execution_row is None
+                    else public_book_execution(book_execution_row)
+                )
                 step["orders"] = [
                     {
                         **dict(order_row),
@@ -1095,6 +1129,16 @@ class ReviewRecorder:
                     "fidelity": str(case_row["fidelity"]),
                     "component_hash": str(case_row["component_hash"]),
                     "legs": legs,
+                    "book_snapshots": [
+                        public_book_snapshot(row)
+                        for row in connection.execute(
+                            """
+                            SELECT * FROM replay_training_liquidation_book_snapshot
+                            WHERE run_id = ? AND case_id = ? ORDER BY track_id
+                            """,
+                            (run_id, case_id),
+                        ).fetchall()
+                    ],
                     "steps": steps,
                 }
             )
@@ -1124,9 +1168,7 @@ class ReviewRecorder:
                     (run_id,),
                 ).fetchone()[0]
             ),
-            "order_hash": canonical_sha256(
-                orders
-            ),
+            "order_hash": canonical_sha256(orders),
             "fill_count": int(
                 connection.execute(
                     "SELECT COUNT(*) FROM replay_training_contract_fill "
@@ -1148,9 +1190,7 @@ class ReviewRecorder:
                     (run_id,),
                 ).fetchone()[0]
             ),
-            "liquidation_count": int(
-                len(liquidations)
-            ),
+            "liquidation_count": int(len(liquidations)),
             "completed_liquidation_count": sum(
                 item["state"] == "COMPLETED" for item in liquidations
             ),
@@ -1385,13 +1425,16 @@ class ReviewRecorder:
             }
         )
         anchor_id = f"anchor-{anchor_hash.removeprefix('sha256:')}"
-        if connection.execute(
-            """
+        if (
+            connection.execute(
+                """
             SELECT 1 FROM replay_review_actor_anchor
             WHERE run_id = ? AND anchor_id = ?
             """,
-            (run_id, anchor_id),
-        ).fetchone() is not None:
+                (run_id, anchor_id),
+            ).fetchone()
+            is not None
+        ):
             return anchor_id
         encoded = encode_anchor_payload(payload)
         used = int(
@@ -1576,10 +1619,14 @@ class ReviewRecorder:
             else run["virtual_time_ms"]
         )
         source_sequence = int(
-            state["source_sequence"] if isinstance(state, Mapping) else run["source_sequence"]
+            state["source_sequence"]
+            if isinstance(state, Mapping)
+            else run["source_sequence"]
         )
         event_sequence = int(
-            state["event_sequence"] if isinstance(state, Mapping) else run["event_sequence"]
+            state["event_sequence"]
+            if isinstance(state, Mapping)
+            else run["event_sequence"]
         )
         state_hash = str(
             state["state_hash"] if isinstance(state, Mapping) else run["state_hash"]
@@ -1621,10 +1668,7 @@ class ReviewRecorder:
                     )
                 },
             )
-        if (
-            len(full_times) > 1
-            and context_kind not in {"INITIAL", "DIRECT"}
-        ):
+        if len(full_times) > 1 and context_kind not in {"INITIAL", "DIRECT"}:
             # A critical mutation may be observed before the coordinator has
             # aligned the remaining actors. Preserve only this actor's exact
             # checkpoint now; the aligned transaction will build the global
@@ -1659,9 +1703,7 @@ class ReviewRecorder:
             ).fetchall():
                 try:
                     decoded = json.loads(str(row["projection_json"]))
-                    prior_equities.append(
-                        Decimal(str(decoded["domain"]["equity"]))
-                    )
+                    prior_equities.append(Decimal(str(decoded["domain"]["equity"])))
                 except (InvalidOperation, KeyError, TypeError):
                     continue
             current_equity = Decimal(

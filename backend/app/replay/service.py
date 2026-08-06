@@ -474,9 +474,7 @@ class ReplayService:
         if not isinstance(config, ReplaySessionConfig):
             raise TypeError("config must be ReplaySessionConfig")
         required_history_bars = (
-            config.warmup_bars
-            if minimum_history_bars is None
-            else minimum_history_bars
+            config.warmup_bars if minimum_history_bars is None else minimum_history_bars
         )
         if (
             isinstance(required_history_bars, bool)
@@ -1667,6 +1665,7 @@ class ReplayService:
             command.type
             in {
                 InternalCommandType.ADJUST_CAPITAL,
+                InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE,
                 InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
                 InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
                 InternalCommandType.FAST_FORWARD_FINAL_STATE,
@@ -3837,10 +3836,7 @@ class ReplayService:
             first_start_ms = candidate.first_start_ms
             if first_start_ms < reachable_floor_ms:
                 offset = (
-                    reachable_floor_ms
-                    - first_start_ms
-                    + candidate.interval_ms
-                    - 1
+                    reachable_floor_ms - first_start_ms + candidate.interval_ms - 1
                 ) // candidate.interval_ms
                 first_start_ms += offset * candidate.interval_ms
             if first_start_ms > candidate.last_start_ms:
@@ -3883,9 +3879,7 @@ class ReplayService:
         minimum_history_bars: int | None = None,
     ) -> tuple[EligibleWindow, str | None]:
         required_history_bars = (
-            config.warmup_bars
-            if minimum_history_bars is None
-            else minimum_history_bars
+            config.warmup_bars if minimum_history_bars is None else minimum_history_bars
         )
         if config.source_kind is SourceKind.BAR:
             eligible_ranges = self._minimum_history_ranges(
@@ -4003,7 +3997,9 @@ class ReplayService:
                 None,
             )
             if source is None:
-                raise ValueError("eligible range is not bound to its source catalog range")
+                raise ValueError(
+                    "eligible range is not bound to its source catalog range"
+                )
             first_start_ms = max(
                 candidate.first_start_ms,
                 source.first_start_ms + extra_bars * candidate.interval_ms,

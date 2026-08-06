@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 
@@ -34,6 +35,9 @@ def build_book_archive(
     range_start_ms: int,
     range_end_ms: int,
     interval_ms: int = 60_000,
+    mid_prices: list[str] | None = None,
+    level_quantities: list[str] | None = None,
+    price_offset: str = "0",
 ) -> Path:
     dataset_epoch = (
         "sha256:"
@@ -71,6 +75,29 @@ def build_book_archive(
             );
             """
         )
+        frame_count = (range_end_ms - range_start_ms) // interval_ms + 1
+        mids = mid_prices or ["100"] * frame_count
+        if not mids or len(mids) > frame_count:
+            raise ValueError("book mid_prices exceed the requested range")
+        mids = [*mids, *([mids[-1]] * (frame_count - len(mids)))]
+        quantities = level_quantities or ["10", "20"]
+        if not quantities or any(Decimal(value) <= 0 for value in quantities):
+            raise ValueError("book level quantities must be positive")
+        offset = Decimal(price_offset)
+
+        def levels_at(mid: str) -> tuple[list[list[str]], list[list[str]]]:
+            center = Decimal(mid) + offset
+            bids = [
+                [format(center - Decimal(index), "f"), quantity]
+                for index, quantity in enumerate(quantities, start=1)
+            ]
+            asks = [
+                [format(center + Decimal(index), "f"), quantity]
+                for index, quantity in enumerate(quantities, start=1)
+            ]
+            return bids, asks
+
+        initial_bids, initial_asks = levels_at(mids[0])
         connection.execute(
             """
             INSERT INTO archive_meta VALUES (
@@ -99,15 +126,28 @@ def build_book_archive(
             (
                 range_start_ms,
                 range_start_ms,
-                _levels([["99", "10"], ["98", "20"]]),
-                _levels([["101", "10"], ["102", "20"]]),
+                _levels(initial_bids),
+                _levels(initial_asks),
             ),
         )
         previous = 100
+        previous_bids = {price: quantity for price, quantity in initial_bids}
+        previous_asks = {price: quantity for price, quantity in initial_asks}
         ordinal = 1
         event_time = range_start_ms + interval_ms
         while event_time <= range_end_ms:
             final = previous + 1
+            next_bids_list, next_asks_list = levels_at(mids[ordinal])
+            next_bids = {price: quantity for price, quantity in next_bids_list}
+            next_asks = {price: quantity for price, quantity in next_asks_list}
+            bid_changes = {
+                **{price: "0" for price in previous_bids if price not in next_bids},
+                **next_bids,
+            }
+            ask_changes = {
+                **{price: "0" for price in previous_asks if price not in next_asks},
+                **next_asks,
+            }
             connection.execute(
                 """
                 INSERT INTO book_frame VALUES (
@@ -121,11 +161,17 @@ def build_book_archive(
                     previous if ordinal == 1 else final,
                     final,
                     previous,
-                    _levels([["99", "10"]]),
-                    _levels([["101", "10"]]),
+                    _levels(
+                        [[price, quantity] for price, quantity in bid_changes.items()]
+                    ),
+                    _levels(
+                        [[price, quantity] for price, quantity in ask_changes.items()]
+                    ),
                 ),
             )
             previous = final
+            previous_bids = next_bids
+            previous_asks = next_asks
             ordinal += 1
             event_time += interval_ms
     return path
@@ -141,6 +187,8 @@ async def prepare_hedge_request(
     insurance_opening_balance: str = "1000000",
     adl_candidates: list[dict[str, object]] | None = None,
     maintenance_tiers: list[dict[str, str]] | None = None,
+    book_level_quantities: list[str] | None = None,
+    book_price_offset: str = "0",
 ) -> TrainingRunCreateRequest:
     training = getattr(service, "training")
     if training is None:
@@ -151,6 +199,9 @@ async def prepare_hedge_request(
     interval_ms = 60_000
     end = start + request.forward_cache_ms
     book_end = end + interval_ms
+    marks = mark_prices or ["100"] * ((end - start) // interval_ms + 1)
+    if len(marks) != (end - start) // interval_ms + 1:
+        raise ValueError("mark_prices does not cover the requested range")
     book_path = build_book_archive(
         root / f"{prefix}-book.sqlite3",
         exchange=request.exchange,
@@ -159,14 +210,14 @@ async def prepare_hedge_request(
         range_start_ms=start,
         range_end_ms=book_end,
         interval_ms=interval_ms,
+        mid_prices=marks,
+        level_quantities=book_level_quantities,
+        price_offset=book_price_offset,
     )
     book = await training.historical_books.import_archive(
         book_path,
         trusted_origin="TEST_CAPTURE",
     )
-    marks = mark_prices or ["100"] * ((end - start) // interval_ms + 1)
-    if len(marks) != (end - start) // interval_ms + 1:
-        raise ValueError("mark_prices does not cover the requested range")
     events: list[dict[str, object]] = [
         {
             "event_time_ms": start,

@@ -477,6 +477,19 @@ diff check 通过。阶段证据见
 
 预估：4–7 个工程日。
 
+状态：`COMPLETE`。training schema v18 已在风险 case 创建时冻结同一 virtual time 的
+历史 L2 快照，并为每个 HEDGE liquidation step 保存逐档 execution proof。强平通过仅
+training 内部可调用的 historical-book close 命令生成单 order、多 real fills；每个 fill
+都绑定非空 book level、book/execution-plan hash 与
+`HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1`，且永久声明 `queue_exact=false`。
+快照缺失/陈旧、archive/ref 不可用、深度耗尽、price tick 或 quantity step 冲突均形成
+durable `FAILED_CLOSED` 并暂停 Run，不回退普通 `CLOSE_POSITION`/Touch/Tape。触发时快照
+可跨进程恢复，公开 Review 投影不泄漏 archive/actual time，精确 Review fork 可恢复历史
+L2 fills。优化开启的 advance 仍选择 `FULL_EVENT_SCAN`，与逐步 reference 的 hedge state
+和 execution plan hashes 一致。完整 replay 后端 `875 passed`，前端 replay `326 passed`，
+typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE6_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE6_RESULT_20260806_zh.md)。
+
 ### Phase 7：API、右栏、报告与默认体验
 
 工作内容：

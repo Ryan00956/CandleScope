@@ -1191,9 +1191,7 @@ class ReplaySessionActor:
         self._clock.pause()
         if self._state is not SessionState.ENDED:
             self._state = (
-                SessionState.ENDED
-                if self._source.exhausted()
-                else SessionState.PAUSED
+                SessionState.ENDED if self._source.exhausted() else SessionState.PAUSED
             )
         if self._compute_state_hash() != target.state_hash:
             raise ReplayDomainError(
@@ -1478,9 +1476,7 @@ class ReplaySessionActor:
                     "period summary belongs to a different replay session",
                 )
             expected_source_kind = (
-                "BAR"
-                if self.config.source_kind is SourceKind.BAR
-                else "AGG_TRADE"
+                "BAR" if self.config.source_kind is SourceKind.BAR else "AGG_TRADE"
             )
             if summary.source_kind != expected_source_kind:
                 raise ReplayDomainError(
@@ -1566,9 +1562,7 @@ class ReplaySessionActor:
             try:
                 positioned = fast_position(
                     summary.end_source_sequence,
-                    last_event_time_ms=summary.end_source_cursor[
-                        "last_event_time_ms"
-                    ],
+                    last_event_time_ms=summary.end_source_cursor["last_event_time_ms"],
                 )
             except ReplayDomainError:
                 raise
@@ -1642,15 +1636,12 @@ class ReplaySessionActor:
                 self._restore_rollback(rollback, force_paused=True)
                 raise self._enter_persistence_degraded(exc) from exc
             self._record_checkpoint(checkpoint, initial=False)
-            skipped = (
-                summary.end_source_sequence - current_cursor.source_sequence
-            )
+            skipped = summary.end_source_sequence - current_cursor.source_sequence
             self._metrics["period_summary_jumps"] = (
                 int(self._metrics["period_summary_jumps"] or 0) + 1
             )
             self._metrics["period_summary_skipped_events"] = (
-                int(self._metrics["period_summary_skipped_events"] or 0)
-                + skipped
+                int(self._metrics["period_summary_skipped_events"] or 0) + skipped
             )
             if not request.future.done():
                 request.future.set_result(
@@ -2006,9 +1997,7 @@ class ReplaySessionActor:
                         "batch_reducer_events": 0,
                         "require_empty_account": require_empty_account,
                         "snapshot_published": True,
-                        "reference_semantics": (
-                            "ORDERED_SOURCE_EVENT_REDUCER_V1"
-                        ),
+                        "reference_semantics": ("ORDERED_SOURCE_EVENT_REDUCER_V1"),
                     },
                 )
             consumed = 0
@@ -2188,6 +2177,7 @@ class ReplaySessionActor:
             CommandType.SET_POSITION_PROTECTION,
             CommandType.SET_POSITION_LEVERAGE,
             InternalCommandType.ADJUST_CAPITAL,
+            InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE,
         }:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:
                 self._invalid_transition(command_type)
@@ -2531,12 +2521,14 @@ class ReplaySessionActor:
         if owns_candidate:
             self._begin_candidate()
         try:
-            component_state, state_hash, published = (
-                await self._apply_source_event_candidate(
-                    publish=publish,
-                    publish_interactions=publish_interactions,
-                    materialize_state=owns_candidate or publish or checkpoint,
-                )
+            (
+                component_state,
+                state_hash,
+                published,
+            ) = await self._apply_source_event_candidate(
+                publish=publish,
+                publish_interactions=publish_interactions,
+                materialize_state=owns_candidate or publish or checkpoint,
             )
         except BaseException:
             if rollback is not None:
@@ -2780,9 +2772,7 @@ class ReplaySessionActor:
             self._controller_client_id = None
             self._controller_deadline_wall = None
         immediate_delivery = self._projection_requires_immediate_delivery(projection)
-        should_publish = publish or (
-            publish_interactions and immediate_delivery
-        )
+        should_publish = publish or (publish_interactions and immediate_delivery)
         if not materialize_state and not should_publish:
             return None, None, False
         component_state = self._component_state()
@@ -3195,9 +3185,10 @@ class ReplaySessionActor:
                 validator=self._checkpoint_matches_actor,
             )
             checkpoint_payload = selected.payload
-            checkpoint_source, positioning_events = (
-                await self._source_for_seek_checkpoint(selected.payload)
-            )
+            (
+                checkpoint_source,
+                positioning_events,
+            ) = await self._source_for_seek_checkpoint(selected.payload)
 
         scan_source = self._fork_source(checkpoint_source)
         previous_time = scan_source.cursor().last_event_time_ms
@@ -3548,9 +3539,7 @@ class ReplaySessionActor:
         self._final_state_anchor_source_sequence = (
             rollback.final_state_anchor_source_sequence
         )
-        self._final_state_anchor_bar_open_ms = (
-            rollback.final_state_anchor_bar_open_ms
-        )
+        self._final_state_anchor_bar_open_ms = rollback.final_state_anchor_bar_open_ms
         self._status_reason = rollback.status_reason
         self._controller_client_id = rollback.controller_client_id
         self._controller_deadline_wall = rollback.controller_deadline_wall
@@ -3733,7 +3722,13 @@ class ReplaySessionActor:
                     payload["state_hash"],
                     "retained checkpoint state_hash",
                 )
-            except (CheckpointError, ReplayDomainError, TypeError, ValueError, KeyError):
+            except (
+                CheckpointError,
+                ReplayDomainError,
+                TypeError,
+                ValueError,
+                KeyError,
+            ):
                 continue
             valid.append(
                 (
@@ -4052,8 +4047,7 @@ class ReplaySessionActor:
             field_name="virtual_time_ms",
         )
         if any(
-            int(entry["virtual_time_ms"]) > virtual_time
-            for entry in journal_entries
+            int(entry["virtual_time_ms"]) > virtual_time for entry in journal_entries
         ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
@@ -4358,9 +4352,7 @@ class ReplaySessionActor:
                 bar_open_ms,
                 field_name="final_state_transport_anchor_open_ms",
             )
-        self._final_state_anchor_source_sequence = (
-            self._source.cursor().source_sequence
-        )
+        self._final_state_anchor_source_sequence = self._source.cursor().source_sequence
         self._final_state_anchor_bar_open_ms = bar_open_ms
 
     def _emit_final_state_projection(self, reason: str, *, mandatory: bool) -> None:
@@ -4458,7 +4450,9 @@ class ReplaySessionActor:
             sequence=self._sequence,
             revision=self._revision,
             virtual_time_ms=self._clock.virtual_time_ms,
-            state_hash=(self._compute_state_hash() if state_hash is None else state_hash),
+            state_hash=(
+                self._compute_state_hash() if state_hash is None else state_hash
+            ),
             data_epoch=self._data_epoch,
             data=data,
         )

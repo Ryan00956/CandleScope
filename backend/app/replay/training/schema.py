@@ -7,7 +7,7 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 17
+TRAINING_SCHEMA_VERSION = 18
 TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
@@ -2253,6 +2253,69 @@ CREATE TABLE IF NOT EXISTS replay_training_adl_counterparty_ledger (
 """
 
 
+TRAINING_SCHEMA_V18_HISTORICAL_L2_LIQUIDATION = """
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_book_snapshot (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    archive_id TEXT NOT NULL,
+    as_of_actual_time_ms INTEGER NOT NULL CHECK (as_of_actual_time_ms >= 0),
+    as_of_virtual_time_ms INTEGER NOT NULL CHECK (as_of_virtual_time_ms >= 0),
+    last_update_id INTEGER NOT NULL CHECK (last_update_id >= 0),
+    bids_json TEXT NOT NULL,
+    asks_json TEXT NOT NULL,
+    book_hash TEXT NOT NULL CHECK (
+        length(book_hash) = 71 AND book_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    execution_fidelity TEXT NOT NULL,
+    queue_exact INTEGER NOT NULL CHECK (queue_exact = 0),
+    snapshot_hash TEXT NOT NULL CHECK (
+        length(snapshot_hash) = 71 AND snapshot_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, track_id),
+    FOREIGN KEY (run_id, case_id)
+        REFERENCES replay_training_liquidation_case(run_id, case_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE RESTRICT,
+    FOREIGN KEY (archive_id)
+        REFERENCES replay_historical_book_archive(archive_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_book_execution (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL CHECK (step_sequence >= 1),
+    track_id TEXT NOT NULL,
+    archive_id TEXT NOT NULL,
+    as_of_virtual_time_ms INTEGER NOT NULL CHECK (as_of_virtual_time_ms >= 0),
+    last_update_id INTEGER NOT NULL CHECK (last_update_id >= 0),
+    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    requested_quantity TEXT NOT NULL,
+    visible_quantity TEXT NOT NULL,
+    levels_json TEXT NOT NULL,
+    book_hash TEXT NOT NULL CHECK (
+        length(book_hash) = 71 AND book_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    execution_fidelity TEXT NOT NULL,
+    queue_exact INTEGER NOT NULL CHECK (queue_exact = 0),
+    execution_plan_hash TEXT NOT NULL CHECK (
+        length(execution_plan_hash) = 71
+        AND execution_plan_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, step_sequence),
+    FOREIGN KEY (run_id, case_id, step_sequence)
+        REFERENCES replay_training_liquidation_step(run_id, case_id, step_sequence)
+        ON DELETE CASCADE,
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE RESTRICT,
+    FOREIGN KEY (archive_id)
+        REFERENCES replay_historical_book_archive(archive_id) ON DELETE RESTRICT
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -2409,6 +2472,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_V15_HEDGE_INPUTS,
         TRAINING_SCHEMA_V16_HEDGE_ACCOUNTING,
         TRAINING_SCHEMA_V17_HEDGE_LIQUIDATION,
+        TRAINING_SCHEMA_V18_HISTORICAL_L2_LIQUIDATION,
     ):
         _execute_script(connection, script)
     connection.execute(

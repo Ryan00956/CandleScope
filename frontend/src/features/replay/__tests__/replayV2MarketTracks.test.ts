@@ -371,10 +371,11 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
       ...contractPortfolio,
       position_mode: "HEDGE",
       hedge_inputs: {
-        schema_version: "replay.hedge-input-view.v1",
+        schema_version: "replay.hedge-input-view.v2",
         status: "ACTIVE",
         degraded_reason: null,
         input_proof_hash: hedgeProof,
+        time_domain: "ACTUAL",
         bound_range_start_ms: 1_710_000_000_000,
         bound_range_end_ms: 1_710_000_600_000,
         public: {
@@ -397,14 +398,14 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
           health: "READY",
         },
         projections: ["PUBLIC", "SIMULATION"].map((sourceKind, index) => ({
-          schema_version: "replay.hedge-input-projection.v1",
+          schema_version: "replay.hedge-input-public-projection.v1",
           source_kind: sourceKind,
           last_event_sequence: index + 1,
-          as_of_actual_time_ms: 1_710_000_000_000,
-          as_of_virtual_time_ms: 1_710_000_000_000,
-          state: {},
+          as_of_time_ms: 1_710_000_000_000,
+          time_domain: "ACTUAL",
+          state_hash: `sha256:${String(index + 2).repeat(64)}`,
           input_chain_hash: `sha256:${String(index + 1).repeat(64)}`,
-          component_hash: `sha256:${String(index + 3).repeat(64)}`,
+          source_component_hash: `sha256:${String(index + 3).repeat(64)}`,
         })),
         track_public: [{
           track_id: "track-1",
@@ -417,21 +418,22 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
           status: "ACTIVE",
           degraded_reason: null,
           projection: {
-            schema_version: "replay.hedge-track-public-projection.v1",
+            schema_version: "replay.hedge-track-public-projection.v2",
             run_id: "run-1",
             track_id: "track-1",
             last_event_sequence: 1,
-            as_of_actual_time_ms: 1_710_000_000_000,
-            as_of_virtual_time_ms: 1_710_000_000_000,
-            state: {},
+            as_of_time_ms: 1_710_000_000_000,
+            time_domain: "ACTUAL",
+            state_hash: `sha256:${"e".repeat(64)}`,
             input_chain_hash: `sha256:${"c".repeat(64)}`,
-            component_hash: `sha256:${"d".repeat(64)}`,
+            source_component_hash: `sha256:${"d".repeat(64)}`,
           },
         }],
         auditor: {
           status: "PASS",
           proof_hash: `sha256:${"a".repeat(64)}`,
-          differences: [],
+          difference_count: 0,
+          difference_hashes: [],
         },
       },
     },
@@ -444,6 +446,84 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
   assert.ok(parsedHedgeInputs);
   assert.equal(parsedHedgeInputs.input_proof_hash, hedgeProof);
   assert.equal(parsedHedgeInputs.track_public[0]?.track_id, "track-1");
+  const publicOrigin = 946_684_800_000;
+  const publicHedge = {
+    ...parsedHedgeInputs,
+    time_domain: "PUBLIC",
+    bound_range_start_ms: publicOrigin,
+    bound_range_end_ms: publicOrigin + 600_000,
+    projections: parsedHedgeInputs.projections.map((projection) => ({
+      ...projection,
+      time_domain: "PUBLIC",
+      as_of_time_ms: publicOrigin,
+    })),
+    track_public: parsedHedgeInputs.track_public.map((binding) => ({
+      ...binding,
+      projection: {
+        ...(binding.projection as Readonly<Record<string, unknown>>),
+        time_domain: "PUBLIC",
+        as_of_time_ms: publicOrigin,
+      },
+    })),
+  };
+  const parsedPublicHedge = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: publicHedge,
+    },
+  });
+  if (parsedPublicHedge.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("public-domain HEDGE portfolio did not survive parsing");
+  }
+  assert.equal(parsedPublicHedge.portfolio.hedge_inputs?.time_domain, "PUBLIC");
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        ...publicHedge,
+        projections: publicHedge.projections.map((projection, index) => (
+          index === 0
+            ? { ...projection, as_of_actual_time_ms: 1_710_000_000_000 }
+            : projection
+        )),
+      },
+    },
+  }), /unknown as_of_actual_time_ms/);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        ...publicHedge,
+        track_public: publicHedge.track_public.map((binding, index) => (
+          index === 0
+            ? {
+                ...binding,
+                projection: { ...binding.projection, state: { effective_time_ms: 1 } },
+              }
+            : binding
+        )),
+      },
+    },
+  }), /unknown state/);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        ...publicHedge,
+        projections: publicHedge.projections.map((projection, index) => (
+          index === 0 ? { ...projection, time_domain: "ACTUAL" } : projection
+        )),
+      },
+    },
+  }), /time_domain is inconsistent/);
   assert.throws(() => parseReplayMarketTracksResponse({
     ...payload,
     portfolio: {

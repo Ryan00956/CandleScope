@@ -27,6 +27,132 @@ from tests.test_replay_v2_training_phase6 import _risk_service, _sandbox_request
 pytestmark = pytest.mark.anyio
 
 
+@pytest.mark.parametrize(
+    ("time_disclosure_policy", "expected_time_domain"),
+    (("HIDE_ALL", "PUBLIC"), ("NONE", "ACTUAL")),
+)
+async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
+    tmp_path: Path,
+    time_disclosure_policy: str,
+    expected_time_domain: str,
+) -> None:
+    database = tmp_path / f"phase9-public-input-{time_disclosure_policy.lower()}.db"
+    service = await _risk_service(database)
+    try:
+        base = replace(
+            _sandbox_request(await _request(service)),
+            market_type="futures",
+            time_disclosure_policy=time_disclosure_policy,
+        )
+        request = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix=f"phase9-public-input-{time_disclosure_policy.lower()}",
+            mark_prices=["100"] * 13,
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        public_portfolio = (
+            await service.training.get_market_tracks(run_id)
+        )["portfolio"]
+        public_view = public_portfolio["hedge_inputs"]
+
+        def read_private(connection: sqlite3.Connection) -> tuple[dict[str, object], sqlite3.Row]:
+            private_view = service.training.store._hedge_input_projection(
+                connection,
+                run_id=run_id,
+            )
+            dataset = connection.execute(
+                """
+                SELECT actual_replay_start_ms, actual_replay_end_ms,
+                       synthetic_origin_ms
+                FROM replay_dataset_ref
+                WHERE session_id = (
+                    SELECT adapter_session_id FROM replay_training_run
+                    WHERE run_id = ?
+                )
+                """,
+                (run_id,),
+            ).fetchone()
+            assert private_view is not None and dataset is not None
+            return private_view, dataset
+
+        private_view, dataset = await service.training.store.base_store.run_extension_read(
+            read_private
+        )
+        assert private_view["schema_version"] == "replay.hedge-input-view.v1"
+        assert public_view["schema_version"] == "replay.hedge-input-view.v2"
+        assert public_view["time_domain"] == expected_time_domain
+        expected_origin = (
+            int(dataset["synthetic_origin_ms"])
+            if expected_time_domain == "PUBLIC"
+            else int(dataset["actual_replay_start_ms"])
+        )
+        assert public_view["bound_range_start_ms"] == expected_origin
+        assert public_view["bound_range_end_ms"] == (
+            expected_origin
+            + int(private_view["bound_range_end_ms"])
+            - int(private_view["bound_range_start_ms"])
+        )
+        for projection in [
+            *public_view["projections"],
+            *(item["projection"] for item in public_view["track_public"]),
+        ]:
+            assert projection["time_domain"] == expected_time_domain
+            assert (
+                public_view["bound_range_start_ms"]
+                <= projection["as_of_time_ms"]
+                <= public_view["bound_range_end_ms"]
+            )
+            assert "state" not in projection
+            assert "as_of_actual_time_ms" not in projection
+            assert "as_of_virtual_time_ms" not in projection
+            assert projection["state_hash"].startswith("sha256:")
+            assert projection["source_component_hash"].startswith("sha256:")
+        assert set(public_view["auditor"]) == {
+            "status",
+            "proof_hash",
+            "difference_count",
+            "difference_hashes",
+        }
+        if expected_time_domain == "PUBLIC":
+            encoded = json.dumps(public_view, separators=(",", ":"))
+            assert str(private_view["bound_range_start_ms"]) not in encoded
+            assert str(private_view["bound_range_end_ms"]) not in encoded
+            assert '"as_of_actual_time_ms"' not in encoded
+            assert '"state":' not in encoded
+            session_id = str(created["run"]["adapter_session_id"])
+            await _acquire(
+                service,
+                run_id=run_id,
+                selected_session_id=session_id,
+                command_id="phase9-public-input-reveal-acquire",
+            )
+            await _send(
+                service,
+                run_id=run_id,
+                session_id=session_id,
+                command_id="phase9-public-input-reveal",
+                command_type=ReplayV2CommandType.REVEAL_TIME,
+                payload={"reason": "verify irreversible public HEDGE time view"},
+            )
+            revealed_view = (
+                await service.training.get_market_tracks(run_id)
+            )["portfolio"]["hedge_inputs"]
+            assert revealed_view["time_domain"] == "ACTUAL"
+            assert revealed_view["bound_range_start_ms"] == int(
+                private_view["bound_range_start_ms"]
+            )
+            assert all(
+                item["time_domain"] == "ACTUAL"
+                for item in revealed_view["projections"]
+            )
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_same_symbol_hedge_legs_add_protect_partial_close_and_flatten(
     tmp_path: Path,
 ) -> None:

@@ -79,6 +79,7 @@ from .models import (
     HEDGE_INSURANCE_ADL_FIDELITY,
     REPLAY_V2_PROTOCOL,
     ReplayLaunchContext,
+    TimeDisclosurePolicy,
     TrainingRunCreateRequest,
     TrainingRunSetupRequest,
     VisibleHistoryMode,
@@ -12583,12 +12584,21 @@ class TrainingRunStore:
                 """
                 SELECT r.run_id, r.state AS run_state, r.initial_equity,
                        r.source_kind, r.book_mode,
+                       r.adapter_session_id AS primary_adapter_session_id,
+                       r.time_disclosure_policy AS run_time_disclosure_policy,
+                       COALESCE(integrity.revealed, 0) AS run_revealed,
+                       dataset.actual_replay_start_ms AS run_actual_start_ms,
+                       dataset.actual_replay_end_ms AS run_actual_end_ms,
+                       dataset.synthetic_origin_ms AS run_synthetic_origin_ms,
                        launch.context_json AS launch_context_json,
                        launch.context_hash AS launch_context_hash,
                        viewer.*
                 FROM replay_training_run AS r
                 JOIN replay_training_viewer_state AS viewer USING(run_id)
                 LEFT JOIN replay_training_launch_context AS launch USING(run_id)
+                LEFT JOIN replay_training_integrity AS integrity USING(run_id)
+                LEFT JOIN replay_dataset_ref AS dataset
+                  ON dataset.session_id = r.adapter_session_id
                 WHERE r.run_id = ?
                 """,
                 (run_id,),
@@ -12628,6 +12638,28 @@ class TrainingRunStore:
                 initial_equity=str(run["initial_equity"]),
                 tracks=track_payloads,
             )
+            if portfolio.get("hedge_inputs") is not None:
+                try:
+                    portfolio = self._public_contract_portfolio_projection(
+                        portfolio,
+                        time_disclosure_policy=str(
+                            run["run_time_disclosure_policy"]
+                        ),
+                        revealed=bool(run["run_revealed"]),
+                        actual_start_ms=int(run["run_actual_start_ms"]),
+                        actual_end_ms=int(run["run_actual_end_ms"]),
+                        synthetic_origin_ms=(
+                            None
+                            if run["run_synthetic_origin_ms"] is None
+                            else int(run["run_synthetic_origin_ms"])
+                        ),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "public HEDGE input projection is invalid",
+                        status_code=503,
+                    ) from exc
             launch_context = self._launch_context_projection(run)
             if launch_context is None and str(run["run_state"]) != "AWAITING_MARKET":
                 raise TrainingRunError(
@@ -16051,6 +16083,169 @@ class TrainingRunStore:
                 ),
             },
         }
+
+    @classmethod
+    def _public_contract_portfolio_projection(
+        cls,
+        portfolio: dict[str, object],
+        *,
+        time_disclosure_policy: str,
+        revealed: bool,
+        actual_start_ms: int,
+        actual_end_ms: int,
+        synthetic_origin_ms: int | None,
+    ) -> dict[str, object]:
+        """Replace the internal HEDGE input proof view with its public contract.
+
+        The v1 view is deliberately retained inside checkpoints and auditors because
+        its component hashes commit to exact exchange-input timestamps and states.
+        API consumers receive v2 instead: a single disclosed timeline, hashes of the
+        private states, and commitments back to the verified internal components.
+        """
+
+        raw = portfolio.get("hedge_inputs")
+        if raw is None:
+            return portfolio
+        if not isinstance(raw, Mapping):
+            raise TypeError("internal HEDGE input view is invalid")
+        if raw.get("schema_version") != "replay.hedge-input-view.v1":
+            raise TypeError("internal HEDGE input view schema is invalid")
+        try:
+            policy = TimeDisclosurePolicy(time_disclosure_policy)
+        except ValueError as exc:
+            raise TypeError("time disclosure policy is invalid") from exc
+        if actual_start_ms < 0 or actual_end_ms < actual_start_ms:
+            raise ValueError("HEDGE input time bounds are invalid")
+        binding_start_ms = int(raw["bound_range_start_ms"])
+        binding_end_ms = int(raw["bound_range_end_ms"])
+        # Dataset refs end at the final source-bar open.  HEDGE inputs are bound
+        # through that bar's close, so their proven upper bound may be later.
+        if binding_start_ms != actual_start_ms or binding_end_ms < actual_end_ms:
+            raise ValueError("HEDGE input and replay time bounds disagree")
+        actual_end_ms = binding_end_ms
+
+        configured_hidden = policy is not TimeDisclosurePolicy.NONE
+        hidden = configured_hidden and not revealed
+        actor_origin_ms = (
+            cls._required_synthetic_origin(synthetic_origin_ms)
+            if configured_hidden
+            else actual_start_ms
+        )
+        public_origin_ms = actual_start_ms if not hidden else actor_origin_ms
+        public_end_ms = public_origin_ms + actual_end_ms - actual_start_ms
+        time_domain = "PUBLIC" if hidden else "ACTUAL"
+
+        def public_time(actual_time_ms: object, virtual_time_ms: object) -> int:
+            actual = int(actual_time_ms)
+            virtual = int(virtual_time_ms)
+            if actual < actual_start_ms or actual > actual_end_ms:
+                raise ValueError("HEDGE input projection time is outside its binding")
+            actor_time = actor_origin_ms + actual - actual_start_ms
+            if virtual != actor_time:
+                raise ValueError("HEDGE input public timeline is inconsistent")
+            return actual if time_domain == "ACTUAL" else actor_time
+
+        raw_projections = raw.get("projections")
+        if not isinstance(raw_projections, list) or len(raw_projections) != 2:
+            raise TypeError("internal HEDGE input projections are invalid")
+        projections: list[dict[str, object]] = []
+        for item in raw_projections:
+            if not isinstance(item, Mapping):
+                raise TypeError("internal HEDGE input projection is invalid")
+            state = item.get("state")
+            if not isinstance(state, Mapping):
+                raise TypeError("internal HEDGE input state is invalid")
+            projections.append(
+                {
+                    "schema_version": "replay.hedge-input-public-projection.v1",
+                    "source_kind": str(item["source_kind"]),
+                    "last_event_sequence": int(item["last_event_sequence"]),
+                    "as_of_time_ms": public_time(
+                        item["as_of_actual_time_ms"],
+                        item["as_of_virtual_time_ms"],
+                    ),
+                    "time_domain": time_domain,
+                    "state_hash": canonical_sha256(state),
+                    "input_chain_hash": str(item["input_chain_hash"]),
+                    "source_component_hash": str(item["component_hash"]),
+                }
+            )
+
+        raw_track_public = raw.get("track_public")
+        if not isinstance(raw_track_public, list) or not raw_track_public:
+            raise TypeError("internal HEDGE track input projections are invalid")
+        track_public: list[dict[str, object]] = []
+        for item in raw_track_public:
+            if not isinstance(item, Mapping):
+                raise TypeError("internal HEDGE track input binding is invalid")
+            projection = item.get("projection")
+            if not isinstance(projection, Mapping):
+                raise TypeError("internal HEDGE track projection is invalid")
+            state = projection.get("state")
+            if not isinstance(state, Mapping):
+                raise TypeError("internal HEDGE track state is invalid")
+            track_public.append(
+                {
+                    "track_id": str(item["track_id"]),
+                    "archive_id": str(item["archive_id"]),
+                    "generation": int(item["generation"]),
+                    "dataset_epoch": str(item["dataset_epoch"]),
+                    "checksum_sha256": str(item["checksum_sha256"]),
+                    "event_chain_tail": str(item["event_chain_tail"]),
+                    "input_proof_hash": str(item["input_proof_hash"]),
+                    "status": str(item["status"]),
+                    "degraded_reason": item["degraded_reason"],
+                    "projection": {
+                        "schema_version": (
+                            "replay.hedge-track-public-projection.v2"
+                        ),
+                        "run_id": str(projection["run_id"]),
+                        "track_id": str(projection["track_id"]),
+                        "last_event_sequence": int(
+                            projection["last_event_sequence"]
+                        ),
+                        "as_of_time_ms": public_time(
+                            projection["as_of_actual_time_ms"],
+                            projection["as_of_virtual_time_ms"],
+                        ),
+                        "time_domain": time_domain,
+                        "state_hash": canonical_sha256(state),
+                        "input_chain_hash": str(projection["input_chain_hash"]),
+                        "source_component_hash": str(
+                            projection["component_hash"]
+                        ),
+                    },
+                }
+            )
+
+        raw_auditor = raw.get("auditor")
+        if not isinstance(raw_auditor, Mapping):
+            raise TypeError("internal HEDGE input auditor is invalid")
+        raw_differences = raw_auditor.get("differences")
+        if not isinstance(raw_differences, list):
+            raise TypeError("internal HEDGE input auditor differences are invalid")
+        public_view = {
+            "schema_version": "replay.hedge-input-view.v2",
+            "status": str(raw["status"]),
+            "degraded_reason": raw["degraded_reason"],
+            "input_proof_hash": str(raw["input_proof_hash"]),
+            "time_domain": time_domain,
+            "bound_range_start_ms": public_origin_ms,
+            "bound_range_end_ms": public_end_ms,
+            "public": raw["public"],
+            "simulation": raw["simulation"],
+            "projections": projections,
+            "track_public": track_public,
+            "auditor": {
+                "status": str(raw_auditor["status"]),
+                "proof_hash": raw_auditor["proof_hash"],
+                "difference_count": len(raw_differences),
+                "difference_hashes": [
+                    canonical_sha256(difference) for difference in raw_differences
+                ],
+            },
+        }
+        return {**portfolio, "hedge_inputs": public_view}
 
     @classmethod
     def _contract_portfolio_projection(

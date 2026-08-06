@@ -34,6 +34,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - soak 在浏览器内开双腿并验证切商品、切 1m/5m、刷新、强制断线重连前后的 server-authoritative portfolio hash 不变。
 - 新增 22 项 HEDGE 最低验收矩阵及校验器；release manifest v3 纳入逐轨 HEDGE benchmark、浏览器 exact binding 和账户连续性。
 
+### 2.4 盲测公开输入时间域
+
+- 真实浏览器 HIDE_ALL smoke 发现 `/tracks` 曾把 HEDGE 内部真实时间、模拟时间和含真实时间的原始 projection state 同时公开；严格前端解析器因此正确 fail closed。
+- 内部 `replay.hedge-input-view.v1` 保持不变，继续承载真实时间、原始 state、component hash 和 auditor/checkpoint 证明，避免破坏既有审计链。
+- API 边界改为 `replay.hedge-input-view.v2`：一次响应只能是 `PUBLIC` 或 `ACTUAL` 单一时间域；HIDE_ALL 等未揭示模式只返回 synthetic timeline，NONE 或已揭示模式才返回 actual timeline。
+- 公开 projection 删除 `as_of_actual_time_ms`、`as_of_virtual_time_ms` 和原始 `state`，仅返回 `as_of_time_ms`、`state_hash`、`input_chain_hash` 与 `source_component_hash`；auditor 原始 differences 同样改为计数和逐项哈希，防止错误详情夹带真实时间。
+- 后端同时验证 dataset origin、HEDGE binding range 与 actor virtual timeline 的偏移一致性；任一混合时间域、越界时间或缺失元数据均以 storage degraded fail closed。
+
 ## 3. 候选提交前验证
 
 ### 3.1 后端
@@ -49,6 +57,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - Node：`2936 passed, 0 failed`。
 - architecture、plugin architecture、typecheck、ESLint 和 production build：通过。
 - build 仅保留既有 chunk-size warning，不构成失败。
+
+### 3.3 盲测时间域修复增量验证
+
+- 后端 HEDGE 全部阶段用例：`86 passed`。
+- Phase 9 定向用例：`10 passed`，包含 HIDE_ALL/PUBLIC 与 NONE/ACTUAL 双矩阵，并验证公开 JSON 不包含内部真实时间字段或原始 state。
+- 前端 replay 集：`334 passed, 0 failed`；新增 PUBLIC/ACTUAL 正例以及实际时间字段、原始 state、混合时间域反例。
+- Ruff、TypeScript typecheck、ESLint 与 `git diff --check`：通过。
 
 ### 3.3 冻结性能门槛
 

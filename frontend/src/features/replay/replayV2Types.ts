@@ -1356,10 +1356,11 @@ export function parseReplayAccountHistoryRef(
 }
 
 export interface ReplayHedgeInputView {
-  readonly schema_version: "replay.hedge-input-view.v1";
+  readonly schema_version: "replay.hedge-input-view.v2";
   readonly status: "ACTIVE" | "PAUSED" | "QUARANTINED";
   readonly degraded_reason: string | null;
   readonly input_proof_hash: `sha256:${string}`;
+  readonly time_domain: "ACTUAL" | "PUBLIC";
   readonly bound_range_start_ms: number;
   readonly bound_range_end_ms: number;
   readonly public: Readonly<Record<string, ReplayV2Json>>;
@@ -1369,7 +1370,8 @@ export interface ReplayHedgeInputView {
   readonly auditor: {
     readonly status: "NOT_RUN" | "PASS" | "FAIL";
     readonly proof_hash: `sha256:${string}` | null;
-    readonly differences: readonly Readonly<Record<string, ReplayV2Json>>[];
+    readonly difference_count: number;
+    readonly difference_hashes: readonly `sha256:${string}`[];
   };
 }
 
@@ -1695,6 +1697,7 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
     "status",
     "degraded_reason",
     "input_proof_hash",
+    "time_domain",
     "bound_range_start_ms",
     "bound_range_end_ms",
     "public",
@@ -1703,9 +1706,14 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
     "track_public",
     "auditor",
   ]);
-  if (input.schema_version !== "replay.hedge-input-view.v1") {
+  if (input.schema_version !== "replay.hedge-input-view.v2") {
     throw new TypeError("portfolio.hedge_inputs schema is unsupported");
   }
+  const timeDomain = enumValue(
+    input.time_domain,
+    ["ACTUAL", "PUBLIC"] as const,
+    "portfolio.hedge_inputs.time_domain",
+  );
   const status = enumValue(
     input.status,
     ["ACTIVE", "PAUSED", "QUARANTINED"] as const,
@@ -1797,22 +1805,31 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
       "schema_version",
       "source_kind",
       "last_event_sequence",
-      "as_of_actual_time_ms",
-      "as_of_virtual_time_ms",
-      "state",
+      "as_of_time_ms",
+      "time_domain",
+      "state_hash",
       "input_chain_hash",
-      "component_hash",
+      "source_component_hash",
     ]);
-    if (projection.schema_version !== "replay.hedge-input-projection.v1") {
+    if (projection.schema_version !== "replay.hedge-input-public-projection.v1") {
       throw new TypeError(`${field}.schema_version is unsupported`);
     }
     enumValue(projection.source_kind, ["PUBLIC", "SIMULATION"] as const, `${field}.source_kind`);
     counter(projection.last_event_sequence, `${field}.last_event_sequence`);
-    timestamp(projection.as_of_actual_time_ms, `${field}.as_of_actual_time_ms`);
-    timestamp(projection.as_of_virtual_time_ms, `${field}.as_of_virtual_time_ms`);
-    jsonObject(projection.state, `${field}.state`);
+    const asOfTime = timestamp(projection.as_of_time_ms, `${field}.as_of_time_ms`);
+    if (asOfTime < rangeStart || asOfTime > rangeEnd) {
+      throw new TypeError(`${field}.as_of_time_ms is outside the bound range`);
+    }
+    if (enumValue(
+      projection.time_domain,
+      ["ACTUAL", "PUBLIC"] as const,
+      `${field}.time_domain`,
+    ) !== timeDomain) {
+      throw new TypeError(`${field}.time_domain is inconsistent`);
+    }
+    digest(projection.state_hash, `${field}.state_hash`);
     digest(projection.input_chain_hash, `${field}.input_chain_hash`);
-    digest(projection.component_hash, `${field}.component_hash`);
+    digest(projection.source_component_hash, `${field}.source_component_hash`);
     return jsonObject(projection, field);
   });
   const sourceKinds = projections.map((projection) => projection.source_kind);
@@ -1866,13 +1883,13 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
       "run_id",
       "track_id",
       "last_event_sequence",
-      "as_of_actual_time_ms",
-      "as_of_virtual_time_ms",
-      "state",
+      "as_of_time_ms",
+      "time_domain",
+      "state_hash",
       "input_chain_hash",
-      "component_hash",
+      "source_component_hash",
     ]);
-    if (projection.schema_version !== "replay.hedge-track-public-projection.v1") {
+    if (projection.schema_version !== "replay.hedge-track-public-projection.v2") {
       throw new TypeError(`${field}.projection.schema_version is unsupported`);
     }
     identifier(projection.run_id, `${field}.projection.run_id`);
@@ -1880,17 +1897,26 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
       throw new TypeError(`${field}.projection track identity is inconsistent`);
     }
     counter(projection.last_event_sequence, `${field}.projection.last_event_sequence`);
-    timestamp(projection.as_of_actual_time_ms, `${field}.projection.as_of_actual_time_ms`);
-    const projectionVirtualTime = timestamp(
-      projection.as_of_virtual_time_ms,
-      `${field}.projection.as_of_virtual_time_ms`,
+    const projectionTime = timestamp(
+      projection.as_of_time_ms,
+      `${field}.projection.as_of_time_ms`,
     );
-    if (projectionVirtualTime < rangeStart || projectionVirtualTime > rangeEnd) {
-      throw new TypeError(`${field}.projection virtual time is outside the bound range`);
+    if (projectionTime < rangeStart || projectionTime > rangeEnd) {
+      throw new TypeError(`${field}.projection time is outside the bound range`);
     }
-    jsonObject(projection.state, `${field}.projection.state`);
+    if (enumValue(
+      projection.time_domain,
+      ["ACTUAL", "PUBLIC"] as const,
+      `${field}.projection.time_domain`,
+    ) !== timeDomain) {
+      throw new TypeError(`${field}.projection time domain is inconsistent`);
+    }
+    digest(projection.state_hash, `${field}.projection.state_hash`);
     digest(projection.input_chain_hash, `${field}.projection.input_chain_hash`);
-    digest(projection.component_hash, `${field}.projection.component_hash`);
+    digest(
+      projection.source_component_hash,
+      `${field}.projection.source_component_hash`,
+    );
     return jsonObject(binding, field);
   });
   const trackIds = trackPublic.map((binding) => String(binding.track_id));
@@ -1903,7 +1929,8 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
   const rawAuditor = exactObject(input.auditor, "portfolio.hedge_inputs.auditor", [
     "status",
     "proof_hash",
-    "differences",
+    "difference_count",
+    "difference_hashes",
   ]);
   const auditorStatus = enumValue(
     rawAuditor.status,
@@ -1916,18 +1943,30 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
   if (
     (auditorStatus === "NOT_RUN" && auditorProof !== null)
     || (auditorStatus !== "NOT_RUN" && auditorProof === null)
-    || !Array.isArray(rawAuditor.differences)
+    || !Array.isArray(rawAuditor.difference_hashes)
   ) {
     throw new TypeError("portfolio.hedge_inputs auditor is inconsistent");
   }
+  const differenceCount = counter(
+    rawAuditor.difference_count,
+    "portfolio.hedge_inputs.auditor.difference_count",
+  );
+  const differenceHashes = rawAuditor.difference_hashes.map((item, index) => digest(
+    item,
+    `portfolio.hedge_inputs.auditor.difference_hashes[${index}]`,
+  ));
+  if (differenceHashes.length !== differenceCount) {
+    throw new TypeError("portfolio.hedge_inputs auditor difference count is inconsistent");
+  }
   return {
-    schema_version: "replay.hedge-input-view.v1",
+    schema_version: "replay.hedge-input-view.v2",
     status,
     degraded_reason: input.degraded_reason as string | null,
     input_proof_hash: digest(
       input.input_proof_hash,
       "portfolio.hedge_inputs.input_proof_hash",
     ),
+    time_domain: timeDomain,
     bound_range_start_ms: rangeStart,
     bound_range_end_ms: rangeEnd,
     public: parseObjectReceipt(input.public, "public"),
@@ -1937,10 +1976,8 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
     auditor: {
       status: auditorStatus,
       proof_hash: auditorProof,
-      differences: rawAuditor.differences.map((item, index) => jsonObject(
-        item,
-        `portfolio.hedge_inputs.auditor.differences[${index}]`,
-      )),
+      difference_count: differenceCount,
+      difference_hashes: differenceHashes,
     },
   };
 }

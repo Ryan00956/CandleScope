@@ -796,7 +796,32 @@ class TrainingRunService:
             **account_audit,
             "status": combined_status,
             "account_audit_status": account_status,
-            "hedge_input_audit": hedge_input_audit,
+            "hedge_input_audit": self._public_hedge_input_audit(
+                hedge_input_audit
+            ),
+        }
+
+    @staticmethod
+    def _public_hedge_input_audit(
+        audit: Mapping[str, object],
+    ) -> dict[str, object]:
+        differences = audit.get("differences")
+        if not isinstance(differences, list):
+            raise TypeError("internal HEDGE input audit differences are invalid")
+        snapshot = audit.get("snapshot")
+        if snapshot is not None and not isinstance(snapshot, Mapping):
+            raise TypeError("internal HEDGE input audit snapshot is invalid")
+        return {
+            "schema_version": "replay.hedge-input-audit-summary.v1",
+            "status": str(audit.get("status")),
+            "proof_hash": audit.get("proof_hash"),
+            "difference_count": len(differences),
+            "difference_hashes": [
+                canonical_sha256(difference) for difference in differences
+            ],
+            "snapshot_hash": (
+                None if snapshot is None else canonical_sha256(snapshot)
+            ),
         }
 
     async def list_data_segments(
@@ -2403,7 +2428,7 @@ class TrainingRunService:
                         details={
                             "fallback_applied": False,
                             "differences": (
-                                hedge_audit.get("differences", [])
+                                hedge_audit.get("difference_hashes", [])
                                 if isinstance(hedge_audit, Mapping)
                                 else []
                             ),

@@ -117,6 +117,22 @@ async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
             "difference_count",
             "difference_hashes",
         }
+        account_audit = await service.training.audit_account(run_id)
+        hedge_audit = account_audit["hedge_input_audit"]
+        assert hedge_audit == {
+            "schema_version": "replay.hedge-input-audit-summary.v1",
+            "status": "PASS",
+            "proof_hash": hedge_audit["proof_hash"],
+            "difference_count": 0,
+            "difference_hashes": [],
+            "snapshot_hash": hedge_audit["snapshot_hash"],
+        }
+        assert str(hedge_audit["proof_hash"]).startswith("sha256:")
+        assert str(hedge_audit["snapshot_hash"]).startswith("sha256:")
+        encoded_audit = json.dumps(account_audit, separators=(",", ":"))
+        assert '"as_of_actual_time_ms"' not in encoded_audit
+        assert '"as_of_virtual_time_ms"' not in encoded_audit
+        assert '"snapshot":{"schema_version":"replay.hedge-input-audit.v1"' not in encoded_audit
         if expected_time_domain == "PUBLIC":
             encoded = json.dumps(public_view, separators=(",", ":"))
             assert str(private_view["bound_range_start_ms"]) not in encoded

@@ -306,12 +306,21 @@ function accountAuditRaw() {
   return {
     schema_version: "replay.account-audit.v1",
     status: "PASS",
+    account_audit_status: "PASS",
     proof_hash: replayDigest("2"),
     differences: [],
     snapshot: {
       schema_version: "replay.account-audit.v1",
       run_id: "run-16",
       account_data_mode: "HISTORICAL_EXACT",
+    },
+    hedge_input_audit: {
+      schema_version: "replay.hedge-input-audit-summary.v1",
+      status: "NOT_APPLICABLE",
+      proof_hash: null,
+      difference_count: 0,
+      difference_hashes: [],
+      snapshot_hash: null,
     },
   };
 }
@@ -414,6 +423,29 @@ test("Phase 16 account audit API is run-scoped, POST-only, and strictly parsed",
     ...accountAuditRaw(),
     status: "FAIL",
   }), /inconsistent/);
+  assert.throws(() => parseReplayAccountAuditResponse({
+    ...accountAuditRaw(),
+    hedge_input_audit: {
+      schema_version: "replay.hedge-input-audit.v1",
+      status: "PASS",
+      proof_hash: replayDigest("8"),
+      differences: [],
+      snapshot: { as_of_actual_time_ms: 1_700_000_000_000 },
+    },
+  }), /missing|unknown|unsupported/);
+  const hedgeAudit = parseReplayAccountAuditResponse({
+    ...accountAuditRaw(),
+    hedge_input_audit: {
+      schema_version: "replay.hedge-input-audit-summary.v1",
+      status: "PASS",
+      proof_hash: replayDigest("8"),
+      difference_count: 0,
+      difference_hashes: [],
+      snapshot_hash: replayDigest("9"),
+    },
+  });
+  assert.equal(hedgeAudit.hedge_input_audit.status, "PASS");
+  assert.equal(hedgeAudit.hedge_input_audit.snapshot_hash, replayDigest("9"));
 });
 
 test("Phase 16 report and CSV retain archive/auditor proof and both liquidation domains", () => {

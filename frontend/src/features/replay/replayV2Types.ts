@@ -312,9 +312,18 @@ export interface ReplayAccountHistoryProjection {
 export interface ReplayAccountAuditResponse {
   readonly schema_version: "replay.account-audit.v1";
   readonly status: "PASS" | "FAIL";
+  readonly account_audit_status: "PASS" | "FAIL";
   readonly proof_hash: `sha256:${string}`;
   readonly differences: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly snapshot: Readonly<Record<string, ReplayV2Json>>;
+  readonly hedge_input_audit: {
+    readonly schema_version: "replay.hedge-input-audit-summary.v1";
+    readonly status: "NOT_APPLICABLE" | "PASS" | "FAIL";
+    readonly proof_hash: `sha256:${string}` | null;
+    readonly difference_count: number;
+    readonly difference_hashes: readonly `sha256:${string}`[];
+    readonly snapshot_hash: `sha256:${string}` | null;
+  };
 }
 
 export interface ReplayLiquidationChannelProjection {
@@ -1468,14 +1477,21 @@ export function parseReplayAccountAuditResponse(
   const audit = exactObject(value, "account audit", [
     "schema_version",
     "status",
+    "account_audit_status",
     "proof_hash",
     "differences",
     "snapshot",
+    "hedge_input_audit",
   ]);
   if (audit.schema_version !== "replay.account-audit.v1") {
     throw new TypeError("account audit schema is unsupported");
   }
   const status = enumValue(audit.status, enumValues("PASS", "FAIL"), "account audit.status");
+  const accountAuditStatus = enumValue(
+    audit.account_audit_status,
+    enumValues("PASS", "FAIL"),
+    "account audit.account_audit_status",
+  );
   if (!Array.isArray(audit.differences)) {
     throw new TypeError("account audit.differences must be an array");
   }
@@ -1484,17 +1500,72 @@ export function parseReplayAccountAuditResponse(
     `account audit.differences[${index}]`,
   ));
   const snapshot = jsonObject(audit.snapshot, "account audit.snapshot");
+  const rawHedgeAudit = exactObject(
+    audit.hedge_input_audit,
+    "account audit.hedge_input_audit",
+    [
+      "schema_version",
+      "status",
+      "proof_hash",
+      "difference_count",
+      "difference_hashes",
+      "snapshot_hash",
+    ],
+  );
+  if (rawHedgeAudit.schema_version !== "replay.hedge-input-audit-summary.v1") {
+    throw new TypeError("HEDGE input audit summary schema is unsupported");
+  }
+  const hedgeStatus = enumValue(
+    rawHedgeAudit.status,
+    enumValues("NOT_APPLICABLE", "PASS", "FAIL"),
+    "account audit.hedge_input_audit.status",
+  );
+  const hedgeProofHash = rawHedgeAudit.proof_hash === null
+    ? null
+    : digest(rawHedgeAudit.proof_hash, "account audit.hedge_input_audit.proof_hash");
+  const hedgeDifferenceCount = counter(
+    rawHedgeAudit.difference_count,
+    "account audit.hedge_input_audit.difference_count",
+  );
+  if (!Array.isArray(rawHedgeAudit.difference_hashes)) {
+    throw new TypeError("account audit.hedge_input_audit.difference_hashes must be an array");
+  }
+  const hedgeDifferenceHashes = rawHedgeAudit.difference_hashes.map((item, index) => digest(
+    item,
+    `account audit.hedge_input_audit.difference_hashes[${index}]`,
+  ));
+  const hedgeSnapshotHash = rawHedgeAudit.snapshot_hash === null
+    ? null
+    : digest(rawHedgeAudit.snapshot_hash, "account audit.hedge_input_audit.snapshot_hash");
   if (snapshot.schema_version !== "replay.account-audit.v1"
-    || (status === "PASS" && differences.length !== 0)
-    || (status === "FAIL" && differences.length === 0)) {
+    || (accountAuditStatus === "PASS" && differences.length !== 0)
+    || (accountAuditStatus === "FAIL" && differences.length === 0)
+    || hedgeDifferenceCount !== hedgeDifferenceHashes.length
+    || (hedgeStatus !== "FAIL" && hedgeDifferenceCount !== 0)
+    || (hedgeStatus === "FAIL" && hedgeDifferenceCount === 0)
+    || (hedgeStatus === "NOT_APPLICABLE"
+      ? hedgeProofHash !== null || hedgeSnapshotHash !== null
+      : hedgeProofHash === null || hedgeSnapshotHash === null)
+    || status !== (
+      accountAuditStatus === "PASS" && hedgeStatus !== "FAIL" ? "PASS" : "FAIL"
+    )) {
     throw new TypeError("account audit proof is inconsistent");
   }
   return {
     schema_version: "replay.account-audit.v1",
     status,
+    account_audit_status: accountAuditStatus,
     proof_hash: digest(audit.proof_hash, "account audit.proof_hash"),
     differences,
     snapshot,
+    hedge_input_audit: {
+      schema_version: "replay.hedge-input-audit-summary.v1",
+      status: hedgeStatus,
+      proof_hash: hedgeProofHash,
+      difference_count: hedgeDifferenceCount,
+      difference_hashes: hedgeDifferenceHashes,
+      snapshot_hash: hedgeSnapshotHash,
+    },
   };
 }
 

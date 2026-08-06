@@ -55,6 +55,7 @@ function persistenceLabel(mode: ChartWorkspacePersistenceMode | null): string {
   if (mode === "indexeddb") return "本地数据库自动保存";
   if (mode === "local-storage") return "本地兼容存储自动保存";
   if (mode === "memory") return "仅本次会话";
+  if (mode === "workspace-bus") return "WorkspaceBus 单写入者";
   return "本地自动保存";
 }
 

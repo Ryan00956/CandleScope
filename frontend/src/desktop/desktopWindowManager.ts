@@ -4,6 +4,7 @@ import type {
   ChartWorkspaceDocument,
   ChartWorkspaceId,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
+import type { KlineBar } from "../features/market-data/marketDataTypes.js";
 
 export interface DesktopBootstrap {
   mode: "web" | "native";
@@ -60,6 +61,19 @@ interface NativeDesktopBridge {
   onLifecycle(listener: (event: DesktopWindowLifecycleEvent) => void): () => void;
   onCloseRequested(listener: (event: { windowId: ChartWindowId }) => void): () => void;
   onPlacement(listener: (event: DesktopWindowPlacement & { windowId: ChartWindowId }) => void): () => void;
+  workspaceBusConnect(payload: unknown): Promise<unknown>;
+  workspaceBusCommit(payload: unknown): Promise<unknown>;
+  workspaceBusPublishLink(payload: unknown): Promise<unknown>;
+  workspaceBusReportWindow(payload: unknown): void;
+  onWorkspaceBusEvent(listener: (event: unknown) => void): () => void;
+  acquireAppWork(payload: unknown): Promise<unknown>;
+  releaseAppWork(leaseId: string): void;
+  requestAppPreview(payload: unknown): Promise<unknown>;
+  releaseAppPreview(payload: unknown): void;
+  getAppBudgetDiagnostics(): Promise<unknown>;
+  readSeriesSnapshot(key: string): unknown;
+  publishSeriesSnapshot(payload: { key: string; rows: readonly KlineBar[] }): void;
+  getSeriesSnapshotDiagnostics(): Promise<unknown>;
 }
 
 declare global {
@@ -163,6 +177,21 @@ export class DesktopWindowManager {
     listener: (event: DesktopWindowPlacement & { windowId: ChartWindowId }) => void,
   ): () => void {
     return globalThis.window?.candlescopeDesktop?.onPlacement(listener) || (() => undefined);
+  }
+
+  readSeriesSnapshot(key: string): KlineBar[] {
+    const result = globalThis.window?.candlescopeDesktop?.readSeriesSnapshot(key) as {
+      ok?: boolean;
+      hit?: boolean;
+      rows?: KlineBar[];
+    } | undefined;
+    return result?.ok === true && result.hit === true && Array.isArray(result.rows)
+      ? result.rows
+      : [];
+  }
+
+  publishSeriesSnapshot(key: string, rows: readonly KlineBar[]): void {
+    globalThis.window?.candlescopeDesktop?.publishSeriesSnapshot({ key, rows });
   }
 }
 

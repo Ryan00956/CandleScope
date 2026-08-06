@@ -7,12 +7,14 @@ import {
 } from "../chartLinkCoordinator.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
 import { chartWorkspaceCell } from "../chartWorkspaceDocument.js";
+import type { WorkspaceBusClient, WorkspaceBusLinkEvent } from "../workspaceBus.js";
 
 function recordingSurface() {
   const crosshair: Array<number | null> = [];
   const anchors: number[] = [];
   const ranges: Array<{ from: number; to: number }> = [];
   const readyListeners = new Set<(generation: number) => void>();
+  const drawingRevisions: Array<{ scopeKey: string; revision: number }> = [];
   let readyGeneration = 0;
   const surface: ChartLinkSurface = {
     setLinkedCrosshairTime: (time) => {
@@ -31,12 +33,17 @@ function recordingSurface() {
       readyListeners.add(listener);
       return () => { readyListeners.delete(listener); };
     },
+    setLinkedDrawingRevision: (scopeKey, revision) => {
+      drawingRevisions.push({ scopeKey, revision });
+      return true;
+    },
   };
   return {
     surface,
     crosshair,
     anchors,
     ranges,
+    drawingRevisions,
     signalReady: () => {
       readyGeneration += 1;
       for (const listener of [...readyListeners]) listener(readyGeneration);
@@ -67,6 +74,51 @@ test("crosshair and time ranges fan out only to registered cells in the same ena
   assert.deepEqual(cell2.ranges, [{ from: 100, to: 200 }]);
   assert.deepEqual(cell3.ranges, [{ from: 100, to: 200 }]);
   assert.deepEqual(cell4.ranges, []);
+});
+
+test("WorkspaceBus preserves cross-window link roles and suppresses event loops", () => {
+  const document = createDefaultChartWorkspace();
+  document.linkGroups.A.timeAnchor = true;
+  document.linkGroups.A.drawings = true;
+  chartWorkspaceCell(document, "cell-1").linkRole = "source";
+  chartWorkspaceCell(document, "cell-2").linkRole = "destination";
+  const published: unknown[] = [];
+  const remoteListeners = new Set<(event: WorkspaceBusLinkEvent) => void>();
+  const bus = {
+    windowId: "window-2",
+    publishLink: (event: unknown) => { published.push(event); },
+    subscribeLink: (listener: (event: WorkspaceBusLinkEvent) => void) => {
+      remoteListeners.add(listener);
+      return () => { remoteListeners.delete(listener); };
+    },
+  } as unknown as WorkspaceBusClient;
+  const coordinator = new ChartLinkCoordinator(document, "workspace-shared");
+  const target = recordingSurface();
+  coordinator.register("cell-2", target.surface, "workspace-shared");
+  const disconnect = coordinator.connectWorkspaceBus(bus);
+
+  for (const listener of remoteListeners) listener({
+    eventId: "link-1",
+    workspaceId: "workspace-shared",
+    sourceWindowId: "main-window",
+    sourceCellId: "cell-1",
+    kind: "crosshair",
+    payload: { time: 123 },
+  });
+  for (const listener of remoteListeners) listener({
+    eventId: "link-2",
+    workspaceId: "workspace-shared",
+    sourceWindowId: "main-window",
+    sourceCellId: "cell-1",
+    kind: "drawings",
+    payload: { scopeKey: "shared-layer", revision: 9 },
+  });
+  coordinator.publishTimeAnchor("cell-2", 456);
+
+  assert.deepEqual(target.crosshair, [123]);
+  assert.deepEqual(target.drawingRevisions, [{ scopeKey: "shared-layer", revision: 9 }]);
+  assert.deepEqual(published, [], "destination role cannot publish and remote events cannot echo");
+  disconnect();
 });
 
 test("direction roles route viewport events only from publishers to receivers", () => {

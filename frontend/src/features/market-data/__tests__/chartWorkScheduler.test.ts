@@ -200,3 +200,27 @@ test("dispose rejects queued work and clears frame/tier state", async () => {
     windowVisible: true,
   });
 });
+
+test("async lanes hold and always release an app-level window budget lease", async () => {
+  const actions: string[] = [];
+  const scheduler = new ChartWorkScheduler({
+    appBudget: {
+      acquire: async (cellId, lane) => {
+        actions.push(`acquire:${cellId}:${lane}`);
+        return "lease-1";
+      },
+      release: (lease) => { actions.push(`release:${lease}`); },
+    },
+  });
+  const result = await scheduler.run("cell-a", "initial-history", () => {
+    actions.push("work");
+    return 42;
+  });
+  await turn();
+  assert.equal(result, 42);
+  assert.deepEqual(actions, [
+    "acquire:cell-a:initial-history",
+    "work",
+    "release:lease-1",
+  ]);
+});

@@ -27,6 +27,8 @@ export interface ChartSurfaceHandle {
   setLinkedVisibleTimeAnchor(time: number): boolean;
   setLinkedVisibleTimeRange(range: ChartSurfaceLinkedTimeRange): boolean;
   subscribeLinkedViewportReady(listener: (generation: number) => void): () => void;
+  subscribeDrawingRevision(listener: (scopeKey: string, revision: number) => void): () => void;
+  setLinkedDrawingRevision(scopeKey: string, revision: number): boolean;
   captureViewportTransfer(): SurfaceViewportSnapshot | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
@@ -56,6 +58,14 @@ export function useChartSurfaceRuntime() {
 
   const subscribeLinkedViewportReady = useCallback((listener: (generation: number) => void) => (
     callChartSurface(ref, "subscribeLinkedViewportReady", () => {}, listener)
+  ), []);
+
+  const subscribeDrawingRevision = useCallback((listener: (scopeKey: string, revision: number) => void) => (
+    callChartSurface(ref, "subscribeDrawingRevision", () => {}, listener)
+  ), []);
+
+  const setLinkedDrawingRevision = useCallback((scopeKey: string, revision: number) => (
+    callChartSurface(ref, "setLinkedDrawingRevision", false, scopeKey, revision)
   ), []);
 
   const captureViewportTransfer = useCallback(() => (
@@ -93,6 +103,8 @@ export function useChartSurfaceRuntime() {
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -108,6 +120,8 @@ export function useChartSurfaceRuntime() {
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     prepareExport,
     setDrawingsHidden,
     updateSelectedDrawingStyle,

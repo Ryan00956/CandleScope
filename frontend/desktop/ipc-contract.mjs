@@ -4,6 +4,19 @@ export const DESKTOP_IPC = Object.freeze({
   lifecycle: "candlescope:desktop:lifecycle",
   closeRequested: "candlescope:desktop:close-requested",
   placement: "candlescope:desktop:placement",
+  workspaceBusEvent: "candlescope:workspace-bus:event",
+  workspaceBusConnect: "candlescope:workspace-bus:connect",
+  workspaceBusCommit: "candlescope:workspace-bus:commit",
+  workspaceBusLink: "candlescope:workspace-bus:link",
+  workspaceBusWindow: "candlescope:workspace-bus:window",
+  appWorkAcquire: "candlescope:app-work:acquire",
+  appWorkRelease: "candlescope:app-work:release",
+  appPreviewRequest: "candlescope:app-preview:request",
+  appPreviewRelease: "candlescope:app-preview:release",
+  appBudgetDiagnostics: "candlescope:app-budget:diagnostics",
+  seriesSnapshotRead: "candlescope:series-snapshot:read",
+  seriesSnapshotPublish: "candlescope:series-snapshot:publish",
+  seriesSnapshotDiagnostics: "candlescope:series-snapshot:diagnostics",
 });
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;

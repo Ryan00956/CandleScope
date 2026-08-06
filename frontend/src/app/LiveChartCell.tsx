@@ -219,6 +219,12 @@ function LiveChartCell({
     () => linkCoordinator.register(cell.id, chartSurface.actions, workspaceId),
     [cell.id, chartSurface.actions, linkCoordinator, workspaceId],
   );
+  useEffect(
+    () => chartSurface.actions.subscribeDrawingRevision((scopeKey, revision) => {
+      linkCoordinator.publishDrawingRevision(cell.id, scopeKey, revision);
+    }),
+    [cell.id, chartSurface.actions, linkCoordinator],
+  );
   const plugins = usePluginPlatformRuntime({
     exchange: chartSession.view.exchange,
     marketType: chartSession.view.marketType,

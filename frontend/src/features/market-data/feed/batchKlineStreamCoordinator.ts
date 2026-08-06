@@ -21,6 +21,8 @@ interface LogicalBatchSubscription {
   options: KlineStreamOptions;
   controller: KlineStreamController;
   closed: boolean;
+  serverState: "absent" | "subscribing" | "subscribed";
+  activeIntervals: IntervalString[];
 }
 
 export interface BatchKlineStreamCoordinatorOptions {
@@ -70,6 +72,8 @@ export class BatchKlineStreamCoordinator {
       options,
       controller: null as unknown as KlineStreamController,
       closed: false,
+      serverState: "absent" as const,
+      activeIntervals: [],
     };
     subscription.controller = {
       readyState: () => this.socket?.readyState,
@@ -79,13 +83,20 @@ export class BatchKlineStreamCoordinator {
       updateIntervals: (intervals) => {
         if (subscription.closed) return;
         subscription.intervals = canonicalIntervals(intervals);
-        this.sendCommand("update", [subscription]);
+        if (subscription.intervals.length === 0) return;
+        if (subscription.serverState === "absent") {
+          this.sendCommand("subscribe", [subscription]);
+        } else if (subscription.serverState === "subscribed") {
+          this.sendCommand("update", [subscription]);
+        }
       },
       close: () => this.closeSubscription(subscription),
     };
     this.subscriptions.set(clientId, subscription);
     this.ensureSocket();
-    if (this.isOpen()) this.sendCommand("subscribe", [subscription]);
+    if (this.isOpen() && subscription.intervals.length > 0) {
+      this.sendCommand("subscribe", [subscription]);
+    }
     return subscription.controller;
   };
 
@@ -120,7 +131,9 @@ export class BatchKlineStreamCoordinator {
     const socket = this.socketFactory(this.url);
     this.socket = socket;
     socket.onopen = () => {
-      const active = [...this.subscriptions.values()].filter((item) => !item.closed);
+      const active = [...this.subscriptions.values()].filter((item) => (
+        !item.closed && item.intervals.length > 0
+      ));
       active.forEach((item) => item.options.onOpen?.(item.controller));
       this.sendCommand("subscribe", active);
     };
@@ -130,7 +143,11 @@ export class BatchKlineStreamCoordinator {
     };
     socket.onclose = (event) => {
       if (this.socket === socket) this.socket = null;
-      this.subscriptions.forEach((item) => item.options.onClose?.(event, item.controller));
+      this.subscriptions.forEach((item) => {
+        item.serverState = "absent";
+        item.activeIntervals = [];
+        item.options.onClose?.(event, item.controller);
+      });
     };
   }
 
@@ -150,7 +167,10 @@ export class BatchKlineStreamCoordinator {
     subscriptions: LogicalBatchSubscription[],
   ): void {
     if (!this.isOpen() || subscriptions.length === 0) return;
-    this.sendRaw(JSON.stringify({
+    if (action === "subscribe") {
+      subscriptions.forEach((item) => { item.serverState = "subscribing"; });
+    }
+    const sent = this.sendRaw(JSON.stringify({
       action,
       request_id: `kline-batch-${++this.requestSequence}`,
       items: subscriptions.map((item) => ({
@@ -161,6 +181,9 @@ export class BatchKlineStreamCoordinator {
         intervals: item.intervals,
       })),
     }));
+    if (!sent && action === "subscribe") {
+      subscriptions.forEach((item) => { item.serverState = "absent"; });
+    }
   }
 
   private closeSubscription(subscription: LogicalBatchSubscription): void {
@@ -232,6 +255,18 @@ export class BatchKlineStreamCoordinator {
     )
       ? "error"
       : action === "unsubscribe" ? "unsubscribed" : "subscribed";
+    if (action === "subscribe") {
+      subscription.serverState = type === "error" || active.length === 0
+        ? "absent"
+        : "subscribed";
+      subscription.activeIntervals = active;
+    } else if (action === "update" && type !== "error") {
+      subscription.serverState = "subscribed";
+      subscription.activeIntervals = active;
+    } else if (action === "unsubscribe") {
+      subscription.serverState = "absent";
+      subscription.activeIntervals = [];
+    }
     const message: KlineStreamControlMessage = {
       ...record,
       type,
@@ -247,5 +282,10 @@ export class BatchKlineStreamCoordinator {
         .filter((failure) => Boolean(failure.interval)),
     };
     subscription.options.onControlMessage?.(message, subscription.controller);
+    if (action === "subscribe"
+      && subscription.serverState === "subscribed"
+      && JSON.stringify(subscription.activeIntervals) !== JSON.stringify(subscription.intervals)) {
+      this.sendCommand("update", [subscription]);
+    }
   }
 }

@@ -22,6 +22,8 @@ import {
   type MarketDataWorkspaceResources,
 } from "./marketDataWorkspaceContext.js";
 import { desktopWindowManager } from "../../desktop/desktopWindowManager.js";
+import { CHART_WORKSPACE_FEATURE_FLAGS } from "../chart-workspace/chartWorkspaceCapacity.js";
+import { defaultWorkspaceBus } from "../chart-workspace/workspaceBus.js";
 
 export interface MarketDataWorkspaceProviderProps extends PropsWithChildren {
   brokerEnabled?: boolean;
@@ -38,6 +40,9 @@ export function MarketDataWorkspaceProvider({
   children,
 }: MarketDataWorkspaceProviderProps) {
   const [resources] = useState<MarketDataWorkspaceResources>(() => {
+    const workspaceBus = CHART_WORKSPACE_FEATURE_FLAGS.multiChart64Enabled
+      ? defaultWorkspaceBus(desktopWindowManager.windowId)
+      : null;
     const requestCoordinator = brokerEnabled
       ? new SharedKlineRequestCoordinator(defaultKlineApi)
       : null;
@@ -55,8 +60,23 @@ export function MarketDataWorkspaceProvider({
       streamCoordinator: batchStreamEnabled
         ? new BatchKlineStreamCoordinator()
         : new SharedKlineStreamCoordinator(defaultKlineApi),
-      workScheduler: brokerEnabled ? new ChartWorkScheduler() : null,
-      windowRegistry: new SeriesWindowRegistry({ maxBars: MAX_SERIES_BARS }),
+      workScheduler: brokerEnabled ? new ChartWorkScheduler({
+        appBudget: workspaceBus?.isNative()
+          ? {
+              acquire: (cellId, lane) => workspaceBus.acquireWork(cellId, lane),
+              release: (lease) => workspaceBus.releaseWork(lease as Awaited<ReturnType<typeof workspaceBus.acquireWork>>),
+            }
+          : null,
+      }) : null,
+      windowRegistry: new SeriesWindowRegistry({
+        maxBars: MAX_SERIES_BARS,
+        sharedSnapshot: workspaceBus?.isNative()
+          ? {
+              read: (key) => desktopWindowManager.readSeriesSnapshot(key),
+              publish: (key, rows) => desktopWindowManager.publishSeriesSnapshot(key, rows),
+            }
+          : null,
+      }),
     };
   });
 
@@ -105,6 +125,7 @@ export function MarketDataWorkspaceProvider({
         klineStream: resources.streamCoordinator.diagnostics(),
         scheduler: resources.workScheduler?.diagnostics() || null,
         seriesStores: resources.windowRegistry.entries().length,
+        sharedSeries: resources.windowRegistry.sharedSnapshotDiagnostics(),
       }),
     };
     globalRef.__CANDLESCOPE_WINDOW_BROKER__ = handle;

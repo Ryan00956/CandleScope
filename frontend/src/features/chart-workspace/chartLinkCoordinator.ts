@@ -8,6 +8,10 @@ import type {
   ChartWorkspaceDocument,
   ChartWorkspaceId,
 } from "./chartWorkspaceTypes.js";
+import type {
+  WorkspaceBusClient,
+  WorkspaceBusLinkEvent,
+} from "./workspaceBus.js";
 
 export interface ChartLinkedTimeRange {
   from: number;
@@ -19,6 +23,7 @@ export interface ChartLinkSurface {
   setLinkedVisibleTimeAnchor(time: number): boolean;
   setLinkedVisibleTimeRange(range: ChartLinkedTimeRange): boolean;
   subscribeLinkedViewportReady?(listener: (generation: number) => void): () => void;
+  setLinkedDrawingRevision?(scopeKey: string, revision: number): boolean;
 }
 
 export interface ChartLinkViewportIssue {
@@ -52,7 +57,7 @@ export interface ChartLinkDiagnosticsSnapshot {
 }
 
 type ViewportIssueListener = (issue: ChartLinkViewportIssue | null) => void;
-type LinkOption = "crosshair" | "timeAnchor" | "dateRange";
+type LinkOption = "crosshair" | "timeAnchor" | "dateRange" | "drawings";
 
 interface LinkedSurfaceRegistration {
   scopeKey: ChartWorkspaceId;
@@ -117,6 +122,9 @@ export class ChartLinkCoordinator {
   private readonly viewportStateByScope = new Map<ChartWorkspaceId, WorkspaceViewportState>();
   private publishingCrosshair = false;
   private publishingViewport = false;
+  private forwardingRemote = false;
+  private workspaceBus: WorkspaceBusClient | null = null;
+  private unsubscribeWorkspaceBus: (() => void) | null = null;
   private document: ChartWorkspaceDocument;
   private scopeKey: ChartWorkspaceId;
   private viewportSequence = 0;
@@ -146,6 +154,17 @@ export class ChartLinkCoordinator {
     this.scopeKey = scopeKey;
     this.reconcileRetainedViewportEvents();
     this.setViewportIssue(null);
+  }
+
+  connectWorkspaceBus(bus: WorkspaceBusClient | null): () => void {
+    this.unsubscribeWorkspaceBus?.();
+    this.workspaceBus = bus;
+    this.unsubscribeWorkspaceBus = bus?.subscribeLink((event) => this.applyWorkspaceBusEvent(event)) ?? null;
+    return () => {
+      this.unsubscribeWorkspaceBus?.();
+      this.unsubscribeWorkspaceBus = null;
+      if (this.workspaceBus === bus) this.workspaceBus = null;
+    };
   }
 
   register(
@@ -277,6 +296,14 @@ export class ChartLinkCoordinator {
     } finally {
       this.publishingCrosshair = false;
     }
+    if (!this.forwardingRemote) {
+      this.workspaceBus?.publishLink({
+        workspaceId: this.scopeKey,
+        sourceCellId,
+        kind: "crosshair",
+        payload: { time: normalizedTime },
+      });
+    }
   }
 
   publishTimeAnchor(sourceCellId: ChartCellId, time: number): void {
@@ -293,6 +320,14 @@ export class ChartLinkCoordinator {
       failedCellIds: new Set(),
     };
     this.publishViewportToTargets(event, route.targets);
+    if (!this.forwardingRemote) {
+      this.workspaceBus?.publishLink({
+        workspaceId: this.scopeKey,
+        sourceCellId,
+        kind: "timeAnchor",
+        payload: { time },
+      });
+    }
   }
 
   publishDateRange(sourceCellId: ChartCellId, range: ChartLinkedTimeRange): void {
@@ -312,6 +347,59 @@ export class ChartLinkCoordinator {
       failedCellIds: new Set(),
     };
     this.publishViewportToTargets(event, route.targets);
+    if (!this.forwardingRemote) {
+      this.workspaceBus?.publishLink({
+        workspaceId: this.scopeKey,
+        sourceCellId,
+        kind: "dateRange",
+        payload: { range: event.range },
+      });
+    }
+  }
+
+  publishDrawingRevision(sourceCellId: ChartCellId, scopeKey: string, revision: number): void {
+    if (!scopeKey || !Number.isSafeInteger(revision) || revision < 0) return;
+    const route = this.linkedTargets(sourceCellId, "drawings");
+    if (route.group === null) return;
+    for (const target of route.targets) {
+      try {
+        target.surface.setLinkedDrawingRevision?.(scopeKey, revision);
+      } catch {
+        // A drawing surface can recover from the next authoritative revision.
+      }
+    }
+    if (!this.forwardingRemote) {
+      this.workspaceBus?.publishLink({
+        workspaceId: this.scopeKey,
+        sourceCellId,
+        kind: "drawings",
+        payload: { scopeKey, revision },
+      });
+    }
+  }
+
+  private applyWorkspaceBusEvent(event: WorkspaceBusLinkEvent): void {
+    if (event.workspaceId !== this.scopeKey || event.sourceWindowId === this.workspaceBus?.windowId) return;
+    this.forwardingRemote = true;
+    try {
+      if (event.kind === "crosshair") {
+        const time = (event.payload as { time?: unknown } | null)?.time;
+        this.publishCrosshair(event.sourceCellId, typeof time === "number" ? time : null);
+      } else if (event.kind === "timeAnchor") {
+        const time = (event.payload as { time?: unknown } | null)?.time;
+        if (typeof time === "number") this.publishTimeAnchor(event.sourceCellId, time);
+      } else if (event.kind === "dateRange") {
+        const range = (event.payload as { range?: ChartLinkedTimeRange } | null)?.range;
+        if (range) this.publishDateRange(event.sourceCellId, range);
+      } else if (event.kind === "drawings") {
+        const payload = event.payload as { revision?: unknown; scopeKey?: unknown } | null;
+        if (typeof payload?.revision === "number" && typeof payload.scopeKey === "string") {
+          this.publishDrawingRevision(event.sourceCellId, payload.scopeKey, payload.revision);
+        }
+      }
+    } finally {
+      this.forwardingRemote = false;
+    }
   }
 
   private deliverViewportEvent(

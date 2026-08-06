@@ -20,6 +20,7 @@ import type {
     DrawingStylePatch,
     DrawingSurfaceDisposeBoundaryDescriptor,
 } from "./drawingInteractionController.js";
+import type { DrawingCommittedPaintTicket } from "./useDrawingPersistenceLifecycle.js";
 import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
 
 export interface DrawingEngineApi {
@@ -30,6 +31,7 @@ export interface DrawingEngineApi {
     setHidden(hidden: boolean): void;
     updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
     prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
+    subscribePublication(listener: (stamp: DrawingCommittedPaintTicket) => void): () => void;
 }
 
 export interface DrawingEngineHostProps {
@@ -133,6 +135,7 @@ function DrawingEngineHost({
         selectedDrawingMeta,
         setHidden,
         updateSelectedDrawingStyle,
+        subscribeVisibleScenePublication,
     } = drawing;
     const legacyPrimitiveEvidence = drawing.getLegacyPrimitiveRuntimeEvidence();
     const appliedInitialHiddenRef = useRef(false);
@@ -189,6 +192,10 @@ function DrawingEngineHost({
             setHidden,
             updateSelectedDrawingStyle,
             prepareExport,
+            subscribePublication: (listener) => subscribeVisibleScenePublication(
+                listener,
+                { replayLastPublication: false },
+            ),
         });
     }, [
         clearAll,
@@ -198,6 +205,7 @@ function DrawingEngineHost({
         prepareExport,
         prepareSurfaceDispose,
         setHidden,
+        subscribeVisibleScenePublication,
         updateSelectedDrawingStyle,
     ]);
 

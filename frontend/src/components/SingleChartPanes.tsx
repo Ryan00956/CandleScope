@@ -1437,6 +1437,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef<DrawingEngineApi | null>(null);
   const drawingApisByPaneRef = useRef<Map<string, DrawingEngineApi>>(new Map());
+  const drawingPublicationUnsubscribesByPaneRef = useRef<Map<string, () => void>>(new Map());
+  const drawingRevisionListenersRef = useRef<Set<(scopeKey: string, revision: number) => void>>(new Set());
+  const linkedDrawingRevisionsRef = useRef<Record<string, number>>({});
+  const [linkedDrawingRevisions, setLinkedDrawingRevisions] = useState<Record<string, number>>({});
   const drawingApiMountKeysByPaneRef = useRef<Map<string, string>>(new Map());
   const drawingAdaptersByPaneRef = useRef<Map<
     string,
@@ -4953,6 +4957,21 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     drawingPaneSurfaces,
     supportsDrawingFeatures,
   ]);
+  const subscribeDrawingRevision = useCallback((
+    listener: (scopeKey: string, revision: number) => void,
+  ) => {
+    drawingRevisionListenersRef.current.add(listener);
+    return () => { drawingRevisionListenersRef.current.delete(listener); };
+  }, []);
+  const setLinkedDrawingRevision = useCallback((scopeKey: string, revision: number) => {
+    if (!scopeKey || !Number.isSafeInteger(revision) || revision < 0) return false;
+    const current = linkedDrawingRevisionsRef.current[scopeKey] ?? -1;
+    if (revision <= current) return true;
+    const next = { ...linkedDrawingRevisionsRef.current, [scopeKey]: revision };
+    linkedDrawingRevisionsRef.current = next;
+    setLinkedDrawingRevisions(next);
+    return true;
+  }, []);
   const handleDrawingApiChange = useCallback((
     paneId: string,
     paneDrawingKey: string,
@@ -4961,6 +4980,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     previousApi: DrawingEngineApi | null,
   ) => {
     if (api) {
+      drawingPublicationUnsubscribesByPaneRef.current.get(paneId)?.();
+      drawingPublicationUnsubscribesByPaneRef.current.set(paneId, api.subscribePublication((stamp) => {
+        if (stamp.documentRevision <= (linkedDrawingRevisionsRef.current[stamp.scopeKey] ?? -1)) return;
+        for (const listener of [...drawingRevisionListenersRef.current]) {
+          listener(stamp.scopeKey, stamp.documentRevision);
+        }
+      }));
       drawingApisByPaneRef.current.set(paneId, api);
       // The host consumes `initialHidden` when it mounts, while later user
       // changes flow through the chart-surface API. Replaying visibility here
@@ -4991,6 +5017,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       currentKey: drawingApiMountKeysByPaneRef.current.get(paneId) ?? null,
     });
     if (ownsRegistration) {
+      drawingPublicationUnsubscribesByPaneRef.current.get(paneId)?.();
+      drawingPublicationUnsubscribesByPaneRef.current.delete(paneId);
       drawingApisByPaneRef.current.delete(paneId);
       drawingApiMountKeysByPaneRef.current.delete(paneId);
     }
@@ -5035,6 +5063,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -5105,6 +5135,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
   ]);
@@ -5259,7 +5291,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         .filter((surface) => drawingPaneMountKeys.has(surface.drawingKey))
         .map((surface) => (
           <NativePaneDrawingHost
-            key={surface.drawingKey}
+            key={`${surface.drawingKey}:${linkedDrawingRevisions[surface.drawingKey] ?? 0}`}
             component={DrawingEngineHost}
             {...(surface.paneId === "main" ? { chartAdapter } : {})}
             paneId={surface.paneId}

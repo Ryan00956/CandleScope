@@ -15,6 +15,7 @@ import {
   createChartWorkspaceId,
   createChartWorkspaceRecord,
   createTemplateChartWorkspaceDocument,
+  normalizeChartWorkspaceLibrary,
   normalizeChartWorkspaceName,
   removeChartWorkspace,
   summarizeChartWorkspaces,
@@ -88,6 +89,11 @@ import {
   createChartWorkspaceWindowCandidate,
   updateChartWorkspaceWindowPlacementCandidate,
 } from "./chartWorkspaceWindows.js";
+import {
+  defaultWorkspaceBus,
+  type WorkspaceBusClient,
+  type WorkspaceBusState,
+} from "./workspaceBus.js";
 
 export type ChartWorkspaceSaveState = "loading" | "saving" | "saved" | "error";
 
@@ -164,6 +170,7 @@ export interface UseChartWorkspaceRuntimeOptions {
   createId?: () => ChartWorkspaceId;
   autosaveDelayMs?: number;
   windowId?: ChartWindowId;
+  workspaceBus?: WorkspaceBusClient | null;
 }
 
 interface PersistenceStatus {
@@ -223,6 +230,11 @@ export function useChartWorkspaceRuntime(
     createId: options.createId ?? createChartWorkspaceId,
     autosaveDelayMs: options.autosaveDelayMs ?? 350,
     windowId: options.windowId,
+    workspaceBus: options.workspaceBus === undefined
+      ? CHART_WORKSPACE_FEATURE_FLAGS.multiChart64Enabled
+        ? defaultWorkspaceBus(options.windowId ?? "main-window")
+        : null
+      : options.workspaceBus,
     editOptions: {
       allowDynamicCellIds: CHART_WORKSPACE_FEATURE_FLAGS.multiChart16Enabled,
       maxCellsPerWindow: CHART_WORKSPACE_RUNTIME_LIMITS.maxCellsPerWindow,
@@ -255,6 +267,8 @@ export function useChartWorkspaceRuntime(
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSequenceRef = useRef(0);
   const mountedRef = useRef(true);
+  const busSequenceRef = useRef(-1);
+  const loadedPersistenceModeRef = useRef<ChartWorkspacePersistenceMode | null>(null);
 
   useLayoutEffect(() => {
     libraryRef.current = library;
@@ -269,9 +283,36 @@ export function useChartWorkspaceRuntime(
 
   useEffect(() => {
     let cancelled = false;
-    services.repository.loadLibrary().then((result) => {
+    const applyBusState = (state: WorkspaceBusState) => {
+      if (cancelled || !state.ready || !state.snapshot || state.sequence < busSequenceRef.current) return;
+      busSequenceRef.current = state.sequence;
+      const snapshot = normalizeChartWorkspaceLibrary(
+        state.snapshot,
+        activeWorkspace(state.snapshot),
+        services.now(),
+      );
+      setLibrary(snapshot);
+      setReady(true);
+      setPersistence((current) => ({
+        saveState: state.ok ? "saved" : "error",
+        persistenceMode: services.workspaceBus?.isWriter()
+          ? loadedPersistenceModeRef.current
+          : "workspace-bus",
+        lastSavedAt: state.ok ? services.now() : current.lastSavedAt,
+        error: state.ok ? null : state.message || "WorkspaceBus revision conflict",
+      }));
+    };
+    const unsubscribeBus = services.workspaceBus?.subscribeSnapshot(applyBusState) ?? (() => {});
+    services.repository.loadLibrary().then(async (result) => {
       if (cancelled) return;
       const { persistenceMode, ...snapshot } = result;
+      loadedPersistenceModeRef.current = persistenceMode;
+      if (services.workspaceBus) {
+        const state = await services.workspaceBus.connect(snapshot);
+        if (cancelled) return;
+        applyBusState(state);
+        return;
+      }
       setLibrary(snapshot);
       setReady(true);
       setPersistence({
@@ -292,6 +333,7 @@ export function useChartWorkspaceRuntime(
     });
     return () => {
       cancelled = true;
+      unsubscribeBus();
     };
   }, [services, setLibrary]);
 
@@ -299,7 +341,17 @@ export function useChartWorkspaceRuntime(
     const sequence = ++saveSequenceRef.current;
     setPersistence((current) => ({ ...current, saveState: "saving", error: null }));
     try {
-      const persistenceMode = await services.repository.saveLibrary(snapshot);
+      let persistenceMode: ChartWorkspacePersistenceMode;
+      if (services.workspaceBus) {
+        const result = await services.workspaceBus.commit(snapshot);
+        if (!result.ok) throw new Error(result.message || "WorkspaceBus revision conflict");
+        busSequenceRef.current = Math.max(busSequenceRef.current, result.sequence);
+        persistenceMode = services.workspaceBus.isWriter()
+          ? await services.repository.saveLibrary(result.snapshot ?? snapshot)
+          : "workspace-bus";
+      } else {
+        persistenceMode = await services.repository.saveLibrary(snapshot);
+      }
       if (!mountedRef.current || sequence !== saveSequenceRef.current) return;
       setPersistence({
         saveState: "saved",
@@ -319,7 +371,9 @@ export function useChartWorkspaceRuntime(
 
   useEffect(() => {
     if (!ready) return undefined;
-    services.repository.writeBootstrap(library);
+    if (!services.workspaceBus || services.workspaceBus.isWriter()) {
+      services.repository.writeBootstrap(library);
+    }
     setPersistence((current) => ({ ...current, saveState: "saving", error: null }));
     if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
@@ -337,7 +391,9 @@ export function useChartWorkspaceRuntime(
   useEffect(() => {
     if (!ready) return undefined;
     const flushForPageTransition = () => {
-      services.repository.writeBootstrap(libraryRef.current);
+      if (!services.workspaceBus || services.workspaceBus.isWriter()) {
+        services.repository.writeBootstrap(libraryRef.current);
+      }
       if (globalThis.document.visibilityState === "hidden") {
         if (saveTimerRef.current !== null) {
           clearTimeout(saveTimerRef.current);

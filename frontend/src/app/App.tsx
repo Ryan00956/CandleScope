@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
+import type { ChartSession } from "../features/chart-session/chartSessionTypes.js";
 import { MarketDataWorkspaceProvider } from "../features/market-data/MarketDataWorkspaceProvider.js";
 import { useChartWorkspaceRuntime } from "../features/chart-workspace/useChartWorkspaceRuntime.js";
 import type {
@@ -37,6 +38,8 @@ import { chartWorkspaceCell } from "../features/chart-workspace/chartWorkspaceDo
 import WorkspaceLayoutTree from "../features/chart-workspace/WorkspaceLayoutTree.js";
 import { chartWorkspaceTemplateCellCount } from "../features/chart-workspace/chartWorkspaceLayout.js";
 import WorkspaceSwitcher from "../features/chart-workspace/WorkspaceSwitcher.js";
+import { CHART_WORKSPACE_FEATURE_FLAGS } from "../features/chart-workspace/chartWorkspaceCapacity.js";
+import { defaultWorkspaceBus } from "../features/chart-workspace/workspaceBus.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime.js";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime.js";
@@ -203,7 +206,9 @@ function WorkspaceWindowControls({
   const status = bootstrap.mode === "web"
     ? "Web 单窗口（原生多窗口不可用）"
     : nativeEnabled
-      ? `${windowCount}/4 窗口 · ${bootstrap.displayCount} 显示器`
+      ? windowCount >= 4
+        ? "4/4 窗口 · 64/64 图 · 已达应用上限"
+        : `${windowCount}/4 窗口 · ${bootstrap.displayCount} 显示器`
       : "原生多窗口未启用";
   return (
     <div
@@ -221,7 +226,9 @@ function WorkspaceWindowControls({
             onClick={onCreate}
             disabled={disabled || windowCount >= 4}
             aria-label="新建原生图表窗口"
-            title="复制当前布局到新的原生窗口"
+            title={windowCount >= 4
+              ? "已达 4 窗口 / 64 图硬上限；请先关闭一个窗口"
+              : "复制当前布局到新的原生窗口"}
           >
             +屏
           </button>
@@ -399,11 +406,17 @@ function WorkspaceLinkControls({
 }
 
 function LiveWorkspaceApp() {
+  const workspaceBus = CHART_WORKSPACE_FEATURE_FLAGS.multiChart64Enabled
+    ? defaultWorkspaceBus(desktopWindowManager.windowId)
+    : null;
   const workspace = useChartWorkspaceRuntime({ windowId: desktopWindowManager.windowId });
   const [desktopBootstrap, setDesktopBootstrap] = useState<DesktopBootstrap>(
     desktopWindowManager.cachedBootstrap,
   );
   const [desktopError, setDesktopError] = useState<string | null>(null);
+  const [desktopWindowVisible, setDesktopWindowVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
   const settings = useChartSettingsRuntime();
   const replayEntry = useReplayEntryCapability();
   const marketRailLayout = useMarketRailLayout();
@@ -478,6 +491,89 @@ function LiveWorkspaceApp() {
     );
   }, [linkCoordinator, workspace.view.activeWorkspaceId, workspace.view.document]);
   useEffect(
+    () => linkCoordinator.connectWorkspaceBus(workspaceBus),
+    [linkCoordinator, workspaceBus],
+  );
+  useEffect(() => {
+    if (!workspaceBus) return undefined;
+    const report = () => workspaceBus.reportWindow({
+      focused: document.hasFocus(),
+      visible: document.visibilityState !== "hidden",
+    });
+    const reportWithVisibility = () => {
+      setDesktopWindowVisible(document.visibilityState !== "hidden");
+      report();
+    };
+    reportWithVisibility();
+    const unsubscribeLifecycle = desktopWindowManager.onLifecycle(reportWithVisibility);
+    document.addEventListener("visibilitychange", reportWithVisibility);
+    window.addEventListener("focus", reportWithVisibility);
+    window.addEventListener("blur", reportWithVisibility);
+    return () => {
+      unsubscribeLifecycle();
+      document.removeEventListener("visibilitychange", reportWithVisibility);
+      window.removeEventListener("focus", reportWithVisibility);
+      window.removeEventListener("blur", reportWithVisibility);
+    };
+  }, [workspaceBus]);
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("capacityProbe") !== "phase7") return undefined;
+    const target = window as typeof window & {
+      __CANDLESCOPE_PHASE7_CONTROL__?: {
+        configure64(): void;
+        configureW2(symbols: string[]): void;
+        snapshot(): unknown;
+      };
+    };
+    const handle = {
+      configure64: () => {
+        workspace.actions.setLayout("grid-16");
+        workspace.actions.createWindow();
+        workspace.actions.createWindow();
+        workspace.actions.createWindow();
+      },
+      configureW2: (symbols: string[]) => {
+        const cellIds = Object.keys(workspace.view.document.cells).sort();
+        if (cellIds.length !== 64 || symbols.length !== 64 || new Set(symbols).size !== 64) {
+          throw new Error("Phase 7 W2 requires exactly 64 unique Cell ids and symbols");
+        }
+        cellIds.forEach((cellId) => workspace.actions.setCellLinkGroup(cellId, null));
+        cellIds.forEach((cellId, index) => workspace.actions.updateCellSession(cellId, {
+          exchange: "binance",
+          marketType: "spot",
+          symbol: symbols[index]!,
+          interval: "1m",
+        } satisfies ChartSession));
+        workspace.actions.updateLinkGroupSettings("A", { market: false, interval: false, crosshair: true });
+        Object.values(workspace.view.document.windows).forEach((windowState) => {
+          workspace.actions.setCellLinkGroup(windowState.activeCellId, "A");
+        });
+      },
+      snapshot: () => ({
+        workspaceId: workspace.view.activeWorkspaceId,
+        document: workspace.view.document,
+        windowId: desktopWindowManager.windowId,
+        ready: workspace.view.ready,
+        status: workspace.status,
+      }),
+    };
+    target.__CANDLESCOPE_PHASE7_CONTROL__ = handle;
+    return () => {
+      if (target.__CANDLESCOPE_PHASE7_CONTROL__ === handle) delete target.__CANDLESCOPE_PHASE7_CONTROL__;
+    };
+  }, [workspace.actions, workspace.status, workspace.view]);
+  useEffect(() => {
+    if (!workspaceBus || !workspace.view.ready || !desktopWindowVisible) return undefined;
+    let active = true;
+    void workspaceBus.requestPreview(workspace.view.activeCellId).then((result) => {
+      if (active && !result.ok) setDesktopError(`${result.code}: ${result.message || "预览 lane 已满"}`);
+    });
+    return () => {
+      active = false;
+      workspaceBus.releasePreview(workspace.view.activeCellId);
+    };
+  }, [desktopWindowVisible, workspace.view.activeCellId, workspace.view.ready, workspaceBus]);
+  useEffect(
     () => linkCoordinator.subscribeViewportIssue(setViewportLinkIssue),
     [linkCoordinator],
   );
@@ -491,7 +587,8 @@ function LiveWorkspaceApp() {
         publishDateRange: ChartLinkCoordinator["publishDateRange"];
       };
     };
-    if (target.__CANDLESCOPE_MULTI_CHART_CAPACITY__ === undefined) return;
+    if (target.__CANDLESCOPE_MULTI_CHART_CAPACITY__ === undefined
+      && new URLSearchParams(location.search).get("capacityProbe") !== "phase7") return;
     const diagnostics = {
       snapshot: () => linkCoordinator.snapshot(),
       publishCrosshair: linkCoordinator.publishCrosshair.bind(linkCoordinator),
@@ -505,6 +602,17 @@ function LiveWorkspaceApp() {
       }
     };
   }, [linkCoordinator]);
+  useEffect(() => {
+    if (!workspaceBus) return undefined;
+    const target = window as typeof window & {
+      __CANDLESCOPE_WORKSPACE_BUS__?: { snapshot(): Promise<Record<string, unknown>> };
+    };
+    const handle = { snapshot: () => workspaceBus.diagnostics() };
+    target.__CANDLESCOPE_WORKSPACE_BUS__ = handle;
+    return () => {
+      if (target.__CANDLESCOPE_WORKSPACE_BUS__ === handle) delete target.__CANDLESCOPE_WORKSPACE_BUS__;
+    };
+  }, [workspaceBus]);
   const [foregroundPreloadGate] = useState(() => new ForegroundPreloadGate());
   const [activeEnvironment, setActiveEnvironment] = useState<{
     workspaceId: string;

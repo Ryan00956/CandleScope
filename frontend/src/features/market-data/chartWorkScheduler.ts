@@ -11,6 +11,10 @@ export type ChartWorkLane =
   | "prefetch";
 
 export interface ChartWorkSchedulerOptions {
+  appBudget?: {
+    acquire(cellId: string, lane: ChartWorkLane): Promise<unknown>;
+    release(lease: unknown): void;
+  } | null;
   cancelFrame?: (handle: number) => void;
   maxConcurrent?: number;
   maxConcurrentHydration?: number;
@@ -119,6 +123,7 @@ export class ChartWorkScheduler {
   private readonly requestFrame: (callback: () => void) => number;
   private readonly cancelFrame: (handle: number) => void;
   private readonly yieldFrameBetweenTasks: boolean;
+  private readonly appBudget: ChartWorkSchedulerOptions["appBudget"];
   private readonly cells = new Map<string, CellState>();
   private readonly asyncQueue: AsyncTask[] = [];
   private readonly frameQueue = new Map<string, FrameTask>();
@@ -157,6 +162,7 @@ export class ChartWorkScheduler {
     this.requestFrame = options.requestFrame || defaultRequestFrame;
     this.cancelFrame = options.cancelFrame || defaultCancelFrame;
     this.yieldFrameBetweenTasks = options.yieldFrameBetweenTasks ?? true;
+    this.appBudget = options.appBudget ?? null;
   }
 
   registerCell(
@@ -459,10 +465,15 @@ export class ChartWorkScheduler {
       this.activeAsync += 1;
       if (task.lane === "active-hydration") this.activeHydration += 1;
       this.lastServedCell.set(this.priorityKey(task), task.cellId);
+      let appLease: unknown = null;
       void Promise.resolve()
-        .then(task.run)
+        .then(async () => {
+          appLease = await this.appBudget?.acquire(task.cellId, task.lane) ?? null;
+          return task.run();
+        })
         .then(task.resolve, task.reject)
         .finally(() => {
+          this.appBudget?.release(appLease);
           this.activeAsync -= 1;
           if (task.lane === "active-hydration") this.activeHydration -= 1;
           if (!this.disposed) this.recordCommit(state, task.lane, waitMs);

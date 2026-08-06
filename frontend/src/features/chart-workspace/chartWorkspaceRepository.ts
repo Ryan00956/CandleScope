@@ -36,7 +36,7 @@ export const CHART_WORKSPACE_ACTIVE_ID_KEY = "candlescope-active-workspace-id-v2
 export const CHART_WORKSPACE_BOOTSTRAP_KEY = "candlescope-active-workspace-bootstrap-v2";
 export const CHART_WORKSPACE_FALLBACK_LIBRARY_KEY = "candlescope-workspace-library-fallback-v2";
 
-export type ChartWorkspacePersistenceMode = "indexeddb" | "local-storage" | "memory";
+export type ChartWorkspacePersistenceMode = "indexeddb" | "local-storage" | "memory" | "workspace-bus";
 export type ChartWorkspaceRevisionMap = ReadonlyMap<ChartWorkspaceId, number>;
 
 export interface ChartWorkspaceLoadResult extends ChartWorkspaceLibrarySnapshot {

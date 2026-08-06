@@ -123,3 +123,42 @@ test("different instruments share one batch socket with isolated stable client I
   assert.equal(socket.closed, true);
   assert.equal(coordinator.activePhysicalStreamCount(), 0);
 });
+
+test("a Cell mounted after socket open subscribes only after its intervals are known", () => {
+  const socket = new FakeSocket();
+  const coordinator = new BatchKlineStreamCoordinator({
+    url: "ws://test/stream/klines_batch",
+    socketFactory: () => socket,
+  });
+  const controller = coordinator.subscribe(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    { intervals: [] },
+  );
+
+  socket.open();
+  assert.equal(socket.sent.length, 0);
+  controller.updateIntervals(["1m"]);
+  assert.equal(socket.sent.length, 1);
+  const subscribe = JSON.parse(socket.sent[0]!) as {
+    action: string;
+    items: Array<{ clientId: string; intervals: string[] }>;
+  };
+  assert.equal(subscribe.action, "subscribe");
+  assert.deepEqual(subscribe.items[0]!.intervals, ["1m"]);
+
+  controller.updateIntervals(["5m"]);
+  assert.equal(socket.sent.length, 1, "updates coalesce while the subscribe ACK is pending");
+  socket.message({
+    type: "subscription_ack",
+    action: "subscribe",
+    ok: true,
+    client_id: subscribe.items[0]!.clientId,
+    active_intervals: ["1m"],
+  });
+  const update = JSON.parse(socket.sent[1]!) as {
+    action: string;
+    items: Array<{ intervals: string[] }>;
+  };
+  assert.equal(update.action, "update");
+  assert.deepEqual(update.items[0]!.intervals, ["5m"]);
+});

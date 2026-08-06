@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_6_IMPLEMENTATION_COMPLETE_HARDWARE_GATE_PENDING`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6 的桌面壳、四原生窗口、单 sidecar、DIP/恢复、生命周期降载和 unpacked 包实现已通过当前单显示器主机的真实 Electron evidence，但“四个真实显示器及混合 DPI 拔插”验收因本机仅暴露 1 个逻辑显示器仍未通过。Phase 7～8 尚未完成。所有多图、窗口 broker、批量 K 线和原生多窗口 flags 仍默认关闭；本文尚未宣称发布支持四屏 64 图，不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_7_COMPLETE_PHASE_6_HARDWARE_GATE_PENDING`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6 的桌面壳实现已通过当前单显示器主机的真实 Electron evidence，但“四个真实显示器及混合 DPI 拔插”仍因本机只暴露 1 个逻辑显示器而待验；Phase 7 的 WorkspaceBus、跨窗 Link、全应用预算、64 路 W1/W2 身份和共享快照恢复已经完成。Phase 8 尚未完成。所有多图、窗口 broker、批量 K 线和原生多窗口 flags 仍默认关闭；本文尚未宣称发布支持四屏 64 图，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -944,16 +944,16 @@ Spike 必须证明：
 
 ### 任务
 
-- [ ] 7.1 定义 `WorkspaceBus`：document patch、revision、link event、window visibility、focus 和 health。
-- [ ] 7.2 Native 使用受控 IPC；Web fallback 可使用 BroadcastChannel，但不是桌面唯一实现。
-- [ ] 7.3 所有持久化写入经过单 writer 或 revision CAS，冲突返回可诊断结果，不采用 last-write-wins 静默覆盖。
-- [ ] 7.4 Link Group 跨窗口同步 market/interval/crosshair/timeAnchor/dateRange/drawings，并保留 role 方向。
-- [ ] 7.5 高频 crosshair 事件限频且不持久化；session/layout 变更持久化。
-- [ ] 7.6 全应用最多允许 4 个 focused/pinned preview lane；超出时 UI 明确要求取消 pin。
-- [ ] 7.7 其他可见窗口 K 线 forming update 合并提交，final/amended 立即提交。
-- [ ] 7.8 hidden/minimized 窗口暂停 Canvas、preview indicator、普通 prefetch；恢复先从共享 store 首帧，再补缺口。
-- [ ] 7.9 连接/指标/backfill 预算按 app → window → cell 分配，窗口不能互相饿死。
-- [ ] 7.10 窗口崩溃后清理 consumer，并允许原 `windowId` 恢复。
+- [x] 7.1 定义 `WorkspaceBus`：document patch、revision、link event、window visibility、focus 和 health。
+- [x] 7.2 Native 使用受控 IPC；Web fallback 可使用 BroadcastChannel，但不是桌面唯一实现。
+- [x] 7.3 所有持久化写入经过单 writer 或 revision CAS，冲突返回可诊断结果，不采用 last-write-wins 静默覆盖。
+- [x] 7.4 Link Group 跨窗口同步 market/interval/crosshair/timeAnchor/dateRange/drawings，并保留 role 方向。
+- [x] 7.5 高频 crosshair 事件限频且不持久化；session/layout 变更持久化。
+- [x] 7.6 全应用最多允许 4 个 focused/pinned preview lane；超出时 UI 明确要求取消 pin。
+- [x] 7.7 其他可见窗口 K 线 forming update 合并提交，final/amended 立即提交。
+- [x] 7.8 hidden/minimized 窗口暂停 Canvas、preview indicator、普通 prefetch；恢复先从共享 store 首帧，再补缺口。
+- [x] 7.9 连接/指标/backfill 预算按 app → window → cell 分配，窗口不能互相饿死。
+- [x] 7.10 窗口崩溃后清理 consumer，并允许原 `windowId` 恢复。
 
 ### 测试
 
@@ -968,15 +968,32 @@ Spike 必须证明：
 
 ### 验收
 
-- [ ] 四窗口编辑同一 Workspace 无丢更新；
-- [ ] W1/W2 连接计数符合 unique identity；
-- [ ] 最小化窗口无 Canvas/preview 活动；
-- [ ] 恢复窗口不先显示空图再全量重拉；
-- [ ] 64 Cell 超限新增被明确拒绝。
+- [x] 四窗口编辑同一 Workspace 无丢更新；
+- [x] W1/W2 连接计数符合 unique identity；
+- [x] 最小化窗口无 Canvas/preview 活动；
+- [x] 恢复窗口不先显示空图再全量重拉；
+- [x] 64 Cell 超限新增被明确拒绝。
 
 ### 回滚
 
 关闭 `MULTI_CHART_64_ENABLED`，每窗口最多 16 但应用只启用主窗口；v6 多窗口记录保留。
+
+### Phase 7 实施记录（2026-08-07）
+
+1. 本阶段先沿真实状态链核对 Phase 6 边界：四个 renderer 当时只能把 shell topology 交给主窗口保存，尚不存在产品文档的跨窗单写者、可诊断冲突或共享热数据。因此实施顺序固定为“中心文档总线 → link/绘图事件 → app 级工作预算 → 共享 Series 快照 → 真实 W1/W2 和崩溃恢复”，没有用四份 local state 相互覆盖来模拟共享 Workspace。
+2. Electron 主进程新增有界 `WorkspaceBusHub`，只接受 v6、最多 4 window/64 Cell、4 MiB 内的快照。它维护单调 sequence、document/window revision、main writer 和 participant health；commit 必须携带 expected sequence/revision/base snapshot。stale patch 在 JSON path 不相交时三方 rebase，同一路径冲突则返回具体 conflict path，绝不静默 last-write-wins。writer 崩溃后清理事件与参与者并确定性选举继任者。
+3. Desktop renderer 通过 context-isolated preload 的固定 IPC 方法连接总线；Web 单窗口 fallback 才使用 `BroadcastChannel`。主 writer 是唯一 IndexedDB 持久化入口，secondary 使用 `workspace-bus` persistence mode，只消费权威快照和提交 patch。focus、visibility、health、preview/work lease 与诊断都经过同一受控边界。
+4. `ChartLinkCoordinator` 已能跨窗口传递 market、interval、crosshair、timeAnchor、dateRange 和 drawings，并保留 source/destination role。远端事件带 source identity 且禁止回声；crosshair 以 33 ms 合并限频且不推进持久 sequence。drawing commit 发布 scope/revision，远端只重建匹配的 drawing host，不 remount 主图表。
+5. 新增 app → window → cell 的工作准入：全应用同时异步任务最多 16、每窗最多 6，按窗口 round-robin 防止饥饿；focused/pinned preview lane 硬上限 4，第 5 个明确返回 `PREVIEW_LANE_LIMIT`。K 线 final/amended 保持立即提交，forming/preview 走已有 replaceable 合并；窗口释放会同时回收排队任务、活动 lease 与 preview lane。
+6. hidden/minimized 生命周期进入真实 scheduler，停止帧请求与 preview lane。主进程另有 64-entry LRU 共享 Series 快照，每项最多 256 bars/512 KiB，严格校验 identity、OHLCV、升序时间并 clone read；renderer 建立空 store 时先同步 hydrate，再由正常流补缺口。形成中的逐 tick 不灌入 IPC，只有 replace/append/prepend/mid-merge 的稳定窗口发布快照。
+7. 真实四窗探针首次暴露了 batch K 线订阅竞态：renderer 在初始 interval 集合为空时过早发送 subscribe，后续 16 Cell 更新可能在 ACK 前形成 30 个 `intervals_required/subscription_not_found`。客户端现显式维护 absent/subscribing/subscribed 和 activeIntervals，跳过空订阅、在 ACK 后合并追发最新集合；新增回归测试后 W1/W2 的 backend item failure 都为 0。
+8. W1 使用 4×16 重复品种场景：4 条浏览器物理 batch WebSocket、64 个前端逻辑 client、128 个逻辑订阅、5 个 active/leased Series、128 个 stream lease 和 64 个唯一 consumer。四窗均为 16/16 有数据，batch outbox depth、authoritative timeout 和 item failure 都为 0；共享 hub 在恢复门有 4 个 Series，崩溃窗从缓存 hydrate 4 个 store/451 bars。
+9. W2 从真实 Binance Spot/USDT catalog 选择 64 个唯一品种并使用 `1m`：仍为 4 条物理 batch WebSocket、64 个逻辑 client，但对应 64 个逻辑订阅、64 个 active/leased Series、64 个 stream lease 和 64 个唯一 consumer。四窗实际均达到 16/16 有数据；共享 hub 达到 64 entries、1814 bars、377 次 publish、0 reject，批量协议同样 0 item failure/timeout/outbox 残留。
+10. 两个场景都真实执行了跨窗 crosshair、次窗口最小化 500 ms 无 replaceable commit 增长、preview lane 释放、强制销毁、participant/work lease 清理和原 `windowId` 重建。W2 重建窗同步命中 16 个共享 store/83 bars，首个验收观察已经是 16/16 有数据，而不是先空图再触发全量历史重拉；恢复后 Workspace revision 与主进程权威 revision 相同。
+11. machine-readable 聚合器逐项校验九个运行时 gate、W1/W2 精确身份、零静默 batch failure、共享缓存非空/零 reject、恢复窗 16/16 和实际 hydrate；输入原始 evidence 带 SHA-256。完整 `npm run check` 通过 architecture、plugin boundary、typecheck、lint、`3071/3071` 前端测试、`25/25` desktop 测试和 production build；`npm audit` 为 0，探针退出后 `15288/18087` 监听为 0。
+12. Phase 7 完成只证明当前单显示器主机上的四原生窗口和 Binance Spot W1/W2 合同；不替代 W3 指标压力、F1～F3、4 小时 soak、故障/回滚、安装包 fresh-process 或四真实显示器门禁。`MULTI_CHART_64_ENABLED`、`MULTI_WINDOW_ENABLED`、`MULTI_CHART_16_ENABLED`、window broker 与 batch K 线仍默认关闭。
+
+机器可读证据：`docs/perf-baselines/multi-chart-workspace/phase7-workspace-bus-20260807.json`。原始 W1/W2 evidence、独立 user-data、sidecar 日志和临时数据库保存在忽略版本控制的 `output/playwright/multi-chart-phase7/`。
 
 ---
 

@@ -58,6 +58,8 @@
     "desktop:package:dir": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase6-package.ps1",
     "desktop:spike": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase6-spike.ps1",
     "desktop:release:phase6": "node scripts/desktop-phase6-release.mjs --create ../output/playwright/multi-chart-phase6/desktop-spike.json --restore ../output/playwright/multi-chart-phase6/desktop-restore.json --packaged ../output/playwright/multi-chart-phase6/desktop-packaged.json --out ../docs/perf-baselines/multi-chart-workspace/phase6-desktop-shell-20260807.json",
+    "desktop:spike:phase7": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase7-spike.ps1",
+    "desktop:release:phase7": "node scripts/desktop-phase7-release.mjs --w1 ../output/playwright/multi-chart-phase7/desktop-phase7-w1.json --w2 ../output/playwright/multi-chart-phase7/desktop-phase7-w2.json --out ../docs/perf-baselines/multi-chart-workspace/phase7-workspace-bus-20260807.json",
     "test:desktop": "node --test \"desktop/*.test.mjs\"",
     "perf:baseline": "node scripts/perf-baseline.mjs",
     "perf:drawing": "node scripts/drawing-performance.mjs",

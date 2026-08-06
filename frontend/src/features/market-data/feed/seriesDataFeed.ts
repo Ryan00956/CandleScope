@@ -820,10 +820,11 @@ export class SeriesDataFeed {
   private schedulerLane(
     priority: FeedRequestPriority,
     owner: string,
-  ): Extract<ChartWorkLane, "indicator-range" | "initial-history" | "load-more" | "prefetch"> {
+  ): Extract<ChartWorkLane, "active-hydration" | "indicator-range" | "initial-history" | "load-more" | "prefetch"> {
     if (priority === "preload") return "prefetch";
     if (owner.includes("indicator")) return "indicator-range";
-    if (priority === "hydrate" || owner.includes("initial") || owner.includes("reconnect")) {
+    if (priority === "hydrate") return "active-hydration";
+    if (owner.includes("initial") || owner.includes("reconnect")) {
       return "initial-history";
     }
     return "load-more";

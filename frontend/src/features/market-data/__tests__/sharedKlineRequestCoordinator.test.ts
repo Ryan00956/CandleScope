@@ -129,3 +129,63 @@ test("request semantics that can change rows do not join", async () => {
   ]);
   assert.equal(calls.value, 2);
 });
+
+test("distinct history requests in one browser task use one bounded physical batch", async () => {
+  const singleCalls = { value: 0 };
+  let batchCalls = 0;
+  const api = fakeApi(async () => result, singleCalls);
+  api.fetchKlinesHistoryBatch = async (requests) => {
+    batchCalls += 1;
+    assert.deepEqual(requests.map((item) => item.symbol), ["BTCUSDT", "ETHUSDT"]);
+    return requests.map(() => ({ ok: true as const, result }));
+  };
+  const coordinator = new SharedKlineRequestCoordinator(api);
+
+  const outcomes = await Promise.all([
+    coordinator.fetchKlinesHistory(
+      "BTCUSDT", "1m", 7, "spot", "binance", { countBack: 500 },
+    ),
+    coordinator.fetchKlinesHistory(
+      "ETHUSDT", "1m", 7, "spot", "binance", { countBack: 500 },
+    ),
+  ]);
+
+  assert.deepEqual(outcomes, [result, result]);
+  assert.equal(batchCalls, 1);
+  assert.equal(singleCalls.value, 0);
+  assert.equal(coordinator.diagnostics().totalPhysical, 1);
+  assert.equal(coordinator.diagnostics().completedPhysical, 1);
+});
+
+test("one batch consumer abort does not cancel the other distinct history request", async () => {
+  const work = deferred<Awaited<ReturnType<NonNullable<KlineApi["fetchKlinesHistoryBatch"]>>>>();
+  const singleCalls = { value: 0 };
+  const physicalSignal: { current?: AbortSignal } = {};
+  const api = fakeApi(async () => result, singleCalls);
+  api.fetchKlinesHistoryBatch = (_requests, options) => {
+    if (options.signal) physicalSignal.current = options.signal;
+    return work.promise;
+  };
+  const coordinator = new SharedKlineRequestCoordinator(api);
+  const firstAbort = new AbortController();
+  const first = coordinator.fetchKlinesHistory(
+    "BTCUSDT", "1m", 7, "spot", "binance", {
+      countBack: 500,
+      signal: firstAbort.signal,
+    },
+  );
+  const second = coordinator.fetchKlinesHistory(
+    "ETHUSDT", "1m", 7, "spot", "binance", { countBack: 500 },
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+
+  firstAbort.abort();
+  await assert.rejects(first, (error: unknown) => (error as Error).name === "AbortError");
+  assert.equal(physicalSignal.current?.aborted, false);
+  work.resolve([
+    { ok: true, result },
+    { ok: true, result },
+  ]);
+  assert.equal(await second, result);
+});

@@ -67,6 +67,25 @@ async def test_capacity_snapshot_aggregates_read_only_runtime_counts(
             },
         },
         "cache": {"total_series": 2, "total_bars": 90},
+        "stream_leases": {
+            "series_count": 2,
+            "consumer_claims": 3,
+            "unique_consumers": 3,
+            "detail_total": 2,
+            "series": [
+                {"key": "a", "consumer_count": 2},
+                {"key": "b", "consumer_count": 1},
+            ],
+        },
+        "runtimePressure": {
+            "processMemory": {
+                "available": True,
+                "source": "windows.GetProcessMemoryInfo",
+                "rss_bytes": 10,
+                "peak_rss_bytes": 20,
+                "pagefile_bytes": 30,
+            },
+        },
     })
     ingress = _Snapshot({
         "initialized": True,
@@ -116,6 +135,11 @@ async def test_capacity_snapshot_aggregates_read_only_runtime_counts(
     assert snapshot["dataManager"]["activeSeries"] == 2
     assert snapshot["dataManager"]["streamLeases"] == 3
     assert snapshot["dataManager"]["logicalSubscribers"] == 4
+    assert snapshot["dataManager"]["leaseDetailTotal"] == 2
+    assert snapshot["dataManager"]["leaseSeries"] == [
+        {"key": "a", "consumer_count": 2},
+        {"key": "b", "consumer_count": 1},
+    ]
     assert snapshot["dataManager"]["eventBus"]["callbackQueueDepth"] == 3
     assert snapshot["dataManager"]["eventBus"]["callbackQueueCapacity"] == 20
     assert snapshot["dataManager"]["eventBus"]["callbackQueueMaxDepth"] == 2
@@ -125,6 +149,13 @@ async def test_capacity_snapshot_aggregates_read_only_runtime_counts(
     assert snapshot["backfill"]["activeRequests"] == 1
     assert snapshot["backfill"]["pendingRequests"] == 1
     assert snapshot["indicators"]["activeInstances"] == 4
+    assert snapshot["runtime"]["processMemory"] == {
+        "available": True,
+        "source": "windows.GetProcessMemoryInfo",
+        "rssBytes": 10,
+        "peakRssBytes": 20,
+        "privateBytes": 30,
+    }
     assert snapshot["database"]["state"] == "warm"
     assert snapshot["database"]["rowCount"] == 3
     assert snapshot["database"]["seriesCount"] == 2

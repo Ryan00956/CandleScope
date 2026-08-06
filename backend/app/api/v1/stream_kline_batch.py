@@ -44,6 +44,7 @@ _EVENT_TYPES = {
     DataEventType.BAR_AMENDED,
     DataEventType.BACKFILL_COMPLETED,
 }
+_INITIAL_SUBSCRIBE_MAX_CONCURRENCY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,10 @@ class KlineBatchConnection:
         self.item_acks = 0
         self.item_failures = 0
         self._send_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
+        self._reserved_client_ids: set[str] = set()
+        self._reserved_new_client_ids: set[str] = set()
+        self._reserved_logical_subscriptions = 0
 
     async def run(self) -> None:
         forwarder = asyncio.create_task(
@@ -278,62 +283,122 @@ class KlineBatchConnection:
                 "command contains too many items",
             )
             return
-        for index, raw_item in enumerate(items):
-            try:
-                if action == "subscribe":
-                    ack = await self._subscribe(raw_item)
-                elif action == "update":
-                    ack = await self._update(raw_item)
-                else:
-                    ack = await self._unsubscribe(raw_item)
-            except _ItemError as exc:
-                self.item_failures += 1
-                ack = self._failure_ack(
-                    action,
-                    raw_item,
-                    code=exc.code,
-                    message=str(exc),
-                )
-            except StreamCapacityError as exc:
-                self.item_failures += 1
-                ack = self._failure_ack(
-                    action,
-                    raw_item,
-                    code="kline_app_capacity",
-                    message=str(exc),
-                )
-            except Exception as exc:
-                self.item_failures += 1
-                ack = self._failure_ack(
-                    action,
-                    raw_item,
-                    code="stream_subscription_failed",
-                    message=str(exc),
-                )
+        if action == "subscribe" and len(items) > 1:
+            semaphore = asyncio.Semaphore(_INITIAL_SUBSCRIBE_MAX_CONCURRENCY)
+
+            async def _bounded_subscribe(raw_item: Any) -> dict[str, Any]:
+                async with semaphore:
+                    return await self._execute_item(action, raw_item)
+
+            acknowledgements = await asyncio.gather(*(
+                _bounded_subscribe(raw_item) for raw_item in items
+            ))
+        else:
+            acknowledgements = [
+                await self._execute_item(action, raw_item)
+                for raw_item in items
+            ]
+
+        # Preserve command item order on the wire even though cold upstream
+        # streams are admitted in bounded groups. This keeps reconnect/replay and
+        # per-item failure handling deterministic for existing clients.
+        for index, ack in enumerate(acknowledgements):
             ack.update({"request_id": request_id, "item_index": index})
             self.item_acks += 1
             if not await self._safe_send_json(ack):
                 return
 
+    async def _execute_item(
+        self,
+        action: str,
+        raw_item: Any,
+    ) -> dict[str, Any]:
+        try:
+            if action == "subscribe":
+                return await self._subscribe(raw_item)
+            if action == "update":
+                return await self._update(raw_item)
+            return await self._unsubscribe(raw_item)
+        except _ItemError as exc:
+            self.item_failures += 1
+            return self._failure_ack(
+                action,
+                raw_item,
+                code=exc.code,
+                message=str(exc),
+            )
+        except StreamCapacityError as exc:
+            self.item_failures += 1
+            return self._failure_ack(
+                action,
+                raw_item,
+                code="kline_app_capacity",
+                message=str(exc),
+            )
+        except Exception as exc:
+            self.item_failures += 1
+            return self._failure_ack(
+                action,
+                raw_item,
+                code="stream_subscription_failed",
+                message=str(exc),
+            )
+
     async def _subscribe(self, raw_item: Any) -> dict[str, Any]:
         item = self._normalize_item(raw_item, require_intervals=True)
         client_id = item["client_id"]
-        existing = self.subscriptions.get(client_id)
-        if existing is not None and existing.series_key != item["series_key"]:
-            raise _ItemError(
-                "client_id_conflict",
-                "clientId already owns another instrument; use update",
+        reserved_additions = 0
+        reservation_released = False
+        async with self._state_lock:
+            if client_id in self._reserved_client_ids:
+                raise _ItemError(
+                    "client_id_conflict",
+                    "clientId already has a subscribe operation in flight",
+                )
+            existing = self.subscriptions.get(client_id)
+            if existing is not None and existing.series_key != item["series_key"]:
+                raise _ItemError(
+                    "client_id_conflict",
+                    "clientId already owns another instrument; use update",
+                )
+            if existing is None and (
+                len(self.subscriptions) + len(self._reserved_new_client_ids)
+                >= self.limits.max_series_per_client
+            ):
+                raise _ItemError("series_limit", "per-client series limit reached")
+            reserved_additions = len(
+                set(item["intervals"])
+                - (existing.intervals if existing else set())
             )
-        if existing is None and len(self.subscriptions) >= self.limits.max_series_per_client:
-            raise _ItemError("series_limit", "per-client series limit reached")
-        self._require_total_capacity(
-            len(set(item["intervals"]) - (existing.intervals if existing else set())),
-        )
-        subscription = existing or self._new_subscription(item)
-        failures = await self._add_intervals(subscription, item["intervals"])
-        if subscription.handles:
-            self.subscriptions[client_id] = subscription
-        return self._success_ack("subscribe", subscription, failures=failures)
+            self._require_total_capacity(reserved_additions)
+            self._reserved_client_ids.add(client_id)
+            if existing is None:
+                self._reserved_new_client_ids.add(client_id)
+            self._reserved_logical_subscriptions += reserved_additions
+            subscription = existing or self._new_subscription(item)
+
+        try:
+            failures = await self._add_intervals(subscription, item["intervals"])
+            async with self._state_lock:
+                if subscription.handles:
+                    self.subscriptions[client_id] = subscription
+                self._reserved_client_ids.discard(client_id)
+                self._reserved_new_client_ids.discard(client_id)
+                self._reserved_logical_subscriptions = max(
+                    0,
+                    self._reserved_logical_subscriptions - reserved_additions,
+                )
+                reservation_released = True
+            return self._success_ack("subscribe", subscription, failures=failures)
+        finally:
+            if not reservation_released:
+                async with self._state_lock:
+                    self._reserved_client_ids.discard(client_id)
+                    self._reserved_new_client_ids.discard(client_id)
+                    self._reserved_logical_subscriptions = max(
+                        0,
+                        self._reserved_logical_subscriptions - reserved_additions,
+                    )
 
     async def _update(self, raw_item: Any) -> dict[str, Any]:
         item = self._normalize_item(raw_item, require_intervals=True)
@@ -462,7 +527,11 @@ class KlineBatchConnection:
         )
 
     def _require_total_capacity(self, additions: int) -> None:
-        projected = self.logical_subscription_count + max(0, int(additions))
+        projected = (
+            self.logical_subscription_count
+            + self._reserved_logical_subscriptions
+            + max(0, int(additions))
+        )
         if projected > self.limits.max_total_subscriptions:
             raise _ItemError(
                 "total_subscription_limit",

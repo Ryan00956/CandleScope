@@ -251,3 +251,32 @@ test("role and link-setting changes invalidate an ineligible retained viewport",
   settingCoordinator.register("cell-2", settingTarget.surface, "workspace-setting");
   assert.deepEqual(settingTarget.ranges, []);
 });
+
+test("link diagnostics separate publish attempts, deliveries, and failures", () => {
+  const document = createDefaultChartWorkspace();
+  document.linkGroups.A.timeAnchor = true;
+  const coordinator = new ChartLinkCoordinator(document, "workspace-diagnostics");
+  const target = recordingSurface();
+  coordinator.register("cell-2", target.surface, "workspace-diagnostics");
+
+  coordinator.publishCrosshair("cell-1", 123);
+  coordinator.publishTimeAnchor("cell-1", 456);
+  coordinator.publishDateRange("cell-1", { from: 100, to: 200 });
+
+  const snapshot = coordinator.snapshot();
+  assert.deepEqual(snapshot.registeredCellIds, ["cell-2"]);
+  assert.equal(snapshot.counts.crosshairPublishes, 1);
+  assert.equal(snapshot.counts.crosshairTargetAttempts, 1);
+  assert.equal(snapshot.counts.crosshairTargetDeliveries, 1);
+  assert.equal(snapshot.counts.timeAnchorPublishes, 1);
+  assert.equal(snapshot.counts.dateRangePublishes, 1);
+  assert.equal(snapshot.counts.viewportTargetAttempts, 2);
+  assert.equal(snapshot.counts.viewportTargetDeliveries, 2);
+  assert.equal(snapshot.counts.viewportTargetFailures, 0);
+  assert.deepEqual(snapshot.retainedViewportGroups, [{
+    group: "A",
+    kind: "dateRange",
+    sourceCellId: "cell-1",
+    failedCellIds: [],
+  }]);
+});

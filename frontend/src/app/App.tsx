@@ -358,6 +358,30 @@ function LiveWorkspaceApp() {
     () => linkCoordinator.subscribeViewportIssue(setViewportLinkIssue),
     [linkCoordinator],
   );
+  useEffect(() => {
+    const target = window as typeof window & {
+      __CANDLESCOPE_MULTI_CHART_CAPACITY__?: unknown;
+      __CANDLESCOPE_CHART_LINK_DIAGNOSTICS__?: {
+        snapshot: () => ReturnType<ChartLinkCoordinator["snapshot"]>;
+        publishCrosshair: ChartLinkCoordinator["publishCrosshair"];
+        publishTimeAnchor: ChartLinkCoordinator["publishTimeAnchor"];
+        publishDateRange: ChartLinkCoordinator["publishDateRange"];
+      };
+    };
+    if (target.__CANDLESCOPE_MULTI_CHART_CAPACITY__ === undefined) return;
+    const diagnostics = {
+      snapshot: () => linkCoordinator.snapshot(),
+      publishCrosshair: linkCoordinator.publishCrosshair.bind(linkCoordinator),
+      publishTimeAnchor: linkCoordinator.publishTimeAnchor.bind(linkCoordinator),
+      publishDateRange: linkCoordinator.publishDateRange.bind(linkCoordinator),
+    };
+    target.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__ = diagnostics;
+    return () => {
+      if (target.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__ === diagnostics) {
+        delete target.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__;
+      }
+    };
+  }, [linkCoordinator]);
   const [foregroundPreloadGate] = useState(() => new ForegroundPreloadGate());
   const [activeEnvironment, setActiveEnvironment] = useState<{
     workspaceId: string;

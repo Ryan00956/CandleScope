@@ -125,6 +125,19 @@ export interface KlineHistoryRequestOptions extends KlineRequestOptions {
   intent?: KlineHistoryIntent;
 }
 
+export interface KlineHistoryBatchRequest {
+  symbol: string;
+  interval: IntervalString;
+  days: number | null | undefined;
+  marketType: string;
+  exchange: string;
+  options: Omit<KlineHistoryRequestOptions, "signal">;
+}
+
+export type KlineHistoryBatchOutcome =
+  | { ok: true; result: KlineFetchResult }
+  | { ok: false; error: Error };
+
 export interface KlineBeforeRequestOptions extends KlineRequestOptions {
   /** Backend long-poll budget. Validation probes use zero to stay non-blocking. */
   maxWaitMs?: number;
@@ -145,6 +158,11 @@ export interface KlineApi {
     exchange: string,
     options: KlineHistoryRequestOptions,
   ): Promise<KlineFetchResult>;
+  /** Optional bounded transport used to serialize a multi-Cell history burst. */
+  fetchKlinesHistoryBatch?(
+    requests: readonly KlineHistoryBatchRequest[],
+    options: Pick<KlineRequestOptions, "signal">,
+  ): Promise<KlineHistoryBatchOutcome[]>;
   fetchKlinesBefore(
     symbol: string,
     interval: IntervalString,

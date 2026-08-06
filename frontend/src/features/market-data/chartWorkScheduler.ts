@@ -1,6 +1,7 @@
 export type ChartWorkTier = "focused" | "hidden" | "minimized" | "visible-secondary";
 
 export type ChartWorkLane =
+  | "active-hydration"
   | "authoritative-final"
   | "indicator-preview"
   | "indicator-range"
@@ -12,8 +13,11 @@ export type ChartWorkLane =
 export interface ChartWorkSchedulerOptions {
   cancelFrame?: (handle: number) => void;
   maxConcurrent?: number;
+  maxConcurrentHydration?: number;
+  maxFrameTasksPerFrame?: number;
   now?: () => number;
   requestFrame?: (callback: () => void) => number;
+  yieldFrameBetweenTasks?: boolean;
 }
 
 export interface ChartWorkCellDiagnostics {
@@ -31,6 +35,7 @@ export interface ChartWorkCellDiagnostics {
 
 export interface ChartWorkSchedulerDiagnostics {
   activeAsync: number;
+  activeHydration: number;
   cells: ChartWorkCellDiagnostics[];
   disposed: boolean;
   pendingAsync: number;
@@ -46,7 +51,7 @@ interface CellState {
 interface AsyncTask<TResult = unknown> {
   cellId: string;
   createdAt: number;
-  lane: Extract<ChartWorkLane, "indicator-range" | "initial-history" | "load-more" | "prefetch">;
+  lane: Extract<ChartWorkLane, "active-hydration" | "indicator-range" | "initial-history" | "load-more" | "prefetch">;
   reject(error: unknown): void;
   resolve(result: TResult): void;
   run(): TResult | PromiseLike<TResult>;
@@ -73,7 +78,8 @@ const LANE_ORDER: Record<AsyncTask["lane"], number> = {
   "initial-history": 0,
   "load-more": 1,
   "indicator-range": 2,
-  prefetch: 3,
+  "active-hydration": 3,
+  prefetch: 4,
 };
 
 function defaultRequestFrame(callback: () => void): number {
@@ -107,15 +113,20 @@ export class ChartWorkDroppedError extends Error {
  */
 export class ChartWorkScheduler {
   private readonly maxConcurrent: number;
+  private readonly maxConcurrentHydration: number;
+  private readonly maxFrameTasksPerFrame: number;
   private readonly now: () => number;
   private readonly requestFrame: (callback: () => void) => number;
   private readonly cancelFrame: (handle: number) => void;
+  private readonly yieldFrameBetweenTasks: boolean;
   private readonly cells = new Map<string, CellState>();
   private readonly asyncQueue: AsyncTask[] = [];
   private readonly frameQueue = new Map<string, FrameTask>();
   private readonly lastServedCell = new Map<string, string>();
   private activeAsync = 0;
+  private activeHydration = 0;
   private frameHandle: number | null = null;
+  private yieldNextFrame = false;
   private nextSequence = 0;
   private nextFrameHandle = 0;
   private windowVisible = true;
@@ -126,9 +137,26 @@ export class ChartWorkScheduler {
     // exact-request broker concurrently, where they collapse to one physical
     // transport. CPU-heavy forming/preview work uses the separate frame lane.
     this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrent ?? 16));
+    // Deep cache hydration is intentionally background work. One request at a
+    // time prevents several distinct 1,500-row SQLite projections from
+    // contending for the Python GIL while foreground 16-Cell reads stay fully
+    // concurrent.
+    this.maxConcurrentHydration = Math.max(
+      1,
+      Math.floor(options.maxConcurrentHydration ?? 1),
+    );
+    // Canvas paint cost scales with visible Cell count. Stagger replaceable
+    // forming/preview commits across frames so a 16-Cell fan-out cannot turn a
+    // one-second market tick into one 250+ ms main-thread block. Authoritative
+    // final/amended commits bypass this queue and remain immediate.
+    this.maxFrameTasksPerFrame = Math.max(
+      1,
+      Math.floor(options.maxFrameTasksPerFrame ?? 1),
+    );
     this.now = options.now || Date.now;
     this.requestFrame = options.requestFrame || defaultRequestFrame;
     this.cancelFrame = options.cancelFrame || defaultCancelFrame;
+    this.yieldFrameBetweenTasks = options.yieldFrameBetweenTasks ?? true;
   }
 
   registerCell(
@@ -269,6 +297,7 @@ export class ChartWorkScheduler {
   diagnostics(): ChartWorkSchedulerDiagnostics {
     return {
       activeAsync: this.activeAsync,
+      activeHydration: this.activeHydration,
       cells: [...this.cells.values()].map((state) => ({
         ...state.diagnostics,
         committed: { ...state.diagnostics.committed },
@@ -299,6 +328,7 @@ export class ChartWorkScheduler {
     this.disposed = true;
     if (this.frameHandle !== null) this.cancelFrame(this.frameHandle);
     this.frameHandle = null;
+    this.yieldNextFrame = false;
     this.frameQueue.clear();
     const error = new ChartWorkDroppedError("Chart work scheduler was disposed");
     this.asyncQueue.splice(0).forEach((task) => task.reject(error));
@@ -360,6 +390,7 @@ export class ChartWorkScheduler {
     if (this.frameQueue.size === 0 && this.frameHandle !== null) {
       this.cancelFrame(this.frameHandle);
       this.frameHandle = null;
+      this.yieldNextFrame = false;
     }
   }
 
@@ -372,12 +403,20 @@ export class ChartWorkScheduler {
   }
 
   private flushFrames(): void {
+    if (this.yieldNextFrame) {
+      this.yieldNextFrame = false;
+      this.scheduleFrame();
+      return;
+    }
     const tasks = [...this.frameQueue.values()].sort((left, right) => {
       const tierDelta = TIER_ORDER[this.tier(left.cellId)] - TIER_ORDER[this.tier(right.cellId)];
       return tierDelta || left.sequence - right.sequence;
     });
-    this.frameQueue.clear();
+    let committed = 0;
     for (const task of tasks) {
+      if (committed >= this.maxFrameTasksPerFrame) break;
+      const taskKey = `${task.cellId}\u0000${task.lane}\u0000${task.key}`;
+      if (!this.frameQueue.delete(taskKey)) continue;
       const state = this.ensureCell(task.cellId);
       this.incrementPending(state, task.lane, -1);
       if (state.diagnostics.tier === "hidden" || state.diagnostics.tier === "minimized") {
@@ -387,6 +426,10 @@ export class ChartWorkScheduler {
       const waitMs = Math.max(0, this.now() - task.createdAt);
       task.callback();
       this.recordCommit(state, task.lane, waitMs);
+      committed += 1;
+    }
+    if (committed > 0 && this.frameQueue.size > 0 && this.yieldFrameBetweenTasks) {
+      this.yieldNextFrame = true;
     }
     this.scheduleFrame();
   }
@@ -399,6 +442,7 @@ export class ChartWorkScheduler {
   private drain(): void {
     while (!this.disposed && this.activeAsync < this.maxConcurrent && this.asyncQueue.length > 0) {
       const index = this.selectNextAsyncTask();
+      if (index < 0) return;
       const task = this.asyncQueue.splice(index, 1)[0];
       if (!task) return;
       const state = this.ensureCell(task.cellId);
@@ -413,12 +457,14 @@ export class ChartWorkScheduler {
       }
       const waitMs = Math.max(0, this.now() - task.createdAt);
       this.activeAsync += 1;
+      if (task.lane === "active-hydration") this.activeHydration += 1;
       this.lastServedCell.set(this.priorityKey(task), task.cellId);
       void Promise.resolve()
         .then(task.run)
         .then(task.resolve, task.reject)
         .finally(() => {
           this.activeAsync -= 1;
+          if (task.lane === "active-hydration") this.activeHydration -= 1;
           if (!this.disposed) this.recordCommit(state, task.lane, waitMs);
           this.drain();
         });
@@ -430,9 +476,16 @@ export class ChartWorkScheduler {
   }
 
   private selectNextAsyncTask(): number {
+    const eligible = this.asyncQueue
+      .map((task, index) => ({ index, task }))
+      .filter(({ task }) => (
+        task.lane !== "active-hydration"
+        || this.activeHydration < this.maxConcurrentHydration
+      ));
+    if (eligible.length === 0) return -1;
     let bestTier = Number.POSITIVE_INFINITY;
     let bestLane = Number.POSITIVE_INFINITY;
-    for (const task of this.asyncQueue) {
+    for (const { task } of eligible) {
       const tier = TIER_ORDER[this.tier(task.cellId)];
       const lane = LANE_ORDER[task.lane];
       if (tier < bestTier || (tier === bestTier && lane < bestLane)) {
@@ -440,8 +493,7 @@ export class ChartWorkScheduler {
         bestLane = lane;
       }
     }
-    const candidates = this.asyncQueue
-      .map((task, index) => ({ index, task }))
+    const candidates = eligible
       .filter(({ task }) => (
         TIER_ORDER[this.tier(task.cellId)] === bestTier
         && LANE_ORDER[task.lane] === bestLane

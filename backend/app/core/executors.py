@@ -28,14 +28,16 @@ class _ExecutorStats:
     max_queue_wait_ms: float = 0.0
     total_run_ms: float = 0.0
     max_run_ms: float = 0.0
+    recent_slow_operations: list[dict[str, Any]] = field(default_factory=list)
     _lock: Lock = field(default_factory=Lock)
 
-    def mark_submitted(self) -> float:
+    def mark_submitted(self) -> tuple[int, float]:
         with self._lock:
             self.submitted += 1
-        return time.perf_counter()
+            sequence = self.submitted
+        return sequence, time.perf_counter()
 
-    def mark_started(self, submitted_at: float) -> float:
+    def mark_started(self, submitted_at: float) -> tuple[float, float]:
         now = time.perf_counter()
         wait_ms = (now - submitted_at) * 1000
         with self._lock:
@@ -43,9 +45,17 @@ class _ExecutorStats:
             self.active += 1
             self.total_queue_wait_ms += wait_ms
             self.max_queue_wait_ms = max(self.max_queue_wait_ms, wait_ms)
-        return now
+        return now, wait_ms
 
-    def mark_finished(self, started_at: float, *, failed: bool) -> None:
+    def mark_finished(
+        self,
+        started_at: float,
+        *,
+        sequence: int,
+        operation: str,
+        queue_wait_ms: float,
+        failed: bool,
+    ) -> None:
         run_ms = (time.perf_counter() - started_at) * 1000
         with self._lock:
             self.active = max(0, self.active - 1)
@@ -54,6 +64,16 @@ class _ExecutorStats:
             self.max_run_ms = max(self.max_run_ms, run_ms)
             if failed:
                 self.failed += 1
+            if run_ms >= 20.0 or queue_wait_ms >= 20.0:
+                self.recent_slow_operations.append({
+                    "sequence": sequence,
+                    "operation": operation,
+                    "queue_wait_ms": round(queue_wait_ms, 2),
+                    "run_ms": round(run_ms, 2),
+                    "failed": failed,
+                })
+                if len(self.recent_slow_operations) > 64:
+                    self.recent_slow_operations.pop(0)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -77,6 +97,7 @@ class _ExecutorStats:
                 "max_queue_wait_ms": round(self.max_queue_wait_ms, 2),
                 "avg_run_ms": round(avg_run, 2),
                 "max_run_ms": round(self.max_run_ms, 2),
+                "recent_slow_operations": list(self.recent_slow_operations),
             }
 
 
@@ -120,10 +141,16 @@ async def _run(
     loop = asyncio.get_running_loop()
     bound = functools.partial(func, *args, **kwargs)
     stats = _stats[stats_name]
-    submitted_at = stats.mark_submitted()
+    sequence, submitted_at = stats.mark_submitted()
+    operation_target = args[0] if operation_is_dispatch_wrapper(func, args) else func
+    operation = str(
+        getattr(operation_target, "__qualname__", None)
+        or getattr(operation_target, "__name__", None)
+        or type(operation_target).__name__
+    )
 
     def _call() -> T:
-        started_at = stats.mark_started(submitted_at)
+        started_at, queue_wait_ms = stats.mark_started(submitted_at)
         failed = False
         try:
             return bound()
@@ -131,9 +158,24 @@ async def _run(
             failed = True
             raise
         finally:
-            stats.mark_finished(started_at, failed=failed)
+            stats.mark_finished(
+                started_at,
+                sequence=sequence,
+                operation=operation,
+                queue_wait_ms=queue_wait_ms,
+                failed=failed,
+            )
 
     return await loop.run_in_executor(executor, _call)
+
+
+def operation_is_dispatch_wrapper(func: Callable[..., Any], args: tuple[Any, ...]) -> bool:
+    """Expose the wrapped callable name for generic API compatibility shims."""
+    return bool(
+        args
+        and callable(args[0])
+        and getattr(func, "__name__", "") == "_call_data_manager_method"
+    )
 
 
 async def run_indicator(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:

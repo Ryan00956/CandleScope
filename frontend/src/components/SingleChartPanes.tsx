@@ -1954,6 +1954,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (adapter !== chartAdapter) adapter.notifyDrawingFrameInvalidation();
     }
   }, [chartAdapter]);
+  const reportCrosshairMove = useEffectEvent((value: MainSeriesCrosshairValue | null) => {
+    onCrosshairMove?.(value);
+  });
 
   useEffect(() => {
     if (drawingFontMetricRevision <= 0) return;
@@ -1966,10 +1969,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   );
 
   useEffect(() => {
-    onCrosshairMove?.(null);
+    reportCrosshairMove(null);
     paneCrosshairStore.clear();
     publishMainLegendCrosshair(null);
-  }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, publishMainLegendCrosshair, symbol]);
+  }, [datasetKey, interval, paneCrosshairStore, publishMainLegendCrosshair, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(indicatorReconcileReady ? seriesStore : null);
   const derivedAuxiliaryIndex = useMemo(() => {
@@ -2825,7 +2828,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (param.time == null) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       const axisTime = typeof param.time === "number" || isOrdinalAxisTime(param.time)
@@ -2834,7 +2837,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (axisTime == null) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
@@ -2844,7 +2847,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (shouldUseLatestChartPaneLegend(sourceTime, displayRow, sourceRow)) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       paneCrosshairStore.publish(sourceTime);
@@ -2857,11 +2860,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       );
       if (!crosshairValue) {
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       publishMainLegendCrosshair(crosshairValue);
-      onCrosshairMove?.(crosshairValue);
+      reportCrosshairMove(crosshairValue);
     };
 
     const handleVisibleLogicalRangeChange = (range: VisibleLogicalRange) => {
@@ -2973,7 +2976,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       } catch { /* chart may already be disposing */ }
       paneCrosshairStore.clear();
       publishMainLegendCrosshair(null);
-      onCrosshairMove?.(null);
+      reportCrosshairMove(null);
       const drawingBoundary = resolveDrawingSurfaceChartTypeBoundary(
         initialChartType,
         requestedChartTypeRef.current,
@@ -3004,7 +3007,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;

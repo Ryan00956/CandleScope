@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import (
+    BACKFILL_COORDINATOR_MAX_CONCURRENCY,
     KLINES_DB_PATH,
     KLINE_APP_MAX_ACTIVE_SERIES,
     FULL_ORDER_BOOK_DEFAULT_MAX_PENDING,
@@ -921,6 +922,7 @@ async def start_data_engine() -> DataEngineRuntime:
                     variant=repair.interval,
                 )
             ),
+            max_concurrency=BACKFILL_COORDINATOR_MAX_CONCURRENCY,
         )
         await backfill_coordinator.refresh_suppressions()
         set_suppression_lookup = getattr(

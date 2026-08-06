@@ -12,6 +12,7 @@
  *   POST /indicators/compute          → compute indicator (engine or script)
  */
 import { API_BASE, httpBaseToWsBase } from "./apiConfig.js";
+import { sharedControlRead } from "./sharedControlRead.js";
 import {
   isIndicatorRecord,
   parseCustomIndicatorList,
@@ -89,10 +90,12 @@ export async function fetchPresets(): Promise<IndicatorPreset[]> {
 
 /** Fetch a single preset with full script */
 export async function fetchPreset(presetId: string): Promise<IndicatorPreset> {
-  const payload = await request(
-    `${API_BASE}/indicators/presets/${encodeURIComponent(presetId)}`,
-  );
-  return parseIndicatorPreset(payload);
+  return sharedControlRead(`control:indicator-preset:${presetId}`, 5_000, async () => {
+    const payload = await request(
+      `${API_BASE}/indicators/presets/${encodeURIComponent(presetId)}`,
+    );
+    return parseIndicatorPreset(payload);
+  });
 }
 
 /** Fetch raw indicator specs from registry (advanced) */

@@ -14,6 +14,7 @@ import {
   syncWatchlistSymbols,
 } from "../api.js";
 import { ApiPayloadError } from "../apiPayloadParsers.js";
+import { resetSharedControlReadsForTests } from "../sharedControlRead.js";
 
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(payload), {
@@ -256,7 +257,10 @@ test("request rejects invalid JSON on a successful response", async (context) =>
 
 test("exchange endpoints validate the list and capabilities shapes", async (context) => {
   const originalFetch = globalThis.fetch;
-  context.after(() => { globalThis.fetch = originalFetch; });
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+    resetSharedControlReadsForTests();
+  });
   const capability = exchangeCapability({
     capability_schema_version: 3,
     channels: [{
@@ -281,6 +285,7 @@ test("exchange endpoints validate the list and capabilities shapes", async (cont
   assert.equal(parsedCapability.capability_schema_version, 3);
   assert.deepEqual(parsedCapability.channels?.[0]?.params.interval, ["1m", "1h"]);
 
+  resetSharedControlReadsForTests();
   globalThis.fetch = async () => jsonResponse({ count: 1, exchanges: [{}] });
   await assert.rejects(() => fetchExchanges(), ApiPayloadError);
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
 import {
@@ -209,7 +209,7 @@ export function useKlineStreamRuntime({
     trackedIntervalsRef.current = trackedIntervals;
   }, [trackedIntervals]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!enabled) {
       setWsStatus("idle");
       return undefined;

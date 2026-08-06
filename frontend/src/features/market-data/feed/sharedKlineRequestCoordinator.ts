@@ -4,6 +4,7 @@ import type {
   KlineApi,
   KlineBeforeRequestOptions,
   KlineFetchResult,
+  KlineHistoryBatchRequest,
   KlineHistoryRequestOptions,
   KlineRangeRequestOptions,
   KlineRequestOptions,
@@ -19,11 +20,18 @@ interface RequestConsumer {
 }
 
 interface SharedRequestEntry {
-  controller: AbortController;
   consumers: Map<symbol, RequestConsumer>;
+  group?: SharedPhysicalGroup;
+  historyBatchRequest?: KlineHistoryBatchRequest;
   key: string;
   kind: RequestKind;
   startedAt: number;
+}
+
+interface SharedPhysicalGroup {
+  controller: AbortController;
+  entries: SharedRequestEntry[];
+  token: symbol;
 }
 
 export interface SharedKlineRequestCoordinatorDiagnostics {
@@ -87,6 +95,9 @@ function physicalOptions<TOptions extends KlineRequestOptions>(
 export class SharedKlineRequestCoordinator implements KlineApi {
   private readonly api: KlineApi;
   private readonly entries = new Map<string, SharedRequestEntry>();
+  private readonly pendingHistory = new Set<SharedRequestEntry>();
+  private readonly physicalGroups = new Map<symbol, SharedPhysicalGroup>();
+  private historyFlushScheduled = false;
   private totalLogical = 0;
   private totalPhysical = 0;
   private joinedLogical = 0;
@@ -123,6 +134,24 @@ export class SharedKlineRequestCoordinator implements KlineApi {
         exchange,
         physicalOptions(options, signal),
       ),
+      this.api.fetchKlinesHistoryBatch
+        ? {
+            symbol,
+            interval,
+            days,
+            marketType,
+            exchange,
+            options: {
+              ...(options.countBack === undefined ? {} : { countBack: options.countBack }),
+              ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
+              ...(options.intent === undefined ? {} : { intent: options.intent }),
+              ...(options.demandScope === undefined ? {} : { demandScope: options.demandScope }),
+              ...(options.demandGeneration === undefined
+                ? {}
+                : { demandGeneration: options.demandGeneration }),
+            },
+          }
+        : undefined,
     );
   }
 
@@ -244,7 +273,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
       completedPhysical: this.completedPhysical,
       joinedLogical: this.joinedLogical,
       logicalInflight,
-      physicalInflight: this.entries.size,
+      physicalInflight: this.physicalGroups.size,
       requests,
       totalLogical: this.totalLogical,
       totalPhysical: this.totalPhysical,
@@ -254,8 +283,10 @@ export class SharedKlineRequestCoordinator implements KlineApi {
   closeAll(): void {
     const entries = [...this.entries.values()];
     this.entries.clear();
+    this.pendingHistory.clear();
+    for (const group of this.physicalGroups.values()) group.controller.abort();
+    this.physicalGroups.clear();
     for (const entry of entries) {
-      entry.controller.abort();
       this.settle(entry, "reject", abortError());
     }
   }
@@ -265,6 +296,7 @@ export class SharedKlineRequestCoordinator implements KlineApi {
     key: string,
     signal: AbortSignal | undefined,
     request: (signal: AbortSignal) => Promise<KlineFetchResult>,
+    historyBatchRequest?: KlineHistoryBatchRequest,
   ): Promise<KlineFetchResult> {
     this.totalLogical += 1;
     if (signal?.aborted) return Promise.reject(abortError());
@@ -272,21 +304,19 @@ export class SharedKlineRequestCoordinator implements KlineApi {
     let entry = this.entries.get(key);
     if (!entry) {
       entry = {
-        controller: new AbortController(),
         consumers: new Map(),
+        ...(historyBatchRequest === undefined ? {} : { historyBatchRequest }),
         key,
         kind,
         startedAt: Date.now(),
       };
       this.entries.set(key, entry);
-      this.totalPhysical += 1;
-      const ownedEntry = entry;
-      void Promise.resolve()
-        .then(() => request(ownedEntry.controller.signal))
-        .then(
-          (result) => this.finish(ownedEntry, "resolve", result),
-          (error) => this.finish(ownedEntry, "reject", error),
-        );
+      if (historyBatchRequest && this.api.fetchKlinesHistoryBatch) {
+        this.pendingHistory.add(entry);
+        this.scheduleHistoryFlush();
+      } else {
+        this.startSingle(entry, request);
+      }
     } else {
       this.joinedLogical += 1;
     }
@@ -302,7 +332,8 @@ export class SharedKlineRequestCoordinator implements KlineApi {
           reject(abortError());
           if (ownedEntry.consumers.size === 0 && this.entries.get(key) === ownedEntry) {
             this.entries.delete(key);
-            ownedEntry.controller.abort();
+            this.pendingHistory.delete(ownedEntry);
+            this.abortGroupIfUnowned(ownedEntry.group);
           }
         };
         consumer.signal = signal;
@@ -313,14 +344,107 @@ export class SharedKlineRequestCoordinator implements KlineApi {
     });
   }
 
-  private finish(
+  private startSingle(
     entry: SharedRequestEntry,
-    outcome: "reject" | "resolve",
-    value: unknown,
+    request: (signal: AbortSignal) => Promise<KlineFetchResult>,
   ): void {
-    if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+    const group = this.createPhysicalGroup([entry]);
+    void Promise.resolve()
+      .then(() => request(group.controller.signal))
+      .then(
+        (result) => this.finishGroup(group, [{ outcome: "resolve", value: result }]),
+        (error) => this.finishGroup(group, [{ outcome: "reject", value: error }]),
+      );
+  }
+
+  private scheduleHistoryFlush(): void {
+    if (this.historyFlushScheduled) return;
+    this.historyFlushScheduled = true;
+    queueMicrotask(() => {
+      this.historyFlushScheduled = false;
+      this.flushHistory();
+    });
+  }
+
+  private flushHistory(): void {
+    const available = [...this.pendingHistory].filter((entry) => (
+      this.entries.get(entry.key) === entry && entry.consumers.size > 0
+    ));
+    for (const entry of available) this.pendingHistory.delete(entry);
+    for (let offset = 0; offset < available.length; offset += 16) {
+      const entries = available.slice(offset, offset + 16);
+      if (entries.length === 1 || !this.api.fetchKlinesHistoryBatch) {
+        const entry = entries[0];
+        if (!entry) continue;
+        const item = entry.historyBatchRequest;
+        if (!item) continue;
+        this.startSingle(entry, (signal) => this.api.fetchKlinesHistory(
+          item.symbol,
+          item.interval,
+          item.days,
+          item.marketType,
+          item.exchange,
+          physicalOptions(item.options, signal),
+        ));
+        continue;
+      }
+      const group = this.createPhysicalGroup(entries);
+      const items = entries.map((entry) => entry.historyBatchRequest as KlineHistoryBatchRequest);
+      void this.api.fetchKlinesHistoryBatch(items, { signal: group.controller.signal }).then(
+        (outcomes) => {
+          if (outcomes.length !== entries.length) {
+            throw new Error("History batch response length did not match the request length");
+          }
+          this.finishGroup(group, outcomes.map((outcome) => outcome.ok
+            ? { outcome: "resolve" as const, value: outcome.result }
+            : { outcome: "reject" as const, value: outcome.error }));
+        },
+        (error: unknown) => this.finishGroup(
+          group,
+          entries.map(() => ({ outcome: "reject" as const, value: error })),
+        ),
+      ).catch((error: unknown) => this.finishGroup(
+        group,
+        entries.map(() => ({ outcome: "reject" as const, value: error })),
+      ));
+    }
+  }
+
+  private createPhysicalGroup(entries: SharedRequestEntry[]): SharedPhysicalGroup {
+    const group: SharedPhysicalGroup = {
+      controller: new AbortController(),
+      entries,
+      token: Symbol("physical-kline-request"),
+    };
+    for (const entry of entries) entry.group = group;
+    this.physicalGroups.set(group.token, group);
+    this.totalPhysical += 1;
+    return group;
+  }
+
+  private abortGroupIfUnowned(group: SharedPhysicalGroup | undefined): void {
+    if (!group) return;
+    const hasOwner = group.entries.some((entry) => (
+      this.entries.get(entry.key) === entry && entry.consumers.size > 0
+    ));
+    if (!hasOwner) group.controller.abort();
+  }
+
+  private finishGroup(
+    group: SharedPhysicalGroup,
+    outcomes: Array<{ outcome: "reject" | "resolve"; value: unknown }>,
+  ): void {
+    if (!this.physicalGroups.delete(group.token)) return;
     this.completedPhysical += 1;
-    this.settle(entry, outcome, value);
+    group.entries.forEach((entry, index) => {
+      if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+      delete entry.group;
+      const result = outcomes[index] ?? {
+        outcome: "reject" as const,
+        value: new Error("Missing physical request outcome"),
+      };
+      this.settle(entry, result.outcome, result.value);
+    });
   }
 
   private settle(

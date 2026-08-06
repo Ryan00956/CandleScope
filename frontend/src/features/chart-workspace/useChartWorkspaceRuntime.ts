@@ -774,7 +774,11 @@ export function useChartWorkspaceRuntime(
       window: activeWindow,
       activeWorkspaceId: workspace.id,
       activeWorkspaceName: workspace.name,
-      runtimeKey: `${workspace.id}:${ready ? "ready" : "bootstrap"}`,
+      // The bootstrap journal and hydrated repository record describe the
+      // same Workspace identity. Keep Cell keys stable across hydration so a
+      // 16-Cell window does not tear down and recreate every chart, request,
+      // and broker consumer as IndexedDB becomes ready.
+      runtimeKey: workspace.id,
       workspaces: workspaceSummaries,
       layout,
       activeCellId: activeWindow.activeCellId,

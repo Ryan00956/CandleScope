@@ -783,6 +783,7 @@ plot(ma, "MA", color=line_color)
                           return (
                           <div
                             key={preset.id}
+                            data-indicator-id={preset.id}
                             className={`indicator-preset-item ${isActive(preset.id) ? "is-active" : ""}`}
                           >
                             <div className="indicator-preset-info">
@@ -843,6 +844,7 @@ plot(ma, "MA", color=line_color)
                           return (
                             <div
                               key={study.id}
+                              data-market-study-id={study.id}
                               className={`indicator-preset-item ${study.added ? "is-active" : ""}`}
                             >
                               <div className="indicator-preset-info">

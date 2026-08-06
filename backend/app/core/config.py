@@ -595,6 +595,14 @@ INDICATOR_HTTP_TIMEOUT_SECONDS = float(os.getenv("INDICATOR_HTTP_TIMEOUT_SECONDS
 INDICATOR_THREAD_WORKERS = int(os.getenv("INDICATOR_THREAD_WORKERS", "2"))
 PYNE_HTTP_THREAD_WORKERS = int(os.getenv("PYNE_HTTP_THREAD_WORKERS", "2"))
 STORAGE_THREAD_WORKERS = int(os.getenv("STORAGE_THREAD_WORKERS", "4"))
+# Backfill chunks perform SQLite projection and reconciliation in the same
+# process as the async API. Keep the coordinator serialized by default so a
+# 16-series repair burst cannot occupy every storage worker and starve control
+# plane/WebSocket scheduling. Endpoint fetchers retain their own rate limits.
+BACKFILL_COORDINATOR_MAX_CONCURRENCY = max(
+    1,
+    int(os.getenv("BACKFILL_COORDINATOR_MAX_CONCURRENCY", "1")),
+)
 
 # Indicator history reuse.  These caches only hold data derived from K-lines;
 # they are deliberately bounded and can be disabled without changing API
@@ -620,7 +628,7 @@ INDICATOR_WS_HEARTBEAT_SECONDS = float(os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS
 INDICATOR_WS_RESUME_MAX_BARS = int(os.getenv("INDICATOR_WS_RESUME_MAX_BARS", "32"))
 INDICATOR_WS_SEED_CACHE_SECONDS = float(os.getenv("INDICATOR_WS_SEED_CACHE_SECONDS", "1"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "2"))
-EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1"))
+EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "0.01"))
 
 # Multi-chart K-line transport and process capacity.  These values are hard
 # safety ceilings: environment configuration may tighten them, never expand

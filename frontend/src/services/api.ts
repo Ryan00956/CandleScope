@@ -27,6 +27,7 @@ import type {
   SubscriptionRequestOptions,
   SubscriptionTier,
 } from "../features/watchlist/watchlistTypes.js";
+import { sharedControlRead } from "./sharedControlRead.js";
 
 const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
@@ -67,6 +68,19 @@ export interface KlineRangeOptions extends RequestSignalOptions {
   waitMs?: number;
   strict?: boolean;
 }
+
+export interface TransportKlineHistoryBatchRequest {
+  symbol: string;
+  interval: string;
+  days: number | null | undefined;
+  marketType: string;
+  exchange: string;
+  options: Omit<KlineHistoryOptions, "signal">;
+}
+
+export type TransportKlineHistoryBatchOutcome =
+  | { ok: true; result: TransportKlineResponse }
+  | { ok: false; error: ApiError };
 
 function requestSignalOptions(signal: AbortSignal | undefined): RequestSignalOptions {
   return signal === undefined ? {} : { signal };
@@ -192,6 +206,67 @@ export async function fetchKlinesHistory(
   return parseKlineResponse(payload, "GET /klines/history");
 }
 
+export async function fetchKlinesHistoryBatch(
+  requests: readonly TransportKlineHistoryBatchRequest[],
+  options: Pick<RequestSignalOptions, "signal"> = {},
+): Promise<TransportKlineHistoryBatchOutcome[]> {
+  if (requests.length < 1 || requests.length > 16) {
+    throw new RangeError("History batch must contain between 1 and 16 requests");
+  }
+  const requestIds = requests.map((_item, index) => `history-${index}`);
+  const url = buildUrl("/klines/history/batch");
+  const payload = await request(url, {
+    method: "POST",
+    body: {
+      requests: requests.map((item, index) => ({
+        request_id: requestIds[index],
+        symbol: item.symbol,
+        interval: item.interval,
+        days: item.days ?? 7,
+        count_back: item.options.countBack,
+        exchange: item.exchange,
+        market_type: item.marketType,
+        max_wait_ms: item.options.maxWaitMs,
+        intent: item.options.intent,
+        request_scope: item.options.demandScope,
+        request_generation: item.options.demandGeneration,
+      })),
+    },
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  if (!isJsonRecord(payload) || !Array.isArray(payload.results)) {
+    throw new TypeError("Invalid API payload at POST /klines/history/batch.results: expected an array");
+  }
+  const byId = new Map<string, UnknownRecord>();
+  for (const item of payload.results) {
+    if (!isJsonRecord(item) || typeof item.request_id !== "string" || byId.has(item.request_id)) {
+      throw new TypeError("Invalid API payload at POST /klines/history/batch.results: invalid request_id");
+    }
+    byId.set(item.request_id, item);
+  }
+  return requestIds.map((requestId, index) => {
+    const item = byId.get(requestId);
+    if (!item || typeof item.ok !== "boolean" || typeof item.status !== "number") {
+      throw new TypeError(`Invalid API payload at POST /klines/history/batch.results[${index}]`);
+    }
+    if (item.ok) {
+      return {
+        ok: true as const,
+        result: parseKlineResponse(item.payload, `POST /klines/history/batch.results[${index}].payload`),
+      };
+    }
+    const detail = typeof item.detail === "string"
+      ? item.detail
+      : isJsonRecord(item.detail)
+        ? JSON.stringify(item.detail)
+        : `HTTP ${item.status}`;
+    return {
+      ok: false as const,
+      error: new ApiError({ status: item.status, detail, url }),
+    };
+  });
+}
+
 export async function fetchKlinesBefore(
   symbol = "BTCUSDT",
   interval = "1h",
@@ -310,8 +385,10 @@ export async function fetchExchangeInfo(marketType = "", exchange = ""): Promise
 }
 
 export async function fetchSupportedExchanges(): Promise<ExchangeListPayload> {
-  const payload = await request(`${API_BASE}/exchanges/`);
-  return parseExchangeListResponse(payload, "GET /exchanges/");
+  return sharedControlRead("control:exchanges", 5_000, async () => {
+    const payload = await request(`${API_BASE}/exchanges/`);
+    return parseExchangeListResponse(payload, "GET /exchanges/");
+  });
 }
 
 export async function refreshExchangeInfo(exchange = ""): Promise<unknown> {
@@ -530,8 +607,10 @@ export function getPriceStreamUrl(): string {
 }
 
 export async function fetchExchanges(): Promise<ExchangeListPayload> {
-  const payload = await request(`${API_BASE}/exchanges/`);
-  return parseExchangeListResponse(payload, "GET /exchanges/");
+  return sharedControlRead("control:chart-exchanges", 5_000, async () => {
+    const payload = await request(`${API_BASE}/exchanges/`);
+    return parseExchangeListResponse(payload, "GET /exchanges/");
+  });
 }
 
 export async function fetchExchangeCapabilities(exchange = "binance"): Promise<ExchangeCapabilityPayload> {

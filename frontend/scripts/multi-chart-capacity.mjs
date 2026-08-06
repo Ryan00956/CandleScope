@@ -11,7 +11,7 @@ export const CAPACITY_SCHEMA_VERSION = "candlescope.multi-chart.capacity/1";
 export const HARDWARE_SCHEMA_VERSION = "candlescope.multi-chart.hardware/1";
 export const CURRENT_PRODUCT_CELL_LIMIT = 16;
 export const SUPPORTED_CELL_ARGUMENTS = Object.freeze([1, 2, 4, 8, 16]);
-export const SUPPORTED_SCENARIOS = Object.freeze(["S1", "S2", "S3", "S4", "S5"]);
+export const SUPPORTED_SCENARIOS = Object.freeze(["S1", "S2", "S3", "S4", "S5", "C1"]);
 const EVIDENCE_SCENARIOS = new Set([
   ...SUPPORTED_SCENARIOS,
   "C1", "W1", "W2", "W3", "F1", "F2", "F3",
@@ -20,8 +20,13 @@ const EVIDENCE_SCENARIOS = new Set([
 const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_BACKEND_URL = "http://127.0.0.1:18080";
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1920, height: 1080 });
-const SYMBOLS = Object.freeze(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]);
-const INTERVALS = Object.freeze(["1m", "5m", "15m", "1h"]);
+const SYMBOLS = Object.freeze([
+  "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+  "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT",
+  "LINKUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
+  "TRXUSDT", "NEARUSDT", "APTUSDT", "FILUSDT",
+]);
+const INTERVALS = Object.freeze(["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"]);
 
 function requireValue(argv, index, name) {
   const value = argv[index + 1];
@@ -41,6 +46,9 @@ export function parseArgs(argv, environment = process.env) {
     artifactsDir: environment.MULTI_CHART_ARTIFACTS_DIR || "output/playwright/multi-chart-capacity",
     hardwareOut: environment.MULTI_CHART_HARDWARE_OUT || "docs/perf-baselines/multi-chart-workspace/hardware-profile.json",
     chromePath: environment.CHROME_PATH || "",
+    requireDatabaseState: environment.MULTI_CHART_REQUIRE_DATABASE_STATE || "auto",
+    workload: environment.MULTI_CHART_WORKLOAD || "observe",
+    sampleMs: Number(environment.MULTI_CHART_SAMPLE_MS || 5_000),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -55,6 +63,9 @@ export function parseArgs(argv, environment = process.env) {
     else if (value === "--artifacts-dir") args.artifactsDir = requireValue(argv, index++, value);
     else if (value === "--hardware-out") args.hardwareOut = requireValue(argv, index++, value);
     else if (value === "--chrome") args.chromePath = requireValue(argv, index++, value);
+    else if (value === "--require-database-state") args.requireDatabaseState = requireValue(argv, index++, value).toLowerCase();
+    else if (value === "--workload") args.workload = requireValue(argv, index++, value).toLowerCase();
+    else if (value === "--sample-ms") args.sampleMs = Number(requireValue(argv, index++, value));
     else if (value === "--help" || value === "-h") args.help = true;
     else throw new Error(`Unknown argument: ${value}`);
   }
@@ -64,6 +75,18 @@ export function parseArgs(argv, environment = process.env) {
   }
   if (!SUPPORTED_SCENARIOS.includes(args.scenario)) {
     throw new Error(`--scenario must be one of ${SUPPORTED_SCENARIOS.join(", ")}`);
+  }
+  if (!["auto", "warm", "empty"].includes(args.requireDatabaseState)) {
+    throw new Error("--require-database-state must be auto, warm, or empty");
+  }
+  if (!["observe", "soak"].includes(args.workload)) {
+    throw new Error("--workload must be observe or soak");
+  }
+  if (!Number.isFinite(args.sampleMs) || args.sampleMs < 1_000) {
+    throw new Error("--sample-ms must be at least 1000");
+  }
+  if (args.scenario === "C1" && args.requireDatabaseState === "auto") {
+    args.requireDatabaseState = "empty";
   }
   if (!Number.isFinite(args.durationMs) || args.durationMs < 1_000) {
     throw new Error("--duration-ms must be at least 1000");
@@ -78,7 +101,7 @@ function usage() {
   return `Usage: npm run capacity:multi-chart -- [options]
 
   --cells <1|2|4|8|16>       Logical cells to request
-  --scenario <S1|S2|S3|S4|S5>
+  --scenario <S1|S2|S3|S4|S5|C1>
   --url <frontend-url>        Existing frontend origin
   --backend-url <url>         Existing backend origin
   --duration-ms <ms>          Measured duration after readiness (>=1000)
@@ -86,23 +109,29 @@ function usage() {
   --out <json-path>           Capacity evidence output
   --artifacts-dir <path>      Screenshot and trace directory
   --hardware-out <json-path>  Hardware profile output
-  --chrome <path>             Chrome or Edge executable`;
+  --chrome <path>             Chrome or Edge executable
+  --require-database-state <auto|warm|empty>
+  --workload <observe|soak>   Run observation only or the release interaction loop
+  --sample-ms <ms>            Heap/backend sample period during soak (>=1000)`;
 }
 
 function scenarioCells(scenario, cellCount) {
   const cells = [];
   for (let index = 0; index < cellCount; index += 1) {
     const visibleIndex = index % Math.max(1, cellCount);
-    const symbol = ["S3", "S4", "S5"].includes(scenario)
+    const symbol = ["S3", "S4", "S5", "C1"].includes(scenario)
       ? SYMBOLS[visibleIndex % SYMBOLS.length]
       : SYMBOLS[0];
     const interval = scenario === "S2"
       ? INTERVALS[visibleIndex % INTERVALS.length]
       : INTERVALS[0];
-    const indicators = scenario === "S4"
+    const indicators = ["S4", "C1"].includes(scenario)
       ? [
-          { id: `capacity-ma-${index + 1}`, name: "MA", engineName: "MA", kind: "builtin", params: { period: 20 }, visible: true },
-          { id: `capacity-rsi-${index + 1}`, name: "RSI", engineName: "RSI", kind: "builtin", params: { period: 14 }, visible: true },
+          // Indicator identifiers are cell-local. Use the real catalog ids so
+          // the release interaction exercises the same remove/restore path as
+          // a user-created workspace instead of an artificial unmatched id.
+          { id: "ma", name: "MA", engineName: "MA", kind: "builtin", executionTarget: "local", params: { period: 20 }, visible: true },
+          { id: "rsi", name: "RSI", engineName: "RSI", kind: "builtin", executionTarget: "local", params: { period: 14 }, visible: true },
         ]
       : scenario === "S5"
         ? [{
@@ -118,8 +147,8 @@ function scenarioCells(scenario, cellCount) {
         : [];
     cells.push({
       id: `cell-${index + 1}`,
-      linkGroup: null,
-      linkRole: "bidirectional",
+      linkGroup: index < 2 ? "A" : null,
+      linkRole: index === 0 ? "source" : index === 1 ? "destination" : "bidirectional",
       drawingLayerSet: "1",
       session: { exchange: "binance", marketType: "spot", symbol, interval },
       chartSettings: {},
@@ -177,7 +206,7 @@ export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
     activeWindowId: "main-window",
     windows: { "main-window": windowState },
     linkGroups: Object.fromEntries(["A", "B", "C", "D"].map((group) => [group, {
-      market: true,
+      market: group !== "A",
       interval: false,
       crosshair: true,
       timeAnchor: false,
@@ -189,11 +218,31 @@ export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
   const record = {
     schemaVersion: 1,
     id: "workspace-capacity-phase0",
-    name: `Phase 2 ${scenario} ${cells} Cell`,
+    name: `Phase 5 ${scenario} ${cells} Cell`,
     createdAt: now,
     updatedAt: now,
     document,
   };
+  const expectedClaimsBySeries = Object.fromEntries(states.reduce((claims, state) => {
+    const requestedKey = `${state.session.symbol}@${state.session.interval}`;
+    claims.set(requestedKey, (claims.get(requestedKey) || 0) + 1);
+    if (state.session.interval !== "1m") {
+      const baseKey = `${state.session.symbol}@1m`;
+      claims.set(baseKey, (claims.get(baseKey) || 0) + 1);
+    }
+    return claims;
+  }, new Map()));
+  const expectedLeaseClaimsBySeries = { ...expectedClaimsBySeries };
+  for (const state of states) {
+    const ownsHostedIndicatorStream = state.indicators.some((indicator) => (
+      indicator.executionTarget === "hosted"
+    ));
+    if (!ownsHostedIndicatorStream) continue;
+    const requestedKey = `${state.session.symbol}@${state.session.interval}`;
+    expectedLeaseClaimsBySeries[requestedKey] = Number(
+      expectedLeaseClaimsBySeries[requestedKey] || 0,
+    ) + 1;
+  }
   return {
     record,
     library: { activeWorkspaceId: record.id, workspaces: [record] },
@@ -201,6 +250,11 @@ export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
       `${state.session.symbol}@${state.session.interval}`
     )))).sort(),
     expectedSymbols: Array.from(new Set(states.map((state) => state.session.symbol))).sort(),
+    // K-line batch claims and DataManager lease claims differ only for hosted
+    // indicators: each hosted series has one additional indicator-stream
+    // owner, while local MA/RSI adds no backend lease.
+    expectedClaimsBySeries,
+    expectedLeaseClaimsBySeries,
   };
 }
 
@@ -285,7 +339,7 @@ async function waitForHttp(url, timeoutMs) {
   throw lastError || new Error(`Timed out waiting for ${url}`);
 }
 
-function findChrome(explicitPath) {
+export function findChrome(explicitPath) {
   return [
     explicitPath,
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -299,7 +353,7 @@ function findChrome(explicitPath) {
   ].filter(Boolean).find((candidate) => fs.existsSync(candidate));
 }
 
-async function connectWebSocket(url) {
+export async function connectWebSocket(url) {
   if (!globalThis.WebSocket) throw new Error("Node.js WebSocket is unavailable");
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
@@ -336,7 +390,7 @@ async function connectWebSocket(url) {
   };
 }
 
-async function evaluate(cdp, expression) {
+export async function evaluate(cdp, expression) {
   const response = await cdp.send("Runtime.evaluate", {
     expression,
     awaitPromise: true,
@@ -347,9 +401,35 @@ async function evaluate(cdp, expression) {
   return result?.value;
 }
 
-async function evaluateJson(cdp, expression) {
+export async function evaluateJson(cdp, expression) {
   const value = await evaluate(cdp, `JSON.stringify((${expression})())`);
   return typeof value === "string" ? JSON.parse(value) : null;
+}
+
+export async function evaluateAsyncJson(cdp, expression) {
+  const value = await evaluate(cdp, `(async () => JSON.stringify(await (${expression})()))()`);
+  return typeof value === "string" ? JSON.parse(value) : null;
+}
+
+export async function writeProtocolStream(cdp, streamHandle, outputPath) {
+  if (!streamHandle) throw new Error("Tracing did not return an IO stream handle");
+  const fileHandle = fs.openSync(outputPath, "w");
+  try {
+    while (true) {
+      const chunk = await cdp.send("IO.read", {
+        handle: streamHandle,
+        size: 1024 * 1024,
+      });
+      const data = chunk.base64Encoded
+        ? Buffer.from(chunk.data || "", "base64")
+        : Buffer.from(chunk.data || "", "utf8");
+      if (data.length > 0) fs.writeSync(fileHandle, data);
+      if (chunk.eof) break;
+    }
+  } finally {
+    fs.closeSync(fileHandle);
+    await cdp.send("IO.close", { handle: streamHandle }).catch(() => {});
+  }
 }
 
 function percentile(values, percentileValue) {
@@ -357,6 +437,30 @@ function percentile(values, percentileValue) {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentileValue / 100) * sorted.length) - 1));
   return Number(sorted[index].toFixed(3));
+}
+
+export function eventLoopLagForWindow(before, after) {
+  const beforeSequence = Number(before?.sample_sequence ?? before?.samples ?? 0);
+  const samples = Array.isArray(after?.recent_samples)
+    ? after.recent_samples
+        .filter((sample) => Number(sample?.sequence) > beforeSequence)
+        .map((sample) => Number(sample?.value_ms))
+        .filter(Number.isFinite)
+    : [];
+  const hasAuthoritativeWindow = after?.window_after_sequence === beforeSequence;
+  return {
+    beforeSequence,
+    afterSequence: Number(after?.sample_sequence ?? after?.samples ?? 0),
+    samples,
+    ...(hasAuthoritativeWindow ? {
+      complete: after?.window_complete === true,
+      sampleCount: Number(after?.window_sample_count || 0),
+    } : {}),
+    p99Ms: hasAuthoritativeWindow
+      && after?.window_complete === true
+      ? Number(after?.window_p99_ms)
+      : samples.length > 0 ? percentile(samples, 99) : null,
+  };
 }
 
 function canonicalJson(value) {
@@ -456,21 +560,86 @@ function initializationScript(bootstrap) {
     localStorage.setItem('candlescope-workspace-library-fallback-v1', JSON.stringify(library));
     const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ = {
       longTasks: [], inputEvents: [], canvasAdded: 0, canvasRemoved: 0,
-      lastCanvasMutationAt: performance.now(), measuring: false,
+      canvasMutations: [], chartSurfaceAdded: 0, chartSurfaceRemoved: 0,
+      chartSurfaceMutations: [], lastCanvasMutationAt: performance.now(),
+      lastChartSurfaceMutationAt: performance.now(), measuring: false,
     };
-    const observeCanvas = (nodes, field) => {
+    const recordCanvasMutation = (canvas, field) => {
+      const now = performance.now();
+      state[field] += 1;
+      state.lastCanvasMutationAt = now;
+      state.canvasMutations.push({
+        atMs: Number(now.toFixed(3)),
+        field,
+        cellId: canvas.closest?.('.multi-chart-cell')?.getAttribute('data-chart-cell-id') || null,
+        className: typeof canvas.className === 'string' ? canvas.className : null,
+        parentClassName: typeof canvas.parentElement?.className === 'string'
+          ? canvas.parentElement.className
+          : null,
+      });
+      if (state.canvasMutations.length > 128) state.canvasMutations.splice(0, state.canvasMutations.length - 128);
+    };
+    const canvasesIn = (nodes) => {
+      const canvases = [];
       for (const node of nodes) {
         if (!(node instanceof Element)) continue;
-        if (node.matches('canvas')) { state[field] += 1; state.lastCanvasMutationAt = performance.now(); }
-        const nested = node.querySelectorAll?.('canvas').length || 0;
-        state[field] += nested;
-        if (nested > 0) state.lastCanvasMutationAt = performance.now();
+        if (node.matches('canvas')) canvases.push(node);
+        for (const canvas of node.querySelectorAll?.('canvas') || []) {
+          canvases.push(canvas);
+        }
+      }
+      return canvases;
+    };
+    const chartSurfacesIn = (nodes) => {
+      const surfaces = [];
+      for (const node of nodes) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches('.tv-lightweight-charts')) surfaces.push(node);
+        for (const surface of node.querySelectorAll?.('.tv-lightweight-charts') || []) {
+          surfaces.push(surface);
+        }
+      }
+      return surfaces;
+    };
+    const recordChartSurfaceMutation = (surface, field) => {
+      const now = performance.now();
+      state[field] += 1;
+      state.lastChartSurfaceMutationAt = now;
+      state.chartSurfaceMutations.push({
+        atMs: Number(now.toFixed(3)),
+        field,
+        cellId: surface.closest?.('.multi-chart-cell')?.getAttribute('data-chart-cell-id') || null,
+      });
+      if (state.chartSurfaceMutations.length > 128) {
+        state.chartSurfaceMutations.splice(0, state.chartSurfaceMutations.length - 128);
       }
     };
     new MutationObserver((records) => {
+      const removed = [];
+      const removedSurfaces = [];
       for (const record of records) {
-        observeCanvas(record.addedNodes, 'canvasAdded');
-        observeCanvas(record.removedNodes, 'canvasRemoved');
+        for (const canvas of canvasesIn(record.addedNodes)) {
+          recordCanvasMutation(canvas, 'canvasAdded');
+        }
+        for (const surface of chartSurfacesIn(record.addedNodes)) {
+          recordChartSurfaceMutation(surface, 'chartSurfaceAdded');
+        }
+        removed.push(...canvasesIn(record.removedNodes));
+        removedSurfaces.push(...chartSurfacesIn(record.removedNodes));
+      }
+      // Moving a keyed Cell within the stable layout layer produces a
+      // childList removal and insertion for the same connected DOM nodes.
+      // Count only canvases that are actually detached after the complete
+      // mutation batch; mount-token evidence below independently guards the
+      // React component lifecycle.
+      for (const canvas of removed) {
+        if (!canvas.isConnected) recordCanvasMutation(canvas, 'canvasRemoved');
+      }
+      // Lightweight Charts owns one stable root per mounted chart instance.
+      // Drawing and indicator panes legitimately replace their internal
+      // canvases, so only a detached root is an actual chart remount.
+      for (const surface of removedSurfaces) {
+        if (!surface.isConnected) recordChartSurfaceMutation(surface, 'chartSurfaceRemoved');
       }
     }).observe(document, { childList: true, subtree: true });
     try {
@@ -487,72 +656,708 @@ function initializationScript(bootstrap) {
 }
 
 export function isCapacityReadySnapshot(snapshot, cellCount) {
-  const statusesReady = snapshot?.statuses?.every((status) => /\b(live|fallback)\b/.test(status));
   const chartDataReady = snapshot?.marketDataReady?.every((ready) => ready === "true");
   return snapshot?.visibleCells === cellCount
     && snapshot.canvasCount >= cellCount
-    && snapshot.canvasQuietMs >= 500
+    && snapshot.chartSurfaceCount === cellCount
+    && snapshot.chartSurfaceQuietMs >= 500
     && snapshot.documentVisibility === "visible"
-    && statusesReady
     && chartDataReady;
+}
+
+export function isRealtimeSettledSnapshot(snapshot, cellCount) {
+  return snapshot?.visibleCells === cellCount
+    && snapshot?.statuses?.length === cellCount
+    && snapshot.statuses.every((status) => /\b(live|fallback)\b/.test(status));
 }
 
 async function waitForCapacityReady(cdp, cellCount, timeoutMs) {
   const startedAt = Date.now();
   let latest = null;
   while (Date.now() - startedAt < timeoutMs) {
-    latest = await evaluateJson(cdp, `() => {
-      const cells = Array.from(document.querySelectorAll('.multi-chart-cell'));
-      const statuses = cells.map((cell) => cell.querySelector('.multi-chart-cell-status')?.className || 'missing');
-      const capacityState = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ || {};
-      return {
-        documentReady: document.readyState,
-        documentVisibility: document.visibilityState,
-        visibleCells: cells.length,
-        cellIds: cells.map((cell) => cell.getAttribute('data-chart-cell-id')),
-        marketDataReady: cells.map((cell) => cell.getAttribute('data-market-data-ready')),
-        canvasQuietMs: Math.max(0, performance.now() - Number(capacityState.lastCanvasMutationAt || 0)),
-        statuses,
-        canvasCount: cells.reduce((count, cell) => count + cell.querySelectorAll('canvas').length, 0),
-        errorText: Array.from(document.querySelectorAll('.error-message, .chart-error')).map((node) => node.textContent?.trim()).filter(Boolean),
-      };
-    }`);
+    try {
+      latest = await evaluateJson(cdp, `() => {
+        const cells = Array.from(document.querySelectorAll('.multi-chart-cell'));
+        const statuses = cells.map((cell) => cell.querySelector('.multi-chart-cell-status')?.className || 'missing');
+        const capacityState = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ || {};
+        return {
+          documentReady: document.readyState,
+          documentVisibility: document.visibilityState,
+          visibleCells: cells.length,
+          cellIds: cells.map((cell) => cell.getAttribute('data-chart-cell-id')),
+          marketDataReady: cells.map((cell) => cell.getAttribute('data-market-data-ready')),
+          canvasQuietMs: Math.max(0, performance.now() - Number(capacityState.lastCanvasMutationAt || 0)),
+          chartSurfaceQuietMs: Math.max(0, performance.now() - Number(capacityState.lastChartSurfaceMutationAt || 0)),
+          canvasMutations: (capacityState.canvasMutations || []).slice(-32),
+          chartSurfaceMutations: (capacityState.chartSurfaceMutations || []).slice(-32),
+          statuses,
+          canvasCount: cells.reduce((count, cell) => count + cell.querySelectorAll('canvas').length, 0),
+          chartSurfaceCount: cells.reduce((count, cell) => count + cell.querySelectorAll('.tv-lightweight-charts').length, 0),
+          errorText: Array.from(document.querySelectorAll('.error-message, .chart-error')).map((node) => node.textContent?.trim()).filter(Boolean),
+        };
+      }`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/navigated or closed|context.*destroyed|Cannot find context/i.test(message)) throw error;
+      await wait(100);
+      continue;
+    }
     if (isCapacityReadySnapshot(latest, cellCount)) {
       return { ready: true, readyMs: Date.now() - startedAt, ...latest };
     }
     if (latest?.documentVisibility !== "visible") {
       await cdp.send("Page.bringToFront").catch(() => {});
     }
-    await wait(250);
+    // A 250 ms probe interval adds up to 249 ms of observer delay to the
+    // readiness metric and is too coarse for a 3 s p95 gate. The readiness
+    // contract itself (including 500 ms Canvas quiet time) is unchanged.
+    await wait(50);
   }
   return { ready: false, readyMs: Date.now() - startedAt, ...(latest || {}) };
+}
+
+async function waitForRealtimeSettlement(cdp, cellCount, timeoutMs) {
+  const startedAt = Date.now();
+  const snapshot = await waitForBrowserValue(cdp, `() => {
+    const cells = Array.from(document.querySelectorAll('.multi-chart-cell'));
+    const statuses = cells.map((cell) => cell.querySelector('.multi-chart-cell-status')?.className || 'missing');
+    return {
+      ready: cells.length === ${cellCount}
+        && statuses.length === ${cellCount}
+        && statuses.every((status) => /\\b(live|fallback)\\b/.test(status)),
+      visibleCells: cells.length,
+      statuses,
+    };
+  }`, timeoutMs, "all K-line subscriptions to settle");
+  return { ...snapshot, settledMs: Date.now() - startedAt };
+}
+
+async function waitForBrowserValue(cdp, expression, timeoutMs, description) {
+  const startedAt = Date.now();
+  let latest = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await evaluateJson(cdp, expression);
+    if (latest?.ready === true) return latest;
+    await wait(200);
+  }
+  throw new Error(`${description} did not become ready: ${JSON.stringify(latest)}`);
+}
+
+async function drawingDocumentStats(cdp) {
+  return evaluateAsyncJson(cdp, `async () => {
+    const databases = await indexedDB.databases();
+    if (!databases.some((item) => item.name === 'candlescope-drawings-v2')) {
+      return { documents: 0, entities: 0 };
+    }
+    return await new Promise((resolve, reject) => {
+      const request = indexedDB.open('candlescope-drawings-v2');
+      request.onerror = () => reject(request.error || new Error('drawing database open failed'));
+      request.onsuccess = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains('documents')) {
+          database.close();
+          resolve({ documents: 0, entities: 0 });
+          return;
+        }
+        const transaction = database.transaction('documents', 'readonly');
+        const read = transaction.objectStore('documents').getAll();
+        read.onerror = () => reject(read.error || new Error('drawing document read failed'));
+        read.onsuccess = () => {
+          const records = Array.isArray(read.result) ? read.result : [];
+          database.close();
+          resolve({
+            documents: records.length,
+            entities: records.reduce((total, record) => total + Number(record?.document?.entities?.length || record?.entities?.length || 0), 0),
+          });
+        };
+      };
+    });
+  }`);
+}
+
+async function runProductBoundaryDrill(cdp, cellCount, timeoutMs) {
+  const beforeDrawings = await drawingDocumentStats(cdp);
+  const mountTokensBefore = await evaluateJson(cdp, `() => Object.fromEntries(
+    Array.from(document.querySelectorAll('.multi-chart-cell')).map((cell) => [
+      cell.getAttribute('data-chart-cell-id'),
+      cell.getAttribute('data-runtime-mount-token'),
+    ]),
+  )`);
+  await evaluate(cdp, `document.querySelector('.multi-chart-cell[data-chart-cell-id="cell-1"]')?.click()`);
+  const maximize = await evaluateJson(cdp, `() => {
+    const button = document.querySelector('.multi-chart-cell[data-chart-cell-id="cell-1"] [aria-label="最大化图表"]');
+    if (!(button instanceof HTMLButtonElement)) return { ready: false, reason: 'maximize button unavailable' };
+    button.click();
+    return { ready: true };
+  }`);
+  if (!maximize?.ready) throw new Error(`Boundary drill could not maximize cell-1: ${JSON.stringify(maximize)}`);
+  const maximized = await waitForBrowserValue(cdp, `() => {
+    const layers = Array.from(document.querySelectorAll('[data-layout-cell-id]'));
+    return {
+      ready: layers.length === ${cellCount} && layers.filter((node) => node.getAttribute('data-obscured') === 'true').length === ${Math.max(0, cellCount - 1)},
+      mountedCells: layers.length,
+      obscuredCells: layers.filter((node) => node.getAttribute('data-obscured') === 'true').length,
+    };
+  }`, timeoutMs, "maximized stable cell layer");
+
+  const drawingReady = await waitForBrowserValue(cdp, `() => ({
+    ready: document.querySelector('[data-drawing-toolbar-state="ready"] [data-drawing-tool="pen"]:not([disabled])') instanceof HTMLButtonElement,
+  })`, timeoutMs, "drawing toolbar");
+  if (!drawingReady.ready) throw new Error("Drawing toolbar was not ready");
+  await evaluate(cdp, `document.querySelector('[data-drawing-tool="pen"]')?.click()`);
+  const drawingRect = await evaluateJson(cdp, `() => {
+    const host = document.querySelector('.multi-chart-cell[data-chart-cell-id="cell-1"] .multi-chart-cell-canvas');
+    if (!(host instanceof HTMLElement)) return null;
+    const rect = host.getBoundingClientRect();
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  }`);
+  if (!drawingRect || drawingRect.width < 100 || drawingRect.height < 100) {
+    throw new Error(`Drawing host is too small: ${JSON.stringify(drawingRect)}`);
+  }
+  const drawingPoints = [
+    { x: drawingRect.left + drawingRect.width * 0.25, y: drawingRect.top + drawingRect.height * 0.35 },
+    { x: drawingRect.left + drawingRect.width * 0.40, y: drawingRect.top + drawingRect.height * 0.45 },
+    { x: drawingRect.left + drawingRect.width * 0.55, y: drawingRect.top + drawingRect.height * 0.40 },
+  ];
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...drawingPoints[0], button: "left", clickCount: 1 });
+  for (const point of drawingPoints.slice(1)) {
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point, button: "left", buttons: 1 });
+  }
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...drawingPoints.at(-1), button: "left", clickCount: 1 });
+  await wait(2_000);
+  const afterDrawings = await drawingDocumentStats(cdp);
+
+  const exportOpen = await evaluateJson(cdp, `() => {
+    const button = document.querySelector('[data-drawing-action="export"]');
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return { ready: false };
+    button.click();
+    return { ready: true };
+  }`);
+  if (!exportOpen?.ready) throw new Error("Export action was unavailable");
+  const exportPanel = await waitForBrowserValue(cdp, `() => ({
+    ready: document.querySelector('[role="dialog"][aria-label="截图导出设置"]') instanceof HTMLElement,
+  })`, timeoutMs, "export panel");
+  await evaluate(cdp, `document.querySelector('[aria-label="关闭导出面板"]')?.click()`);
+
+  await evaluate(cdp, `document.querySelector('.multi-chart-cell[data-chart-cell-id="cell-1"] [aria-label="还原图表"]')?.click()`);
+  const restored = await waitForBrowserValue(cdp, `() => {
+    const layers = Array.from(document.querySelectorAll('[data-layout-cell-id]'));
+    return {
+      ready: layers.length === ${cellCount} && layers.every((node) => node.getAttribute('data-obscured') === 'false'),
+      mountedCells: layers.length,
+      obscuredCells: layers.filter((node) => node.getAttribute('data-obscured') === 'true').length,
+    };
+  }`, timeoutMs, "restored stable cell layer");
+
+  const unlocked = await evaluateJson(cdp, `() => {
+    const root = document.querySelector('.multi-chart-grid');
+    if (root?.getAttribute('data-layout-locked') !== 'true') return { ready: true, changed: false };
+    const button = document.querySelector('[aria-label="解锁布局"]');
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return { ready: false, changed: false };
+    button.click();
+    return { ready: true, changed: true };
+  }`);
+  if (!unlocked?.ready) throw new Error("Layout lock could not be released for the drag boundary drill");
+  await waitForBrowserValue(cdp, `() => ({
+    ready: document.querySelector('.multi-chart-grid')?.getAttribute('data-layout-locked') === 'false',
+  })`, timeoutMs, "unlocked layout");
+
+  const dragBefore = await evaluateJson(cdp, `() => Object.fromEntries(Array.from(document.querySelectorAll('[data-layout-cell-id]')).slice(0, 2).map((node) => {
+    const rect = node.getBoundingClientRect();
+    return [node.getAttribute('data-layout-cell-id'), { left: rect.left, top: rect.top }];
+  }))`);
+  const dragRects = await evaluateJson(cdp, `() => {
+    const handle = document.querySelector('.multi-chart-cell[data-chart-cell-id="cell-1"] .multi-chart-cell-drag-handle');
+    const target = document.querySelector('[data-layout-cell-id="cell-2"]');
+    if (!(handle instanceof HTMLElement) || !(target instanceof HTMLElement)) return null;
+    const sourceRect = handle.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    return {
+      source: { x: sourceRect.left + sourceRect.width / 2, y: sourceRect.top + sourceRect.height / 2 },
+      target: { x: targetRect.left + targetRect.width / 2, y: targetRect.top + targetRect.height / 2 },
+    };
+  }`);
+  if (!dragRects) throw new Error("Layout drag handles were unavailable");
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...dragRects.source, button: "left", clickCount: 1 });
+  for (let step = 1; step <= 8; step += 1) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: dragRects.source.x + ((dragRects.target.x - dragRects.source.x) * step) / 8,
+      y: dragRects.source.y + ((dragRects.target.y - dragRects.source.y) * step) / 8,
+      button: "left",
+      buttons: 1,
+    });
+  }
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...dragRects.target, button: "left", clickCount: 1 });
+  await wait(800);
+  const dragAfter = await evaluateJson(cdp, `() => Object.fromEntries(Array.from(document.querySelectorAll('[data-layout-cell-id]')).slice(0, 2).map((node) => {
+    const rect = node.getBoundingClientRect();
+    return [node.getAttribute('data-layout-cell-id'), { left: rect.left, top: rect.top }];
+  }))`);
+  const dragSwapped = Boolean(
+    dragBefore?.["cell-1"] && dragBefore?.["cell-2"] && dragAfter?.["cell-1"] && dragAfter?.["cell-2"]
+    && dragBefore["cell-1"].left === dragAfter["cell-2"].left
+    && dragBefore["cell-1"].top === dragAfter["cell-2"].top
+    && dragBefore["cell-2"].left === dragAfter["cell-1"].left
+    && dragBefore["cell-2"].top === dragAfter["cell-1"].top
+  );
+  const mountTokensAfter = await evaluateJson(cdp, `() => Object.fromEntries(
+    Array.from(document.querySelectorAll('.multi-chart-cell')).map((cell) => [
+      cell.getAttribute('data-chart-cell-id'),
+      cell.getAttribute('data-runtime-mount-token'),
+    ]),
+  )`);
+  const stableMountTokens = Object.keys(mountTokensBefore || {}).length === cellCount
+    && Object.keys(mountTokensAfter || {}).length === cellCount
+    && Object.entries(mountTokensBefore || {}).every(([cellId, token]) => (
+      mountTokensAfter?.[cellId] === token
+    ));
+
+  return {
+    supported: true,
+    maximized,
+    restored,
+    drawing: {
+      before: beforeDrawings,
+      after: afterDrawings,
+      persistedEntityDelta: Number(afterDrawings?.entities || 0) - Number(beforeDrawings?.entities || 0),
+    },
+    export: { panelOpened: exportPanel.ready === true },
+    layoutLock: { releasedForDrag: unlocked.changed === true },
+    layoutDrag: { before: dragBefore, after: dragAfter, swapped: dragSwapped },
+    mountTokens: { before: mountTokensBefore, after: mountTokensAfter, stable: stableMountTokens },
+  };
+}
+
+async function selectSymbolThroughUi(cdp, symbol, timeoutMs) {
+  await evaluate(cdp, `document.querySelector('#symbol-selector')?.click()`);
+  await waitForBrowserValue(cdp, `() => ({
+    ready: document.querySelector('.sym-modal-search-input') instanceof HTMLInputElement,
+  })`, timeoutMs, "symbol search input");
+  await evaluate(cdp, `(() => {
+    const input = document.querySelector('.sym-modal-search-input');
+    if (!(input instanceof HTMLInputElement)) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    setter?.call(input, ${JSON.stringify(symbol)});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await waitForBrowserValue(cdp, `() => {
+    const pair = Array.from(document.querySelectorAll('.sym-modal-row-pair')).find((node) => {
+      const ownText = Array.from(node.childNodes).filter((item) => item.nodeType === Node.TEXT_NODE).map((item) => item.textContent || '').join('').trim();
+      return ownText === ${JSON.stringify(symbol)};
+    });
+    return { ready: pair instanceof HTMLElement };
+  }`, timeoutMs, `symbol result ${symbol}`);
+  const selected = await evaluate(cdp, `(() => {
+    const pair = Array.from(document.querySelectorAll('.sym-modal-row-pair')).find((node) => {
+      const ownText = Array.from(node.childNodes).filter((item) => item.nodeType === Node.TEXT_NODE).map((item) => item.textContent || '').join('').trim();
+      return ownText === ${JSON.stringify(symbol)};
+    });
+    const row = pair?.closest('.sym-modal-row');
+    if (!(row instanceof HTMLElement)) return false;
+    row.click();
+    return true;
+  })()`);
+  if (selected !== true) throw new Error(`Could not select ${symbol} through the symbol UI`);
+  await waitForBrowserValue(cdp, `() => ({
+    ready: document.querySelector('#symbol-selector .symbol-name')?.textContent?.trim() === ${JSON.stringify(symbol)},
+  })`, timeoutMs, `active symbol ${symbol}`);
+}
+
+async function performSoakInteraction(cdp, iteration, cellCount, timeoutMs) {
+  const cellId = `cell-${(iteration % cellCount) + 1}`;
+  const actions = [];
+  const failures = [];
+  const runAction = async (name, action) => {
+    try {
+      await action();
+      actions.push(name);
+    } catch (error) {
+      failures.push({ name, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  await runAction("activate-cell", async () => {
+    const activated = await evaluate(cdp, `(() => {
+      const cell = document.querySelector('.multi-chart-cell[data-chart-cell-id="${cellId}"]');
+      if (!(cell instanceof HTMLElement)) return false;
+      cell.click();
+      return true;
+    })()`);
+    if (activated !== true) throw new Error(`${cellId} is unavailable`);
+    await wait(250);
+  });
+
+  await runAction("interval-cycle", async () => {
+    for (const interval of ["5m", "1m"]) {
+      const switched = await evaluate(cdp, `(() => {
+        const button = document.querySelector('#interval-${interval}');
+        if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+        button.click();
+        return true;
+      })()`);
+      if (switched !== true) throw new Error(`${interval} interval is unavailable`);
+      await wait(600);
+    }
+  });
+
+  if (iteration % 4 === 0) {
+    await runAction("maximize-restore", async () => {
+      const maximized = await evaluate(cdp, `(() => {
+        const button = document.querySelector('.multi-chart-cell[data-chart-cell-id="${cellId}"] [aria-label="最大化图表"]');
+        if (!(button instanceof HTMLButtonElement)) return false;
+        button.click();
+        return true;
+      })()`);
+      if (maximized !== true) throw new Error("maximize button unavailable");
+      await wait(500);
+      const restored = await evaluate(cdp, `(() => {
+        const button = document.querySelector('.multi-chart-cell[data-chart-cell-id="${cellId}"] [aria-label="还原图表"]');
+        if (!(button instanceof HTMLButtonElement)) return false;
+        button.click();
+        return true;
+      })()`);
+      if (restored !== true) throw new Error("restore button unavailable");
+      await wait(500);
+    });
+  }
+
+  if (iteration % 6 === 0) {
+    await runAction("indicator-remove-add", async () => {
+      await evaluate(cdp, `document.querySelector('.indicator-toggle-btn[title="指标 (Indicators)"]')?.click()`);
+      await waitForBrowserValue(cdp, `() => ({
+        ready: Boolean(document.querySelector('.indicator-tab-bar')),
+      })`, timeoutMs, "indicator panel");
+      await evaluate(cdp, `(() => {
+        const tab = Array.from(document.querySelectorAll('.indicator-tab')).find((item) => item.textContent?.includes('指标库'));
+        if (tab instanceof HTMLButtonElement && !tab.classList.contains('active')) tab.click();
+      })()`);
+      await waitForBrowserValue(cdp, `() => ({
+        ready: Boolean(document.querySelector('.indicator-preset-item[data-indicator-id="ma"] .indicator-add-btn.added')),
+      })`, timeoutMs, "MA indicator preset");
+      for (let toggle = 0; toggle < 2; toggle += 1) {
+        const toggled = await evaluate(cdp, `(() => {
+          const button = document.querySelector('.indicator-preset-item[data-indicator-id="ma"] .indicator-add-btn');
+          if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+          button.click();
+          return true;
+        })()`);
+        if (toggled !== true) throw new Error("MA indicator toggle unavailable");
+        const expectedAdded = toggle === 1;
+        await waitForBrowserValue(cdp, `() => {
+          const button = document.querySelector('.indicator-preset-item[data-indicator-id="ma"] .indicator-add-btn');
+          return { ready: button instanceof HTMLButtonElement && button.classList.contains('added') === ${expectedAdded} };
+        }`, timeoutMs, expectedAdded ? "MA indicator restored" : "MA indicator removed");
+      }
+      await evaluate(cdp, `document.querySelector('.indicator-panel-close')?.click()`);
+    });
+  }
+
+  if (iteration % 8 === 0) {
+    await runAction("symbol-cycle", async () => {
+      const original = await evaluate(cdp, `document.querySelector('#symbol-selector .symbol-name')?.textContent?.trim() || null`);
+      if (typeof original !== "string" || !original) throw new Error("active symbol unavailable");
+      const alternate = original === "BTCUSDT" ? "ETHUSDT" : "BTCUSDT";
+      await selectSymbolThroughUi(cdp, alternate, timeoutMs);
+      await wait(800);
+      await selectSymbolThroughUi(cdp, original, timeoutMs);
+      await wait(800);
+    });
+  }
+  return { iteration, cellId, actions, failures };
+}
+
+async function waitForBackendQuiescence(args, timeoutMs) {
+  const startedAt = Date.now();
+  let consecutiveIdleSnapshots = 0;
+  let latest = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await httpJson(
+      `${args.backendUrl}/debug/capacity?detail_limit=0`,
+      Math.min(args.readyTimeoutMs, 10_000),
+    );
+    const idle = Number(latest?.backfill?.activeRequests || 0) === 0
+      && Number(latest?.backfill?.pendingRequests || 0) === 0
+      && Number(latest?.backfill?.runningChunks || 0) === 0
+      && Number(latest?.executors?.storage?.pending || 0) === 0;
+    consecutiveIdleSnapshots = idle ? consecutiveIdleSnapshots + 1 : 0;
+    if (consecutiveIdleSnapshots >= 3) {
+      return { durationMs: Date.now() - startedAt, snapshots: consecutiveIdleSnapshots, capacity: latest };
+    }
+    await wait(1_000);
+  }
+  throw new Error(`Backend did not become quiescent before the soak baseline: ${JSON.stringify({
+    backfill: latest?.backfill || null,
+    storageExecutor: latest?.executors?.storage || null,
+  })}`);
+}
+
+async function runSoakPrecondition(cdp, args) {
+  if (args.workload !== "soak") return null;
+  const startedAt = Date.now();
+  const actions = [];
+  for (let iteration = 0; iteration < args.cells; iteration += 1) {
+    const result = await performSoakInteraction(cdp, iteration, args.cells, args.readyTimeoutMs);
+    actions.push(result);
+    if (result.failures.length) {
+      throw new Error(`Soak preconditioning failed: ${JSON.stringify(result.failures)}`);
+    }
+  }
+  const readiness = await waitForCapacityReady(cdp, args.cells, args.readyTimeoutMs);
+  const quiescence = await waitForBackendQuiescence(
+    args,
+    Math.max(args.readyTimeoutMs, 120_000),
+  );
+  const stabilizationMs = args.durationMs >= 30 * 60_000 ? 120_000 : 0;
+  const stabilizationStartedAt = Date.now();
+  while (Date.now() - stabilizationStartedAt < stabilizationMs) {
+    // Warm the same read-only diagnostics path used by the release sampler so
+    // Python/ORJSON allocator arenas and steady live-stream buffers are part
+    // of the baseline, not reported as a leak in minute one.
+    await httpJson(
+      `${args.backendUrl}/debug/capacity?detail_limit=0`,
+      Math.min(args.readyTimeoutMs, 10_000),
+    );
+    await wait(Math.min(5_000, stabilizationMs - (Date.now() - stabilizationStartedAt)));
+  }
+  const stabilized = stabilizationMs > 0
+    ? await waitForBackendQuiescence(args, Math.max(args.readyTimeoutMs, 120_000))
+    : quiescence;
+  return {
+    durationMs: Date.now() - startedAt,
+    actionCount: actions.length,
+    actionNames: [...new Set(actions.flatMap((entry) => entry.actions))].sort(),
+    readiness,
+    stabilizationMs,
+    quiescence: {
+      durationMs: stabilized.durationMs,
+      cacheSeries: Number(stabilized.capacity?.dataManager?.cacheSeries || 0),
+      cacheBars: Number(stabilized.capacity?.dataManager?.cacheBars || 0),
+      privateBytes: Number(stabilized.capacity?.runtime?.processMemory?.privateBytes || 0),
+    },
+  };
+}
+
+export function seriesAnalysis(samples, field) {
+  const values = samples
+    .filter((sample) => sample[field] !== null && sample[field] !== undefined)
+    .map((sample) => Number(sample[field]))
+    .filter(Number.isFinite);
+  if (values.length < 2) {
+    return { samples: values.length, start: values[0] ?? null, end: values.at(-1) ?? null, deltaPct: null, finalWindowDeltaPct: null, plateau: false };
+  }
+  const start = values[0];
+  const end = values.at(-1);
+  const finalWindow = values.slice(Math.max(0, Math.floor(values.length * 0.8)));
+  const finalStart = finalWindow[0];
+  const finalEnd = finalWindow.at(-1);
+  const deltaPct = start > 0 ? ((end - start) / start) * 100 : null;
+  const finalWindowDeltaPct = finalStart > 0 ? ((finalEnd - finalStart) / finalStart) * 100 : null;
+  return {
+    samples: values.length,
+    start,
+    end,
+    min: Math.min(...values),
+    max: Math.max(...values),
+    deltaPct: deltaPct === null ? null : Number(deltaPct.toFixed(3)),
+    finalWindowDeltaPct: finalWindowDeltaPct === null ? null : Number(finalWindowDeltaPct.toFixed(3)),
+    plateau: finalWindowDeltaPct !== null && finalWindowDeltaPct <= 5,
+  };
+}
+
+async function runMeasuredWindow(cdp, args, eventLoopLagBaseline) {
+  if (args.workload !== "soak") {
+    await wait(args.durationMs);
+    return { mode: "observe", samples: [], actions: [], reconnects: [], actionFailures: [], analysis: null };
+  }
+  const startedAt = Date.now();
+  let nextSampleAt = startedAt;
+  let nextActionAt = startedAt;
+  let nextReconnectAt = startedAt + 15 * 60_000;
+  let nextRetainedHeapAt = startedAt;
+  const retainedHeapIntervalMs = Math.max(60_000, Math.min(6 * 60_000, Math.floor(args.durationMs / 10)));
+  let iteration = 0;
+  const samples = [];
+  const actions = [];
+  const reconnects = [];
+  while (Date.now() - startedAt < args.durationMs) {
+    const now = Date.now();
+    if (now >= nextActionAt) {
+      const result = await performSoakInteraction(cdp, iteration, args.cells, args.readyTimeoutMs);
+      actions.push({ atMs: now - startedAt, ...result });
+      iteration += 1;
+      nextActionAt = now + 30_000;
+    }
+    if (now >= nextReconnectAt) {
+      const reconnectStartedAt = Date.now();
+      try {
+        await cdp.send("Network.emulateNetworkConditions", {
+          offline: true,
+          latency: 0,
+          downloadThroughput: 0,
+          uploadThroughput: 0,
+        });
+        await wait(2_000);
+        await cdp.send("Network.emulateNetworkConditions", {
+          offline: false,
+          latency: 0,
+          downloadThroughput: -1,
+          uploadThroughput: -1,
+        });
+        reconnects.push({ atMs: reconnectStartedAt - startedAt, atEpochMs: reconnectStartedAt, offlineMs: Date.now() - reconnectStartedAt, restored: true });
+      } catch (error) {
+        reconnects.push({ atMs: reconnectStartedAt - startedAt, atEpochMs: reconnectStartedAt, restored: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      nextReconnectAt += 15 * 60_000;
+    }
+    if (now >= nextSampleAt) {
+      let heapRetainedBytes = null;
+      if (now >= nextRetainedHeapAt) {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const retainedHeap = await cdp.send("Runtime.getHeapUsage");
+        heapRetainedBytes = Number(retainedHeap.usedSize || 0);
+        nextRetainedHeapAt = now + retainedHeapIntervalMs;
+      }
+      const heap = await cdp.send("Runtime.getHeapUsage");
+      let backend = null;
+      let backendError = null;
+      try {
+        backend = await httpJson(`${args.backendUrl}/debug/capacity?detail_limit=0`, Math.min(args.readyTimeoutMs, 10_000));
+      } catch (error) {
+        backendError = error instanceof Error ? error.message : String(error);
+      }
+      const browser = await evaluateJson(cdp, `() => ({
+        visibleCells: document.querySelectorAll('.multi-chart-cell').length,
+        render: window.__CANDLESCOPE_MULTI_CHART_RENDER_DIAGNOSTICS__?.snapshot?.() || null,
+        broker: window.__CANDLESCOPE_WINDOW_BROKER__?.snapshot?.() || null,
+      })`);
+      samples.push({
+        atMs: now - startedAt,
+        heapUsedBytes: Number(heap.usedSize || 0),
+        heapRetainedBytes,
+        backendPrivateBytes: Number(backend?.runtime?.processMemory?.privateBytes || 0),
+        backendRssBytes: Number(backend?.runtime?.processMemory?.rssBytes || 0),
+        eventLoopLagP99Ms: eventLoopLagForWindow(
+          eventLoopLagBaseline,
+          backend?.runtime?.eventLoopLag,
+        ).p99Ms,
+        activeSeries: Number(backend?.dataManager?.activeSeries || 0),
+        streamLeases: Number(backend?.dataManager?.streamLeases || 0),
+        batchLogicalSubscriptions: Number(backend?.klineBatch?.logical_subscriptions || 0),
+        batchOutboxDepth: Number(backend?.klineBatch?.outbox_depth || 0),
+        batchAuthoritativeTimeouts: Number(backend?.klineBatch?.outbox_authoritative_timeouts || 0),
+        activeBackfills: Number(backend?.backfill?.activeRequests || 0),
+        pendingBackfills: Number(backend?.backfill?.pendingRequests || 0),
+        cacheSeries: Number(backend?.dataManager?.cacheSeries || 0),
+        cacheBars: Number(backend?.dataManager?.cacheBars || 0),
+        visibleCells: Number(browser?.visibleCells || 0),
+        totalReactRenders: Number(browser?.render?.totalReactRenders || 0),
+        totalDomCommits: Number(browser?.render?.totalDomCommits || 0),
+        backendError,
+      });
+      nextSampleAt = now + args.sampleMs;
+    }
+    const nextDue = Math.min(nextSampleAt, nextActionAt, nextReconnectAt, startedAt + args.durationMs);
+    await wait(Math.max(25, Math.min(1_000, nextDue - Date.now())));
+  }
+  if (samples.length) {
+    await cdp.send("HeapProfiler.collectGarbage");
+    const retainedHeap = await cdp.send("Runtime.getHeapUsage");
+    samples.push({
+      ...samples.at(-1),
+      atMs: Date.now() - startedAt,
+      heapUsedBytes: Number(retainedHeap.usedSize || 0),
+      heapRetainedBytes: Number(retainedHeap.usedSize || 0),
+      finalRetainedHeapCheckpoint: true,
+    });
+  }
+  const actionFailures = actions.flatMap((entry) => entry.failures.map((failure) => ({
+    atMs: entry.atMs,
+    iteration: entry.iteration,
+    cellId: entry.cellId,
+    ...failure,
+  })));
+  return {
+    mode: "soak",
+    durationMs: Date.now() - startedAt,
+    sampleMs: args.sampleMs,
+    samples,
+    actions,
+    reconnects,
+    actionFailures,
+    analysis: {
+      heap: seriesAnalysis(samples, "heapRetainedBytes"),
+      rawHeap: seriesAnalysis(samples, "heapUsedBytes"),
+      privateBytes: seriesAnalysis(samples, "backendPrivateBytes"),
+      rss: seriesAnalysis(samples, "backendRssBytes"),
+      maxEventLoopLagP99Ms: Math.max(
+        0,
+        ...samples.map((sample) => sample.eventLoopLagP99Ms).filter(Number.isFinite),
+      ),
+      maxActiveSeries: Math.max(0, ...samples.map((sample) => sample.activeSeries)),
+      maxStreamLeases: Math.max(0, ...samples.map((sample) => sample.streamLeases)),
+      maxBatchOutboxDepth: Math.max(0, ...samples.map((sample) => sample.batchOutboxDepth)),
+      authoritativeTimeouts: Math.max(0, ...samples.map((sample) => sample.batchAuthoritativeTimeouts)),
+      backendSampleErrors: samples.filter((sample) => sample.backendError !== null).length,
+      visibleCellViolations: samples.filter((sample) => sample.visibleCells !== args.cells).length,
+    },
+  };
 }
 
 function classifyWebSockets(records) {
   const created = records.filter((record) => record.event === "created");
   const kline = created.filter((record) => /\/stream\/klines(?:_multi|_batch)?(?:\?|$)/.test(record.url));
   const indicator = created.filter((record) => /\/stream\/indicators(?:\?|$)/.test(record.url));
+  const peakActive = (matching) => {
+    const ids = new Set(matching.map((record) => record.requestId));
+    const active = new Set();
+    let peak = 0;
+    for (const record of records) {
+      if (!ids.has(record.requestId)) continue;
+      if (record.event === "created") active.add(record.requestId);
+      else if (record.event === "closed") active.delete(record.requestId);
+      peak = Math.max(peak, active.size);
+    }
+    return peak;
+  };
   return {
     all: created,
     kline,
     indicator,
+    klinePeakActive: peakActive(kline),
+    indicatorPeakActive: peakActive(indicator),
     other: created.filter((record) => !kline.includes(record) && !indicator.includes(record)),
   };
 }
 
-function leaseMapping(before, after, expectedSeries) {
+export function leaseMapping(before, after, expectedSeries, expectedClaimsBySeries, batchEnabled) {
   const beforeMap = before?.dataManager?.directSubscriptionsBySeries || {};
   const afterMap = after?.dataManager?.directSubscriptionsBySeries || {};
   const bySeries = Object.fromEntries(expectedSeries.map((series) => [series, {
     before: Number(beforeMap[series] || 0),
     after: Number(afterMap[series] || 0),
     delta: Number(afterMap[series] || 0) - Number(beforeMap[series] || 0),
+    expectedDelta: batchEnabled ? Number(expectedClaimsBySeries[series] || 0) : 1,
   }]));
+  // Batch client identities are stable and replace an immediately preceding
+  // browser session without requiring the shared DataManager lease count to
+  // drop to zero between CDP runs. The invariant is therefore the absolute
+  // active claim count. Legacy per-socket evidence still uses a delta because
+  // its consumer identity is not stable across runs.
+  const observedClaims = (series) => (
+    batchEnabled ? bySeries[series].after : bySeries[series].delta
+  );
+  const claimMismatches = expectedSeries.filter((series) => (
+    observedClaims(series) !== bySeries[series].expectedDelta
+  ));
   return {
     bySeries,
     observedSeries: expectedSeries.filter((series) => bySeries[series].after > 0).length,
-    leases: expectedSeries.reduce((total, series) => total + Math.max(0, bySeries[series].delta), 0),
-    duplicateSeries: expectedSeries.filter((series) => bySeries[series].delta > 1),
+    leases: expectedSeries.reduce((total, series) => total + Math.max(0, observedClaims(series)), 0),
+    duplicateSeries: expectedSeries.filter((series) => observedClaims(series) > bySeries[series].expectedDelta),
+    missingSeries: expectedSeries.filter((series) => observedClaims(series) < bySeries[series].expectedDelta),
+    claimMismatches,
   };
 }
 
@@ -611,6 +1416,8 @@ function compactBackendSnapshot(snapshot) {
       pendingRequests: Number(backfill.pendingRequests || 0),
       runningChunks: Number(backfill.runningChunks || 0),
       readyChunks: Number(backfill.readyChunks || 0),
+      summary: backfill.summary || null,
+      detail: backfill.detail || null,
     },
     executors: snapshot?.executors || null,
     indicators: {
@@ -634,6 +1441,8 @@ function compactBackendSnapshot(snapshot) {
       },
     },
     exchange: compactExchangeSnapshot(snapshot?.exchange || {}),
+    limits: snapshot?.limits || null,
+    klineBatch: snapshot?.klineBatch || null,
     runtime: snapshot?.runtime || null,
   };
 }
@@ -682,6 +1491,7 @@ export function evaluateCapacityResult({
   mapping,
   canvasRemounts,
   backgroundSuppression,
+  releaseMetrics = null,
 }) {
   if (!supported) {
     return {
@@ -694,6 +1504,14 @@ export function evaluateCapacityResult({
   const checks = {
     visibleCells: { actual: readiness.visibleCells ?? 0, expected: requestedCells, passed: readiness.visibleCells === requestedCells },
     allCellsReady: { actual: readiness.ready, expected: true, passed: readiness.ready === true },
+    realtimeSubscriptionsSettled: {
+      actual: {
+        settled: readiness.realtimeSettled ?? false,
+        statuses: readiness.realtimeStatuses ?? [],
+      },
+      expected: `${requestedCells} live or explicit polling fallback subscriptions`,
+      passed: readiness.realtimeSettled === true,
+    },
     documentVisible: { actual: readiness.documentVisibility || null, expected: "visible", passed: readiness.documentVisibility === "visible" },
     consoleErrors: { actual: errors.console.length, expected: 0, passed: errors.console.length === 0 },
     runtimeExceptions: { actual: errors.exceptions.length, expected: 0, passed: errors.exceptions.length === 0 },
@@ -701,6 +1519,7 @@ export function evaluateCapacityResult({
     backendSnapshot: { actual: backendAfter?.schemaVersion || null, expected: "candlescope.backend.capacity/1", passed: backendAfter?.ok === true },
     expectedBackendSeries: { actual: mapping.observedSeries, expected: mapping.expectedSeries, passed: mapping.observedSeries === mapping.expectedSeries },
     duplicateBackendLease: { actual: mapping.duplicateSeries, expected: [], passed: mapping.duplicateSeries.length === 0 },
+    exactBackendLeaseClaims: { actual: mapping.claimMismatches, expected: [], passed: mapping.claimMismatches.length === 0 },
     canvasRemounts: { actual: canvasRemounts, expected: 0, passed: canvasRemounts === 0 },
     backgroundSuppression: {
       actual: backgroundSuppression || null,
@@ -712,6 +1531,132 @@ export function evaluateCapacityResult({
         && backgroundSuppression?.pendingFrames === 0,
     },
   };
+  if (releaseMetrics) {
+    const hotScenario = releaseMetrics.scenario !== "C1";
+    checks.hotReadyP95 = {
+      actual: releaseMetrics.readyMs,
+      expected: hotScenario ? "<= 3000 ms" : "reported separately for cold C1",
+      passed: hotScenario ? releaseMetrics.readyMs <= 3_000 : true,
+    };
+    checks.inputResponseP95 = {
+      actual: releaseMetrics.inputP95Ms,
+      expected: "<= 100 ms",
+      passed: releaseMetrics.inputP95Ms !== null && releaseMetrics.inputP95Ms <= 100,
+    };
+    checks.longTasksPerMinute = {
+      actual: releaseMetrics.longTasksPerMinute,
+      expected: "<= 5/min",
+      passed: releaseMetrics.longTasksPerMinute <= 5,
+    };
+    checks.backendEventLoopLagP99 = {
+      actual: releaseMetrics.eventLoopLagP99Ms,
+      expected: "<= 50 ms",
+      passed: releaseMetrics.eventLoopLagP99Ms !== null
+        && releaseMetrics.eventLoopLagP99Ms <= 50,
+    };
+    checks.batchBrowserPhysicalKlineSockets = {
+      actual: releaseMetrics.klineSockets,
+      expected: releaseMetrics.batchEnabled ? 1 : ">= 1 on legacy fallback",
+      passed: releaseMetrics.batchEnabled
+        ? releaseMetrics.klineSockets === 1
+        : releaseMetrics.klineSockets >= 1,
+    };
+    checks.batchLogicalClients = {
+      actual: releaseMetrics.batchSnapshot?.logical_clients ?? null,
+      expected: releaseMetrics.batchEnabled ? requestedCells : "not applicable",
+      passed: !releaseMetrics.batchEnabled
+        || releaseMetrics.batchSnapshot?.logical_clients === requestedCells,
+    };
+    checks.batchLogicalSubscriptions = {
+      actual: releaseMetrics.batchSnapshot?.logical_subscriptions ?? null,
+      expected: releaseMetrics.batchEnabled
+        ? releaseMetrics.expectedLogicalSubscriptions
+        : "not applicable",
+      passed: !releaseMetrics.batchEnabled
+        || releaseMetrics.batchSnapshot?.logical_subscriptions
+          === releaseMetrics.expectedLogicalSubscriptions,
+    };
+    checks.batchAuthoritativeTimeouts = {
+      actual: releaseMetrics.batchSnapshot?.outbox_authoritative_timeouts ?? 0,
+      expected: 0,
+      passed: Number(releaseMetrics.batchSnapshot?.outbox_authoritative_timeouts || 0) === 0,
+    };
+    const linkCounts = releaseMetrics.linkDrill?.snapshot?.counts;
+    checks.linkBoundary = {
+      actual: linkCounts || releaseMetrics.linkDrill || null,
+      expected: "crosshair and date-range delivered to the linked destination",
+      passed: releaseMetrics.linkDrill?.supported === true
+        && Number(linkCounts?.crosshairTargetDeliveries || 0) >= 1
+        && Number(linkCounts?.dateRangePublishes || 0) >= 1
+        && Number(linkCounts?.viewportTargetDeliveries || 0) >= 1,
+    };
+    if (releaseMetrics.scenario === "S4") {
+      const boundary = releaseMetrics.productBoundaryDrill;
+      checks.productBoundaryDrill = {
+        actual: boundary || null,
+        expected: "stable maximize/restore, persisted drawing, export panel, and drag swap",
+        passed: boundary?.supported === true
+          && boundary.maximized?.mountedCells === requestedCells
+          && boundary.maximized?.obscuredCells === requestedCells - 1
+          && boundary.restored?.mountedCells === requestedCells
+          && boundary.restored?.obscuredCells === 0
+          && boundary.drawing?.persistedEntityDelta >= 1
+          && boundary.export?.panelOpened === true
+          && boundary.layoutDrag?.swapped === true
+          && boundary.mountTokens?.stable === true,
+      };
+    }
+    if (releaseMetrics.measuredWindow?.mode === "soak") {
+      const measuredWindow = releaseMetrics.measuredWindow;
+      const actionNames = new Set(measuredWindow.actions.flatMap((entry) => entry.actions));
+      checks.soakInteractions = {
+        actual: {
+          actionCount: measuredWindow.actions.length,
+          actionNames: [...actionNames].sort(),
+          failures: measuredWindow.actionFailures,
+        },
+        expected: "interval, symbol, maximize, and indicator cycles with zero failures",
+        passed: measuredWindow.actionFailures.length === 0
+          && ["interval-cycle", "symbol-cycle", "maximize-restore", "indicator-remove-add"]
+            .every((name) => actionNames.has(name)),
+      };
+      checks.soakSampling = {
+        actual: measuredWindow.analysis,
+        expected: "no backend sample errors, visibility violations, or authoritative outbox timeouts",
+        passed: measuredWindow.analysis?.backendSampleErrors === 0
+          && measuredWindow.analysis?.visibleCellViolations === 0
+          && measuredWindow.analysis?.authoritativeTimeouts === 0,
+      };
+      if (releaseMetrics.durationMs >= 60 * 60_000) {
+        checks.soakReconnects = {
+          actual: measuredWindow.reconnects,
+          expected: "at least three controlled offline/recovery cycles",
+          passed: measuredWindow.reconnects.length >= 3
+            && measuredWindow.reconnects.every((item) => item.restored === true),
+        };
+      }
+    }
+    if (releaseMetrics.durationMs >= 30 * 60_000) {
+      const heapAnalysis = releaseMetrics.measuredWindow?.analysis?.heap;
+      checks.longSoakHeapGrowth = {
+        actual: heapAnalysis || releaseMetrics.heapDeltaPct,
+        expected: "<= 15% after at least 30 minutes and <= 5% growth in the final 20% window",
+        passed: releaseMetrics.heapDeltaPct !== null
+          && releaseMetrics.heapDeltaPct <= 15
+          && heapAnalysis?.plateau === true,
+      };
+    }
+    if (releaseMetrics.durationMs >= 60 * 60_000) {
+      const privateBytesAnalysis = releaseMetrics.measuredWindow?.analysis?.privateBytes;
+      checks.longSoakPrivateBytesGrowth = {
+        actual: privateBytesAnalysis || releaseMetrics.privateBytesDeltaPct,
+        expected: "<= 15% after at least 1 hour and <= 5% growth in the final 20% window",
+        passed: releaseMetrics.privateBytesDeltaPct !== null
+          && releaseMetrics.privateBytesDeltaPct <= 15
+          && privateBytesAnalysis?.plateau === true,
+      };
+    }
+  }
   return {
     result: Object.values(checks).every((check) => check.passed) ? "pass" : "fail",
     checks,
@@ -793,6 +1738,12 @@ async function runSupported(args) {
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge not found; pass --chrome");
   const backendBefore = await waitForJson(`${args.backendUrl}/debug/capacity`, args.readyTimeoutMs);
+  if (args.requireDatabaseState !== "auto" && backendBefore?.database?.state !== args.requireDatabaseState) {
+    throw new Error(
+      `Scenario ${args.scenario} requires a ${args.requireDatabaseState} database, `
+      + `but the sidecar reported ${backendBefore?.database?.state || "unknown"}`,
+    );
+  }
   await waitForHttp(args.url, args.readyTimeoutMs).catch((error) => {
     throw new Error(`Frontend is not reachable at ${args.url}: ${error.message}`);
   });
@@ -816,7 +1767,6 @@ async function runSupported(args) {
 
   let cdp;
   let tracingStarted = false;
-  const traceEvents = [];
   const webSockets = [];
   const errors = { console: [], exceptions: [], network: [] };
   const networkFailureTracker = createNetworkFailureTracker();
@@ -837,19 +1787,25 @@ async function runSupported(args) {
       const failure = networkFailureTracker.loadingFailed(event);
       if (failure) errors.network.push(failure);
     });
-    cdp.on("Tracing.dataCollected", (event) => traceEvents.push(...(event.value || [])));
-
     await Promise.all([
       cdp.send("Runtime.enable"),
       cdp.send("Network.enable"),
       cdp.send("Page.enable"),
       cdp.send("Performance.enable"),
+      cdp.send("HeapProfiler.enable"),
     ]);
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: initializationScript(bootstrap) });
     await cdp.send("Tracing.start", {
-      categories: "devtools.timeline,blink.user_timing,loading,disabled-by-default-devtools.timeline",
+      // A full disabled-by-default timeline grows beyond V8's single-string
+      // limit during the required one-hour soak. The soak keeps navigation,
+      // loading, and product user-timing events while its dedicated observers
+      // record long tasks, input, React commits, Canvas lifecycle, heap, and
+      // backend samples. Short release scenarios retain the detailed trace.
+      categories: args.workload === "soak"
+        ? "blink.user_timing,loading"
+        : "devtools.timeline,blink.user_timing,loading,disabled-by-default-devtools.timeline",
       options: "record-as-much-as-possible",
-      transferMode: "ReportEvents",
+      transferMode: "ReturnAsStream",
     });
     tracingStarted = true;
     const browserWindow = await cdp.send("Browser.getWindowForTarget", { targetId: page.id });
@@ -863,13 +1819,41 @@ async function runSupported(args) {
     await cdp.send("Page.bringToFront");
     const readiness = await waitForCapacityReady(cdp, args.cells, args.readyTimeoutMs);
     readiness.navigationToReadyMs = Date.now() - navigationStartedAt;
+    const realtimeSettlement = await waitForRealtimeSettlement(
+      cdp,
+      args.cells,
+      args.readyTimeoutMs,
+    );
+    readiness.realtimeSettled = isRealtimeSettledSnapshot(realtimeSettlement, args.cells);
+    readiness.realtimeSettledMs = Date.now() - navigationStartedAt;
+    readiness.realtimeStatuses = realtimeSettlement.statuses;
 
     await cdp.send("Page.bringToFront");
-    await evaluate(cdp, `(() => {
-      const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__;
-      if (state) { state.measuring = true; state.canvasAdded = 0; state.canvasRemoved = 0; state.longTasks = []; state.inputEvents = []; }
-    })()`);
-    const heapBefore = await cdp.send("Runtime.getHeapUsage");
+    const linkDrillInitial = await evaluateJson(cdp, `() => {
+      const diagnostics = window.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__;
+      if (!diagnostics) return { supported: false, reason: 'diagnostics unavailable' };
+      const now = Math.floor(Date.now() / 1000);
+      diagnostics.publishCrosshair('cell-1', now);
+      diagnostics.publishTimeAnchor('cell-1', now);
+      diagnostics.publishDateRange('cell-1', { from: now - 3600, to: now });
+      return { supported: true, snapshot: diagnostics.snapshot() };
+    }`);
+    const linkDrill = linkDrillInitial.supported
+      ? await waitForBrowserValue(cdp, `() => {
+          const diagnostics = window.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__;
+          const snapshot = diagnostics?.snapshot?.() || null;
+          return {
+            ready: Number(snapshot?.counts?.crosshairTargetDeliveries || 0) >= 1
+              && Number(snapshot?.counts?.viewportTargetDeliveries || 0) >= 1
+              && snapshot?.viewportIssue == null,
+            supported: Boolean(snapshot),
+            snapshot,
+          };
+        }`, 5_000, "linked crosshair/date-range delivery")
+      : linkDrillInitial;
+    const productBoundaryDrill = args.scenario === "S4"
+      ? await runProductBoundaryDrill(cdp, args.cells, args.readyTimeoutMs)
+      : { supported: false, reason: "The product boundary drill runs once in S4" };
 
     const rectangles = await evaluateJson(cdp, `() => Array.from(document.querySelectorAll('.multi-chart-cell')).map((cell) => {
       const rect = cell.getBoundingClientRect();
@@ -880,7 +1864,36 @@ async function runSupported(args) {
       await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: rectangle.x, y: rectangle.y, button: "left", clickCount: 1 });
       await wait(100);
     }
-    await wait(args.durationMs);
+    // Memory leak gates begin only after the finite workload state has been
+    // materialized. Otherwise the expected 1m/5m and alternate-symbol caches
+    // are misclassified as unbounded growth during the first soak minutes.
+    const preconditioning = await runSoakPrecondition(cdp, args);
+    const measurementBaseline = await httpJson(
+      `${args.backendUrl}/debug/capacity?detail_limit=0`,
+      args.readyTimeoutMs,
+    );
+    await cdp.send("HeapProfiler.collectGarbage");
+    await evaluate(cdp, `(() => {
+      const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__;
+      if (state) {
+        state.measuring = true;
+        state.canvasAdded = 0;
+        state.canvasRemoved = 0;
+        state.canvasMutations = [];
+        state.chartSurfaceAdded = 0;
+        state.chartSurfaceRemoved = 0;
+        state.chartSurfaceMutations = [];
+        state.longTasks = [];
+        state.inputEvents = [];
+      }
+      window.__CANDLESCOPE_MULTI_CHART_RENDER_DIAGNOSTICS__?.reset?.();
+    })()`);
+    const heapBefore = await cdp.send("Runtime.getHeapUsage");
+    const measuredWindow = await runMeasuredWindow(
+      cdp,
+      args,
+      measurementBaseline.runtime?.eventLoopLag,
+    );
 
     const measured = await evaluateJson(cdp, `() => {
       const state = window.__CANDLESCOPE_MULTI_CHART_CAPACITY__ || {};
@@ -895,12 +1908,18 @@ async function runSupported(args) {
         canvasCount: cells.reduce((count, cell) => count + cell.querySelectorAll('canvas').length, 0),
         canvasAdded: state.canvasAdded || 0,
         canvasRemoved: state.canvasRemoved || 0,
+        chartSurfaceAdded: state.chartSurfaceAdded || 0,
+        chartSurfaceRemoved: state.chartSurfaceRemoved || 0,
         longTasks: state.longTasks || [],
         inputEvents: state.inputEvents || [],
         display: { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight, devicePixelRatio, colorDepth: screen.colorDepth },
         webgl: { vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : null, renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : null },
         perf: window.__CANDLESCOPE_PERF__?.report?.() || null,
         windowBroker: window.__CANDLESCOPE_WINDOW_BROKER__?.snapshot?.() || null,
+        renderDiagnostics: window.__CANDLESCOPE_MULTI_CHART_RENDER_DIAGNOSTICS__?.snapshot?.() || null,
+        linkDiagnostics: window.__CANDLESCOPE_CHART_LINK_DIAGNOSTICS__?.snapshot?.() || null,
+        canvasMutations: state.canvasMutations || [],
+        chartSurfaceMutations: state.chartSurfaceMutations || [],
       };
     }`);
     const replaceableCommitCounts = (snapshot) => {
@@ -910,9 +1929,13 @@ async function runSupported(args) {
         preview: cells.reduce((total, cell) => total + Number(cell.committed?.['indicator-preview'] || 0), 0),
       };
     };
-    const replaceableBeforeBackground = replaceableCommitCounts(measured.windowBroker);
     const backgroundPage = await cdp.send("Target.createTarget", { url: "about:blank" });
     await cdp.send("Target.activateTarget", { targetId: backgroundPage.targetId });
+    const backgroundBaseline = await waitForBrowserValue(cdp, `() => ({
+      ready: document.visibilityState === 'hidden',
+      documentVisibility: document.visibilityState,
+      windowBroker: window.__CANDLESCOPE_WINDOW_BROKER__?.snapshot?.() || null,
+    })`, 5_000, "background suppression baseline");
     await wait(1_200);
     const backgroundSnapshot = await evaluateJson(cdp, `() => ({
       documentVisibility: document.visibilityState,
@@ -921,6 +1944,7 @@ async function runSupported(args) {
     await cdp.send("Target.activateTarget", { targetId: page.id });
     await cdp.send("Target.closeTarget", { targetId: backgroundPage.targetId }).catch(() => {});
     await cdp.send("Page.bringToFront");
+    const replaceableBeforeBackground = replaceableCommitCounts(backgroundBaseline.windowBroker);
     const replaceableAfterBackground = replaceableCommitCounts(backgroundSnapshot.windowBroker);
     const minimizedCells = backgroundSnapshot.windowBroker?.scheduler?.cells || [];
     const backgroundSuppression = {
@@ -932,10 +1956,29 @@ async function runSupported(args) {
       pendingFrames: Number(backgroundSnapshot.windowBroker?.scheduler?.pendingFrames || 0),
     };
     const heapAfter = await cdp.send("Runtime.getHeapUsage");
-    const backendAfter = await httpJson(`${args.backendUrl}/debug/capacity?include_database_hash=true`, args.readyTimeoutMs);
+    const lagAfterSequence = Number(
+      measurementBaseline.runtime?.eventLoopLag?.sample_sequence
+      ?? measurementBaseline.runtime?.eventLoopLag?.samples
+      ?? 0,
+    );
+    const backendAfter = await httpJson(
+      `${args.backendUrl}/debug/capacity?include_database_hash=true&event_loop_after_sequence=${lagAfterSequence}`,
+      args.readyTimeoutMs,
+    );
     const backendDebug = await httpJson(`${args.backendUrl}/debug/snapshot`, args.readyTimeoutMs);
+    const eventLoopLagWindow = eventLoopLagForWindow(
+      measurementBaseline.runtime?.eventLoopLag,
+      backendAfter.runtime?.eventLoopLag,
+    );
     const socketSummary = classifyWebSockets(webSockets);
-    const mapping = leaseMapping(backendBefore, backendAfter, bootstrap.expectedSeries);
+    const batchEnabled = backendAfter?.limits?.klineBatchEnabled === true;
+    const mapping = leaseMapping(
+      backendBefore,
+      backendAfter,
+      bootstrap.expectedSeries,
+      bootstrap.expectedLeaseClaimsBySeries,
+      batchEnabled,
+    );
     mapping.expectedSeries = bootstrap.expectedSeries.length;
 
     const screenshotPath = path.resolve(args.artifactsDir, `${args.scenario.toLowerCase()}-${args.cells}cell.png`);
@@ -947,12 +1990,12 @@ async function runSupported(args) {
     fs.writeFileSync(backendPath, `${JSON.stringify({ capacity: backendAfter, debug: backendDebug }, null, 2)}\n`);
 
     const traceComplete = new Promise((resolve) => {
-      const off = cdp.on("Tracing.tracingComplete", () => { off(); resolve(); });
+      const off = cdp.on("Tracing.tracingComplete", (event) => { off(); resolve(event); });
     });
     await cdp.send("Tracing.end");
-    await traceComplete;
+    const traceResult = await traceComplete;
     tracingStarted = false;
-    fs.writeFileSync(tracePath, `${JSON.stringify({ traceEvents })}\n`);
+    await writeProtocolStream(cdp, traceResult?.stream, tracePath);
 
     const debugVersion = await httpJson(`http://127.0.0.1:${debugPort}/json/version`);
     const hardware = buildHostProfile({
@@ -967,15 +2010,48 @@ async function runSupported(args) {
     const durationMinutes = args.durationMs / 60_000;
     const heapDelta = Number(heapAfter.usedSize || 0) - Number(heapBefore.usedSize || 0);
     const inputDurations = (measured.inputEvents || []).map((entry) => Number(entry.duration)).filter(Number.isFinite);
+    const expectedNetworkFailures = errors.network.filter((failure) => measuredWindow.reconnects.some((reconnect) => (
+      reconnect.restored === true
+      && failure.atMs >= reconnect.atEpochMs - 250
+      && failure.atMs <= reconnect.atEpochMs + reconnect.offlineMs + 5_000
+    )));
+    const unexpectedNetworkFailures = errors.network.filter((failure) => !expectedNetworkFailures.includes(failure));
     const gate = evaluateCapacityResult({
       supported: true,
       requestedCells: args.cells,
       readiness,
-      errors,
+      errors: { ...errors, network: unexpectedNetworkFailures },
       backendAfter,
       mapping,
-      canvasRemounts: measured.canvasRemoved || 0,
+      canvasRemounts: measured.chartSurfaceRemoved || 0,
       backgroundSuppression,
+      releaseMetrics: {
+        scenario: args.scenario,
+        durationMs: args.durationMs,
+        readyMs: readiness.navigationToReadyMs,
+        inputP95Ms: percentile(inputDurations, 95),
+        longTasksPerMinute: durationMinutes > 0
+          ? Number((measured.longTasks.length / durationMinutes).toFixed(3))
+          : Number.POSITIVE_INFINITY,
+        eventLoopLagP99Ms: eventLoopLagWindow.p99Ms,
+        batchEnabled,
+        klineSockets: socketSummary.klinePeakActive,
+        batchSnapshot: backendAfter.klineBatch || null,
+        expectedLogicalSubscriptions: Object.values(bootstrap.expectedClaimsBySeries)
+          .reduce((total, value) => total + Number(value || 0), 0),
+        linkDrill,
+        productBoundaryDrill,
+        preconditioning,
+        measuredWindow,
+        heapDeltaPct: measuredWindow.analysis?.heap?.deltaPct ?? (heapBefore.usedSize > 0
+          ? Number(((heapDelta / heapBefore.usedSize) * 100).toFixed(3))
+          : null),
+        privateBytesDeltaPct: measuredWindow.analysis?.privateBytes?.deltaPct ?? (Number(backendBefore.runtime?.processMemory?.privateBytes) > 0
+          ? Number((((Number(backendAfter.runtime?.processMemory?.privateBytes || 0)
+            - Number(backendBefore.runtime.processMemory.privateBytes))
+            / Number(backendBefore.runtime.processMemory.privateBytes)) * 100).toFixed(3))
+          : null),
+      },
     });
     const evidence = {
       schemaVersion: CAPACITY_SCHEMA_VERSION,
@@ -1009,33 +2085,63 @@ async function runSupported(args) {
           durationsMs: measured.longTasks.map((entry) => entry.duration),
         },
         inputResponse: { samples: inputDurations.length, p95Ms: percentile(inputDurations, 95), rawMs: inputDurations },
-        reactCommits: { supported: false, reason: "React profiler is not enabled in the production build" },
-        canvasRemounts: measured.canvasRemoved || 0,
-        canvasAddsAfterReady: measured.canvasAdded || 0,
+        reactRenders: {
+          source: "instrumented LiveChartCell function entry",
+          total: measured.renderDiagnostics?.totalReactRenders ?? null,
+          cells: measured.renderDiagnostics?.cells || [],
+        },
+        domCommits: {
+          source: "instrumented LiveChartCell useLayoutEffect commit",
+          total: measured.renderDiagnostics?.totalDomCommits ?? null,
+          cells: measured.renderDiagnostics?.cells || [],
+        },
+        chartSurfaceRemounts: measured.chartSurfaceRemoved || 0,
+        chartSurfaceAddsAfterBaseline: measured.chartSurfaceAdded || 0,
+        chartSurfaceMutations: measured.chartSurfaceMutations || [],
+        paneCanvasRemovals: measured.canvasRemoved || 0,
+        paneCanvasAddsAfterBaseline: measured.canvasAdded || 0,
+        // Backward-compatible evidence key; its value now has the precise
+        // product meaning: a detached Lightweight Charts root, not an
+        // internal drawing/indicator canvas lifecycle event.
+        canvasRemounts: measured.chartSurfaceRemoved || 0,
+        canvasMutations: measured.canvasMutations || readiness.canvasMutations || [],
         backgroundSuppression,
-        klineWebSockets: socketSummary.kline.length,
-        indicatorWebSockets: socketSummary.indicator.length,
+        klineWebSockets: socketSummary.klinePeakActive,
+        klineWebSocketCreates: socketSummary.kline.length,
+        indicatorWebSockets: socketSummary.indicatorPeakActive,
+        indicatorWebSocketCreates: socketSummary.indicator.length,
         webSockets: socketSummary,
         perf: compactPerfSnapshot(measured.perf),
         windowBroker: measured.windowBroker,
-        errors,
+        linkDrill,
+        linkDiagnostics: measured.linkDiagnostics,
+        productBoundaryDrill,
+        preconditioning,
+        measuredWindow,
+        errors: {
+          ...errors,
+          expectedNetworkFailures,
+          unexpectedNetworkFailures,
+        },
       },
       backend: {
         activeSeries: backendAfter.dataManager?.activeSeries || 0,
         streamLeases: backendAfter.dataManager?.streamLeases || 0,
         eventLoopLag: backendAfter.runtime?.eventLoopLag || null,
-        privateBytes: { supported: false, reason: "process private-bytes sampler is introduced at the long-soak gate" },
+        eventLoopLagWindow,
+        privateBytes: backendAfter.runtime?.processMemory || null,
         backfill: compactBackendSnapshot(backendAfter).backfill,
         indicatorExecutor: backendAfter.executors?.indicator || null,
         before: compactBackendSnapshot(backendBefore),
+        measurementBaseline: compactBackendSnapshot(measurementBaseline),
         after: compactBackendSnapshot(backendAfter),
         scenarioMapping: mapping,
       },
       upstream: {
         physicalWebSockets: backendAfter.exchange?.physicalWebSockets || 0,
         physicalWebSocketDelta: (backendAfter.exchange?.physicalWebSockets || 0) - (backendBefore.exchange?.physicalWebSockets || 0),
-        httpRequests: null,
-        httpRequestsSupported: false,
+        httpRequests: backendAfter.exchange?.ingestion?.ingress?.transport?.metrics?.counters || null,
+        httpRequestsSupported: Boolean(backendAfter.exchange?.ingestion?.ingress?.transport?.metrics?.counters),
         exchange: compactExchangeSnapshot(backendAfter.exchange || {}),
       },
       artifacts: { screenshot: screenshotPath, trace: tracePath, backendSnapshot: backendPath },

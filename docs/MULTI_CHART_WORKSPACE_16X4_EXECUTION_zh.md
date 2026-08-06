@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_4_COMPLETE`。Phase 0～4 已完成并通过各节记录的门禁；Phase 5～8 尚未完成。当前版本在默认关闭的多图、窗口 broker 和批量 K 线 flags 后实现单窗口最多 16 图、稳定挂载、每窗口调度以及有界后端批量订阅/容量治理，默认 UI 仍限制为 4 图且默认继续走旧 K 线 endpoint；尚未完成单窗口发布门、四窗口和 64 图，不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_5_COMPLETE`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6～8 尚未完成。当前版本在默认关闭的多图、窗口 broker 和批量 K 线 flags 后实现并真实验收单窗口最多 16 图、稳定挂载、每窗口调度以及有界后端批量订阅/容量治理；默认 UI 仍限制为 4 图且默认继续走旧 K 线 endpoint。本文尚未宣称原生四窗口或 64 图能力，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -829,20 +829,36 @@ INDICATOR_APP_MAX_ACTIVE_TARGETS
 
 ### 任务
 
-- [ ] 5.1 跑 S1～S5、C1 全矩阵，冷库使用真正空数据库。
-- [ ] 5.2 对每个场景采集 trace、截图、Network、heap、backend diagnostics、SQLite/backfill 和 upstream 计数。
-- [ ] 5.3 运行 1 小时 16 图 soak；包含切周期、换品种、拖布局、最大化、指标增删和重连。
-- [ ] 5.4 检查浏览器 profiler：React render、DOM commit、Canvas remount 分开记录。
-- [ ] 5.5 检查 16 图下 drawing、crosshair、date range、link role 和导出边界。
-- [ ] 5.6 固化 release evidence 和已知限制。
+- [x] 5.1 跑 S1～S5、C1 全矩阵，冷库使用真正空数据库。
+- [x] 5.2 对每个场景采集 trace、截图、Network、heap、backend diagnostics、SQLite/backfill 和 upstream 计数。
+- [x] 5.3 运行 1 小时 16 图 soak；包含切周期、换品种、拖布局、最大化、指标增删和重连。
+- [x] 5.4 检查浏览器 profiler：React render、DOM commit、Canvas remount 分开记录。
+- [x] 5.5 检查 16 图下 drawing、crosshair、date range、link role 和导出边界。
+- [x] 5.6 固化 release evidence 和已知限制。
 
 ### 验收
 
-- [ ] §6 的单窗口门槛全部 PASS；
-- [ ] 16 图热库和空库结果分开报告；
-- [ ] 无 connection/backfill/indicator 风暴；
-- [ ] 关闭 flag 可恢复 4 图，v6 数据不丢；
-- [ ] `MULTI_CHART_16_ENABLED` 在通过 release review 前仍默认 `0`。
+- [x] §6 的单窗口门槛全部 PASS；
+- [x] 16 图热库和空库结果分开报告；
+- [x] 无 connection/backfill/indicator 风暴；
+- [x] 关闭 flag 可恢复 4 图，v6 数据不丢；
+- [x] `MULTI_CHART_16_ENABLED` 在通过 release review 前仍默认 `0`。
+
+### Phase 5 实施记录（2026-08-06）
+
+1. 使用真实 production 前端、真实 Python sidecar 和固定 Chrome/硬件 profile 完成 S1～S5、C1。S1～S5 热库首屏分别为 `1415/2190/2434/2519/1398 ms`，输入 p95 为 `88/56/56/96/48 ms`，后端 event-loop p99 为 `14/14/27/28/27 ms`；所有场景均为一条浏览器物理 K 线 socket，0 console/runtime/network error、0 chart-root remount、0 重复 lease 和 0 静默订阅失败。
+2. C1 使用新目录和真实零行 SQLite 启动：运行前 `state=empty,rowCount=0,seriesCount=0`，首屏可用 `11676 ms`，运行后写入 `24438` 行、`19` 个 series。证据分别保留浏览器首屏、HTTP、SQLite、backfill、exchange REST admission/真实 upstream 和指标计算，不把外网下载耗时混成浏览器渲染时间。
+3. “热库全部 Cell 可用”被明确测为每个 Cell 已提交历史首帧、16 个 chart root 均存在且稳定 500 ms；实时 K 线另设硬门，必须 16/16 随后进入 `live` 或明确 `fallback`。20 个独立 Chrome 进程的首屏 p95 为 `1832 ms`（范围 `1506～2112 ms`），实时 settle p95 为 `1884 ms`（范围 `1529～2166 ms`），没有用外部 WS 握手尾部冒充首屏，也没有取消实时成功门。
+4. 独立进程基准在每轮结束后等待 `streamLeases=0`、batch logical client/subscription 均为 0 再进入下一轮；实际 drain p95 为 `25165 ms`（范围 `21116～25181 ms`）。这避免前一 Chrome 的顺序上游关闭污染下一轮，也保留了断开清理的真实成本。初始 batch subscribe 仍是固定四路有界准入，未为跑分放宽 backfill、REST 或交易所并发。
+5. 一小时 S4 soak 完成 `120` 次受控操作，覆盖激活、周期、品种、最大化/还原和指标删除/恢复；3 次离线重连全部恢复，0 action failure、0 chart-root remount、0 authoritative timeout、0 visibility violation。输入 p95 `72 ms`、long task `0/min`、完整窗口 event-loop p99 `27 ms`。
+6. 强制 GC 后浏览器 retained heap 增长 `13.878%`、末 20% 窗口 `0.812%`；后端 private bytes 增长 `14.101%`、末 20% 窗口 `0.136%`；RSS 增长 `12.438%`、末 20% 窗口 `0.082%`，三者均到达平台期。运行中 transient 上限为 17 active series、21 stream leases、batch outbox depth 1，没有单调连接或 subscriber 增长。
+7. Profiler/诊断把 `LiveChartCell` React function entry、`useLayoutEffect` DOM commit、Lightweight Charts 根节点 remount 和内部 pane/drawing canvas 生命周期分开计数。布局换位、最大化/还原、drawing 持久化、crosshair/date-range link delivery、link role、export panel 和 16/16 mount token 稳定均通过；内部指标/绘图 canvas 的合法替换不再误报整个图表重挂载。
+8. 默认关闭 flags 的真实 production 回滚演练通过：DOM 只投影 `cell-1..4`，菜单不暴露 6/8/9/12/16 图；IndexedDB v6 仍保存 16 个 Cell 与 16-leaf layout tree，v5 bootstrap SHA-256 前后相同，0 浏览器错误。`MULTI_CHART_16_ENABLED`、window broker 和 batch K 线仍默认 `0`，Phase 5 完成不等于默认发布。
+9. `candlescope.multi-chart.phase5-release/1` 聚合器只允许独立 20 进程 p95 替换一小时 soak 中的单次热启动样本；其他任何 soak、矩阵、C1 真空库或回滚门失败都会 fail closed。最终 machine-readable aggregate 为 `pass`，并内嵌矩阵、热样本、长稳、C1 和回滚摘要及原始证据 SHA-256。
+10. 提交前完整前端 `npm run check` 的 architecture、plugin boundary、typecheck、lint、`3055/3055` tests 和默认关闭 production build 全部通过；后端受影响闭包 `78/78` 通过。首次全量前端运行准确暴露共享控制面 TTL 的测试隔离缺口，补充显式 reset 后针对性 `15/15` 与完整门均通过，没有把失败列为波动重跑。
+11. 已知限制：本阶段只证明固定基准机、Chrome `151.0.7922.71`、单原生显示器/单浏览器窗口、Binance Spot 及本矩阵 builtin/hosted-Pyne 组合；不外推四原生窗口、64 图、其他交易所或多显示器/DPI 能力。它们仍由 Phase 6～8 验证。
+
+机器可读证据：`docs/perf-baselines/multi-chart-workspace/phase5-single-window-release-20260806.json`。原始 trace、截图、20 个独立进程 evidence、C1 空库文件和一小时逐样本记录保存在忽略版本控制的 `output/playwright/multi-chart-phase5/run-20260806-1/`。
 
 ### 回滚
 

@@ -1,4 +1,5 @@
 import { API_BASE } from "../../services/apiConfig.js";
+import { sharedControlRead } from "../../services/sharedControlRead.js";
 import {
   parsePluginCatalog,
   parsePluginLiveConfirmationPreview,
@@ -155,8 +156,11 @@ async function responseJson(response: Response): Promise<unknown> {
 }
 
 export async function fetchPluginCatalog(signal?: AbortSignal): Promise<PluginCatalog> {
-  const response = await fetch(`${publicPluginBase()}/catalog`, { ...(signal ? { signal } : {}) });
-  return parsePluginCatalog(await responseJson(response));
+  const url = `${publicPluginBase()}/catalog`;
+  return sharedControlRead("control:plugin-catalog", 5_000, async () => {
+    const response = await fetch(url);
+    return parsePluginCatalog(await responseJson(response));
+  }, signal);
 }
 
 export async function fetchPluginMarketplaceCatalog(
@@ -170,18 +174,21 @@ export async function fetchPluginMarketplaceCatalog(
 }
 
 export async function fetchPluginUiSnapshot(signal?: AbortSignal): Promise<PluginUiSnapshot> {
-  const response = await fetch(`${publicPluginBase()}/ui/snapshot`, { ...(signal ? { signal } : {}) });
-  return parsePluginUiSnapshot(await responseJson(response));
+  const url = `${publicPluginBase()}/ui/snapshot`;
+  return sharedControlRead("control:plugin-ui-snapshot", 1_000, async () => {
+    const response = await fetch(url);
+    return parsePluginUiSnapshot(await responseJson(response));
+  }, signal);
 }
 
 export async function fetchPluginLiveControlStatus(
   signal?: AbortSignal,
 ): Promise<PluginLiveControlStatus> {
-  const response = await fetch(
-    `${publicPluginBase()}/live/control/status`,
-    { ...(signal ? { signal } : {}) },
-  );
-  return parsePluginLiveControlStatus(await responseJson(response));
+  const url = `${publicPluginBase()}/live/control/status`;
+  return sharedControlRead("control:plugin-live-status", 1_000, async () => {
+    const response = await fetch(url);
+    return parsePluginLiveControlStatus(await responseJson(response));
+  }, signal);
 }
 
 export async function syncPluginChartContext(

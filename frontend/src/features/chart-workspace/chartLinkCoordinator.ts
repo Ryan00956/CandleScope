@@ -28,6 +28,29 @@ export interface ChartLinkViewportIssue {
   failedCellIds: readonly ChartCellId[];
 }
 
+export interface ChartLinkDiagnosticsSnapshot {
+  scopeKey: ChartWorkspaceId;
+  registeredCellIds: ChartCellId[];
+  retainedViewportGroups: Array<{
+    group: ChartLinkGroupId;
+    kind: "timeAnchor" | "dateRange";
+    sourceCellId: ChartCellId;
+    failedCellIds: ChartCellId[];
+  }>;
+  viewportIssue: ChartLinkViewportIssue | null;
+  counts: {
+    crosshairPublishes: number;
+    crosshairTargetAttempts: number;
+    crosshairTargetDeliveries: number;
+    crosshairTargetFailures: number;
+    timeAnchorPublishes: number;
+    dateRangePublishes: number;
+    viewportTargetAttempts: number;
+    viewportTargetDeliveries: number;
+    viewportTargetFailures: number;
+  };
+}
+
 type ViewportIssueListener = (issue: ChartLinkViewportIssue | null) => void;
 type LinkOption = "crosshair" | "timeAnchor" | "dateRange";
 
@@ -98,6 +121,17 @@ export class ChartLinkCoordinator {
   private scopeKey: ChartWorkspaceId;
   private viewportSequence = 0;
   private viewportIssue: ChartLinkViewportIssue | null = null;
+  private readonly diagnostics = {
+    crosshairPublishes: 0,
+    crosshairTargetAttempts: 0,
+    crosshairTargetDeliveries: 0,
+    crosshairTargetFailures: 0,
+    timeAnchorPublishes: 0,
+    dateRangePublishes: 0,
+    viewportTargetAttempts: 0,
+    viewportTargetDeliveries: 0,
+    viewportTargetFailures: 0,
+  };
 
   constructor(document: ChartWorkspaceDocument, scopeKey: ChartWorkspaceId = "default") {
     this.document = document;
@@ -222,12 +256,21 @@ export class ChartLinkCoordinator {
   publishCrosshair(sourceCellId: ChartCellId, time: number | null): void {
     if (this.publishingCrosshair) return;
     const normalizedTime = time === null || Number.isFinite(time) ? time : null;
+    const route = this.linkedTargets(sourceCellId, "crosshair");
+    if (route.group === null) return;
+    this.diagnostics.crosshairPublishes += 1;
+    this.diagnostics.crosshairTargetAttempts += route.targets.length;
     this.publishingCrosshair = true;
     try {
-      for (const { surface } of this.linkedTargets(sourceCellId, "crosshair").targets) {
+      for (const { surface } of route.targets) {
         try {
-          surface.setLinkedCrosshairTime(normalizedTime);
+          if (surface.setLinkedCrosshairTime(normalizedTime)) {
+            this.diagnostics.crosshairTargetDeliveries += 1;
+          } else {
+            this.diagnostics.crosshairTargetFailures += 1;
+          }
         } catch {
+          this.diagnostics.crosshairTargetFailures += 1;
           // One unavailable target must not block the other linked charts.
         }
       }
@@ -240,6 +283,7 @@ export class ChartLinkCoordinator {
     if (this.publishingViewport || !Number.isFinite(time)) return;
     const route = this.linkedTargets(sourceCellId, "timeAnchor");
     if (route.group === null) return;
+    this.diagnostics.timeAnchorPublishes += 1;
     const event: RetainedTimeAnchorEvent = {
       sequence: ++this.viewportSequence,
       group: route.group,
@@ -258,6 +302,7 @@ export class ChartLinkCoordinator {
     if (!Number.isFinite(from) || !Number.isFinite(to)) return;
     const route = this.linkedTargets(sourceCellId, "dateRange");
     if (route.group === null) return;
+    this.diagnostics.dateRangePublishes += 1;
     const event: RetainedDateRangeEvent = {
       sequence: ++this.viewportSequence,
       group: route.group,
@@ -276,6 +321,7 @@ export class ChartLinkCoordinator {
     readinessGeneration: number,
   ): boolean {
     let delivered = false;
+    this.diagnostics.viewportTargetAttempts += 1;
     this.publishingViewport = true;
     try {
       delivered = event.kind === "timeAnchor"
@@ -288,12 +334,14 @@ export class ChartLinkCoordinator {
     }
     const state = this.viewportState();
     if (delivered) {
+      this.diagnostics.viewportTargetDeliveries += 1;
       state.deliveredByCell.set(target.cellId, {
         sequence: event.sequence,
         readinessGeneration,
       });
       event.failedCellIds.delete(target.cellId);
     } else if (reportFailure) {
+      this.diagnostics.viewportTargetFailures += 1;
       event.failedCellIds.add(target.cellId);
     }
     return delivered;
@@ -370,6 +418,24 @@ export class ChartLinkCoordinator {
     return [...this.surfaces.entries()]
       .filter(([, registration]) => registration.scopeKey === this.scopeKey)
       .map(([cellId]) => cellId);
+  }
+
+  snapshot(): ChartLinkDiagnosticsSnapshot {
+    const state = this.viewportState();
+    return {
+      scopeKey: this.scopeKey,
+      registeredCellIds: this.registeredCellIds().sort(),
+      retainedViewportGroups: [...state.latestByGroup.entries()]
+        .map(([group, event]) => ({
+          group,
+          kind: event.kind,
+          sourceCellId: event.sourceCellId,
+          failedCellIds: [...event.failedCellIds].sort(),
+        }))
+        .sort((left, right) => left.group.localeCompare(right.group)),
+      viewportIssue: this.viewportIssue ? { ...this.viewportIssue } : null,
+      counts: { ...this.diagnostics },
+    };
   }
 }
 

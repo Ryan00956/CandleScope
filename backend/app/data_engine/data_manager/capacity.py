@@ -96,12 +96,43 @@ def _indicator_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None
     return {key: value for key, value in snapshot.items() if key != "instances"}
 
 
+def _process_memory_summary(runtime_pressure: Any) -> dict[str, Any] | None:
+    if not isinstance(runtime_pressure, dict):
+        return None
+    source = runtime_pressure.get("processMemory")
+    if not isinstance(source, dict):
+        return None
+    return {
+        "available": source.get("available") is True,
+        "source": source.get("source"),
+        "rssBytes": int(source.get("rss_bytes", 0) or 0),
+        "peakRssBytes": int(source.get("peak_rss_bytes", 0) or 0),
+        # GetProcessMemoryInfo.PagefileUsage is the process commit/private-bytes
+        # measurement used by the Windows release gate.
+        "privateBytes": int(source.get("pagefile_bytes", 0) or 0),
+        **({"error": str(source["error"])} if source.get("error") else {}),
+    }
+
+
 def _ingestion_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(snapshot, dict):
         return None
     ingress = snapshot.get("ingress")
     if not isinstance(ingress, dict):
         return {key: value for key, value in snapshot.items() if key != "ingress"}
+    transport = ingress.get("transport")
+    transport_summary = None
+    if isinstance(transport, dict):
+        rate_limits = transport.get("exchange_rate_limits")
+        transport_summary = {
+            **{
+                key: value
+                for key, value in transport.items()
+                if key != "exchange_rate_limits"
+            },
+            "exchange_rate_limit_count": len(rate_limits)
+            if isinstance(rate_limits, dict) else 0,
+        }
     return {
         **{key: value for key, value in snapshot.items() if key != "ingress"},
         "ingress": {
@@ -112,6 +143,7 @@ def _ingestion_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None
                 for key, value in (ingress.get("shared_ws") or {}).items()
                 if key != "hubs"
             } if isinstance(ingress.get("shared_ws"), dict) else None,
+            "transport": transport_summary,
         },
     }
 
@@ -226,6 +258,7 @@ async def build_capacity_snapshot(
     include_database_hash: bool = False,
     detail_offset: int = 0,
     detail_limit: int = 20,
+    event_loop_after_sequence: int | None = None,
 ) -> dict[str, Any]:
     """Compose a stable capacity snapshot from application-owned runtimes."""
 
@@ -300,8 +333,32 @@ async def build_capacity_snapshot(
         limit=safe_limit,
     )
     lease_snapshot = (manager_snapshot or {}).get("stream_leases") or {}
+    lease_page_is_prepared = False
+    lease_snapshot_method = getattr(data_manager, "stream_lease_snapshot", None)
+    if callable(lease_snapshot_method):
+        try:
+            lease_snapshot = lease_snapshot_method(
+                offset=safe_offset,
+                limit=safe_limit,
+            )
+            lease_page_is_prepared = True
+        except Exception as exc:
+            errors.append({"component": "stream_leases", "error": str(exc)})
     if not isinstance(lease_snapshot, dict):
         lease_snapshot = {}
+    if lease_page_is_prepared:
+        lease_series = lease_snapshot.get("series")
+        lease_series = lease_series if isinstance(lease_series, list) else []
+        lease_series_total = int(
+            lease_snapshot.get("detail_total", len(lease_series))
+        )
+    else:
+        lease_series, lease_series_total = _page_list(
+            lease_snapshot.get("series"),
+            offset=safe_offset,
+            limit=safe_limit,
+        )
+    runtime_pressure = (manager_snapshot or {}).get("runtimePressure") or {}
 
     ingress = (
         ingestion_factory_snapshot.get("ingress")
@@ -318,7 +375,17 @@ async def build_capacity_snapshot(
 
     lag_monitor = getattr(state, "event_loop_lag_monitor", None)
     try:
-        event_loop_lag = _component_snapshot(lag_monitor)
+        if lag_monitor is not None and callable(getattr(lag_monitor, "snapshot", None)):
+            try:
+                event_loop_lag = lag_monitor.snapshot(
+                    after_sequence=event_loop_after_sequence,
+                )
+            except TypeError:
+                # Compatibility for test doubles and older embedders whose
+                # snapshot surface predates sequence-window diagnostics.
+                event_loop_lag = lag_monitor.snapshot()
+        else:
+            event_loop_lag = None
     except Exception as exc:
         event_loop_lag = None
         errors.append({"component": "event_loop_lag", "error": str(exc)})
@@ -398,6 +465,9 @@ async def build_capacity_snapshot(
             "maxLimit": _MAX_CAPACITY_DETAIL_LIMIT,
         },
         "limits": {
+            "backfillCoordinatorMaxConcurrency": int(
+                config.BACKFILL_COORDINATOR_MAX_CONCURRENCY
+            ),
             "klineBatchEnabled": bool(config.KLINE_BATCH_STREAM_ENABLED),
             "klineBatchMaxSeriesPerClient": int(config.KLINE_BATCH_MAX_SERIES_PER_CLIENT),
             "klineBatchMaxIntervalsPerSeries": int(config.KLINE_BATCH_MAX_INTERVALS_PER_SERIES),
@@ -426,6 +496,10 @@ async def build_capacity_snapshot(
             "directSubscriptionsBySeries": direct_page,
             "streamDetailTotal": stream_total,
             "streams": stream_page,
+            "leaseDetailTotal": int(
+                lease_snapshot.get("detail_total", lease_series_total)
+            ),
+            "leaseSeries": lease_series,
             "eventBus": _event_bus_summary(event_bus),
         },
         "klineBatch": batch_snapshot,
@@ -465,6 +539,7 @@ async def build_capacity_snapshot(
         },
         "runtime": {
             "eventLoopLag": event_loop_lag,
+            "processMemory": _process_memory_summary(runtime_pressure),
         },
     }
 

@@ -32,6 +32,10 @@ import type {
 import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspaceLibrary.js";
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
+import {
+  recordMultiChartCellCommit,
+  recordMultiChartCellRender,
+} from "../features/chart-workspace/multiChartRenderDiagnostics.js";
 import { writeChartCellDragData } from "../features/chart-workspace/chartWorkspaceDrag.js";
 import WorkspaceCellLayoutMenu from "../features/chart-workspace/WorkspaceCellLayoutMenu.js";
 import {
@@ -39,6 +43,7 @@ import {
   type WorkspaceCellDensity,
 } from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
+import { initialViewportCountBackCapForCellCount } from "../features/market-data/useChartInitialLoad.js";
 import { useMarketDataWorkspaceResources } from "../features/market-data/marketDataWorkspaceContext.js";
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
@@ -172,9 +177,13 @@ function LiveChartCell({
   onOpenReplayLauncher,
   onActiveEnvironmentChange,
 }: LiveChartCellProps) {
+  recordMultiChartCellRender(cell.id);
   const marketWorkspaceResources = useMarketDataWorkspaceResources();
   const sectionRef = useRef<HTMLElement | null>(null);
   const [density, setDensity] = useState<WorkspaceCellDensity>("full");
+  useLayoutEffect(() => {
+    recordMultiChartCellCommit(cell.id);
+  });
   const [mountToken] = useState(() => {
     liveChartCellMountSequence += 1;
     return `${cell.id}:${liveChartCellMountSequence}`;
@@ -216,6 +225,9 @@ function LiveChartCell({
     symbol: chartSession.view.symbol,
     interval: chartSession.view.interval,
   });
+  const initialViewportCountBackCap = initialViewportCountBackCapForCellCount(
+    layoutCellIds.length,
+  );
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
@@ -224,6 +236,9 @@ function LiveChartCell({
     schedulerCellId: cell.id,
     workspaceId,
     windowId,
+    ...(initialViewportCountBackCap === undefined
+      ? {}
+      : { initialViewportCountBackCap }),
   });
 
   const workTier = obscured ? "hidden" : active ? "focused" : "visible-secondary";
@@ -301,6 +316,10 @@ function LiveChartCell({
   );
 
   const indicators = useIndicatorRuntime({
+    // Workspace schema v6 persists an explicit indicator list for every cell.
+    // An empty list is therefore intentional (and is required by capacity
+    // scenarios such as S3), not a signal to inject the legacy VOL default.
+    autoAddVolume: false,
     session: chartSession,
     marketData,
     candleUpColor: combinedSettings.upColor,

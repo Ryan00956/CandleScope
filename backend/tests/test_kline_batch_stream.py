@@ -22,9 +22,18 @@ from app.data_engine.interval_resolution import (
 
 
 class _BatchDataManager:
-    def __init__(self, *, fail_interval: str | None = None, emit: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_interval: str | None = None,
+        emit: bool = False,
+        ensure_delay: float = 0,
+    ) -> None:
         self.fail_interval = fail_interval
         self.emit = emit
+        self.ensure_delay = ensure_delay
+        self.ensure_active = 0
+        self.ensure_max_active = 0
         self.ensure_calls: list[dict] = []
         self.release_calls: list[dict] = []
         self.subscribe_calls: list[dict] = []
@@ -32,16 +41,23 @@ class _BatchDataManager:
 
     async def ensure_stream(self, symbol: str, interval: str, **kwargs):
         self.ensure_calls.append({"symbol": symbol, "interval": interval, **kwargs})
-        if interval == self.fail_interval:
-            raise IntervalResolutionError(
-                IntervalResolutionErrorCode.NO_EXACT_BASE,
-                f"cannot reconstruct {interval}",
-                exchange=kwargs["exchange"],
-                market_type=kwargs["market_type"],
-                interval=interval,
-                purpose=IntervalPurpose.REALTIME,
-            )
-        return None
+        self.ensure_active += 1
+        self.ensure_max_active = max(self.ensure_max_active, self.ensure_active)
+        try:
+            if self.ensure_delay:
+                await asyncio.sleep(self.ensure_delay)
+            if interval == self.fail_interval:
+                raise IntervalResolutionError(
+                    IntervalResolutionErrorCode.NO_EXACT_BASE,
+                    f"cannot reconstruct {interval}",
+                    exchange=kwargs["exchange"],
+                    market_type=kwargs["market_type"],
+                    interval=interval,
+                    purpose=IntervalPurpose.REALTIME,
+                )
+            return None
+        finally:
+            self.ensure_active -= 1
 
     async def release_stream(self, symbol: str, interval: str, **kwargs) -> None:
         self.release_calls.append({"symbol": symbol, "interval": interval, **kwargs})
@@ -202,6 +218,26 @@ def test_batch_partial_failure_and_item_ack_are_isolated(
     assert second["client_id"] == "cell-2"
     assert second["active_intervals"] == ["5m"]
     assert {call["symbol"] for call in dm.ensure_calls} == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_batch_initial_subscribe_admits_upstream_streams_in_bounded_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "KLINE_BATCH_STREAM_ENABLED", True)
+    dm = _BatchDataManager(ensure_delay=0.02)
+    items = [
+        _item(f"cell-{index}", f"ASSET{index}USDT", ["1m"])
+        for index in range(9)
+    ]
+
+    with _client(dm).websocket_connect("/api/v1/stream/klines_batch") as ws:
+        ws.receive_json()
+        ws.send_json({"action": "subscribe", "request_id": "bounded", "items": items})
+        acknowledgements = [ws.receive_json() for _index in items]
+
+    assert [ack["item_index"] for ack in acknowledgements] == list(range(len(items)))
+    assert all(ack["ok"] is True for ack in acknowledgements)
+    assert dm.ensure_max_active == 4
 
 
 def test_batch_update_and_unsubscribe_release_only_owned_intervals(

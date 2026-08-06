@@ -614,6 +614,7 @@ async def capacity_snapshot(
     include_database_hash: bool = False,
     detail_offset: int = 0,
     detail_limit: int = 20,
+    event_loop_after_sequence: int | None = None,
 ) -> dict:
     """Return a read-only, multi-chart-oriented capacity snapshot."""
 
@@ -622,4 +623,5 @@ async def capacity_snapshot(
         include_database_hash=include_database_hash,
         detail_offset=detail_offset,
         detail_limit=detail_limit,
+        event_loop_after_sequence=event_loop_after_sequence,
     )

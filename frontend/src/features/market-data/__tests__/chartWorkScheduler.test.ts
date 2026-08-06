@@ -46,6 +46,37 @@ test("forming work is latest-only per frame while authoritative final commits im
   assert.equal(cell?.lastLane, "authoritative-final");
 });
 
+test("replaceable Canvas fan-out is staggered across bounded animation frames", () => {
+  const frames: Array<() => void> = [];
+  const commits: string[] = [];
+  const scheduler = new ChartWorkScheduler({
+    maxFrameTasksPerFrame: 2,
+    yieldFrameBetweenTasks: false,
+    requestFrame: (callback) => {
+      frames.push(callback);
+      return frames.length;
+    },
+    cancelFrame: () => undefined,
+  });
+  for (let index = 1; index <= 5; index += 1) {
+    const cellId = `cell-${index}`;
+    scheduler.registerCell(cellId, "visible-secondary");
+    scheduler.enqueueFrame(cellId, "kline-forming", "BTCUSDT@1m", () => {
+      commits.push(cellId);
+    });
+  }
+
+  frames[0]?.();
+  assert.deepEqual(commits, ["cell-1", "cell-2"]);
+  assert.equal(scheduler.diagnostics().pendingFrames, 3);
+  frames[1]?.();
+  assert.deepEqual(commits, ["cell-1", "cell-2", "cell-3", "cell-4"]);
+  assert.equal(scheduler.diagnostics().pendingFrames, 1);
+  frames[2]?.();
+  assert.deepEqual(commits, ["cell-1", "cell-2", "cell-3", "cell-4", "cell-5"]);
+  assert.equal(scheduler.diagnostics().pendingFrames, 0);
+});
+
 test("hidden and minimized Cells run no replaceable Canvas or preview work", () => {
   const frames: Array<() => void> = [];
   const scheduler = new ChartWorkScheduler({
@@ -112,6 +143,32 @@ test("async lanes honor tier and lane priority and expose bounded per-Cell diagn
   assert.equal(scheduler.diagnostics().cells.length, 2);
 });
 
+test("active hydration is serialized without consuming foreground concurrency", async () => {
+  const scheduler = new ChartWorkScheduler({
+    maxConcurrent: 4,
+    maxConcurrentHydration: 1,
+  });
+  const first = deferred<void>();
+  const order: string[] = [];
+  const hydrationA = scheduler.run("cell-a", "active-hydration", async () => {
+    order.push("hydrate-a");
+    await first.promise;
+  });
+  const hydrationB = scheduler.run("cell-b", "active-hydration", () => {
+    order.push("hydrate-b");
+  });
+  const foreground = scheduler.run("cell-c", "initial-history", () => {
+    order.push("foreground");
+  });
+  await turn();
+  assert.deepEqual(order, ["foreground", "hydrate-a"]);
+  assert.equal(scheduler.diagnostics().activeHydration, 1);
+  first.resolve();
+  await Promise.all([hydrationA, hydrationB, foreground]);
+  assert.deepEqual(order, ["foreground", "hydrate-a", "hydrate-b"]);
+  assert.equal(scheduler.diagnostics().activeHydration, 0);
+});
+
 test("hidden speculative lanes fail closed while authoritative history remains schedulable", async () => {
   const scheduler = new ChartWorkScheduler();
   scheduler.registerCell("cell-a", "hidden");
@@ -135,6 +192,7 @@ test("dispose rejects queued work and clears frame/tier state", async () => {
   await turn();
   assert.deepEqual(scheduler.diagnostics(), {
     activeAsync: 0,
+    activeHydration: 0,
     cells: [],
     disposed: true,
     pendingAsync: 0,

@@ -20,7 +20,10 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
+import orjson
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import ORJSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.executors import run_storage
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
@@ -68,6 +71,39 @@ RELATED_WARMUP_REGISTRY_LIMIT = 512
 BACKFILL_REQUERY_MAX_SECONDS = 1.0
 BACKFILL_FINAL_REQUERY_GRACE_SECONDS = 0.5
 BACKFILL_CLEANUP_GRACE_SECONDS = 0.25
+HISTORY_BATCH_MAX_REQUESTS = 16
+# Match the bounded storage executor: four reads let a 16-series first paint
+# overlap SQLite I/O without opening the unbounded burst that previously
+# starved the event loop. The release harness gates the exact 10 ms event-loop
+# window at P99 <= 50 ms.
+HISTORY_BATCH_MAX_CONCURRENCY = 4
+
+
+class KlineHistoryBatchItem(BaseModel):
+    """One independently validated history read in a bounded browser burst."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=64)
+    symbol: str = Field(default="BTCUSDT", min_length=1, max_length=64)
+    interval: str = Field(default="1h", min_length=1, max_length=16)
+    days: float = Field(default=7, ge=0.001)
+    count_back: int | None = Field(default=None, ge=1, le=MAX_RANGE_RESPONSE_BARS)
+    exchange: str = Field(default=DEFAULT_EXCHANGE, min_length=1, max_length=32)
+    market_type: str = Field(default=DEFAULT_MARKET_TYPE, min_length=1, max_length=32)
+    intent: Literal["viewport", "active_hydration"] = "viewport"
+    request_scope: str | None = Field(default=None, max_length=128)
+    request_generation: int | None = Field(default=None, ge=0)
+    max_wait_ms: int = Field(default=3500, ge=0, le=8000)
+
+
+class KlineHistoryBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requests: list[KlineHistoryBatchItem] = Field(
+        min_length=1,
+        max_length=HISTORY_BATCH_MAX_REQUESTS,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1983,7 +2019,17 @@ async def get_klines_history(
             )
             return candidate_data, candidate_verification
 
-        result = await _run_history_query()
+        # A zero-wait viewport request is the frontend's non-blocking storage probe.
+        # It must report gaps but must not synchronously admit repair work that
+        # then contends with the remaining 15 first-paint reads. A later
+        # bounded viewport retry owns repair admission and waiting. The
+        # active_hydration lane also uses zero-wait, but it must continue to
+        # admit its background repair or the focused chart can never reach its
+        # full history target.
+        read_only_viewport_probe = max_wait_ms == 0 and intent == "viewport"
+        result = await _run_history_query(
+            auto_backfill=False if read_only_viewport_probe else None,
+        )
         initially_empty = not bool(result.bars)
         backfill_triggered = bool(result.backfill_triggered)
         data, verification = _verify_history_result(result)
@@ -1994,13 +2040,16 @@ async def get_klines_history(
             interval=interval,
             calendar=calendar,
         )
-        submitted, request_ids, suppressions = _submit_verification_repairs(
-            dm,
-            verification_only,
-            reason=history_reason,
-            requester="klines_history",
-            demand_metadata=demand_metadata,
-        )
+        if read_only_viewport_probe:
+            submitted, request_ids, suppressions = False, [], []
+        else:
+            submitted, request_ids, suppressions = _submit_verification_repairs(
+                dm,
+                verification_only,
+                reason=history_reason,
+                requester="klines_history",
+                demand_metadata=demand_metadata,
+            )
         if submitted:
             result.backfill_triggered = True
             _attach_backfill_request_ids(result, request_ids)
@@ -2120,7 +2169,7 @@ async def get_klines_history(
         [r.to_dict() for r in result.missing_ranges],
         verification["missing_ranges"],
     )
-    return {
+    payload = {
         "exchange": exchange,
         "market_type": market_type,
         "symbol": symbol.upper(),
@@ -2146,6 +2195,91 @@ async def get_klines_history(
         "data": data,
         "base_interval": None,
     }
+    # The 16-cell workspace can complete a warm history burst at essentially
+    # the same instant. Returning a dict here makes FastAPI recursively copy
+    # every one of the 500-row payloads through jsonable_encoder on the event
+    # loop before JSON serialization. A response object preserves the exact
+    # wire contract while avoiding that redundant traversal and its resulting
+    # event-loop stall.
+    return ORJSONResponse(payload)
+
+
+@router.post("/history/batch")
+async def post_klines_history_batch(
+    request: Request,
+    body: KlineHistoryBatchRequest,
+):
+    """Run a bounded history burst and preserve per-item outcomes.
+
+    The single-window workspace commonly asks for 16 different series in the
+    same browser task. Running those CPU-heavy storage projections in parallel
+    across Python workers creates avoidable GIL contention and event-loop lag.
+    Four-at-a-time execution keeps the existing endpoint semantics (including
+    demand generations and backfill admission) and avoids the GIL storm created
+    by 16 independent requests. The dense workspace limits its first paint to
+    64 bars, so the bounded burst remains inside the hot-start gate.
+    """
+    seen_ids: set[str] = set()
+    for item in body.requests:
+        if item.request_id in seen_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"duplicate history batch request_id: {item.request_id}",
+            )
+        seen_ids.add(item.request_id)
+
+    async def _run_item(item: KlineHistoryBatchItem) -> dict[str, Any]:
+        try:
+            response = await get_klines_history(
+                request=request,
+                symbol=item.symbol,
+                interval=item.interval,
+                days=item.days,
+                count_back=item.count_back,
+                exchange=item.exchange,
+                market_type=item.market_type,
+                intent=item.intent,
+                request_scope=item.request_scope,
+                request_generation=item.request_generation,
+                max_wait_ms=item.max_wait_ms,
+            )
+            payload = orjson.loads(response.body)
+            return {
+                "request_id": item.request_id,
+                "ok": True,
+                "status": response.status_code,
+                "payload": payload,
+            }
+        except asyncio.CancelledError:
+            raise
+        except HTTPException as exc:
+            return {
+                "request_id": item.request_id,
+                "ok": False,
+                "status": exc.status_code,
+                "detail": exc.detail,
+            }
+        except Exception:
+            logger.exception(
+                "Unexpected history batch item failure request_id=%s",
+                item.request_id,
+            )
+            return {
+                "request_id": item.request_id,
+                "ok": False,
+                "status": 500,
+                "detail": "History batch item failed",
+            }
+
+    results: list[dict[str, Any]] = []
+    for offset in range(0, len(body.requests), HISTORY_BATCH_MAX_CONCURRENCY):
+        results.extend(await asyncio.gather(*(
+            _run_item(item)
+            for item in body.requests[
+                offset:offset + HISTORY_BATCH_MAX_CONCURRENCY
+            ]
+        )))
+    return ORJSONResponse({"results": results})
 
 
 @router.get("/range")
@@ -2383,7 +2517,7 @@ async def get_klines_range(
     all_rows_final = _all_rows_final(result)
     renderable = (verified and all_rows_final) or not strict
     rendered_data = data if renderable else []
-    return {
+    payload = {
         "exchange": exchange,
         "market_type": market_type,
         "symbol": symbol.upper(),
@@ -2415,6 +2549,7 @@ async def get_klines_range(
         "data": rendered_data,
         "base_interval": None,
     }
+    return ORJSONResponse(payload)
 
 
 @router.get("/history/before")

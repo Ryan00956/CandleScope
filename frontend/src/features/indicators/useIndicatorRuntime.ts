@@ -148,6 +148,7 @@ import type {
 export { buildIndicatorRangeLifecycleKey } from "./indicatorRangeLifecycle.js";
 
 interface UseIndicatorRuntimeOptions {
+  autoAddVolume?: boolean;
   session?: ChartSessionRuntime;
   marketData?: MarketDataRuntime;
   candleDownColor?: string;
@@ -602,6 +603,9 @@ export function useIndicatorRuntime(
     updateIndicatorParams,
     updateIndicatorScript,
   } = useActiveIndicatorStore({
+    ...(options.autoAddVolume === undefined
+      ? {}
+      : { autoAddVolume: options.autoAddVolume }),
     onRequireCompute: requireIndicatorCompute,
     ...(options.indicatorPersistence === undefined
       ? {}

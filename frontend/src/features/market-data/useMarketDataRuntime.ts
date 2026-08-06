@@ -162,6 +162,7 @@ export interface UseMarketDataRuntimeOptions {
   schedulerCellId?: string;
   workspaceId?: string;
   windowId?: string;
+  initialViewportCountBackCap?: number;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -174,6 +175,7 @@ export function useMarketDataRuntime({
   schedulerCellId,
   workspaceId,
   windowId,
+  initialViewportCountBackCap,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
   const workspaceResources = useMarketDataWorkspaceResources();
   const {
@@ -467,6 +469,7 @@ export function useMarketDataRuntime({
     exchange,
     marketType,
     nativeIntervalValues,
+    ...(initialViewportCountBackCap === undefined ? {} : { initialViewportCountBackCap }),
     getFromCache,
     resolveInitialRows,
     seriesDataFeed,
@@ -492,10 +495,16 @@ export function useMarketDataRuntime({
     interval,
     nativeIntervalValues,
   );
-  const activeHistoryViewportCountBack = planInitialViewportCountBack(
+  const plannedActiveHistoryViewportCountBack = planInitialViewportCountBack(
     interval,
     nativeIntervalValues,
   );
+  const activeHistoryViewportCountBack = initialViewportCountBackCap == null
+    ? plannedActiveHistoryViewportCountBack
+    : Math.min(
+        plannedActiveHistoryViewportCountBack,
+        Math.max(1, Math.floor(initialViewportCountBackCap)),
+      );
   useActiveChartHistoryHydration({
     enabled: backgroundPrefetchEnabled
       && activeChartReady

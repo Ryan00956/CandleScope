@@ -5,6 +5,9 @@ import {
   canFinalizePendingInitialHistory,
   canUseWarmCacheWithoutImmediateRevalidation,
   initialHistoryCacheProof,
+  initialViewportCountBackCapForCellCount,
+  INITIAL_VIEWPORT_MAX_WAIT_MS,
+  INITIAL_VIEWPORT_PROBE_WAIT_MS,
   planInitialHistoryCountBack,
   planInitialViewportCountBack,
   shouldRequestInitialLatest,
@@ -24,6 +27,18 @@ test("initial latest is reserved for exchange-native intervals", () => {
   assert.equal(shouldRequestInitialLatest("60m", nativeIntervals), true);
   assert.equal(shouldRequestInitialLatest("47m", nativeIntervals), false);
   assert.equal(shouldRequestInitialLatest("8h", nativeIntervals), false);
+});
+
+test("initial viewport probes storage without blocking before bounded cold retries", () => {
+  assert.equal(INITIAL_VIEWPORT_PROBE_WAIT_MS, 0);
+  assert.equal(INITIAL_VIEWPORT_MAX_WAIT_MS, 1_500);
+});
+
+test("dense 8/16-Cell workspaces paint a smaller first viewport before deep hydration", () => {
+  assert.equal(initialViewportCountBackCapForCellCount(1), undefined);
+  assert.equal(initialViewportCountBackCapForCellCount(4), undefined);
+  assert.equal(initialViewportCountBackCapForCellCount(8), 64);
+  assert.equal(initialViewportCountBackCapForCellCount(16), 64);
 });
 
 test("only an explicitly complete, contiguous and recent activation skips REST revalidation", () => {

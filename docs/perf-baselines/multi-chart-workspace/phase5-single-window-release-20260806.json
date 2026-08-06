@@ -1,0 +1,1622 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase5-release/1",
+  "generatedAt": "2026-08-06T19:30:05.049Z",
+  "scope": "single-window-16-chart",
+  "methodology": {
+    "hotReady": "20 independent Chrome processes against one warm sidecar/database",
+    "soak": "one continuous 60 minute S4 measured window",
+    "cold": "C1 starts from a verified zero-row SQLite database",
+    "rollback": "production build with default-disabled flags projects four cells without rewriting v6"
+  },
+  "sources": {
+    "matrix": {
+      "S1": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s1-16cell-pass.json",
+        "sha256": "sha256:64a7905cb2220fc8373bc4c6c53500e7a396cb81f117c0fc804bec20d4fae918"
+      },
+      "S2": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s2-16cell-pass.json",
+        "sha256": "sha256:6fafedfae52504ad354adbc56840d9ed795f421f3bb9cd4ae9c74258bf2e0cb1"
+      },
+      "S3": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s3-16cell-bounded-subscribe.json",
+        "sha256": "sha256:bc812d5175625ac1b2da30e61bfa3fb75659ea4e0f5ac27bd908cf681687642e"
+      },
+      "S4": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s4-16cell-final.json",
+        "sha256": "sha256:640795809a94339b59f9cc23cc85743ba4b9f48179344de7bf60f378797e713a"
+      },
+      "S5": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s5-16cell-hosted-pyne-final.json",
+        "sha256": "sha256:0f11d8509661dd2e3de2e72ebc8b410c3c66ed8a3bb93231505da69aecbd658a"
+      },
+      "C1": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-c1-16cell-true-empty.json",
+        "sha256": "sha256:48766a30b46255f38bef72c3a67c17936ac7544b9bc0c28530047c41386652f8"
+      }
+    },
+    "hotReady": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s4-hot-ready-p95-20-first-usable.json",
+      "sha256": "sha256:bcc022e5c38bdd3c87b6d1e5b878bdcbd5aa27cc9ff4e33e63047966c476d323"
+    },
+    "soak": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-s4-16cell-soak-1h-pass.json",
+      "sha256": "sha256:fe6afc1e58b06c92a293070a2e992abdb630a45947dd278e10918997c1498f43"
+    },
+    "rollback": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\phase5-flag-rollback.json",
+      "sha256": "sha256:d3758e6707f37bf76cc893e4975984fc8dcfb3778180ac94ec9c66d8be041ac9"
+    }
+  },
+  "evidenceSummary": {
+    "matrix": {
+      "S1": {
+        "result": "pass",
+        "firstUsableMs": 1415,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 11538432,
+          "rowCount": 41405,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786022700000,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 11538432,
+          "rowCount": 41407,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786022820000,
+          "sha256": "sha256:9914304438a9b7cd2df09db0ef0b68865b29551ea6927b7340c98b7f2c99d9c3",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 11538432,
+              "sha256": "sha256:cfe17a3a82e36d6b52b55fa41cbaf2ded3bb5231560522e7b4f2b934f954e6fb"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 1829312,
+              "sha256": "sha256:a99cf2aeac6cbda0f086b3ba7797a1e3b293c1b70e2e1f0ab2e9de96dbcc24e3"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:e440e470e2dc602fdf96e8d8a29a8109e89fe5098df5989b4cbae6f884fc7a04"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 1,
+        "backendStreamLeases": 16,
+        "upstream": {
+          "physicalWebSockets": 2,
+          "physicalWebSocketDelta": 2,
+          "httpRequests": {
+            "ws_connect_attempts": 35,
+            "ws_connect_ok": 15
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 2,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 2,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 35,
+                  "ws_connect_ok": 15
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786022895097,
+                  "ws_last_success_at": 1786022838137
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      },
+      "S2": {
+        "result": "pass",
+        "firstUsableMs": 2190,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 11554816,
+          "rowCount": 42764,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786022940000,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 11894784,
+          "rowCount": 42768,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786023000000,
+          "sha256": "sha256:41a1908be2894b8d6c636767f297b639dd6767b82b6dcd1b0fcd8d2ebcb198e3",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 11894784,
+              "sha256": "sha256:618c0878f4ee009cdc12f62c743bd6f7f177188927b66d497b955957d987c2c2"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 605672,
+              "sha256": "sha256:80de5fb5cce0801d23fa999c8383f31fa024f773457d8d1ef37589fd9c7b9bc1"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:e8b02be4586c30682bd431e36c1990cc6d54f8e2d1cb72eda46b272f4f369977"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 8,
+        "backendStreamLeases": 30,
+        "upstream": {
+          "physicalWebSockets": 9,
+          "physicalWebSocketDelta": 9,
+          "httpRequests": {
+            "ws_connect_attempts": 71,
+            "ws_connect_ok": 35
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 9,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 9,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 71,
+                  "ws_connect_ok": 35
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786023108547,
+                  "ws_last_success_at": 1786023052883
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      },
+      "S3": {
+        "result": "pass",
+        "firstUsableMs": 2434,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 12902400,
+          "rowCount": 44175,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026420000,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 12902400,
+          "rowCount": 44265,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026540000,
+          "sha256": "sha256:57967b7aafef0ebd380f1be84653b758595d9b30930b74645667d0c99d225cb5",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 12902400,
+              "sha256": "sha256:e52eedd6ab32533ec1dbf94c188e744ff2eb7098d2cb7c5758d831c89c040daa"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 1705712,
+              "sha256": "sha256:a5492a062752a376c310b738af5aaf6e7bd6dfdb9208e0e8b83bd8eef38e2bdf"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:effc3eca3e75e6c70024cdb1c7b6ef71e65af45e5643c6edf8c0568f49e341c6"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 16,
+        "backendStreamLeases": 16,
+        "upstream": {
+          "physicalWebSockets": 17,
+          "physicalWebSocketDelta": 17,
+          "httpRequests": {
+            "ws_connect_attempts": 38,
+            "ws_connect_ok": 20
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 17,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 17,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 38,
+                  "ws_connect_ok": 20
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786026600732,
+                  "ws_last_success_at": 1786026596322
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      },
+      "S4": {
+        "result": "pass",
+        "firstUsableMs": 2519,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 12902400,
+          "rowCount": 44265,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026540000,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 12939264,
+          "rowCount": 44327,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026600000,
+          "sha256": "sha256:98bacedf04444283955714d32f313ab2e3102dbf7789689c50ddcc18597cb65e",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 12939264,
+              "sha256": "sha256:8e67b974428aebdcdb864bf3cee0263f30c6f648b24078e19dfdd37b03a08b4f"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 3860472,
+              "sha256": "sha256:a94e7b356ac5bae7322fcc98303e4791313fe86cf1bf47e64be64961652406c4"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:639b8acea0cd29c01d3d63e76a8d4c89018cc65b6cb7e2c7cbd0f3897a8b1222"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 16,
+        "backendStreamLeases": 16,
+        "upstream": {
+          "physicalWebSockets": 17,
+          "physicalWebSocketDelta": 8,
+          "httpRequests": {
+            "ws_connect_attempts": 67,
+            "ws_connect_ok": 31
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 17,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 17,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 67,
+                  "ws_connect_ok": 31
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786026692103,
+                  "ws_last_success_at": 1786026637261
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      },
+      "S5": {
+        "result": "pass",
+        "firstUsableMs": 1398,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 13049856,
+          "rowCount": 44360,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026780000,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\hot-data\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 13082624,
+          "rowCount": 44391,
+          "seriesCount": 70,
+          "earliestOpenTimeMs": 1656374400000,
+          "latestOpenTimeMs": 1786026840000,
+          "sha256": "sha256:42119025dfe763b09b8b78b247ce6fd86366b63e693d8941a5173d5c3dc97d73",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 13082624,
+              "sha256": "sha256:80bb48ddbfd7113f5ed8c0408a3934ec52e2e690acbfaa3bbd6010eeb6a43bf9"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 0,
+              "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 16,
+        "backendStreamLeases": 32,
+        "upstream": {
+          "physicalWebSockets": 16,
+          "physicalWebSocketDelta": 16,
+          "httpRequests": {
+            "ws_connect_attempts": 140,
+            "ws_connect_ok": 63
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 16,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 16,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 140,
+                  "ws_connect_ok": 63
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786026947306,
+                  "ws_last_success_at": 1786026886963
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      },
+      "C1": {
+        "result": "pass",
+        "firstUsableMs": 11676,
+        "realtimeSettledMs": null,
+        "visibleCells": 16,
+        "initialDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\cold-c1-fresh-01\\candlescope.db",
+          "exists": true,
+          "state": "empty",
+          "sizeBytes": 155648,
+          "rowCount": 0,
+          "seriesCount": 0,
+          "earliestOpenTimeMs": null,
+          "latestOpenTimeMs": null,
+          "sha256": null,
+          "hashConsistency": "not_requested",
+          "files": []
+        },
+        "finalDatabase": {
+          "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase5\\run-20260806-1\\cold-c1-fresh-01\\candlescope.db",
+          "exists": true,
+          "state": "warm",
+          "sizeBytes": 5386240,
+          "rowCount": 24438,
+          "seriesCount": 19,
+          "earliestOpenTimeMs": 1785937020000,
+          "latestOpenTimeMs": 1786027020000,
+          "sha256": "sha256:811c8114b4077061fb4f356375025521d50ebb5e23656443f3293c2c05c58cf9",
+          "hashConsistency": "live_sqlite_file_set",
+          "files": [
+            {
+              "name": "candlescope.db",
+              "sizeBytes": 5386240,
+              "sha256": "sha256:0fdcdd1dd992af033630bc04321d8d251d4a620d00e9855da8ef22a96fc4aa81"
+            },
+            {
+              "name": "candlescope.db-wal",
+              "sizeBytes": 1058872,
+              "sha256": "sha256:79e18547b0a4e605fa8323d5415b0553c192e10ad411fa3184b9f9bc4f304800"
+            },
+            {
+              "name": "candlescope.db-shm",
+              "sizeBytes": 32768,
+              "sha256": "sha256:493ddb1e62e54eff631eade74172d0767431ae56b78391ed7fe45563ac37d186"
+            }
+          ]
+        },
+        "browserPhysicalKlineSockets": 1,
+        "backendActiveSeries": 16,
+        "backendStreamLeases": 16,
+        "upstream": {
+          "physicalWebSockets": 17,
+          "physicalWebSocketDelta": 17,
+          "httpRequests": {
+            "ws_connect_attempts": 36,
+            "ws_connect_ok": 19
+          },
+          "httpRequestsSupported": true,
+          "exchange": {
+            "physicalWebSockets": 17,
+            "sharedPhysicalWebSockets": 0,
+            "dedicatedPhysicalWebSockets": 17,
+            "sharedWs": {
+              "hub_count": 0,
+              "active_hubs": 0,
+              "physical_websockets": 0,
+              "subscriber_count": 0,
+              "descriptor_count": 0,
+              "max_descriptors_per_shard": 32
+            },
+            "pipelineCount": 0,
+            "pipelineKeys": [],
+            "transport": {
+              "activeHttpEndpoint": "https://api.binance.com",
+              "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+              "metrics": {
+                "layer": "L1_Transport",
+                "counters": {
+                  "ws_connect_attempts": 36,
+                  "ws_connect_ok": 19
+                },
+                "gauges": {
+                  "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+                },
+                "timestamps": {
+                  "ws_last_connect_at": 1786027091333,
+                  "ws_last_success_at": 1786027064746
+                }
+              },
+              "rateLimits": {}
+            }
+          }
+        },
+        "failedGates": []
+      }
+    },
+    "hotReady": {
+      "samplesMs": [
+        1608,
+        1506,
+        1602,
+        1782,
+        1522,
+        1609,
+        1686,
+        1766,
+        2112,
+        1670,
+        1675,
+        1707,
+        1685,
+        1744,
+        1734,
+        1832,
+        1717,
+        1687,
+        1809,
+        1634
+      ],
+      "p95Ms": 1832,
+      "gates": {
+        "exactIndependentRuns": {
+          "actual": 20,
+          "expected": 20,
+          "passed": true
+        },
+        "validNonReadinessGates": {
+          "actual": [],
+          "expected": [],
+          "passed": true
+        },
+        "hotReadyP95": {
+          "actual": 1832,
+          "expected": "<= 3000 ms",
+          "passed": true
+        }
+      },
+      "processes": [
+        {
+          "run": 1,
+          "readyMs": 1608,
+          "realtimeSettledMs": 1654,
+          "backendDrainMs": 23408,
+          "processExitCode": 1
+        },
+        {
+          "run": 2,
+          "readyMs": 1506,
+          "realtimeSettledMs": 1529,
+          "backendDrainMs": 25095,
+          "processExitCode": 1
+        },
+        {
+          "run": 3,
+          "readyMs": 1602,
+          "realtimeSettledMs": 1612,
+          "backendDrainMs": 25181,
+          "processExitCode": 1
+        },
+        {
+          "run": 4,
+          "readyMs": 1782,
+          "realtimeSettledMs": 1807,
+          "backendDrainMs": 23372,
+          "processExitCode": 1
+        },
+        {
+          "run": 5,
+          "readyMs": 1522,
+          "realtimeSettledMs": 1573,
+          "backendDrainMs": 25156,
+          "processExitCode": 1
+        },
+        {
+          "run": 6,
+          "readyMs": 1609,
+          "realtimeSettledMs": 1622,
+          "backendDrainMs": 23554,
+          "processExitCode": 1
+        },
+        {
+          "run": 7,
+          "readyMs": 1686,
+          "realtimeSettledMs": 1695,
+          "backendDrainMs": 25150,
+          "processExitCode": 1
+        },
+        {
+          "run": 8,
+          "readyMs": 1766,
+          "realtimeSettledMs": 1792,
+          "backendDrainMs": 23061,
+          "processExitCode": 1
+        },
+        {
+          "run": 9,
+          "readyMs": 2112,
+          "realtimeSettledMs": 2166,
+          "backendDrainMs": 23148,
+          "processExitCode": 1
+        },
+        {
+          "run": 10,
+          "readyMs": 1670,
+          "realtimeSettledMs": 1699,
+          "backendDrainMs": 25156,
+          "processExitCode": 1
+        },
+        {
+          "run": 11,
+          "readyMs": 1675,
+          "realtimeSettledMs": 1686,
+          "backendDrainMs": 25145,
+          "processExitCode": 1
+        },
+        {
+          "run": 12,
+          "readyMs": 1707,
+          "realtimeSettledMs": 1770,
+          "backendDrainMs": 23470,
+          "processExitCode": 1
+        },
+        {
+          "run": 13,
+          "readyMs": 1685,
+          "realtimeSettledMs": 1697,
+          "backendDrainMs": 21116,
+          "processExitCode": 1
+        },
+        {
+          "run": 14,
+          "readyMs": 1744,
+          "realtimeSettledMs": 1775,
+          "backendDrainMs": 23196,
+          "processExitCode": 1
+        },
+        {
+          "run": 15,
+          "readyMs": 1734,
+          "realtimeSettledMs": 1774,
+          "backendDrainMs": 25072,
+          "processExitCode": 1
+        },
+        {
+          "run": 16,
+          "readyMs": 1832,
+          "realtimeSettledMs": 1884,
+          "backendDrainMs": 23364,
+          "processExitCode": 1
+        },
+        {
+          "run": 17,
+          "readyMs": 1717,
+          "realtimeSettledMs": 1771,
+          "backendDrainMs": 25165,
+          "processExitCode": 1
+        },
+        {
+          "run": 18,
+          "readyMs": 1687,
+          "realtimeSettledMs": 1740,
+          "backendDrainMs": 25141,
+          "processExitCode": 1
+        },
+        {
+          "run": 19,
+          "readyMs": 1809,
+          "realtimeSettledMs": 1842,
+          "backendDrainMs": 25100,
+          "processExitCode": 1
+        },
+        {
+          "run": 20,
+          "readyMs": 1634,
+          "realtimeSettledMs": 1691,
+          "backendDrainMs": 25130,
+          "processExitCode": 1
+        }
+      ]
+    },
+    "soak": {
+      "durationMs": 3600069,
+      "gates": {
+        "visibleCells": {
+          "actual": 16,
+          "expected": 16,
+          "passed": true
+        },
+        "allCellsReady": {
+          "actual": true,
+          "expected": true,
+          "passed": true
+        },
+        "documentVisible": {
+          "actual": "visible",
+          "expected": "visible",
+          "passed": true
+        },
+        "consoleErrors": {
+          "actual": 0,
+          "expected": 0,
+          "passed": true
+        },
+        "runtimeExceptions": {
+          "actual": 0,
+          "expected": 0,
+          "passed": true
+        },
+        "networkFailures": {
+          "actual": 0,
+          "expected": 0,
+          "passed": true
+        },
+        "backendSnapshot": {
+          "actual": "candlescope.backend.capacity/1",
+          "expected": "candlescope.backend.capacity/1",
+          "passed": true
+        },
+        "expectedBackendSeries": {
+          "actual": 16,
+          "expected": 16,
+          "passed": true
+        },
+        "duplicateBackendLease": {
+          "actual": [],
+          "expected": [],
+          "passed": true
+        },
+        "exactBackendLeaseClaims": {
+          "actual": [],
+          "expected": [],
+          "passed": true
+        },
+        "canvasRemounts": {
+          "actual": 0,
+          "expected": 0,
+          "passed": true
+        },
+        "backgroundSuppression": {
+          "actual": {
+            "hidden": true,
+            "allMinimized": true,
+            "formingDelta": 0,
+            "previewDelta": 0,
+            "pendingFrames": 0
+          },
+          "expected": {
+            "hidden": true,
+            "allMinimized": true,
+            "formingDelta": 0,
+            "previewDelta": 0,
+            "pendingFrames": 0
+          },
+          "passed": true
+        },
+        "hotReadyP95": {
+          "actual": 3052,
+          "expected": "<= 3000 ms",
+          "passed": false
+        },
+        "inputResponseP95": {
+          "actual": 72,
+          "expected": "<= 100 ms",
+          "passed": true
+        },
+        "longTasksPerMinute": {
+          "actual": 0,
+          "expected": "<= 5/min",
+          "passed": true
+        },
+        "backendEventLoopLagP99": {
+          "actual": 27,
+          "expected": "<= 50 ms",
+          "passed": true
+        },
+        "batchBrowserPhysicalKlineSockets": {
+          "actual": 1,
+          "expected": 1,
+          "passed": true
+        },
+        "batchLogicalClients": {
+          "actual": 16,
+          "expected": 16,
+          "passed": true
+        },
+        "batchLogicalSubscriptions": {
+          "actual": 16,
+          "expected": 16,
+          "passed": true
+        },
+        "batchAuthoritativeTimeouts": {
+          "actual": 0,
+          "expected": 0,
+          "passed": true
+        },
+        "linkBoundary": {
+          "actual": {
+            "crosshairPublishes": 2,
+            "crosshairTargetAttempts": 1,
+            "crosshairTargetDeliveries": 1,
+            "crosshairTargetFailures": 0,
+            "timeAnchorPublishes": 0,
+            "dateRangePublishes": 1,
+            "viewportTargetAttempts": 1,
+            "viewportTargetDeliveries": 1,
+            "viewportTargetFailures": 0
+          },
+          "expected": "crosshair and date-range delivered to the linked destination",
+          "passed": true
+        },
+        "productBoundaryDrill": {
+          "actual": {
+            "supported": true,
+            "maximized": {
+              "ready": true,
+              "mountedCells": 16,
+              "obscuredCells": 15
+            },
+            "restored": {
+              "ready": true,
+              "mountedCells": 16,
+              "obscuredCells": 0
+            },
+            "drawing": {
+              "before": {
+                "documents": 0,
+                "entities": 0
+              },
+              "after": {
+                "documents": 1,
+                "entities": 1
+              },
+              "persistedEntityDelta": 1
+            },
+            "export": {
+              "panelOpened": true
+            },
+            "layoutLock": {
+              "releasedForDrag": true
+            },
+            "layoutDrag": {
+              "before": {
+                "cell-1": {
+                  "left": 40,
+                  "top": 84
+                },
+                "cell-2": {
+                  "left": 365.8333435058594,
+                  "top": 84
+                }
+              },
+              "after": {
+                "cell-2": {
+                  "left": 40,
+                  "top": 84
+                },
+                "cell-1": {
+                  "left": 365.8333435058594,
+                  "top": 84
+                }
+              },
+              "swapped": true
+            },
+            "mountTokens": {
+              "before": {
+                "cell-1": "cell-1:1",
+                "cell-2": "cell-2:2",
+                "cell-3": "cell-3:3",
+                "cell-4": "cell-4:4",
+                "cell-5": "cell-5:5",
+                "cell-6": "cell-6:6",
+                "cell-7": "cell-7:7",
+                "cell-8": "cell-8:8",
+                "cell-9": "cell-9:9",
+                "cell-10": "cell-10:10",
+                "cell-11": "cell-11:11",
+                "cell-12": "cell-12:12",
+                "cell-13": "cell-13:13",
+                "cell-14": "cell-14:14",
+                "cell-15": "cell-15:15",
+                "cell-16": "cell-16:16"
+              },
+              "after": {
+                "cell-2": "cell-2:2",
+                "cell-1": "cell-1:1",
+                "cell-3": "cell-3:3",
+                "cell-4": "cell-4:4",
+                "cell-5": "cell-5:5",
+                "cell-6": "cell-6:6",
+                "cell-7": "cell-7:7",
+                "cell-8": "cell-8:8",
+                "cell-9": "cell-9:9",
+                "cell-10": "cell-10:10",
+                "cell-11": "cell-11:11",
+                "cell-12": "cell-12:12",
+                "cell-13": "cell-13:13",
+                "cell-14": "cell-14:14",
+                "cell-15": "cell-15:15",
+                "cell-16": "cell-16:16"
+              },
+              "stable": true
+            }
+          },
+          "expected": "stable maximize/restore, persisted drawing, export panel, and drag swap",
+          "passed": true
+        },
+        "soakInteractions": {
+          "actual": {
+            "actionCount": 120,
+            "actionNames": [
+              "activate-cell",
+              "indicator-remove-add",
+              "interval-cycle",
+              "maximize-restore",
+              "symbol-cycle"
+            ],
+            "failures": []
+          },
+          "expected": "interval, symbol, maximize, and indicator cycles with zero failures",
+          "passed": true
+        },
+        "soakSampling": {
+          "actual": {
+            "heap": {
+              "samples": 11,
+              "start": 46926848,
+              "end": 53439432,
+              "min": 46926848,
+              "max": 53742828,
+              "deltaPct": 13.878,
+              "finalWindowDeltaPct": 0.812,
+              "plateau": true
+            },
+            "rawHeap": {
+              "samples": 715,
+              "start": 47404968,
+              "end": 53439432,
+              "min": 47404968,
+              "max": 227680888,
+              "deltaPct": 12.73,
+              "finalWindowDeltaPct": -40.346,
+              "plateau": true
+            },
+            "privateBytes": {
+              "samples": 715,
+              "start": 272138240,
+              "end": 310513664,
+              "min": 267124736,
+              "max": 311447552,
+              "deltaPct": 14.101,
+              "finalWindowDeltaPct": 0.136,
+              "plateau": true
+            },
+            "rss": {
+              "samples": 715,
+              "start": 297807872,
+              "end": 334848000,
+              "min": 293257216,
+              "max": 336838656,
+              "deltaPct": 12.438,
+              "finalWindowDeltaPct": 0.082,
+              "plateau": true
+            },
+            "maxEventLoopLagP99Ms": 122,
+            "maxActiveSeries": 17,
+            "maxStreamLeases": 21,
+            "maxBatchOutboxDepth": 1,
+            "authoritativeTimeouts": 0,
+            "backendSampleErrors": 0,
+            "visibleCellViolations": 0
+          },
+          "expected": "no backend sample errors, visibility violations, or authoritative outbox timeouts",
+          "passed": true
+        },
+        "soakReconnects": {
+          "actual": [
+            {
+              "atMs": 900010,
+              "atEpochMs": 1786036968398,
+              "offlineMs": 2009,
+              "restored": true
+            },
+            {
+              "atMs": 1800000,
+              "atEpochMs": 1786037868388,
+              "offlineMs": 2009,
+              "restored": true
+            },
+            {
+              "atMs": 2700001,
+              "atEpochMs": 1786038768389,
+              "offlineMs": 2006,
+              "restored": true
+            }
+          ],
+          "expected": "at least three controlled offline/recovery cycles",
+          "passed": true
+        },
+        "longSoakHeapGrowth": {
+          "actual": {
+            "samples": 11,
+            "start": 46926848,
+            "end": 53439432,
+            "min": 46926848,
+            "max": 53742828,
+            "deltaPct": 13.878,
+            "finalWindowDeltaPct": 0.812,
+            "plateau": true
+          },
+          "expected": "<= 15% after at least 30 minutes and <= 5% growth in the final 20% window",
+          "passed": true
+        },
+        "longSoakPrivateBytesGrowth": {
+          "actual": {
+            "samples": 715,
+            "start": 272138240,
+            "end": 310513664,
+            "min": 267124736,
+            "max": 311447552,
+            "deltaPct": 14.101,
+            "finalWindowDeltaPct": 0.136,
+            "plateau": true
+          },
+          "expected": "<= 15% after at least 1 hour and <= 5% growth in the final 20% window",
+          "passed": true
+        }
+      },
+      "analysis": {
+        "heap": {
+          "samples": 11,
+          "start": 46926848,
+          "end": 53439432,
+          "min": 46926848,
+          "max": 53742828,
+          "deltaPct": 13.878,
+          "finalWindowDeltaPct": 0.812,
+          "plateau": true
+        },
+        "rawHeap": {
+          "samples": 715,
+          "start": 47404968,
+          "end": 53439432,
+          "min": 47404968,
+          "max": 227680888,
+          "deltaPct": 12.73,
+          "finalWindowDeltaPct": -40.346,
+          "plateau": true
+        },
+        "privateBytes": {
+          "samples": 715,
+          "start": 272138240,
+          "end": 310513664,
+          "min": 267124736,
+          "max": 311447552,
+          "deltaPct": 14.101,
+          "finalWindowDeltaPct": 0.136,
+          "plateau": true
+        },
+        "rss": {
+          "samples": 715,
+          "start": 297807872,
+          "end": 334848000,
+          "min": 293257216,
+          "max": 336838656,
+          "deltaPct": 12.438,
+          "finalWindowDeltaPct": 0.082,
+          "plateau": true
+        },
+        "maxEventLoopLagP99Ms": 122,
+        "maxActiveSeries": 17,
+        "maxStreamLeases": 21,
+        "maxBatchOutboxDepth": 1,
+        "authoritativeTimeouts": 0,
+        "backendSampleErrors": 0,
+        "visibleCellViolations": 0
+      },
+      "reconnects": [
+        {
+          "atMs": 900010,
+          "atEpochMs": 1786036968398,
+          "offlineMs": 2009,
+          "restored": true
+        },
+        {
+          "atMs": 1800000,
+          "atEpochMs": 1786037868388,
+          "offlineMs": 2009,
+          "restored": true
+        },
+        {
+          "atMs": 2700001,
+          "atEpochMs": 1786038768389,
+          "offlineMs": 2006,
+          "restored": true
+        }
+      ],
+      "actionFailures": []
+    },
+    "rollback": {
+      "build": {
+        "multiChart16Enabled": false,
+        "chartWindowBrokerEnabled": false,
+        "klineBatchEnabled": false
+      },
+      "browser": {
+        "visibleCellIds": [
+          "cell-1",
+          "cell-2",
+          "cell-3",
+          "cell-4"
+        ],
+        "layoutOptions": [
+          "□",
+          "▯▯",
+          "▭",
+          "◧",
+          "▦",
+          "↶",
+          "↷",
+          "⟲",
+          "🔒"
+        ],
+        "errors": []
+      },
+      "persisted": {
+        "v1RecordSha256": "sha256:8a944dd001b7a9150ef4cfdd9c795e6c10679e5a255ab95142f7c9bb53738db1",
+        "v6DocumentSha256": "sha256:b35767023b31c645ee40fb381278cbf7d429b8a897e9ac4b320db0da3ae8664b",
+        "v6CellCount": 16,
+        "v6LayoutCellCount": 16
+      },
+      "checks": {
+        "visibleCells": {
+          "actual": [
+            "cell-1",
+            "cell-2",
+            "cell-3",
+            "cell-4"
+          ],
+          "expected": "exact four-cell default-off projection",
+          "passed": true
+        },
+        "v6DocumentPreserved": {
+          "actual": {
+            "cellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ],
+            "layoutCellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ]
+          },
+          "expected": {
+            "cellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ],
+            "layoutCellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ]
+          },
+          "passed": true
+        },
+        "v5SourcePreserved": {
+          "actual": "sha256:8a944dd001b7a9150ef4cfdd9c795e6c10679e5a255ab95142f7c9bb53738db1",
+          "expected": "sha256:8a944dd001b7a9150ef4cfdd9c795e6c10679e5a255ab95142f7c9bb53738db1",
+          "passed": true
+        },
+        "defaultFlagsDisabled": {
+          "actual": [
+            "□",
+            "▯▯",
+            "▭",
+            "◧",
+            "▦",
+            "↶",
+            "↷",
+            "⟲",
+            "🔒"
+          ],
+          "expected": "no layout preset above four cells",
+          "passed": true
+        },
+        "browserErrors": {
+          "actual": [],
+          "expected": [],
+          "passed": true
+        }
+      }
+    }
+  },
+  "matrixResults": [
+    {
+      "scenarioId": "S1",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "warm",
+      "validationErrors": [],
+      "passed": true
+    },
+    {
+      "scenarioId": "S2",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "warm",
+      "validationErrors": [],
+      "passed": true
+    },
+    {
+      "scenarioId": "S3",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "warm",
+      "validationErrors": [],
+      "passed": true
+    },
+    {
+      "scenarioId": "S4",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "warm",
+      "validationErrors": [],
+      "passed": true
+    },
+    {
+      "scenarioId": "S5",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "warm",
+      "validationErrors": [],
+      "passed": true
+    },
+    {
+      "scenarioId": "C1",
+      "result": "pass",
+      "databaseState": "warm",
+      "initialDatabaseState": "empty",
+      "validationErrors": [],
+      "passed": true
+    }
+  ],
+  "nonReadinessSoakFailures": [],
+  "durationMs": 3600069,
+  "checks": {
+    "scenarioMatrix": {
+      "actual": [
+        {
+          "scenarioId": "S1",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "warm",
+          "validationErrors": [],
+          "passed": true
+        },
+        {
+          "scenarioId": "S2",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "warm",
+          "validationErrors": [],
+          "passed": true
+        },
+        {
+          "scenarioId": "S3",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "warm",
+          "validationErrors": [],
+          "passed": true
+        },
+        {
+          "scenarioId": "S4",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "warm",
+          "validationErrors": [],
+          "passed": true
+        },
+        {
+          "scenarioId": "S5",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "warm",
+          "validationErrors": [],
+          "passed": true
+        },
+        {
+          "scenarioId": "C1",
+          "result": "pass",
+          "databaseState": "warm",
+          "initialDatabaseState": "empty",
+          "validationErrors": [],
+          "passed": true
+        }
+      ],
+      "expected": "S1-S5 warm plus C1 true-empty capacity evidence all pass",
+      "passed": true
+    },
+    "independentHotReadyP95": {
+      "actual": {
+        "schemaVersion": "candlescope.multi-chart.hot-ready-baseline/1",
+        "runs": 20,
+        "p95Ms": 1832
+      },
+      "expected": "20 independent browser processes, p95 <= 3000 ms",
+      "passed": true
+    },
+    "oneHourSoak": {
+      "actual": {
+        "durationMs": 3600069,
+        "nonReadinessSoakFailures": []
+      },
+      "expected": "at least 1 hour and every gate except the separately sampled hotReadyP95 passes",
+      "passed": true
+    },
+    "flagRollback": {
+      "actual": {
+        "visibleCells": {
+          "actual": [
+            "cell-1",
+            "cell-2",
+            "cell-3",
+            "cell-4"
+          ],
+          "expected": "exact four-cell default-off projection",
+          "passed": true
+        },
+        "v6DocumentPreserved": {
+          "actual": {
+            "cellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ],
+            "layoutCellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ]
+          },
+          "expected": {
+            "cellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ],
+            "layoutCellIds": [
+              "cell-1",
+              "cell-10",
+              "cell-11",
+              "cell-12",
+              "cell-13",
+              "cell-14",
+              "cell-15",
+              "cell-16",
+              "cell-2",
+              "cell-3",
+              "cell-4",
+              "cell-5",
+              "cell-6",
+              "cell-7",
+              "cell-8",
+              "cell-9"
+            ]
+          },
+          "passed": true
+        },
+        "v5SourcePreserved": {
+          "actual": "sha256:8a944dd001b7a9150ef4cfdd9c795e6c10679e5a255ab95142f7c9bb53738db1",
+          "expected": "sha256:8a944dd001b7a9150ef4cfdd9c795e6c10679e5a255ab95142f7c9bb53738db1",
+          "passed": true
+        },
+        "defaultFlagsDisabled": {
+          "actual": [
+            "□",
+            "▯▯",
+            "▭",
+            "◧",
+            "▦",
+            "↶",
+            "↷",
+            "⟲",
+            "🔒"
+          ],
+          "expected": "no layout preset above four cells",
+          "passed": true
+        },
+        "browserErrors": {
+          "actual": [],
+          "expected": [],
+          "passed": true
+        }
+      },
+      "expected": "16 -> 4 projection preserves the v6 document and defaults remain disabled",
+      "passed": true
+    }
+  },
+  "result": "pass"
+}

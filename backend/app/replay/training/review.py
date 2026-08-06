@@ -16,6 +16,7 @@ from app.replay.canonical import canonical_json, canonical_sha256
 
 from .anchor_codec import encode_anchor_payload
 from .errors import TrainingRunError
+from .liquidation_projection import load_public_liquidation_cases
 from .models import REPLAY_V2_PROTOCOL
 from .schema import REVIEW_TIMELINE_SCHEMA_VERSION, RUN_RULES_SCHEMA_VERSION
 
@@ -999,149 +1000,7 @@ class ReviewRecorder:
                 (run_id,),
             ).fetchall()
         ]
-        liquidations: list[dict[str, object]] = []
-
-        def public_book_execution(row: sqlite3.Row) -> dict[str, object]:
-            return {
-                "case_id": str(row["case_id"]),
-                "step_sequence": int(row["step_sequence"]),
-                "track_id": str(row["track_id"]),
-                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
-                "last_update_id": int(row["last_update_id"]),
-                "side": str(row["side"]),
-                "requested_quantity": str(row["requested_quantity"]),
-                "visible_quantity": str(row["visible_quantity"]),
-                "levels": json.loads(str(row["levels_json"])),
-                "book_hash": str(row["book_hash"]),
-                "execution_fidelity": str(row["execution_fidelity"]),
-                "queue_exact": int(row["queue_exact"]),
-                "execution_plan_hash": str(row["execution_plan_hash"]),
-            }
-
-        def public_book_snapshot(row: sqlite3.Row) -> dict[str, object]:
-            return {
-                "case_id": str(row["case_id"]),
-                "track_id": str(row["track_id"]),
-                "as_of_virtual_time_ms": int(row["as_of_virtual_time_ms"]),
-                "last_update_id": int(row["last_update_id"]),
-                "book_hash": str(row["book_hash"]),
-                "execution_fidelity": str(row["execution_fidelity"]),
-                "queue_exact": int(row["queue_exact"]),
-                "snapshot_hash": str(row["snapshot_hash"]),
-            }
-
-        for case_row in connection.execute(
-            """
-            SELECT * FROM replay_training_liquidation_case
-            WHERE run_id = ? ORDER BY case_sequence
-            """,
-            (run_id,),
-        ).fetchall():
-            case_id = str(case_row["case_id"])
-            legs = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_leg
-                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
-                    """,
-                    (run_id, case_id),
-                ).fetchall()
-            ]
-            steps: list[dict[str, object]] = []
-            for step_row in connection.execute(
-                """
-                SELECT * FROM replay_training_liquidation_step
-                WHERE run_id = ? AND case_id = ? ORDER BY step_sequence
-                """,
-                (run_id, case_id),
-            ).fetchall():
-                step = dict(step_row)
-                step_sequence = int(step_row["step_sequence"])
-                book_execution_row = connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_book_execution
-                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                    """,
-                    (run_id, case_id, step_sequence),
-                ).fetchone()
-                step["book_execution"] = (
-                    None
-                    if book_execution_row is None
-                    else public_book_execution(book_execution_row)
-                )
-                step["orders"] = [
-                    {
-                        **dict(order_row),
-                        "fills": [
-                            dict(fill_row)
-                            for fill_row in connection.execute(
-                                """
-                                SELECT * FROM replay_training_liquidation_fill
-                                WHERE run_id = ? AND case_id = ? AND order_id = ?
-                                ORDER BY fill_sequence
-                                """,
-                                (run_id, case_id, order_row["order_id"]),
-                            ).fetchall()
-                        ],
-                    }
-                    for order_row in connection.execute(
-                        """
-                        SELECT * FROM replay_training_liquidation_order
-                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                        ORDER BY order_sequence
-                        """,
-                        (run_id, case_id, step_sequence),
-                    ).fetchall()
-                ]
-                step["insurance_postings"] = [
-                    dict(row)
-                    for row in connection.execute(
-                        """
-                        SELECT * FROM replay_training_insurance_posting
-                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                        ORDER BY posting_sequence
-                        """,
-                        (run_id, case_id, step_sequence),
-                    ).fetchall()
-                ]
-                step["adl_events"] = [
-                    dict(row)
-                    for row in connection.execute(
-                        """
-                        SELECT * FROM replay_training_adl_event
-                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                        ORDER BY adl_event_id
-                        """,
-                        (run_id, case_id, step_sequence),
-                    ).fetchall()
-                ]
-                steps.append(step)
-            liquidations.append(
-                {
-                    "liquidation_id": case_id,
-                    "state": str(case_row["state"]),
-                    "reason": str(case_row["reason"]),
-                    "trigger_cursor": {
-                        "virtual_time_ms": int(case_row["trigger_virtual_time_ms"]),
-                        "source_sequence": int(case_row["trigger_source_sequence"]),
-                    },
-                    "fidelity": str(case_row["fidelity"]),
-                    "component_hash": str(case_row["component_hash"]),
-                    "legs": legs,
-                    "book_snapshots": [
-                        public_book_snapshot(row)
-                        for row in connection.execute(
-                            """
-                            SELECT * FROM replay_training_liquidation_book_snapshot
-                            WHERE run_id = ? AND case_id = ? ORDER BY track_id
-                            """,
-                            (run_id, case_id),
-                        ).fetchall()
-                    ],
-                    "steps": steps,
-                }
-            )
+        liquidations = load_public_liquidation_cases(connection, run_id=run_id)
         viewer_state = {
             "run_id": run_id,
             "selected_track_id": str(viewer["selected_track_id"]),

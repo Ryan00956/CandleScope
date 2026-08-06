@@ -225,6 +225,7 @@ function exactPortfolioRaw() {
     isolated_allocations: {},
     next_funding_time_ms: START_MS + 28_800_000,
     liquidations: [],
+    liquidation_recoveries: [],
     hedge_state: {
       schema_version: "replay.hedge-relational-state.v1",
       state_hash: replayDigest("7"),
@@ -511,9 +512,9 @@ test("Phase 16 Hub defers exact archive binding until a market is selected", () 
     },
   } satisfies TrainingHubRuntime;
   const html = renderToStaticMarkup(<TrainingHubDialog runtime={runtime} />);
-  assert.match(html, /历史 L2、精确账户历史与 funding 仍 fail closed/);
-  assert.match(html, /选中具体商品后绑定对应 archive ref/);
-  assert.match(html, /Run 保持空局/);
-  assert.match(html, /HISTORICAL_EXACT · 归档结算/);
+  assert.match(html, /历史 L2 与 pinned funding 默认属于可用产品能力/);
+  assert.match(html, /选中具体商品后绑定 archive ref/);
+  assert.match(html, /数据不连续时明确 fail closed/);
+  assert.match(html, /HISTORICAL_EXACT · pinned 归档结算/);
   assert.doesNotMatch(html, /data-account-history-capability|account-btc-202403/);
 });

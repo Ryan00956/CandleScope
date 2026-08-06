@@ -1,7 +1,9 @@
 import {
   parseReplayAccountAuditResponse,
+  parseReplayLiquidationCases,
   parseReplayTrainingPortfolio,
   type ReplayAccountAuditResponse,
+  type ReplayLiquidationCase,
   type ReplayTrainingPortfolio,
   type ReplayV2IntegrityMode,
   type ReplayV2Json,
@@ -224,7 +226,7 @@ export interface ReplayReviewProjection {
   readonly fills: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly ledger: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly markers: readonly Readonly<Record<string, ReplayV2Json>>[];
-  readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly liquidations: readonly ReplayLiquidationCase[];
   readonly books: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly account: Readonly<Record<string, ReplayV2Json>>;
   readonly account_hash: `sha256:${string}`;
@@ -690,7 +692,10 @@ function parseReviewProjection(value: unknown): ReplayReviewProjection {
     fills: objectArray(source.fills, "review.projection.fills"),
     ledger: objectArray(source.ledger, "review.projection.ledger"),
     markers: objectArray(source.markers, "review.projection.markers"),
-    liquidations: objectArray(source.liquidations, "review.projection.liquidations"),
+    liquidations: parseReplayLiquidationCases(
+      source.liquidations,
+      "review.projection.liquidations",
+    ),
     books: objectArray(source.books, "review.projection.books"),
     account: jsonObject(source.account, "review.projection.account"),
     account_hash: digest(source.account_hash, "review.projection.account_hash"),

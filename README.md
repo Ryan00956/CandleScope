@@ -16,7 +16,7 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 - [Quick Start](#quick-start)
 - [What It Does](#what-it-does)
-- [Replay Training (Opt-In)](#replay-training-opt-in)
+- [Replay Training](#replay-training)
 - [Architecture](#architecture)
 - [Backend](#backend)
 - [Frontend](#frontend)
@@ -102,28 +102,31 @@ CandleScope is a local-first market charting application with:
 - Multi-pane chart layout for price, volume, and oscillator indicators.
 - Settings tools for proxy testing, symbol metadata refresh, storage repair, gap scanning, and retention limits.
 
-## Replay Training (Opt-In)
+## Replay Training
 
 Replay is a local-first, deterministic v2 market-training product. It opens in
 an independent `replay.html` document with its own composition root; the live
-page never swaps its market source or owns replay state. The authoritative
-replay capability and live-page entry remain disabled by default. Aggregate-trade archive,
-historical-book, background workers, and optimized paths remain independently
-closed:
+page never swaps its market source or owns replay state. Replay and its live-page
+entry are part of the normal build and are enabled by default. Missing or
+invalid pinned datasets fail the affected operation closed with a visible
+capability reason; they do not hide or disable the product. Live aggregate-trade
+capture, background workers, automatic GC, and optimized paths remain
+independently closed:
 
 ```text
-REPLAY_ENABLED=0
-VITE_REPLAY_ENTRY_ENABLED=0
+REPLAY_ENABLED=1
 RAW_AGG_TRADE_ARCHIVE_ENABLED=0
-REPLAY_HISTORICAL_BOOK_ENABLED=0
+REPLAY_HISTORICAL_BOOK_ENABLED=1
 REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED=0
 REPLAY_SEGMENT_AUTO_GC_ENABLED=0
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
-REPLAY_ACCOUNT_HISTORY_ENABLED=0
+REPLAY_ACCOUNT_HISTORY_ENABLED=1
 ```
 
-The frontend flag only hides or shows the live-page entry. The backend
-capability is authoritative, including for direct `replay.html` access.
+The frontend has no replay-entry feature flag. The backend capability and
+dataset validation remain authoritative, including for direct `replay.html`
+access. `REPLAY_ENABLED=0` is an explicit whole-product operational stop, not a
+rollout or gray-release mechanism.
 
 Internal adapter fidelity used by v2:
 
@@ -137,11 +140,14 @@ Both sources use the same deterministic actor, virtual clock,
 are internal execution contracts, not a selectable v1 product. Sessions restart in `PAUSED`, and
 the report exposes its actual data/execution fidelity and integrity hashes.
 
-The internal adapter explicitly does **not** support:
+The internal adapter explicitly does **not** claim:
 
 - `RAW_TRADE`: aggregate trades are not renamed or claimed as raw individual fills.
-- `L2_BOOK`: no historical order-book queue position or book-assisted fill fidelity.
-- `EXCHANGE_FUTURES_EXACT`: no historical funding, maintenance-margin tiers, liquidation/ADL, or exact exchange account semantics.
+- private exchange queue position, maker priority, or hidden-liquidity fidelity.
+- exact exchange-private insurance-fund and ADL candidate state when those
+  archives are unavailable. The hedge, maintenance-margin, liquidation,
+  insurance-fund, and ADL state machines remain complete and deterministic,
+  with approximation disclosed in every affected result.
 
 Phase 8 adds explainable
 `CHECKPOINT_JUMP` / `AGGREGATE_SCAN` / `FULL_EVENT_SCAN` / `BLOCKED` planning,
@@ -162,12 +168,13 @@ explicit revalidation/resync. The execution model remains `TOUCH_OR_TAPE_V2`
 and reports `BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE`: L2 is an exact
 continuity capability, not proof of queue position or maker-fill priority.
 
-`REPLAY_ENABLED` is the only backend product gate. Optional optimization and
-historical-book capabilities remain default-off:
+`REPLAY_ENABLED` is the only whole-product operational stop. Historical-book
+validation is active by default and fails individual BOOK-required operations
+closed when no trusted capture is available; optimization remains default-off:
 
 ```text
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED=0
-REPLAY_HISTORICAL_BOOK_ENABLED=0
+REPLAY_HISTORICAL_BOOK_ENABLED=1
 REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES=1099511627776
 ```
 
@@ -198,11 +205,11 @@ book, and account-history GC are category-specific, require a fresh dry-run
 plan hash, protect active pins, and rehydrate only from checksum-identical
 trusted sources. Review evidence has no deletion action.
 
-Implementation acceptance does not open the authoritative replay or live-entry
-gates. The current decision is `HOLD_CORE_DEFAULT_OFF_V2_DEFAULT_ON`: real BAR
-and official checksum-bound Binance USD-M aggTrade sources are release-tested,
-while BOOK and exact account modes still lack bound production captures and an
-operations observation window.
+The production contract is `HARD_CUTOVER_DEFAULT_ON`: the replay entry, hedge
+account, historical-book validation, and account-history validation are present
+in every normal build. A missing BOOK/account capture is reported as a pinned
+data capability gap for that requested fidelity, never as a hidden feature or
+silent downgrade.
 
 ### Prepare Isolated Data
 
@@ -276,7 +283,6 @@ $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
 Set-Location frontend
 $env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:18082'
 $env:VITE_DEV_PORT = '15175'
-$env:VITE_REPLAY_ENTRY_ENABLED = '1'
 npm run dev
 ```
 
@@ -290,9 +296,11 @@ is disabled or its dataset/persistence checks fail.
   closing replay storage. Restart recovery never resumes wall-clock autoplay.
 - Controller loss pauses playback. Sequence/epoch gaps resynchronize through
   an atomic snapshot; dataset, checkpoint, or persistence faults fail closed.
-- To disable replay, set `REPLAY_ENABLED=0`, restart the backend, set
-  `VITE_REPLAY_ENTRY_ENABLED=0`, and restart/rebuild the frontend. Keep
-  `replay.db`; disabling or rolling back must not delete training records.
+- Emergency stop is whole-build operational rollback: deploy the previous
+  verified build, or explicitly set `REPLAY_ENABLED=0` and restart the backend.
+  The frontend entry remains visible and reports the authoritative unavailable
+  reason. Keep `replay.db`; stopping or rolling back must not delete training
+  records.
 - An old build without replay routes ignores the retained `replay.db`. To
   disable only AGG_TRADE, set `RAW_AGG_TRADE_ARCHIVE_ENABLED=0`; BAR replay can
   remain independently available.

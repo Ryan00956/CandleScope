@@ -96,7 +96,7 @@ All application APIs are mounted under `/api/v1`.
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test, storage repair, gap scan, storage health, cache limits |
 | Subscriptions | list, sync, prices snapshot, get/set/delete symbol tier |
-| Replay (opt-in) | v2 TrainingRun catalog/create/list/command/review/fork/report routes, plus gated internal adapter get/command/journal/report and `WS /stream/replay/{session_id}` |
+| Replay | v2 TrainingRun catalog/create/list/command/review/fork/report routes, plus the internal adapter get/command/journal/report and `WS /stream/replay/{session_id}` |
 
 The enhanced K-line volume, delta, and CVD-contribution contract is documented in [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md).
 
@@ -106,17 +106,18 @@ System endpoints outside `/api/v1`:
 - `GET /health`
 - `GET /debug/snapshot`
 
-## Deterministic Replay Runtime (Opt-In)
+## Deterministic Replay Runtime
 
-Replay is disabled by default. `REPLAY_ENABLED=0` does not construct the
-`ReplayService`, open `REPLAY_DB_PATH`, start an actor task, or allow session
-creation. The disabled capability response remains stable so the independent
-frontend page can show `REPLAY_DISABLED` instead of falling back to live data.
+Replay is enabled in the normal build. An explicit `REPLAY_ENABLED=0` emergency
+stop does not construct the `ReplayService`, open `REPLAY_DB_PATH`, start an
+actor task, or allow session creation. The disabled capability response remains
+stable so the independent frontend page shows `REPLAY_DISABLED` instead of
+falling back to live data.
 
-`REPLAY_ENABLED` is the sole replay product gate. When it is enabled, the
-TrainingRun service is always constructed; there is no product selector or v1
-fallback. Optional archive, book, worker, and optimization capabilities remain
-independently fail closed.
+`REPLAY_ENABLED` is the sole whole-product operational stop. The TrainingRun
+service is otherwise always constructed; there is no product selector, v1
+fallback, gray rollout, or frontend entry flag. Archive validity remains
+fail-closed per requested operation. Workers and optimization remain optional.
 
 When enabled, replay owns a separate SQLite database and a bounded runtime:
 
@@ -152,7 +153,7 @@ cannot reveal data after the durable virtual-time cursor.
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `REPLAY_ENABLED` | `0` | Authoritative backend feature/capability switch |
+| `REPLAY_ENABLED` | `1` | Normal-build replay runtime; `0` is an explicit operational stop |
 | `REPLAY_DB_PATH` | `<CANDLE_DATA_DIR>/replay.db` | Replay-only SQLite state; must differ from `KLINES_DB_PATH` |
 | `REPLAY_HISTORY_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/replay-history` | Local archive, or disposable metadata/object cache when `REPLAY_HISTORY_ORIGIN_URI` is set |
 | `REPLAY_HISTORY_ORIGIN_URI` | unset | Authoritative `file`/HTTP(S) history root; new catalogs/Runs fail closed when its current index is unavailable, while pinned Runs may read cached immutable revisions |
@@ -176,9 +177,11 @@ cannot reveal data after the durable virtual-time cursor.
 | `REPLAY_IDLE_TTL_SECONDS` | `3600` | Configured idle-session lifetime |
 | `RAW_AGG_TRADE_ARCHIVE_ENABLED` | `0` | Enables live aggregate-trade capture only |
 | `RAW_AGG_TRADE_ARCHIVE_DIR` | `<CANDLE_DATA_DIR>/raw-agg-live-spool` | Mutable live capture spool; replay never reads this path |
+| `REPLAY_HISTORICAL_BOOK_ENABLED` | `1` | Validate and use pinned historical L2 when the requested Run requires it; missing or invalid data fails that operation closed |
+| `REPLAY_ACCOUNT_HISTORY_ENABLED` | `1` | Validate and use pinned account-history inputs when requested; missing or invalid data fails that operation closed |
 
 Use [`.env.replay.example`](.env.replay.example) as a starting point. The
-frontend entry flag is separate and is not an authorization boundary.
+frontend entry is always present and backend capability remains authoritative.
 
 ### Data Preparation and Capability Rules
 
@@ -292,8 +295,9 @@ the fidelity claim.
 - Controller expiry, sequence/epoch mismatch, slow subscribers, SQLite busy or
   write failure, corrupt checkpoints, dataset drift, and degraded archives all
   fail closed with bounded diagnostics or explicit resynchronization.
-- Set `REPLAY_ENABLED=0` and restart to disable the backend in one deployment.
-  The capability reports persistence unopened; retain `replay.db`.
+- For an emergency operational stop, set `REPLAY_ENABLED=0` and restart the
+  backend, or deploy the previous verified build. The visible entry reports
+  persistence unopened; retain `replay.db`.
 - To roll back only aggregate-trade replay, set
   `REPLAY_AGG_TRADE_ENABLED=0`; live capture and BAR replay are independent.
 - BAR replay has no legacy SQLite fallback. Keep
@@ -307,9 +311,9 @@ the fidelity claim.
 
 Formal local gates are `scripts/audit_replay_determinism.py`,
 `scripts/benchmark_replay.py`, the frontend `smoke:replay` and 4-hour replay
-soak, and `frontend/scripts/replay-rollback-drill.ps1`. Passing local gates does
-not make replay default-on; production observation and an explicit enablement
-decision remain separate.
+soak, and `frontend/scripts/replay-rollback-drill.ps1`. Normal builds are
+default-on; release evidence must prove the hard-cut contract and whole-build
+rollback without relying on a gray flag.
 
 ## Data Engine
 

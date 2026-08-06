@@ -60,15 +60,15 @@ def test_protocol_literals_and_enums_are_frozen_and_round_trip() -> None:
             "set_speed",
             "step",
             "advance_by",
-                "seek_to",
-                "place_order",
-                "replace_order",
-                "cancel_order",
-                "cancel_orders",
-                "close_position",
+            "seek_to",
+            "place_order",
+            "replace_order",
+            "cancel_order",
+            "cancel_orders",
+            "close_position",
             "execute_position_intent",
-                "set_position_protection",
-                "set_position_leverage",
+            "set_position_protection",
+            "set_position_leverage",
             "add_journal_note",
             "reveal_history",
             "end_session",
@@ -123,7 +123,9 @@ def test_identifier_validation_rejects_unsafe_or_ambiguous_values(value: str) ->
         validate_identifier(value, field_name="command_id")
 
 
-@pytest.mark.parametrize("value", ["", "NaN", "Infinity", "-Infinity", "1e3", "--1", 1.0])
+@pytest.mark.parametrize(
+    "value", ["", "NaN", "Infinity", "-Infinity", "1e3", "--1", 1.0]
+)
 def test_decimal_string_validation_rejects_noncanonical_inputs(value: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         normalize_decimal_string(value, field_name="amount")
@@ -139,7 +141,9 @@ def test_decimal_string_validation_rejects_noncanonical_inputs(value: object) ->
         ("10000.00", "10000"),
     ],
 )
-def test_decimal_strings_normalize_without_binary_float(raw: str, expected: str) -> None:
+def test_decimal_strings_normalize_without_binary_float(
+    raw: str, expected: str
+) -> None:
     assert normalize_decimal_string(raw, field_name="amount") == expected
 
 
@@ -154,7 +158,9 @@ def test_revision_sequence_and_timestamp_validation_fail_closed() -> None:
         ReplayCursor(virtual_time_ms=1, source_sequence=True)
 
 
-def test_command_parser_rejects_unknown_type_negative_revision_and_reused_shape() -> None:
+def test_command_parser_rejects_unknown_type_negative_revision_and_reused_shape() -> (
+    None
+):
     base = {
         "protocol": REPLAY_PROTOCOL,
         "command_id": "01J00000000000000000000000",
@@ -259,8 +265,10 @@ def test_every_stable_error_code_has_transport_agnostic_http_mapping() -> None:
 
 
 def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -> None:
-    settings = load_replay_settings({}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db")
-    assert settings.enabled is False
+    settings = load_replay_settings(
+        {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
+    )
+    assert settings.enabled is True
     assert settings.db_path == tmp_path / "replay.db"
     assert settings.max_active_sessions == 8
     assert settings.command_queue_size == 256
@@ -275,7 +283,7 @@ def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -
     assert settings.event_subscriber_queue == 256
     assert settings.controller_ttl_seconds == 10
     assert settings.idle_ttl_seconds == 3_600
-    assert settings.replay_account_history_enabled is False
+    assert settings.replay_account_history_enabled is True
     assert settings.replay_account_history_max_archive_bytes == 128 * 1024**3
     assert settings.replay_history_archive_dir == tmp_path / "replay-history"
 
@@ -299,7 +307,9 @@ def test_replay_settings_defaults_match_frozen_resource_budget(tmp_path: Path) -
         "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES",
     ],
 )
-def test_replay_settings_reject_each_non_positive_budget(name: str, tmp_path: Path) -> None:
+def test_replay_settings_reject_each_non_positive_budget(
+    name: str, tmp_path: Path
+) -> None:
     with pytest.raises(ValueError, match=name):
         load_replay_settings(
             {name: "0"},

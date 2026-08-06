@@ -11622,6 +11622,133 @@ tr[data-position-side="short"] .replay-side-tag { color: var(--trade-negative); 
   justify-self: start;
 }
 
+.replay-liquidation-timeline,
+.replay-liquidation-case,
+.replay-liquidation-case-body,
+.replay-liquidation-steps,
+.replay-liquidation-legs,
+.replay-liquidation-order,
+.replay-liquidation-adl,
+.replay-liquidation-posting {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.replay-liquidation-timeline,
+.replay-liquidation-case-body,
+.replay-liquidation-steps {
+  display: grid;
+  gap: 8px;
+  overflow-x: hidden;
+}
+
+.replay-liquidation-case {
+  overflow: hidden;
+  border: 1px solid var(--trade-border);
+  border-radius: var(--trade-radius-control);
+  background: var(--trade-surface);
+}
+
+.replay-liquidation-case > summary,
+.replay-liquidation-steps > details > summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.replay-liquidation-case > summary::-webkit-details-marker,
+.replay-liquidation-steps > details > summary::-webkit-details-marker { display: none; }
+
+.replay-liquidation-case > summary > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.replay-liquidation-case :is(strong, span, small, dd, p) { overflow-wrap: anywhere; }
+
+.replay-liquidation-case-body { padding: 0 9px 9px; }
+
+.replay-liquidation-disclosure {
+  color: var(--trade-muted) !important;
+  font-size: 10px !important;
+}
+
+.replay-liquidation-legs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.replay-right-rail .replay-liquidation-legs { grid-template-columns: minmax(0, 1fr); }
+
+.replay-liquidation-legs > article,
+.replay-liquidation-order,
+.replay-liquidation-adl,
+.replay-liquidation-posting {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--trade-border);
+  border-radius: var(--trade-radius-control);
+}
+
+.replay-liquidation-legs > article > header,
+.replay-liquidation-order > header,
+.replay-liquidation-adl > header {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.replay-liquidation-steps > details {
+  min-width: 0;
+  border-top: 1px solid var(--trade-border);
+}
+
+.replay-liquidation-steps > details > :not(summary) { margin: 0 8px 8px; }
+
+.replay-liquidation-fill {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.replay-liquidation-fill > div,
+.replay-liquidation-adl > div,
+.replay-liquidation-posting {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.replay-report-liquidations,
+.replay-review-liquidations {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.replay-report-liquidations > h4,
+.replay-review-liquidations > h4 { margin: 0; }
+
+.replay-integrity-panel .replay-liquidation-timeline {
+  max-height: min(480px, 52vh);
+  overflow: auto;
+}
+
+.replay-liquidation-recoveries > summary { cursor: pointer; }
+
+@media (max-width: 1100px) {
+  .replay-liquidation-legs { grid-template-columns: 1fr; }
+}
+
 .replay-isolated-allocation label {
   display: grid;
   gap: 6px;

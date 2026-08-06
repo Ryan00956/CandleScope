@@ -70,6 +70,7 @@ def test_replay_v2_phase8_package_keeps_optimization_inside_training() -> None:
         "hedge_simulation_contract.py",
         "historical_book.py",
         "history.py",
+        "liquidation_projection.py",
         "models.py",
         "multitrack.py",
         "review.py",
@@ -181,12 +182,12 @@ def test_replay_has_one_strict_core_gate_and_optional_capabilities(
     default = load_replay_settings(
         {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
     )
-    assert default.enabled is False
+    assert default.enabled is True
     assert default.replay_segment_download_worker_enabled is False
     assert default.replay_segment_auto_gc_enabled is False
     assert default.replay_fast_forward_optimization_enabled is False
     assert default.replay_agg_trade_enabled is False
-    assert default.replay_account_history_enabled is False
+    assert default.replay_account_history_enabled is True
     assert default.replay_account_history_max_archive_bytes == 128 * 1024**3
 
     enabled = load_replay_settings(
@@ -237,7 +238,7 @@ async def test_training_http_paths_fail_closed_without_a_started_runtime(
             response = await client.request(method, "/api/v1/replay/runs", json={})
             assert response.status_code == 503
             assert response.json() == {
-                    "protocol": "replay.v3",
+                "protocol": "replay.v3",
                 "error": {
                     "code": "REPLAY_TRAINING_UNAVAILABLE",
                     "message": "Replay training runtime is unavailable",

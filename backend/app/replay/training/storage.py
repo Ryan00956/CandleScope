@@ -45,6 +45,7 @@ from .hedge_inputs import (
     bind_hedge_inputs,
     runtime_hedge_rule,
 )
+from .liquidation_projection import load_public_liquidation_cases
 from .hedge_simulation_contract import (
     ADL_MODEL_VERSION,
     LIQUIDATION_FORMULA_VERSION,
@@ -131,6 +132,45 @@ _EQUITY_RESOLUTIONS: tuple[tuple[str, int, int], ...] = (
     ("15M", 900_000, 2_048),
     ("1H", 3_600_000, 2_048),
 )
+
+
+def _project_liquidation_price_pair(
+    *,
+    mark_price: Decimal,
+    scope_equity: Decimal,
+    scope_maintenance_margin: Decimal,
+    absolute_quantity: Decimal,
+    position_side: str,
+    rule: InstrumentRule,
+) -> tuple[Decimal, Decimal]:
+    """Project deterministic adverse-tick liquidation and bankruptcy prices."""
+
+    if absolute_quantity <= 0:
+        raise ValueError("liquidation price projection requires positive quantity")
+    direction = Decimal(1) if position_side == "LONG" else Decimal(-1)
+    denominator = direction * absolute_quantity * Decimal(rule.contract_size)
+    liquidation_raw = (
+        mark_price + (scope_maintenance_margin - scope_equity) / denominator
+    )
+    bankruptcy_raw = mark_price - scope_equity / denominator
+    return (
+        max(
+            Decimal(0),
+            round_to_step(
+                max(Decimal(0), liquidation_raw),
+                Decimal(rule.price_tick),
+                upward=position_side == "SHORT",
+            ),
+        ),
+        max(
+            Decimal(0),
+            round_to_step(
+                max(Decimal(0), bankruptcy_raw),
+                Decimal(rule.price_tick),
+                upward=position_side == "SHORT",
+            ),
+        ),
+    )
 
 
 _CARD_CTE = """
@@ -15168,6 +15208,12 @@ class TrainingRunStore:
                             },
                             "initial_margin": str(row["initial_margin"]),
                             "maintenance_margin": str(row["maintenance_margin"]),
+                            "liquidation_price": row["liquidation_price"],
+                            "bankruptcy_price": row["bankruptcy_price"],
+                            "accumulated_funding": str(row["accumulated_funding"]),
+                            "trading_fees": str(row["trading_fees"]),
+                            "liquidation_fees": str(row["liquidation_fees"]),
+                            "protection": protection,
                             "risk_tier": int(row["risk_tier"]),
                             "position_leg_hash": str(row["component_hash"]),
                         }
@@ -15416,111 +15462,7 @@ class TrainingRunStore:
                 (run_id, run_id),
             ).fetchall()
         ]
-        liquidations: list[dict[str, object]] = []
-        for case_row in connection.execute(
-            """
-            SELECT * FROM replay_training_liquidation_case
-            WHERE run_id = ? ORDER BY case_sequence
-            """,
-            (run_id,),
-        ).fetchall():
-            case_id = str(case_row["case_id"])
-            legs = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_leg
-                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
-                    """,
-                    (run_id, case_id),
-                ).fetchall()
-            ]
-            steps: list[dict[str, object]] = []
-            for step_row in connection.execute(
-                """
-                SELECT * FROM replay_training_liquidation_step
-                WHERE run_id = ? AND case_id = ? ORDER BY step_sequence
-                """,
-                (run_id, case_id),
-            ).fetchall():
-                step = dict(step_row)
-                step_sequence = int(step_row["step_sequence"])
-                book_execution_row = connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_book_execution
-                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                    """,
-                    (run_id, case_id, step_sequence),
-                ).fetchone()
-                step["book_execution"] = (
-                    None
-                    if book_execution_row is None
-                    else public_book_execution(book_execution_row)
-                )
-                step_orders: list[dict[str, object]] = []
-                for order_row in connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_order
-                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                    ORDER BY order_sequence
-                    """,
-                    (run_id, case_id, step_sequence),
-                ).fetchall():
-                    order = dict(order_row)
-                    order["fills"] = [
-                        dict(fill_row)
-                        for fill_row in connection.execute(
-                            """
-                            SELECT * FROM replay_training_liquidation_fill
-                            WHERE run_id = ? AND case_id = ? AND order_id = ?
-                            ORDER BY fill_sequence
-                            """,
-                            (run_id, case_id, order_row["order_id"]),
-                        ).fetchall()
-                    ]
-                    step_orders.append(order)
-                step["orders"] = step_orders
-                step["insurance_postings"] = [
-                    dict(posting)
-                    for posting in connection.execute(
-                        """
-                        SELECT * FROM replay_training_insurance_posting
-                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                        ORDER BY posting_sequence
-                        """,
-                        (run_id, case_id, step_sequence),
-                    ).fetchall()
-                ]
-                step["adl_events"] = [
-                    dict(event)
-                    for event in connection.execute(
-                        """
-                        SELECT * FROM replay_training_adl_event
-                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
-                        ORDER BY adl_event_id
-                        """,
-                        (run_id, case_id, step_sequence),
-                    ).fetchall()
-                ]
-                steps.append(step)
-            book_snapshots = [
-                public_book_snapshot(row)
-                for row in connection.execute(
-                    """
-                    SELECT * FROM replay_training_liquidation_book_snapshot
-                    WHERE run_id = ? AND case_id = ? ORDER BY track_id
-                    """,
-                    (run_id, case_id),
-                ).fetchall()
-            ]
-            liquidations.append(
-                {
-                    **dict(case_row),
-                    "legs": legs,
-                    "book_snapshots": book_snapshots,
-                    "steps": steps,
-                }
-            )
+        liquidations = load_public_liquidation_cases(connection, run_id=run_id)
         archive_bindings = [
             {
                 "track_id": str(row["track_id"]),
@@ -19674,6 +19616,7 @@ class TrainingRunStore:
                 absolute_quantity if position_side == "LONG" else -absolute_quantity
             )
             notional = abs(Decimal(str(leg["notional"])))
+            mark_price = Decimal(str(leg.get("mark_price", track["public_price"])))
             leverage = Decimal(str(leg.get("leverage", rule.max_leverage)))
             if leverage <= 0:
                 leverage = Decimal(rule.max_leverage)
@@ -19683,6 +19626,24 @@ class TrainingRunStore:
             open_orders = json.loads(str(track["open_orders_json"]))
             if not isinstance(open_orders, list):
                 raise TypeError("track open-order projection is invalid")
+            protection_orders = [
+                {
+                    "order_id": str(order["order_id"]),
+                    "order_type": str(order["order_type"]),
+                    "quantity": str(order["quantity"]),
+                    "remaining_quantity": str(order["remaining_quantity"]),
+                    "stop_price": order.get("stop_price"),
+                    "status": str(order["status"]),
+                }
+                for order in open_orders
+                if isinstance(order, Mapping)
+                and str(order.get("client_order_id", "")).startswith("protection-")
+                and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                and (
+                    raw_position_side is None
+                    or order.get("position_side") == position_side
+                )
+            ]
             reserved_margin = sum(
                 (
                     Decimal(str(order.get("reserved_margin", "0")))
@@ -19729,6 +19690,28 @@ class TrainingRunStore:
                 accumulated_funding = str(leg.get("accumulated_funding", "0"))
                 trading_fees = str(leg.get("trading_fees", "0"))
                 liquidation_fees = str(leg.get("liquidation_fees", "0"))
+            if absolute_quantity > 0:
+                scope_equity = (
+                    equity
+                    if str(account["margin_mode"]) == "CROSS"
+                    else isolated_wallet + Decimal(str(leg.get("unrealized_pnl", "0")))
+                )
+                scope_maintenance = (
+                    total_maintenance
+                    if str(account["margin_mode"]) == "CROSS"
+                    else maintenance
+                )
+                liquidation_price, bankruptcy_price = _project_liquidation_price_pair(
+                    mark_price=mark_price,
+                    scope_equity=scope_equity,
+                    scope_maintenance_margin=scope_maintenance,
+                    absolute_quantity=absolute_quantity,
+                    position_side=position_side,
+                    rule=rule,
+                )
+            else:
+                liquidation_price = None
+                bankruptcy_price = None
             component = {
                 "schema_version": "replay.position-leg.v1",
                 "track_id": str(track["track_id"]),
@@ -19742,7 +19725,9 @@ class TrainingRunStore:
                     field_name="position absolute quantity",
                 ),
                 "entry_price": leg.get("entry_price"),
-                "mark_price": leg.get("mark_price", track["public_price"]),
+                "mark_price": decimal_to_string(
+                    mark_price, field_name="position mark price"
+                ),
                 "notional": decimal_to_string(notional, field_name="position notional"),
                 "realized_pnl": str(leg.get("realized_pnl", "0")),
                 "unrealized_pnl": str(leg.get("unrealized_pnl", "0")),
@@ -19760,14 +19745,26 @@ class TrainingRunStore:
                     isolated_wallet,
                     field_name="isolated wallet",
                 ),
-                "liquidation_price": leg.get("liquidation_price"),
-                "bankruptcy_price": leg.get("bankruptcy_price"),
+                "liquidation_price": (
+                    None
+                    if liquidation_price is None
+                    else decimal_to_string(
+                        liquidation_price, field_name="position liquidation price"
+                    )
+                ),
+                "bankruptcy_price": (
+                    None
+                    if bankruptcy_price is None
+                    else decimal_to_string(
+                        bankruptcy_price, field_name="position bankruptcy price"
+                    )
+                ),
                 "accumulated_funding": accumulated_funding,
                 "trading_fees": trading_fees,
                 "liquidation_fees": liquidation_fees,
                 "risk_tier": risk_tier,
                 "rule_revision": rule_revision,
-                "protection": leg.get("protection", {}),
+                "protection": {"orders": protection_orders},
             }
             component_hash = canonical_sha256(component)
             prior_component = connection.execute(
@@ -20504,7 +20501,6 @@ class TrainingRunStore:
                 absolute_quantity = abs(quantity)
                 notional = abs(Decimal(str(leg["notional"])))
                 mark = Decimal(str(leg.get("mark_price", track["public_price"])))
-                direction = Decimal(1) if position_side == "LONG" else Decimal(-1)
                 scope_equity = (
                     equity
                     if str(account["margin_mode"]) == "CROSS"
@@ -20525,28 +20521,13 @@ class TrainingRunStore:
                     if str(account["margin_mode"]) == "CROSS"
                     else maintenance
                 )
-                denominator = (
-                    direction * absolute_quantity * Decimal(rule.contract_size)
-                )
-                liquidation_raw = (
-                    mark + (scope_maintenance - scope_equity) / denominator
-                )
-                bankruptcy_raw = mark - scope_equity / denominator
-                liquidation_price = max(
-                    Decimal(0),
-                    round_to_step(
-                        max(Decimal(0), liquidation_raw),
-                        Decimal(rule.price_tick),
-                        upward=position_side == "SHORT",
-                    ),
-                )
-                bankruptcy = max(
-                    Decimal(0),
-                    round_to_step(
-                        max(Decimal(0), bankruptcy_raw),
-                        Decimal(rule.price_tick),
-                        upward=position_side == "SHORT",
-                    ),
+                liquidation_price, bankruptcy = _project_liquidation_price_pair(
+                    mark_price=mark,
+                    scope_equity=scope_equity,
+                    scope_maintenance_margin=scope_maintenance,
+                    absolute_quantity=absolute_quantity,
+                    position_side=position_side,
+                    rule=rule,
                 )
                 takeover = bankruptcy
                 fee = rule.liquidation_fee(notional)

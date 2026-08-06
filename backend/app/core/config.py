@@ -1,6 +1,7 @@
 """
 CandleScope global configuration.
 """
+
 import json
 import logging
 import os
@@ -70,16 +71,17 @@ class ReplaySettings:
     replay_agg_trade_archive_dir: Path = Path("data/replay-agg-trades")
     replay_agg_trade_origin_uri: str | None = None
 
-def _strict_replay_bool(environment: Mapping[str, str], name: str, default: str) -> bool:
+
+def _strict_replay_bool(
+    environment: Mapping[str, str], name: str, default: str
+) -> bool:
     raw_value = environment.get(name, default)
     normalized = raw_value.strip().lower()
     if normalized in _REPLAY_TRUE_VALUES:
         return True
     if normalized in _REPLAY_FALSE_VALUES:
         return False
-    raise ValueError(
-        f"{name} must be one of 0/1, false/true, no/yes, or off/on"
-    )
+    raise ValueError(f"{name} must be one of 0/1, false/true, no/yes, or off/on")
 
 
 def _bounded_replay_int(environment: Mapping[str, str], name: str) -> int:
@@ -91,8 +93,7 @@ def _bounded_replay_int(environment: Mapping[str, str], name: str) -> int:
         raise ValueError(f"{name} must be an integer") from exc
     if value < 1 or value > safe_upper_bound:
         raise ValueError(
-            f"{name} must be between 1 and the frozen safety limit "
-            f"{safe_upper_bound}"
+            f"{name} must be between 1 and the frozen safety limit {safe_upper_bound}"
         )
     return value
 
@@ -120,7 +121,9 @@ def load_replay_settings(
             "REPLAY_PRODUCT_V2_ENABLED was removed; REPLAY_ENABLED is the only replay product gate"
         )
 
-    replay_db_path = Path(environment.get("REPLAY_DB_PATH", str(data_dir / "replay.db")))
+    replay_db_path = Path(
+        environment.get("REPLAY_DB_PATH", str(data_dir / "replay.db"))
+    )
     if _paths_refer_to_same_file(replay_db_path, klines_db_path):
         raise ValueError("REPLAY_DB_PATH must not identify KLINES_DB_PATH")
     if "REPLAY_BAR_SOURCE" in environment:
@@ -193,23 +196,18 @@ def load_replay_settings(
         replay_history_archive_dir,
     ):
         raise ValueError(
-            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify "
-            "REPLAY_HISTORY_ARCHIVE_DIR"
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify REPLAY_HISTORY_ARCHIVE_DIR"
         )
     if _paths_refer_to_same_file(
         replay_agg_trade_archive_dir,
         live_agg_trade_archive_dir,
     ):
         raise ValueError(
-            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify "
-            "RAW_AGG_TRADE_ARCHIVE_DIR"
+            "REPLAY_AGG_TRADE_ARCHIVE_DIR must not identify RAW_AGG_TRADE_ARCHIVE_DIR"
         )
-    values = {
-        name: _bounded_replay_int(environment, name)
-        for name in _REPLAY_BUDGETS
-    }
+    values = {name: _bounded_replay_int(environment, name) for name in _REPLAY_BUDGETS}
     return ReplaySettings(
-        enabled=_strict_replay_bool(environment, "REPLAY_ENABLED", "0"),
+        enabled=_strict_replay_bool(environment, "REPLAY_ENABLED", "1"),
         db_path=replay_db_path,
         max_active_sessions=values["REPLAY_MAX_ACTIVE_SESSIONS"],
         command_queue_size=values["REPLAY_COMMAND_QUEUE_SIZE"],
@@ -230,29 +228,25 @@ def load_replay_settings(
         replay_segment_auto_gc_enabled=_strict_replay_bool(
             environment, "REPLAY_SEGMENT_AUTO_GC_ENABLED", "0"
         ),
-        replay_segment_max_archive_bytes=values[
-            "REPLAY_SEGMENT_MAX_ARCHIVE_BYTES"
-        ],
+        replay_segment_max_archive_bytes=values["REPLAY_SEGMENT_MAX_ARCHIVE_BYTES"],
         replay_fast_forward_optimization_enabled=_strict_replay_bool(
             environment, "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED", "0"
         ),
         replay_historical_book_enabled=_strict_replay_bool(
-            environment, "REPLAY_HISTORICAL_BOOK_ENABLED", "0"
+            environment, "REPLAY_HISTORICAL_BOOK_ENABLED", "1"
         ),
         replay_historical_book_max_archive_bytes=values[
             "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES"
         ],
         replay_account_history_enabled=_strict_replay_bool(
-            environment, "REPLAY_ACCOUNT_HISTORY_ENABLED", "0"
+            environment, "REPLAY_ACCOUNT_HISTORY_ENABLED", "1"
         ),
         replay_account_history_max_archive_bytes=values[
             "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES"
         ],
         replay_history_archive_dir=replay_history_archive_dir,
         replay_history_origin_uri=replay_history_origin_uri,
-        replay_history_catalog_refresh_seconds=(
-            replay_history_catalog_refresh_seconds
-        ),
+        replay_history_catalog_refresh_seconds=(replay_history_catalog_refresh_seconds),
         replay_history_download_timeout_seconds=(
             replay_history_download_timeout_seconds
         ),
@@ -263,6 +257,7 @@ def load_replay_settings(
         replay_agg_trade_origin_uri=replay_agg_trade_origin_uri,
     )
 
+
 # Server
 HOST = os.getenv("CANDLE_HOST", "0.0.0.0")
 PORT = int(os.getenv("CANDLE_PORT", "8000"))
@@ -271,9 +266,12 @@ PORT = int(os.getenv("CANDLE_PORT", "8000"))
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
-HISTORY_ARCHIVE_ENABLED = os.getenv(
-    "HISTORY_ARCHIVE_ENABLED", "1"
-).strip().lower() in {"1", "true", "yes", "on"}
+HISTORY_ARCHIVE_ENABLED = os.getenv("HISTORY_ARCHIVE_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 HISTORY_ARCHIVE_CACHE_DIR = Path(
     os.getenv("HISTORY_ARCHIVE_CACHE_DIR", DATA_DIR / "history_archives")
 )
@@ -284,7 +282,7 @@ OKX_HISTORY_ARCHIVE_ENABLED = os.getenv(
     "OKX_HISTORY_ARCHIVE_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-# Replay remains disabled by default and owns a database separate from K-lines.
+# Replay is a default-on product and owns a database separate from K-lines.
 # These limits are frozen Phase 0 safety ceilings; environment overrides may
 # tighten them, but cannot silently widen them without a reviewed code change.
 REPLAY_SETTINGS = load_replay_settings(
@@ -297,9 +295,7 @@ REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED = (
     REPLAY_SETTINGS.replay_segment_download_worker_enabled
 )
 REPLAY_SEGMENT_AUTO_GC_ENABLED = REPLAY_SETTINGS.replay_segment_auto_gc_enabled
-REPLAY_SEGMENT_MAX_ARCHIVE_BYTES = (
-    REPLAY_SETTINGS.replay_segment_max_archive_bytes
-)
+REPLAY_SEGMENT_MAX_ARCHIVE_BYTES = REPLAY_SETTINGS.replay_segment_max_archive_bytes
 REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED = (
     REPLAY_SETTINGS.replay_fast_forward_optimization_enabled
 )
@@ -332,15 +328,13 @@ REPLAY_IDLE_TTL_SECONDS = REPLAY_SETTINGS.idle_ttl_seconds
 # TradeFlow is storage-backend neutral at the service boundary.  SQLite is the
 # first rollup implementation; raw aggregate-trade Parquet is opt-in because it
 # is intended for deterministic research/replay rather than normal chart use.
-TRADE_FLOW_ROLLUP_BACKEND = os.getenv(
-    "TRADE_FLOW_ROLLUP_BACKEND", "sqlite"
-).strip().lower()
+TRADE_FLOW_ROLLUP_BACKEND = (
+    os.getenv("TRADE_FLOW_ROLLUP_BACKEND", "sqlite").strip().lower()
+)
 TRADE_FLOW_DB_PATH = Path(os.getenv("TRADE_FLOW_DB_PATH", KLINES_DB_PATH))
 TRADE_FLOW_RAW_RING_SIZE = int(os.getenv("TRADE_FLOW_RAW_RING_SIZE", "20000"))
 TRADE_FLOW_MAX_STREAMS = int(os.getenv("TRADE_FLOW_MAX_STREAMS", "64"))
-TRADE_FLOW_EVENT_QUEUE_SIZE = int(
-    os.getenv("TRADE_FLOW_EVENT_QUEUE_SIZE", "20000")
-)
+TRADE_FLOW_EVENT_QUEUE_SIZE = int(os.getenv("TRADE_FLOW_EVENT_QUEUE_SIZE", "20000"))
 TRADE_FLOW_BATCH_INTERVAL_SECONDS = float(
     os.getenv("TRADE_FLOW_BATCH_INTERVAL_SECONDS", "0.05")
 )
@@ -351,9 +345,9 @@ TRADE_FLOW_GAP_REPAIR_MAX_TRADES = int(
 RAW_AGG_TRADE_ARCHIVE_ENABLED = os.getenv(
     "RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
-RAW_AGG_TRADE_ARCHIVE_BACKEND = os.getenv(
-    "RAW_AGG_TRADE_ARCHIVE_BACKEND", "parquet"
-).strip().lower()
+RAW_AGG_TRADE_ARCHIVE_BACKEND = (
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_BACKEND", "parquet").strip().lower()
+)
 RAW_AGG_TRADE_ARCHIVE_DIR = Path(
     os.getenv("RAW_AGG_TRADE_ARCHIVE_DIR", DATA_DIR / "raw-agg-live-spool")
 )
@@ -391,15 +385,13 @@ RAW_AGG_TRADE_ARCHIVE_COMPACT_EVERY_BATCHES = int(
 # observations we do receive are append-only and worth retaining as one-minute
 # directional rollups.  Keep this backend selection independent so a future
 # DuckDB implementation does not leak into the service or API contracts.
-LIQUIDATION_ROLLUP_BACKEND = os.getenv(
-    "LIQUIDATION_ROLLUP_BACKEND", "sqlite"
-).strip().lower()
+LIQUIDATION_ROLLUP_BACKEND = (
+    os.getenv("LIQUIDATION_ROLLUP_BACKEND", "sqlite").strip().lower()
+)
 LIQUIDATION_DB_PATH = Path(os.getenv("LIQUIDATION_DB_PATH", KLINES_DB_PATH))
 LIQUIDATION_RAW_RING_SIZE = int(os.getenv("LIQUIDATION_RAW_RING_SIZE", "5000"))
 LIQUIDATION_MAX_STREAMS = int(os.getenv("LIQUIDATION_MAX_STREAMS", "64"))
-LIQUIDATION_EVENT_QUEUE_SIZE = int(
-    os.getenv("LIQUIDATION_EVENT_QUEUE_SIZE", "8192")
-)
+LIQUIDATION_EVENT_QUEUE_SIZE = int(os.getenv("LIQUIDATION_EVENT_QUEUE_SIZE", "8192"))
 LIQUIDATION_BATCH_INTERVAL_SECONDS = float(
     os.getenv("LIQUIDATION_BATCH_INTERVAL_SECONDS", "0.1")
 )
@@ -419,12 +411,8 @@ LIQUIDATION_CAPTURE_STREAMS = tuple(
 # not share append-only persistence settings because raw depth is deliberately
 # not archived in P3A.
 ORDER_BOOK_MAX_STREAMS = int(os.getenv("ORDER_BOOK_MAX_STREAMS", "64"))
-ORDER_BOOK_EVENT_QUEUE_SIZE = int(
-    os.getenv("ORDER_BOOK_EVENT_QUEUE_SIZE", "256")
-)
-ORDER_BOOK_DEFAULT_MAX_PENDING = int(
-    os.getenv("ORDER_BOOK_DEFAULT_MAX_PENDING", "32")
-)
+ORDER_BOOK_EVENT_QUEUE_SIZE = int(os.getenv("ORDER_BOOK_EVENT_QUEUE_SIZE", "256"))
+ORDER_BOOK_DEFAULT_MAX_PENDING = int(os.getenv("ORDER_BOOK_DEFAULT_MAX_PENDING", "32"))
 ORDER_BOOK_MAX_SNAPSHOT_AGE_MS = int(
     os.getenv("ORDER_BOOK_MAX_SNAPSHOT_AGE_MS", "5000")
 )
@@ -439,9 +427,7 @@ ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
 # event.  They deliberately have separate, tighter stream limits and explicit
 # per-stream queue/book bounds; a bound violation invalidates the book and
 # triggers resynchronization instead of dropping a delta silently.
-FULL_ORDER_BOOK_MAX_STREAMS = int(
-    os.getenv("FULL_ORDER_BOOK_MAX_STREAMS", "16")
-)
+FULL_ORDER_BOOK_MAX_STREAMS = int(os.getenv("FULL_ORDER_BOOK_MAX_STREAMS", "16"))
 FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE = int(
     os.getenv("FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE", "4096")
 )
@@ -489,14 +475,18 @@ BINANCE_WS_URLS = [
 ]
 
 # Binance Futures (USDT-M Perpetual) HTTP APIs
-BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com")
+BINANCE_FUTURES_BASE_URL = os.getenv(
+    "BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com"
+)
 BINANCE_FUTURES_BASE_URLS = [
     "https://fapi.binance.com",
     "https://fapi.binance.me",
 ]
 
 # Binance Futures WebSocket
-BINANCE_FUTURES_WS_URL = os.getenv("BINANCE_FUTURES_WS_URL", "wss://fstream.binance.com/ws")
+BINANCE_FUTURES_WS_URL = os.getenv(
+    "BINANCE_FUTURES_WS_URL", "wss://fstream.binance.com/ws"
+)
 BINANCE_FUTURES_WS_URLS = [
     BINANCE_FUTURES_WS_URL,
     "wss://fstream.binance.me/ws",
@@ -558,7 +548,9 @@ PYNE_MAX_OUTPUT_POINTS = int(os.getenv("PYNE_MAX_OUTPUT_POINTS", "1000000"))
 PYNE_CACHE_MAX_ITEMS = int(os.getenv("PYNE_CACHE_MAX_ITEMS", "32"))
 PYNE_ALLOWED_IMPORTS = [
     item.strip()
-    for item in os.getenv("PYNE_ALLOWED_IMPORTS", "numpy,pandas,scipy,sklearn,torch").split(",")
+    for item in os.getenv(
+        "PYNE_ALLOWED_IMPORTS", "numpy,pandas,scipy,sklearn,torch"
+    ).split(",")
     if item.strip()
 ]
 
@@ -575,25 +567,45 @@ STORAGE_THREAD_WORKERS = int(os.getenv("STORAGE_THREAD_WORKERS", "4"))
 INDICATOR_RANGE_CACHE_ENABLED = os.getenv(
     "INDICATOR_RANGE_CACHE_ENABLED", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
-INDICATOR_RANGE_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_RANGE_CACHE_MAX_ENTRIES", "128"))
-INDICATOR_RANGE_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_RANGE_CACHE_TTL_SECONDS", "180"))
-INDICATOR_BARS_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_BARS_CACHE_MAX_ENTRIES", "8"))
-INDICATOR_BARS_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_BARS_CACHE_TTL_SECONDS", "30"))
-INDICATOR_RANGE_BACKFILL_WAIT_SECONDS = float(os.getenv("INDICATOR_RANGE_BACKFILL_WAIT_SECONDS", "3"))
+INDICATOR_RANGE_CACHE_MAX_ENTRIES = int(
+    os.getenv("INDICATOR_RANGE_CACHE_MAX_ENTRIES", "128")
+)
+INDICATOR_RANGE_CACHE_TTL_SECONDS = float(
+    os.getenv("INDICATOR_RANGE_CACHE_TTL_SECONDS", "180")
+)
+INDICATOR_BARS_CACHE_MAX_ENTRIES = int(
+    os.getenv("INDICATOR_BARS_CACHE_MAX_ENTRIES", "8")
+)
+INDICATOR_BARS_CACHE_TTL_SECONDS = float(
+    os.getenv("INDICATOR_BARS_CACHE_TTL_SECONDS", "30")
+)
+INDICATOR_RANGE_BACKFILL_WAIT_SECONDS = float(
+    os.getenv("INDICATOR_RANGE_BACKFILL_WAIT_SECONDS", "3")
+)
 
 # Keep unsubscribed builtin engines warm briefly so a quick interval switch can
 # resume from the cached state instead of replaying the full seed history.
-INDICATOR_ENGINE_WARM_TTL_SECONDS = float(os.getenv("INDICATOR_ENGINE_WARM_TTL_SECONDS", "120"))
-INDICATOR_ENGINE_WARM_MAX_INSTANCES = int(os.getenv("INDICATOR_ENGINE_WARM_MAX_INSTANCES", "64"))
+INDICATOR_ENGINE_WARM_TTL_SECONDS = float(
+    os.getenv("INDICATOR_ENGINE_WARM_TTL_SECONDS", "120")
+)
+INDICATOR_ENGINE_WARM_MAX_INSTANCES = int(
+    os.getenv("INDICATOR_ENGINE_WARM_MAX_INSTANCES", "64")
+)
 
 # Indicator WebSocket stability tuning.
 INDICATOR_WS_MAX_SUBSCRIPTIONS = int(os.getenv("INDICATOR_WS_MAX_SUBSCRIPTIONS", "50"))
 INDICATOR_WS_QUEUE_SIZE = int(os.getenv("INDICATOR_WS_QUEUE_SIZE", "1000"))
-INDICATOR_WS_HEARTBEAT_SECONDS = float(os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS", "15"))
+INDICATOR_WS_HEARTBEAT_SECONDS = float(
+    os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS", "15")
+)
 INDICATOR_WS_RESUME_MAX_BARS = int(os.getenv("INDICATOR_WS_RESUME_MAX_BARS", "32"))
-INDICATOR_WS_SEED_CACHE_SECONDS = float(os.getenv("INDICATOR_WS_SEED_CACHE_SECONDS", "1"))
+INDICATOR_WS_SEED_CACHE_SECONDS = float(
+    os.getenv("INDICATOR_WS_SEED_CACHE_SECONDS", "1")
+)
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "2"))
-EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1"))
+EVENT_LOOP_LAG_INTERVAL_SECONDS = float(
+    os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1")
+)
 
 # CORS
 CORS_ORIGINS = os.getenv(
@@ -610,7 +622,9 @@ PROXY_SETTINGS_PATH = DATA_DIR / "proxy_settings.json"
 _VALID_PROXY_MODES = {"system", "custom", "none"}
 
 
-def normalize_proxy_settings(mode: str | None, custom_proxy: str | None) -> tuple[str, str | None]:
+def normalize_proxy_settings(
+    mode: str | None, custom_proxy: str | None
+) -> tuple[str, str | None]:
     """Normalize proxy settings into a stable persisted/runtime shape."""
     normalized_mode = (mode or "system").strip().lower()
     if normalized_mode not in _VALID_PROXY_MODES:
@@ -676,11 +690,14 @@ def _get_system_proxy() -> str | None:
         return env_proxy
 
     import sys
+
     if sys.platform == "win32":
         from urllib.request import getproxies_registry
+
         proxies = getproxies_registry()
     else:
         from urllib.request import getproxies
+
         proxies = getproxies()
     return proxies.get("https") or proxies.get("http") or None
 

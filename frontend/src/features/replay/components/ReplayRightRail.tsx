@@ -28,6 +28,7 @@ import type {
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import { useReplayTradeFlow } from "../useReplayTradeFlow.js";
 import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
+import ReplayLiquidationTimeline from "./ReplayLiquidationTimeline.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
 const WORKBENCH_TABS = [
@@ -1531,6 +1532,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               const showLeverage = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "leverage";
               const uPnl = finiteNumber(item.position.unrealized_pnl) ?? 0;
               const marginLabel = item.margin_equity ?? item.isolated_margin ?? null;
+              const protectionOrders = item.protection?.orders ?? [];
               const itemQtyAsset = baseAsset(item.symbol, settlementAsset);
               const itemCloseQuantity = closeDraft?.trackId === item.track_id
                 && closeDraft.positionSide === hedgePositionSide
@@ -1568,12 +1570,19 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                     </div>
                   </header>
                   <dl className="replay-metric-flat">
-                    <div><dt>持仓量 ({itemQtyAsset})</dt><dd>{formatDecimal(Math.abs(quantityValue))}</dd></div>
-                    <div><dt>维持保证金</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
-                    <div><dt>风险覆盖</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
-                    <div><dt>开仓均价</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
-                    <div><dt>标记价格</dt><dd>{formatDecimal(item.position.mark_price, 6)}</dd></div>
-                    <div><dt title="回放组合未提供预估强平价">预估强平</dt><dd>--</dd></div>
+                     <div><dt>持仓量 ({itemQtyAsset})</dt><dd>{formatDecimal(Math.abs(quantityValue))}</dd></div>
+                     <div><dt>初始保证金</dt><dd>{formatDecimal(item.initial_margin, 4)}</dd></div>
+                     <div><dt>维持保证金</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
+                     <div><dt>风险覆盖</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
+                     <div><dt>开仓均价</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
+                     <div><dt>标记价格</dt><dd>{formatDecimal(item.position.mark_price, 6)}</dd></div>
+                     <div><dt>逐腿杠杆</dt><dd>{formatDecimal(item.leverage, 2)}x</dd></div>
+                     <div><dt>强平价格</dt><dd>{formatDecimal(item.liquidation_price, 6)}</dd></div>
+                     <div><dt>破产价格</dt><dd>{formatDecimal(item.bankruptcy_price, 6)}</dd></div>
+                     <div><dt>累计资金费</dt><dd>{formatDecimal(item.accumulated_funding, 8)}</dd></div>
+                     <div className="wide"><dt>保护单</dt><dd>{protectionOrders.length === 0
+                       ? "无"
+                       : protectionOrders.map((order) => `${order.order_type === "STOP_MARKET" ? "止损" : "止盈"} ${formatDecimal(order.stop_price, 6)}`).join(" · ")}</dd></div>
                     {marginLabel !== null && (
                       <div className="wide"><dt>保证金权益</dt><dd>{formatDecimal(marginLabel, 4)} {settlementAsset}</dd></div>
                     )}
@@ -1933,7 +1942,21 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
             </section>
             <section className="replay-risk-card" data-replay-panel="simulated-liquidations" data-replay-domain="simulated-account-liquidation">
               <header><strong>模拟账户强平</strong><span className="replay-chip">{contract?.liquidations.length ?? 0}</span></header>
-              <p>与「历史市场爆仓」严格分域。</p>
+              <p>交易所规则级确定性模拟，与「历史市场爆仓」严格分域；insurance/ADL 不代表历史交易所私有账本。</p>
+              <ReplayLiquidationTimeline
+                cases={contract?.liquidations ?? []}
+                formatVirtualTime={time}
+              />
+              {(contract?.liquidation_recoveries.length ?? 0) > 0 && (
+                <details className="replay-liquidation-recoveries">
+                  <summary>撤单后恢复 · {contract?.liquidation_recoveries.length}</summary>
+                  <ReplayLiquidationTimeline
+                    cases={contract?.liquidation_recoveries ?? []}
+                    formatVirtualTime={time}
+                    emptyLabel="暂无恢复 case"
+                  />
+                </details>
+              )}
             </section>
           </div>
         )}

@@ -66,7 +66,7 @@ export interface TrainingRunDraft {
 
 export interface TrainingHubUnsupportedCapabilities {
   readonly account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact";
-  readonly funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用";
+  readonly funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed";
   readonly historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队";
   readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
   readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
@@ -82,7 +82,7 @@ export interface TrainingRunDraftEvaluation {
 
 export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
   account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
-  funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用",
+  funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed",
   historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
   rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
   isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",

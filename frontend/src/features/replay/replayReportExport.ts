@@ -1,4 +1,5 @@
 import type { ReplayTrainingReportResponse } from "./replayIntegrityModel.js";
+import type { ReplayLiquidationCase } from "./replayV2Types.js";
 
 function csvCell(value: unknown): string {
   const text = value === null || value === undefined
@@ -53,6 +54,46 @@ export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse
   const contractAccount = response.modelled_account.schema_version === "replay.training.portfolio.v2"
     ? response.modelled_account
     : null;
+  const liquidationRows = (
+    cases: readonly ReplayLiquidationCase[],
+    caseSection: "liquidation_case" | "liquidation_recovery_case",
+  ): unknown[][] => cases.flatMap((item) => [
+    [caseSection, item.case_id, item.state, withPublicTime(item)],
+    ...item.legs.map((leg) => ["liquidation_leg", leg.liquidation_leg_id, leg.state, leg]),
+    ...item.steps.flatMap((step) => [
+      ["liquidation_step", `${item.case_id}:${step.step_sequence}`, step.step_type, step],
+      ...step.orders.flatMap((order) => [
+        ["liquidation_order", order.order_id, order.state, order],
+        ...order.fills.map((fill) => [
+          "liquidation_fill",
+          fill.fill_id,
+          fill.quantity,
+          withPublicTime(fill),
+        ]),
+      ]),
+      ...step.insurance_postings.map((posting) => [
+        "insurance_posting",
+        posting.posting_id,
+        posting.cash_delta,
+        posting,
+      ]),
+      ...step.adl_events.flatMap((event) => [
+        ["adl_event", event.adl_event_id, event.state, event],
+        ...event.selections.map((selection) => [
+          "adl_selection",
+          `${event.adl_event_id}:${selection.selection_sequence}`,
+          selection.quantity,
+          selection,
+        ]),
+        ...event.counterparty_ledger.map((entry) => [
+          "adl_counterparty_ledger",
+          `${event.adl_event_id}:${entry.ledger_sequence}`,
+          entry.quantity_delta,
+          entry,
+        ]),
+      ]),
+    ]),
+  ]);
   const rows: unknown[][] = [
     ["section", "key", "value", "detail"],
     ["run", "run_id", response.run_id, ""],
@@ -93,6 +134,17 @@ export function replayTrainingReportToCsv(response: ReplayTrainingReportResponse
         "FAIL",
         difference,
       ]),
+      ...contractAccount.positions.map((position) => [
+        "position_leg",
+        `${position.track_id}:${position.position_side ?? "NET"}`,
+        position.position.quantity,
+        position,
+      ]),
+      ...liquidationRows(contractAccount.liquidations, "liquidation_case"),
+      ...liquidationRows(
+        contractAccount.liquidation_recoveries,
+        "liquidation_recovery_case",
+      ),
     ]),
     ...(response.account_audit === null ? [] : [
       ["account_audit", "status", response.account_audit.status, response.account_audit.proof_hash],

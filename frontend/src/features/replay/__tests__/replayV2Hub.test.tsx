@@ -223,6 +223,11 @@ test("Phase 1 run list and mutation parsers reject unknown fields and blind hist
   const parsed = parseTrainingRunListResponse(listResponse());
   assert.equal(parsed.items[0]?.run_id, "run-1");
   assert.equal(parseTrainingRunMutationResponse(mutationResponse()).run.adapter_session_id, "adapter-1");
+  assert.equal(
+    parseTrainingRunListResponse(listResponse([runCard({ equity: "-11.434960416" })]))
+      .items[0]?.equity,
+    "-11.434960416",
+  );
 
   assert.throws(() => parseTrainingRunListResponse({ ...listResponse(), future: true }));
   assert.throws(() => parseTrainingRunListResponse(listResponse([
@@ -554,7 +559,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
     account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
-    funding: "HISTORICAL_EXACT 仅在精确账户归档含完整 funding 与同刻 mark 时可用",
+    funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed",
     historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
     rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
@@ -745,7 +750,8 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /商品在 Run 内选择/);
   assert.match(html, /创建时不固定商品、交易所、市场类型、基础周期或数据集/);
   assert.match(html, /原子创建首条 MarketTrack/);
-  assert.match(html, /历史 L2、精确账户历史与 funding 仍 fail closed/);
+  assert.match(html, /历史 L2 与 pinned funding 默认属于可用产品能力/);
+  assert.doesNotMatch(html, /DETERMINISTIC_SIMULATION[^<]*disabled|APPROX_PROXY[^<]*disabled/);
   assert.match(html, /公开 K 线代理不算 exact/);
   assert.match(html, /指标预热 BAR/);
   assert.match(html, /全部可用（默认，按需加载）/);

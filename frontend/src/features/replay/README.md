@@ -1,9 +1,10 @@
 # Replay feature boundary
 
 Replay is a server-authoritative historical market runtime. It is not a source
-toggle inside the live application. The backend replay capability and live-page
-entry remain disabled by default. An enabled replay entry opens the verified v2
-workbench; there is no v1 product selector or fallback UI.
+toggle inside the live application. Replay and the live-page entry are present
+and enabled in every normal build. The entry opens the verified v2 workbench;
+there is no v1 product selector, fallback UI, or Vite entry flag. Backend data
+capability remains authoritative and exposes unavailable reasons visibly.
 
 The phase-gated v2 workbench now includes the Training Hub, source-neutral market
 workspace, ViewerState and aligned replay controls, Phase 4 server-owned time
@@ -68,8 +69,8 @@ aggressor/CVD is explicitly approximate because side is inferred from
 buyer-maker. Any gap or epoch change clears the projection and requires resync.
 BAR shows `UNSUPPORTED_SOURCE_MODE`; it never renders missing history as zero.
 
-The configure entry always opens the v2 Hub. The backend still requires its
-authoritative replay gate before serving v2 routes. The internal `replay.v1`
+The configure entry always opens the v2 Hub. An explicit backend emergency stop
+may reject v2 routes, but it is not a rollout mechanism. The internal `replay.v1`
 actor protocol and `PAPER_LINEAR_V1` broker remain implementation details of a
 v2 TrainingRun; they are not user-selectable products or archive formats. Historical-exact
 funding remains fail-closed because this repository has no aligned historical
@@ -137,4 +138,4 @@ Replay modules and `ReplayApp` must not value-import or mount:
 
 The replay page may use type-only imports from pure shared contracts. Network
 and state isolation are enforced again by architecture and browser tests in
-later phases; the frontend entry flag is never a security boundary.
+later phases; there is no frontend entry flag or alternate product path.

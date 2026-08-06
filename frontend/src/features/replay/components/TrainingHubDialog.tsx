@@ -345,7 +345,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <option value="ONE_WAY">ONE_WAY · 单向净持仓</option>
             <option value="HEDGE">HEDGE · 多空双向持仓</option>
           </select>
-          <small>双向模式下多仓和空仓独立；首版仅支持近似账户、全仓、资金费关闭和 Touch/Tape 撮合。</small>
+          <small>双向模式下多空腿独立计算保证金、资金费、强平与保护单；私有 insurance/ADL 固定为版本化确定性模拟。</small>
         </label>
         <label>
           保证金模式
@@ -373,13 +373,18 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               });
             }}
           >
-            <option value="DETERMINISTIC_SIMULATION" disabled={draft.positionMode !== "HEDGE"}>
-              DETERMINISTIC_SIMULATION · 固定公开输入与模拟私有状态
-            </option>
-            <option value="APPROX_PROXY" disabled={draft.positionMode === "HEDGE"}>APPROX_PROXY · 已揭示价格代理模拟账户</option>
-            <option value="HISTORICAL_EXACT" disabled={draft.positionMode === "HEDGE"}>HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
+            {draft.positionMode === "HEDGE" ? (
+              <option value="DETERMINISTIC_SIMULATION">
+                DETERMINISTIC_SIMULATION · pinned 公开输入 + 模拟私有状态
+              </option>
+            ) : (
+              <>
+                <option value="APPROX_PROXY">APPROX_PROXY · 已揭示价格代理模拟账户</option>
+                <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · 固定历史 mark/index/规则</option>
+              </>
+            )}
           </select>
-          <small>Exact 必须手动起点，并由服务端返回不可变 archive ref；不会接受公开 K 线代理。</small>
+          <small>HEDGE 唯一账户模型是交易所规则级确定性模拟；不会把不可观测的历史 insurance/ADL 宣称为 exact。</small>
         </label>
         <label>
           资金费模式
@@ -390,16 +395,13 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             })}
           >
             <option value="OFF">OFF</option>
-            <option value="SANDBOX_FIXED" disabled={draft.integrityMode !== "SANDBOX"}>
-              SANDBOX_FIXED · 近似练习
-            </option>
-            <option
-              value="HISTORICAL_EXACT"
-              disabled={draft.accountDataMode !== "HISTORICAL_EXACT"
-                && draft.accountDataMode !== "DETERMINISTIC_SIMULATION"}
-            >
-              HISTORICAL_EXACT · 归档结算
-            </option>
+            {draft.integrityMode === "SANDBOX" && (
+              <option value="SANDBOX_FIXED">SANDBOX_FIXED · 近似练习</option>
+            )}
+            {(draft.accountDataMode === "HISTORICAL_EXACT"
+              || draft.accountDataMode === "DETERMINISTIC_SIMULATION") && (
+              <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · pinned 归档结算</option>
+            )}
           </select>
         </label>
         <label>
@@ -486,7 +488,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       <div className="training-hub-capability-boundary" aria-label="选品与数据边界">
         <h3>商品在 Run 内选择</h3>
         <p>创建时不固定商品、交易所、市场类型、基础周期或数据集，但会提交不可变 T0。进入空 Run 后搜索商品，服务端只校验它是否支持这个时间，再原子创建首条 MarketTrack。</p>
-        <p>历史 L2、精确账户历史与 funding 仍 fail closed：它们会在选中具体商品后绑定对应 archive ref，校验失败时 Run 保持空局。</p>
+        <p>历史 L2 与 pinned funding 默认属于可用产品能力；选中具体商品后绑定 archive ref，数据不连续时明确 fail closed，绝不降级为代理成交。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
           <li><strong>账户历史</strong> — {evaluation.unsupported.account_history}</li>

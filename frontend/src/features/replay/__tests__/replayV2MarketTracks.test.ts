@@ -168,6 +168,40 @@ test("Phase 5 market-track parser keeps tier, public price, and force reasons st
   }), /FULL.*cursor|cursor.*FULL/);
 });
 
+test("HEDGE track parser accepts every pinned and materialized exchange-parity capability", () => {
+  const payload = marketTracksResponse();
+  const parsed = parseReplayMarketTracksResponse({
+    ...payload,
+    tracks: payload.tracks.map((track, index) => index === 0 ? {
+      ...track,
+      capabilities: {
+        HISTORICAL_MARK_INDEX: "AVAILABLE_PINNED",
+        HISTORICAL_INSTRUMENT_RULE: "AVAILABLE_PINNED",
+        HISTORICAL_FEE_POLICY: "AVAILABLE_PINNED",
+        HISTORICAL_FUNDING: "AVAILABLE_PINNED",
+        HISTORICAL_L2: "AVAILABLE_PINNED_CONTINUITY_GATED",
+        SIMULATED_INSURANCE_FUND: "AVAILABLE_MATERIALIZED",
+        SIMULATED_ADL_COHORT: "AVAILABLE_MATERIALIZED",
+      },
+    } : track),
+  });
+  assert.equal(
+    parsed.tracks[0]?.capabilities.HISTORICAL_L2,
+    "AVAILABLE_PINNED_CONTINUITY_GATED",
+  );
+  assert.equal(
+    parsed.tracks[0]?.capabilities.SIMULATED_ADL_COHORT,
+    "AVAILABLE_MATERIALIZED",
+  );
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    tracks: [{
+      ...payload.tracks[0],
+      capabilities: { PRIVATE_EXCHANGE_QUEUE: "AVAILABLE_PINNED" },
+    }],
+  }), /capability kind is unsupported/);
+});
+
 test("Phase 13 global clock parser freezes basis, rate, limits, and display binding", () => {
   const parsed = parseReplayMarketTracksResponse(marketTracksResponse());
   assert.ok(parsed.global_clock);
@@ -261,11 +295,22 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
       isolated_allocations: { "track-2": "1000" },
       next_funding_time_ms: 1_710_000_300_000,
       liquidations: [{
-        liquidation_id: "liq-track-2-0000000001",
-        track_id: "track-2",
+        run_id: "run-1",
+        case_id: "liq-track-2-0000000001",
+        case_sequence: 1,
         state: "COMPLETED",
+        trigger_snapshot_id: "risk-1",
+        final_snapshot_id: "risk-2",
+        trigger_virtual_time_ms: 1_710_000_000_000,
+        trigger_source_sequence: 1,
+        reason: "MAINTENANCE_MARGIN_BREACH",
         fidelity: "REVEALED_BAR_CLOSE_PROXY",
+        component_hash: `sha256:${"e".repeat(64)}`,
+        legs: [],
+        book_snapshots: [],
+        steps: [],
       }],
+      liquidation_recoveries: [],
       hedge_state: {
         schema_version: "replay.hedge-relational-state.v1",
         state_hash: `sha256:${"d".repeat(64)}`,

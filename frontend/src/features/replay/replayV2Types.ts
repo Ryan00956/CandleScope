@@ -48,11 +48,19 @@ export const REPLAY_V2_ENUMS = Object.freeze({
     "SIMULATED_LIQUIDATION",
     "HISTORICAL_MARK_INDEX",
     "HISTORICAL_INSTRUMENT_RULE",
+    "HISTORICAL_FEE_POLICY",
+    "HISTORICAL_FUNDING",
+    "HISTORICAL_L2",
+    "SIMULATED_INSURANCE_FUND",
+    "SIMULATED_ADL_COHORT",
   ),
   capability_state: enumValues(
     "AVAILABLE_EXACT",
     "AVAILABLE_APPROX",
     "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT",
+    "AVAILABLE_PINNED",
+    "AVAILABLE_PINNED_CONTINUITY_GATED",
+    "AVAILABLE_MATERIALIZED",
     "UNSUPPORTED_NO_HISTORY",
     "UNSUPPORTED_SOURCE_MODE",
     "LOADING",
@@ -319,6 +327,196 @@ export interface ReplayLiquidationChannelProjection {
     | "UNSUPPORTED_NO_HISTORY";
 }
 
+export interface ReplayPositionProtectionOrder {
+  readonly order_id: string;
+  readonly order_type: "STOP_MARKET" | "TAKE_PROFIT_MARKET";
+  readonly quantity: string;
+  readonly remaining_quantity: string;
+  readonly stop_price: string;
+  readonly status: "OPEN" | "PARTIALLY_FILLED";
+}
+
+export interface ReplayPositionProtection {
+  readonly orders: readonly ReplayPositionProtectionOrder[];
+}
+
+export interface ReplayLiquidationBookLevel {
+  readonly book_level: number;
+  readonly price: string;
+  readonly quantity: string;
+}
+
+export interface ReplayLiquidationBookExecution {
+  readonly case_id: string;
+  readonly step_sequence: number;
+  readonly track_id: string;
+  readonly as_of_virtual_time_ms: number;
+  readonly last_update_id: number;
+  readonly side: "BUY" | "SELL";
+  readonly requested_quantity: string;
+  readonly visible_quantity: string;
+  readonly levels: readonly ReplayLiquidationBookLevel[];
+  readonly book_hash: `sha256:${string}`;
+  readonly execution_fidelity: "HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1";
+  readonly queue_exact: false;
+  readonly execution_plan_hash: `sha256:${string}`;
+}
+
+export interface ReplayLiquidationBookSnapshot {
+  readonly case_id: string;
+  readonly track_id: string;
+  readonly as_of_virtual_time_ms: number;
+  readonly last_update_id: number;
+  readonly book_hash: `sha256:${string}`;
+  readonly execution_fidelity: "HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1";
+  readonly queue_exact: false;
+  readonly snapshot_hash: `sha256:${string}`;
+}
+
+export interface ReplayLiquidationFill {
+  readonly fill_id: string;
+  readonly fill_sequence: number;
+  readonly price: string;
+  readonly quantity: string;
+  readonly notional: string;
+  readonly trading_fee: string;
+  readonly liquidation_fee: string;
+  readonly book_level: number | null;
+  readonly virtual_time_ms: number;
+  readonly source_sequence: number;
+  readonly fill_hash: `sha256:${string}`;
+}
+
+export interface ReplayLiquidationOrder {
+  readonly order_id: string;
+  readonly liquidation_leg_id: string;
+  readonly order_sequence: number;
+  readonly side: "BUY" | "SELL";
+  readonly order_type: "MARKET" | "LIMIT";
+  readonly requested_quantity: string;
+  readonly filled_quantity: string;
+  readonly remaining_quantity: string;
+  readonly average_price: string | null;
+  readonly state: "NEW" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "FAILED_CLOSED";
+  readonly order_hash: `sha256:${string}`;
+  readonly fills: readonly ReplayLiquidationFill[];
+}
+
+export interface ReplayInsurancePosting {
+  readonly asset: string;
+  readonly posting_sequence: number;
+  readonly posting_id: string;
+  readonly cash_delta: string;
+  readonly balance_after: string;
+  readonly reason: string;
+  readonly posting_hash: `sha256:${string}`;
+}
+
+export interface ReplayAdlSelection {
+  readonly selection_sequence: number;
+  readonly candidate_id: string;
+  readonly snapshot_id: string;
+  readonly quantity: string;
+  readonly price: string;
+  readonly notional: string;
+  readonly cash_delta: string;
+  readonly selection_hash: `sha256:${string}`;
+}
+
+export interface ReplayAdlCounterpartyLedgerEntry {
+  readonly ledger_sequence: number;
+  readonly candidate_id: string;
+  readonly snapshot_id: string;
+  readonly position_side: "LONG" | "SHORT";
+  readonly quantity_before: string;
+  readonly quantity_delta: string;
+  readonly quantity_after: string;
+  readonly takeover_price: string;
+  readonly cash_delta: string;
+  readonly entry_hash: `sha256:${string}`;
+}
+
+export interface ReplayAdlEvent {
+  readonly adl_event_id: string;
+  readonly snapshot_id: string;
+  readonly required_notional: string;
+  readonly completed_notional: string;
+  readonly state: "PENDING" | "COMPLETED" | "FAILED_CLOSED";
+  readonly event_hash: `sha256:${string}`;
+  readonly selections: readonly ReplayAdlSelection[];
+  readonly counterparty_ledger: readonly ReplayAdlCounterpartyLedgerEntry[];
+}
+
+export interface ReplayLiquidationStep {
+  readonly step_sequence: number;
+  readonly step_type:
+    | "CANCEL_ORDERS"
+    | "RISK_RECHECK"
+    | "PARTIAL_LIQUIDATION"
+    | "FULL_LIQUIDATION"
+    | "BANKRUPTCY_TRANSFER"
+    | "INSURANCE_FUND_SETTLEMENT"
+    | "ADL"
+    | "COMPLETE"
+    | "FAILED_CLOSED";
+  readonly state: "PENDING" | "APPLIED" | "FAILED_CLOSED";
+  readonly before_snapshot_id: string;
+  readonly after_snapshot_id: string | null;
+  readonly reason: string;
+  readonly step_hash: `sha256:${string}`;
+  readonly book_execution: ReplayLiquidationBookExecution | null;
+  readonly orders: readonly ReplayLiquidationOrder[];
+  readonly insurance_postings: readonly ReplayInsurancePosting[];
+  readonly adl_events: readonly ReplayAdlEvent[];
+}
+
+export interface ReplayLiquidationLeg {
+  readonly liquidation_leg_id: string;
+  readonly leg_sequence: number;
+  readonly track_id: string;
+  readonly position_side: "LONG" | "SHORT";
+  readonly trigger_quantity: string;
+  readonly trigger_notional: string;
+  readonly maintenance_margin: string;
+  readonly liquidation_price: string | null;
+  readonly bankruptcy_price: string | null;
+  readonly takeover_price: string | null;
+  readonly liquidation_fee: string;
+  readonly target_quantity: string;
+  readonly completed_quantity: string;
+  readonly state: "PENDING" | "PARTIAL" | "CLOSED" | "TRANSFERRED" | "FAILED_CLOSED";
+  readonly component_hash: `sha256:${string}`;
+}
+
+export interface ReplayLiquidationCase {
+  readonly run_id: string;
+  readonly case_id: string;
+  readonly case_sequence: number;
+  readonly state:
+    | "RISK_BREACH_DETECTED"
+    | "CANCELING_ORDERS"
+    | "RISK_RECHECK"
+    | "PARTIAL_LIQUIDATION"
+    | "FULL_LIQUIDATION"
+    | "BANKRUPTCY_TRANSFER"
+    | "INSURANCE_FUND_SETTLEMENT"
+    | "ADL"
+    | "RECOVERED_AFTER_CANCEL"
+    | "COMPLETED"
+    | "BANKRUPT"
+    | "FAILED_CLOSED";
+  readonly trigger_snapshot_id: string;
+  readonly final_snapshot_id: string | null;
+  readonly trigger_virtual_time_ms: number;
+  readonly trigger_source_sequence: number;
+  readonly reason: string;
+  readonly fidelity: string;
+  readonly component_hash: `sha256:${string}`;
+  readonly legs: readonly ReplayLiquidationLeg[];
+  readonly book_snapshots: readonly ReplayLiquidationBookSnapshot[];
+  readonly steps: readonly ReplayLiquidationStep[];
+}
+
 export interface ReplayTrainingPortfolioV1 {
   readonly schema_version: "replay.training.portfolio.v1";
   readonly fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER";
@@ -376,7 +574,8 @@ export interface ReplayTrainingContractPortfolio {
   readonly instrument_rules: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly isolated_allocations: Readonly<Record<string, ReplayV2Json>>;
   readonly next_funding_time_ms: number | null;
-  readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly liquidations: readonly ReplayLiquidationCase[];
+  readonly liquidation_recoveries: readonly ReplayLiquidationCase[];
   readonly hedge_state: Readonly<Record<string, ReplayV2Json>>;
   readonly hedge_inputs: ReplayHedgeInputView | null;
   readonly account_history: ReplayAccountHistoryProjection;
@@ -412,6 +611,12 @@ export interface ReplayTrainingPortfolioPosition {
   readonly position: Readonly<Record<string, ReplayV2Json>>;
   readonly maintenance_margin?: string;
   readonly initial_margin?: string;
+  readonly liquidation_price?: string | null;
+  readonly bankruptcy_price?: string | null;
+  readonly accumulated_funding?: string;
+  readonly trading_fees?: string;
+  readonly liquidation_fees?: string;
+  readonly protection?: ReplayPositionProtection;
   readonly leverage?: string;
   readonly risk_tier?: number;
   readonly account_notional?: string;
@@ -1654,6 +1859,429 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
   };
 }
 
+function parseReplayPositionProtection(
+  value: unknown,
+  field: string,
+): ReplayPositionProtection {
+  const protection = exactObject(value, field, ["orders"]);
+  if (!Array.isArray(protection.orders)) throw new TypeError(`${field}.orders must be an array`);
+  return {
+    orders: protection.orders.map((value, index) => {
+      const orderField = `${field}.orders[${index}]`;
+      const order = exactObject(value, orderField, [
+        "order_id", "order_type", "quantity", "remaining_quantity", "stop_price", "status",
+      ]);
+      return {
+        order_id: identifier(order.order_id, `${orderField}.order_id`),
+        order_type: enumValue(
+          order.order_type,
+          ["STOP_MARKET", "TAKE_PROFIT_MARKET"] as const,
+          `${orderField}.order_type`,
+        ),
+        quantity: positiveDecimal(order.quantity, `${orderField}.quantity`),
+        remaining_quantity: positiveDecimal(
+          order.remaining_quantity,
+          `${orderField}.remaining_quantity`,
+        ),
+        stop_price: positiveDecimal(order.stop_price, `${orderField}.stop_price`),
+        status: enumValue(
+          order.status,
+          ["OPEN", "PARTIALLY_FILLED"] as const,
+          `${orderField}.status`,
+        ),
+      };
+    }),
+  };
+}
+
+function parseReplayLiquidationBookExecution(
+  value: unknown,
+  field: string,
+): ReplayLiquidationBookExecution {
+  const execution = exactObject(value, field, [
+    "case_id", "step_sequence", "track_id", "as_of_virtual_time_ms", "last_update_id",
+    "side", "requested_quantity", "visible_quantity", "levels", "book_hash",
+    "execution_fidelity", "queue_exact", "execution_plan_hash",
+  ]);
+  if (!Array.isArray(execution.levels)) throw new TypeError(`${field}.levels must be an array`);
+  const queueExact = boolValue(execution.queue_exact, `${field}.queue_exact`);
+  if (queueExact) throw new TypeError(`${field}.queue_exact must remain false`);
+  return {
+    case_id: identifier(execution.case_id, `${field}.case_id`),
+    step_sequence: counter(execution.step_sequence, `${field}.step_sequence`),
+    track_id: identifier(execution.track_id, `${field}.track_id`),
+    as_of_virtual_time_ms: timestamp(
+      execution.as_of_virtual_time_ms,
+      `${field}.as_of_virtual_time_ms`,
+    ),
+    last_update_id: counter(execution.last_update_id, `${field}.last_update_id`),
+    side: enumValue(execution.side, ["BUY", "SELL"] as const, `${field}.side`),
+    requested_quantity: positiveDecimal(
+      execution.requested_quantity,
+      `${field}.requested_quantity`,
+    ),
+    visible_quantity: positiveDecimal(
+      execution.visible_quantity,
+      `${field}.visible_quantity`,
+    ),
+    levels: execution.levels.map((value, index) => {
+      const levelField = `${field}.levels[${index}]`;
+      const level = exactObject(value, levelField, ["book_level", "price", "quantity"]);
+      return {
+        book_level: counter(level.book_level, `${levelField}.book_level`),
+        price: positiveDecimal(level.price, `${levelField}.price`),
+        quantity: positiveDecimal(level.quantity, `${levelField}.quantity`),
+      };
+    }),
+    book_hash: digest(execution.book_hash, `${field}.book_hash`),
+    execution_fidelity: enumValue(
+      execution.execution_fidelity,
+      ["HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1"] as const,
+      `${field}.execution_fidelity`,
+    ),
+    queue_exact: false,
+    execution_plan_hash: digest(
+      execution.execution_plan_hash,
+      `${field}.execution_plan_hash`,
+    ),
+  };
+}
+
+function parseReplayLiquidationCase(value: unknown, field: string): ReplayLiquidationCase {
+  const item = exactObject(value, field, [
+    "run_id", "case_id", "case_sequence", "state", "trigger_snapshot_id",
+    "final_snapshot_id", "trigger_virtual_time_ms", "trigger_source_sequence", "reason",
+    "fidelity", "component_hash", "legs", "book_snapshots", "steps",
+  ]);
+  if (!Array.isArray(item.legs) || !Array.isArray(item.book_snapshots) || !Array.isArray(item.steps)) {
+    throw new TypeError(`${field} timeline collections must be arrays`);
+  }
+  return {
+    run_id: identifier(item.run_id, `${field}.run_id`),
+    case_id: identifier(item.case_id, `${field}.case_id`),
+    case_sequence: counter(item.case_sequence, `${field}.case_sequence`),
+    state: enumValue(item.state, [
+      "RISK_BREACH_DETECTED", "CANCELING_ORDERS", "RISK_RECHECK", "PARTIAL_LIQUIDATION",
+      "FULL_LIQUIDATION", "BANKRUPTCY_TRANSFER", "INSURANCE_FUND_SETTLEMENT", "ADL",
+      "RECOVERED_AFTER_CANCEL", "COMPLETED", "BANKRUPT", "FAILED_CLOSED",
+    ] as const, `${field}.state`),
+    trigger_snapshot_id: identifier(item.trigger_snapshot_id, `${field}.trigger_snapshot_id`),
+    final_snapshot_id: nullableIdentifier(item.final_snapshot_id, `${field}.final_snapshot_id`),
+    trigger_virtual_time_ms: timestamp(
+      item.trigger_virtual_time_ms,
+      `${field}.trigger_virtual_time_ms`,
+    ),
+    trigger_source_sequence: counter(
+      item.trigger_source_sequence,
+      `${field}.trigger_source_sequence`,
+    ),
+    reason: displayString(item.reason, `${field}.reason`, 512),
+    fidelity: displayString(item.fidelity, `${field}.fidelity`, 256),
+    component_hash: digest(item.component_hash, `${field}.component_hash`),
+    legs: item.legs.map((value, index) => {
+      const legField = `${field}.legs[${index}]`;
+      const leg = exactObject(value, legField, [
+        "liquidation_leg_id", "leg_sequence", "track_id", "position_side",
+        "trigger_quantity", "trigger_notional", "maintenance_margin", "liquidation_price",
+        "bankruptcy_price", "takeover_price", "liquidation_fee", "target_quantity",
+        "completed_quantity", "state", "component_hash",
+      ]);
+      return {
+        liquidation_leg_id: identifier(
+          leg.liquidation_leg_id,
+          `${legField}.liquidation_leg_id`,
+        ),
+        leg_sequence: counter(leg.leg_sequence, `${legField}.leg_sequence`),
+        track_id: identifier(leg.track_id, `${legField}.track_id`),
+        position_side: enumValue(
+          leg.position_side,
+          ["LONG", "SHORT"] as const,
+          `${legField}.position_side`,
+        ),
+        trigger_quantity: canonicalDecimal(leg.trigger_quantity, `${legField}.trigger_quantity`),
+        trigger_notional: canonicalDecimal(leg.trigger_notional, `${legField}.trigger_notional`),
+        maintenance_margin: canonicalDecimal(
+          leg.maintenance_margin,
+          `${legField}.maintenance_margin`,
+        ),
+        liquidation_price: nullableCanonicalDecimal(
+          leg.liquidation_price,
+          `${legField}.liquidation_price`,
+        ),
+        bankruptcy_price: nullableCanonicalDecimal(
+          leg.bankruptcy_price,
+          `${legField}.bankruptcy_price`,
+        ),
+        takeover_price: nullableCanonicalDecimal(
+          leg.takeover_price,
+          `${legField}.takeover_price`,
+        ),
+        liquidation_fee: canonicalDecimal(leg.liquidation_fee, `${legField}.liquidation_fee`),
+        target_quantity: canonicalDecimal(leg.target_quantity, `${legField}.target_quantity`),
+        completed_quantity: canonicalDecimal(
+          leg.completed_quantity,
+          `${legField}.completed_quantity`,
+        ),
+        state: enumValue(
+          leg.state,
+          ["PENDING", "PARTIAL", "CLOSED", "TRANSFERRED", "FAILED_CLOSED"] as const,
+          `${legField}.state`,
+        ),
+        component_hash: digest(leg.component_hash, `${legField}.component_hash`),
+      };
+    }),
+    book_snapshots: item.book_snapshots.map((value, index) => {
+      const snapshotField = `${field}.book_snapshots[${index}]`;
+      const snapshot = exactObject(value, snapshotField, [
+        "case_id", "track_id", "as_of_virtual_time_ms", "last_update_id", "book_hash",
+        "execution_fidelity", "queue_exact", "snapshot_hash",
+      ]);
+      const queueExact = boolValue(snapshot.queue_exact, `${snapshotField}.queue_exact`);
+      if (queueExact) throw new TypeError(`${snapshotField}.queue_exact must remain false`);
+      return {
+        case_id: identifier(snapshot.case_id, `${snapshotField}.case_id`),
+        track_id: identifier(snapshot.track_id, `${snapshotField}.track_id`),
+        as_of_virtual_time_ms: timestamp(
+          snapshot.as_of_virtual_time_ms,
+          `${snapshotField}.as_of_virtual_time_ms`,
+        ),
+        last_update_id: counter(snapshot.last_update_id, `${snapshotField}.last_update_id`),
+        book_hash: digest(snapshot.book_hash, `${snapshotField}.book_hash`),
+        execution_fidelity: enumValue(
+          snapshot.execution_fidelity,
+          ["HISTORICAL_L2_VISIBLE_DEPTH_CONSERVATIVE_V1"] as const,
+          `${snapshotField}.execution_fidelity`,
+        ),
+        queue_exact: false,
+        snapshot_hash: digest(snapshot.snapshot_hash, `${snapshotField}.snapshot_hash`),
+      };
+    }),
+    steps: item.steps.map((value, index) => {
+      const stepField = `${field}.steps[${index}]`;
+      const step = exactObject(value, stepField, [
+        "step_sequence", "step_type", "state", "before_snapshot_id", "after_snapshot_id",
+        "reason", "step_hash", "book_execution", "orders", "insurance_postings", "adl_events",
+      ]);
+      if (!Array.isArray(step.orders)
+        || !Array.isArray(step.insurance_postings)
+        || !Array.isArray(step.adl_events)) {
+        throw new TypeError(`${stepField} collections must be arrays`);
+      }
+      const parseFill = (value: unknown, fillField: string): ReplayLiquidationFill => {
+        const fill = exactObject(value, fillField, [
+          "fill_id", "fill_sequence", "price", "quantity", "notional", "trading_fee",
+          "liquidation_fee", "book_level", "virtual_time_ms", "source_sequence", "fill_hash",
+        ]);
+        return {
+          fill_id: identifier(fill.fill_id, `${fillField}.fill_id`),
+          fill_sequence: counter(fill.fill_sequence, `${fillField}.fill_sequence`),
+          price: positiveDecimal(fill.price, `${fillField}.price`),
+          quantity: positiveDecimal(fill.quantity, `${fillField}.quantity`),
+          notional: positiveDecimal(fill.notional, `${fillField}.notional`),
+          trading_fee: canonicalDecimal(fill.trading_fee, `${fillField}.trading_fee`),
+          liquidation_fee: canonicalDecimal(
+            fill.liquidation_fee,
+            `${fillField}.liquidation_fee`,
+          ),
+          book_level: nullableCounter(fill.book_level, `${fillField}.book_level`),
+          virtual_time_ms: timestamp(fill.virtual_time_ms, `${fillField}.virtual_time_ms`),
+          source_sequence: counter(fill.source_sequence, `${fillField}.source_sequence`),
+          fill_hash: digest(fill.fill_hash, `${fillField}.fill_hash`),
+        };
+      };
+      const orders = step.orders.map((value, orderIndex) => {
+        const orderField = `${stepField}.orders[${orderIndex}]`;
+        const order = exactObject(value, orderField, [
+          "order_id", "liquidation_leg_id", "order_sequence", "side", "order_type",
+          "requested_quantity", "filled_quantity", "remaining_quantity", "average_price",
+          "state", "order_hash", "fills",
+        ]);
+        if (!Array.isArray(order.fills)) throw new TypeError(`${orderField}.fills must be an array`);
+        return {
+          order_id: identifier(order.order_id, `${orderField}.order_id`),
+          liquidation_leg_id: identifier(
+            order.liquidation_leg_id,
+            `${orderField}.liquidation_leg_id`,
+          ),
+          order_sequence: counter(order.order_sequence, `${orderField}.order_sequence`),
+          side: enumValue(order.side, ["BUY", "SELL"] as const, `${orderField}.side`),
+          order_type: enumValue(
+            order.order_type,
+            ["MARKET", "LIMIT"] as const,
+            `${orderField}.order_type`,
+          ),
+          requested_quantity: positiveDecimal(
+            order.requested_quantity,
+            `${orderField}.requested_quantity`,
+          ),
+          filled_quantity: canonicalDecimal(
+            order.filled_quantity,
+            `${orderField}.filled_quantity`,
+          ),
+          remaining_quantity: canonicalDecimal(
+            order.remaining_quantity,
+            `${orderField}.remaining_quantity`,
+          ),
+          average_price: nullableCanonicalDecimal(
+            order.average_price,
+            `${orderField}.average_price`,
+          ),
+          state: enumValue(order.state, [
+            "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "FAILED_CLOSED",
+          ] as const, `${orderField}.state`),
+          order_hash: digest(order.order_hash, `${orderField}.order_hash`),
+          fills: order.fills.map((value, fillIndex) => (
+            parseFill(value, `${orderField}.fills[${fillIndex}]`)
+          )),
+        };
+      });
+      const insurancePostings = step.insurance_postings.map((value, postingIndex) => {
+        const postingField = `${stepField}.insurance_postings[${postingIndex}]`;
+        const posting = exactObject(value, postingField, [
+          "asset", "posting_sequence", "posting_id", "cash_delta", "balance_after", "reason",
+          "posting_hash",
+        ]);
+        return {
+          asset: identifier(posting.asset, `${postingField}.asset`),
+          posting_sequence: counter(
+            posting.posting_sequence,
+            `${postingField}.posting_sequence`,
+          ),
+          posting_id: identifier(posting.posting_id, `${postingField}.posting_id`),
+          cash_delta: canonicalDecimal(posting.cash_delta, `${postingField}.cash_delta`),
+          balance_after: canonicalDecimal(posting.balance_after, `${postingField}.balance_after`),
+          reason: displayString(posting.reason, `${postingField}.reason`, 512),
+          posting_hash: digest(posting.posting_hash, `${postingField}.posting_hash`),
+        };
+      });
+      const adlEvents = step.adl_events.map((value, eventIndex) => {
+        const eventField = `${stepField}.adl_events[${eventIndex}]`;
+        const event = exactObject(value, eventField, [
+          "adl_event_id", "snapshot_id", "required_notional", "completed_notional", "state",
+          "event_hash", "selections", "counterparty_ledger",
+        ]);
+        if (!Array.isArray(event.selections) || !Array.isArray(event.counterparty_ledger)) {
+          throw new TypeError(`${eventField} collections must be arrays`);
+        }
+        return {
+          adl_event_id: identifier(event.adl_event_id, `${eventField}.adl_event_id`),
+          snapshot_id: identifier(event.snapshot_id, `${eventField}.snapshot_id`),
+          required_notional: canonicalDecimal(
+            event.required_notional,
+            `${eventField}.required_notional`,
+          ),
+          completed_notional: canonicalDecimal(
+            event.completed_notional,
+            `${eventField}.completed_notional`,
+          ),
+          state: enumValue(
+            event.state,
+            ["PENDING", "COMPLETED", "FAILED_CLOSED"] as const,
+            `${eventField}.state`,
+          ),
+          event_hash: digest(event.event_hash, `${eventField}.event_hash`),
+          selections: event.selections.map((value, selectionIndex) => {
+            const selectionField = `${eventField}.selections[${selectionIndex}]`;
+            const selection = exactObject(value, selectionField, [
+              "selection_sequence", "candidate_id", "snapshot_id", "quantity", "price",
+              "notional", "cash_delta", "selection_hash",
+            ]);
+            return {
+              selection_sequence: counter(
+                selection.selection_sequence,
+                `${selectionField}.selection_sequence`,
+              ),
+              candidate_id: identifier(selection.candidate_id, `${selectionField}.candidate_id`),
+              snapshot_id: identifier(selection.snapshot_id, `${selectionField}.snapshot_id`),
+              quantity: positiveDecimal(selection.quantity, `${selectionField}.quantity`),
+              price: positiveDecimal(selection.price, `${selectionField}.price`),
+              notional: positiveDecimal(selection.notional, `${selectionField}.notional`),
+              cash_delta: canonicalDecimal(selection.cash_delta, `${selectionField}.cash_delta`),
+              selection_hash: digest(selection.selection_hash, `${selectionField}.selection_hash`),
+            };
+          }),
+          counterparty_ledger: event.counterparty_ledger.map((value, ledgerIndex) => {
+            const ledgerField = `${eventField}.counterparty_ledger[${ledgerIndex}]`;
+            const entry = exactObject(value, ledgerField, [
+              "ledger_sequence", "candidate_id", "snapshot_id", "position_side",
+              "quantity_before", "quantity_delta", "quantity_after", "takeover_price",
+              "cash_delta", "entry_hash",
+            ]);
+            return {
+              ledger_sequence: counter(entry.ledger_sequence, `${ledgerField}.ledger_sequence`),
+              candidate_id: identifier(entry.candidate_id, `${ledgerField}.candidate_id`),
+              snapshot_id: identifier(entry.snapshot_id, `${ledgerField}.snapshot_id`),
+              position_side: enumValue(
+                entry.position_side,
+                ["LONG", "SHORT"] as const,
+                `${ledgerField}.position_side`,
+              ),
+              quantity_before: canonicalDecimal(
+                entry.quantity_before,
+                `${ledgerField}.quantity_before`,
+              ),
+              quantity_delta: canonicalDecimal(
+                entry.quantity_delta,
+                `${ledgerField}.quantity_delta`,
+              ),
+              quantity_after: canonicalDecimal(
+                entry.quantity_after,
+                `${ledgerField}.quantity_after`,
+              ),
+              takeover_price: positiveDecimal(
+                entry.takeover_price,
+                `${ledgerField}.takeover_price`,
+              ),
+              cash_delta: canonicalDecimal(entry.cash_delta, `${ledgerField}.cash_delta`),
+              entry_hash: digest(entry.entry_hash, `${ledgerField}.entry_hash`),
+            };
+          }),
+        };
+      });
+      return {
+        step_sequence: counter(step.step_sequence, `${stepField}.step_sequence`),
+        step_type: enumValue(step.step_type, [
+          "CANCEL_ORDERS", "RISK_RECHECK", "PARTIAL_LIQUIDATION", "FULL_LIQUIDATION",
+          "BANKRUPTCY_TRANSFER", "INSURANCE_FUND_SETTLEMENT", "ADL", "COMPLETE",
+          "FAILED_CLOSED",
+        ] as const, `${stepField}.step_type`),
+        state: enumValue(
+          step.state,
+          ["PENDING", "APPLIED", "FAILED_CLOSED"] as const,
+          `${stepField}.state`,
+        ),
+        before_snapshot_id: identifier(
+          step.before_snapshot_id,
+          `${stepField}.before_snapshot_id`,
+        ),
+        after_snapshot_id: nullableIdentifier(
+          step.after_snapshot_id,
+          `${stepField}.after_snapshot_id`,
+        ),
+        reason: displayString(step.reason, `${stepField}.reason`, 512),
+        step_hash: digest(step.step_hash, `${stepField}.step_hash`),
+        book_execution: step.book_execution === null
+          ? null
+          : parseReplayLiquidationBookExecution(
+            step.book_execution,
+            `${stepField}.book_execution`,
+          ),
+        orders,
+        insurance_postings: insurancePostings,
+        adl_events: adlEvents,
+      };
+    }),
+  };
+}
+
+export function parseReplayLiquidationCases(
+  value: unknown,
+  field = "liquidations",
+): readonly ReplayLiquidationCase[] {
+  if (!Array.isArray(value)) throw new TypeError(`${field} must be an array`);
+  return value.map((item, index) => parseReplayLiquidationCase(item, `${field}[${index}]`));
+}
+
 export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
   if (
     typeof value === "object"
@@ -1697,6 +2325,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       "isolated_allocations",
       "next_funding_time_ms",
       "liquidations",
+      "liquidation_recoveries",
       "hedge_state",
       "hedge_inputs",
       "account_history",
@@ -1723,6 +2352,10 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
     const rawFills = objectList(portfolio.fills, "portfolio.fills");
     const rawRules = objectList(portfolio.instrument_rules, "portfolio.instrument_rules");
     const rawLiquidations = objectList(portfolio.liquidations, "portfolio.liquidations");
+    const rawLiquidationRecoveries = objectList(
+      portfolio.liquidation_recoveries,
+      "portfolio.liquidation_recoveries",
+    );
     const rawHistory = exactObject(portfolio.history, "portfolio.history", [
       "orders_total",
       "active_orders",
@@ -1770,6 +2403,12 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         "initial_margin",
         "account_notional",
         "maintenance_margin",
+        ...(Object.hasOwn(position as object, "liquidation_price") ? ["liquidation_price"] : []),
+        ...(Object.hasOwn(position as object, "bankruptcy_price") ? ["bankruptcy_price"] : []),
+        ...(Object.hasOwn(position as object, "accumulated_funding") ? ["accumulated_funding"] : []),
+        ...(Object.hasOwn(position as object, "trading_fees") ? ["trading_fees"] : []),
+        ...(Object.hasOwn(position as object, "liquidation_fees") ? ["liquidation_fees"] : []),
+        ...(Object.hasOwn(position as object, "protection") ? ["protection"] : []),
         "isolated_margin",
         "isolated_allocation_key",
         "risk_tier",
@@ -1806,6 +2445,44 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
           item.maintenance_margin,
           `${field}.maintenance_margin`,
         ),
+        ...(Object.hasOwn(item, "liquidation_price")
+          ? {
+              liquidation_price: nullableCanonicalDecimal(
+                item.liquidation_price,
+                `${field}.liquidation_price`,
+              ),
+            }
+          : {}),
+        ...(Object.hasOwn(item, "bankruptcy_price")
+          ? {
+              bankruptcy_price: nullableCanonicalDecimal(
+                item.bankruptcy_price,
+                `${field}.bankruptcy_price`,
+              ),
+            }
+          : {}),
+        ...(Object.hasOwn(item, "accumulated_funding")
+          ? {
+              accumulated_funding: canonicalDecimal(
+                item.accumulated_funding,
+                `${field}.accumulated_funding`,
+              ),
+            }
+          : {}),
+        ...(Object.hasOwn(item, "trading_fees")
+          ? { trading_fees: canonicalDecimal(item.trading_fees, `${field}.trading_fees`) }
+          : {}),
+        ...(Object.hasOwn(item, "liquidation_fees")
+          ? {
+              liquidation_fees: canonicalDecimal(
+                item.liquidation_fees,
+                `${field}.liquidation_fees`,
+              ),
+            }
+          : {}),
+        ...(Object.hasOwn(item, "protection")
+          ? { protection: parseReplayPositionProtection(item.protection, `${field}.protection`) }
+          : {}),
         isolated_margin: canonicalDecimal(item.isolated_margin, `${field}.isolated_margin`),
         isolated_allocation_key: identifier(
           item.isolated_allocation_key,
@@ -1869,7 +2546,11 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       next_funding_time_ms: portfolio.next_funding_time_ms === null
         ? null
         : counter(portfolio.next_funding_time_ms, "portfolio.next_funding_time_ms"),
-      liquidations: objectArray(rawLiquidations, "portfolio.liquidations"),
+      liquidations: parseReplayLiquidationCases(rawLiquidations, "portfolio.liquidations"),
+      liquidation_recoveries: parseReplayLiquidationCases(
+        rawLiquidationRecoveries,
+        "portfolio.liquidation_recoveries",
+      ),
       hedge_state: jsonObject(portfolio.hedge_state, "portfolio.hedge_state"),
       hedge_inputs: parseReplayHedgeInputView(portfolio.hedge_inputs),
       account_history: accountHistory,
@@ -3208,7 +3889,7 @@ function nullableIdentifier(value: unknown, fieldName: string): string | null {
 
 function nullableCanonicalDecimal(value: unknown, fieldName: string): string | null {
   if (value === null) return null;
-  if (typeof value !== "string" || !POSITIVE_CANONICAL_DECIMAL.test(value)) {
+  if (typeof value !== "string" || !CANONICAL_DECIMAL.test(value)) {
     throw new TypeError(`${fieldName} must be a canonical Decimal string or null`);
   }
   return value;

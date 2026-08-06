@@ -88,7 +88,9 @@ def _validate_matrix() -> tuple[Mapping[str, object], list[dict[str, object]]]:
         try:
             source.relative_to(REPOSITORY_ROOT.resolve())
         except ValueError as exc:
-            raise ValueError(f"scenario {scenario.get('id')} escapes repository") from exc
+            raise ValueError(
+                f"scenario {scenario.get('id')} escapes repository"
+            ) from exc
         if not source.is_file() or needle not in source.read_text(encoding="utf-8"):
             raise ValueError(
                 f"scenario {scenario.get('id')} evidence is missing: {relative} :: {needle}"
@@ -122,23 +124,21 @@ def _validate_default_flags() -> dict[str, str]:
         encoding="utf-8"
     )
     entry_source = (
-        REPOSITORY_ROOT
-        / "frontend/src/features/replay/useReplayEntryCapability.ts"
+        REPOSITORY_ROOT / "frontend/src/features/replay/useReplayEntryCapability.ts"
     ).read_text(encoding="utf-8")
     readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
     flags = {
-        "REPLAY_ENABLED": "0",
-        "VITE_REPLAY_ENTRY_ENABLED": "0",
+        "REPLAY_ENABLED": "1",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
-        "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
+        "REPLAY_HISTORICAL_BOOK_ENABLED": "1",
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
         "REPLAY_SEGMENT_AUTO_GC_ENABLED": "0",
         "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED": "0",
-        "REPLAY_ACCOUNT_HISTORY_ENABLED": "0",
+        "REPLAY_ACCOUNT_HISTORY_ENABLED": "1",
     }
     checks = {
-        "backend_core_off": settings.enabled is False,
-        "backend_book_off": settings.replay_historical_book_enabled is False,
+        "backend_core_on": settings.enabled is True,
+        "backend_book_on": settings.replay_historical_book_enabled is True,
         "backend_segment_worker_off": (
             settings.replay_segment_download_worker_enabled is False
         ),
@@ -146,12 +146,14 @@ def _validate_default_flags() -> dict[str, str]:
         "backend_fast_forward_off": (
             settings.replay_fast_forward_optimization_enabled is False
         ),
-        "backend_account_history_off": (
-            settings.replay_account_history_enabled is False
+        "backend_account_history_on": (settings.replay_account_history_enabled is True),
+        "backend_raw_agg_default_source": '"RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"'
+        in backend_source,
+        "frontend_entry_has_no_vite_gate": "VITE_REPLAY_ENTRY_ENABLED"
+        not in entry_source,
+        "readme_freezes_all_defaults": all(
+            f"{name}={value}" in readme for name, value in flags.items()
         ),
-        "backend_raw_agg_default_source": '"RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"' in backend_source,
-        "frontend_entry_strict_default_off": "return value === true || value === \"1\" || value === \"true\";" in entry_source,
-        "readme_freezes_all_defaults": all(f"{name}={value}" in readme for name, value in flags.items()),
     }
     if not all(checks.values()):
         raise RuntimeError(f"repository replay-default contract failed: {checks}")
@@ -184,14 +186,20 @@ def _run_revert_drill(head: str) -> dict[str, object]:
                 raise RuntimeError(
                     f"git revert --no-commit failed: {completed.stderr or completed.stdout}"
                 )
-            worktree_matches_parent = subprocess.run(
-                ["git", "diff", "--quiet", parent, "--"], cwd=worktree, check=False
-            ).returncode == 0
-            index_matches_parent = subprocess.run(
-                ["git", "diff", "--cached", "--quiet", parent, "--"],
-                cwd=worktree,
-                check=False,
-            ).returncode == 0
+            worktree_matches_parent = (
+                subprocess.run(
+                    ["git", "diff", "--quiet", parent, "--"], cwd=worktree, check=False
+                ).returncode
+                == 0
+            )
+            index_matches_parent = (
+                subprocess.run(
+                    ["git", "diff", "--cached", "--quiet", parent, "--"],
+                    cwd=worktree,
+                    check=False,
+                ).returncode
+                == 0
+            )
             untracked = run_git(
                 "ls-files", "--others", "--exclude-standard", cwd=worktree
             ).splitlines()
@@ -221,8 +229,10 @@ def _acceptance_checks(payload: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(acceptance, Mapping) or acceptance.get("passed") is not True:
         raise ValueError("browser artifact acceptance did not pass")
     checks = acceptance.get("checks")
-    if not isinstance(checks, Mapping) or not checks or not all(
-        value is True for value in checks.values()
+    if (
+        not isinstance(checks, Mapping)
+        or not checks
+        or not all(value is True for value in checks.values())
     ):
         raise ValueError("browser artifact did not pass every acceptance check")
     return checks
@@ -267,9 +277,7 @@ def main() -> int:
     smoke_config = v2_smoke.get("config")
     soak_config = v2_soak.get("config")
     soak_training_source = (
-        soak_config.get("trainingSource")
-        if isinstance(soak_config, Mapping)
-        else None
+        soak_config.get("trainingSource") if isinstance(soak_config, Mapping) else None
     )
     soak_lifecycle = v2_soak.get("archiveLifecycle")
     rollback_config = rollback.get("configuration")
@@ -329,10 +337,7 @@ def main() -> int:
         and rollback_config.get("product") == "replay.v2",
         "v2_rollback_storage_preserved": isinstance(rollback_checks, Mapping)
         and rollback_checks.get("phase18_storage_schema_present") is True
-        and rollback_checks.get(
-            "disabled_restart_preserved_storage_semantics"
-        )
-        is True
+        and rollback_checks.get("disabled_restart_preserved_storage_semantics") is True
         and rollback_checks.get("old_build_preserved_storage_semantics") is True,
     }
     _acceptance_checks(v2_smoke)
@@ -364,9 +369,9 @@ def main() -> int:
         "commit_revert_drill": revert,
         "repository_defaults": default_flags,
         "implementation_decision": "PASS",
-        "production_enablement": "HOLD_CORE_DEFAULT_OFF",
+        "production_enablement": "HARD_CUTOVER_DEFAULT_ON",
         "production_observation": (
-            "REQUIRED_FOR_BOOK_AND_EXACT_ACCOUNT_BEFORE_ANY_ENABLEMENT_DECISION"
+            "PINNED_DATA_GAPS_FAIL_CLOSED_WITHOUT_DISABLING_THE_PRODUCT"
         ),
         "support_decision": real_source_support,
     }

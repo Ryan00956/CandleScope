@@ -5,6 +5,7 @@ import { downloadReplayTrainingReport } from "../replayReportExport.js";
 import { replayOwnsController } from "../replayUiModel.js";
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayIntegrityRuntime } from "../useReplayIntegrityRuntime.js";
+import ReplayLiquidationTimeline from "./ReplayLiquidationTimeline.js";
 
 export interface ReplayIntegrityReviewPanelProps {
   readonly runtime: ReplayRuntime;
@@ -341,7 +342,7 @@ export default function ReplayIntegrityReviewPanel({
                     </div>
                     <div>
                       <span>模拟账户强平</span>
-                      <strong>{report.modelled_account.liquidations.length}</strong>
+                      <strong>{report.modelled_account.liquidations.length + report.modelled_account.liquidation_recoveries.length}</strong>
                     </div>
                     <div>
                       <span>历史市场爆仓</span>
@@ -350,6 +351,17 @@ export default function ReplayIntegrityReviewPanel({
                   </>
                 )}
               </div>
+              {report.modelled_account.schema_version === "replay.training.portfolio.v2" && (
+                <section className="replay-report-liquidations" aria-label="报告强平时间线">
+                  <h4>强平 Case / Steps / Orders / Fills / Insurance / ADL</h4>
+                  <ReplayLiquidationTimeline
+                    cases={[
+                      ...report.modelled_account.liquidation_recoveries,
+                      ...report.modelled_account.liquidations,
+                    ]}
+                  />
+                </section>
+              )}
               {report.account_audit !== null && (
                 <p>
                   独立账户审计：<strong>{report.account_audit.status}</strong>
@@ -441,6 +453,10 @@ export default function ReplayIntegrityReviewPanel({
                   <div><span>Rules</span><strong>fee r{review.projection.rules.fee_policy.revision} · leverage r{review.projection.rules.leverage_policy.revision} · funding r{review.projection.rules.funding_policy.revision}</strong></div>
                   <div><span>Drawing</span><strong>r{review.projection.drawing_revision} · {review.projection.drawing_document_hash ?? "empty"}</strong></div>
                 </div>
+                <section className="replay-review-liquidations" aria-label="复盘强平时间线">
+                  <h4>强平 Case / Steps / Orders / Fills / Insurance / ADL</h4>
+                  <ReplayLiquidationTimeline cases={review.projection.liquidations} />
+                </section>
                 <div className="replay-review-timeline" aria-label="不可变复盘时间线">
                   {review.events.map((event) => (
                     <button

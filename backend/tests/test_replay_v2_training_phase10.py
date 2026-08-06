@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None:
     matrix, validated = release_verifier._validate_matrix()
-    assert matrix["production_enablement"] == "HOLD_CORE_DEFAULT_OFF"
+    assert matrix["production_enablement"] == "HARD_CUTOVER_DEFAULT_ON"
     assert matrix["expected_scenarios"] == 40
     assert [scenario["id"] for scenario in validated] == list(range(1, 41))
     assert all(scenario["validated"] is True for scenario in validated)
@@ -33,23 +33,22 @@ def test_phase10_maps_every_product_contract_scenario_to_live_evidence() -> None
     }
 
 
-def test_phase10_keeps_the_single_core_gate_default_off(
+def test_phase10_keeps_replay_and_exact_input_capabilities_default_on(
     tmp_path: Path,
 ) -> None:
     settings = load_replay_settings(
         {}, data_dir=tmp_path, klines_db_path=tmp_path / "candlescope.db"
     )
-    assert settings.enabled is False
-    assert settings.replay_historical_book_enabled is False
+    assert settings.enabled is True
+    assert settings.replay_historical_book_enabled is True
     assert release_verifier._validate_default_flags() == {
-        "REPLAY_ENABLED": "0",
-        "VITE_REPLAY_ENTRY_ENABLED": "0",
+        "REPLAY_ENABLED": "1",
         "RAW_AGG_TRADE_ARCHIVE_ENABLED": "0",
-        "REPLAY_HISTORICAL_BOOK_ENABLED": "0",
+        "REPLAY_HISTORICAL_BOOK_ENABLED": "1",
         "REPLAY_SEGMENT_DOWNLOAD_WORKER_ENABLED": "0",
         "REPLAY_SEGMENT_AUTO_GC_ENABLED": "0",
         "REPLAY_FAST_FORWARD_OPTIMIZATION_ENABLED": "0",
-        "REPLAY_ACCOUNT_HISTORY_ENABLED": "0",
+        "REPLAY_ACCOUNT_HISTORY_ENABLED": "1",
     }
 
 
@@ -109,8 +108,16 @@ def test_bound_json_rejects_wrong_head_schema_dirty_or_failed(tmp_path: Path) ->
 
     for field, value, message in (
         ("schema_version", "wrong.v1", "schema drifted"),
-        ("release_evidence", {**valid["release_evidence"], "git_head": "b" * 40}, "not bound"),
-        ("release_evidence", {**valid["release_evidence"], "git_dirty": True}, "not captured"),
+        (
+            "release_evidence",
+            {**valid["release_evidence"], "git_head": "b" * 40},
+            "not bound",
+        ),
+        (
+            "release_evidence",
+            {**valid["release_evidence"], "git_dirty": True},
+            "not captured",
+        ),
         ("passed", False, "not a passing"),
     ):
         mutated = dict(valid)
@@ -173,9 +180,9 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         assert needle in rollback
     assert "--live-window" in smoke
     assert "--disable-gap-maintenance" in smoke
-    assert "--duration-ms 14400000 --cycles 100" in package["scripts"][
-        "soak:replay:v2:4h"
-    ]
+    assert (
+        "--duration-ms 14400000 --cycles 100" in package["scripts"]["soak:replay:v2:4h"]
+    )
     assert "--product-v2" not in soak
     assert "--product-v2" not in rollback
     assert "--product-v2" not in package["scripts"]["drill:replay:v2:rollback"]

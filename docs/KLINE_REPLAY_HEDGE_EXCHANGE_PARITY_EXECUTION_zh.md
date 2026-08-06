@@ -509,6 +509,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 预估：4–6 个工程日。
 
+完成记录（2026-08-06）：已完成。入口、HEDGE 创建、历史盘口和账户历史改为代码默认启用，移除 Vite 入口旗标及 HEDGE/ISOLATED/funding/book 灰色禁用项；新建 Run 默认 HEDGE，ONE_WAY 保持显式可选。portfolio、ReviewMode、报告和 CSV 现在共享公开安全的逐腿持仓与完整强平时间线，包含持续 liquidation/bankruptcy price、保护单、L2 order/fill、fee、insurance 和 ADL；内部执行计划已从公共 reason 中清除。Python/TypeScript/golden capability 协议同步，破产负权益可严格解析。真实浏览器在 1440×900 和 1024×720 无横向溢出，刷新和 1m→3m 切换后仍保留两腿或全部强平步骤。完整 replay 后端 `877 passed`，前端 replay `329 passed`，typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据见 [`evidence/KLINE_REPLAY_HEDGE_PHASE7_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE7_RESULT_20260806_zh.md)。
+
 ### Phase 8：恢复、审计与故障注入
 
 工作内容：

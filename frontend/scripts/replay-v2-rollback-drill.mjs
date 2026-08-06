@@ -191,11 +191,37 @@ export function buildBackendPythonPath({ root, baseline, inherited = "" }) {
   return [sdkSource, inherited].filter(Boolean).join(path.delimiter);
 }
 
+export function buildBackendLaunch({ port, baseline, enabled }) {
+  const hedgeFixture = enabled && !baseline;
+  return {
+    historicalBookEnabled: hedgeFixture,
+    args: baseline
+      ? [
+          fixtureScript,
+          "--port",
+          String(port),
+          "--live-window",
+          "--disable-gap-maintenance",
+        ]
+      : [
+          "-m",
+          "scripts.replay_smoke_fixture",
+          "--port",
+          String(port),
+          "--live-window",
+          "--disable-gap-maintenance",
+          ...(hedgeFixture ? ["--historical-book", "--hedge"] : []),
+        ],
+  };
+}
+
 function startBackend({ python, root, port, enabled, paths, baseline = false }) {
+  const launch = buildBackendLaunch({ port, baseline, enabled });
   const backendEnv = {
     ...process.env,
     REPLAY_ENABLED: enabled ? "1" : "0",
-    REPLAY_HISTORICAL_BOOK_ENABLED: "0",
+    REPLAY_HISTORICAL_BOOK_ENABLED: launch.historicalBookEnabled ? "1" : "0",
+    REPLAY_SMOKE_BOOK_SOURCE_DIR: path.join(paths.data, "hedge-book-source"),
     KLINES_DB_PATH: paths.klines,
     REPLAY_DB_PATH: paths.replay,
     CANDLE_DATA_DIR: paths.data,
@@ -214,23 +240,7 @@ function startBackend({ python, root, port, enabled, paths, baseline = false }) 
       inherited: process.env.PYTHONPATH || "",
     }),
   };
-  const args = baseline
-    ? [
-        fixtureScript,
-        "--port",
-        String(port),
-        "--live-window",
-        "--disable-gap-maintenance",
-      ]
-    : [
-        "-m",
-        "scripts.replay_smoke_fixture",
-        "--port",
-        String(port),
-        "--live-window",
-        "--disable-gap-maintenance",
-      ];
-  const child = spawn(python, args, {
+  const child = spawn(python, launch.args, {
     cwd: root,
     env: backendEnv,
     stdio: ["ignore", "pipe", "pipe"],

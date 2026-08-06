@@ -18,17 +18,18 @@ test("capacity CLI accepts only the frozen 1/2/4/8/16 and S1-S5 matrix", () => {
   assert.throws(() => parseArgs(["--unknown"]), /Unknown argument/);
 });
 
-test("phase 0 bootstrap produces exact 1, 2, and 4-cell trees without changing schema v5", () => {
-  for (const cells of [1, 2, 4]) {
+test("phase 2 bootstrap produces exact v6 1/2/4/8/16-cell trees", () => {
+  for (const cells of [1, 2, 4, 8, 16]) {
     const bootstrap = buildWorkspaceBootstrap({ cells, scenario: "S1", now: 100 });
-    assert.equal(bootstrap.record.document.schemaVersion, 5);
-    assert.equal(bootstrap.record.document.layoutLocked, true);
+    assert.equal(bootstrap.record.document.schemaVersion, 6);
+    assert.equal(bootstrap.record.document.revision, 1);
+    assert.equal(bootstrap.record.document.windows["main-window"].layoutLocked, true);
     assert.equal(bootstrap.expectedSeries.length, 1);
-    const serialized = JSON.stringify(bootstrap.record.document.layoutTree);
+    const serialized = JSON.stringify(bootstrap.record.document.windows["main-window"].layoutTree);
     for (let index = 1; index <= cells; index += 1) assert.match(serialized, new RegExp(`cell-${index}`));
-    for (let index = cells + 1; index <= 4; index += 1) assert.doesNotMatch(serialized, new RegExp(`cell-${index}`));
+    assert.equal(Object.keys(bootstrap.record.document.cells).length, cells);
   }
-  assert.throws(() => buildWorkspaceBootstrap({ cells: 8, scenario: "S1" }), /cannot represent 8/);
+  assert.throws(() => buildWorkspaceBootstrap({ cells: 64, scenario: "S1" }), /cannot represent 64/);
 });
 
 test("S2 and S3 scenarios freeze unique series independently from logical cells", () => {

@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_1_COMPLETE`。Phase 0～1 已完成并通过各节记录的门禁；Phase 2～8 尚未完成。当前版本只具备可回滚的 v6 数据模型，默认 UI 仍限制为 4 图，不代表已经支持 16/64 图，也不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_2_COMPLETE`。Phase 0～2 已完成并通过各节记录的门禁；Phase 3～8 尚未完成。当前版本在默认关闭的 `MULTI_CHART_16_ENABLED` 后实现单窗口最多 16 图和可回滚的稳定挂载，默认 UI 仍限制为 4 图；尚未完成每窗口 broker/scheduler、四窗口和 64 图，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -633,15 +633,15 @@ MULTI_CHART_64_ENABLED=0
 
 ### 任务
 
-- [ ] 2.1 新增 6/8/9/12/16 preset，并由一个可测试的矩阵/递归树生成器生成。
-- [ ] 2.2 `firstAvailableChartCellId` 改为 ID factory + capacity check。
-- [ ] 2.3 引入 `WorkspaceLayoutGeometry`，输出 leaf/split rect。
-- [ ] 2.4 引入稳定 `WorkspaceCellLayer`；Cell 作为稳定 keyed sibling，不由递归 DOM 位置拥有 runtime。
-- [ ] 2.5 split handle 使用独立 overlay，锁定、拖动、键盘和触摸行为保持可访问。
-- [ ] 2.6 用 ResizeObserver 定义密度档：完整 header、紧凑 header、极简状态；功能不因窄 Cell 静默消失。
-- [ ] 2.7 最大化时暂停被遮挡 Cell 的 Canvas/indicator preview，保留共享 store 和可恢复状态。
-- [ ] 2.8 切换 preset、换位和调整 ratio 不重建未变化 Cell 的 market/indicator/drawing runtime。
-- [ ] 2.9 添加 4K、1440p、1080p 的 16 Cell 可用性检查；低分辨率明确提示空间不足，不强行挤压到不可操作。
+- [x] 2.1 新增 6/8/9/12/16 preset，并由一个可测试的矩阵/递归树生成器生成。
+- [x] 2.2 `firstAvailableChartCellId` 改为 ID factory + capacity check。
+- [x] 2.3 引入 `WorkspaceLayoutGeometry`，输出 leaf/split rect。
+- [x] 2.4 引入稳定 `WorkspaceCellLayer`；Cell 作为稳定 keyed sibling，不由递归 DOM 位置拥有 runtime。
+- [x] 2.5 split handle 使用独立 overlay，锁定、拖动、键盘和触摸行为保持可访问。
+- [x] 2.6 用 ResizeObserver 定义密度档：完整 header、紧凑 header、极简状态；功能不因窄 Cell 静默消失。
+- [x] 2.7 最大化时暂停被遮挡 Cell 的 Canvas/indicator preview，保留共享 store 和可恢复状态。
+- [x] 2.8 切换 preset、换位和调整 ratio 不重建未变化 Cell 的 market/indicator/drawing runtime。
+- [x] 2.9 添加 4K、1440p、1080p 的 16 Cell 可用性检查；低分辨率明确提示空间不足，不强行挤压到不可操作。
 
 ### 测试
 
@@ -655,10 +655,31 @@ MULTI_CHART_64_ENABLED=0
 
 ### 验收
 
-- [ ] `MULTI_CHART_16_ENABLED=1` 时可创建、保存、刷新恢复 4×4；
-- [ ] 16 Cell 不要求每次布局编辑重连 K 线或指标；
-- [ ] 第 17 个 Cell fail closed；
-- [ ] 无 React key、hook、Canvas attach/detach 错误。
+- [x] `MULTI_CHART_16_ENABLED=1` 时可创建、保存、刷新恢复 4×4；
+- [x] 16 Cell 不要求每次布局编辑重连 K 线或指标；
+- [x] 第 17 个 Cell fail closed；
+- [x] 无 React key、hook、Canvas attach/detach 错误。
+
+### Phase 2 实施记录（2026-08-06）
+
+1. 新增 `grid-6`、`grid-8`、`grid-9`、`grid-12`、`grid-16`，由同一矩阵/平衡递归生成器创建等尺寸 split tree；production preset 沿用当前可见 ID，并通过 collision-checked factory 补齐 opaque ID。定向测试验证每个 preset 的 leaf 数、ID 唯一性、31-node 上限和归一化矩形无面积重叠。
+2. `firstAvailableChartCellId` 现在同时接收 occupied ID、每窗口 capacity 和 ID factory；运行时 flag 开启时上限为 16，flag 关闭时保持 legacy 4。`setChartWorkspaceDocumentLayout` 原子创建 preset 所需 Cell state，第 17 个 split 和超过 flag 上限的 preset 均返回原 document，不产生部分布局。
+3. 原递归 DOM renderer 已替换为 `WorkspaceLayoutGeometry → WorkspaceCellLayer + WorkspaceSplitHandleLayer`。所有 `LiveChartCell` 是同一稳定父层下以 Cell ID 为 key 的 sibling；split tree 只计算 leaf/split/handle rect，不再拥有 chart runtime。ratio 拖动保持 pointer/touch capture，分隔线继续提供 separator role、方向、数值、锁定、Home/End 和方向键。
+4. 每个 Cell 由 ResizeObserver 在 `full/compact/minimal` 三档间切换；布局层按真实最小 Cell CSS 尺寸判断空间。真实 Chrome 中 1600×900 的最小 Cell 为约 298×198 px，1920×1080 仍明确显示空间不足；2560×1440 和 3840×2160 为 sufficient/full，不以隐藏布局操作强行塞入低分辨率。
+5. 最大化保留 16 个 runtime 和 Canvas DOM，15 个遮挡 Cell 标为 paused：indicator realtime preview 关闭，Canvas 使用 `content-visibility: hidden` 停止绘制。还原后 16/16 mount token、首图 `BTCUSDT 15m` 会话标签和首图 13 个 Canvas 均未变化；组件未卸载，因此 indicator/drawing store 和视口控制器也保持原实例。
+6. 真实 headed Chrome 的稳定挂载计数为：ratio 键盘调整 16/16 未变化、拖拽换位 16/16、16→12 preset 的保留 Cell 12/12、最大化/还原 16/16。刷新后 v6 `revision=13 → 13`，16 个持久 Cell ID、顺序和 DOM 完全一致；全程 0 console error、0 warning、0 React key/hook/Canvas attach-detach 异常。
+7. 键盘验证证明 DOM 顺序与按 top/left 排序的视觉顺序一致，visual index 为连续 0～15；方向键从首行 `cell-2` 向右聚焦换位后的 `cell-1`。4×4 的 15 个布局 separator 全部可聚焦，锁定测试则全部 `aria-disabled=true/tabIndex=-1`。
+8. 容量脚本已从 v5/4 Cell bootstrap 升级为 v6 的 1/2/4/8/16 矩阵。真实 S1 16 图结果为 pass：16/16 live、0 console/runtime/network error、0 Canvas remount、同 series 只新增 1 个 backend lease、10 秒采样 0 long task。该 Phase 2 样本导航到 ready 为 4.532 秒，尚未达到 Phase 5 的热库 ≤3 秒终验门槛；该差距保留给 Phase 3～5 的 broker/scheduler 和容量优化，未放宽阈值。
+9. 真实回滚重建默认关闭 flag 后，页面只投影持久布局的前四个 Cell，显示 `quad` 且不提供 6～16 preset；独立 v6 store 仍为 `revision=13`、16 个 Cell state 和 16-leaf layout，未删除或改写数据，console error/warning 均为 0。
+10. 完整前端门禁为 architecture、plugins、typecheck、lint、`3009/3009` tests 和默认关闭 flag 的 production build 全部通过。Phase 2 未修改后端生产代码。
+
+机器可读证据：
+
+- `docs/perf-baselines/multi-chart-workspace/phase2-layout-runtime-20260806.json`
+- `docs/perf-baselines/multi-chart-workspace/phase2-s1-16cell-20260806.json`
+- `docs/perf-baselines/multi-chart-workspace/hardware-profile-phase2-20260806.json`
+
+真实浏览器截图和后端只读快照保存在忽略版本控制的 `output/playwright/multi-chart-capacity/`。
 
 ### 回滚
 

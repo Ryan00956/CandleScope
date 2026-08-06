@@ -19,6 +19,7 @@ export interface ChartCellCanvasProps {
   errorBoundary?: ComponentType<PropsWithChildren>;
   drawingInteractionReady?: boolean;
   onDrawingInteractionReadyChange?: (ready: boolean) => void;
+  paused?: boolean;
 }
 
 function ChartCellCanvas({
@@ -29,6 +30,7 @@ function ChartCellCanvas({
   errorBoundary = ChartErrorBoundary,
   drawingInteractionReady = false,
   onDrawingInteractionReadyChange,
+  paused = false,
 }: ChartCellCanvasProps) {
   const Boundary = errorBoundary;
   const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
@@ -91,7 +93,7 @@ function ChartCellCanvas({
 
   return (
     <Boundary>
-      <SingleChartPanes {...chartProps} />
+      <SingleChartPanes {...chartProps} suspended={paused} />
     </Boundary>
   );
 }

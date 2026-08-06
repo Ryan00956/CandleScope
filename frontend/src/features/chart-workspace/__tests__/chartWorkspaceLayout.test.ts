@@ -10,6 +10,7 @@ import {
   normalizeChartSplitRatio,
   normalizeChartWorkspaceLayoutTree,
   parseChartWorkspaceLayoutTree,
+  projectChartWorkspaceLayoutTree,
   ratioFromPointerPosition,
   resetChartWorkspaceLayout,
   splitChartWorkspaceCell,
@@ -17,6 +18,41 @@ import {
   updateChartWorkspaceSplitRatio,
   visibleCellIds,
 } from "../chartWorkspaceLayout.js";
+
+test("high-density presets expose exact leaf counts and survive opaque Cell IDs", () => {
+  for (const [template, count] of [["grid-6", 6], ["grid-8", 8], ["grid-9", 9], ["grid-12", 12], ["grid-16", 16]] as const) {
+    const cellIds = Array.from({ length: count }, (_, index) => `cell-opaque-${index + 1}`);
+    const tree = createChartWorkspaceLayoutTree(template, undefined, cellIds);
+    assert.equal(visibleCellIds(tree).length, count);
+    assert.equal(detectChartWorkspaceLayout(tree), template);
+  }
+});
+
+test("Cell ID allocation delegates to the factory and fails closed at capacity", () => {
+  const tree = createChartWorkspaceLayoutTree("split-vertical");
+  const occupied = new Set(["cell-1", "cell-2", "cell-retired"]);
+  let factorySawRetired = false;
+  assert.equal(firstAvailableChartCellId(tree, {
+    occupiedCellIds: occupied,
+    maxCells: 3,
+    createCellId: (ids) => {
+      factorySawRetired = ids.has("cell-retired");
+      return "cell-dynamic-next";
+    },
+  }), "cell-dynamic-next");
+  assert.equal(factorySawRetired, true);
+  assert.equal(firstAvailableChartCellId(tree, { maxCells: 2 }), null);
+});
+
+test("flag-off projection exposes only the first four cells without mutating the v6 tree", () => {
+  const tree = createChartWorkspaceLayoutTree("grid-16");
+  const serialized = JSON.stringify(tree);
+  const projected = projectChartWorkspaceLayoutTree(tree, 4);
+  assert.deepEqual(visibleCellIds(projected), ["cell-1", "cell-2", "cell-3", "cell-4"]);
+  assert.equal(detectChartWorkspaceLayout(projected), "quad");
+  assert.equal(JSON.stringify(tree), serialized);
+  assert.equal(visibleCellIds(tree).length, 16);
+});
 
 test("split ratios clamp to a usable 20 to 80 percent range", () => {
   assert.equal(normalizeChartSplitRatio(-1), 0.2);

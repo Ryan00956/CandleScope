@@ -1,11 +1,12 @@
 import { useRef, type RefObject } from "react";
+import type { WorkspaceLayoutSplitGeometry } from "./chartWorkspaceGeometry.js";
+import { workspaceLayoutRectStyle } from "./chartWorkspaceGeometry.js";
 import {
   MAX_CHART_SPLIT_RATIO,
   MIN_CHART_SPLIT_RATIO,
   normalizeChartSplitRatio,
   ratioFromPointerPosition,
 } from "./chartWorkspaceLayout.js";
-import type { ChartWorkspaceSplitDirection } from "./chartWorkspaceTypes.js";
 
 interface DragState {
   pointerId: number;
@@ -13,65 +14,66 @@ interface DragState {
 }
 
 export interface WorkspaceSplitHandleProps {
-  containerRef: RefObject<HTMLDivElement | null>;
-  splitId: string;
-  direction: ChartWorkspaceSplitDirection;
-  ratio: number;
+  rootRef: RefObject<HTMLDivElement | null>;
+  split: WorkspaceLayoutSplitGeometry;
   disabled?: boolean;
+  onPreview(splitId: string, ratio: number | null): void;
   onCommit(splitId: string, ratio: number): void;
 }
 
 export default function WorkspaceSplitHandle({
-  containerRef,
-  splitId,
-  direction,
-  ratio,
+  rootRef,
+  split,
   disabled = false,
+  onPreview,
   onCommit,
 }: WorkspaceSplitHandleProps) {
   const dragRef = useRef<DragState | null>(null);
-  const orientation = direction === "columns" ? "vertical" : "horizontal";
-
-  const previewRatio = (nextRatio: number) => {
-    containerRef.current?.style.setProperty("--workspace-split-ratio", `${nextRatio * 100}%`);
-  };
+  const orientation = split.direction === "columns" ? "vertical" : "horizontal";
   const commitRatio = (nextRatio: number) => {
-    onCommit(splitId, normalizeChartSplitRatio(nextRatio, ratio));
+    onCommit(split.splitId, normalizeChartSplitRatio(nextRatio, split.ratio));
   };
 
   return (
     <div
       className={`workspace-split-handle workspace-split-handle-${orientation}`}
-      data-split-id={splitId}
-      data-split-direction={direction}
+      data-split-id={split.splitId}
+      data-split-direction={split.direction}
       role="separator"
-      aria-label={direction === "columns" ? "调整左右图表宽度" : "调整上下图表高度"}
+      aria-label={split.direction === "columns" ? "调整左右图表宽度" : "调整上下图表高度"}
       aria-orientation={orientation}
       aria-valuemin={Math.round(MIN_CHART_SPLIT_RATIO * 100)}
       aria-valuemax={Math.round(MAX_CHART_SPLIT_RATIO * 100)}
-      aria-valuenow={Math.round(ratio * 100)}
+      aria-valuenow={Math.round(split.ratio * 100)}
       aria-disabled={disabled}
       tabIndex={disabled ? -1 : 0}
+      style={workspaceLayoutRectStyle(split.handleRect)}
       onPointerDown={(event) => {
         if (disabled || event.button !== 0) return;
         event.preventDefault();
         event.stopPropagation();
         event.currentTarget.setPointerCapture(event.pointerId);
-        dragRef.current = { pointerId: event.pointerId, ratio };
+        dragRef.current = { pointerId: event.pointerId, ratio: split.ratio };
       }}
       onPointerMove={(event) => {
         const drag = dragRef.current;
-        const container = containerRef.current;
-        if (!drag || drag.pointerId !== event.pointerId || !container) return;
-        const rect = container.getBoundingClientRect();
+        const root = rootRef.current;
+        if (!drag || drag.pointerId !== event.pointerId || !root) return;
+        const rootRect = root.getBoundingClientRect();
+        const containerStart = split.direction === "columns"
+          ? rootRect.left + split.rect.x * rootRect.width
+          : rootRect.top + split.rect.y * rootRect.height;
+        const containerSize = split.direction === "columns"
+          ? split.rect.width * rootRect.width
+          : split.rect.height * rootRect.height;
         const next = ratioFromPointerPosition(
-          direction === "columns" ? event.clientX : event.clientY,
-          direction === "columns" ? rect.left : rect.top,
-          direction === "columns" ? rect.width : rect.height,
+          split.direction === "columns" ? event.clientX : event.clientY,
+          containerStart,
+          containerSize,
         );
         if (next === null) return;
         drag.ratio = next;
-        previewRatio(next);
+        onPreview(split.splitId, next);
         event.currentTarget.setAttribute("aria-valuenow", String(Math.round(next * 100)));
       }}
       onPointerUp={(event) => {
@@ -85,32 +87,29 @@ export default function WorkspaceSplitHandle({
         const drag = dragRef.current;
         if (!drag || drag.pointerId !== event.pointerId) return;
         dragRef.current = null;
-        previewRatio(ratio);
+        onPreview(split.splitId, null);
       }}
       onDoubleClick={(event) => {
         if (disabled) return;
         event.preventDefault();
         event.stopPropagation();
-        previewRatio(0.5);
         commitRatio(0.5);
       }}
       onKeyDown={(event) => {
         if (disabled) return;
-        const decrement = direction === "columns"
+        const decrement = split.direction === "columns"
           ? event.key === "ArrowLeft"
           : event.key === "ArrowUp";
-        const increment = direction === "columns"
+        const increment = split.direction === "columns"
           ? event.key === "ArrowRight"
           : event.key === "ArrowDown";
-        let next = ratio;
+        let next = split.ratio;
         if (decrement) next -= 0.02;
         else if (increment) next += 0.02;
         else if (event.key === "Home") next = MIN_CHART_SPLIT_RATIO;
         else if (event.key === "End") next = MAX_CHART_SPLIT_RATIO;
         else return;
         event.preventDefault();
-        next = normalizeChartSplitRatio(next, ratio);
-        previewRatio(next);
         commitRatio(next);
       }}
     />

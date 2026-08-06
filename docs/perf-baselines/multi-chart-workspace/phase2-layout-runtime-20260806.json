@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase2-layout-runtime/1",
+  "generatedAt": "2026-08-06T09:02:07.7425280Z",
+  "git": {
+    "baselineCommit": "6c068ba4a5f761aa5d597fe014d9c71b8427a534",
+    "dirtyDuringMeasurement": true
+  },
+  "environment": {
+    "browser": "Chrome/151.0.7922.71",
+    "frontendUrl": "http://127.0.0.1:15285/",
+    "backendUrl": "http://127.0.0.1:18081",
+    "hardwareProfile": "hardware-profile-phase2-20260806.json",
+    "hardwareProfileSha256": "sha256:88973308182b77405db1eca6499d8e13f7979d58ad904a2b337e72b9ff345376"
+  },
+  "featureEnabled": {
+    "flag": "VITE_MULTI_CHART_16_ENABLED=1",
+    "layout": "grid-16",
+    "visibleCells": 16,
+    "liveCells": 16,
+    "consoleErrors": 0,
+    "consoleWarningsAfterReload": 0,
+    "responsive": [
+      {
+        "viewport": [1600, 900],
+        "space": "insufficient",
+        "warningVisible": true,
+        "minimumCellCssPixels": [298, 198]
+      },
+      {
+        "viewport": [1920, 1080],
+        "space": "insufficient",
+        "density": "compact"
+      },
+      {
+        "viewport": [2560, 1440],
+        "space": "sufficient",
+        "density": "full"
+      },
+      {
+        "viewport": [3840, 2160],
+        "space": "sufficient",
+        "density": "full"
+      }
+    ],
+    "stableMounts": {
+      "ratioKeyboardEdit": { "unchanged": 16, "total": 16 },
+      "dragSwap": { "unchanged": 16, "total": 16 },
+      "preset16To12": { "unchanged": 12, "total": 12 },
+      "maximizeRestore": { "unchanged": 16, "total": 16 }
+    },
+    "maximize": {
+      "mountedCells": 16,
+      "obscuredCells": 15,
+      "pausedCells": 15,
+      "canvasElementsRetained": 210,
+      "restoredSessionLabel": "BTCUSDT 15m 图表",
+      "restoredCellCanvasCount": 13
+    },
+    "accessibility": {
+      "domOrderMatchesSpatialOrder": true,
+      "visualIndexesContiguous": true,
+      "keyboardMove": { "from": "cell-2", "right": "cell-1" },
+      "layoutSeparators": 15,
+      "layoutSeparatorsFocusable": true
+    },
+    "persistence": {
+      "database": "candlescope-chart-workspaces-v6",
+      "store": "workspaces-v6",
+      "schemaVersion": 6,
+      "revisionBeforeReload": 13,
+      "revisionAfterReload": 13,
+      "cellStates": 16,
+      "layoutCells": 16,
+      "domOrderMatchedPersistedOrder": true
+    }
+  },
+  "rollback": {
+    "flag": "VITE_MULTI_CHART_16_ENABLED=0",
+    "projectedVisibleCells": 4,
+    "projectedLayout": "quad",
+    "highDensityPresetButtons": 0,
+    "persistedRevision": 13,
+    "persistedCellStates": 16,
+    "persistedLayoutCells": 16,
+    "persistedDataDeleted": false,
+    "consoleErrors": 0,
+    "consoleWarnings": 0
+  },
+  "capacityEvidence": "phase2-s1-16cell-20260806.json",
+  "artifacts": [
+    "output/playwright/multi-chart-capacity/phase2-1600x900-16cell.png",
+    "output/playwright/multi-chart-capacity/phase2-2560x1440-16cell.png",
+    "output/playwright/multi-chart-capacity/phase2-s1-16/s1-16cell.png",
+    "output/playwright/multi-chart-capacity/phase2-s1-16/s1-16cell.trace.json"
+  ],
+  "result": "pass"
+}

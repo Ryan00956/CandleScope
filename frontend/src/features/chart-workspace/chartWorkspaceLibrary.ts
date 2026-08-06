@@ -15,9 +15,11 @@ import {
   normalizeChartWorkspace,
 } from "./chartWorkspaceStorage.js";
 import {
+  chartWorkspaceTemplateCellCount,
   createChartWorkspaceLayoutTree,
   detectChartWorkspaceLayout,
 } from "./chartWorkspaceLayout.js";
+import { createChartCellId } from "./chartWorkspaceIdentity.js";
 import {
   activeChartWorkspaceWindow,
   chartWorkspaceCell,
@@ -34,6 +36,11 @@ export const CHART_WORKSPACE_TEMPLATE_NAMES: Record<ChartWorkspaceTemplateId, st
   "split-horizontal": "上下双图",
   "main-confirmation": "主图与确认图",
   quad: "四图工作区",
+  "grid-6": "六图工作区",
+  "grid-8": "八图工作区",
+  "grid-9": "九图工作区",
+  "grid-12": "十二图工作区",
+  "grid-16": "十六图工作区",
 };
 
 export function chartCellStorageScope(
@@ -140,10 +147,19 @@ export function createTemplateChartWorkspaceDocument(
     priceScale: cloneSerializable(anchor.priceScale),
     indicators: cloneSerializable(anchor.indicators),
   });
-  document.cells = Object.fromEntries(CHART_CELL_IDS.map((cellId, index) => [
+  const targetCount = chartWorkspaceTemplateCellCount(templateId);
+  const targetCellIds: ChartCellId[] = [...CHART_CELL_IDS];
+  const occupied = new Set<ChartCellId>(targetCellIds);
+  while (targetCellIds.length < targetCount) {
+    const cellId = createChartCellId(occupied);
+    if (!cellId) throw new Error(`Unable to allocate Cell ID for ${templateId}`);
+    occupied.add(cellId);
+    targetCellIds.push(cellId);
+  }
+  document.cells = Object.fromEntries(targetCellIds.map((cellId, index) => [
     cellId,
     {
-      ...copyCellPreferences(chartWorkspaceCell(document, cellId), index),
+      ...copyCellPreferences(document.cells[cellId] ?? { ...anchor, id: cellId }, index),
       linkRole: templateId === "main-confirmation"
         ? index === 0 ? "source" : index < 3 ? "destination" : "bidirectional"
         : "bidirectional",
@@ -152,7 +168,11 @@ export function createTemplateChartWorkspaceDocument(
   const window = activeChartWorkspaceWindow(document);
   return replaceChartWorkspaceWindow(document, {
     ...window,
-    layoutTree: createChartWorkspaceLayoutTree(templateId),
+    layoutTree: createChartWorkspaceLayoutTree(
+      templateId,
+      undefined,
+      targetCellIds.slice(0, targetCount),
+    ),
     activeCellId: "cell-1",
     maximizedCellId: null,
   });

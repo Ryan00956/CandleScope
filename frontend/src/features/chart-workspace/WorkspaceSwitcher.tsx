@@ -23,6 +23,11 @@ const TEMPLATE_OPTIONS: ReadonlyArray<{
   { id: "split-horizontal", label: "上下双图", description: "上下确认", glyph: "▭" },
   { id: "main-confirmation", label: "主图 / 确认图", description: "左主图 + 右双确认", glyph: "◧" },
   { id: "quad", label: "四图", description: "多周期工作台", glyph: "▦" },
+  { id: "grid-6", label: "六图", description: "2 × 3 矩阵", glyph: "2×3" },
+  { id: "grid-8", label: "八图", description: "2 × 4 矩阵", glyph: "2×4" },
+  { id: "grid-9", label: "九图", description: "3 × 3 矩阵", glyph: "3×3" },
+  { id: "grid-12", label: "十二图", description: "3 × 4 矩阵", glyph: "3×4" },
+  { id: "grid-16", label: "十六图", description: "4 × 4 矩阵", glyph: "4×4" },
 ];
 
 const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], string> = {
@@ -31,6 +36,11 @@ const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], string> = {
   "split-horizontal": "上下双图",
   "main-confirmation": "主图 / 确认图",
   quad: "四图",
+  "grid-6": "六图",
+  "grid-8": "八图",
+  "grid-9": "九图",
+  "grid-12": "十二图",
+  "grid-16": "十六图",
   custom: "自定义布局",
 };
 
@@ -56,6 +66,7 @@ export interface WorkspaceSwitcherProps {
   saveState: ChartWorkspaceSaveState;
   persistenceMode: ChartWorkspacePersistenceMode | null;
   error: string | null;
+  maxCellsPerWindow: number;
   onSwitch(workspaceId: ChartWorkspaceId): void;
   onCreate(templateId: ChartWorkspaceTemplateId): void;
   onDuplicate(workspaceId: ChartWorkspaceId): void;
@@ -71,6 +82,7 @@ export default function WorkspaceSwitcher({
   saveState,
   persistenceMode,
   error,
+  maxCellsPerWindow,
   onSwitch,
   onCreate,
   onDuplicate,
@@ -266,7 +278,13 @@ export default function WorkspaceSwitcher({
               <span>沿用当前品种与图表偏好</span>
             </div>
             <div className="workspace-template-grid">
-              {TEMPLATE_OPTIONS.map((template) => (
+              {TEMPLATE_OPTIONS.filter((template) => {
+                const cells = Number(template.id.match(/grid-(\d+)/)?.[1]
+                  ?? (template.id === "quad" ? 4
+                    : template.id === "main-confirmation" ? 3
+                      : template.id === "single" ? 1 : 2));
+                return cells <= maxCellsPerWindow;
+              }).map((template) => (
                 <button
                   key={template.id}
                   type="button"

@@ -253,6 +253,7 @@ import type { MainChartType } from "../shared/mainChartTypes.js";
 import type { IntervalString } from "../utils/intervals.js";
 
 export interface SingleChartPanesProps {
+  suspended?: boolean;
   seriesStore?: SeriesWindowStore | null;
   symbol: string;
   drawingKeyBase?: string;
@@ -1221,6 +1222,7 @@ function buildPaneDescriptors({
 }
 
 const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(function SingleChartPanes({
+  suspended = false,
   seriesStore = null,
   symbol,
   drawingKeyBase = "",
@@ -5107,6 +5109,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   return (
     <div
       className="chart-area multi-pane-chart"
+      data-rendering-suspended={suspended ? "true" : "false"}
       ref={wrapperRef}
       onPointerMove={handleChartPanePointerMove}
       onPointerLeave={handleChartPanePointerLeave}

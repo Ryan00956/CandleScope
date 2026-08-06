@@ -6,6 +6,7 @@ import {
   type ChartWindowState,
   type ChartWorkspaceDocument,
   type ChartWorkspaceSplitDirection,
+  type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
 import {
   LEGACY_VISIBLE_CELLS_PER_WINDOW,
@@ -18,7 +19,9 @@ import {
   replaceChartWorkspaceWindow,
 } from "./chartWorkspaceDocument.js";
 import {
+  chartWorkspaceTemplateCellCount,
   closeChartWorkspaceCell,
+  createChartWorkspaceLayoutTree,
   firstAvailableChartCellId,
   resetChartWorkspaceLayout,
   splitChartWorkspaceCell,
@@ -106,14 +109,80 @@ function allocateCellId(
     Math.max(1, options.maxCellsPerWindow ?? LEGACY_VISIBLE_CELLS_PER_WINDOW),
   );
   if (visibleCellIds(window.layoutTree).length >= maxCellsPerWindow) return null;
-  if (!options.allowDynamicCellIds) return firstAvailableChartCellId(window.layoutTree);
+  if (!options.allowDynamicCellIds) {
+    const visible = new Set(visibleCellIds(window.layoutTree));
+    return ["cell-1", "cell-2", "cell-3", "cell-4"]
+      .find((cellId) => !visible.has(cellId)) ?? null;
+  }
   const occupied = new Set(Object.keys(document.cells));
   const maxCellsPerApp = Math.min(
     MAX_CELLS_PER_APP,
     Math.max(1, options.maxCellsPerApp ?? MAX_CELLS_PER_APP),
   );
   if (occupied.size >= maxCellsPerApp) return null;
-  return (options.createCellId ?? createChartCellId)(occupied);
+  return firstAvailableChartCellId(window.layoutTree, {
+    occupiedCellIds: occupied,
+    maxCells: maxCellsPerWindow,
+    createCellId: options.createCellId ?? createChartCellId,
+  });
+}
+
+export function setChartWorkspaceDocumentLayout(
+  document: ChartWorkspaceDocument,
+  templateId: ChartWorkspaceTemplateId,
+  options: ChartWorkspaceEditOptions = {},
+): ChartWorkspaceEditResult {
+  const window = editWindow(document, options);
+  if (window.layoutLocked) return { document, restoreCellIds: [] };
+  const targetCount = chartWorkspaceTemplateCellCount(templateId);
+  const maxCellsPerWindow = Math.min(
+    MAX_CELLS_PER_WINDOW,
+    Math.max(1, options.maxCellsPerWindow ?? LEGACY_VISIBLE_CELLS_PER_WINDOW),
+  );
+  if (targetCount > maxCellsPerWindow) return { document, restoreCellIds: [] };
+
+  const currentCellIds = visibleCellIds(window.layoutTree);
+  const targetCellIds = currentCellIds.slice(0, targetCount);
+  const occupied = new Set(Object.keys(document.cells));
+  const reusable = Object.keys(document.cells).filter((cellId) => !currentCellIds.includes(cellId));
+  while (targetCellIds.length < targetCount && reusable.length > 0) {
+    targetCellIds.push(reusable.shift()!);
+  }
+  const maxCellsPerApp = Math.min(
+    MAX_CELLS_PER_APP,
+    Math.max(1, options.maxCellsPerApp ?? MAX_CELLS_PER_APP),
+  );
+  const createdCellIds: ChartCellId[] = [];
+  while (targetCellIds.length < targetCount) {
+    if (!options.allowDynamicCellIds || occupied.size >= maxCellsPerApp) {
+      return { document, restoreCellIds: [] };
+    }
+    const newCellId = (options.createCellId ?? createChartCellId)(occupied);
+    if (!newCellId || occupied.has(newCellId)) return { document, restoreCellIds: [] };
+    occupied.add(newCellId);
+    targetCellIds.push(newCellId);
+    createdCellIds.push(newCellId);
+  }
+
+  const layoutTree = createChartWorkspaceLayoutTree(templateId, undefined, targetCellIds);
+  const sameTree = JSON.stringify(layoutTree) === JSON.stringify(window.layoutTree);
+  if (sameTree && window.maximizedCellId === null) return { document, restoreCellIds: [] };
+  const source = document.cells[window.activeCellId] ?? document.cells[currentCellIds[0]!];
+  if (!source) return { document, restoreCellIds: [] };
+  const cells = { ...document.cells };
+  for (const cellId of createdCellIds) cells[cellId] = copiedCell(source, cellId);
+  const activeCellId = targetCellIds.includes(window.activeCellId)
+    ? window.activeCellId
+    : targetCellIds[0]!;
+  return {
+    document: replaceChartWorkspaceWindow({ ...document, cells }, {
+      ...window,
+      layoutTree,
+      activeCellId,
+      maximizedCellId: null,
+    }),
+    restoreCellIds: [],
+  };
 }
 
 export function splitChartWorkspaceDocument(

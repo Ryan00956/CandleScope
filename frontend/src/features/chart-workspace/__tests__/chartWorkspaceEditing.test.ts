@@ -10,6 +10,7 @@ import {
   recordChartWorkspaceLayoutEdit,
   redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
+  setChartWorkspaceDocumentLayout,
   splitChartWorkspaceDocument,
   swapChartWorkspaceDocumentCells,
   undoChartWorkspaceLayoutEdit,
@@ -185,6 +186,47 @@ test("dynamic editing creates 16 unique IDs and never reuses a closed ID", () =>
   assert.equal(visible(document).length, 16);
   assert.ok(!visible(document).includes(closedId));
   assert.ok(document.cells[closedId]);
+});
+
+test("16-cell preset, split rejection, undo, and redo preserve the complete layout", () => {
+  let sequence = 0;
+  const options: ChartWorkspaceEditOptions = {
+    allowDynamicCellIds: true,
+    maxCellsPerWindow: 16,
+    maxCellsPerApp: 64,
+    createCellId: (occupied) => {
+      let id: ChartCellId;
+      do id = `cell-preset-${++sequence}`; while (occupied.has(id));
+      return id;
+    },
+  };
+  const before = createDefaultChartWorkspace();
+  const preset = setChartWorkspaceDocumentLayout(before, "grid-16", options);
+  assert.equal(visible(preset.document).length, 16);
+  assert.equal(new Set(visible(preset.document)).size, 16);
+  const rejected = splitChartWorkspaceDocument(
+    preset.document,
+    visible(preset.document)[0]!,
+    "columns",
+    "copy",
+    options,
+  );
+  assert.equal(rejected.document, preset.document);
+
+  let history = recordChartWorkspaceLayoutEdit(createEmptyChartWorkspaceLayoutHistory(), before, preset);
+  const undo = undoChartWorkspaceLayoutEdit(preset.document, history);
+  assert.ok(undo);
+  assert.deepEqual(visible(undo.document), ["cell-1"]);
+  history = undo.history;
+  const redo = redoChartWorkspaceLayoutEdit(undo.document, history);
+  assert.ok(redo);
+  assert.equal(visible(redo.document).length, 16);
+
+  const disabled = setChartWorkspaceDocumentLayout(before, "grid-6", {
+    ...options,
+    maxCellsPerWindow: 4,
+  });
+  assert.equal(disabled.document, before);
 });
 
 test("dynamic undo and redo restore the same ID and its complete edited snapshot", () => {

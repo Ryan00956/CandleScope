@@ -33,6 +33,10 @@ import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspac
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
 import { writeChartCellDragData } from "../features/chart-workspace/chartWorkspaceDrag.js";
 import WorkspaceCellLayoutMenu from "../features/chart-workspace/WorkspaceCellLayoutMenu.js";
+import {
+  workspaceCellDensityForSize,
+  type WorkspaceCellDensity,
+} from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
@@ -75,6 +79,7 @@ const DrawingToolbar = lazy(() => {
   return import("../features/drawings/DrawingToolbar.js");
 });
 const RightMarketRail = lazy(() => import("./RightMarketRail.js"));
+let liveChartCellMountSequence = 0;
 
 export interface WorkspacePortalHosts {
   topBar: HTMLElement | null;
@@ -99,7 +104,9 @@ export interface LiveChartCellProps {
   layoutRole: ChartWorkspaceCellRole | null;
   active: boolean;
   maximized: boolean;
+  obscured: boolean;
   layoutCellIds: readonly ChartCellId[];
+  maxCellsPerWindow: number;
   layoutEditingDisabled?: boolean;
   pageExportRef: RefObject<HTMLDivElement | null>;
   foregroundPreloadGate: ForegroundPreloadGate;
@@ -135,7 +142,9 @@ function LiveChartCell({
   layoutRole,
   active,
   maximized,
+  obscured,
   layoutCellIds,
+  maxCellsPerWindow,
   layoutEditingDisabled = false,
   pageExportRef,
   foregroundPreloadGate,
@@ -159,6 +168,26 @@ function LiveChartCell({
   onOpenReplayLauncher,
   onActiveEnvironmentChange,
 }: LiveChartCellProps) {
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const [density, setDensity] = useState<WorkspaceCellDensity>("full");
+  const [mountToken] = useState(() => {
+    liveChartCellMountSequence += 1;
+    return `${cell.id}:${liveChartCellMountSequence}`;
+  });
+  useLayoutEffect(() => {
+    const element = sectionRef.current;
+    if (!element) return undefined;
+    const update = () => {
+      const rect = element.getBoundingClientRect();
+      const next = workspaceCellDensityForSize(rect.width, rect.height);
+      setDensity((current) => current === next ? current : next);
+    };
+    update();
+    if (typeof ResizeObserver !== "function") return undefined;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const chartSurface = useChartSurfaceRuntime();
   const cellStorageScope = chartCellStorageScope(workspaceId, cell.id);
   const realtimePriceRef = useRef<number | null>(null);
@@ -257,6 +286,7 @@ function LiveChartCell({
     getCurrentVisibleRange: chartSurface.actions.getVisibleRange,
     onIndicatorRemoved: drawings.actions.handleIndicatorRemoved,
     indicatorPersistence,
+    realtimeEnabled: !obscured,
   });
   const exportFlow = useExportRuntime({
     session: chartSession,
@@ -483,12 +513,20 @@ function LiveChartCell({
   return (
     <>
       <section
+        ref={sectionRef}
         className={`multi-chart-cell${active ? " active" : ""}${maximized ? " maximized" : ""}`}
         data-chart-cell-id={cell.id}
+        data-runtime-mount-token={mountToken}
+        data-density={density}
+        data-rendering-paused={obscured ? "true" : "false"}
         data-active={active ? "true" : "false"}
         data-layout-role={layoutRole ?? "standard"}
         data-link-group={cell.linkGroup ?? "none"}
         data-link-role={cell.linkRole}
+        role="group"
+        aria-label={`${chartSession.view.symbol} ${chartSession.view.interval} 图表`}
+        tabIndex={obscured ? -1 : active ? 0 : -1}
+        onFocus={activate}
         onPointerDown={activate}
       >
         <header className="multi-chart-cell-header" onDoubleClick={toggleMaximize}>
@@ -557,6 +595,7 @@ function LiveChartCell({
           <WorkspaceCellLayoutMenu
             cellId={cell.id}
             layoutCellIds={layoutCellIds}
+            maxCellsPerWindow={maxCellsPerWindow}
             disabled={layoutEditingDisabled || maximized}
             onSplit={onSplitCell}
             onClose={onCloseCell}
@@ -584,6 +623,7 @@ function LiveChartCell({
             pluginChartLayerSource={plugins.view.chartLayerSource}
             drawingInteractionReady={drawingInteractionReady}
             onDrawingInteractionReadyChange={setDrawingInteractionReady}
+            paused={obscured}
           />
           {active && model.chartWorkspace.exportPanel.isOpen && (
             <Suspense fallback={null}>

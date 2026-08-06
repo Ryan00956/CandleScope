@@ -45,8 +45,9 @@ import {
   type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
 import {
-  createChartWorkspaceLayoutTree,
+  chartWorkspaceTemplateCellCount,
   detectChartWorkspaceLayout,
+  projectChartWorkspaceLayoutTree,
   updateChartWorkspaceSplitRatio,
   visibleCellIds,
 } from "./chartWorkspaceLayout.js";
@@ -56,6 +57,7 @@ import {
   recordChartWorkspaceLayoutEdit,
   redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
+  setChartWorkspaceDocumentLayout,
   splitChartWorkspaceDocument,
   swapChartWorkspaceDocumentCells,
   undoChartWorkspaceLayoutEdit,
@@ -95,6 +97,8 @@ export interface ChartWorkspaceRuntime {
     activeCell: ChartWorkspaceDocument["cells"][ChartCellId];
     layoutCellIds: ChartCellId[];
     visibleCellIds: ChartCellId[];
+    maxCellsPerWindow: number;
+    multiChart16Enabled: boolean;
     layoutLocked: boolean;
     canUndoLayout: boolean;
     canRedoLayout: boolean;
@@ -397,6 +401,7 @@ export function useChartWorkspaceRuntime(
   }, [setLibrary]);
 
   const createWorkspace = useCallback((templateId: ChartWorkspaceTemplateId) => {
+    if (chartWorkspaceTemplateCellCount(templateId) > services.editOptions.maxCellsPerWindow) return;
     const snapshot = libraryRef.current;
     const source = activeWorkspace(snapshot);
     const createdAt = services.now();
@@ -481,28 +486,12 @@ export function useChartWorkspaceRuntime(
   }, []);
 
   const setLayout = useCallback((layout: ChartWorkspaceTemplateId) => {
-    updateActiveLayoutDocument((current) => {
-      const window = activeChartWorkspaceWindow(current);
-      const currentLayout = detectChartWorkspaceLayout(window.layoutTree);
-      const nextTree = currentLayout === layout
-        ? window.layoutTree
-        : createChartWorkspaceLayoutTree(layout);
-      const nextVisible = visibleCellIds(nextTree);
-      return {
-        document: window.layoutTree === nextTree && window.maximizedCellId === null
-          ? current
-          : replaceChartWorkspaceWindow(current, {
-            ...window,
-            layoutTree: nextTree,
-            maximizedCellId: null,
-            activeCellId: nextVisible.includes(window.activeCellId)
-              ? window.activeCellId
-              : nextVisible[0] ?? "cell-1",
-          }),
-        restoreCellIds: [],
-      };
-    });
-  }, [updateActiveLayoutDocument]);
+    updateActiveLayoutDocument((current) => setChartWorkspaceDocumentLayout(
+      current,
+      layout,
+      services.editOptions,
+    ));
+  }, [services, updateActiveLayoutDocument]);
 
   const splitCell = useCallback((
     cellId: ChartCellId,
@@ -739,7 +728,26 @@ export function useChartWorkspaceRuntime(
 
   const workspace = activeWorkspace(library);
   const document = workspace.document;
-  const activeWindow = activeChartWorkspaceWindow(document);
+  const persistedActiveWindow = activeChartWorkspaceWindow(document);
+  const activeWindow = useMemo<ChartWindowState>(() => {
+    const layoutTree = projectChartWorkspaceLayoutTree(
+      persistedActiveWindow.layoutTree,
+      services.editOptions.maxCellsPerWindow,
+    );
+    if (layoutTree === persistedActiveWindow.layoutTree) return persistedActiveWindow;
+    const projectedCellIds = visibleCellIds(layoutTree);
+    return {
+      ...persistedActiveWindow,
+      layoutTree,
+      activeCellId: projectedCellIds.includes(persistedActiveWindow.activeCellId)
+        ? persistedActiveWindow.activeCellId
+        : projectedCellIds[0]!,
+      maximizedCellId: persistedActiveWindow.maximizedCellId
+        && projectedCellIds.includes(persistedActiveWindow.maximizedCellId)
+        ? persistedActiveWindow.maximizedCellId
+        : null,
+    };
+  }, [persistedActiveWindow, services.editOptions.maxCellsPerWindow]);
   const layout = useMemo(
     () => detectChartWorkspaceLayout(activeWindow.layoutTree),
     [activeWindow.layoutTree],
@@ -773,6 +781,8 @@ export function useChartWorkspaceRuntime(
       activeCell,
       layoutCellIds,
       visibleCellIds: renderedCellIds,
+      maxCellsPerWindow: services.editOptions.maxCellsPerWindow,
+      multiChart16Enabled: CHART_WORKSPACE_FEATURE_FLAGS.multiChart16Enabled,
       layoutLocked: activeWindow.layoutLocked,
       canUndoLayout: layoutHistory.past.length > 0,
       canRedoLayout: layoutHistory.future.length > 0,

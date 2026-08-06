@@ -29,6 +29,28 @@ export const MAIN_CONFIRMATION_PRIMARY_RATIO = 0.68;
 export const MAX_LAYOUT_TREE_DEPTH = 16;
 export const MAX_LAYOUT_TREE_NODES = MAX_CELLS_PER_WINDOW * 2 - 1;
 
+export interface ChartWorkspaceMatrixPreset {
+  rows: number;
+  columns: number;
+}
+
+export const CHART_WORKSPACE_MATRIX_PRESETS = Object.freeze({
+  "grid-6": Object.freeze({ rows: 2, columns: 3 }),
+  "grid-8": Object.freeze({ rows: 2, columns: 4 }),
+  "grid-9": Object.freeze({ rows: 3, columns: 3 }),
+  "grid-12": Object.freeze({ rows: 3, columns: 4 }),
+  "grid-16": Object.freeze({ rows: 4, columns: 4 }),
+} satisfies Record<Extract<ChartWorkspaceTemplateId, `grid-${number}`>, ChartWorkspaceMatrixPreset>);
+
+export function chartWorkspaceTemplateCellCount(templateId: ChartWorkspaceTemplateId): number {
+  if (templateId === "single") return 1;
+  if (templateId === "split-vertical" || templateId === "split-horizontal") return 2;
+  if (templateId === "main-confirmation") return 3;
+  if (templateId === "quad") return 4;
+  const preset = CHART_WORKSPACE_MATRIX_PRESETS[templateId];
+  return preset.rows * preset.columns;
+}
+
 export interface ChartWorkspaceLayoutDiagnostic {
   code:
     | "invalid-node"
@@ -78,6 +100,51 @@ function splitNode(
   return { kind: "split", id, direction, ratio, first, second };
 }
 
+function defaultTemplateCellIds(count: number): ChartCellId[] {
+  return Array.from({ length: count }, (_, index) => `cell-${index + 1}`);
+}
+
+function combineLayoutNodes(
+  nodes: readonly ChartWorkspaceLayoutNode[],
+  direction: ChartWorkspaceSplitDirection,
+  idPrefix: string,
+): ChartWorkspaceLayoutNode {
+  if (nodes.length === 1) return nodes[0]!;
+  const firstCount = Math.floor(nodes.length / 2);
+  return splitNode(
+    `${idPrefix}-${nodes.length}`,
+    direction,
+    firstCount / nodes.length,
+    combineLayoutNodes(nodes.slice(0, firstCount), direction, `${idPrefix}-first`),
+    combineLayoutNodes(nodes.slice(firstCount), direction, `${idPrefix}-second`),
+  );
+}
+
+export function createChartWorkspaceMatrixLayoutTree(
+  cellIds: readonly ChartCellId[],
+  preset: ChartWorkspaceMatrixPreset,
+  idPrefix = "matrix",
+): ChartWorkspaceLayoutNode {
+  const expected = preset.rows * preset.columns;
+  if (cellIds.length !== expected
+    || expected < 1
+    || expected > MAX_CELLS_PER_WINDOW
+    || new Set(cellIds).size !== cellIds.length
+    || cellIds.some((cellId) => !isChartCellId(cellId))) {
+    throw new Error(`Matrix layout requires ${expected} unique valid Cell IDs`);
+  }
+  const rows = Array.from({ length: preset.rows }, (_, rowIndex) => (
+    combineLayoutNodes(
+      cellIds
+        .slice(rowIndex * preset.columns, (rowIndex + 1) * preset.columns)
+        .map((cellId) => cellNode(cellId)),
+      "columns",
+      `${idPrefix}-row-${rowIndex + 1}`,
+    )
+  ));
+  return combineLayoutNodes(rows, "rows", `${idPrefix}-rows`);
+}
+
 export function normalizeChartSplitRatio(value: unknown, fallback = 0.5): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -99,15 +166,21 @@ export function ratioFromPointerPosition(
 export function createChartWorkspaceLayoutTree(
   templateId: ChartWorkspaceTemplateId,
   ratios?: Partial<ChartWorkspaceLayoutRatios>,
+  requestedCellIds?: readonly ChartCellId[],
 ): ChartWorkspaceLayoutNode {
-  if (templateId === "single") return cellNode("cell-1");
+  const cellIds = requestedCellIds
+    ?? defaultTemplateCellIds(chartWorkspaceTemplateCellCount(templateId));
+  if (cellIds.length !== chartWorkspaceTemplateCellCount(templateId)) {
+    throw new Error(`${templateId} requires ${chartWorkspaceTemplateCellCount(templateId)} Cell IDs`);
+  }
+  if (templateId === "single") return cellNode(cellIds[0]!);
   if (templateId === "split-vertical") {
     return splitNode(
       "split-vertical-root",
       "columns",
       normalizeChartSplitRatio(ratios?.splitVertical),
-      cellNode("cell-1"),
-      cellNode("cell-2"),
+      cellNode(cellIds[0]!),
+      cellNode(cellIds[1]!),
     );
   }
   if (templateId === "split-horizontal") {
@@ -115,8 +188,8 @@ export function createChartWorkspaceLayoutTree(
       "split-horizontal-root",
       "rows",
       normalizeChartSplitRatio(ratios?.splitHorizontal),
-      cellNode("cell-1"),
-      cellNode("cell-2"),
+      cellNode(cellIds[0]!),
+      cellNode(cellIds[1]!),
     );
   }
   if (templateId === "main-confirmation") {
@@ -124,40 +197,47 @@ export function createChartWorkspaceLayoutTree(
       "main-confirmation-root",
       "columns",
       MAIN_CONFIRMATION_PRIMARY_RATIO,
-      cellNode("cell-1", "main"),
+      cellNode(cellIds[0]!, "main"),
       splitNode(
         "main-confirmation-confirmations",
         "rows",
         0.5,
-        cellNode("cell-2", "confirmation"),
-        cellNode("cell-3", "confirmation"),
+        cellNode(cellIds[1]!, "confirmation"),
+        cellNode(cellIds[2]!, "confirmation"),
       ),
     );
   }
-  return splitNode(
-    "quad-root",
-    "rows",
-    normalizeChartSplitRatio(ratios?.quadRows),
-    splitNode(
-      "quad-top",
-      "columns",
-      normalizeChartSplitRatio(ratios?.quadColumns),
-      cellNode("cell-1"),
-      cellNode("cell-2"),
-    ),
-    splitNode(
-      "quad-bottom",
-      "columns",
-      normalizeChartSplitRatio(ratios?.quadColumns),
-      cellNode("cell-3"),
-      cellNode("cell-4"),
-    ),
+  if (templateId === "quad") {
+    return splitNode(
+      "quad-root",
+      "rows",
+      normalizeChartSplitRatio(ratios?.quadRows),
+      splitNode(
+        "quad-top",
+        "columns",
+        normalizeChartSplitRatio(ratios?.quadColumns),
+        cellNode(cellIds[0]!),
+        cellNode(cellIds[1]!),
+      ),
+      splitNode(
+        "quad-bottom",
+        "columns",
+        normalizeChartSplitRatio(ratios?.quadColumns),
+        cellNode(cellIds[2]!),
+        cellNode(cellIds[3]!),
+      ),
+    );
+  }
+  return createChartWorkspaceMatrixLayoutTree(
+    cellIds,
+    CHART_WORKSPACE_MATRIX_PRESETS[templateId],
+    templateId,
   );
 }
 
 function layoutShape(node: ChartWorkspaceLayoutNode): string {
   if (node.kind === "cell") {
-    return `${node.cellId}:${node.role ?? "standard"}`;
+    return `cell:${node.role ?? "standard"}`;
   }
   return `${node.direction}(${layoutShape(node.first)},${layoutShape(node.second)})`;
 }
@@ -219,11 +299,52 @@ function nextSplitId(
   return `${stem}-overflow`;
 }
 
+export interface FirstAvailableChartCellIdOptions {
+  occupiedCellIds?: Iterable<ChartCellId>;
+  maxCells?: number;
+  createCellId?: (occupied: ReadonlySet<ChartCellId>) => ChartCellId | null;
+}
+
 export function firstAvailableChartCellId(
   tree: ChartWorkspaceLayoutNode,
+  options: FirstAvailableChartCellIdOptions = {},
 ): ChartCellId | null {
-  const visible = new Set(visibleCellIds(tree));
-  return CHART_CELL_IDS.find((cellId) => !visible.has(cellId)) ?? null;
+  const visibleCellIdList = visibleCellIds(tree);
+  const maxCells = Math.min(
+    MAX_CELLS_PER_WINDOW,
+    Math.max(1, options.maxCells ?? MAX_CELLS_PER_WINDOW),
+  );
+  if (visibleCellIdList.length >= maxCells) return null;
+  const occupied = new Set(options.occupiedCellIds ?? visibleCellIdList);
+  for (const cellId of visibleCellIdList) occupied.add(cellId);
+  const factory = options.createCellId ?? ((ids: ReadonlySet<ChartCellId>) => (
+    CHART_CELL_IDS.find((cellId) => !ids.has(cellId)) ?? null
+  ));
+  return factory(occupied);
+}
+
+export function projectChartWorkspaceLayoutTree(
+  tree: ChartWorkspaceLayoutNode,
+  maxCells: number,
+): ChartWorkspaceLayoutNode {
+  const limit = Math.min(MAX_CELLS_PER_WINDOW, Math.max(1, Math.floor(maxCells)));
+  const cellIds = visibleCellIds(tree);
+  if (cellIds.length <= limit) return tree;
+  const projected = cellIds.slice(0, limit);
+  if (limit === 1) return cellNode(projected[0]!);
+  if (limit === 2) {
+    return createChartWorkspaceLayoutTree("split-vertical", undefined, projected);
+  }
+  if (limit === 3) {
+    return createChartWorkspaceLayoutTree("main-confirmation", undefined, projected);
+  }
+  if (limit === 4) return createChartWorkspaceLayoutTree("quad", undefined, projected);
+  const rows = Math.floor(Math.sqrt(limit));
+  const columns = Math.ceil(limit / rows);
+  if (rows * columns !== limit) {
+    return combineLayoutNodes(projected.map((cellId) => cellNode(cellId)), "columns", "projection");
+  }
+  return createChartWorkspaceMatrixLayoutTree(projected, { rows, columns }, "projection");
 }
 
 export function splitChartWorkspaceCell(

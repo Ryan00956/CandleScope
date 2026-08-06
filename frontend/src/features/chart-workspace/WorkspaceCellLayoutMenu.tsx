@@ -12,6 +12,7 @@ import type {
 export interface WorkspaceCellLayoutMenuProps {
   cellId: ChartCellId;
   layoutCellIds: readonly ChartCellId[];
+  maxCellsPerWindow?: number;
   disabled?: boolean;
   onSplit(
     cellId: ChartCellId,
@@ -29,6 +30,7 @@ function cellNumber(cellId: ChartCellId): string {
 export default function WorkspaceCellLayoutMenu({
   cellId,
   layoutCellIds,
+  maxCellsPerWindow = 4,
   disabled = false,
   onSplit,
   onClose,
@@ -38,7 +40,7 @@ export default function WorkspaceCellLayoutMenu({
   const [creationMode, setCreationMode] = useState<ChartCellCreationMode>("copy");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const canSplit = layoutCellIds.length < 4;
+  const canSplit = layoutCellIds.length < maxCellsPerWindow;
   const canClose = layoutCellIds.length > 1;
   const swapTargets = layoutCellIds.filter((candidate) => candidate !== cellId);
   const menuOpen = open && !disabled;

@@ -35,6 +35,7 @@ import {
 } from "../features/chart-workspace/chartWorkspaceDrawingLink.js";
 import { chartWorkspaceCell } from "../features/chart-workspace/chartWorkspaceDocument.js";
 import WorkspaceLayoutTree from "../features/chart-workspace/WorkspaceLayoutTree.js";
+import { chartWorkspaceTemplateCellCount } from "../features/chart-workspace/chartWorkspaceLayout.js";
 import WorkspaceSwitcher from "../features/chart-workspace/WorkspaceSwitcher.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime.js";
@@ -68,6 +69,11 @@ const LAYOUT_OPTIONS: ReadonlyArray<{
   { id: "split-horizontal", label: "上下双图", glyph: "▭" },
   { id: "main-confirmation", label: "主图与确认图", glyph: "◧" },
   { id: "quad", label: "四图", glyph: "▦" },
+  { id: "grid-6", label: "六图（2×3）", glyph: "6" },
+  { id: "grid-8", label: "八图（2×4）", glyph: "8" },
+  { id: "grid-9", label: "九图（3×3）", glyph: "9" },
+  { id: "grid-12", label: "十二图（3×4）", glyph: "12" },
+  { id: "grid-16", label: "十六图（4×4）", glyph: "16" },
 ];
 
 function WorkspaceLayoutControls({
@@ -76,6 +82,7 @@ function WorkspaceLayoutControls({
   locked,
   canUndo,
   canRedo,
+  maxCellsPerWindow,
   onChange,
   onUndo,
   onRedo,
@@ -87,6 +94,7 @@ function WorkspaceLayoutControls({
   locked: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  maxCellsPerWindow: number;
   onChange(layout: ChartWorkspaceTemplateId): void;
   onUndo(): void;
   onRedo(): void;
@@ -100,7 +108,9 @@ function WorkspaceLayoutControls({
       aria-label="图表布局"
       data-layout-locked={locked ? "true" : "false"}
     >
-      {LAYOUT_OPTIONS.map((option) => (
+      {LAYOUT_OPTIONS.filter((option) => (
+        chartWorkspaceTemplateCellCount(option.id) <= maxCellsPerWindow
+      )).map((option) => (
         <button
           key={option.id}
           type="button"
@@ -511,6 +521,7 @@ function LiveWorkspaceApp() {
         saveState={workspace.status.saveState}
         persistenceMode={workspace.status.persistenceMode}
         error={workspace.status.error}
+        maxCellsPerWindow={workspace.view.maxCellsPerWindow}
         onSwitch={workspace.actions.switchWorkspace}
         onCreate={workspace.actions.createWorkspace}
         onDuplicate={workspace.actions.duplicateWorkspace}
@@ -523,6 +534,7 @@ function LiveWorkspaceApp() {
         locked={workspace.view.layoutLocked}
         canUndo={workspace.view.canUndoLayout}
         canRedo={workspace.view.canRedoLayout}
+        maxCellsPerWindow={workspace.view.maxCellsPerWindow}
         onChange={workspace.actions.setLayout}
         onUndo={workspace.actions.undoLayout}
         onRedo={workspace.actions.redoLayout}
@@ -578,6 +590,7 @@ function LiveWorkspaceApp() {
     workspace.view.canRedoLayout,
     workspace.view.canUndoLayout,
     workspace.view.layoutLocked,
+    workspace.view.maxCellsPerWindow,
     workspace.view.document,
     workspace.view.ready,
     workspace.view.visibleCellIds,
@@ -614,7 +627,7 @@ function LiveWorkspaceApp() {
                   disabled={!workspace.view.ready || workspace.view.layoutLocked}
                   onSplitRatioChange={workspace.actions.setLayoutRatio}
                   onCellDrop={workspace.actions.swapCells}
-                  renderCell={(cellId, layoutRole) => (
+                  renderCell={(cellId, layoutRole, obscured) => (
                     <LiveChartCell
                       key={`${workspace.view.runtimeKey}:${cellId}`}
                       workspaceId={workspace.view.activeWorkspaceId}
@@ -627,7 +640,9 @@ function LiveWorkspaceApp() {
                       layoutRole={layoutRole}
                       active={workspace.view.activeCellId === cellId}
                       maximized={workspace.view.window.maximizedCellId === cellId}
+                      obscured={obscured}
                       layoutCellIds={workspace.view.layoutCellIds}
+                      maxCellsPerWindow={workspace.view.maxCellsPerWindow}
                       layoutEditingDisabled={!workspace.view.ready || workspace.view.layoutLocked}
                       pageExportRef={pageExportRef}
                       foregroundPreloadGate={foregroundPreloadGate}

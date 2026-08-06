@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 export const CAPACITY_SCHEMA_VERSION = "candlescope.multi-chart.capacity/1";
 export const HARDWARE_SCHEMA_VERSION = "candlescope.multi-chart.hardware/1";
-export const CURRENT_PRODUCT_CELL_LIMIT = 4;
+export const CURRENT_PRODUCT_CELL_LIMIT = 16;
 export const SUPPORTED_CELL_ARGUMENTS = Object.freeze([1, 2, 4, 8, 16]);
 export const SUPPORTED_SCENARIOS = Object.freeze(["S1", "S2", "S3", "S4", "S5"]);
 const EVIDENCE_SCENARIOS = new Set([
@@ -91,7 +91,7 @@ function usage() {
 
 function scenarioCells(scenario, cellCount) {
   const cells = [];
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < cellCount; index += 1) {
     const visibleIndex = index % Math.max(1, cellCount);
     const symbol = ["S3", "S4", "S5"].includes(scenario)
       ? SYMBOLS[visibleIndex % SYMBOLS.length]
@@ -133,30 +133,49 @@ function scenarioCells(scenario, cellCount) {
 function layoutTree(cellCount) {
   const cell = (index) => ({ kind: "cell", cellId: `cell-${index}` });
   if (cellCount === 1) return cell(1);
-  if (cellCount === 2) {
-    return { kind: "split", id: "capacity-root", direction: "columns", ratio: 0.5, first: cell(1), second: cell(2) };
-  }
-  return {
-    kind: "split",
-    id: "capacity-root",
-    direction: "columns",
-    ratio: 0.5,
-    first: { kind: "split", id: "capacity-left", direction: "rows", ratio: 0.5, first: cell(1), second: cell(2) },
-    second: { kind: "split", id: "capacity-right", direction: "rows", ratio: 0.5, first: cell(3), second: cell(4) },
+  const columns = cellCount === 2 ? 2 : cellCount === 4 ? 2 : cellCount === 8 ? 4 : 4;
+  const rows = cellCount / columns;
+  const combine = (nodes, direction, prefix) => {
+    if (nodes.length === 1) return nodes[0];
+    const firstCount = Math.floor(nodes.length / 2);
+    return {
+      kind: "split",
+      id: `${prefix}-${nodes.length}`,
+      direction,
+      ratio: firstCount / nodes.length,
+      first: combine(nodes.slice(0, firstCount), direction, `${prefix}-first`),
+      second: combine(nodes.slice(firstCount), direction, `${prefix}-second`),
+    };
   };
+  const rowNodes = Array.from({ length: rows }, (_, rowIndex) => combine(
+    Array.from({ length: columns }, (_, columnIndex) => cell(rowIndex * columns + columnIndex + 1)),
+    "columns",
+    `capacity-row-${rowIndex + 1}`,
+  ));
+  return combine(rowNodes, "rows", "capacity-rows");
 }
 
 export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
-  if (![1, 2, 4].includes(cells)) {
-    throw new Error(`Workspace schema v5 cannot represent ${cells} visible cells`);
+  if (!SUPPORTED_CELL_ARGUMENTS.includes(cells) || cells > CURRENT_PRODUCT_CELL_LIMIT) {
+    throw new Error(`Workspace schema v6 cannot represent ${cells} visible cells`);
   }
   const states = scenarioCells(scenario, cells);
-  const document = {
-    schemaVersion: 5,
+  const windowState = {
+    id: "main-window",
     layoutTree: layoutTree(cells),
     layoutLocked: true,
     activeCellId: "cell-1",
     maximizedCellId: null,
+    boundsDip: null,
+    monitorFingerprint: null,
+    dpiScale: null,
+    windowState: "normal",
+  };
+  const document = {
+    schemaVersion: 6,
+    revision: 1,
+    activeWindowId: "main-window",
+    windows: { "main-window": windowState },
     linkGroups: Object.fromEntries(["A", "B", "C", "D"].map((group) => [group, {
       market: true,
       interval: false,
@@ -170,7 +189,7 @@ export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
   const record = {
     schemaVersion: 1,
     id: "workspace-capacity-phase0",
-    name: `Phase 0 ${scenario} ${cells} Cell`,
+    name: `Phase 2 ${scenario} ${cells} Cell`,
     createdAt: now,
     updatedAt: now,
     document,
@@ -178,10 +197,10 @@ export function buildWorkspaceBootstrap({ cells, scenario, now = Date.now() }) {
   return {
     record,
     library: { activeWorkspaceId: record.id, workspaces: [record] },
-    expectedSeries: Array.from(new Set(states.slice(0, cells).map((state) => (
+    expectedSeries: Array.from(new Set(states.map((state) => (
       `${state.session.symbol}@${state.session.interval}`
     )))).sort(),
-    expectedSymbols: Array.from(new Set(states.slice(0, cells).map((state) => state.session.symbol))).sort(),
+    expectedSymbols: Array.from(new Set(states.map((state) => state.session.symbol))).sort(),
   };
 }
 
@@ -946,7 +965,7 @@ function writeUnsupported(args) {
     hardware: { profileSha256: hardware.profileSha256, profilePath: path.resolve(args.hardwareOut) },
     scenario: { id: args.scenario, windows: 1, cells: args.cells, durationMs: 0 },
     data: { databaseState: "not_measured", datasetSha256: null },
-    frontend: { unsupportedReason: `Workspace schema v5 exposes at most ${CURRENT_PRODUCT_CELL_LIMIT} cells` },
+    frontend: { unsupportedReason: `Workspace schema v6 exposes at most ${CURRENT_PRODUCT_CELL_LIMIT} cells per window` },
     backend: { unsupportedReason: "Logical chart request was rejected before runtime measurement" },
     upstream: { physicalWebSockets: 0, httpRequests: 0 },
     artifacts: {},

@@ -22,7 +22,12 @@ export type ChartWorkspaceTemplateId =
   | "split-vertical"
   | "split-horizontal"
   | "main-confirmation"
-  | "quad";
+  | "quad"
+  | "grid-6"
+  | "grid-8"
+  | "grid-9"
+  | "grid-12"
+  | "grid-16";
 
 export type ChartWorkspaceId = string;
 export type ChartWorkspaceLayout = ChartWorkspaceTemplateId | "custom";
@@ -173,6 +178,11 @@ export const CHART_WORKSPACE_LAYOUTS: readonly ChartWorkspaceLayout[] = [
   "split-horizontal",
   "main-confirmation",
   "quad",
+  "grid-6",
+  "grid-8",
+  "grid-9",
+  "grid-12",
+  "grid-16",
   "custom",
 ];
 
@@ -182,4 +192,9 @@ export const CHART_WORKSPACE_TEMPLATE_IDS: readonly ChartWorkspaceTemplateId[] =
   "split-horizontal",
   "main-confirmation",
   "quad",
+  "grid-6",
+  "grid-8",
+  "grid-9",
+  "grid-12",
+  "grid-16",
 ];

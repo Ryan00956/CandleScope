@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import WorkspaceLayoutTree from "../WorkspaceLayoutTree.js";
 import { createChartWorkspaceLayoutTree } from "../chartWorkspaceLayout.js";
 
-test("recursive renderer materializes both levels of the main and confirmation template", () => {
+test("geometry renderer materializes stable sibling cells and independent split overlays", () => {
   const html = renderToStaticMarkup(
     <WorkspaceLayoutTree
       tree={createChartWorkspaceLayoutTree("main-confirmation")}
@@ -19,15 +19,16 @@ test("recursive renderer materializes both levels of the main and confirmation t
     />,
   );
 
-  assert.match(html, /data-layout-split-id="main-confirmation-root"/);
-  assert.match(html, /data-layout-split-id="main-confirmation-confirmations"/);
+  assert.match(html, /data-stable-cell-layer="true"/);
+  assert.match(html, /data-split-id="main-confirmation-root"/);
+  assert.match(html, /data-split-id="main-confirmation-confirmations"/);
   assert.match(html, /data-rendered-cell="cell-1" data-rendered-role="main"/);
   assert.match(html, /data-rendered-cell="cell-2" data-rendered-role="confirmation"/);
   assert.match(html, /data-rendered-cell="cell-3" data-rendered-role="confirmation"/);
   assert.equal((html.match(/role="separator"/g) ?? []).length, 2);
 });
 
-test("maximized recursive layout renders only the requested cell and no split handles", () => {
+test("maximized layout retains obscured cells while removing split interactions", () => {
   const html = renderToStaticMarkup(
     <WorkspaceLayoutTree
       tree={createChartWorkspaceLayoutTree("main-confirmation")}
@@ -41,7 +42,9 @@ test("maximized recursive layout renders only the requested cell and no split ha
   );
 
   assert.match(html, /data-rendered-cell="cell-3" data-rendered-role="confirmation"/);
-  assert.doesNotMatch(html, /data-rendered-cell="cell-1"/);
+  assert.match(html, /data-layout-cell-id="cell-1"[^>]*data-obscured="true"/);
+  assert.match(html, /data-layout-cell-id="cell-2"[^>]*data-obscured="true"/);
+  assert.match(html, /data-layout-cell-id="cell-3"[^>]*data-obscured="false"/);
   assert.doesNotMatch(html, /role="separator"/);
 });
 

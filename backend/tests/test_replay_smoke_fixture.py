@@ -24,6 +24,7 @@ from scripts.replay_smoke_fixture import (
     _legacy_live_tail_required,
     _load_real_kline_profile,
     _release_replay_adapter_when_idle,
+    _replay_history_seed_required,
     _seed_historical_book_source,
     _smoke_live_tail_required,
     _soak_live_window_rows,
@@ -272,6 +273,20 @@ def test_legacy_live_tail_is_limited_to_cross_root_rollback_invocation(
         fixture_backend_root=current_root,
     )
     assert _legacy_live_tail_required(
+        runtime_backend_root=legacy_root,
+        fixture_backend_root=current_root,
+    )
+
+
+def test_cross_root_rollback_skips_current_replay_archive_import() -> None:
+    current_root = Path("current-backend")
+    legacy_root = Path("legacy-backend")
+
+    assert _replay_history_seed_required(
+        runtime_backend_root=current_root,
+        fixture_backend_root=current_root,
+    )
+    assert not _replay_history_seed_required(
         runtime_backend_root=legacy_root,
         fixture_backend_root=current_root,
     )

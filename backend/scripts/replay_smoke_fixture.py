@@ -215,6 +215,19 @@ def _legacy_live_tail_required(
     return runtime_root != fixture_root
 
 
+def _replay_history_seed_required(
+    *,
+    runtime_backend_root: Path | None = None,
+    fixture_backend_root: Path | None = None,
+) -> bool:
+    """Keep current replay imports out of the pre-replay rollback runtime."""
+
+    return not _legacy_live_tail_required(
+        runtime_backend_root=runtime_backend_root,
+        fixture_backend_root=fixture_backend_root,
+    )
+
+
 def _smoke_live_tail_required(
     *,
     explicit: bool,
@@ -982,6 +995,12 @@ def main() -> None:
         parser.error("--real-kline-window-rows requires --real-klines-source")
     if args.hedge and not args.historical_book:
         parser.error("--hedge requires --historical-book")
+    replay_history_seed_required = _replay_history_seed_required()
+    legacy_runtime = not replay_history_seed_required
+    if legacy_runtime and (args.agg_trades or args.historical_book or args.hedge):
+        parser.error(
+            "cross-root legacy backend fixture cannot enable replay-only sources"
+        )
     if (
         args.real_kline_window_rows is not None
         and args.real_kline_window_rows < 2
@@ -989,7 +1008,7 @@ def main() -> None:
         parser.error("--real-kline-window-rows must be >= 2")
     _require_isolated_environment()
     _force_offline_upstreams()
-    live_tail_enabled = _smoke_live_tail_required(explicit=args.live_tail)
+    live_tail_enabled = args.live_tail or legacy_runtime
     real_rows_by_symbol: dict[str, list[dict[str, object]]] | None = None
     real_source_evidence: dict[str, object] | None = None
     if args.real_klines_source is not None:
@@ -1031,7 +1050,9 @@ def main() -> None:
         if args.historical_book
         else {}
     )
-    replay_history_manifests = _seed_replay_history_archive()
+    replay_history_manifests = (
+        _seed_replay_history_archive() if replay_history_seed_required else []
+    )
     if args.disable_gap_maintenance:
         _disable_fixture_gap_maintenance()
 

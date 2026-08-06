@@ -468,6 +468,8 @@ async function liveSnapshot(cdp) {
       canvasCount: document.querySelectorAll("canvas").length,
       prefs: localStorage.getItem("candlescope-user-prefs"),
       replayEntry: document.querySelector('[data-replay-entry="enabled"]')?.textContent?.trim() || "",
+      replayEntryState: document.querySelector("[data-replay-entry]")?.getAttribute("data-replay-entry") || "",
+      replayEntryDisabled: document.querySelector("[data-replay-entry]")?.matches(":disabled") === true,
       anyReplayEntry: document.querySelector("[data-replay-entry]") !== null,
     };
   })()`);
@@ -837,7 +839,12 @@ async function main() {
 
     await live.cdp.send("Page.navigate", { url: `${currentFrontendOrigin}/` });
     await waitForLiveReady(live.cdp, args.timeoutMs);
-    await waitForValue(live.cdp, `document.querySelector("[data-replay-entry]") === null`, args.timeoutMs, "hidden replay entry after rollback");
+    await waitForValue(
+      live.cdp,
+      `document.querySelector('[data-replay-entry="disabled"]')?.matches(":disabled") === true`,
+      args.timeoutMs,
+      "fail-closed replay entry after rollback",
+    );
     const liveAfterDisable = await liveSnapshot(live.cdp);
     assert(liveAfterDisable.prefs === liveBefore.prefs, "feature rollback changed live preferences", { liveBefore, liveAfterDisable });
     assert(liveAfterDisable.symbol === liveBefore.symbol && liveAfterDisable.interval === liveBefore.interval, "feature rollback changed live identity", { liveBefore, liveAfterDisable });
@@ -964,7 +971,9 @@ async function main() {
         trainingArchive?.protocol === REPLAY_TRAINING_PROTOCOL
         && trainingArchive?.session_state === "PAUSED",
       disabled_capability_closed: disabledCapabilities.enabled === false && disabledCapabilities.persistence.opened === false,
-      disabled_entry_hidden: liveAfterDisable.anyReplayEntry === false,
+      disabled_entry_failed_closed:
+        liveAfterDisable.replayEntryState === "disabled"
+        && liveAfterDisable.replayEntryDisabled === true,
       open_replay_failed_closed: disabledReplay.error === "REPLAY_DISABLED" && disabledReplay.canvasCount === 0,
       live_identity_preserved: liveAfterDisable.symbol === liveBefore.symbol && liveAfterDisable.interval === liveBefore.interval && liveAfterDisable.prefs === liveBefore.prefs,
       live_data_and_settings_preserved: currentKlines.count > 0 && currentSettings.mode === "none",

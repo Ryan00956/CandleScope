@@ -83,6 +83,9 @@ test("rollback follows the current two-stage Run and market contract", () => {
   assert.match(source, /runDetail\?\.adapter_session_id/);
   assert.match(source, /trainingArchive\?\.protocol === REPLAY_TRAINING_PROTOCOL/);
   assert.match(source, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
+  assert.match(source, /data-replay-entry="disabled"/);
+  assert.match(source, /disabled_entry_failed_closed/);
+  assert.doesNotMatch(source, /hidden replay entry after rollback/);
   assert.doesNotMatch(source, /创建并进入训练/);
   assert.doesNotMatch(source, /searchParams\.get\("session"\)/);
 });

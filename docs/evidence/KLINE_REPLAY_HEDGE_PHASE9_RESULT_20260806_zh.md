@@ -119,6 +119,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - ESLint 与 `git diff --check`：通过。
 - 完整构建候选诊断：通过；历史基线 `c9a1ddbfe316c68c91787b69c783baeeb0670a9f` 的 replay route 为 404，live K 线与设置保持健康，replay.db SHA-256 为 `20b7631626b10c259de44e788a064ce532078a23b6db296b5ccf20a97faff5b7` 且三阶段一致。
 
+### 3.7 clean-HEAD 首轮全量失败处置
+
+- `0208a7463bb57d2b00a91a7ff867c1ccb62aafe4` 首轮 backend 全量结果为 `3240 passed, 2 failed`，发布脚本按合同停止，未继续前端，也未生成 PASS artifact。
+- 确定性失败来自 Phase 10 静态门禁仍搜索已退役的 `queryReplayV2Archive`；现已改为搜索 `queryReplayTrainingArchive` 和 `REPLAY_TRAINING_PROTOCOL = "replay.v3"`，使产品代际与训练 wire 协议不再混淆。
+- Windows sandbox CPU quota 用例成功终止目标进程，但在受载全量中记录 `8171 ms`，超过冻结的 `8000 ms` 上限 `171 ms`。空闲串行重跑三次均通过（约 `7.78 / 6.40 / 6.65 s`），因此不放宽安全时限；最终全量仍须在新 clean HEAD 重跑并自然通过。
+- 由于本修复和记录都会生成新 HEAD，`0208a746` 的真实来源 PASS 也只保留为失败轮诊断，不进入最终 manifest。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

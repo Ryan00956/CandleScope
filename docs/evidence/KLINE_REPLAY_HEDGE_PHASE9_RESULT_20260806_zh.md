@@ -53,6 +53,7 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 对已经 `ENDED` 的 actor，shutdown 明确是纯资源屏障：关闭投影批次和 actor task，但不再调用 flush、checkpoint 或 `shutdown` mutation 持久化钩子。活跃的 `PLAYING/PAUSED` actor 仍保持原有 shutdown pause 与持久化合同。
 - actor 回归测试用会主动失败的 flush/checkpoint 钩子证明终态回收不触碰外部持久化；service 回归测试用会拒绝 `shutdown` mutation 的真实 SQLite service 证明容量回收、报告恢复和 5 秒 handoff grace 均正常，且 `reaper_failures=0`。
 - WebSocket 建立后不再长期占用 service 的请求 lease，但 actor 的 subscriber token 本身就是活跃页面所有权。reaper 现在在候选筛选和最终 claim 两处都拒绝回收仍有 subscriber 的 actor；断线/关闭触发 unsubscribe 后，终态 actor 才重新满足容量与 TTL 回收条件，避免报告页在 HTTP + WebSocket 交接中反复 recovery/eviction。
+- 完整性 drawer 的 1 秒终态报告轮询改为逐 Run single-flight：同一 Run 的慢请求共享同一 Promise，不再通过递增 generation 互相作废；不同 Run 仍可并行，旧 Run 响应继续受 generation 和 `run_id` 双重隔离。真实失败证据中后端连续返回 6 份一致的 `ended=true`、`account_audit=PASS` 报告，修复后前端不再因轮询频率高于五接口组合延迟而永久丢弃报告。
 
 ## 3. 候选提交前验证
 
@@ -84,6 +85,7 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - service 终态回收/报告 handoff：`2 passed`。
 - WebSocket stream 生命周期：`13 passed`。
 - 完整 actor、service、stream 与全部 HEDGE 文件：`159 passed`。
+- 前端 replay：`336 passed`；refresh gate 包含同 Run 合并、跨 Run 不阻塞和失败后可重试三类合同。
 - Ruff：通过。
 
 ### 3.5 冻结性能门槛

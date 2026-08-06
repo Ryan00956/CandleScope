@@ -12,6 +12,7 @@ import {
   type ReplayRunRulesResponse,
   type ReplayTrainingReportResponse,
 } from "./replayIntegrityModel.js";
+import { ReplayRefreshGate } from "./replayRefreshGate.js";
 import { replayEffectiveTrainingState } from "./replayUiModel.js";
 import { defaultReplayV2Api } from "./replayV2Api.js";
 import type {
@@ -116,6 +117,7 @@ export function useReplayIntegrityRuntime(
   const sampler = useRef(new SemanticViewActionSampler());
   const viewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generation = useRef(0);
+  const refreshGate = useRef(new ReplayRefreshGate());
   const pendingPolicy = useRef(false);
   const pendingReviewControl = useRef(false);
   const runtimeRef = useRef(runtime);
@@ -135,55 +137,57 @@ export function useReplayIntegrityRuntime(
   const refresh = useCallback(async (): Promise<void> => {
     const currentRunId = replayRunId(viewerRef.current);
     if (currentRunId === null) return;
-    const requestGeneration = ++generation.current;
-    setOperation((current) => current ?? "refresh");
-    try {
-      const currentRuntime = runtimeRef.current;
-      const currentViewer = viewerRef.current;
-      const currentState = replayEffectiveTrainingState(
-        currentViewer.marketTracks?.global_clock?.state,
-        currentRuntime.store.state,
-        currentRuntime.store.controllerClientId,
-      );
-      const [
-        nextIntegrity,
-        nextRules,
-        nextEquity,
-        nextDrawing,
-        nextReport,
-      ] = await Promise.all([
-        defaultReplayV2Api.integrityRun(currentRunId),
-        defaultReplayV2Api.rulesRun(currentRunId),
-        defaultReplayV2Api.equityRun(currentRunId, "AUTO", 1_000),
-        defaultReplayV2Api.currentDrawingRun(currentRunId),
-        currentState === "ENDED"
-          ? defaultReplayV2Api.reportRun(currentRunId)
-          : Promise.resolve(null),
-      ]);
-      if (requestGeneration !== generation.current
-        || replayRunId(viewerRef.current) !== currentRunId) return;
-      setIntegrity(nextIntegrity);
-      setRules(nextRules);
-      setEquity(nextEquity);
-      setCurrentDrawing((current) => (
-        current?.run_id === nextDrawing.run_id
-        && current.document_hash === nextDrawing.document_hash
-        && current.revision === nextDrawing.revision
-          ? current
-          : nextDrawing
-      ));
-      setDrawingLoaded(true);
-      setBudget(nextDrawing.budget);
-      setReport(nextReport);
-      setError(null);
-    } catch (cause) {
-      if (requestGeneration !== generation.current) return;
-      setError(cause instanceof Error ? cause.message : "训练完整性数据加载失败");
-    } finally {
-      if (requestGeneration === generation.current) {
-        setOperation((current) => current === "refresh" ? null : current);
+    return refreshGate.current.run(currentRunId, async () => {
+      const requestGeneration = generation.current;
+      setOperation((current) => current ?? "refresh");
+      try {
+        const currentRuntime = runtimeRef.current;
+        const currentViewer = viewerRef.current;
+        const currentState = replayEffectiveTrainingState(
+          currentViewer.marketTracks?.global_clock?.state,
+          currentRuntime.store.state,
+          currentRuntime.store.controllerClientId,
+        );
+        const [
+          nextIntegrity,
+          nextRules,
+          nextEquity,
+          nextDrawing,
+          nextReport,
+        ] = await Promise.all([
+          defaultReplayV2Api.integrityRun(currentRunId),
+          defaultReplayV2Api.rulesRun(currentRunId),
+          defaultReplayV2Api.equityRun(currentRunId, "AUTO", 1_000),
+          defaultReplayV2Api.currentDrawingRun(currentRunId),
+          currentState === "ENDED"
+            ? defaultReplayV2Api.reportRun(currentRunId)
+            : Promise.resolve(null),
+        ]);
+        if (requestGeneration !== generation.current
+          || replayRunId(viewerRef.current) !== currentRunId) return;
+        setIntegrity(nextIntegrity);
+        setRules(nextRules);
+        setEquity(nextEquity);
+        setCurrentDrawing((current) => (
+          current?.run_id === nextDrawing.run_id
+          && current.document_hash === nextDrawing.document_hash
+          && current.revision === nextDrawing.revision
+            ? current
+            : nextDrawing
+        ));
+        setDrawingLoaded(true);
+        setBudget(nextDrawing.budget);
+        setReport(nextReport);
+        setError(null);
+      } catch (cause) {
+        if (requestGeneration !== generation.current) return;
+        setError(cause instanceof Error ? cause.message : "训练完整性数据加载失败");
+      } finally {
+        if (requestGeneration === generation.current) {
+          setOperation((current) => current === "refresh" ? null : current);
+        }
       }
-    }
+    });
   }, []);
 
   useEffect(() => {

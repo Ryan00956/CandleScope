@@ -10,7 +10,45 @@ import {
 } from "../replayIntegrityModel.js";
 import { buildTrainingRunPreparationRequest, evaluateTrainingRunDraft } from "../trainingHubModel.js";
 import { parseReplayCapabilities, parseReplayCatalog } from "../replayParser.js";
+import { ReplayRefreshGate } from "../replayRefreshGate.js";
 import { enabledCapabilities } from "./fixtures.js";
+
+test("integrity refresh gate coalesces one slow request per run without cross-run blocking", async () => {
+  const gate = new ReplayRefreshGate();
+  let releaseRunA: (() => void) | undefined;
+  let runACalls = 0;
+  const runA = gate.run("run-a", () => {
+    runACalls += 1;
+    return new Promise<void>((resolve) => { releaseRunA = resolve; });
+  });
+  const duplicateRunA = gate.run("run-a", async () => {
+    runACalls += 1;
+  });
+  let runBCalls = 0;
+  const runB = gate.run("run-b", async () => { runBCalls += 1; });
+
+  assert.equal(runA, duplicateRunA);
+  assert.equal(runACalls, 0);
+  await runB;
+  assert.equal(runBCalls, 1);
+  await Promise.resolve();
+  assert.equal(runACalls, 1);
+  assert.ok(releaseRunA !== undefined);
+  releaseRunA();
+  await runA;
+
+  await gate.run("run-a", async () => { runACalls += 1; });
+  assert.equal(runACalls, 2);
+});
+
+test("integrity refresh gate releases a failed run for retry", async () => {
+  const gate = new ReplayRefreshGate();
+  await assert.rejects(
+    gate.run("run-a", async () => { throw new Error("offline"); }),
+    /offline/,
+  );
+  await gate.run("run-a", async () => undefined);
+});
 
 function replayCatalog() {
   const epoch = `sha256:${"a".repeat(64)}`;

@@ -22,6 +22,7 @@ const backendRoot = path.join(repositoryRoot, "backend");
 const fixtureScript = path.join(backendRoot, "scripts", "replay_smoke_fixture.py");
 const DEFAULT_BASELINE = "c9a1ddbfe316c68c91787b69c783baeeb0670a9f";
 const DEFAULT_TIMEOUT_MS = 120_000;
+const REPLAY_TRAINING_PROTOCOL = "replay.v3";
 const HELP_TEXT = `Usage: node frontend/scripts/replay-v2-rollback-drill.mjs [options]
 
 Options:
@@ -567,7 +568,7 @@ function queryReplaySession(python, dbPath, sessionId) {
   return JSON.parse(output);
 }
 
-function queryReplayV2Archive(python, dbPath, sessionId) {
+function queryReplayTrainingArchive(python, dbPath, sessionId) {
   const source = [
     "import json, sqlite3, sys",
     "path, session_id = sys.argv[1], sys.argv[2]",
@@ -789,9 +790,23 @@ async function main() {
     const persisted = queryReplaySession(python, paths.replay, sessionId);
     assert(persisted?.state === "PAUSED", "graceful feature rollback did not persist PAUSED", persisted);
     assert(persisted?.status_reason === "shutdown_pause", "graceful feature rollback did not persist shutdown_pause", persisted);
-    const v2Archive = queryReplayV2Archive(python, paths.replay, sessionId);
-    assert(v2Archive?.protocol === "replay.v2" && v2Archive?.adapter_session_id === sessionId, "v2 archive identity was not persisted", v2Archive);
-    assert(v2Archive?.session_state === "PAUSED" && v2Archive?.state_hash === persisted.state_hash, "v2 archive/session state drifted", { v2Archive, persisted });
+    const trainingArchive = queryReplayTrainingArchive(
+      python,
+      paths.replay,
+      sessionId,
+    );
+    assert(
+      trainingArchive?.protocol === REPLAY_TRAINING_PROTOCOL
+        && trainingArchive?.adapter_session_id === sessionId,
+      "training archive identity was not persisted",
+      trainingArchive,
+    );
+    assert(
+      trainingArchive?.session_state === "PAUSED"
+        && trainingArchive?.state_hash === persisted.state_hash,
+      "training archive/session state drifted",
+      { trainingArchive, persisted },
+    );
     const digestAfterGracefulShutdown = replayDatabaseDigest(paths.replay);
     const storageAfterGracefulShutdown = queryReplayStorageSnapshot(
       python,
@@ -945,7 +960,9 @@ async function main() {
     const checks = {
       active_session_was_playing: progressed.state === "PLAYING" && progressed.sourceSequence > playing.sourceSequence,
       graceful_shutdown_persisted_paused: persisted.state === "PAUSED" && persisted.status_reason === "shutdown_pause",
-      v2_archive_persisted: v2Archive?.protocol === "replay.v2" && v2Archive?.session_state === "PAUSED",
+      training_archive_persisted:
+        trainingArchive?.protocol === REPLAY_TRAINING_PROTOCOL
+        && trainingArchive?.session_state === "PAUSED",
       disabled_capability_closed: disabledCapabilities.enabled === false && disabledCapabilities.persistence.opened === false,
       disabled_entry_hidden: liveAfterDisable.anyReplayEntry === false,
       open_replay_failed_closed: disabledReplay.error === "REPLAY_DISABLED" && disabledReplay.canvasCount === 0,
@@ -979,7 +996,16 @@ async function main() {
         isolatedFixtureRows: 4_000,
       },
       featureFlagRollback: {
-        enabled: { liveBefore, initial, playing, progressed, runId, sessionId, persisted, v2Archive },
+        enabled: {
+          liveBefore,
+          initial,
+          playing,
+          progressed,
+          runId,
+          sessionId,
+          persisted,
+          trainingArchive,
+        },
         disabled: {
           capabilities: disabledCapabilities,
           liveAfter: liveAfterDisable,

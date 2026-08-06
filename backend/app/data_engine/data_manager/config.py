@@ -167,6 +167,10 @@ class CoordinatorConfig:
     })
     prewarm_symbols: list[str] = field(default_factory=lambda: ["BTCUSDT"])
     prewarm_targets: list[PrewarmTarget] = field(default_factory=list)
+    # Process-wide hard ceiling for leased K-line series. Existing leases and
+    # idempotent replays continue at the boundary; only a new unique series is
+    # rejected.
+    max_active_series: int = 128
 
 
 @dataclass
@@ -218,5 +222,6 @@ class DataManagerConfig:
                 "prewarm_intervals": self.coordinator.prewarm_intervals,
                 "prewarm_symbols": self.coordinator.prewarm_symbols,
                 "prewarm_targets": [target.to_dict() for target in self.coordinator.prewarm_targets],
+                "max_active_series": self.coordinator.max_active_series,
             },
         }

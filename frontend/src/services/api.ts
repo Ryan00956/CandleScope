@@ -296,6 +296,11 @@ export function getMultiStreamUrl(
   });
 }
 
+/** Default-off multi-instrument K-line WebSocket URL. */
+export function getBatchKlineStreamUrl(): string {
+  return buildWsUrl("/stream/klines_batch");
+}
+
 // Exchange-info payloads remain unknown until their T10 symbol/settings owners migrate.
 export async function fetchExchangeInfo(marketType = "", exchange = ""): Promise<unknown> {
   return request(buildUrl("/symbols/exchange-info", {

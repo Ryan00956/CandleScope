@@ -41,11 +41,12 @@ from .models import (
 from .maintenance import MaintenanceBusyError, MaintenanceUnavailableError
 from .storage_intents import StorageIntentRegistry
 from .subscriptions import SubscriptionTier
-from .manager import DataManager
+from .manager import DataManager, StreamCapacityError
 
 __all__ = [
     # Facade
     "DataManager",
+    "StreamCapacityError",
     # Config
     "DataManagerConfig",
     "CacheConfig",

@@ -11,6 +11,7 @@ from typing import Any
 
 from app.core.config import (
     KLINES_DB_PATH,
+    KLINE_APP_MAX_ACTIVE_SERIES,
     FULL_ORDER_BOOK_DEFAULT_MAX_PENDING,
     FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES,
     FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE,
@@ -55,7 +56,7 @@ from app.core.config import (
     TRADE_FLOW_ROLLUP_BACKEND,
 )
 from app.data_engine.backfill import BackfillEngine
-from app.data_engine.data_manager import DataManager
+from app.data_engine.data_manager import DataManager, DataManagerConfig
 from app.data_engine.data_manager.backfill_coordinator import BackfillCoordinator
 from app.data_engine.data_manager.ingestion_price_source import IngestionPriceSource
 from app.data_engine.data_manager.subscriptions import SubscriptionService
@@ -827,7 +828,9 @@ async def start_data_engine() -> DataEngineRuntime:
                 or "history.calendar.unknown"
             )
 
-        dm = DataManager()
+        data_manager_config = DataManagerConfig()
+        data_manager_config.coordinator.max_active_series = KLINE_APP_MAX_ACTIVE_SERIES
+        dm = DataManager(data_manager_config)
         set_history_policy = getattr(dm, "set_history_policy", None)
         if callable(set_history_policy):
             set_history_policy(history_policy)

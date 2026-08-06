@@ -59,11 +59,29 @@ export function formatChartDemandScope(
   clientInstanceId: string,
   runtimeId: string,
   sequence: number,
+  owner?: Readonly<{
+    workspaceId?: string | undefined;
+    windowId?: string | undefined;
+    cellId?: string | undefined;
+  }>,
 ): string {
-  return `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
+  const base = `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
+  if (!owner?.workspaceId && !owner?.windowId && !owner?.cellId) return base;
+  return [
+    base,
+    "workspace", owner.workspaceId || "_",
+    "window", owner.windowId || "_",
+    "cell", owner.cellId || "_",
+  ].join(":");
 }
 
-function createChartDemandScope(): string {
+function createChartDemandScope(
+  owner?: Readonly<{
+    workspaceId?: string | undefined;
+    windowId?: string | undefined;
+    cellId?: string | undefined;
+  }>,
+): string {
   chartDemandScopeSequence += 1;
   // Fast Refresh can reload this module while the API transport module keeps
   // its client id. A per-module nonce prevents sequence 1 from reusing a
@@ -72,6 +90,7 @@ function createChartDemandScope(): string {
     getClientInstanceId(),
     chartDemandScopeRuntimeId,
     chartDemandScopeSequence,
+    owner,
   );
 }
 
@@ -141,6 +160,8 @@ export interface UseMarketDataRuntimeOptions {
   foregroundPreloadGate?: ForegroundPreloadGate;
   backgroundPrefetchEnabled?: boolean;
   schedulerCellId?: string;
+  workspaceId?: string;
+  windowId?: string;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -151,6 +172,8 @@ export function useMarketDataRuntime({
   foregroundPreloadGate,
   backgroundPrefetchEnabled = true,
   schedulerCellId,
+  workspaceId,
+  windowId,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
   const workspaceResources = useMarketDataWorkspaceResources();
   const {
@@ -266,7 +289,11 @@ export function useMarketDataRuntime({
   } | null>(null);
   if (requestDemandRef.current == null) {
     requestDemandRef.current = {
-      scope: createChartDemandScope(),
+      scope: createChartDemandScope({
+        workspaceId,
+        windowId,
+        cellId: schedulerCellId,
+      }),
       generation: 0,
       sessionKey: null,
       ready: false,

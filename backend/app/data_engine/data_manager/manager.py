@@ -170,6 +170,19 @@ class _StreamLease:
     consumers: set[str] = field(default_factory=set)
 
 
+class StreamCapacityError(RuntimeError):
+    """A new unique K-line series would exceed the process hard ceiling."""
+
+    def __init__(self, *, active: int, requested: int, maximum: int) -> None:
+        self.active = int(active)
+        self.requested = int(requested)
+        self.maximum = int(maximum)
+        super().__init__(
+            "K-line active-series capacity exceeded "
+            f"(active={self.active}, requested={self.requested}, max={self.maximum})"
+        )
+
+
 class DataManager:
     """Unified facade for all K-line data operations.
 
@@ -1773,6 +1786,15 @@ class DataManager:
         consumer_id: str,
     ) -> None:
         with self._storage_gc_guard:
+            new_keys = tuple(key for key in keys if key not in self._stream_leases)
+            maximum = max(1, int(self._cfg.coordinator.max_active_series))
+            projected = len(self._stream_leases) + len(new_keys)
+            if projected > maximum:
+                raise StreamCapacityError(
+                    active=len(self._stream_leases),
+                    requested=len(new_keys),
+                    maximum=maximum,
+                )
             changed = False
             for key in keys:
                 lease = self._stream_leases.setdefault(key, _StreamLease())
@@ -2770,6 +2792,7 @@ class DataManager:
             "query_engine": self.query_engine.snapshot(),
             "event_bus": self.event_bus.snapshot(),
             "coordinator": self.coordinator.snapshot(),
+            "stream_leases": self.stream_lease_snapshot(),
             "bar_aggregator": self.bar_aggregator.snapshot(),
             "retention": self.retention.snapshot(),
             "storage_intents": self.storage_intents.snapshot(),
@@ -2811,6 +2834,45 @@ class DataManager:
                 "owner": "sqlite-storage",
             },
         }
+
+    def stream_lease_snapshot(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return bounded lease diagnostics without exposing mutable owners."""
+        safe_offset = max(0, int(offset))
+        safe_limit = min(100, max(0, int(limit)))
+        with self._storage_gc_guard:
+            ordered = sorted(self._stream_leases.items(), key=lambda item: str(item[0]))
+            page = ordered[safe_offset:safe_offset + safe_limit]
+            unique_consumers = {
+                consumer
+                for lease in self._stream_leases.values()
+                for consumer in lease.consumers
+            }
+            return {
+                "series_count": len(self._stream_leases),
+                "consumer_claims": sum(
+                    len(lease.consumers) for lease in self._stream_leases.values()
+                ),
+                "unique_consumers": len(unique_consumers),
+                "max_active_series": max(
+                    1,
+                    int(self._cfg.coordinator.max_active_series),
+                ),
+                "detail_offset": safe_offset,
+                "detail_limit": safe_limit,
+                "detail_total": len(ordered),
+                "series": [
+                    {
+                        "key": str(key),
+                        "consumer_count": len(lease.consumers),
+                    }
+                    for key, lease in page
+                ],
+            }
 
     def health_snapshot(self) -> dict[str, Any]:
         """Return the small, in-memory subset used by the liveness endpoint."""

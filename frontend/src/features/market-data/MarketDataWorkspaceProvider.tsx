@@ -10,6 +10,8 @@ import {
 import { SharedIndicatorStreamCoordinator } from "../indicators/sharedIndicatorStreamCoordinator.js";
 import { ChartWorkScheduler } from "./chartWorkScheduler.js";
 import { CHART_WINDOW_BROKER_ENABLED } from "./chartWindowBrokerFeature.js";
+import { KLINE_BATCH_STREAM_ENABLED } from "./klineBatchFeature.js";
+import { BatchKlineStreamCoordinator } from "./feed/batchKlineStreamCoordinator.js";
 import { defaultKlineApi } from "./feed/klineApi.js";
 import { SharedKlineRequestCoordinator } from "./feed/sharedKlineRequestCoordinator.js";
 import { SharedKlineStreamCoordinator } from "./feed/sharedKlineStreamCoordinator.js";
@@ -22,6 +24,7 @@ import {
 
 export interface MarketDataWorkspaceProviderProps extends PropsWithChildren {
   brokerEnabled?: boolean;
+  batchStreamEnabled?: boolean;
 }
 
 interface WindowBrokerDiagnosticsHandle {
@@ -30,6 +33,7 @@ interface WindowBrokerDiagnosticsHandle {
 
 export function MarketDataWorkspaceProvider({
   brokerEnabled = CHART_WINDOW_BROKER_ENABLED,
+  batchStreamEnabled = KLINE_BATCH_STREAM_ENABLED,
   children,
 }: MarketDataWorkspaceProviderProps) {
   const [resources] = useState<MarketDataWorkspaceResources>(() => {
@@ -47,7 +51,9 @@ export function MarketDataWorkspaceProvider({
         : null,
       klineApi: requestCoordinator || defaultKlineApi,
       requestCoordinator,
-      streamCoordinator: new SharedKlineStreamCoordinator(defaultKlineApi),
+      streamCoordinator: batchStreamEnabled
+        ? new BatchKlineStreamCoordinator()
+        : new SharedKlineStreamCoordinator(defaultKlineApi),
       workScheduler: brokerEnabled ? new ChartWorkScheduler() : null,
       windowRegistry: new SeriesWindowRegistry({ maxBars: MAX_SERIES_BARS }),
     };
@@ -83,6 +89,7 @@ export function MarketDataWorkspaceProvider({
     const handle: WindowBrokerDiagnosticsHandle = {
       snapshot: () => ({
         enabled: resources.brokerEnabled,
+        klineBatchEnabled: batchStreamEnabled,
         indicator: resources.indicatorStreamCoordinator?.diagnostics() || null,
         klineHttp: resources.requestCoordinator?.diagnostics() || null,
         klineStream: resources.streamCoordinator.diagnostics(),
@@ -96,7 +103,7 @@ export function MarketDataWorkspaceProvider({
         delete globalRef.__CANDLESCOPE_WINDOW_BROKER__;
       }
     };
-  }, [resources]);
+  }, [batchStreamEnabled, resources]);
 
   useEffect(() => {
     return () => {

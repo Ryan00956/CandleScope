@@ -23,6 +23,17 @@ test("chart demand scopes cannot collide across fast-refresh runtimes", () => {
   );
 });
 
+test("chart demand scope carries stable workspace window and cell ownership", () => {
+  assert.equal(
+    formatChartDemandScope("client", "runtime", 1, {
+      workspaceId: "workspace-a",
+      windowId: "window-b",
+      cellId: "cell-03",
+    }),
+    "chart:client:runtime:1:workspace:workspace-a:window:window-b:cell:cell-03",
+  );
+});
+
 test("right-window restore commits only for the owning session and epoch", () => {
   const owned = {
     aborted: false,

@@ -35,7 +35,7 @@ from .dependency import (
     UnresolvedDependencyError,
     build_synthetic_bars,
 )
-from .engine import IndicatorEngine
+from .engine import IndicatorCapacityError, IndicatorEngine
 from .events import IndicatorEvent, IndicatorEventType
 from .registry import IndicatorRegistry, registry
 from .types import (
@@ -84,9 +84,17 @@ __all__ = [
     # Core
     "Indicator",
     "IndicatorEngine",
+    "IndicatorCapacityError",
     "IndicatorRegistry",
     "registry",
     "create_engine",
+    # Dependency graph
+    "CyclicDependencyError",
+    "DependencyEdge",
+    "DependencyGraph",
+    "DependencyNode",
+    "UnresolvedDependencyError",
+    "build_synthetic_bars",
     # Types
     "IndicatorKey",
     "IndicatorMeta",

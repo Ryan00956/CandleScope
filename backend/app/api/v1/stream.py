@@ -13,6 +13,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicators import stream_indicators
+from app.api.v1.stream_kline_batch import (
+    KLINE_BATCH_PROTOCOL,
+    KlineBatchLimits,
+    kline_batch_registry_from_state,
+    stream_batch_kline,
+)
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
 from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
@@ -31,6 +37,7 @@ from app.replay.models import MAX_COUNTER, validate_identifier
 from app.replay.constants import REPLAY_PROTOCOL
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import REPLAY_V2_PROTOCOL
+from app.core import config
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -43,6 +50,16 @@ def _get_data_manager(websocket: WebSocket):
 def _get_indicator_engine(websocket: WebSocket):
     """Get IndicatorEngine from app state."""
     return getattr(websocket.app.state, "indicator_engine", None)
+
+
+@router.get("/klines_batch/capabilities")
+async def kline_batch_capabilities() -> dict:
+    """Advertise frozen client/app limits without opening a WebSocket."""
+    return {
+        "protocol": KLINE_BATCH_PROTOCOL,
+        "enabled": bool(config.KLINE_BATCH_STREAM_ENABLED),
+        "limits": KlineBatchLimits.from_config().to_wire(),
+    }
 
 
 @router.websocket("/replay/{session_id}")
@@ -210,6 +227,35 @@ async def kline_stream_multi(
         return
 
     await stream_multi_kline(websocket, dm, symbol, exchange=exchange, market_type=market_type)
+
+
+@router.websocket("/klines_batch")
+async def kline_stream_batch(websocket: WebSocket) -> None:
+    """Default-off multi-instrument K-line stream with per-item ACKs."""
+    await websocket.accept()
+    if not config.KLINE_BATCH_STREAM_ENABLED:
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "protocol": KLINE_BATCH_PROTOCOL,
+            "code": "kline_batch_disabled",
+            "message": "K-line batch stream is disabled",
+        })
+        await websocket.close(code=1008, reason="K-line batch stream disabled")
+        return
+
+    dm = _get_data_manager(websocket)
+    if dm is None:
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "protocol": KLINE_BATCH_PROTOCOL,
+            "code": "data_manager_unavailable",
+            "message": "DataManager not initialized. Server is not ready.",
+        })
+        await websocket.close(code=1013, reason="DataManager unavailable")
+        return
+
+    registry = kline_batch_registry_from_state(websocket.app.state)
+    await stream_batch_kline(websocket, dm, registry=registry)
 
 
 @router.websocket("/indicators")

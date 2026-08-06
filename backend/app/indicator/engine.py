@@ -42,6 +42,17 @@ logger = logging.getLogger("candlescope.indicator.engine")
 EventListener = Callable[[IndicatorEvent], None]
 
 
+class IndicatorCapacityError(RuntimeError):
+    """Raised when a new target would exceed the process-wide hard limit."""
+
+    def __init__(self, *, active: int, maximum: int) -> None:
+        self.active = active
+        self.maximum = maximum
+        super().__init__(
+            f"indicator target capacity reached: active={active}, maximum={maximum}"
+        )
+
+
 def indicator_code_hash(indicator_name: str) -> str:
     """Hash the implementation file for a registered builtin indicator."""
     cls = registry.get(indicator_name.upper().strip())
@@ -67,6 +78,7 @@ class IndicatorEngine:
         *,
         warm_ttl_seconds: float | None = None,
         warm_max_instances: int | None = None,
+        max_active_targets: int | None = None,
     ) -> None:
         # Instance cache: IndicatorKey -> Indicator
         self._instances: dict[IndicatorKey, Indicator] = {}
@@ -89,6 +101,10 @@ class IndicatorEngine:
         self._warm_max_instances = max(0, int(
             config.INDICATOR_ENGINE_WARM_MAX_INSTANCES
             if warm_max_instances is None else warm_max_instances
+        ))
+        self._max_active_targets = max(1, int(
+            config.INDICATOR_APP_MAX_ACTIVE_TARGETS
+            if max_active_targets is None else max_active_targets
         ))
         # Event listeners
         self._listeners: list[EventListener] = []
@@ -168,7 +184,6 @@ class IndicatorEngine:
             instance.recompute(bars)
         except Exception as exc:
             logger.error("Indicator %s computation failed: %s", key.uid, exc, exc_info=True)
-            from .types import IndicatorMeta
             return IndicatorResult(
                 key=key,
                 meta=instance.get_meta(),
@@ -344,6 +359,19 @@ class IndicatorEngine:
         cls = registry.get(key.indicator_name)
         if cls is None:
             return None
+
+        # Idle instances are only a warm optimization.  Reclaim them before
+        # rejecting new live work, then fail closed without disturbing any
+        # active target already running at the boundary.
+        self._prune_idle_instances()
+        while len(self._instances) >= self._max_active_targets and self._idle_since:
+            oldest = min(self._idle_since, key=self._idle_since.get)
+            self._destroy_instance(oldest)
+        if len(self._instances) >= self._max_active_targets:
+            raise IndicatorCapacityError(
+                active=len(self._instances),
+                maximum=self._max_active_targets,
+            )
 
         instance = cls(params=dict(key.params))
         self._instances[key] = instance
@@ -842,6 +870,7 @@ class IndicatorEngine:
             "warm_idle_count": len(self._idle_since),
             "warm_ttl_seconds": self._warm_ttl_seconds,
             "warm_max_instances": self._warm_max_instances,
+            "max_active_targets": self._max_active_targets,
             "instances": [
                 {
                     "key": key.uid,

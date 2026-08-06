@@ -1,0 +1,156 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase4-backend-capacity/1",
+  "generatedAt": "2026-08-06T19:08:38.4028940+08:00",
+  "git": {
+    "baselineCommit": "3dc857f878e403d33992fb6f476442523565dba6",
+    "dirtyDuringValidation": true
+  },
+  "environment": {
+    "hardwareProfile": "hardware-profile-phase3-20260806.json",
+    "hardwareProfileSha256": "sha256:073488463b033ce4a06433c5c9a5021113ff64d55b2faa28ee31b60366546efe"
+  },
+  "transport": {
+    "protocol": "candlescope.kline-batch/1",
+    "endpoint": "/api/v1/stream/klines_batch",
+    "capabilitiesEndpoint": "/api/v1/stream/klines_batch/capabilities",
+    "legacyEndpointPreserved": "/api/v1/stream/klines_multi",
+    "backendFlag": "KLINE_BATCH_STREAM_ENABLED=0",
+    "frontendFlag": "VITE_KLINE_BATCH_STREAM_ENABLED=0",
+    "defaultEnabled": false,
+    "ackGranularity": "logical subscription item",
+    "stableLogicalIdentity": "chart cell client_id"
+  },
+  "hardLimits": {
+    "seriesPerClient": 64,
+    "intervalsPerSeries": 16,
+    "logicalSubscriptionsPerBatchSocket": 128,
+    "outboxDefault": 1024,
+    "outboxFrozenMaximum": 2048,
+    "activeDataManagerSeriesPerApplication": 128,
+    "activeIndicatorTargetsPerApplication": 256,
+    "upstreamDescriptorsPerShardDefault": 32,
+    "upstreamDescriptorsPerShardFrozenMaximum": 64,
+    "capacityDetailPageMaximum": 100
+  },
+  "scenarioConnectionModel": [
+    {
+      "id": "S1",
+      "windows": 1,
+      "cells": 16,
+      "marketShape": "same instrument and interval",
+      "browserPhysicalKlineWebSockets": 1,
+      "frontendLogicalClients": 16,
+      "frontendLogicalSubscriptions": 16,
+      "dataManagerRequestedSeries": 1,
+      "dataManagerConsumerClaims": 16,
+      "binancePhysicalUpstream": 1,
+      "okxPhysicalUpstreamShards": 1,
+      "explanation": "The batch socket preserves 16 stable cell identities while DataManager and the exchange adapter share the one unique SeriesKey/descriptor."
+    },
+    {
+      "id": "S2",
+      "windows": 1,
+      "cells": 16,
+      "marketShape": "same instrument and 8 to 16 intervals",
+      "browserPhysicalKlineWebSockets": 1,
+      "frontendLogicalClients": 16,
+      "frontendLogicalSubscriptions": "8..16 unique requested interval subscriptions",
+      "dataManagerRequestedSeries": "8..16 before any explicit aggregation prerequisite",
+      "dataManagerConsumerClaims": 16,
+      "binancePhysicalUpstream": "one path-per-stream connection for each unique descriptor",
+      "okxPhysicalUpstreamShards": 1,
+      "explanation": "The browser unions work onto one batch socket. The capacity snapshot is authoritative when interval planning adds base-series prerequisites; Binance stays path-per-stream, while OKX may multiplex up to 32 descriptors in this shard."
+    },
+    {
+      "id": "S3",
+      "windows": 1,
+      "cells": 16,
+      "marketShape": "16 instruments and one interval each",
+      "browserPhysicalKlineWebSockets": 1,
+      "frontendLogicalClients": 16,
+      "frontendLogicalSubscriptions": 16,
+      "dataManagerRequestedSeries": 16,
+      "dataManagerConsumerClaims": 16,
+      "binancePhysicalUpstream": 16,
+      "okxPhysicalUpstreamShards": 1,
+      "explanation": "The additive client transport does not imply unsafe exchange multiplexing: Binance retains one physical K-line path per descriptor and OKX uses one bounded cross-symbol shard."
+    }
+  ],
+  "exchangeProtocolAudit": {
+    "capturedAt": "2026-08-06",
+    "okx": {
+      "officialDocumentation": "https://www.okx.com/docs-v5/",
+      "decision": "cross-symbol K-line multiplexing enabled only inside a bounded shard",
+      "enforcedControlMessagesPerConnectionPerHour": 480,
+      "enforcedControlPayloadBytes": 65536,
+      "internalDescriptorCap": 32,
+      "reason": "The official connection-level control and payload budgets are enforced. The public document did not provide a smaller K-line-specific descriptor count, so CandleScope freezes a conservative internal cap."
+    },
+    "binance": {
+      "officialDocumentation": "https://developers.binance.com/zh-CN/docs/products/spot/testnet/web-socket-streams",
+      "documentedCombinedStreams": true,
+      "documentedStreamsPerConnection": 1024,
+      "documentedIncomingMessagesPerSecond": 5,
+      "decision": "retain existing K-line path-per-stream scope",
+      "reason": "The current product spans market types and adapters; the audited Spot combined-stream contract alone does not prove safe parity for every existing K-line route."
+    }
+  },
+  "capacityDiagnostics": {
+    "schemaVersion": "candlescope.backend.capacity/1",
+    "boundedDetailMaximum": 100,
+    "includes": [
+      "logical clients and logical subscriptions",
+      "DataManager leased series and unique consumers",
+      "EventBus subscriber counts plus queue depth and capacity",
+      "batch outbox physical and logical depth plus drops and authoritative timeouts",
+      "backfill queue, fairness rotations and owner",
+      "indicator engine, range cache, runtime routing and executor diagnostics",
+      "shared, dedicated and total exchange physical WebSockets"
+    ]
+  },
+  "failureIsolation": {
+    "partialAckPreservesAcceptedItems": true,
+    "capacityRejectionPreservesExistingSubscriptions": true,
+    "disconnectReleasesOnlyOwnedConsumerIds": true,
+    "formingUpdatesMayCoalesce": true,
+    "authoritativeFinalOrderingPreserved": true,
+    "upstreamShardBackoffAndFailureIsolationTested": true,
+    "backfillConcurrencyIncreased": false
+  },
+  "tests": {
+    "postAuditTargeted": {
+      "command": "pytest -q test_multi_chart_upstream_shards.py test_ingestion_session_types.py test_binance_derivatives_market_data.py test_transport_ws_urls.py test_multi_chart_capacity.py test_multi_chart_hard_limits.py test_kline_batch_stream.py",
+      "passed": 59,
+      "failed": 0
+    },
+    "backendImpactedTransitive": {
+      "selection": "data_manager|indicator|ingestion|stream|backfill|transport_ws|binance_derivatives|multi_chart",
+      "passed": 562,
+      "failed": 0
+    },
+    "frontendFullGate": {
+      "command": "npm --prefix frontend run check",
+      "architecture": "pass",
+      "plugins": "pass",
+      "typecheck": "pass",
+      "lint": "pass",
+      "testsPassed": 3032,
+      "testsFailed": 0,
+      "productionBuild": "pass"
+    },
+    "repositoryBackendFullSuite": {
+      "collected": 3151,
+      "completed": false,
+      "outerBudgetSeconds": 600,
+      "assertionFailuresObservedBeforeOuterTimeout": 0,
+      "interpretation": "Not counted as a pass. Phase-owned and transitive backend coverage completed separately."
+    }
+  },
+  "rollback": {
+    "procedure": "Keep KLINE_BATCH_STREAM_ENABLED=0 and VITE_KLINE_BATCH_STREAM_ENABLED=0, or turn both back off. The frontend then uses the existing SharedKlineStreamCoordinator and /stream/klines_multi path.",
+    "persistentMigration": false,
+    "diagnosticsMayRemain": true,
+    "legacyEndpointRemoved": false
+  },
+  "result": "pass"
+}

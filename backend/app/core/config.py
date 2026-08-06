@@ -17,6 +17,8 @@ logger = logging.getLogger("candlescope.config")
 
 _REPLAY_TRUE_VALUES = {"1", "true", "yes", "on"}
 _REPLAY_FALSE_VALUES = {"0", "false", "no", "off"}
+_MULTI_CHART_TRUE_VALUES = {"1", "true", "yes", "on"}
+_MULTI_CHART_FALSE_VALUES = {"0", "false", "no", "off"}
 _REPLAY_BUDGETS: dict[str, int] = {
     "REPLAY_MAX_ACTIVE_SESSIONS": 8,
     "REPLAY_COMMAND_QUEUE_SIZE": 256,
@@ -93,6 +95,31 @@ def _bounded_replay_int(environment: Mapping[str, str], name: str) -> int:
         raise ValueError(
             f"{name} must be between 1 and the frozen safety limit "
             f"{safe_upper_bound}"
+        )
+    return value
+
+
+def _strict_multi_chart_bool(name: str, default: str = "0") -> bool:
+    normalized = os.getenv(name, default).strip().lower()
+    if normalized in _MULTI_CHART_TRUE_VALUES:
+        return True
+    if normalized in _MULTI_CHART_FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be one of 0/1, false/true, no/yes, or off/on"
+    )
+
+
+def _bounded_multi_chart_int(name: str, default: int, frozen_max: int) -> int:
+    """Read a positive capacity value that may only tighten a frozen limit."""
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1 or value > frozen_max:
+        raise ValueError(
+            f"{name} must be between 1 and the frozen safety limit {frozen_max}"
         )
     return value
 
@@ -594,6 +621,50 @@ INDICATOR_WS_RESUME_MAX_BARS = int(os.getenv("INDICATOR_WS_RESUME_MAX_BARS", "32
 INDICATOR_WS_SEED_CACHE_SECONDS = float(os.getenv("INDICATOR_WS_SEED_CACHE_SECONDS", "1"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "2"))
 EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1"))
+
+# Multi-chart K-line transport and process capacity.  These values are hard
+# safety ceilings: environment configuration may tighten them, never expand
+# them.  The additive batch endpoint stays disabled until a release gate turns
+# it on explicitly; the legacy /stream/klines_multi endpoint remains intact.
+KLINE_BATCH_STREAM_ENABLED = _strict_multi_chart_bool(
+    "KLINE_BATCH_STREAM_ENABLED",
+    "0",
+)
+KLINE_BATCH_MAX_SERIES_PER_CLIENT = _bounded_multi_chart_int(
+    "KLINE_BATCH_MAX_SERIES_PER_CLIENT",
+    64,
+    64,
+)
+KLINE_BATCH_MAX_INTERVALS_PER_SERIES = _bounded_multi_chart_int(
+    "KLINE_BATCH_MAX_INTERVALS_PER_SERIES",
+    16,
+    16,
+)
+KLINE_BATCH_MAX_TOTAL_SUBSCRIPTIONS = _bounded_multi_chart_int(
+    "KLINE_BATCH_MAX_TOTAL_SUBSCRIPTIONS",
+    128,
+    128,
+)
+KLINE_BATCH_OUTBOX_SIZE = _bounded_multi_chart_int(
+    "KLINE_BATCH_OUTBOX_SIZE",
+    1024,
+    2048,
+)
+KLINE_APP_MAX_ACTIVE_SERIES = _bounded_multi_chart_int(
+    "KLINE_APP_MAX_ACTIVE_SERIES",
+    128,
+    128,
+)
+INDICATOR_APP_MAX_ACTIVE_TARGETS = _bounded_multi_chart_int(
+    "INDICATOR_APP_MAX_ACTIVE_TARGETS",
+    256,
+    256,
+)
+KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD = _bounded_multi_chart_int(
+    "KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD",
+    32,
+    64,
+)
 
 # CORS
 CORS_ORIGINS = os.getenv(

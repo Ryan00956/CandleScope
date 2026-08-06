@@ -15,11 +15,105 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.core import config
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import executors_snapshot
 
 
 BACKEND_CAPACITY_SCHEMA_VERSION = "candlescope.backend.capacity/1"
+_MAX_CAPACITY_DETAIL_LIMIT = 100
+
+
+def _detail_window(offset: int, limit: int) -> tuple[int, int]:
+    return max(0, int(offset)), min(_MAX_CAPACITY_DETAIL_LIMIT, max(0, int(limit)))
+
+
+def _page_list(value: Any, *, offset: int, limit: int) -> tuple[list[Any], int]:
+    items = value if isinstance(value, list) else []
+    return items[offset:offset + limit], len(items)
+
+
+def _page_mapping(value: Any, *, offset: int, limit: int) -> tuple[dict[str, Any], int]:
+    mapping = value if isinstance(value, dict) else {}
+    ordered = sorted(mapping.items(), key=lambda item: str(item[0]))
+    return dict(ordered[offset:offset + limit]), len(ordered)
+
+
+def _event_bus_summary(event_bus: dict[str, Any]) -> dict[str, Any]:
+    callback_lag = event_bus.get("callback_lag")
+    queue_lag = event_bus.get("queue_lag")
+    callback_lag = callback_lag if isinstance(callback_lag, dict) else {}
+    queue_lag = queue_lag if isinstance(queue_lag, dict) else {}
+
+    def _queue_totals(lag: dict[str, Any]) -> tuple[int, int, int]:
+        snapshots = [value for value in lag.values() if isinstance(value, dict)]
+        depths = [max(0, int(value.get("queue_size", 0))) for value in snapshots]
+        capacities = [
+            max(0, int(value.get("queue_max_size", 0))) for value in snapshots
+        ]
+        return sum(depths), sum(capacities), max(depths, default=0)
+
+    callback_depth, callback_capacity, callback_max_depth = _queue_totals(callback_lag)
+    iterator_depth, iterator_capacity, iterator_max_depth = _queue_totals(queue_lag)
+    return {
+        "callbackSubscriptions": int(event_bus.get("callback_subscriptions", 0)),
+        "queueSubscriptions": int(event_bus.get("queue_subscriptions", 0)),
+        "middlewareCount": int(event_bus.get("middleware_count", 0)),
+        "eventsEmitted": int(event_bus.get("events_emitted", 0)),
+        "eventsDropped": int(event_bus.get("events_dropped", 0)),
+        "callbackErrors": int(event_bus.get("callback_errors", 0)),
+        "callbackQueuesObserved": len(callback_lag),
+        "callbackQueueDepth": callback_depth,
+        "callbackQueueCapacity": callback_capacity,
+        "callbackQueueMaxDepth": callback_max_depth,
+        "iteratorQueuesObserved": len(queue_lag),
+        "iteratorQueueDepth": iterator_depth,
+        "iteratorQueueCapacity": iterator_capacity,
+        "iteratorQueueMaxDepth": iterator_max_depth,
+    }
+
+
+def _backfill_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    source = snapshot or {}
+    return {
+        key: value
+        for key, value in source.items()
+        if key not in {
+            "active",
+            "pending",
+            "deferred",
+            "buckets",
+            "scheduler_buckets",
+            "coverage",
+            "recent_outcomes",
+        }
+    }
+
+
+def _indicator_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    return {key: value for key, value in snapshot.items() if key != "instances"}
+
+
+def _ingestion_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    ingress = snapshot.get("ingress")
+    if not isinstance(ingress, dict):
+        return {key: value for key, value in snapshot.items() if key != "ingress"}
+    return {
+        **{key: value for key, value in snapshot.items() if key != "ingress"},
+        "ingress": {
+            "pipelineCount": len(ingress.get("pipelines", {}))
+            if isinstance(ingress.get("pipelines"), dict) else 0,
+            "shared_ws": {
+                key: value
+                for key, value in (ingress.get("shared_ws") or {}).items()
+                if key != "hubs"
+            } if isinstance(ingress.get("shared_ws"), dict) else None,
+        },
+    }
 
 
 def _component_snapshot(component: Any) -> dict[str, Any] | None:
@@ -130,10 +224,13 @@ async def build_capacity_snapshot(
     state: Any,
     *,
     include_database_hash: bool = False,
+    detail_offset: int = 0,
+    detail_limit: int = 20,
 ) -> dict[str, Any]:
     """Compose a stable capacity snapshot from application-owned runtimes."""
 
     generated_at_ms = int(time.time() * 1000)
+    safe_offset, safe_limit = _detail_window(detail_offset, detail_limit)
     errors: list[dict[str, str]] = []
 
     data_manager = getattr(state, "data_manager", None)
@@ -186,12 +283,25 @@ async def build_capacity_snapshot(
     cache = (manager_snapshot or {}).get("cache") or {}
     streams = coordinator.get("streams") if isinstance(coordinator, dict) else []
     streams = streams if isinstance(streams, list) else []
+    stream_page, stream_total = _page_list(
+        streams,
+        offset=safe_offset,
+        limit=safe_limit,
+    )
     direct_by_key = (
         event_bus.get("direct_subscriptions_by_key", {})
         if isinstance(event_bus, dict)
         else {}
     )
     direct_by_key = direct_by_key if isinstance(direct_by_key, dict) else {}
+    direct_page, direct_total = _page_mapping(
+        direct_by_key,
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    lease_snapshot = (manager_snapshot or {}).get("stream_leases") or {}
+    if not isinstance(lease_snapshot, dict):
+        lease_snapshot = {}
 
     ingress = (
         ingestion_factory_snapshot.get("ingress")
@@ -231,6 +341,50 @@ async def build_capacity_snapshot(
         and isinstance(backfill_snapshot.get("pending"), list)
         else 0
     )
+    active_page, active_total = _page_list(
+        (backfill_snapshot or {}).get("active"),
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    pending_page, pending_total = _page_list(
+        (backfill_snapshot or {}).get("pending"),
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    deferred_page, deferred_total = _page_list(
+        (backfill_snapshot or {}).get("deferred"),
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    indicator_instances, indicator_instance_total = _page_list(
+        (indicator_engine or {}).get("instances"),
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    pipelines = ingress.get("pipelines") if isinstance(ingress, dict) else {}
+    pipeline_page, pipeline_total = _page_mapping(
+        pipelines,
+        offset=safe_offset,
+        limit=safe_limit,
+    )
+    batch_registry = getattr(state, "kline_batch_registry", None)
+    try:
+        batch_snapshot = (
+            batch_registry.snapshot(offset=safe_offset, limit=safe_limit)
+            if batch_registry is not None
+            and callable(getattr(batch_registry, "snapshot", None))
+            else {
+                "enabled": bool(config.KLINE_BATCH_STREAM_ENABLED),
+                "websocket_connections": 0,
+                "logical_clients": 0,
+                "logical_series": 0,
+                "logical_subscriptions": 0,
+                "outbox_depth": 0,
+            }
+        )
+    except Exception as exc:
+        batch_snapshot = None
+        errors.append({"component": "kline_batch", "error": str(exc)})
 
     return {
         "schemaVersion": BACKEND_CAPACITY_SCHEMA_VERSION,
@@ -238,33 +392,66 @@ async def build_capacity_snapshot(
         "readOnly": True,
         "ok": not errors,
         "errors": errors,
+        "detail": {
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "maxLimit": _MAX_CAPACITY_DETAIL_LIMIT,
+        },
+        "limits": {
+            "klineBatchEnabled": bool(config.KLINE_BATCH_STREAM_ENABLED),
+            "klineBatchMaxSeriesPerClient": int(config.KLINE_BATCH_MAX_SERIES_PER_CLIENT),
+            "klineBatchMaxIntervalsPerSeries": int(config.KLINE_BATCH_MAX_INTERVALS_PER_SERIES),
+            "klineBatchMaxTotalSubscriptions": int(config.KLINE_BATCH_MAX_TOTAL_SUBSCRIPTIONS),
+            "klineBatchOutboxSize": int(config.KLINE_BATCH_OUTBOX_SIZE),
+            "klineAppMaxActiveSeries": int(config.KLINE_APP_MAX_ACTIVE_SERIES),
+            "indicatorAppMaxActiveTargets": int(config.INDICATOR_APP_MAX_ACTIVE_TARGETS),
+            "upstreamMaxDescriptorsPerShard": int(
+                config.KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD
+            ),
+        },
         "database": database,
         "dataManager": {
             "activeSeries": len(streams),
-            "streamLeases": sum(
+            "leasedSeries": int(lease_snapshot.get("series_count", len(streams))),
+            "streamLeases": int(lease_snapshot.get("consumer_claims", sum(
                 int(value) for value in direct_by_key.values()
                 if isinstance(value, (int, float))
-            ),
+            ))),
+            "uniqueLeaseConsumers": int(lease_snapshot.get("unique_consumers", 0)),
             "logicalSubscribers": int(event_bus.get("callback_subscriptions", 0))
             + int(event_bus.get("queue_subscriptions", 0)),
             "cacheSeries": int(cache.get("total_series", 0)),
             "cacheBars": int(cache.get("total_bars", 0)),
-            "directSubscriptionsBySeries": direct_by_key,
-            "streams": streams,
-            "eventBus": event_bus,
+            "directSubscriptionSeries": direct_total,
+            "directSubscriptionsBySeries": direct_page,
+            "streamDetailTotal": stream_total,
+            "streams": stream_page,
+            "eventBus": _event_bus_summary(event_bus),
         },
+        "klineBatch": batch_snapshot,
         "backfill": {
             "activeRequests": active_backfills,
             "pendingRequests": pending_backfills,
             "runningChunks": int((backfill_snapshot or {}).get("running_chunks", 0)),
             "readyChunks": int((backfill_snapshot or {}).get("ready_chunks", 0)),
-            "snapshot": backfill_snapshot,
+            "summary": _backfill_summary(backfill_snapshot),
+            "detail": {
+                "active": active_page,
+                "activeTotal": active_total,
+                "pending": pending_page,
+                "pendingTotal": pending_total,
+                "deferred": deferred_page,
+                "deferredTotal": deferred_total,
+            },
         },
         "executors": executors_snapshot(),
         "indicators": {
             "activeInstances": int((indicator_engine or {}).get("instance_count", 0)),
             "streamSubscriptions": int((indicator_engine or {}).get("stream_count", 0)),
-            "engine": indicator_engine,
+            "maxActiveTargets": int(config.INDICATOR_APP_MAX_ACTIVE_TARGETS),
+            "engine": _indicator_summary(indicator_engine),
+            "instanceDetailTotal": indicator_instance_total,
+            "instances": indicator_instances,
             "rangeCache": indicator_range,
             "runtimeRouting": indicator_runtime,
         },
@@ -272,7 +459,9 @@ async def build_capacity_snapshot(
             "physicalWebSockets": shared_physical + dedicated_physical,
             "sharedPhysicalWebSockets": shared_physical,
             "dedicatedPhysicalWebSockets": dedicated_physical,
-            "ingestion": ingestion_factory_snapshot,
+            "ingestion": _ingestion_summary(ingestion_factory_snapshot),
+            "pipelineDetailTotal": pipeline_total,
+            "pipelines": pipeline_page,
         },
         "runtime": {
             "eventLoopLag": event_loop_lag,

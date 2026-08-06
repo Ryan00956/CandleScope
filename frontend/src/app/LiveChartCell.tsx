@@ -222,6 +222,8 @@ function LiveChartCell({
     foregroundPreloadGate,
     backgroundPrefetchEnabled: active,
     schedulerCellId: cell.id,
+    workspaceId,
+    windowId,
   });
 
   const workTier = obscured ? "hidden" : active ? "focused" : "visible-secondary";

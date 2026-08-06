@@ -537,6 +537,7 @@ class _BackfillScheduler:
         self._last_foreground_activity_at = 0.0
         self._active_foreground_chunks: set[str] = set()
         self._active_background_chunks: set[str] = set()
+        self._last_dispatch_owner: dict[tuple[int, bool], str] = {}
 
         self.submitted = 0
         self.deduped = 0
@@ -548,6 +549,7 @@ class _BackfillScheduler:
         self.cancelled_after_chunk = 0
         self.background_dispatches = 0
         self.covered_chunks_skipped = 0
+        self.fairness_rotations = 0
 
     def submit(self, request: RepairRequest) -> tuple[str, asyncio.Future[RepairOutcome]]:
         if self._shutdown:
@@ -1059,6 +1061,7 @@ class _BackfillScheduler:
                 "reason": chunk.defer_reason,
                 "bucket_key": chunk.rate_limit_bucket,
                 "defer_count": chunk.defer_count,
+                "fairness_owner": self._fairness_owner(chunk.request),
             }
             for chunk in self._chunks.values()
             if chunk.eligible_at_monotonic > now_monotonic
@@ -1073,6 +1076,7 @@ class _BackfillScheduler:
             "cancelled_after_chunk": self.cancelled_after_chunk,
             "background_dispatches": self.background_dispatches,
             "covered_chunks_skipped": self.covered_chunks_skipped,
+            "fairness_rotations": self.fairness_rotations,
             "running_background_chunks": self._running_background_count(),
             "active": active,
             "pending": pending,
@@ -1319,6 +1323,18 @@ class _BackfillScheduler:
                 ):
                     skipped.append(item)
                     continue
+                fairness_lane = (
+                    int(chunk.request.priority or 100),
+                    self._is_background(chunk.request),
+                )
+                fairness_owner = self._fairness_owner(chunk.request)
+                if (
+                    self._last_dispatch_owner.get(fairness_lane) == fairness_owner
+                    and self._has_fairness_alternative(chunk, lane=fairness_lane)
+                ):
+                    self.fairness_rotations += 1
+                    skipped.append(item)
+                    continue
                 bucket = self._bucket_for(chunk.request)
                 now_ms = int(time.time() * 1000)
                 if not bucket.try_acquire(now_ms):
@@ -1345,6 +1361,7 @@ class _BackfillScheduler:
                     ),
                 )
                 self._tasks[chunk.chunk_id] = task
+                self._last_dispatch_owner[fairness_lane] = fairness_owner
                 if self._is_background(chunk.request):
                     self._active_background_chunks.add(chunk.chunk_id)
                     self.background_dispatches += 1
@@ -1375,6 +1392,47 @@ class _BackfillScheduler:
 
     def _running_background_count(self) -> int:
         return len(self._active_background_chunks)
+
+    @staticmethod
+    def _fairness_owner(request: RepairRequest) -> str:
+        """Return a stable app/window/cell owner for equal-priority rotation."""
+        metadata = request.metadata or {}
+        structured = [
+            str(metadata.get(key) or "").strip()
+            for key in ("app_id", "workspace_id", "window_id", "cell_id")
+        ]
+        if any(structured):
+            return "/".join(value or "_" for value in structured)
+        demand_scope = str(metadata.get("demand_scope") or "").strip()
+        if demand_scope:
+            return demand_scope
+        return f"{request.requester}:{':'.join(request.series_key)}"
+
+    def _has_fairness_alternative(
+        self,
+        current: _FetchChunk,
+        *,
+        lane: tuple[int, bool],
+    ) -> bool:
+        current_owner = self._fairness_owner(current.request)
+        now = time.monotonic()
+        for item in self._ready:
+            if int(item[0]) != lane[0]:
+                continue
+            candidate = self._chunks.get(item[3])
+            if candidate is None or candidate.eligible_at_monotonic > now:
+                continue
+            if self._is_background(candidate.request) != lane[1]:
+                continue
+            state = self._requests.get(candidate.parent_id)
+            if state is None or state.stale or state.failed is not None:
+                continue
+            series = self._series.get(candidate.request.series_key)
+            if series is not None and series.active is not None:
+                continue
+            if self._fairness_owner(candidate.request) != current_owner:
+                return True
+        return False
 
     def _has_foreground_active(self) -> bool:
         return bool(self._active_foreground_chunks)
@@ -1937,6 +1995,7 @@ class _BackfillScheduler:
             "reason": state.request.reason,
             "priority": state.request.priority,
             "requester": state.request.requester,
+            "fairness_owner": self._fairness_owner(state.request),
             "range_start_ms": state.request.start_ms,
             "range_end_ms": state.request.end_ms,
             "total_chunks": state.total,

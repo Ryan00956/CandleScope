@@ -610,10 +610,16 @@ async def debug_snapshot() -> dict:
 
 
 @app.get("/debug/capacity", tags=["system"])
-async def capacity_snapshot(include_database_hash: bool = False) -> dict:
+async def capacity_snapshot(
+    include_database_hash: bool = False,
+    detail_offset: int = 0,
+    detail_limit: int = 20,
+) -> dict:
     """Return a read-only, multi-chart-oriented capacity snapshot."""
 
     return await build_capacity_snapshot(
         app.state,
         include_database_hash=include_database_hash,
+        detail_offset=detail_offset,
+        detail_limit=detail_limit,
     )

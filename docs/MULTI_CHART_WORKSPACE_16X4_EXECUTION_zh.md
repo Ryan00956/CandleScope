@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_3_COMPLETE`。Phase 0～3 已完成并通过各节记录的门禁；Phase 4～8 尚未完成。当前版本在默认关闭的 `MULTI_CHART_16_ENABLED` 和 `CHART_WINDOW_BROKER_ENABLED` 后实现单窗口最多 16 图、稳定挂载以及每窗口 K 线/指标 broker 与调度预算，默认 UI 仍限制为 4 图；尚未完成后端批量订阅、四窗口和 64 图，不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_4_COMPLETE`。Phase 0～4 已完成并通过各节记录的门禁；Phase 5～8 尚未完成。当前版本在默认关闭的多图、窗口 broker 和批量 K 线 flags 后实现单窗口最多 16 图、稳定挂载、每窗口调度以及有界后端批量订阅/容量治理，默认 UI 仍限制为 4 图且默认继续走旧 K 线 endpoint；尚未完成单窗口发布门、四窗口和 64 图，不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -758,16 +758,16 @@ MULTI_CHART_64_ENABLED=0
 
 ### 任务
 
-- [ ] 4.1 新增 additive `/api/v1/stream/klines_batch`；支持一条 client socket 管理多个 instrument/interval。
-- [ ] 4.2 每个 subscription 使用稳定 client ID，subscribe/unsubscribe/update 都逐项 ACK。
-- [ ] 4.3 限制单 client series、单 series intervals、总 logical subscription 和 outbox；上限写入 capabilities。
-- [ ] 4.4 DataManager lease 保持 `SeriesKey + consumer_id` 幂等；重复 subscribe 不增加重复 consumer。
-- [ ] 4.5 客户端断开时释放自己的 lease，不误停其他窗口、watchlist、指标或插件 consumer。
-- [ ] 4.6 capacity diagnostics 增加 logical clients、leases、active series、EventBus subscribers、queue/outbox 和 physical upstream。
-- [ ] 4.7 BackfillCoordinator 加入 app/window/cell/reason priority 与公平性；不先调大并发。
-- [ ] 4.8 对 Binance/OKX K 线做真实 multiplex scope 审计；只有协议与官方限制证明安全时才合并跨 symbol hub。
-- [ ] 4.9 adapter hub 分片、订阅上限、重连退避和失败隔离进入测试；不能无限塞入单连接。
-- [ ] 4.10 指标 executor、range cache 和 WS subscription diagnostics 纳入同一 capacity snapshot。
+- [x] 4.1 新增 additive `/api/v1/stream/klines_batch`；支持一条 client socket 管理多个 instrument/interval。
+- [x] 4.2 每个 subscription 使用稳定 client ID，subscribe/unsubscribe/update 都逐项 ACK。
+- [x] 4.3 限制单 client series、单 series intervals、总 logical subscription 和 outbox；上限写入 capabilities。
+- [x] 4.4 DataManager lease 保持 `SeriesKey + consumer_id` 幂等；重复 subscribe 不增加重复 consumer。
+- [x] 4.5 客户端断开时释放自己的 lease，不误停其他窗口、watchlist、指标或插件 consumer。
+- [x] 4.6 capacity diagnostics 增加 logical clients、leases、active series、EventBus subscribers、queue/outbox 和 physical upstream。
+- [x] 4.7 BackfillCoordinator 加入 app/window/cell/reason priority 与公平性；不先调大并发。
+- [x] 4.8 对 Binance/OKX K 线做真实 multiplex scope 审计；只有协议与官方限制证明安全时才合并跨 symbol hub。
+- [x] 4.9 adapter hub 分片、订阅上限、重连退避和失败隔离进入测试；不能无限塞入单连接。
+- [x] 4.10 指标 executor、range cache 和 WS subscription diagnostics 纳入同一 capacity snapshot。
 
 建议 hard ceilings（最终值由 Phase 0 证据冻结）：
 
@@ -794,11 +794,26 @@ INDICATOR_APP_MAX_ACTIVE_TARGETS
 
 ### 验收
 
-- [ ] S1/S2/S3 的每层连接计数都能解释；
-- [ ] 同一订阅身份没有重复 upstream；
-- [ ] 达到硬上限时新增订阅失败，已运行订阅继续；
-- [ ] 冷启动不会因盲目加并发突破交易所额度；
-- [ ] 旧 `/stream/klines_multi` 回归保持通过。
+- [x] S1/S2/S3 的每层连接计数都能解释；
+- [x] 同一订阅身份没有重复 upstream；
+- [x] 达到硬上限时新增订阅失败，已运行订阅继续；
+- [x] 冷启动不会因盲目加并发突破交易所额度；
+- [x] 旧 `/stream/klines_multi` 回归保持通过。
+
+### Phase 4 实施记录（2026-08-06）
+
+1. 新增默认关闭的 `candlescope.kline-batch/1` endpoint 与 capabilities：一条浏览器 socket 可承载多个稳定 `client_id` 的 subscribe/update/unsubscribe；每个请求项独立返回 accepted/failed/active，部分失败不会回滚已接受项。旧 `/stream/klines_multi` 未删除、未改变默认路由。
+2. 前端新增 `BatchKlineStreamCoordinator`，窗口内 Cell 使用稳定 `chart-cell-N` 身份共享一个物理 K 线 socket。`VITE_KLINE_BATCH_STREAM_ENABLED=0` 时仍实例化既有 `SharedKlineStreamCoordinator`，因此发布与回滚不依赖服务端瞬时切换。
+3. 冻结默认硬合同：单 client 64 series、单 series 16 intervals、单 batch socket 128 logical subscriptions、outbox 1024（冻结最大 2048）、进程 128 active K-line series、256 active indicator targets、上游每 shard 32 descriptors（冻结最大 64）。环境变量只能收紧，不能扩大；越界项逐项拒绝且保留已运行项。
+4. DataManager 在同一保护区内原子检查新增 unique `SeriesKey` 数量，`SeriesKey + consumer_id` 重放幂等且不重复占容量；断开只释放该 batch 连接创建的 consumer IDs。lease snapshot 输出真实 series、consumer claim 和 unique consumer 计数，详细项最多分页 100 条。
+5. batch outbox 对 forming update 允许同逻辑 key 合并，但 authoritative final 使用独立槽位并保持 forming → final 顺序；不同 `client_id` 的同 SeriesKey 不互相覆盖。诊断区分 physical/logical depth、replaceable drop 和 authoritative timeout。
+6. capacity snapshot 现在聚合 logical clients/subscriptions、DataManager lease/active series、EventBus subscriber 及队列深度/容量、batch outbox、backfill、公用 executor、indicator engine/range/runtime routing 以及 shared/dedicated/total exchange physical WebSockets。大集合只输出常量摘要或最多 100 条分页详情。
+7. BackfillCoordinator 沿用既有并发和上游 admission，不为 16/64 图调大并发；同优先级请求按 app/workspace/window/cell/reason owner 轮转，并输出 fairness owner/rotation。`LiveChartCell` 将稳定 Workspace/Window/Cell scope 传到后端 demand，避免同一大窗口长期垄断冷启动。
+8. 2026-08-06 对官方协议重新审计：OKX 公布每连接每小时 480 个 subscribe/unsubscribe/login 请求和单次订阅消息 64 KiB 限制，代码同时强制这两个预算，跨 symbol K-line 仅在 32-descriptor shard 内共享；Binance Spot 文档虽提供 combined stream 与每连接 1024 streams，但当前产品横跨 market type，未证明所有现有 K-line route 同构，因此 Binance 保持既有 path-per-stream，未为减少数字而冒险合并。
+9. shared hub 预留 descriptor 后再建冷连接，关闭并发 `get_hub()` 争用导致的超卖窗口；满 shard 新建下一个有界 shard。每个 hub 继续独立重连退避和失败隔离，控制预算耗尽或 payload 超限会拒绝新控制操作而不停止既有订阅。
+10. 测试结果：协议审计后定向 `59/59`；后端 data-manager/indicator/ingestion/stream/backfill/transport/Binance/multi-chart 传递闭包 `562/562`；前端完整 `npm run check` 的 architecture、plugin、typecheck、lint、`3032/3032` 和 production build 全通过。后端仓库全量收集为 3151 个节点，两次外层运行在 120 秒和 600 秒预算内未完成、超时前未输出断言失败，因此不把它虚报为全量通过；本阶段以完整受影响闭包为提交门禁。
+
+机器可读证据：`docs/perf-baselines/multi-chart-workspace/phase4-backend-capacity-contract-20260806.json`。其中逐层列出 S1/S2/S3 的 browser physical socket、logical client/subscription、DataManager series/claim 和 Binance/OKX upstream 模型；若 interval planner 生成基准周期依赖，以运行时 capacity snapshot 为最终计数真值。
 
 ### 回滚
 

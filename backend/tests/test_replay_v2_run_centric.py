@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 
@@ -205,7 +206,14 @@ async def test_empty_run_is_initialized_by_first_market_without_changing_identit
         )
         assert post_init_catalog.status_code == 200
         assert post_init_catalog.json()["catalog_epoch"] == catalog["catalog_epoch"]
-        assert post_init_catalog.json()["entries"][0]["identity"]["symbol"] == "BTCUSDT"
+        public_catalog = post_init_catalog.json()
+        assert public_catalog["blind_mode"] is True
+        assert public_catalog["entries"][0]["identity"]["symbol"] == "BTCUSDT"
+        assert public_catalog["entries"][0]["bounds"] is None
+        assert public_catalog["entries"][0]["eligible_ranges"] == []
+        serialized_public_catalog = json.dumps(public_catalog, sort_keys=True)
+        assert "source_fingerprint" not in serialized_public_catalog
+        assert str(START_MS) not in serialized_public_catalog
     finally:
         await service.shutdown(step_timeout=1.0)
 

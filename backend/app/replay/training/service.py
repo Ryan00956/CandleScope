@@ -565,10 +565,10 @@ class TrainingRunService:
             require_awaiting_market=False,
         )
         settings = setup.to_dict()
-        blind_mode = (
-            settings["start_mode"] == "RANDOM"
-            and settings["time_disclosure_policy"] != "NONE"
-        )
+        # A MANUAL start means the user knows the committed start; it does not
+        # authorize exposing the source tail, eligible future windows, or data
+        # fingerprint while the Run's disclosure policy is still active.
+        blind_mode = settings["time_disclosure_policy"] != "NONE"
         catalog = await self.replay_service.catalog(
             warmup_bars=int(settings["indicator_warmup_bars"]),
             horizon_ms=int(settings["forward_cache_ms"]),

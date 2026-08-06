@@ -1119,7 +1119,9 @@ async def command_replay_v2_run(
     payload: ReplayV2CommandPayload,
 ) -> dict[str, object]:
     command = ReplayV2Command.from_dict(payload.model_dump(mode="json"))
-    return await _training_service(request).command(run_id, command)
+    training = _training_service(request)
+    result = await training.command(run_id, command)
+    return training.project_public_command_result(result)
 
 
 @router.post(

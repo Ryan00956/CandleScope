@@ -8456,6 +8456,51 @@ class TrainingRunService:
             "data": dict(data),
         }
 
+    _PRIVATE_COMMAND_RESULT_FIELDS = frozenset(
+        {
+            "actual_event_time_ms",
+            "actual_time_ms",
+            "as_of_actual_time_ms",
+            "bound_range_end_ms",
+            "bound_range_start_ms",
+            "global_checkpoint",
+            "hedge_inputs",
+            "recovery_checkpoint",
+            "source_fingerprint",
+        }
+    )
+
+    @classmethod
+    def project_public_command_result(
+        cls,
+        result: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Project a durable internal command result onto the HTTP boundary."""
+
+        data = result.get("data")
+        if not isinstance(data, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "stored command result data is invalid",
+                status_code=503,
+            )
+        return {
+            **dict(result),
+            "data": cls._project_public_command_value(data),
+        }
+
+    @classmethod
+    def _project_public_command_value(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._project_public_command_value(item)
+                for key, item in value.items()
+                if str(key) not in cls._PRIVATE_COMMAND_RESULT_FIELDS
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._project_public_command_value(item) for item in value]
+        return value
+
     @staticmethod
     def _cursor_time(snapshot: Mapping[str, object]) -> int:
         cursor = snapshot.get("cursor")

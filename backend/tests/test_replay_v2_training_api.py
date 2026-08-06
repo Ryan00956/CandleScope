@@ -18,6 +18,7 @@ from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.errors import TrainingRunError
+from app.replay.training.service import TrainingRunService
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
     NOW_MS,
@@ -30,6 +31,54 @@ from tests.fixtures.replay.service_fakes import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_v2_public_command_projection_keeps_internal_evidence_private() -> None:
+    internal = {
+        "protocol": "replay.v3",
+        "data": {
+            "consumed": 1,
+            "stable_order": [{
+                "actual_event_time_ms": START_MS,
+                "event_phase": 20,
+                "market_track_stable_id": "track-1",
+                "source_sequence": 1,
+            }],
+            "global_checkpoint": {
+                "portfolio": {
+                    "hedge_inputs": {
+                        "as_of_actual_time_ms": START_MS,
+                        "bound_range_start_ms": START_MS,
+                        "source_fingerprint": "sha256:" + "a" * 64,
+                    },
+                },
+            },
+            "portfolio": {
+                "equity": "10000",
+                "hedge_inputs": {"actual_time_ms": START_MS},
+            },
+            "progress": {
+                "current_virtual_time_ms": 946_684_800_000,
+                "ratio_ppm": 500_000,
+            },
+        },
+    }
+
+    public = TrainingRunService.project_public_command_result(internal)
+    serialized = json.dumps(public, sort_keys=True)
+    assert public["data"]["consumed"] == 1
+    assert public["data"]["portfolio"] == {"equity": "10000"}
+    assert public["data"]["stable_order"] == [{
+        "event_phase": 20,
+        "market_track_stable_id": "track-1",
+        "source_sequence": 1,
+    }]
+    assert public["data"]["progress"]["ratio_ppm"] == 500_000
+    assert "global_checkpoint" not in serialized
+    assert "hedge_inputs" not in serialized
+    assert "actual_time" not in serialized
+    assert str(START_MS) not in serialized
+    assert internal["data"]["global_checkpoint"] is not None
 
 
 async def _service(path: Path) -> ReplayService:

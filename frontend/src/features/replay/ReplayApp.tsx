@@ -5,6 +5,7 @@ import type { ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type { TrainingRunCard } from "./replayV2Types.js";
 import { defaultReplayV2Api, ReplayV2ApiError } from "./replayV2Api.js";
 import { selectReplayInitialMarketWithEpochRetry } from "./replayInitialMarket.js";
+import { getReplayControllerClientInstanceId } from "./replayControllerIdentity.js";
 import TrainingHubDialog from "./components/TrainingHubDialog.js";
 import ReplayTrainingPageShell from "./ReplayTrainingPageShell.js";
 import { useReplaySharedIndicatorRuntime } from "./useReplaySharedIndicatorRuntime.js";
@@ -87,7 +88,11 @@ function ReplayInitializedRun({
     () => ({ kind: "adapter" as const, sessionId }),
     [sessionId],
   );
-  const replay = useReplayRuntime(runtimeEntry);
+  const clientInstanceId = useMemo(
+    () => getReplayControllerClientInstanceId(runId),
+    [runId],
+  );
+  const replay = useReplayRuntime(runtimeEntry, { clientInstanceId });
   const viewer = useReplayViewerRuntime(replay);
   return (
     <ReplayTrainingWorkspaceSurface

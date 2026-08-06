@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   auditBoundary,
+  captureTarget,
   CdpConnection,
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
@@ -538,6 +539,53 @@ test("replay soak streaming blind audit resets creation-time public inputs", () 
   assert.equal(result.passed, true);
   assert.deepEqual(result.forbiddenMatches, []);
   assert.throws(() => audit.reset(), /cannot reset after finish/);
+});
+
+test("replay soak blind capture attributes late response bodies to request start", async () => {
+  const handlers = new Map();
+  const bodies = new Map([
+    ["setup", JSON.stringify({ latest_source_open_ms: 1_700_260_666_666 })],
+    ["runtime", JSON.stringify({ virtual_time: "D+2 03:04:00" })],
+  ]);
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name, payload) {
+      assert.equal(name, "Network.getResponseBody");
+      return Promise.resolve({ base64Encoded: false, body: bodies.get(payload.requestId) });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp, { auditReplayBoundaries: true });
+  const replayUrl = "http://127.0.0.1/api/v1/replay/catalog";
+
+  emit("Network.requestWillBeSent", {
+    requestId: "setup",
+    request: { method: "GET", url: replayUrl },
+  });
+  capture.startBlindBoundaryAudit();
+  emit("Network.responseReceived", {
+    requestId: "setup",
+    response: { status: 200, url: replayUrl },
+  });
+  emit("Network.loadingFinished", { requestId: "setup" });
+  emit("Network.requestWillBeSent", {
+    requestId: "runtime",
+    request: { method: "GET", url: "http://127.0.0.1/api/v1/replay/runs/run-1" },
+  });
+  emit("Network.responseReceived", {
+    requestId: "runtime",
+    response: { status: 200, url: "http://127.0.0.1/api/v1/replay/runs/run-1" },
+  });
+  emit("Network.loadingFinished", { requestId: "runtime" });
+  await capture.settle();
+
+  const result = capture.boundaryAudits.http.finish();
+  assert.equal(result.passed, true);
+  assert.equal(result.itemCount, 2);
+  assert.deepEqual(result.forbiddenMatches, []);
+  assert.equal(capture.responseBodies.length, 2);
 });
 
 test("replay soak reconnect accepts an already-ready controller", async () => {

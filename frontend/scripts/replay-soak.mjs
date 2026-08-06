@@ -1146,7 +1146,9 @@ async function hedgeBrowserAccountContinuityAudit({
 
 function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   const responseByRequest = new Map();
+  const boundaryGenerationByRequest = new Map();
   const bodyTasks = new Set();
+  let boundaryGeneration = 0;
   const boundaryAudits = auditReplayBoundaries
     ? {
         http: createStreamingBoundaryAudit("http"),
@@ -1167,6 +1169,14 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     exceptions: [],
     consoleErrors: [],
     failedRequests: [],
+    startBlindBoundaryAudit() {
+      if (!boundaryAudits) {
+        throw new Error("replay boundary audit was not initialized");
+      }
+      boundaryGeneration += 1;
+      boundaryAudits.http.reset();
+      boundaryAudits.websocket.reset();
+    },
     async settle() {
       await Promise.allSettled([...bodyTasks]);
     },
@@ -1179,6 +1189,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
       url: event.request?.url || "",
     };
     boundedPush(capture.requests, item);
+    boundaryGenerationByRequest.set(event.requestId, boundaryGeneration);
     if (boundaryAudits && /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
       boundaryAudits.http.add({ kind: "request", ...item });
     }
@@ -1187,19 +1198,28 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     const item = { url: event.response?.url || "", status: event.response?.status || 0 };
     capture.responseCount += 1;
     boundedPush(capture.responses, item);
-    if (/\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) responseByRequest.set(event.requestId, item.url);
+    if (/\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
+      responseByRequest.set(event.requestId, {
+        boundaryGeneration: boundaryGenerationByRequest.get(event.requestId)
+          ?? boundaryGeneration,
+        url: item.url,
+      });
+    }
   });
   cdp.on("Network.loadingFinished", (event) => {
-    const url = responseByRequest.get(event.requestId);
-    if (!url) return;
+    const response = responseByRequest.get(event.requestId);
+    if (!response) return;
     responseByRequest.delete(event.requestId);
+    boundaryGenerationByRequest.delete(event.requestId);
     const task = cdp.send("Network.getResponseBody", { requestId: event.requestId })
       .then((result) => {
         const body = result.base64Encoded
           ? Buffer.from(result.body, "base64").toString("utf8")
           : result.body;
-        const item = { url, body };
-        boundaryAudits?.http.add({ kind: "response", ...item });
+        const item = { url: response.url, body };
+        if (response.boundaryGeneration === boundaryGeneration) {
+          boundaryAudits?.http.add({ kind: "response", ...item });
+        }
         boundedPush(capture.responseBodies, item, MAX_CAPTURE_RESPONSE_BODIES);
       })
       .catch(() => undefined)
@@ -1207,6 +1227,8 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     bodyTasks.add(task);
   });
   cdp.on("Network.loadingFailed", (event) => {
+    responseByRequest.delete(event.requestId);
+    boundaryGenerationByRequest.delete(event.requestId);
     boundedPush(capture.failedRequests, {
       requestId: event.requestId || "",
       errorText: event.errorText || "",
@@ -3025,8 +3047,7 @@ async function main() {
     // input and the non-blind Training Hub catalog are deliberately outside the
     // blind runtime contract; every subsequent replay request/frame is audited.
     await replayCapture.settle();
-    replayCapture.boundaryAudits.http.reset();
-    replayCapture.boundaryAudits.websocket.reset();
+    replayCapture.startBlindBoundaryAudit();
     const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({
       backendOrigin,
       cdp: replay.cdp,
@@ -3733,6 +3754,7 @@ export {
   auditBoundary,
   createV2ArchiveRun,
   createStreamingBoundaryAudit,
+  captureTarget,
   isAuthoritativeReplayStatus,
   replayBackendHealth,
   replaySpeedRequestState,

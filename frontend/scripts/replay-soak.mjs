@@ -671,6 +671,12 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
 
 async function chooseReplayMarket(cdp, plan, timeoutMs) {
   if (plan !== null) {
+    await waitForValue(
+      cdp,
+      `document.querySelector('input[placeholder*="BTC"]') instanceof HTMLInputElement`,
+      timeoutMs,
+      "Run market search readiness",
+    );
     const query = JSON.stringify(plan.symbol);
     const filtered = await evaluate(cdp, `(() => {
       const input = document.querySelector('input[placeholder*="BTC"]');

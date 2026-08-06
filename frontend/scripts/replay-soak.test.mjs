@@ -50,6 +50,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /process\.env\.PYTHONPATH/);
   assert.match(soak, /确认时间并创建 Run/);
   assert.doesNotMatch(soak, /创建 Run 并选择商品/);
+  assert.match(soak, /Run market search readiness/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {

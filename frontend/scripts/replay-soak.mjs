@@ -839,7 +839,48 @@ async function addAndSelectHedgeSecondaryMarket(cdp, symbol, timeoutMs) {
   })()`, timeoutMs, "HEDGE secondary market select acknowledgement");
 }
 
-async function selectTrackedMarket(cdp, symbol, timeoutMs) {
+async function waitForServerSelectedMarket(backendOrigin, runId, symbol, timeoutMs) {
+  const started = Date.now();
+  let lastResponse = null;
+  let lastError = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      lastResponse = await readJson(
+        `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/tracks`,
+        { timeoutMs: Math.min(5_000, Math.max(1, timeoutMs - (Date.now() - started))) },
+      );
+      const target = lastResponse?.tracks?.find((track) => track.symbol === symbol);
+      if (
+        typeof target?.track_id === "string"
+        && lastResponse?.viewer_state?.selected_track_id === target.track_id
+      ) {
+        return {
+          selectedTrackId: target.track_id,
+          viewerRevision: lastResponse.viewer_state.semantic_view_revision,
+          adapterSessionId: target.adapter_session_id,
+        };
+      }
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+    }
+    await wait(100);
+  }
+  throw new Error(`Timed out waiting for authoritative HEDGE market selection: ${JSON.stringify({
+    symbol,
+    selectedTrackId: lastResponse?.viewer_state?.selected_track_id ?? null,
+    tracks: lastResponse?.tracks?.map((track) => ({
+      trackId: track.track_id,
+      symbol: track.symbol,
+      state: track.state,
+      tier: track.subscription_tier,
+      degradedReason: track.degraded_reason,
+    })) ?? null,
+    lastError: lastError?.message ?? null,
+  })}`);
+}
+
+async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs) {
   const clicked = await evaluate(cdp, `(() => {
     const expected = ${JSON.stringify(symbol)};
     const row = [...document.querySelectorAll('.replay-watchlist-row')]
@@ -850,11 +891,32 @@ async function selectTrackedMarket(cdp, symbol, timeoutMs) {
     return true;
   })()`, { userGesture: true });
   assert(clicked === true, `tracked HEDGE market ${symbol} was not selectable`);
-  return waitForValue(cdp, `(() => {
-    const expected = ${JSON.stringify(symbol)};
-    return [...document.querySelectorAll('.replay-watchlist-row.active')]
-      .some((item) => item.querySelector('strong')?.textContent?.trim() === expected);
-  })()`, timeoutMs, `tracked HEDGE market ${symbol} selection`);
+  const authoritative = await waitForServerSelectedMarket(
+    backendOrigin,
+    runId,
+    symbol,
+    timeoutMs,
+  );
+  try {
+    await waitForValue(cdp, `(() => {
+      const expected = ${JSON.stringify(symbol)};
+      return [...document.querySelectorAll('.replay-watchlist-row.active')]
+        .some((item) => item.querySelector('strong')?.textContent?.trim() === expected);
+    })()`, timeoutMs, `tracked HEDGE market ${symbol} selection`);
+  } catch (error) {
+    const page = await evaluate(cdp, `({
+      url: location.href,
+      error: document.querySelector('.replay-command-error')?.textContent || null,
+      rows: [...document.querySelectorAll('.replay-watchlist-row')].map((row) => ({
+        active: row.classList.contains('active'),
+        symbol: row.querySelector('strong')?.textContent?.trim() || null,
+        trackId: row.getAttribute('data-replay-track-id'),
+      })),
+      bodyTail: (document.body?.innerText || '').slice(-2000),
+    })`).catch((diagnosticError) => ({ diagnosticError: diagnosticError?.message || String(diagnosticError) }));
+    throw new Error(`${error.message}; authoritative=${JSON.stringify(authoritative)}; page=${JSON.stringify(page)}`);
+  }
+  return authoritative;
 }
 
 async function selectReplayInterval(cdp, interval, timeoutMs) {
@@ -888,7 +950,7 @@ async function hedgeBrowserAccountContinuityAudit({
     timeoutMs,
   );
   const baseline = await readServerAccountProof(backendOrigin, runId);
-  await selectTrackedMarket(cdp, "BTCUSDT", timeoutMs);
+  await selectTrackedMarket(backendOrigin, runId, cdp, "BTCUSDT", timeoutMs);
   const afterProductSwitch = await readServerAccountProof(backendOrigin, runId);
   await selectReplayInterval(cdp, "5m", timeoutMs);
   await selectReplayInterval(cdp, "1m", timeoutMs);

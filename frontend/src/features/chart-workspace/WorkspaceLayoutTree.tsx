@@ -1,10 +1,20 @@
-import { useRef, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type {
   ChartCellId,
   ChartWorkspaceCellRole,
   ChartWorkspaceLayoutNode,
 } from "./chartWorkspaceTypes.js";
 import { findChartWorkspaceCellRole } from "./chartWorkspaceLayout.js";
+import {
+  hasChartCellDragData,
+  readChartCellDragData,
+} from "./chartWorkspaceDrag.js";
 import WorkspaceSplitHandle from "./WorkspaceSplitHandles.js";
 
 export interface WorkspaceLayoutTreeProps {
@@ -13,6 +23,7 @@ export interface WorkspaceLayoutTreeProps {
   disabled?: boolean;
   renderCell(cellId: ChartCellId, role: ChartWorkspaceCellRole | null): ReactNode;
   onSplitRatioChange(splitId: string, ratio: number): void;
+  onCellDrop(sourceCellId: ChartCellId, targetCellId: ChartCellId): void;
 }
 
 interface WorkspaceLayoutNodeViewProps {
@@ -20,6 +31,7 @@ interface WorkspaceLayoutNodeViewProps {
   disabled: boolean;
   renderCell: WorkspaceLayoutTreeProps["renderCell"];
   onSplitRatioChange: WorkspaceLayoutTreeProps["onSplitRatioChange"];
+  onCellDrop: WorkspaceLayoutTreeProps["onCellDrop"];
 }
 
 function WorkspaceLayoutNodeView({
@@ -27,14 +39,51 @@ function WorkspaceLayoutNodeView({
   disabled,
   renderCell,
   onSplitRatioChange,
+  onCellDrop,
 }: WorkspaceLayoutNodeViewProps) {
   const splitRef = useRef<HTMLDivElement | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  useEffect(() => {
+    if (!dropActive) return undefined;
+    const clearDropTarget = () => setDropActive(false);
+    document.addEventListener("dragend", clearDropTarget);
+    document.addEventListener("drop", clearDropTarget);
+    return () => {
+      document.removeEventListener("dragend", clearDropTarget);
+      document.removeEventListener("drop", clearDropTarget);
+    };
+  }, [dropActive]);
   if (node.kind === "cell") {
     return (
       <div
-        className="workspace-layout-leaf"
+        className={`workspace-layout-leaf${dropActive ? " drop-target" : ""}`}
         data-layout-cell-id={node.cellId}
         data-layout-cell-role={node.role ?? "standard"}
+        data-drop-target={dropActive ? "true" : "false"}
+        onDragEnter={(event) => {
+          if (disabled || !hasChartCellDragData(event.dataTransfer)) return;
+          event.preventDefault();
+          setDropActive(true);
+        }}
+        onDragOver={(event) => {
+          if (disabled || !hasChartCellDragData(event.dataTransfer)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setDropActive(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setDropActive(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDropActive(false);
+          if (disabled) return;
+          const sourceCellId = readChartCellDragData(event.dataTransfer);
+          if (sourceCellId && sourceCellId !== node.cellId) {
+            onCellDrop(sourceCellId, node.cellId);
+          }
+        }}
       >
         {renderCell(node.cellId, node.role ?? null)}
       </div>
@@ -59,6 +108,7 @@ function WorkspaceLayoutNodeView({
           disabled={disabled}
           renderCell={renderCell}
           onSplitRatioChange={onSplitRatioChange}
+          onCellDrop={onCellDrop}
         />
       </div>
       <div className="workspace-layout-branch workspace-layout-branch-second">
@@ -67,6 +117,7 @@ function WorkspaceLayoutNodeView({
           disabled={disabled}
           renderCell={renderCell}
           onSplitRatioChange={onSplitRatioChange}
+          onCellDrop={onCellDrop}
         />
       </div>
       <WorkspaceSplitHandle
@@ -87,6 +138,7 @@ export default function WorkspaceLayoutTree({
   disabled = false,
   renderCell,
   onSplitRatioChange,
+  onCellDrop,
 }: WorkspaceLayoutTreeProps) {
   if (maximizedCellId) {
     return (
@@ -108,6 +160,7 @@ export default function WorkspaceLayoutTree({
       disabled={disabled}
       renderCell={renderCell}
       onSplitRatioChange={onSplitRatioChange}
+      onCellDrop={onCellDrop}
     />
   );
 }

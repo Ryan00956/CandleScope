@@ -15,6 +15,7 @@ test("recursive renderer materializes both levels of the main and confirmation t
         <article data-rendered-cell={cellId} data-rendered-role={role ?? "standard"} />
       )}
       onSplitRatioChange={() => {}}
+      onCellDrop={() => {}}
     />,
   );
 
@@ -35,6 +36,7 @@ test("maximized recursive layout renders only the requested cell and no split ha
         <article data-rendered-cell={cellId} data-rendered-role={role ?? "standard"} />
       )}
       onSplitRatioChange={() => {}}
+      onCellDrop={() => {}}
     />,
   );
 

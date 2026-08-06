@@ -72,11 +72,17 @@ const LAYOUT_OPTIONS: ReadonlyArray<{
 function WorkspaceLayoutControls({
   layout,
   disabled,
+  canUndo,
   onChange,
+  onUndo,
+  onReset,
 }: {
   layout: ChartWorkspaceLayout;
   disabled?: boolean;
+  canUndo: boolean;
   onChange(layout: ChartWorkspaceTemplateId): void;
+  onUndo(): void;
+  onReset(): void;
 }) {
   return (
     <div className="workspace-layout-controls" role="group" aria-label="图表布局">
@@ -94,8 +100,37 @@ function WorkspaceLayoutControls({
           <span aria-hidden="true">{option.glyph}</span>
         </button>
       ))}
+      <span className="workspace-layout-action-separator" aria-hidden="true" />
+      <button
+        type="button"
+        className="workspace-layout-button workspace-layout-history-button"
+        onClick={onUndo}
+        disabled={disabled || !canUndo}
+        aria-label="撤销上一次布局修改"
+        title="撤销上一次布局修改（Ctrl+Z）"
+      >
+        ↶
+      </button>
+      <button
+        type="button"
+        className="workspace-layout-button workspace-layout-reset-button"
+        onClick={onReset}
+        disabled={disabled}
+        aria-label="只保留当前图表"
+        title="重置布局，只保留当前图表"
+      >
+        ⟲
+      </button>
     </div>
   );
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable
+    || target.tagName === "INPUT"
+    || target.tagName === "TEXTAREA"
+    || target.tagName === "SELECT";
 }
 
 const LINK_SETTING_OPTIONS: ReadonlyArray<{
@@ -376,6 +411,23 @@ function LiveWorkspaceApp() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [toggleWorkspaceMaximize, workspace.view.document.maximizedCellId]);
 
+  const undoWorkspaceLayout = workspace.actions.undoLayout;
+  const canUndoWorkspaceLayout = workspace.view.canUndoLayout;
+  useEffect(() => {
+    if (!canUndoWorkspaceLayout) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLocaleLowerCase() !== "z"
+        || (!event.ctrlKey && !event.metaKey)
+        || event.altKey
+        || event.shiftKey
+        || isEditableKeyboardTarget(event.target)) return;
+      event.preventDefault();
+      undoWorkspaceLayout();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canUndoWorkspaceLayout, undoWorkspaceLayout]);
+
   const [topBarHost, setTopBarHost] = useState<HTMLElement | null>(null);
   const [intervalSelectorHost, setIntervalSelectorHost] = useState<HTMLElement | null>(null);
   const [drawingToolbarHost, setDrawingToolbarHost] = useState<HTMLElement | null>(null);
@@ -416,7 +468,10 @@ function LiveWorkspaceApp() {
       <WorkspaceLayoutControls
         layout={workspace.view.layout}
         disabled={!workspace.view.ready}
+        canUndo={workspace.view.canUndoLayout}
         onChange={workspace.actions.setLayout}
+        onUndo={workspace.actions.undoLayout}
+        onReset={workspace.actions.resetLayout}
       />
       <WorkspaceLinkControls
         activeCellId={workspace.view.activeCellId}
@@ -448,8 +503,10 @@ function LiveWorkspaceApp() {
     workspace.actions.setCellDrawingLayerSet,
     workspace.actions.setCellLinkRole,
     workspace.actions.setLayout,
+    workspace.actions.resetLayout,
     workspace.actions.switchWorkspace,
     workspace.actions.updateLinkGroupSettings,
+    workspace.actions.undoLayout,
     workspace.status.error,
     workspace.status.persistenceMode,
     workspace.status.saveState,
@@ -460,6 +517,7 @@ function LiveWorkspaceApp() {
     workspace.view.activeWorkspaceId,
     workspace.view.activeWorkspaceName,
     workspace.view.layout,
+    workspace.view.canUndoLayout,
     workspace.view.document,
     workspace.view.ready,
     workspace.view.visibleCellIds,
@@ -494,6 +552,7 @@ function LiveWorkspaceApp() {
                   maximizedCellId={workspace.view.document.maximizedCellId}
                   disabled={!workspace.view.ready}
                   onSplitRatioChange={workspace.actions.setLayoutRatio}
+                  onCellDrop={workspace.actions.swapCells}
                   renderCell={(cellId, layoutRole) => (
                     <LiveChartCell
                       key={`${workspace.view.runtimeKey}:${cellId}`}
@@ -507,6 +566,8 @@ function LiveWorkspaceApp() {
                       layoutRole={layoutRole}
                       active={workspace.view.activeCellId === cellId}
                       maximized={workspace.view.document.maximizedCellId === cellId}
+                      layoutCellIds={workspace.view.layoutCellIds}
+                      layoutEditingDisabled={!workspace.view.ready}
                       pageExportRef={pageExportRef}
                       foregroundPreloadGate={foregroundPreloadGate}
                       globalSettings={settings}
@@ -518,6 +579,9 @@ function LiveWorkspaceApp() {
                       linkCoordinator={linkCoordinator}
                       onActivate={workspace.actions.setActiveCell}
                       onLinkGroupChange={workspace.actions.setCellLinkGroup}
+                      onSplitCell={workspace.actions.splitCell}
+                      onCloseCell={workspace.actions.closeCell}
+                      onSwapCells={workspace.actions.swapCells}
                       onToggleMaximize={workspace.actions.toggleMaximize}
                       onSessionChange={workspace.actions.updateCellSession}
                       onChartSettingsChange={workspace.actions.updateCellChartSettings}

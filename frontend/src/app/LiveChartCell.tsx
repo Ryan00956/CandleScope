@@ -20,15 +20,19 @@ import type { MainSeriesCrosshairValue } from "../chart-adapter/chartAdapterType
 import { useChartSession } from "../features/chart-session/useChartSession.js";
 import type { ChartSession } from "../features/chart-session/chartSessionTypes.js";
 import type {
+  ChartCellCreationMode,
   ChartCellId,
   ChartCellState,
   ChartLinkGroupId,
   ChartWorkspaceCellRole,
   ChartWorkspaceId,
+  ChartWorkspaceSplitDirection,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspaceLibrary.js";
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
+import { writeChartCellDragData } from "../features/chart-workspace/chartWorkspaceDrag.js";
+import WorkspaceCellLayoutMenu from "../features/chart-workspace/WorkspaceCellLayoutMenu.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
@@ -95,6 +99,8 @@ export interface LiveChartCellProps {
   layoutRole: ChartWorkspaceCellRole | null;
   active: boolean;
   maximized: boolean;
+  layoutCellIds: readonly ChartCellId[];
+  layoutEditingDisabled?: boolean;
   pageExportRef: RefObject<HTMLDivElement | null>;
   foregroundPreloadGate: ForegroundPreloadGate;
   globalSettings: ChartSettingsRuntime;
@@ -106,6 +112,13 @@ export interface LiveChartCellProps {
   linkCoordinator: ChartLinkCoordinator;
   onActivate(cellId: ChartCellId): void;
   onLinkGroupChange(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
+  onSplitCell(
+    cellId: ChartCellId,
+    direction: ChartWorkspaceSplitDirection,
+    creationMode: ChartCellCreationMode,
+  ): void;
+  onCloseCell(cellId: ChartCellId): void;
+  onSwapCells(firstCellId: ChartCellId, secondCellId: ChartCellId): void;
   onToggleMaximize(cellId: ChartCellId): void;
   onSessionChange(cellId: ChartCellId, session: ChartSession): void;
   onChartSettingsChange(cellId: ChartCellId, settings: ReturnType<typeof normalizeSettings>): void;
@@ -122,6 +135,8 @@ function LiveChartCell({
   layoutRole,
   active,
   maximized,
+  layoutCellIds,
+  layoutEditingDisabled = false,
   pageExportRef,
   foregroundPreloadGate,
   globalSettings,
@@ -133,6 +148,9 @@ function LiveChartCell({
   linkCoordinator,
   onActivate,
   onLinkGroupChange,
+  onSplitCell,
+  onCloseCell,
+  onSwapCells,
   onToggleMaximize,
   onSessionChange,
   onChartSettingsChange,
@@ -475,6 +493,24 @@ function LiveChartCell({
       >
         <header className="multi-chart-cell-header" onDoubleClick={toggleMaximize}>
           <span className={`multi-chart-cell-status ${marketData.view.wsStatus}`} aria-hidden="true" />
+          <button
+            type="button"
+            className="multi-chart-cell-drag-handle"
+            draggable={!layoutEditingDisabled && !maximized && layoutCellIds.length > 1}
+            aria-label={`拖动图 ${cell.id.slice("cell-".length)} 交换位置`}
+            aria-disabled={layoutEditingDisabled || maximized || layoutCellIds.length <= 1}
+            title={layoutCellIds.length > 1 ? "拖动到另一图表以交换位置" : "拆分后可拖动交换"}
+            onDragStart={(event) => {
+              if (layoutEditingDisabled || maximized || layoutCellIds.length <= 1) {
+                event.preventDefault();
+                return;
+              }
+              writeChartCellDragData(event.dataTransfer, cell.id);
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            ⠿
+          </button>
           {layoutRole && (
             <span className={`multi-chart-cell-role role-${layoutRole}`}>
               {layoutRole === "main" ? "主图" : "确认图"}
@@ -518,6 +554,14 @@ function LiveChartCell({
               ))}
             </select>
           </label>
+          <WorkspaceCellLayoutMenu
+            cellId={cell.id}
+            layoutCellIds={layoutCellIds}
+            disabled={layoutEditingDisabled || maximized}
+            onSplit={onSplitCell}
+            onClose={onCloseCell}
+            onSwap={onSwapCells}
+          />
           <button
             type="button"
             className="multi-chart-cell-maximize"

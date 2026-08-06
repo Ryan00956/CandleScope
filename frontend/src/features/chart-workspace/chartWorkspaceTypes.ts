@@ -25,6 +25,7 @@ export type ChartWorkspaceId = string;
 export type ChartWorkspaceLayout = ChartWorkspaceTemplateId | "custom";
 export type ChartWorkspaceSplitDirection = "columns" | "rows";
 export type ChartWorkspaceCellRole = "main" | "confirmation";
+export type ChartCellCreationMode = "copy" | "blank";
 
 export interface ChartWorkspaceCellLayoutNode {
   kind: "cell";

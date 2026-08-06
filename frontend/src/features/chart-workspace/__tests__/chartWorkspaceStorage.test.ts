@@ -11,7 +11,9 @@ import {
 } from "../chartWorkspaceStorage.js";
 import {
   createChartWorkspaceLayoutTree,
+  closeChartWorkspaceCell,
   detectChartWorkspaceLayout,
+  splitChartWorkspaceCell,
   updateChartWorkspaceSplitRatio,
   visibleCellIds,
 } from "../chartWorkspaceLayout.js";
@@ -98,6 +100,23 @@ test("workspace persistence keeps recursive split ratios and cell-scoped state",
     "quad-top": 0.64,
     "quad-bottom": 0.58,
   });
+});
+
+test("workspace persistence restores arbitrary split and collapsed cell identities", () => {
+  const storage = memoryStorage();
+  const workspace = createDefaultChartWorkspace();
+  let tree = splitChartWorkspaceCell(workspace.layoutTree, "cell-1", "cell-2", "columns");
+  tree = splitChartWorkspaceCell(tree, "cell-2", "cell-3", "rows");
+  tree = splitChartWorkspaceCell(tree, "cell-3", "cell-4", "columns");
+  tree = closeChartWorkspaceCell(tree, "cell-2");
+  workspace.layoutTree = tree;
+  workspace.activeCellId = "cell-4";
+  saveChartWorkspace(workspace, storage);
+
+  const restored = loadChartWorkspace(storage);
+  assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "custom");
+  assert.deepEqual(visibleCellIds(restored.layoutTree), ["cell-1", "cell-3", "cell-4"]);
+  assert.equal(restored.activeCellId, "cell-4");
 });
 
 test("v2 migration turns shared legacy ratios into independent recursive split nodes", () => {

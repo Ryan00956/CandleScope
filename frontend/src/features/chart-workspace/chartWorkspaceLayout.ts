@@ -123,7 +123,9 @@ export function createChartWorkspaceLayoutTree(
 }
 
 function layoutShape(node: ChartWorkspaceLayoutNode): string {
-  if (node.kind === "cell") return node.cellId;
+  if (node.kind === "cell") {
+    return `${node.cellId}:${node.role ?? "standard"}`;
+  }
   return `${node.direction}(${layoutShape(node.first)},${layoutShape(node.second)})`;
 }
 
@@ -137,11 +139,137 @@ const TEMPLATE_LAYOUT_SHAPES = new Map<ChartWorkspaceTemplateId, string>(
 export function detectChartWorkspaceLayout(
   tree: ChartWorkspaceLayoutNode,
 ): ChartWorkspaceLayout {
+  if (tree.kind === "cell") return "single";
   const shape = layoutShape(tree);
   for (const [templateId, templateShape] of TEMPLATE_LAYOUT_SHAPES) {
     if (shape === templateShape) return templateId;
   }
   return "custom";
+}
+
+function clearCellRoles(node: ChartWorkspaceLayoutNode): ChartWorkspaceLayoutNode {
+  if (node.kind === "cell") {
+    return node.role ? { kind: "cell", cellId: node.cellId } : node;
+  }
+  const first = clearCellRoles(node.first);
+  const second = clearCellRoles(node.second);
+  return first === node.first && second === node.second
+    ? node
+    : { ...node, first, second };
+}
+
+function layoutSplitIds(tree: ChartWorkspaceLayoutNode): Set<string> {
+  const ids = new Set<string>();
+  const visit = (node: ChartWorkspaceLayoutNode) => {
+    if (node.kind === "cell") return;
+    ids.add(node.id);
+    visit(node.first);
+    visit(node.second);
+  };
+  visit(tree);
+  return ids;
+}
+
+function nextSplitId(
+  tree: ChartWorkspaceLayoutNode,
+  targetCellId: ChartCellId,
+  newCellId: ChartCellId,
+  direction: ChartWorkspaceSplitDirection,
+): string {
+  const occupied = layoutSplitIds(tree);
+  const stem = `custom-${direction}-${targetCellId}-${newCellId}`;
+  if (!occupied.has(stem)) return stem;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${stem}-${suffix}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  return `${stem}-overflow`;
+}
+
+export function firstAvailableChartCellId(
+  tree: ChartWorkspaceLayoutNode,
+): ChartCellId | null {
+  const visible = new Set(visibleCellIds(tree));
+  return CHART_CELL_IDS.find((cellId) => !visible.has(cellId)) ?? null;
+}
+
+export function splitChartWorkspaceCell(
+  tree: ChartWorkspaceLayoutNode,
+  targetCellId: ChartCellId,
+  newCellId: ChartCellId,
+  direction: ChartWorkspaceSplitDirection,
+): ChartWorkspaceLayoutNode {
+  const visible = visibleCellIds(tree);
+  if (!visible.includes(targetCellId)
+    || visible.includes(newCellId)
+    || visible.length >= CHART_CELL_IDS.length) return tree;
+  const splitId = nextSplitId(tree, targetCellId, newCellId, direction);
+  const replace = (node: ChartWorkspaceLayoutNode): ChartWorkspaceLayoutNode => {
+    if (node.kind === "cell") {
+      if (node.cellId !== targetCellId) return node;
+      return splitNode(
+        splitId,
+        direction,
+        0.5,
+        cellNode(targetCellId),
+        cellNode(newCellId),
+      );
+    }
+    const first = replace(node.first);
+    const second = replace(node.second);
+    return first === node.first && second === node.second
+      ? node
+      : { ...node, first, second };
+  };
+  return clearCellRoles(replace(tree));
+}
+
+export function closeChartWorkspaceCell(
+  tree: ChartWorkspaceLayoutNode,
+  cellId: ChartCellId,
+): ChartWorkspaceLayoutNode {
+  const visible = visibleCellIds(tree);
+  if (visible.length <= 1 || !visible.includes(cellId)) return tree;
+  const remove = (node: ChartWorkspaceLayoutNode): ChartWorkspaceLayoutNode | null => {
+    if (node.kind === "cell") return node.cellId === cellId ? null : node;
+    const first = remove(node.first);
+    const second = remove(node.second);
+    if (!first) return second;
+    if (!second) return first;
+    return first === node.first && second === node.second
+      ? node
+      : { ...node, first, second };
+  };
+  return clearCellRoles(remove(tree) ?? tree);
+}
+
+export function swapChartWorkspaceCells(
+  tree: ChartWorkspaceLayoutNode,
+  firstCellId: ChartCellId,
+  secondCellId: ChartCellId,
+): ChartWorkspaceLayoutNode {
+  if (firstCellId === secondCellId) return tree;
+  const visible = visibleCellIds(tree);
+  if (!visible.includes(firstCellId) || !visible.includes(secondCellId)) return tree;
+  const swap = (node: ChartWorkspaceLayoutNode): ChartWorkspaceLayoutNode => {
+    if (node.kind === "cell") {
+      if (node.cellId === firstCellId) return { ...node, cellId: secondCellId };
+      if (node.cellId === secondCellId) return { ...node, cellId: firstCellId };
+      return node;
+    }
+    const first = swap(node.first);
+    const second = swap(node.second);
+    return first === node.first && second === node.second
+      ? node
+      : { ...node, first, second };
+  };
+  return swap(tree);
+}
+
+export function resetChartWorkspaceLayout(
+  activeCellId: ChartCellId,
+): ChartWorkspaceLayoutNode {
+  return cellNode(activeCellId);
 }
 
 export function visibleCellIds(

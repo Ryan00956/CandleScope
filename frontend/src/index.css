@@ -9488,6 +9488,27 @@ body {
   overflow: hidden;
 }
 
+.workspace-layout-leaf {
+  position: relative;
+}
+
+.workspace-layout-leaf.drop-target::after {
+  position: absolute;
+  z-index: 90;
+  inset: 4px;
+  border: 2px solid var(--accent-blue);
+  border-radius: 6px;
+  content: "交换到这里";
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: white;
+  background: color-mix(in srgb, var(--accent-blue) 24%, transparent);
+  box-shadow: inset 0 0 32px color-mix(in srgb, var(--accent-blue) 18%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .workspace-layout-branch > *,
 .workspace-layout-leaf > * {
   flex: 1 1 auto;
@@ -9695,7 +9716,9 @@ body {
   background: var(--candle-down);
 }
 
-.multi-chart-cell-maximize {
+.multi-chart-cell-maximize,
+.multi-chart-cell-drag-handle,
+.multi-chart-cell-layout-trigger {
   display: grid;
   place-items: center;
   width: 22px;
@@ -9709,10 +9732,131 @@ body {
   cursor: pointer;
 }
 
-.multi-chart-cell-maximize:hover {
+.multi-chart-cell-maximize:hover,
+.multi-chart-cell-drag-handle:hover,
+.multi-chart-cell-layout-trigger:hover,
+.multi-chart-cell-layout-trigger[aria-expanded="true"] {
   border-color: var(--border-color);
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.multi-chart-cell-drag-handle {
+  width: 18px;
+  margin-left: -3px;
+  font-size: 12px;
+  cursor: grab;
+}
+
+.multi-chart-cell-drag-handle:active {
+  cursor: grabbing;
+}
+
+.multi-chart-cell-drag-handle[aria-disabled="true"],
+.multi-chart-cell-layout-trigger:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.workspace-cell-layout-menu {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.workspace-cell-layout-popover {
+  position: absolute;
+  z-index: 180;
+  top: calc(100% + 7px);
+  right: 0;
+  display: grid;
+  width: 236px;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 46%, var(--border-color));
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-secondary) 97%, black);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 42%);
+  line-height: 1.25;
+}
+
+.workspace-cell-layout-popover > strong {
+  color: var(--accent-blue);
+  font-size: 11px;
+}
+
+.workspace-cell-layout-popover fieldset {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  margin: 0;
+  padding: 7px 0;
+  border: 0;
+  border-block: 1px solid var(--border-color);
+}
+
+.workspace-cell-layout-popover legend,
+.workspace-cell-swap-actions > span {
+  padding: 0 4px 0 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.workspace-cell-layout-popover label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.workspace-cell-layout-popover input {
+  margin: 0;
+  accent-color: var(--accent-blue);
+}
+
+.workspace-cell-layout-actions,
+.workspace-cell-swap-actions > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.workspace-cell-swap-actions {
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-cell-swap-actions > div {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.workspace-cell-layout-popover button {
+  min-height: 27px;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.workspace-cell-layout-popover button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-blue) 50%, var(--border-color));
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.workspace-cell-layout-popover button:disabled,
+.workspace-cell-layout-popover fieldset:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.workspace-cell-layout-popover .workspace-cell-close-action {
+  color: var(--candle-down);
 }
 
 .multi-chart-cell-canvas {
@@ -10109,6 +10253,13 @@ body {
   margin-right: 4px;
   padding-right: 6px;
   border-right: 1px solid var(--border-color);
+}
+
+.workspace-layout-action-separator {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--border-color);
 }
 
 .workspace-top-controls,

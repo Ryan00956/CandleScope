@@ -3,11 +3,16 @@ import test from "node:test";
 
 import {
   createChartWorkspaceLayoutTree,
+  closeChartWorkspaceCell,
   detectChartWorkspaceLayout,
+  firstAvailableChartCellId,
   findChartWorkspaceCellRole,
   normalizeChartSplitRatio,
   normalizeChartWorkspaceLayoutTree,
   ratioFromPointerPosition,
+  resetChartWorkspaceLayout,
+  splitChartWorkspaceCell,
+  swapChartWorkspaceCells,
   updateChartWorkspaceSplitRatio,
   visibleCellIds,
 } from "../chartWorkspaceLayout.js";
@@ -72,4 +77,44 @@ test("malformed or duplicate recursive nodes fail closed to the supplied preset"
   };
   assert.equal(normalizeChartWorkspaceLayoutTree(duplicateCells, fallback), fallback);
   assert.equal(normalizeChartWorkspaceLayoutTree({ kind: "split" }, fallback), fallback);
+});
+
+test("arbitrary split and close operations grow and collapse the recursive tree", () => {
+  let tree = createChartWorkspaceLayoutTree("single");
+  assert.equal(firstAvailableChartCellId(tree), "cell-2");
+  tree = splitChartWorkspaceCell(tree, "cell-1", "cell-2", "columns");
+  assert.deepEqual(visibleCellIds(tree), ["cell-1", "cell-2"]);
+  assert.equal(detectChartWorkspaceLayout(tree), "split-vertical");
+  tree = splitChartWorkspaceCell(tree, "cell-2", "cell-3", "rows");
+  assert.equal(detectChartWorkspaceLayout(tree), "custom");
+  tree = splitChartWorkspaceCell(tree, "cell-3", "cell-4", "columns");
+  assert.deepEqual(visibleCellIds(tree), ["cell-1", "cell-2", "cell-3", "cell-4"]);
+  assert.equal(firstAvailableChartCellId(tree), null);
+  assert.equal(splitChartWorkspaceCell(tree, "cell-1", "cell-4", "rows"), tree);
+
+  tree = closeChartWorkspaceCell(tree, "cell-3");
+  assert.deepEqual(visibleCellIds(tree), ["cell-1", "cell-2", "cell-4"]);
+  tree = closeChartWorkspaceCell(tree, "cell-2");
+  assert.deepEqual(visibleCellIds(tree), ["cell-1", "cell-4"]);
+  tree = closeChartWorkspaceCell(tree, "cell-4");
+  assert.deepEqual(visibleCellIds(tree), ["cell-1"]);
+  assert.equal(closeChartWorkspaceCell(tree, "cell-1"), tree);
+});
+
+test("structural edits clear preset roles while swaps preserve positional roles", () => {
+  const preset = createChartWorkspaceLayoutTree("main-confirmation");
+  const swapped = swapChartWorkspaceCells(preset, "cell-1", "cell-3");
+  assert.deepEqual(visibleCellIds(swapped), ["cell-3", "cell-2", "cell-1"]);
+  assert.equal(findChartWorkspaceCellRole(swapped, "cell-3"), "main");
+  assert.equal(findChartWorkspaceCellRole(swapped, "cell-1"), "confirmation");
+
+  const closed = closeChartWorkspaceCell(preset, "cell-2");
+  assert.equal(findChartWorkspaceCellRole(closed, "cell-1"), null);
+  assert.equal(findChartWorkspaceCellRole(closed, "cell-3"), null);
+});
+
+test("reset keeps the active cell identity and still reports a single layout", () => {
+  const tree = resetChartWorkspaceLayout("cell-3");
+  assert.deepEqual(visibleCellIds(tree), ["cell-3"]);
+  assert.equal(detectChartWorkspaceLayout(tree), "single");
 });

@@ -756,8 +756,17 @@ async function main() {
     assert(await evaluate(replay.cdp, "window.opener === null"), "current replay target retained window.opener");
     const initial = await waitForReplayStatus(replay.cdp, `(value) => value.connection === "connected" && value.state === "PAUSED" && value.bars > 0`, args.timeoutMs, "initial replay snapshot");
     const sessionUrl = await evaluate(replay.cdp, "location.href");
-    const sessionId = new URL(sessionUrl).searchParams.get("session");
-    assert(sessionId, "replay session URL lost its session id");
+    const runId = new URL(sessionUrl).searchParams.get("run");
+    assert(runId, "replay URL lost its product Run id");
+    const runDetail = await readJson(
+      `${currentBackendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}`,
+    );
+    const sessionId = runDetail?.adapter_session_id;
+    assert(
+      typeof sessionId === "string" && sessionId.length > 0,
+      "product Run did not expose its authoritative adapter session",
+      runDetail,
+    );
     const speedAction = "playback-rate";
     const speedChanged = await evaluate(replay.cdp, `(() => { const select = document.querySelector('[data-replay-action="${speedAction}"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "60"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
     assert(speedChanged, "rollback replay speed control was unavailable", {
@@ -970,7 +979,7 @@ async function main() {
         isolatedFixtureRows: 4_000,
       },
       featureFlagRollback: {
-        enabled: { liveBefore, initial, playing, progressed, sessionId, persisted, v2Archive },
+        enabled: { liveBefore, initial, playing, progressed, runId, sessionId, persisted, v2Archive },
         disabled: {
           capabilities: disabledCapabilities,
           liveAfter: liveAfterDisable,

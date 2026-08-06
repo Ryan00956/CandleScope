@@ -53,6 +53,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /Run market search readiness/);
   assert.match(soak, /market-picker-readiness/);
   assert.match(soak, /data-training-field="requested-start-utc"/);
+  assert.match(soak, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {
@@ -275,7 +276,7 @@ const catalogEntry = {
 };
 
 const createPayload = {
-  protocol: "replay.v2",
+  protocol: "replay.v3",
   name: "Run-centric soak",
   source_kind: "BAR",
   start_mode: "RANDOM",

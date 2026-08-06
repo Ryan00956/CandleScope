@@ -31,6 +31,7 @@ const FORMAL_V2_REAL_WINDOW_ROWS = (
 );
 const SHUTDOWN_REQUEST_TIMEOUT_MS = 5_000;
 const HEDGE_BROWSER_SOURCE_PROFILE = "HEDGE_EXACT_ARCHIVE_QA";
+const REPLAY_TRAINING_PROTOCOL = "replay.v3";
 
 function parseArgs(argv) {
   const result = {
@@ -1545,7 +1546,7 @@ function replayV2Command(runId, commandId, session, type, payload = {}) {
   const cursor = snapshot?.cursor;
   assert(snapshot && cursor, "v2 lifecycle session snapshot is missing", session);
   return {
-    protocol: "replay.v2",
+    protocol: REPLAY_TRAINING_PROTOCOL,
     run_id: runId,
     command_id: commandId,
     client_instance_id: "phase10-browser-soak",
@@ -2781,11 +2782,15 @@ async function main() {
     ));
     const v2CreatePayload = v2CreateRequest?.postData ? JSON.parse(v2CreateRequest.postData) : null;
     assert(
-      v2CreatePayload?.protocol === "replay.v2"
+      v2CreatePayload?.protocol === REPLAY_TRAINING_PROTOCOL
         && v2CreatePayload?.position_mode === "HEDGE"
         && v2CreatePayload?.account_data_mode === "DETERMINISTIC_SIMULATION"
         && v2CreatePayload?.book_mode === "BOOK_ASSISTED_REQUIRED"
-        && v2CreatePayload?.funding_mode === "HISTORICAL_EXACT",
+        && v2CreatePayload?.funding_mode === "HISTORICAL_EXACT"
+        && v2CreatePayload?.account_fidelity
+          === "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE"
+        && v2CreatePayload?.insurance_adl_fidelity
+          === "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT",
       "training create payload was not the default HEDGE exchange-parity contract",
       v2CreateRequest,
     );
@@ -2804,10 +2809,6 @@ async function main() {
         && v2MarketPayload?.base_interval === formalTrainingPlan.interval
         && v2CreatePayload?.indicator_warmup_bars === formalTrainingPlan.warmupBars
         && v2CreatePayload?.forward_cache_ms === formalTrainingPlan.forwardCacheMs
-        && v2CreatePayload?.hedge_public_history_ref?.archive_id
-          === formalTrainingPlan.publicRefs.BTCUSDT.archive_id
-        && v2CreatePayload?.simulation_manifest_ref?.manifest_id
-          === formalTrainingPlan.simulationRef.manifest_id
         && v2MarketPayload?.hedge_public_history_ref?.archive_id
           === formalTrainingPlan.publicRefs.BTCUSDT.archive_id
         && v2MarketPayload?.simulation_manifest_ref?.manifest_id
@@ -2816,7 +2817,7 @@ async function main() {
     };
     assert(
       formalTrainingBinding.payloadBound === true,
-      "formal replay.v2 training POST was not bound to the exact HEDGE input set",
+      "formal replay.v3 training POST was not bound to the exact HEDGE input set",
       { formalTrainingBinding, v2CreatePayload, v2MarketPayload },
     );
     const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({

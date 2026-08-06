@@ -55,6 +55,9 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /data-training-field="requested-start-utc"/);
   assert.match(soak, /railView: "replay-paper"/);
   assert.doesNotMatch(soak, /text: "纸面交易"/);
+  assert.match(soak, /data-replay-action="place-order"/);
+  assert.match(soak, /data-side="\$\{side\}"/);
+  assert.doesNotMatch(soak, /\.replay-order-ticket/);
   assert.match(soak, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
   const accountProofSource = soak.slice(
     soak.indexOf("async function readServerAccountProof"),

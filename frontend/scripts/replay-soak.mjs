@@ -1590,21 +1590,18 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   await waitForCommandReady(cdp, timeoutMs);
 
   const side = index % 2 === 0 ? "BUY" : "SELL";
-  const sideChanged = await evaluate(cdp, `(() => {
-    const ticket = document.querySelector('.replay-order-ticket');
-    const button = [...(ticket?.querySelectorAll('button') || [])].find((item) => item.textContent?.trim() === "${side}");
-    if (!(button instanceof HTMLButtonElement)) return false;
-    button.click();
-    return true;
+  const sideReady = await evaluate(cdp, `(() => {
+    const button = document.querySelector('[data-replay-action="place-order"][data-side="${side}"]');
+    return button instanceof HTMLButtonElement && !button.disabled;
   })()`);
-  assert(sideChanged, "training order side control was unavailable", { index, side });
+  assert(sideReady, "training order side action was unavailable", { index, side });
   const beforeOrder = await waitForAuthoritativeReplayStatus(
     cdp,
     `(value) => value.state === "PAUSED"`,
     timeoutMs,
     "authoritative pre-order snapshot",
   );
-  await click(cdp, '[data-replay-action="place-order"]');
+  await click(cdp, `[data-replay-action="place-order"][data-side="${side}"]`);
   const ordered = await waitForAuthoritativeReplayStatus(
     cdp,
     `(value) => value.orderCount > ${beforeOrder.orderCount}`,

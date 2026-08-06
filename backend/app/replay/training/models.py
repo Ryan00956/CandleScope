@@ -196,6 +196,7 @@ class ReplayV2CommandType(_StringEnum):
     CLOSE_POSITION = "close_position"
     EXECUTE_POSITION_INTENT = "execute_position_intent"
     SET_POSITION_PROTECTION = "set_position_protection"
+    SET_POSITION_LEVERAGE = "set_position_leverage"
     ALLOCATE_ISOLATED_MARGIN = "allocate_isolated_margin"
     DEPOSIT = "deposit"
     WITHDRAW = "withdraw"

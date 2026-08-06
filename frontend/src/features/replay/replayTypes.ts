@@ -386,6 +386,7 @@ export interface ReplayOrder {
   readonly status_history: readonly string[];
   readonly model_version: string;
   readonly position_side?: "LONG" | "SHORT";
+  readonly leverage?: ReplayDecimalString;
 }
 
 export interface ReplayFill {
@@ -435,6 +436,7 @@ export interface ReplayPosition {
   readonly notional: ReplayDecimalString;
   readonly realized_pnl: ReplayDecimalString;
   readonly unrealized_pnl: ReplayDecimalString;
+  readonly leverage?: ReplayDecimalString;
 }
 
 export interface ReplayAccount {

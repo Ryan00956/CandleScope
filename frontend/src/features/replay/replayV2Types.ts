@@ -109,6 +109,7 @@ export const REPLAY_V2_ENUMS = Object.freeze({
     "close_position",
     "execute_position_intent",
     "set_position_protection",
+    "set_position_leverage",
     "allocate_isolated_margin",
     "deposit",
     "withdraw",
@@ -409,7 +410,13 @@ export interface ReplayTrainingPortfolioPosition {
   readonly position_side?: "LONG" | "SHORT";
   readonly position: Readonly<Record<string, ReplayV2Json>>;
   readonly maintenance_margin?: string;
+  readonly initial_margin?: string;
+  readonly leverage?: string;
+  readonly risk_tier?: number;
+  readonly account_notional?: string;
   readonly isolated_margin?: string;
+  readonly isolated_allocation_key?: string;
+  readonly position_leg_hash?: `sha256:${string}`;
   readonly margin_equity?: string;
   readonly risk_ratio?: string | null;
   readonly rule_revision?: number;
@@ -1566,8 +1573,14 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         "symbol",
         ...(Object.hasOwn(position as object, "position_side") ? ["position_side"] : []),
         "position",
+        "leverage",
+        "initial_margin",
+        "account_notional",
         "maintenance_margin",
         "isolated_margin",
+        "isolated_allocation_key",
+        "risk_tier",
+        ...(Object.hasOwn(position as object, "position_leg_hash") ? ["position_leg_hash"] : []),
         "margin_equity",
         "risk_ratio",
         "rule_revision",
@@ -1587,11 +1600,28 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
             }
           : {}),
         position: jsonObject(item.position, `${field}.position`),
+        leverage: positiveDecimal(item.leverage, `${field}.leverage`),
+        initial_margin: canonicalDecimal(
+          item.initial_margin,
+          `${field}.initial_margin`,
+        ),
+        account_notional: canonicalDecimal(
+          item.account_notional,
+          `${field}.account_notional`,
+        ),
         maintenance_margin: canonicalDecimal(
           item.maintenance_margin,
           `${field}.maintenance_margin`,
         ),
         isolated_margin: canonicalDecimal(item.isolated_margin, `${field}.isolated_margin`),
+        isolated_allocation_key: identifier(
+          item.isolated_allocation_key,
+          `${field}.isolated_allocation_key`,
+        ),
+        risk_tier: counter(item.risk_tier, `${field}.risk_tier`),
+        ...(Object.hasOwn(item as object, "position_leg_hash")
+          ? { position_leg_hash: digest(item.position_leg_hash, `${field}.position_leg_hash`) }
+          : {}),
         margin_equity: canonicalDecimal(item.margin_equity, `${field}.margin_equity`),
         risk_ratio: item.risk_ratio === null
           ? null

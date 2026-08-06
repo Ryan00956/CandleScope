@@ -2186,6 +2186,7 @@ class ReplaySessionActor:
             CommandType.CLOSE_POSITION,
             CommandType.EXECUTE_POSITION_INTENT,
             CommandType.SET_POSITION_PROTECTION,
+            CommandType.SET_POSITION_LEVERAGE,
             InternalCommandType.ADJUST_CAPITAL,
         }:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:

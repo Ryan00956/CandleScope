@@ -79,6 +79,7 @@ class CommandType(_StringEnum):
     CLOSE_POSITION = "close_position"
     EXECUTE_POSITION_INTENT = "execute_position_intent"
     SET_POSITION_PROTECTION = "set_position_protection"
+    SET_POSITION_LEVERAGE = "set_position_leverage"
     ADD_JOURNAL_NOTE = "add_journal_note"
     REVEAL_HISTORY = "reveal_history"
     END_SESSION = "end_session"

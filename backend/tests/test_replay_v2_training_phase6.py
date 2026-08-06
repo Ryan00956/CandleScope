@@ -808,7 +808,11 @@ async def test_isolated_margin_requires_allocation_and_releases_when_flat(
             session_id=session_id,
             command_id="isolated-allocation",
             command_type=ReplayV2CommandType.ALLOCATE_ISOLATED_MARGIN,
-            payload={"track_id": "track-1", "amount": "1000"},
+            payload={
+                "track_id": "track-1",
+                "position_side": None,
+                "amount": "1000",
+            },
         )
         assert allocated["data"]["portfolio"]["isolated_allocations"] == {
             "track-1": "1000"

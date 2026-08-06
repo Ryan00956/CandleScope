@@ -60,6 +60,7 @@ from .risk import (
     build_order_preview,
     build_account,
     decimal_multiple,
+    effective_order_leverage,
     fee_for_fill,
     mark_position,
     validate_order_risk,
@@ -185,6 +186,7 @@ def apply_position_fill(
     quantity: str,
     price: str,
     mark_price: str,
+    leverage: str | None = None,
 ) -> PositionFillResult:
     """Apply one fill to a one-way net position without binary floats."""
 
@@ -252,6 +254,7 @@ def apply_position_fill(
             unrealized,
             field_name="position.unrealized_pnl",
         ),
+        leverage=(position.leverage if leverage is None else leverage),
     )
     return PositionFillResult(
         position=updated,
@@ -542,6 +545,21 @@ class ConservativeBarBroker:
             status_history=(OrderStatus.NEW, OrderStatus.OPEN),
             model_version=self._model_version,
             position_side=request.position_side,
+            leverage=(
+                decimal_to_string(
+                    effective_order_leverage(
+                        request,
+                        self.config,
+                        self._position_for_side(
+                            self._position,
+                            request.position_side,
+                        ),
+                    ),
+                    field_name="order.leverage",
+                )
+                if self.config.position_mode is PositionMode.HEDGE
+                else None
+            ),
         )
         orders = dict(self._orders)
         orders[order.order_id] = order
@@ -982,6 +1000,56 @@ class ConservativeBarBroker:
         except (ReplayDomainError, InvalidOperation, TypeError, ValueError):
             self.restore(checkpoint)
             raise
+
+    def set_position_leverage(
+        self,
+        *,
+        position_side: PositionSide | str,
+        leverage: str,
+    ) -> Position:
+        """Atomically change one HEDGE leg's active leverage."""
+
+        if self.config.position_mode is not PositionMode.HEDGE:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "set_position_leverage requires HEDGE mode",
+            )
+        side = self._normalize_position_side(position_side)
+        assert side is not None and isinstance(self._position, PositionBook)
+        normalized = canonical_decimal(
+            leverage,
+            field_name="position leverage",
+            positive=True,
+        )
+        value = Decimal(normalized)
+        if value < 1 or value > Decimal(self.config.limits.max_leverage):
+            raise ReplayDomainError(
+                ReplayErrorCode.RISK_LIMIT_EXCEEDED,
+                "position leverage is outside the session leverage limit",
+            )
+        if any(
+            order.position_side is side
+            and not order.reduce_only
+            and order.status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
+            for order in self._orders.values()
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.RISK_LIMIT_EXCEEDED,
+                "cancel active opening orders before changing leg leverage",
+            )
+        candidate_leg = replace(self._position.leg(side), leverage=normalized)
+        candidate_position = self._position.with_leg(side, candidate_leg)
+        candidate_account = self._account_from(self._ledger, candidate_position)
+        if Decimal(candidate_account.available_equity) < 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.RISK_LIMIT_EXCEEDED,
+                "position leverage change exceeds available equity",
+            )
+        self._position = candidate_position
+        self._account = candidate_account
+        self._has_trading_activity = True
+        self._assert_invariants()
+        return candidate_leg
 
     def adjust_capital(
         self,
@@ -1493,6 +1561,7 @@ class ConservativeBarBroker:
                         else str(values["stop_price"])
                     ),
                     position_side=existing.position_side,
+                    leverage=existing.leverage,
                 )
                 orders = self.replace_order(
                     str(values["order_id"]),
@@ -1643,6 +1712,17 @@ class ConservativeBarBroker:
                     ReplayErrorCode.ORDER_REJECTED,
                     "position protection violates the order contract",
                 ) from exc
+        elif normalized is CommandType.SET_POSITION_LEVERAGE:
+            if set(values) != {"position_side", "leverage"}:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "set_position_leverage payload is invalid",
+                )
+            self.set_position_leverage(
+                position_side=str(values["position_side"]),
+                leverage=str(values["leverage"]),
+            )
+            orders = ()
         else:
             raise ReplayDomainError(
                 ReplayErrorCode.INVALID_STATE_TRANSITION,
@@ -1842,7 +1922,10 @@ class ConservativeBarBroker:
         self._closed_trades: list[ClosedTrade] = []
         self._warnings: list[BrokerWarning] = []
         self._position: PositionState = (
-            PositionBook.flat(mark_price=self.config.initial_mark_price)
+            PositionBook.flat(
+                mark_price=self.config.initial_mark_price,
+                leverage=self.config.limits.max_leverage,
+            )
             if self.config.position_mode is PositionMode.HEDGE
             else Position.flat(mark_price=self.config.initial_mark_price)
         )
@@ -2299,6 +2382,7 @@ class ConservativeBarBroker:
             quantity,
             price,
             price,
+            leverage=order.leverage,
         )
         candidate_position = self._replace_position_leg(
             working.position,

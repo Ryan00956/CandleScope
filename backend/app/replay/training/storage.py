@@ -47,6 +47,7 @@ from .account import (
     fee_for_notional,
     initial_ledger_hash,
     instrument_rule_from_broker_config,
+    isolated_margin_key,
     ledger_chain_hash,
     round_to_step,
 )
@@ -2850,9 +2851,11 @@ class TrainingRunStore:
                 configured_max_leverage,
                 Decimal(active_rule.max_leverage),
             )
-            margin = notional / leverage
+            broker_margin = notional / leverage
+            margin = active_rule.initial_margin(notional, leverage)
             maintenance = active_rule.maintenance_margin(notional)
             open_orders = json.loads(str(track["open_orders_json"]))
+            broker_reserved = Decimal(0)
             reserved = Decimal(0)
             if not isinstance(open_orders, list):
                 add_difference(
@@ -2881,11 +2884,20 @@ class TrainingRunStore:
                     or order.get("stop_price")
                     or mark
                 )
-                reserved += (
+                order_notional = (
                     abs(order_quantity)
                     * Decimal(str(reference))
                     * contract_size
-                    / leverage
+                )
+                order_leverage = min(
+                    Decimal(str(order.get("leverage") or leverage)),
+                    configured_max_leverage,
+                    Decimal(active_rule.max_leverage),
+                )
+                broker_reserved += order_notional / order_leverage
+                reserved += active_rule.initial_margin(
+                    order_notional,
+                    order_leverage,
                 )
             expected_unrealized += unrealized
             expected_margin += margin
@@ -2945,15 +2957,22 @@ class TrainingRunStore:
                     expected_track_cash + unrealized,
                     track_account.get("equity"),
                 ),
-                ("margin_used", margin, track_account.get("margin_used")),
+                (
+                    "margin_used",
+                    broker_margin,
+                    track_account.get("margin_used"),
+                ),
                 (
                     "reserved_margin",
-                    reserved,
+                    broker_reserved,
                     track_account.get("reserved_margin"),
                 ),
                 (
                     "available_equity",
-                    expected_track_cash + unrealized - margin - reserved,
+                    expected_track_cash
+                    + unrealized
+                    - broker_margin
+                    - broker_reserved,
                     track_account.get("available_equity"),
                 ),
                 (
@@ -8021,6 +8040,7 @@ class TrainingRunStore:
         *,
         run_id: str,
         track_id: str,
+        position_side: str | None,
         amount: str,
         command_id: str,
         virtual_time_ms: int,
@@ -8031,7 +8051,8 @@ class TrainingRunStore:
         def write(connection: sqlite3.Connection) -> None:
             account = connection.execute(
                 """
-                SELECT account.*, run.settlement_asset
+                SELECT account.*, run.settlement_asset, run.position_mode,
+                       run.adapter_session_id
                 FROM replay_training_contract_account AS account
                 JOIN replay_training_run AS run USING(run_id)
                 WHERE run_id = ?
@@ -8050,6 +8071,19 @@ class TrainingRunStore:
                     "margin allocation requires an ISOLATED TrainingRun",
                     status_code=409,
                 )
+            if str(account["position_mode"]) == "HEDGE":
+                if position_side not in {"LONG", "SHORT"}:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "HEDGE isolated margin requires position_side",
+                        status_code=422,
+                    )
+            elif position_side is not None:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "ONE_WAY isolated margin does not accept position_side",
+                    status_code=422,
+                )
             track = connection.execute(
                 """
                 SELECT * FROM replay_training_market_track
@@ -8063,12 +8097,50 @@ class TrainingRunStore:
                     "training market track does not exist",
                     status_code=404,
                 )
-            track_account = json.loads(str(track["account_json"]))
-            if not isinstance(track_account, dict):
-                raise TypeError("track account projection is invalid")
-            required = Decimal(str(track_account.get("margin_used", "0"))) + Decimal(
-                str(track_account.get("reserved_margin", "0"))
-            )
+            if str(account["position_mode"]) == "HEDGE":
+                leg = connection.execute(
+                    """
+                    SELECT initial_margin FROM replay_training_position_leg
+                    WHERE run_id = ? AND track_id = ? AND position_side = ?
+                    """,
+                    (run_id, track_id, position_side),
+                ).fetchone()
+                position_margin = (
+                    Decimal(0)
+                    if leg is None
+                    else Decimal(str(leg["initial_margin"]))
+                )
+                reserved_margin = sum(
+                    (
+                        Decimal(
+                            str(
+                                json.loads(str(row["order_json"]))[
+                                    "reserved_margin"
+                                ]
+                            )
+                        )
+                        for row in connection.execute(
+                            """
+                            SELECT order_json
+                            FROM replay_training_contract_order
+                            WHERE run_id = ? AND track_id = ?
+                              AND json_extract(order_json, '$.position_side') = ?
+                              AND json_extract(order_json, '$.status')
+                                  IN ('OPEN', 'PARTIALLY_FILLED')
+                            """,
+                            (run_id, track_id, position_side),
+                        ).fetchall()
+                    ),
+                    Decimal(0),
+                )
+                required = position_margin + reserved_margin
+            else:
+                track_account = json.loads(str(track["account_json"]))
+                if not isinstance(track_account, dict):
+                    raise TypeError("track account projection is invalid")
+                required = Decimal(
+                    str(track_account.get("margin_used", "0"))
+                ) + Decimal(str(track_account.get("reserved_margin", "0")))
             if target < required:
                 raise TrainingRunError(
                     "ISOLATED_MARGIN_IN_USE",
@@ -8084,7 +8156,8 @@ class TrainingRunStore:
             allocations = json.loads(str(account["isolated_margin_json"]))
             if not isinstance(allocations, dict):
                 raise TypeError("isolated margin allocation is invalid")
-            current = Decimal(str(allocations.get(track_id, "0")))
+            allocation_key = isolated_margin_key(track_id, position_side)
+            current = Decimal(str(allocations.get(allocation_key, "0")))
             delta = target - current
             rows = tuple(
                 connection.execute(
@@ -8113,10 +8186,10 @@ class TrainingRunStore:
                     status_code=409,
                 )
             if target == 0:
-                allocations.pop(track_id, None)
+                allocations.pop(allocation_key, None)
                 kind = "MARGIN_RELEASE"
             else:
-                allocations[track_id] = decimal_to_string(
+                allocations[allocation_key] = decimal_to_string(
                     target,
                     field_name="isolated margin allocation",
                 )
@@ -8151,6 +8224,8 @@ class TrainingRunStore:
                 reference_type="COMMAND",
                 reference_id=command_id,
                 metadata={
+                    "allocation_key": allocation_key,
+                    "position_side": position_side,
                     "old_allocation": decimal_to_string(
                         current,
                         field_name="old isolated allocation",
@@ -8160,6 +8235,26 @@ class TrainingRunStore:
                         field_name="new isolated allocation",
                     ),
                 },
+                now_ms=now_ms,
+            )
+            self._detect_contract_liquidations(
+                connection,
+                run_id=run_id,
+                now_ms=now_ms,
+                trigger_virtual_time_ms=virtual_time_ms,
+            )
+            self._append_review_timeline_event(
+                connection,
+                run_id=run_id,
+                session_id=str(account["adapter_session_id"]),
+                context={
+                    "kind": "DIRECT",
+                    "category": "POSITION",
+                    "event_type": "ALLOCATE_ISOLATED_MARGIN",
+                    "command_id": command_id,
+                },
+                state=None,
+                checkpoint=None,
                 now_ms=now_ms,
             )
 
@@ -8757,8 +8852,11 @@ class TrainingRunStore:
             )
             account = connection.execute(
                 """
-                SELECT overlay_cash, isolated_margin_json
-                FROM replay_training_contract_account WHERE run_id = ?
+                SELECT account.overlay_cash, account.isolated_margin_json,
+                       run.position_mode
+                FROM replay_training_contract_account AS account
+                JOIN replay_training_run AS run USING(run_id)
+                WHERE account.run_id = ?
                 """,
                 (run_id,),
             ).fetchone()
@@ -8766,7 +8864,17 @@ class TrainingRunStore:
             allocations = json.loads(str(account["isolated_margin_json"]))
             if isinstance(allocations, dict):
                 for leg in legs:
-                    allocations.pop(str(leg["track_id"]), None)
+                    allocations.pop(
+                        isolated_margin_key(
+                            str(leg["track_id"]),
+                            (
+                                str(leg["position_side"])
+                                if account["position_mode"] == "HEDGE"
+                                else None
+                            ),
+                        ),
+                        None,
+                    )
             rule = connection.execute(
                 """
                 SELECT revision FROM replay_training_instrument_rule
@@ -10634,13 +10742,133 @@ class TrainingRunStore:
             initial_equity=initial_equity,
             tracks=tracks,
         )
+        order_rows = tuple(
+            connection.execute(
+                """
+                SELECT track_id, order_json, rule_revision
+                FROM replay_training_contract_order
+                WHERE run_id = ?
+                  AND json_extract(order_json, '$.status')
+                      IN ('OPEN', 'PARTIALLY_FILLED')
+                ORDER BY track_id, order_id
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        orders = [
+            {
+                **json.loads(str(row["order_json"])),
+                "track_id": str(row["track_id"]),
+                "rule_revision": int(row["rule_revision"]),
+            }
+            for row in order_rows
+        ]
+        ledger_rows = tuple(
+            connection.execute(
+                """
+                SELECT kind, cash_delta FROM replay_training_contract_ledger
+                WHERE run_id = ? ORDER BY ledger_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        ledger_total = sum(
+            (Decimal(str(row["cash_delta"])) for row in ledger_rows),
+            Decimal(0),
+        )
         try:
-            overlay = Decimal(str(account["overlay_cash"]))
-            cash = Decimal(str(base["cash_balance"])) + overlay
-            unrealized = Decimal(str(base["unrealized_pnl"]))
+            cash = ledger_total
+            position_items = list(base["positions"])  # type: ignore[arg-type]
+            realized = Decimal(str(base["realized_pnl"]))
+            if base["position_mode"] == "HEDGE":
+                track_by_id = {
+                    str(track["track_id"]): track for track in tracks
+                }
+                position_items = []
+                realized = Decimal(0)
+                relation_rows = connection.execute(
+                    """
+                    SELECT * FROM replay_training_position_leg
+                    WHERE run_id = ? ORDER BY track_id, position_side
+                    """,
+                    (run_id,),
+                ).fetchall()
+                for row in relation_rows:
+                    protection = json.loads(str(row["protection_json"]))
+                    component = {
+                        "schema_version": "replay.position-leg.v1",
+                        "track_id": str(row["track_id"]),
+                        "position_side": str(row["position_side"]),
+                        "signed_quantity": str(row["signed_quantity"]),
+                        "absolute_quantity": str(row["absolute_quantity"]),
+                        "entry_price": row["entry_price"],
+                        "mark_price": row["mark_price"],
+                        "notional": str(row["notional"]),
+                        "realized_pnl": str(row["realized_pnl"]),
+                        "unrealized_pnl": str(row["unrealized_pnl"]),
+                        "initial_margin": str(row["initial_margin"]),
+                        "maintenance_margin": str(row["maintenance_margin"]),
+                        "leverage": str(row["leverage"]),
+                        "margin_mode": str(row["margin_mode"]),
+                        "isolated_wallet": str(row["isolated_wallet"]),
+                        "liquidation_price": row["liquidation_price"],
+                        "bankruptcy_price": row["bankruptcy_price"],
+                        "accumulated_funding": str(row["accumulated_funding"]),
+                        "trading_fees": str(row["trading_fees"]),
+                        "liquidation_fees": str(row["liquidation_fees"]),
+                        "risk_tier": int(row["risk_tier"]),
+                        "rule_revision": int(row["rule_revision"]),
+                        "protection": protection,
+                    }
+                    if canonical_sha256(component) != row["component_hash"]:
+                        raise TypeError("hedge position leg hash is invalid")
+                    realized += Decimal(str(row["realized_pnl"]))
+                    if Decimal(str(row["absolute_quantity"])) == 0:
+                        continue
+                    track = track_by_id.get(str(row["track_id"]))
+                    if track is None:
+                        raise TypeError("hedge position leg track is missing")
+                    position_items.append(
+                        {
+                            "track_id": str(row["track_id"]),
+                            "symbol": track["symbol"],
+                            "position_side": str(row["position_side"]),
+                            "position": {
+                                "quantity": str(row["signed_quantity"]),
+                                "entry_price": row["entry_price"],
+                                "mark_price": row["mark_price"],
+                                "notional": str(row["notional"]),
+                                "realized_pnl": str(row["realized_pnl"]),
+                                "unrealized_pnl": str(row["unrealized_pnl"]),
+                                "leverage": str(row["leverage"]),
+                            },
+                            "initial_margin": str(row["initial_margin"]),
+                            "maintenance_margin": str(
+                                row["maintenance_margin"]
+                            ),
+                            "risk_tier": int(row["risk_tier"]),
+                            "position_leg_hash": str(row["component_hash"]),
+                        }
+                    )
+            unrealized = sum(
+                (
+                    Decimal(str(item["position"]["unrealized_pnl"]))
+                    for item in position_items
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("position"), Mapping)
+                ),
+                Decimal(0),
+            )
             equity = cash + unrealized
-            margin_used = Decimal(str(base["margin_used"]))
-            reserved = Decimal(str(base["reserved_margin"]))
+            margin_used = Decimal(0)
+            reserved = sum(
+                (
+                    Decimal(str(order.get("reserved_margin", "0")))
+                    for order in orders
+                    if order.get("reduce_only") is not True
+                ),
+                Decimal(0),
+            )
             isolated_raw = json.loads(str(account["isolated_margin_json"]))
             if not isinstance(isolated_raw, dict):
                 raise TypeError("isolated margin allocation must be an object")
@@ -10653,8 +10881,21 @@ class TrainingRunStore:
                 else equity - sum(isolated.values(), Decimal(0))
             )
             risk_positions: list[dict[str, object]] = []
+            leverage_policy = connection.execute(
+                """
+                SELECT max_leverage FROM replay_training_leverage_policy
+                WHERE run_id = ?
+                ORDER BY effective_virtual_time_ms DESC,
+                         source_sequence DESC, revision DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if leverage_policy is None:
+                raise TypeError("active leverage policy is missing")
+            configured_max_leverage = Decimal(str(leverage_policy["max_leverage"]))
+            total_initial_margin = Decimal(0)
             total_maintenance = Decimal(0)
-            for item in base["positions"]:  # type: ignore[union-attr]
+            for item in position_items:
                 if not isinstance(item, Mapping):
                     continue
                 position = item.get("position")
@@ -10673,11 +10914,44 @@ class TrainingRunStore:
                 if rule_row is None:
                     raise TypeError("active instrument rule is missing")
                 rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
-                maintenance = rule.maintenance_margin(
-                    Decimal(str(position["notional"]))
+                notional = Decimal(str(position["notional"]))
+                leverage = Decimal(
+                    str(position.get("leverage") or configured_max_leverage)
                 )
+                leverage = min(
+                    leverage,
+                    configured_max_leverage,
+                    Decimal(rule.max_leverage),
+                )
+                initial_margin = rule.initial_margin(notional, leverage)
+                risk_tier, _tier = rule.active_maintenance_tier(notional)
+                maintenance = rule.maintenance_margin(notional)
+                if base["position_mode"] == "HEDGE":
+                    for field_name, expected_value in (
+                        ("initial_margin", initial_margin),
+                        ("maintenance_margin", maintenance),
+                        ("risk_tier", Decimal(risk_tier)),
+                    ):
+                        actual_value = Decimal(
+                            str(
+                                item.get(field_name)
+                            )
+                        )
+                        if actual_value != expected_value:
+                            raise TypeError(
+                                f"hedge position leg {field_name} is invalid"
+                            )
+                total_initial_margin += initial_margin
                 total_maintenance += maintenance
-                allocation = isolated.get(track_id, Decimal(0))
+                allocation_key = isolated_margin_key(
+                    track_id,
+                    (
+                        str(item["position_side"])
+                        if base["position_mode"] == "HEDGE"
+                        else None
+                    ),
+                )
+                allocation = isolated.get(allocation_key, Decimal(0))
                 isolated_equity = allocation + Decimal(
                     str(position["unrealized_pnl"])
                 )
@@ -10689,6 +10963,14 @@ class TrainingRunStore:
                 risk_positions.append(
                     {
                         **dict(item),
+                        "leverage": decimal_to_string(
+                            leverage,
+                            field_name="position leverage",
+                        ),
+                        "initial_margin": decimal_to_string(
+                            initial_margin,
+                            field_name="initial margin",
+                        ),
                         "maintenance_margin": decimal_to_string(
                             maintenance,
                             field_name="maintenance_margin",
@@ -10697,6 +10979,12 @@ class TrainingRunStore:
                             allocation,
                             field_name="isolated_margin",
                         ),
+                        "isolated_allocation_key": allocation_key,
+                        "account_notional": decimal_to_string(
+                            notional,
+                            field_name="account notional",
+                        ),
+                        "risk_tier": risk_tier,
                         "margin_equity": decimal_to_string(
                             denominator,
                             field_name="margin_equity",
@@ -10714,30 +11002,18 @@ class TrainingRunStore:
                         "mark_fidelity": rule.mark_fidelity,
                     }
                 )
+            margin_used = total_initial_margin
+            available = (
+                equity - margin_used - reserved
+                if str(account["margin_mode"]) == "CROSS"
+                else equity - sum(isolated.values(), Decimal(0))
+            )
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise TrainingRunError(
                 "TRAINING_RUN_STORAGE_DEGRADED",
                 "contract account projection is invalid",
                 status_code=503,
             ) from exc
-        orders = [
-            {
-                **json.loads(str(row["order_json"])),
-                "track_id": str(row["track_id"]),
-                "rule_revision": int(row["rule_revision"]),
-            }
-            for row in connection.execute(
-                """
-                SELECT track_id, order_json, rule_revision
-                FROM replay_training_contract_order
-                WHERE run_id = ?
-                  AND json_extract(order_json, '$.status')
-                      IN ('OPEN', 'PARTIALLY_FILLED')
-                ORDER BY track_id, order_id
-                """,
-                (run_id,),
-            ).fetchall()
-        ]
         order_counts = connection.execute(
             """
             SELECT COUNT(*) AS total_count,
@@ -10763,19 +11039,6 @@ class TrainingRunStore:
                 """,
                 (run_id,),
             ).fetchall()
-        )
-        ledger_rows = tuple(
-            connection.execute(
-                """
-                SELECT kind, cash_delta FROM replay_training_contract_ledger
-                WHERE run_id = ? ORDER BY ledger_sequence
-                """,
-                (run_id,),
-            ).fetchall()
-        )
-        ledger_total = sum(
-            (Decimal(str(row["cash_delta"])) for row in ledger_rows),
-            Decimal(0),
         )
         fee_total = sum(
             (Decimal(str(row["configured_fee"])) for row in fill_fee_rows),
@@ -11054,14 +11317,26 @@ class TrainingRunStore:
                 available,
                 field_name="available_equity",
             ),
-            "reserved_margin": str(base["reserved_margin"]),
-            "margin_used": str(base["margin_used"]),
+            "reserved_margin": decimal_to_string(
+                reserved,
+                field_name="reserved_margin",
+            ),
+            "margin_used": decimal_to_string(
+                margin_used,
+                field_name="margin_used",
+            ),
             "maintenance_margin": decimal_to_string(
                 total_maintenance,
                 field_name="maintenance_margin",
             ),
-            "realized_pnl": str(base["realized_pnl"]),
-            "unrealized_pnl": str(base["unrealized_pnl"]),
+            "realized_pnl": decimal_to_string(
+                realized,
+                field_name="realized_pnl",
+            ),
+            "unrealized_pnl": decimal_to_string(
+                unrealized,
+                field_name="unrealized_pnl",
+            ),
             "fees_paid": decimal_to_string(fee_total, field_name="fees_paid"),
             "funding_cashflow": decimal_to_string(
                 funding_total,
@@ -12314,7 +12589,8 @@ class TrainingRunStore:
 
         parent = connection.execute(
             """
-            SELECT account.*, run.initial_equity, run.settlement_asset
+            SELECT account.*, run.initial_equity, run.settlement_asset,
+                   run.position_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -12436,11 +12712,21 @@ class TrainingRunStore:
                 track_id,
                 str,
             ):
+                position_side = metadata.get("position_side")
+                allocation_key = isolated_margin_key(
+                    "track-1",
+                    (
+                        str(position_side)
+                        if parent["position_mode"] == "HEDGE"
+                        and position_side in {"LONG", "SHORT"}
+                        else None
+                    ),
+                )
                 target = metadata.get("new_allocation")
                 if target is None or Decimal(str(target)) == 0:
-                    allocations.pop("track-1", None)
+                    allocations.pop(allocation_key, None)
                 else:
-                    allocations["track-1"] = decimal_to_string(
+                    allocations[allocation_key] = decimal_to_string(
                         Decimal(str(target)),
                         field_name="fork isolated allocation",
                     )
@@ -14039,30 +14325,64 @@ class TrainingRunStore:
             position = component_state.get("position")
             orders = component_state.get("orders")
             terminal = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
-            has_open_order = isinstance(orders, (list, tuple)) and any(
-                isinstance(order, Mapping) and order.get("status") not in terminal
-                for order in orders
-            )
-            flat = isinstance(position, Mapping) and str(position.get("quantity")) == "0"
             allocations = json.loads(str(account["isolated_margin_json"]))
-            if (
-                flat
-                and not has_open_order
-                and isinstance(allocations, dict)
-                and track_id in allocations
-            ):
-                released = Decimal(str(allocations.pop(track_id)))
-                connection.execute(
-                    """
-                    UPDATE replay_training_contract_account
-                    SET isolated_margin_json = ?, updated_at_ms = ? WHERE run_id = ?
-                    """,
-                    (canonical_json(allocations), now_ms, run_id),
+            if not isinstance(allocations, dict):
+                raise TypeError("isolated margin allocation is invalid")
+            scopes: tuple[tuple[str | None, Mapping[str, object]], ...]
+            if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+                scopes = tuple(
+                    (side, leg)
+                    for side, leg in (
+                        ("LONG", position.get("long")),
+                        ("SHORT", position.get("short")),
+                    )
+                    if isinstance(leg, Mapping)
                 )
+            elif isinstance(position, Mapping):
+                scopes = ((None, position),)
+            else:
+                scopes = ()
+            changed = False
+            for position_side, leg in scopes:
+                allocation_key = isolated_margin_key(track_id, position_side)
+                prior_was_open = True
+                if position_side is not None:
+                    prior_leg = connection.execute(
+                        """
+                        SELECT absolute_quantity
+                        FROM replay_training_position_leg
+                        WHERE run_id = ? AND track_id = ? AND position_side = ?
+                        """,
+                        (run_id, track_id, position_side),
+                    ).fetchone()
+                    prior_was_open = (
+                        prior_leg is not None
+                        and Decimal(str(prior_leg["absolute_quantity"])) > 0
+                    )
+                has_open_order = isinstance(orders, (list, tuple)) and any(
+                    isinstance(order, Mapping)
+                    and order.get("status") not in terminal
+                    and (
+                        position_side is None
+                        or order.get("position_side") == position_side
+                    )
+                    for order in orders
+                )
+                if (
+                    not prior_was_open
+                    or str(leg.get("quantity")) != "0"
+                    or has_open_order
+                    or allocation_key not in allocations
+                ):
+                    continue
+                released = Decimal(str(allocations.pop(allocation_key)))
+                changed = True
                 cls._append_contract_ledger(
                     connection,
                     run_id=run_id,
-                    posting_id=f"auto-margin-release:{track_id}:{source_sequence}",
+                    posting_id=(
+                        f"auto-margin-release:{allocation_key}:{source_sequence}"
+                    ),
                     track_id=track_id,
                     kind="MARGIN_RELEASE",
                     cash_delta=Decimal(0),
@@ -14072,14 +14392,24 @@ class TrainingRunStore:
                     fidelity="CONFIGURED_ISOLATED_MARGIN_EXACT",
                     rule_revision=rule_revision,
                     reference_type="POSITION",
-                    reference_id=track_id,
+                    reference_id=allocation_key,
                     metadata={
+                        "allocation_key": allocation_key,
+                        "position_side": position_side,
                         "released_margin": decimal_to_string(
                             released,
                             field_name="released isolated margin",
-                        )
+                        ),
                     },
                     now_ms=now_ms,
+                )
+            if changed:
+                connection.execute(
+                    """
+                    UPDATE replay_training_contract_account
+                    SET isolated_margin_json = ?, updated_at_ms = ? WHERE run_id = ?
+                    """,
+                    (canonical_json(allocations), now_ms, run_id),
                 )
 
     @classmethod
@@ -14255,6 +14585,9 @@ class TrainingRunStore:
         ).fetchone()
         if account is None or str(account["account_model"]) != CONTRACT_ACCOUNT_MODEL:
             return
+        isolated = json.loads(str(account["isolated_margin_json"]))
+        if not isinstance(isolated, dict):
+            raise TypeError("isolated margin allocation is invalid")
         tracks = tuple(
             connection.execute(
                 """
@@ -14341,6 +14674,7 @@ class TrainingRunStore:
                     positions.append(item)
         total_initial_margin = Decimal(0)
         total_unrealized = Decimal(0)
+        total_reserved_margin = Decimal(0)
         for (
             track,
             leg,
@@ -14361,17 +14695,33 @@ class TrainingRunStore:
             leverage = Decimal(str(leg.get("leverage", rule.max_leverage)))
             if leverage <= 0:
                 leverage = Decimal(rule.max_leverage)
-            initial_margin = Decimal(0) if notional == 0 else notional / leverage
+            initial_margin = rule.initial_margin(notional, leverage)
             total_initial_margin += initial_margin
             total_unrealized += Decimal(str(leg.get("unrealized_pnl", "0")))
-            risk_tier = next(
+            open_orders = json.loads(str(track["open_orders_json"]))
+            if not isinstance(open_orders, list):
+                raise TypeError("track open-order projection is invalid")
+            reserved_margin = sum(
                 (
-                    index
-                    for index, tier in enumerate(rule.maintenance_tiers, start=1)
-                    if notional <= Decimal(tier.notional_cap)
+                    Decimal(str(order.get("reserved_margin", "0")))
+                    for order in open_orders
+                    if isinstance(order, Mapping)
+                    and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                    and order.get("reduce_only") is not True
+                    and (
+                        raw_position_side is None
+                        or order.get("position_side") == position_side
+                    )
                 ),
-                len(rule.maintenance_tiers),
+                Decimal(0),
             )
+            total_reserved_margin += reserved_margin
+            risk_tier, _active_tier = rule.active_maintenance_tier(notional)
+            allocation_key = isolated_margin_key(
+                str(track["track_id"]),
+                position_side if raw_position_side is not None else None,
+            )
+            isolated_wallet = Decimal(str(isolated.get(allocation_key, "0")))
             component = {
                 "schema_version": "replay.position-leg.v1",
                 "track_id": str(track["track_id"]),
@@ -14399,11 +14749,9 @@ class TrainingRunStore:
                 ),
                 "leverage": decimal_to_string(leverage, field_name="position leverage"),
                 "margin_mode": str(account["margin_mode"]),
-                "isolated_wallet": str(
-                    json.loads(str(account["isolated_margin_json"])).get(
-                        str(track["track_id"]),
-                        "0",
-                    )
+                "isolated_wallet": decimal_to_string(
+                    isolated_wallet,
+                    field_name="isolated wallet",
                 ),
                 "liquidation_price": leg.get("liquidation_price"),
                 "bankruptcy_price": leg.get("bankruptcy_price"),
@@ -14523,9 +14871,73 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
-        if position_components:
+            if str(account["margin_mode"]) == "ISOLATED":
+                isolated_available = (
+                    isolated_wallet - initial_margin - reserved_margin
+                )
+                isolated_bucket = {
+                    "schema_version": "replay.margin-bucket.v1",
+                    "bucket_id": (
+                        f"isolated:{track['track_id']}:{position_side}"
+                    ),
+                    "bucket_kind": "ISOLATED_LEG",
+                    "track_id": str(track["track_id"]),
+                    "position_side": position_side,
+                    "asset": str(account["settlement_asset"]),
+                    "wallet_balance": decimal_to_string(
+                        isolated_wallet,
+                        field_name="isolated wallet balance",
+                    ),
+                    "initial_margin": component["initial_margin"],
+                    "maintenance_margin": component["maintenance_margin"],
+                    "reserved_margin": decimal_to_string(
+                        reserved_margin,
+                        field_name="isolated reserved margin",
+                    ),
+                    "available_balance": decimal_to_string(
+                        isolated_available,
+                        field_name="isolated available balance",
+                    ),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_margin_bucket(
+                        run_id, bucket_id, bucket_kind, track_id, position_side,
+                        asset, wallet_balance, initial_margin,
+                        maintenance_margin, reserved_margin, available_balance,
+                        component_revision, component_hash, updated_at_ms
+                    ) VALUES (?, ?, 'ISOLATED_LEG', ?, ?, ?, ?, ?, ?, ?, ?,
+                              1, ?, ?)
+                    ON CONFLICT(run_id, bucket_id) DO UPDATE SET
+                        wallet_balance = excluded.wallet_balance,
+                        initial_margin = excluded.initial_margin,
+                        maintenance_margin = excluded.maintenance_margin,
+                        reserved_margin = excluded.reserved_margin,
+                        available_balance = excluded.available_balance,
+                        component_revision = replay_training_margin_bucket.component_revision + 1,
+                        component_hash = excluded.component_hash,
+                        updated_at_ms = excluded.updated_at_ms
+                    """,
+                    (
+                        run_id,
+                        isolated_bucket["bucket_id"],
+                        track["track_id"],
+                        position_side,
+                        account["settlement_asset"],
+                        isolated_bucket["wallet_balance"],
+                        isolated_bucket["initial_margin"],
+                        isolated_bucket["maintenance_margin"],
+                        isolated_bucket["reserved_margin"],
+                        isolated_bucket["available_balance"],
+                        canonical_sha256(isolated_bucket),
+                        now_ms,
+                    ),
+                )
+        if position_components and str(account["margin_mode"]) == "CROSS":
             wallet_balance = equity - total_unrealized
-            available_balance = equity - total_initial_margin
+            available_balance = (
+                equity - total_initial_margin - total_reserved_margin
+            )
             cross_bucket = {
                 "schema_version": "replay.margin-bucket.v1",
                 "bucket_id": f"cross:{account['settlement_asset']}",
@@ -14543,7 +14955,10 @@ class TrainingRunStore:
                     total_maintenance,
                     field_name="cross maintenance margin",
                 ),
-                "reserved_margin": "0",
+                "reserved_margin": decimal_to_string(
+                    total_reserved_margin,
+                    field_name="cross reserved margin",
+                ),
                 "available_balance": decimal_to_string(
                     available_balance,
                     field_name="cross available balance",
@@ -14556,7 +14971,7 @@ class TrainingRunStore:
                     asset, wallet_balance, initial_margin, maintenance_margin,
                     reserved_margin, available_balance, component_revision,
                     component_hash, updated_at_ms
-                ) VALUES (?, ?, 'CROSS', NULL, NULL, ?, ?, ?, ?, '0', ?, 1, ?, ?)
+                ) VALUES (?, ?, 'CROSS', NULL, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(run_id, bucket_id) DO UPDATE SET
                     wallet_balance = excluded.wallet_balance,
                     initial_margin = excluded.initial_margin,
@@ -14574,6 +14989,7 @@ class TrainingRunStore:
                     cross_bucket["wallet_balance"],
                     cross_bucket["initial_margin"],
                     cross_bucket["maintenance_margin"],
+                    cross_bucket["reserved_margin"],
                     cross_bucket["available_balance"],
                     canonical_sha256(cross_bucket),
                     now_ms,
@@ -14601,9 +15017,6 @@ class TrainingRunStore:
                     (now_ms, run_id),
                 )
             return
-        isolated = json.loads(str(account["isolated_margin_json"]))
-        if not isinstance(isolated, dict):
-            raise TypeError("isolated margin allocation is invalid")
         affected: list[
             tuple[
                 sqlite3.Row,
@@ -14619,8 +15032,12 @@ class TrainingRunStore:
                 affected = positions
         else:
             for item in positions:
-                track, position, _rule, maintenance, _position_side, _revision = item
-                allocated = Decimal(str(isolated.get(str(track["track_id"]), "0")))
+                track, position, _rule, maintenance, position_side, _revision = item
+                allocation_key = isolated_margin_key(
+                    str(track["track_id"]),
+                    position_side,
+                )
+                allocated = Decimal(str(isolated.get(allocation_key, "0")))
                 isolated_equity = allocated + Decimal(str(position["unrealized_pnl"]))
                 if isolated_equity <= maintenance:
                     affected.append(item)
@@ -14700,6 +15117,15 @@ class TrainingRunStore:
                 ],
             }
             risk_hash = canonical_sha256(risk_payload)
+            risk_available = (
+                equity - total_initial_margin - total_reserved_margin
+                if str(account["margin_mode"]) == "CROSS"
+                else equity
+                - sum(
+                    (Decimal(str(value)) for value in isolated.values()),
+                    Decimal(0),
+                )
+            )
             connection.execute(
                 """
                 INSERT INTO replay_training_risk_snapshot(
@@ -14719,16 +15145,19 @@ class TrainingRunStore:
                     sequence,
                     risk_payload["equity"],
                     decimal_to_string(
-                        equity - total_maintenance,
+                        risk_available,
                         field_name="available balance",
                     ),
-                    "0",
+                    decimal_to_string(
+                        total_initial_margin,
+                        field_name="risk total initial margin",
+                    ),
                     risk_payload["total_maintenance_margin"],
                     (
                         None
                         if equity == 0
                         else decimal_to_string(
-                            total_maintenance / equity,
+                            equity / total_maintenance,
                             field_name="risk ratio",
                         )
                     ),
@@ -14792,11 +15221,7 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
-            allocation = (
-                equity
-                if str(account["margin_mode"]) == "CROSS"
-                else Decimal(str(isolated.get(track_id, "0")))
-            )
+            allocation = equity if str(account["margin_mode"]) == "CROSS" else Decimal(0)
             for leg_sequence, item in enumerate(group, start=1):
                 _track, leg, rule, maintenance, raw_side, _revision = item
                 quantity = Decimal(str(leg["quantity"]))
@@ -14805,9 +15230,20 @@ class TrainingRunStore:
                 notional = abs(Decimal(str(leg["notional"])))
                 bankruptcy: Decimal | None = None
                 entry = Decimal(str(leg["entry_price"]))
+                leg_allocation = (
+                    allocation / Decimal(len(group))
+                    if str(account["margin_mode"]) == "CROSS"
+                    else Decimal(
+                        str(
+                            isolated.get(
+                                isolated_margin_key(track_id, position_side),
+                                "0",
+                            )
+                        )
+                    )
+                )
                 bankruptcy = entry - (
-                    allocation
-                    / Decimal(len(group))
+                    leg_allocation
                     / (absolute_quantity * Decimal(rule.contract_size))
                 ) * (
                     Decimal(1) if position_side == "LONG" else Decimal(-1)

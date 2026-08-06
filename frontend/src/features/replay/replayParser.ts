@@ -374,7 +374,11 @@ function parseOrder(value: unknown, path: string): ReplayOrder {
     "average_fill_price", "accepted_source_sequence", "created_time_ms", "ordinal",
     "reserved_margin", "status_reason", "status_history", "model_version",
   ];
-  exact(source, Object.hasOwn(source, "position_side") ? [...fields, "position_side"] : fields, path);
+  exact(source, [
+    ...fields,
+    ...(Object.hasOwn(source, "position_side") ? ["position_side"] : []),
+    ...(Object.hasOwn(source, "leverage") ? ["leverage"] : []),
+  ], path);
   return {
     order_id: identifier(source.order_id, `${path}.order_id`),
     client_order_id: identifier(source.client_order_id, `${path}.client_order_id`),
@@ -397,6 +401,9 @@ function parseOrder(value: unknown, path: string): ReplayOrder {
     model_version: string(source.model_version, `${path}.model_version`),
     ...(Object.hasOwn(source, "position_side")
       ? { position_side: enumeration(source.position_side, ["LONG", "SHORT"] as const, `${path}.position_side`) }
+      : {}),
+    ...(Object.hasOwn(source, "leverage")
+      ? { leverage: parseReplayDecimal(source.leverage, `${path}.leverage`) }
       : {}),
   };
 }
@@ -468,7 +475,10 @@ function parseWarning(value: unknown, path: string): ReplayWarning {
 
 function parsePosition(value: unknown, path: string): ReplayPosition {
   const source = record(value, path);
-  exact(source, ["quantity", "entry_price", "mark_price", "notional", "realized_pnl", "unrealized_pnl"], path);
+  exact(source, [
+    "quantity", "entry_price", "mark_price", "notional", "realized_pnl", "unrealized_pnl",
+    ...(Object.hasOwn(source, "leverage") ? ["leverage"] : []),
+  ], path);
   return {
     quantity: parseReplayDecimal(source.quantity, `${path}.quantity`),
     entry_price: nullableDecimal(source.entry_price, `${path}.entry_price`),
@@ -476,6 +486,9 @@ function parsePosition(value: unknown, path: string): ReplayPosition {
     notional: parseReplayDecimal(source.notional, `${path}.notional`),
     realized_pnl: parseReplayDecimal(source.realized_pnl, `${path}.realized_pnl`),
     unrealized_pnl: parseReplayDecimal(source.unrealized_pnl, `${path}.unrealized_pnl`),
+    ...(Object.hasOwn(source, "leverage")
+      ? { leverage: parseReplayDecimal(source.leverage, `${path}.leverage`) }
+      : {}),
   };
 }
 

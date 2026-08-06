@@ -55,6 +55,17 @@ def round_to_step(value: Decimal, step: Decimal, *, upward: bool) -> Decimal:
         return units * step
 
 
+def isolated_margin_key(track_id: str, position_side: str | None) -> str:
+    """Return the canonical allocation identity for one margin scope."""
+
+    track = validate_identifier(track_id, field_name="track_id")
+    if position_side is None:
+        return track
+    if position_side not in {"LONG", "SHORT"}:
+        raise ValueError("position_side must be LONG or SHORT")
+    return f"{track}:{position_side}"
+
+
 @dataclass(frozen=True, slots=True)
 class MaintenanceTier:
     notional_cap: str
@@ -259,26 +270,49 @@ class InstrumentRule:
         )
         return cls(**payload)  # type: ignore[arg-type]
 
-    def maintenance_margin(self, notional: Decimal) -> Decimal:
+    def active_maintenance_tier(
+        self,
+        notional: Decimal,
+    ) -> tuple[int, MaintenanceTier]:
         if not notional.is_finite() or notional < 0:
             raise ValueError("notional must be finite and non-negative")
-        tier = next(
+        match = next(
             (
-                candidate
-                for candidate in self.maintenance_tiers
+                (index, candidate)
+                for index, candidate in enumerate(self.maintenance_tiers, start=1)
                 if notional <= Decimal(candidate.notional_cap)
             ),
             None,
         )
-        if tier is None:
+        if match is None:
             raise ValueError("notional exceeds the versioned maintenance tiers")
+        return match
+
+    def initial_margin(self, notional: Decimal, leverage: Decimal) -> Decimal:
+        if not notional.is_finite() or notional < 0:
+            raise ValueError("notional must be finite and non-negative")
+        if not leverage.is_finite() or leverage < 1:
+            raise ValueError("leverage must be finite and at least one")
+        if leverage > Decimal(self.max_leverage):
+            raise ValueError("leverage exceeds the versioned rule")
+        with localcontext() as context:
+            context.prec = 60
+            raw = notional / leverage
+        return round_to_step(raw, Decimal(self.quote_step), upward=True)
+
+    def maintenance_margin(self, notional: Decimal) -> Decimal:
+        _, tier = self.active_maintenance_tier(notional)
         with localcontext() as context:
             context.prec = 60
             maintenance = (
                 notional * Decimal(tier.maintenance_rate)
                 - Decimal(tier.maintenance_deduction)
             )
-        return max(Decimal(0), maintenance)
+        return round_to_step(
+            max(Decimal(0), maintenance),
+            Decimal(self.quote_step),
+            upward=True,
+        )
 
     def liquidation_fee(self, notional: Decimal) -> Decimal:
         with localcontext() as context:

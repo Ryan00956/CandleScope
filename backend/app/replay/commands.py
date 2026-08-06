@@ -518,6 +518,26 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 ),
             },
         )
+    if command_type is CommandType.SET_POSITION_LEVERAGE:
+        _exact_keys(payload, {"position_side", "leverage"})
+        if payload["position_side"] not in {"LONG", "SHORT"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position_side must be LONG or SHORT",
+            )
+        leverage = _optional_order_leverage(payload)
+        if leverage is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "leverage is required",
+            )
+        return ParsedCommand(
+            command_type,
+            {
+                "position_side": payload["position_side"],
+                "leverage": leverage,
+            },
+        )
     if command_type is CommandType.ADD_JOURNAL_NOTE:
         _exact_keys(payload, {"text"})
         text = payload["text"]

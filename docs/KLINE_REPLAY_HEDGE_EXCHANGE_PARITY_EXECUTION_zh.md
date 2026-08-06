@@ -365,6 +365,14 @@ portfolio/export 的权威来源。阶段证据见
 
 预估：5–7 个工程日。
 
+状态：`COMPLETE`。broker 已持久化逐腿 active leverage 与订单 effective leverage，
+新增原子 `set_position_leverage` 命令；初始/维持保证金、risk tier、rounding、
+opening reservation 与 close capacity 均由统一 Decimal rule adapter 按目标腿计算。
+CROSS 不做双腿净额抵扣；HEDGE ISOLATED wallet/allocation/bucket/ledger/fork/UI
+全部硬切到逐腿 key，单腿调杠杆、分配或释放不会串改另一腿。portfolio 可从
+ledger、position legs 与 active orders 独立重算并对篡改 fail-closed。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE2_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE2_RESULT_20260806_zh.md)。
+
 ### Phase 3：HEDGE pinned public archive 与 simulation manifest
 
 工作内容：

@@ -54,6 +54,7 @@ export type ReplayPhase5TradeType = Extract<ReplayV2CommandType,
   | "close_position"
   | "execute_position_intent"
   | "set_position_protection"
+  | "set_position_leverage"
   | "allocate_isolated_margin"
 >;
 

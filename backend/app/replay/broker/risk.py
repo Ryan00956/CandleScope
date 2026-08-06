@@ -123,12 +123,30 @@ def order_reference_price_for_existing(order: ReplayOrder, mark_price: str) -> D
     return Decimal(mark_price)
 
 
-def effective_order_leverage(request: OrderRiskContext, config: BrokerConfig) -> Decimal:
-    """Resolve request leverage clamped to the session max leverage ceiling."""
+def position_leverage(position: Position, config: BrokerConfig) -> Decimal:
+    """Return the persisted leg leverage, with ONE_WAY legacy fallback."""
+
+    if position.leverage is None:
+        value = Decimal(config.limits.max_leverage)
+        if value <= 0:
+            _risk_rejected("session leverage limit must be positive")
+        return value
+    value = Decimal(position.leverage)
+    if value < 1 or value > Decimal(config.limits.max_leverage):
+        _risk_rejected("position leverage is outside the session leverage limit")
+    return value
+
+
+def effective_order_leverage(
+    request: OrderRiskContext,
+    config: BrokerConfig,
+    position: Position | None = None,
+) -> Decimal:
+    """Resolve request leverage against the target leg's active setting."""
 
     maximum = Decimal(config.limits.max_leverage)
     if request.leverage is None:
-        return maximum
+        return maximum if position is None else position_leverage(position, config)
     leverage = Decimal(request.leverage)
     if leverage < 1:
         _order_rejected("leverage must be at least 1")
@@ -152,6 +170,17 @@ def validate_order_risk(
         request=request,
         position=position,
     )
+    leverage = effective_order_leverage(request, config, target_position)
+    if (
+        not request.reduce_only
+        and Decimal(target_position.quantity) != 0
+        and request.leverage is not None
+        and leverage != position_leverage(target_position, config)
+    ):
+        _risk_rejected(
+            "opening order leverage differs from the active hedge leg; "
+            "set position leverage first"
+        )
     quantity = Decimal(request.quantity)
     filters = config.instrument
     limits = config.limits
@@ -203,7 +232,6 @@ def validate_order_risk(
     if projected_exposure > Decimal(limits.max_position_notional):
         _risk_rejected("order would exceed max_position_notional")
 
-    leverage = effective_order_leverage(request, config)
     reservation = quote_round_up(notional / leverage, config)
     if reservation > Decimal(account.available_equity):
         _risk_rejected("insufficient available equity for margin reservation")
@@ -251,7 +279,7 @@ def build_order_capacity(
         position=position,
     )
     reference = order_reference_price(request, position.mark_price)
-    leverage = effective_order_leverage(request, config)
+    leverage = effective_order_leverage(request, config, target_position)
     if request.reduce_only:
         position_quantity = Decimal(target_position.quantity)
         if position_quantity == 0:
@@ -413,6 +441,7 @@ def mark_position(position: PositionState, mark_price: str) -> PositionState:
             unrealized,
             field_name="unrealized_pnl",
         ),
+        leverage=position.leverage,
     )
 
 
@@ -436,9 +465,20 @@ def build_account(
             else Decimal(cash_balance)
         )
         equity = cash + Decimal(position.unrealized_pnl)
-        margin_used = quote_round_up(
-            Decimal(position.notional) / Decimal(config.limits.max_leverage),
-            config,
+        legs = (
+            (position.long, position.short)
+            if isinstance(position, PositionBook)
+            else (position,)
+        )
+        margin_used = sum(
+            (
+                quote_round_up(
+                    Decimal(leg.notional) / position_leverage(leg, config),
+                    config,
+                )
+                for leg in legs
+            ),
+            Decimal(0),
         )
         available = equity - margin_used - reserved
     return Account(

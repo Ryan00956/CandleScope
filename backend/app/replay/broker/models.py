@@ -14,8 +14,8 @@ BAR_BROKER_MODEL_VERSION = "BAR_CONSERVATIVE_V1"
 AGG_TRADE_TAPE_MODEL_VERSION = "AGG_TRADE_TAPE_V1"
 BAR_TOUCH_OR_TAPE_MODEL_VERSION = "BAR_TOUCH_OR_TAPE_V2"
 AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION = "AGG_TRADE_TOUCH_OR_TAPE_V2"
-BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "BAR_TOUCH_OR_TAPE_HEDGE_V3"
-AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "AGG_TRADE_TOUCH_OR_TAPE_HEDGE_V3"
+BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "BAR_TOUCH_OR_TAPE_HEDGE_MARGIN_V4"
+AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MARGIN_V4"
 PAPER_LINEAR_EXECUTION_MODE = "paper_linear_v1"
 TOUCH_OR_TAPE_EXECUTION_MODE = "touch_or_tape_v2"
 SUPPORTED_BROKER_MODEL_VERSIONS = frozenset(
@@ -697,6 +697,7 @@ class ReplayOrder:
     status_history: tuple[OrderStatus, ...]
     model_version: str = BROKER_MODEL_VERSION
     position_side: PositionSide | None = None
+    leverage: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -843,6 +844,15 @@ class ReplayOrder:
                 "position_side",
                 coerce_enum(PositionSide, self.position_side, "position_side"),
             )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(
+                self.leverage,
+                field_name="order.leverage",
+                positive=True,
+            ),
+        )
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -868,12 +878,15 @@ class ReplayOrder:
         }
         if self.position_side is not None:
             payload["position_side"] = self.position_side.value
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
         return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ReplayOrder":
         data = dict(payload)
         position_side = data.pop("position_side", None)
+        leverage = data.pop("leverage", None)
         exact_keys(
             data,
             {
@@ -906,6 +919,7 @@ class ReplayOrder:
                 "status_history": tuple(data["status_history"]),
             },
             position_side=position_side,
+            leverage=leverage,
         )  # type: ignore[arg-type]
 
 
@@ -1046,6 +1060,7 @@ class Position:
     notional: str
     realized_pnl: str
     unrealized_pnl: str
+    leverage: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1089,6 +1104,15 @@ class Position:
                     field_name=f"position.{field_name}",
                 ),
             )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(
+                self.leverage,
+                field_name="position.leverage",
+                positive=True,
+            ),
+        )
         if (Decimal(self.quantity) == 0) != (self.entry_price is None):
             raise ValueError("position quantity and entry price disagree")
         quantity = Decimal(self.quantity)
@@ -1106,12 +1130,12 @@ class Position:
             raise ValueError("position unrealized PnL does not reconcile")
 
     @classmethod
-    def flat(cls, *, mark_price: str) -> "Position":
+    def flat(cls, *, mark_price: str, leverage: str | None = None) -> "Position":
         mark = canonical_decimal(mark_price, field_name="mark_price", positive=True)
-        return cls("0", None, mark, "0", "0", "0")
+        return cls("0", None, mark, "0", "0", "0", leverage)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "quantity": self.quantity,
             "entry_price": self.entry_price,
             "mark_price": self.mark_price,
@@ -1119,11 +1143,16 @@ class Position:
             "realized_pnl": self.realized_pnl,
             "unrealized_pnl": self.unrealized_pnl,
         }
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "Position":
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
         exact_keys(
-            payload,
+            data,
             {
                 "quantity",
                 "entry_price",
@@ -1133,7 +1162,7 @@ class Position:
                 "unrealized_pnl",
             },
         )
-        return cls(**payload)  # type: ignore[arg-type]
+        return cls(**data, leverage=leverage)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1160,12 +1189,14 @@ class PositionBook:
             raise ValueError("hedge SHORT leg quantity cannot be positive")
         if Decimal(self.long.mark_price) != Decimal(self.short.mark_price):
             raise ValueError("hedge position legs must share one mark price")
+        if self.long.leverage is None or self.short.leverage is None:
+            raise ValueError("hedge position legs require persisted active leverage")
 
     @classmethod
-    def flat(cls, *, mark_price: str) -> "PositionBook":
+    def flat(cls, *, mark_price: str, leverage: str) -> "PositionBook":
         return cls(
-            long=Position.flat(mark_price=mark_price),
-            short=Position.flat(mark_price=mark_price),
+            long=Position.flat(mark_price=mark_price, leverage=leverage),
+            short=Position.flat(mark_price=mark_price, leverage=leverage),
         )
 
     @property

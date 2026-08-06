@@ -664,7 +664,10 @@ async def test_exact_account_only_waves_batch_until_market_barrier(
         )
         assert sum(event["event_phase"] == 20 for event in stable) == 1
         projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
-        assert projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
+        assert (
+            projection["portfolio"]["account_history"]["auditor"]["status"]
+            == "PASS"
+        ), projection["portfolio"]["account_history"]["auditor"]
         with sqlite3.connect(database) as connection:
             command_types = [
                 json.loads(row[0])["type"]
@@ -1466,7 +1469,10 @@ async def test_exact_multi_full_positions_share_clock_funding_and_audit(
         assert len({track["cursor"]["virtual_time_ms"] for track in tracks}) == 1
         assert all(track["position"]["quantity"] == "1" for track in tracks)
         assert len(projection["portfolio"]["account_history"]["bindings"]) == 2
-        assert projection["portfolio"]["account_history"]["auditor"]["status"] == "PASS"
+        assert (
+            projection["portfolio"]["account_history"]["auditor"]["status"]
+            == "PASS"
+        ), projection["portfolio"]["account_history"]["auditor"]
         with sqlite3.connect(database) as connection:
             connection.row_factory = sqlite3.Row
             stored_equity = connection.execute(
@@ -1609,7 +1615,11 @@ async def test_exact_isolated_margin_and_review_fork_boundary(
             session_id=session_id,
             command_id="isolated-exact-allocate",
             command_type=ReplayV2CommandType.ALLOCATE_ISOLATED_MARGIN,
-            payload={"track_id": "track-1", "amount": "1000"},
+            payload={
+                "track_id": "track-1",
+                "position_side": None,
+                "amount": "1000",
+            },
         )
         await _send(
             service,

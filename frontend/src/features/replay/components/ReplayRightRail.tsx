@@ -54,7 +54,8 @@ type TradeType =
   | "cancel_orders"
   | "close_position"
   | "execute_position_intent"
-  | "set_position_protection";
+  | "set_position_protection"
+  | "set_position_leverage";
 type TradeNotice = Readonly<{
   tone: "pending" | "success" | "error";
   message: string;
@@ -1245,14 +1246,20 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
     stopLoss: string;
     takeProfit: string;
   }> | null>(null);
+  const [leverageDraft, setLeverageDraft] = useState<Readonly<{
+    trackId: string;
+    positionSide: "LONG" | "SHORT";
+    value: string;
+  }> | null>(null);
   const [positionPanel, setPositionPanel] = useState<Readonly<{
     trackId: string;
     positionSide?: "LONG" | "SHORT";
-    kind: "close" | "protection";
+    kind: "close" | "protection" | "leverage";
   }> | null>(null);
   const [filterSelectedTrackOnly, setFilterSelectedTrackOnly] = useState(false);
   const closeQtyInputRef = useRef<HTMLInputElement | null>(null);
   const [isolatedAmount, setIsolatedAmount] = useState("0");
+  const [isolatedSide, setIsolatedSide] = useState<"LONG" | "SHORT">("LONG");
   const [notice, setNotice] = useState<TradeNotice>(null);
   useTradeNoticeAutoDismiss(notice, setNotice);
   const [reportSnapshot, setReportSnapshot] = useState<Readonly<{
@@ -1371,7 +1378,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
 
   const togglePositionPanel = (
     trackId: string,
-    kind: "close" | "protection",
+    kind: "close" | "protection" | "leverage",
     positionSide?: "LONG" | "SHORT",
   ) => {
     setPositionPanel((current) => (
@@ -1521,6 +1528,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               const samePanelLeg = positionPanel?.positionSide === hedgePositionSide;
               const showClose = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "close";
               const showProtection = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "protection";
+              const showLeverage = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "leverage";
               const uPnl = finiteNumber(item.position.unrealized_pnl) ?? 0;
               const marginLabel = item.margin_equity ?? item.isolated_margin ?? null;
               const itemQtyAsset = baseAsset(item.symbol, settlementAsset);
@@ -1536,6 +1544,10 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                 && protectionDraft.positionSide === hedgePositionSide
                 ? protectionDraft.takeProfit
                 : "";
+              const itemLeverage = leverageDraft?.trackId === item.track_id
+                && leverageDraft.positionSide === hedgePositionSide
+                ? leverageDraft.value
+                : String(item.leverage ?? config?.max_leverage ?? "");
               const legPayload = hedgePositionSide === undefined
                 ? {}
                 : { position_side: hedgePositionSide };
@@ -1547,7 +1559,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                       <div className="replay-badge-row">
                         <span className="replay-chip" data-side={positionSide}>{positionSide === "long" ? "多" : "空"}</span>
                         <span className="replay-chip">{contract?.margin_mode === "ISOLATED" ? "逐仓" : "全仓"}</span>
-                        <span className="replay-chip" title="运行中锁定">{config?.max_leverage ?? "--"}x</span>
+                        <span className="replay-chip" title="逐腿有效杠杆">{item.leverage ?? config?.max_leverage ?? "--"}x</span>
                       </div>
                     </div>
                     <div className="replay-position-pnl">
@@ -1574,6 +1586,14 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                   {selected && (
                     <>
                       <div className="replay-position-primary-actions">
+                        {hedgePositionSide !== undefined && (
+                          <button
+                            type="button"
+                            className={`replay-pill-btn${showLeverage ? " active" : ""}`}
+                            aria-expanded={showLeverage}
+                            onClick={() => togglePositionPanel(item.track_id, "leverage", hedgePositionSide)}
+                          >调杠杆</button>
+                        )}
                         <button
                           type="button"
                           className={`replay-pill-btn${showProtection ? " active" : ""}`}
@@ -1606,6 +1626,23 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                             disabled={!commandReady || !itemCloseQuantity.trim()}
                             onClick={() => void runTrade("execute_position_intent", { intent: "CLOSE", side: null, quantity: itemCloseQuantity, ...legPayload }, "正在提交平仓命令…", "平仓命令已受理，组合已刷新")}
                           >确认平仓</button>
+                        </section>
+                      )}
+                      {showLeverage && hedgePositionSide !== undefined && (
+                        <section className="replay-position-actions">
+                          <header><strong>逐腿杠杆</strong><small>{hedgePositionSide} 独立生效</small></header>
+                          <label>杠杆 <span><input value={itemLeverage} inputMode="decimal" onChange={(event) => setLeverageDraft({ trackId: item.track_id, positionSide: hedgePositionSide, value: event.target.value })} aria-label="逐腿杠杆" /><b>x</b></span></label>
+                          <button
+                            type="button"
+                            data-replay-action="set-position-leverage"
+                            disabled={!commandReady || !itemLeverage.trim()}
+                            onClick={() => void runTrade(
+                              "set_position_leverage",
+                              { position_side: hedgePositionSide, leverage: itemLeverage },
+                              `正在调整 ${hedgePositionSide} 杠杆…`,
+                              `${hedgePositionSide} 杠杆已更新`,
+                            )}
+                          >确认调整</button>
                         </section>
                       )}
                       {showProtection && (
@@ -1872,14 +1909,22 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
             {contract?.margin_mode === "ISOLATED" && (
               <section className="replay-risk-card replay-isolated-allocation">
                 <header><strong>逐仓分配</strong><small>{selectedSymbol}</small></header>
+                {contract.position_mode === "HEDGE" && (
+                  <label>仓位腿
+                    <select value={isolatedSide} onChange={(event) => setIsolatedSide(event.target.value as "LONG" | "SHORT")}>
+                      <option value="LONG">LONG</option>
+                      <option value="SHORT">SHORT</option>
+                    </select>
+                  </label>
+                )}
                 <label>分配金额
                   <span>
                     <input value={isolatedAmount} inputMode="decimal" onChange={(event) => setIsolatedAmount(event.target.value)} />
                     <b>{settlementAsset}</b>
                   </span>
                 </label>
-                <button type="button" className="replay-pill-btn" disabled={!commandReady || !isolatedAmount.trim()} onClick={() => void viewer.actions.submitTrade("allocate_isolated_margin", { track_id: selectedTrackId, amount: isolatedAmount }).catch(() => undefined)}>设置分配</button>
-                <small>当前：{String(contract.isolated_allocations[selectedTrackId] ?? "0")} {settlementAsset}</small>
+                <button type="button" className="replay-pill-btn" disabled={!commandReady || !isolatedAmount.trim()} onClick={() => void viewer.actions.submitTrade("allocate_isolated_margin", { track_id: selectedTrackId, position_side: contract.position_mode === "HEDGE" ? isolatedSide : null, amount: isolatedAmount }).catch(() => undefined)}>设置分配</button>
+                <small>当前：{String(contract.isolated_allocations[contract.position_mode === "HEDGE" ? `${selectedTrackId}:${isolatedSide}` : selectedTrackId] ?? "0")} {settlementAsset}</small>
               </section>
             )}
             <section className="replay-risk-card replay-capability-boundary" data-replay-panel="historical-market-liquidations" data-replay-domain="historical-market-liquidation">

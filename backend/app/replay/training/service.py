@@ -9,7 +9,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from app.data_engine.interval_policy import (
@@ -75,6 +75,7 @@ from .account_history import (
     AccountHistoryArchiveManager,
 )
 from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
+from .account import isolated_margin_key, round_to_step
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
     AccountDataMode,
@@ -200,6 +201,66 @@ def _position_gross_notional(value: object) -> Decimal:
         ),
         Decimal(0),
     )
+
+
+def _portfolio_risk_position(
+    portfolio: Mapping[str, object],
+    *,
+    track_id: str,
+    position_side: object,
+) -> Mapping[str, object] | None:
+    positions = portfolio.get("positions")
+    if not isinstance(positions, list):
+        return None
+    item = next(
+        (
+            candidate
+            for candidate in positions
+            if isinstance(candidate, Mapping)
+            and candidate.get("track_id") == track_id
+            and candidate.get("position_side") == position_side
+        ),
+        None,
+    )
+    return cast(Mapping[str, object], item) if isinstance(item, Mapping) else None
+
+
+def _hedge_leg_leverage(
+    portfolio: Mapping[str, object],
+    *,
+    track_id: str,
+    position_side: object,
+) -> Decimal | None:
+    if position_side not in {"LONG", "SHORT"}:
+        return None
+    position = _portfolio_risk_position(
+        portfolio,
+        track_id=track_id,
+        position_side=position_side,
+    )
+    if position is not None and position.get("leverage") is not None:
+        return Decimal(str(position["leverage"]))
+    hedge_state = portfolio.get("hedge_state")
+    legs = (
+        hedge_state.get("position_legs")
+        if isinstance(hedge_state, Mapping)
+        else None
+    )
+    if not isinstance(legs, list):
+        return None
+    leg = next(
+        (
+            candidate
+            for candidate in legs
+            if isinstance(candidate, Mapping)
+            and candidate.get("track_id") == track_id
+            and candidate.get("position_side") == position_side
+        ),
+        None,
+    )
+    if not isinstance(leg, Mapping) or leg.get("leverage") is None:
+        return None
+    return Decimal(str(leg["leverage"]))
 
 
 class TrainingRunService:
@@ -3557,6 +3618,7 @@ class TrainingRunService:
             ReplayV2CommandType.CLOSE_POSITION,
             ReplayV2CommandType.EXECUTE_POSITION_INTENT,
             ReplayV2CommandType.SET_POSITION_PROTECTION,
+            ReplayV2CommandType.SET_POSITION_LEVERAGE,
         }:
             snapshot = self._assert_expected_cursor(command, session)
             await self._guard_historical_book_current(
@@ -3578,8 +3640,25 @@ class TrainingRunService:
             return result
         if command.type is ReplayV2CommandType.ALLOCATE_ISOLATED_MARGIN:
             snapshot = self._assert_expected_cursor(command, session)
-            payload = self._exact_payload(command.payload, {"track_id", "amount"})
+            payload = self._exact_payload(
+                command.payload,
+                {"track_id", "position_side", "amount"},
+            )
             track_id = self._identifier(payload["track_id"], field_name="track_id")
+            position_side = payload["position_side"]
+            if binding.get("position_mode") == "HEDGE":
+                if position_side not in {"LONG", "SHORT"}:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "HEDGE isolated margin requires position_side",
+                        status_code=422,
+                    )
+            elif position_side is not None:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "ONE_WAY isolated margin does not accept position_side",
+                    status_code=422,
+                )
             amount = payload["amount"]
             if not isinstance(amount, str):
                 raise TrainingRunError(
@@ -3608,6 +3687,9 @@ class TrainingRunService:
             portfolio = await self.store.allocate_isolated_margin(
                 run_id=normalized_run,
                 track_id=track_id,
+                position_side=(
+                    None if position_side is None else str(position_side)
+                ),
                 amount=amount,
                 command_id=command.command_id,
                 virtual_time_ms=_stored_counter(
@@ -3619,6 +3701,11 @@ class TrainingRunService:
                     field_name="source_sequence",
                 ),
             )
+            checkpoint = await self.store.checkpoint_market_tracks(
+                normalized_run
+            )
+            refreshed = await self.store.get_market_tracks(normalized_run)
+            portfolio = cast(dict[str, object], refreshed["portfolio"])
             viewer = await self.store.get_viewer_state(normalized_run)
             result = self._result_payload(
                 command=command,
@@ -3628,7 +3715,9 @@ class TrainingRunService:
                 data={
                     "account_contract": "TOUCH_OR_TAPE_V2_CONTRACT_ACCOUNT",
                     "portfolio": portfolio,
+                    "global_checkpoint": checkpoint,
                     "allocated_track_id": track_id,
+                    "allocated_position_side": position_side,
                     "allocated_margin": amount,
                 },
             )
@@ -4522,6 +4611,10 @@ class TrainingRunService:
                 "stop_loss_price",
                 "take_profit_price",
             },
+            ReplayV2CommandType.SET_POSITION_LEVERAGE: {
+                "position_side",
+                "leverage",
+            },
         }
         v1_types = {
             ReplayV2CommandType.PLACE_ORDER: CommandType.PLACE_ORDER,
@@ -4534,6 +4627,9 @@ class TrainingRunService:
             ),
             ReplayV2CommandType.SET_POSITION_PROTECTION: (
                 CommandType.SET_POSITION_PROTECTION
+            ),
+            ReplayV2CommandType.SET_POSITION_LEVERAGE: (
+                CommandType.SET_POSITION_LEVERAGE
             ),
         }
         trade_plan_draft: Mapping[str, object] | None = None
@@ -4570,6 +4666,40 @@ class TrainingRunService:
                     expected_fields[command.type],
                 )
             )
+        elif command.type is ReplayV2CommandType.SET_POSITION_LEVERAGE:
+            payload = dict(
+                self._exact_payload(command.payload, expected_fields[command.type])
+            )
+            if payload.get("position_side") not in {"LONG", "SHORT"}:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "position_side must be LONG or SHORT",
+                    status_code=422,
+                )
+            raw_leverage = payload.get("leverage")
+            if not isinstance(raw_leverage, str):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "position leverage must be a canonical Decimal string",
+                    status_code=422,
+                )
+            try:
+                normalized_leverage = normalize_decimal_string(
+                    raw_leverage,
+                    field_name="position leverage",
+                )
+            except (TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "position leverage is invalid",
+                    status_code=422,
+                ) from exc
+            if normalized_leverage != raw_leverage or Decimal(raw_leverage) < 1:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "position leverage must be canonical and at least 1",
+                    status_code=422,
+                )
         else:
             payload = dict(
                 self._exact_payload(command.payload, expected_fields[command.type])
@@ -4602,6 +4732,93 @@ class TrainingRunService:
                 "orders require the selected market track to be READY and FULL",
                 status_code=409,
             )
+        if command.type is ReplayV2CommandType.SET_POSITION_LEVERAGE:
+            if binding.get("position_mode") != "HEDGE":
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "set_position_leverage requires HEDGE mode",
+                    status_code=422,
+                )
+            portfolio = projection.get("portfolio")
+            if not isinstance(portfolio, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "run portfolio projection is invalid",
+                    status_code=503,
+                )
+            rule = self._active_instrument_rule(
+                portfolio,
+                track_id=selected_track_id,
+            )
+            leverage = Decimal(str(payload["leverage"]))
+            if leverage > Decimal(str(rule["max_leverage"])):
+                raise TrainingRunError(
+                    "RISK_LIMIT_EXCEEDED",
+                    "position leverage exceeds the active instrument rule",
+                    status_code=409,
+                )
+            if portfolio.get("margin_mode") == "ISOLATED":
+                positions = portfolio.get("positions")
+                allocations = portfolio.get("isolated_allocations")
+                orders = portfolio.get("orders")
+                if (
+                    not isinstance(positions, list)
+                    or not isinstance(allocations, Mapping)
+                    or not isinstance(orders, list)
+                ):
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "HEDGE isolated risk projection is invalid",
+                        status_code=503,
+                    )
+                side = str(payload["position_side"])
+                risk_position = next(
+                    (
+                        item
+                        for item in positions
+                        if isinstance(item, Mapping)
+                        and item.get("track_id") == selected_track_id
+                        and item.get("position_side") == side
+                    ),
+                    None,
+                )
+                notional = Decimal(
+                    str(
+                        0
+                        if not isinstance(risk_position, Mapping)
+                        else risk_position.get("account_notional", "0")
+                    )
+                )
+                required = round_to_step(
+                    notional / leverage,
+                    Decimal(str(rule["quote_step"])),
+                    upward=True,
+                )
+                reserved = sum(
+                    (
+                        Decimal(str(order.get("reserved_margin", "0")))
+                        for order in orders
+                        if isinstance(order, Mapping)
+                        and order.get("track_id") == selected_track_id
+                        and order.get("position_side") == side
+                        and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                    ),
+                    Decimal(0),
+                )
+                allocation = Decimal(
+                    str(
+                        allocations.get(
+                            isolated_margin_key(selected_track_id, side),
+                            "0",
+                        )
+                    )
+                )
+                if required + reserved > allocation:
+                    raise TrainingRunError(
+                        "RUN_ACCOUNT_MARGIN_EXCEEDED",
+                        "position leverage change exceeds isolated leg wallet",
+                        status_code=409,
+                    )
         session_id = str(binding["adapter_session_id"])
         if command.type is ReplayV2CommandType.PLACE_ORDER:
             if trade_plan_draft is not None:
@@ -5300,7 +5517,40 @@ class TrainingRunService:
             price = Decimal(str(reference_price))
             if payload.get("reduce_only") is True:
                 return decimal_to_string(maximum, field_name="max_quantity")
-            leverage = Decimal(str(payload.get("leverage") or config["max_leverage"]))
+            raw_leverage = payload.get("leverage")
+            leverage = Decimal(str(raw_leverage or config["max_leverage"]))
+            track_id = str(selected_track["track_id"])
+            if binding.get("position_mode") == "HEDGE":
+                active_leg_leverage = _hedge_leg_leverage(
+                    portfolio,
+                    track_id=track_id,
+                    position_side=payload.get("position_side"),
+                )
+                if raw_leverage is None and active_leg_leverage is not None:
+                    leverage = active_leg_leverage
+                active_position = _portfolio_risk_position(
+                    portfolio,
+                    track_id=track_id,
+                    position_side=payload.get("position_side"),
+                )
+                if (
+                    raw_leverage is not None
+                    and active_position is not None
+                    and active_leg_leverage is not None
+                    and leverage != active_leg_leverage
+                ):
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "opening order leverage differs from the active hedge leg",
+                        status_code=409,
+                    )
+            configured_max = Decimal(str(config["max_leverage"]))
+            if leverage < 1 or leverage > configured_max:
+                raise TrainingRunError(
+                    "RISK_LIMIT_EXCEEDED",
+                    "order leverage is outside the session limit",
+                    status_code=409,
+                )
             contract_size = Decimal(1)
             quantity_step: Decimal | None = None
             minimum_quantity = Decimal(0)
@@ -5320,7 +5570,21 @@ class TrainingRunService:
             if isinstance(active, Mapping):
                 rule = cast(Mapping[str, object], active["rule"])
                 contract_size = Decimal(str(rule.get("contract_size", "1")))
-                leverage = min(leverage, Decimal(str(rule.get("max_leverage", leverage))))
+                rule_max_leverage = Decimal(
+                    str(rule.get("max_leverage", leverage))
+                )
+                if (
+                    leverage > rule_max_leverage
+                    and raw_leverage is None
+                    and binding.get("position_mode") != "HEDGE"
+                ):
+                    leverage = rule_max_leverage
+                elif leverage > rule_max_leverage:
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "order leverage exceeds the active instrument rule",
+                        status_code=409,
+                    )
                 quantity_step = Decimal(str(rule["quantity_step"]))
                 minimum_quantity = Decimal(str(rule["min_quantity"]))
                 minimum_notional = Decimal(str(rule["min_notional"]))
@@ -5339,9 +5603,49 @@ class TrainingRunService:
                 account = selected_track.get("account")
                 if not isinstance(allocations, Mapping) or not isinstance(account, Mapping):
                     raise TypeError("isolated account projection is invalid")
-                allocated = Decimal(str(allocations.get(str(selected_track["track_id"]), "0")))
-                available = allocated - Decimal(str(account.get("margin_used", "0"))) \
-                    - Decimal(str(account.get("reserved_margin", "0")))
+                position_side = payload.get("position_side")
+                allocation_key = isolated_margin_key(
+                    track_id,
+                    None if position_side is None else str(position_side),
+                )
+                allocated = Decimal(str(allocations.get(allocation_key, "0")))
+                if binding.get("position_mode") == "HEDGE":
+                    positions = portfolio.get("positions")
+                    orders = portfolio.get("orders")
+                    if not isinstance(positions, list) or not isinstance(orders, list):
+                        raise TypeError("HEDGE isolated risk projection is invalid")
+                    risk_position = next(
+                        (
+                            item
+                            for item in positions
+                            if isinstance(item, Mapping)
+                            and item.get("track_id") == track_id
+                            and item.get("position_side") == position_side
+                        ),
+                        None,
+                    )
+                    in_use = Decimal(
+                        str(
+                            0
+                            if not isinstance(risk_position, Mapping)
+                            else risk_position.get("initial_margin", "0")
+                        )
+                    ) + sum(
+                        (
+                            Decimal(str(order.get("reserved_margin", "0")))
+                            for order in orders
+                            if isinstance(order, Mapping)
+                            and order.get("track_id") == track_id
+                            and order.get("position_side") == position_side
+                            and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                        ),
+                        Decimal(0),
+                    )
+                else:
+                    in_use = Decimal(str(account.get("margin_used", "0"))) + Decimal(
+                        str(account.get("reserved_margin", "0"))
+                    )
+                available = allocated - in_use
                 if allocated <= 0:
                     available = Decimal(0)
             else:
@@ -5567,7 +5871,64 @@ class TrainingRunService:
                         "order leverage must be between 1 and session max_leverage",
                         status_code=409,
                     )
+            track_id = str(selected_track["track_id"])
+            if binding.get("position_mode") == "HEDGE":
+                active_leg_leverage = _hedge_leg_leverage(
+                    portfolio,
+                    track_id=track_id,
+                    position_side=payload.get("position_side"),
+                )
+                if raw_leverage is None and active_leg_leverage is not None:
+                    leverage = active_leg_leverage
+                active_position = _portfolio_risk_position(
+                    portfolio,
+                    track_id=track_id,
+                    position_side=payload.get("position_side"),
+                )
+                if (
+                    raw_leverage is not None
+                    and active_position is not None
+                    and active_leg_leverage is not None
+                    and leverage != active_leg_leverage
+                ):
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "opening order leverage differs from the active hedge leg",
+                        status_code=409,
+                    )
             contract_size = Decimal(1)
+            quote_step = Decimal("0.00000001")
+            rules = portfolio.get("instrument_rules")
+            active = next(
+                (
+                    item
+                    for item in rules
+                    if isinstance(rules, list)
+                    and isinstance(item, Mapping)
+                    and item.get("track_id") == selected_track.get("track_id")
+                    and isinstance(item.get("rule"), Mapping)
+                ),
+                None,
+            )
+            if isinstance(active, Mapping):
+                active_rule = cast(Mapping[str, object], active["rule"])
+                contract_size = Decimal(str(active_rule.get("contract_size", "1")))
+                quote_step = Decimal(str(active_rule.get("quote_step", quote_step)))
+                rule_max_leverage = Decimal(
+                    str(active_rule.get("max_leverage", leverage))
+                )
+                if (
+                    leverage > rule_max_leverage
+                    and raw_leverage is None
+                    and binding.get("position_mode") != "HEDGE"
+                ):
+                    leverage = rule_max_leverage
+                elif leverage > rule_max_leverage:
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "order leverage exceeds the active instrument rule",
+                        status_code=409,
+                    )
             history = portfolio.get("account_history")
             if (
                 isinstance(history, Mapping)
@@ -5592,10 +5953,20 @@ class TrainingRunService:
                 exact_rule = active["rule"]
                 assert isinstance(exact_rule, Mapping)
                 contract_size = Decimal(str(exact_rule["contract_size"]))
-                leverage = min(
-                    leverage,
-                    Decimal(str(exact_rule["max_leverage"])),
-                )
+                quote_step = Decimal(str(exact_rule["quote_step"]))
+                exact_rule_max = Decimal(str(exact_rule["max_leverage"]))
+                if (
+                    leverage > exact_rule_max
+                    and raw_leverage is None
+                    and binding.get("position_mode") != "HEDGE"
+                ):
+                    leverage = exact_rule_max
+                elif leverage > exact_rule_max:
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "order leverage exceeds the active historical rule",
+                        status_code=409,
+                    )
             if portfolio.get("margin_mode") == "ISOLATED":
                 allocations = portfolio.get("isolated_allocations")
                 track_account = selected_track.get("account")
@@ -5608,14 +5979,56 @@ class TrainingRunService:
                         "isolated account projection is invalid",
                         status_code=503,
                     )
-                track_id = str(selected_track["track_id"])
-                allocated = Decimal(str(allocations.get(track_id, "0")))
-                in_use = Decimal(str(track_account.get("margin_used", "0"))) + Decimal(
-                    str(track_account.get("reserved_margin", "0"))
+                position_side = payload.get("position_side")
+                allocation_key = isolated_margin_key(
+                    track_id,
+                    None if position_side is None else str(position_side),
                 )
+                allocated = Decimal(str(allocations.get(allocation_key, "0")))
+                if binding.get("position_mode") == "HEDGE":
+                    positions = portfolio.get("positions")
+                    orders = portfolio.get("orders")
+                    if not isinstance(positions, list) or not isinstance(orders, list):
+                        raise TypeError("HEDGE isolated risk projection is invalid")
+                    risk_position = next(
+                        (
+                            item
+                            for item in positions
+                            if isinstance(item, Mapping)
+                            and item.get("track_id") == track_id
+                            and item.get("position_side") == position_side
+                        ),
+                        None,
+                    )
+                    position_margin = Decimal(
+                        str(
+                            0
+                            if not isinstance(risk_position, Mapping)
+                            else risk_position.get("initial_margin", "0")
+                        )
+                    )
+                    order_margin = sum(
+                        (
+                            Decimal(str(order.get("reserved_margin", "0")))
+                            for order in orders
+                            if isinstance(order, Mapping)
+                            and order.get("track_id") == track_id
+                            and order.get("position_side") == position_side
+                            and order.get("status") in {"OPEN", "PARTIALLY_FILLED"}
+                        ),
+                        Decimal(0),
+                    )
+                    in_use = position_margin + order_margin
+                else:
+                    position_margin = Decimal(
+                        str(track_account.get("margin_used", "0"))
+                    )
+                    in_use = position_margin + Decimal(
+                        str(track_account.get("reserved_margin", "0"))
+                    )
                 available = allocated - in_use
                 if release_selected_margin:
-                    available += Decimal(str(track_account.get("margin_used", "0")))
+                    available += position_margin
                 available += release_order_reservation
                 if allocated <= 0:
                     raise TrainingRunError(
@@ -5632,9 +6045,10 @@ class TrainingRunService:
                         raise TypeError("selected track account is invalid")
                     available += Decimal(str(track_account.get("margin_used", "0")))
                 available += release_order_reservation
-            reservation = (quantity * price * contract_size / leverage).quantize(
-                Decimal("0.00000001"),
-                rounding=ROUND_CEILING,
+            reservation = round_to_step(
+                quantity * price * contract_size / leverage,
+                quote_step,
+                upward=True,
             )
         except (InvalidOperation, KeyError, TypeError, ZeroDivisionError) as exc:
             raise TrainingRunError(

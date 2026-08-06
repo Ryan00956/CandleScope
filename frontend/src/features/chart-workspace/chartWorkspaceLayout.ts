@@ -13,6 +13,11 @@ import {
   CHART_CELL_IDS,
   CHART_WORKSPACE_TEMPLATE_IDS,
 } from "./chartWorkspaceTypes.js";
+import {
+  LEGACY_VISIBLE_CELLS_PER_WINDOW,
+  MAX_CELLS_PER_WINDOW,
+} from "./chartWorkspaceCapacity.js";
+import { isChartCellId } from "./chartWorkspaceIdentity.js";
 
 export const MIN_CHART_SPLIT_RATIO = 0.2;
 export const MAX_CHART_SPLIT_RATIO = 0.8;
@@ -21,8 +26,36 @@ export type ChartWorkspaceSplitAxis = ChartWorkspaceSplitDirection;
 
 export const MAIN_CONFIRMATION_PRIMARY_RATIO = 0.68;
 
-const MAX_LAYOUT_TREE_DEPTH = 4;
-const MAX_LAYOUT_TREE_NODES = CHART_CELL_IDS.length * 2 - 1;
+export const MAX_LAYOUT_TREE_DEPTH = 16;
+export const MAX_LAYOUT_TREE_NODES = MAX_CELLS_PER_WINDOW * 2 - 1;
+
+export interface ChartWorkspaceLayoutDiagnostic {
+  code:
+    | "invalid-node"
+    | "max-depth"
+    | "max-nodes"
+    | "invalid-cell-id"
+    | "dangling-cell-id"
+    | "duplicate-cell-id"
+    | "invalid-split-id"
+    | "duplicate-split-id"
+    | "invalid-direction"
+    | "max-cells";
+  path: string;
+}
+
+export interface NormalizeChartWorkspaceLayoutOptions {
+  knownCellIds?: ReadonlySet<ChartCellId>;
+  maxCells?: number;
+  maxDepth?: number;
+  maxNodes?: number;
+  path?: string;
+}
+
+export interface NormalizeChartWorkspaceLayoutResult {
+  tree: ChartWorkspaceLayoutNode | null;
+  diagnostics: ChartWorkspaceLayoutDiagnostic[];
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -198,11 +231,12 @@ export function splitChartWorkspaceCell(
   targetCellId: ChartCellId,
   newCellId: ChartCellId,
   direction: ChartWorkspaceSplitDirection,
+  maxCells = LEGACY_VISIBLE_CELLS_PER_WINDOW,
 ): ChartWorkspaceLayoutNode {
   const visible = visibleCellIds(tree);
   if (!visible.includes(targetCellId)
     || visible.includes(newCellId)
-    || visible.length >= CHART_CELL_IDS.length) return tree;
+    || visible.length >= Math.min(MAX_CELLS_PER_WINDOW, maxCells)) return tree;
   const splitId = nextSplitId(tree, targetCellId, newCellId, direction);
   const replace = (node: ChartWorkspaceLayoutNode): ChartWorkspaceLayoutNode => {
     if (node.kind === "cell") {
@@ -319,32 +353,60 @@ export function updateChartWorkspaceSplitRatio(
 export function normalizeChartWorkspaceLayoutTree(
   value: unknown,
   fallback: ChartWorkspaceLayoutNode = createChartWorkspaceLayoutTree("single"),
+  options: NormalizeChartWorkspaceLayoutOptions = {},
 ): ChartWorkspaceLayoutNode {
+  return parseChartWorkspaceLayoutTree(value, options).tree ?? fallback;
+}
+
+export function parseChartWorkspaceLayoutTree(
+  value: unknown,
+  options: NormalizeChartWorkspaceLayoutOptions = {},
+): NormalizeChartWorkspaceLayoutResult {
   const cellIds = new Set<ChartCellId>();
   const splitIds = new Set<string>();
+  const diagnostics: ChartWorkspaceLayoutDiagnostic[] = [];
+  const knownCellIds = options.knownCellIds ?? new Set<ChartCellId>(CHART_CELL_IDS);
+  const maxCells = Math.min(MAX_CELLS_PER_WINDOW, Math.max(1, options.maxCells ?? CHART_CELL_IDS.length));
+  const maxDepth = Math.min(MAX_LAYOUT_TREE_DEPTH, Math.max(1, options.maxDepth ?? MAX_LAYOUT_TREE_DEPTH));
+  const maxNodes = Math.min(MAX_LAYOUT_TREE_NODES, Math.max(1, options.maxNodes ?? MAX_LAYOUT_TREE_NODES));
+  const rootPath = options.path ?? "layoutTree";
   let nodeCount = 0;
 
-  const parse = (candidate: unknown, depth: number): ChartWorkspaceLayoutNode | null => {
-    if (!isRecord(candidate) || depth > MAX_LAYOUT_TREE_DEPTH) return null;
+  const fail = (code: ChartWorkspaceLayoutDiagnostic["code"], path: string) => {
+    diagnostics.push({ code, path });
+    return null;
+  };
+  const parse = (
+    candidate: unknown,
+    depth: number,
+    path: string,
+  ): ChartWorkspaceLayoutNode | null => {
+    if (!isRecord(candidate)) return fail("invalid-node", path);
+    if (depth > maxDepth) return fail("max-depth", path);
     nodeCount += 1;
-    if (nodeCount > MAX_LAYOUT_TREE_NODES) return null;
+    if (nodeCount > maxNodes) return fail("max-nodes", path);
     if (candidate.kind === "cell") {
-      if (!CHART_CELL_IDS.includes(candidate.cellId as ChartCellId)) return null;
-      const cellId = candidate.cellId as ChartCellId;
-      if (cellIds.has(cellId)) return null;
+      if (!isChartCellId(candidate.cellId)) return fail("invalid-cell-id", `${path}.cellId`);
+      const cellId = candidate.cellId;
+      if (!knownCellIds.has(cellId)) return fail("dangling-cell-id", `${path}.cellId`);
+      if (cellIds.has(cellId)) return fail("duplicate-cell-id", `${path}.cellId`);
+      if (cellIds.size >= maxCells) return fail("max-cells", `${path}.cellId`);
       cellIds.add(cellId);
       const role = candidate.role === "main" || candidate.role === "confirmation"
         ? candidate.role
         : undefined;
       return cellNode(cellId, role);
     }
-    if (candidate.kind !== "split") return null;
+    if (candidate.kind !== "split") return fail("invalid-node", `${path}.kind`);
     const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
-    if (!id || id.length > 96 || splitIds.has(id)) return null;
-    if (candidate.direction !== "columns" && candidate.direction !== "rows") return null;
+    if (!id || id.length > 96) return fail("invalid-split-id", `${path}.id`);
+    if (splitIds.has(id)) return fail("duplicate-split-id", `${path}.id`);
+    if (candidate.direction !== "columns" && candidate.direction !== "rows") {
+      return fail("invalid-direction", `${path}.direction`);
+    }
     splitIds.add(id);
-    const first = parse(candidate.first, depth + 1);
-    const second = parse(candidate.second, depth + 1);
+    const first = parse(candidate.first, depth + 1, `${path}.first`);
+    const second = parse(candidate.second, depth + 1, `${path}.second`);
     if (!first || !second) return null;
     return splitNode(
       id,
@@ -355,8 +417,9 @@ export function normalizeChartWorkspaceLayoutTree(
     );
   };
 
-  const parsed = parse(value, 0);
-  return parsed && cellIds.size > 0 && cellIds.size <= CHART_CELL_IDS.length
-    ? parsed
-    : fallback;
+  const tree = parse(value, 0, rootPath);
+  return {
+    tree: tree && cellIds.size > 0 && cellIds.size <= maxCells ? tree : null,
+    diagnostics,
+  };
 }

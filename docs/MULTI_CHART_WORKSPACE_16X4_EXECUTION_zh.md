@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_0_COMPLETE`。Phase 0 已完成并通过本节记录的门禁；Phase 1～8 尚未完成。本文状态不代表当前版本已经支持 16/64 图，也不自动授权合并、发布或默认启用。
+> 状态：`IN_PROGRESS_PHASE_1_COMPLETE`。Phase 0～1 已完成并通过各节记录的门禁；Phase 2～8 尚未完成。当前版本只具备可回滚的 v6 数据模型，默认 UI 仍限制为 4 图，不代表已经支持 16/64 图，也不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -566,14 +566,14 @@ docs/perf-baselines/multi-chart-workspace/
 
 ### 任务
 
-- [ ] 1.1 把 `ChartCellId` 从四值 union 改为受验证的 opaque string。
-- [ ] 1.2 `cells`、layout parser、editing、undo/redo、link coordinator 和 drawing scope 全部改为动态 ID。
-- [ ] 1.3 新增 `ChartWindowId`、`windows`、`activeWindowId` 和 document `revision`。
-- [ ] 1.4 将当前单窗口文档迁入固定 `main-window`，保留已有 Cell ID 和绘图/可见范围 scope。
-- [ ] 1.5 新 Cell ID 不复用已关闭 ID；undo/redo 恢复原 ID 和完整 Cell snapshot。
-- [ ] 1.6 新建 v6 IndexedDB store；首次读取复制 v5，后续不覆盖 v5。
-- [ ] 1.7 parser 对重复 ID、悬空 ID、超节点、超深度、超窗口/Cell fail closed，并保留诊断。
-- [ ] 1.8 增加硬上限常量，但用默认关闭 flag 把可见上限仍收紧为 4。
+- [x] 1.1 把 `ChartCellId` 从四值 union 改为受验证的 opaque string。
+- [x] 1.2 `cells`、layout parser、editing、undo/redo、link coordinator 和 drawing scope 全部改为动态 ID。
+- [x] 1.3 新增 `ChartWindowId`、`windows`、`activeWindowId` 和 document `revision`。
+- [x] 1.4 将当前单窗口文档迁入固定 `main-window`，保留已有 Cell ID 和绘图/可见范围 scope。
+- [x] 1.5 新 Cell ID 不复用已关闭 ID；undo/redo 恢复原 ID 和完整 Cell snapshot。
+- [x] 1.6 新建 v6 IndexedDB store；首次读取复制 v5，后续不覆盖 v5。
+- [x] 1.7 parser 对重复 ID、悬空 ID、超节点、超深度、超窗口/Cell fail closed，并保留诊断。
+- [x] 1.8 增加硬上限常量，但用默认关闭 flag 把可见上限仍收紧为 4。
 
 建议 flags：
 
@@ -597,10 +597,27 @@ MULTI_CHART_64_ENABLED=0
 
 ### 验收
 
-- [ ] flag 关闭时 UI 和当前 4 Cell 行为不变；
-- [ ] v5 用户数据原样保留；
-- [ ] v6 可表达 4 window × 16 Cell，但尚不创建额外窗口；
-- [ ] typecheck、lint、architecture、plugins、targeted、全量和 build 完成。
+- [x] flag 关闭时 UI 和当前 4 Cell 行为不变；
+- [x] v5 用户数据原样保留；
+- [x] v6 可表达 4 window × 16 Cell，但尚不创建额外窗口；
+- [x] typecheck、lint、architecture、plugins、targeted、全量和 build 完成。
+
+### Phase 1 实施记录（2026-08-06）
+
+1. `ChartCellId` 已改为受 `cell-*` 格式校验的 opaque string，并新增 collision-checked ID factory；legacy `cell-1`～`cell-4` 只作为默认四图身份保留。layout parser、拖拽、editing、history、link coordinator、drawing scope 和运行时均不再依赖四值 union。
+2. document schema 提升到 v6：顶层新增单调 `revision`、`activeWindowId` 和 `windows`，原布局/锁定/活动图/最大化字段迁入固定 `main-window`。窗口记录同时预留 DIP bounds、monitor fingerprint、DPI scale 和窗口状态，但 Phase 1 不创建额外窗口。
+3. parser 硬限制为每窗口 16 Cell、每 Workspace 4 window、全应用 64 Cell、layout tree 31 node/16 depth；重复或悬空 Cell、重复 split、非法 ID、超节点/深度/窗口/Cell 均返回路径化 diagnostic 并整体 fail closed。
+4. v6 使用独立 IndexedDB `candlescope-chart-workspaces-v6/workspaces-v6` 和 v2 recovery keys。首次无 v6 数据时只读旧 `candlescope-chart-workspaces/workspaces` 并复制；之后所有保存仅写 v6。真实 Chrome 迁移前后 v5 记录 SHA-256 均为 `25cf5c8406ddf8c35d00459e496ccb86868607578516b6a07a9823028c408d90`，字节序列一致。
+5. repository 保存使用 record-set + document revision CAS；新增、删除和已有 Workspace revision 都在同一事务中校验，冲突抛出含 Workspace ID、expected/actual revision 的诊断错误。recovery journal 只有 revision 更高或文档内容相同的 metadata 更新才可覆盖异步快照，避免同 revision 冲突状态借 bootstrap 绕过 CAS。
+6. 动态编辑定向测试创建 16 个唯一 ID，关闭后再次创建不复用旧 ID；undo/redo 恢复相同 ID 和完整 Cell snapshot。迁移测试覆盖 v1～v5、drawing/visible-range/indicator scope、四窗口 × 十六 Cell 表达、恶意文档 fail-closed 和双 writer 冲突拒绝。
+7. 新 flags 默认全部关闭；`MULTI_CHART_64_ENABLED` 只有在 16 图和多窗口两个前置 flag 同时启用时才生效，运行上限不能超过 16/4/64。真实 Chrome 中迁移后的 quad 仍只挂载 4 个 Cell，向右/向下拆分均 disabled，console error 和 runtime alert 均为 0。
+8. 浏览器验证还发现初始化回调会对语义相同的 Cell settings 重复增加 revision；加入 settings、price-scale 和 indicator definition no-op 比较后，稳定样本在 8 秒间隔内保持 `revision=4 → 4`。完整前端门禁为 architecture/plugins/typecheck/lint、`3002/3002` tests 和 production build 全部通过；Workspace 定向为 `72/72`。Phase 1 未修改后端文件。
+
+机器可读证据：
+
+- `docs/perf-baselines/multi-chart-workspace/phase1-schema-migration-20260806.json`
+
+真实迁移截图和临时 seed/inspection 脚本保存在忽略版本控制的 `output/playwright/multi-chart-capacity/`。
 
 ### 回滚
 

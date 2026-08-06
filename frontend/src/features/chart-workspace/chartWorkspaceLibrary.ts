@@ -18,6 +18,11 @@ import {
   createChartWorkspaceLayoutTree,
   detectChartWorkspaceLayout,
 } from "./chartWorkspaceLayout.js";
+import {
+  activeChartWorkspaceWindow,
+  chartWorkspaceCell,
+  replaceChartWorkspaceWindow,
+} from "./chartWorkspaceDocument.js";
 
 export const DEFAULT_CHART_WORKSPACE_ID = "workspace-default";
 export const DEFAULT_CHART_WORKSPACE_NAME = "默认工作区";
@@ -117,7 +122,8 @@ export function createTemplateChartWorkspaceDocument(
   source: ChartWorkspaceDocument,
 ): ChartWorkspaceDocument {
   const document = createDefaultChartWorkspace();
-  const anchor = source.cells[source.activeCellId];
+  const sourceWindow = activeChartWorkspaceWindow(source);
+  const anchor = chartWorkspaceCell(source, sourceWindow.activeCellId);
   const mainConfirmationIntervals = [anchor.session.interval, "4h", "1d", "15m"];
   const copyCellPreferences = (cell: ChartCellState, index: number): ChartCellState => ({
     ...cell,
@@ -137,16 +143,19 @@ export function createTemplateChartWorkspaceDocument(
   document.cells = Object.fromEntries(CHART_CELL_IDS.map((cellId, index) => [
     cellId,
     {
-      ...copyCellPreferences(document.cells[cellId], index),
+      ...copyCellPreferences(chartWorkspaceCell(document, cellId), index),
       linkRole: templateId === "main-confirmation"
         ? index === 0 ? "source" : index < 3 ? "destination" : "bidirectional"
         : "bidirectional",
     },
   ])) as ChartWorkspaceDocument["cells"];
-  document.layoutTree = createChartWorkspaceLayoutTree(templateId);
-  document.activeCellId = "cell-1";
-  document.maximizedCellId = null;
-  return document;
+  const window = activeChartWorkspaceWindow(document);
+  return replaceChartWorkspaceWindow(document, {
+    ...window,
+    layoutTree: createChartWorkspaceLayoutTree(templateId),
+    activeCellId: "cell-1",
+    maximizedCellId: null,
+  });
 }
 
 export interface CreateChartWorkspaceRecordOptions {
@@ -240,7 +249,17 @@ export function mergeWorkspaceRecoveryRecord(
   const recordsById = new Map(snapshot.workspaces.map((record) => [record.id, record]));
   if (recovery) {
     const existing = recordsById.get(recovery.id);
-    if (!existing || recovery.updatedAt > existing.updatedAt) recordsById.set(recovery.id, recovery);
+    const sameDocument = existing
+      ? JSON.stringify(normalizeChartWorkspace(recovery.document))
+        === JSON.stringify(normalizeChartWorkspace(existing.document))
+      : false;
+    if (!existing
+      || recovery.document.revision > existing.document.revision
+      || (recovery.document.revision === existing.document.revision
+        && sameDocument
+        && recovery.updatedAt > existing.updatedAt)) {
+      recordsById.set(recovery.id, recovery);
+    }
   }
   const workspaces = orderedRecords(recordsById.values());
   const activeWorkspaceId = requestedActiveId && recordsById.has(requestedActiveId)
@@ -259,7 +278,9 @@ export function summarizeChartWorkspaces(
     name: workspace.name,
     createdAt: workspace.createdAt,
     updatedAt: workspace.updatedAt,
-    layout: detectChartWorkspaceLayout(workspace.document.layoutTree),
+    layout: detectChartWorkspaceLayout(
+      activeChartWorkspaceWindow(workspace.document).layoutTree,
+    ),
   }));
 }
 

@@ -1,4 +1,5 @@
 import { chartCellStorageScope } from "./chartWorkspaceLibrary.js";
+import { chartWorkspaceCell } from "./chartWorkspaceDocument.js";
 import type {
   ChartCellId,
   ChartWorkspaceDocument,
@@ -42,7 +43,7 @@ export function chartCellDrawingScopeBase(
   document: ChartWorkspaceDocument,
   cellId: ChartCellId,
 ): string {
-  const cell = document.cells[cellId];
+  const cell = chartWorkspaceCell(document, cellId);
   const group = cell.linkGroup;
   if (group === null || !document.linkGroups[group].drawings) {
     return [
@@ -69,7 +70,7 @@ export function summarizeChartDrawingLink(
   cellId: ChartCellId,
   candidateCellIds: readonly ChartCellId[],
 ): ChartDrawingLinkSummary {
-  const cell = document.cells[cellId];
+  const cell = chartWorkspaceCell(document, cellId);
   const group = cell.linkGroup;
   if (group === null) {
     return { state: "independent", linkedPeerCount: 0, groupPeerCount: 0 };
@@ -79,7 +80,7 @@ export function summarizeChartDrawingLink(
   }
   const peers = candidateCellIds
     .filter((candidateId) => candidateId !== cellId)
-    .map((candidateId) => document.cells[candidateId])
+    .map((candidateId) => chartWorkspaceCell(document, candidateId))
     .filter((candidate) => candidate.linkGroup === group);
   if (peers.length === 0) {
     return { state: "waiting", linkedPeerCount: 0, groupPeerCount: 0 };

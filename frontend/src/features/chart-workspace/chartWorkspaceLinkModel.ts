@@ -6,6 +6,7 @@ import type {
   ChartLinkRole,
   ChartWorkspaceDocument,
 } from "./chartWorkspaceTypes.js";
+import { chartWorkspaceCell } from "./chartWorkspaceDocument.js";
 
 function sameSession(left: ChartSession, right: ChartSession): boolean {
   return left.exchange === right.exchange
@@ -70,7 +71,7 @@ export function applyLinkedSessionUpdate(
   sourceCellId: ChartCellId,
   session: ChartSession,
 ): ChartWorkspaceDocument {
-  const sourceCell = document.cells[sourceCellId];
+  const sourceCell = chartWorkspaceCell(document, sourceCellId);
   const group = sourceCell.linkGroup;
   const publish = group !== null && canPublishChartLinks(sourceCell.linkRole);
   let changed = false;
@@ -98,7 +99,7 @@ export function assignCellLinkGroup(
   cellId: ChartCellId,
   group: ChartLinkGroupId | null,
 ): ChartWorkspaceDocument {
-  const cell = document.cells[cellId];
+  const cell = chartWorkspaceCell(document, cellId);
   if (cell.linkGroup === group) return document;
   const anchor = group === null
     ? null
@@ -120,7 +121,7 @@ export function assignCellLinkRole(
   cellId: ChartCellId,
   role: ChartLinkRole,
 ): ChartWorkspaceDocument {
-  const cell = document.cells[cellId];
+  const cell = chartWorkspaceCell(document, cellId);
   if (cell.linkRole === role) return document;
   let next: ChartWorkspaceDocument = {
     ...document,

@@ -13,6 +13,11 @@ import {
 } from "../chartWorkspaceLibrary.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
 import {
+  activeChartWorkspaceWindow,
+  chartWorkspaceCell,
+  replaceChartWorkspaceWindow,
+} from "../chartWorkspaceDocument.js";
+import {
   detectChartWorkspaceLayout,
   findChartWorkspaceCellRole,
   visibleCellIds,
@@ -20,22 +25,27 @@ import {
 
 test("workspace templates inherit the active market and chart preferences without sharing objects", () => {
   const source = createDefaultChartWorkspace();
-  source.layoutLocked = true;
-  source.activeCellId = "cell-2";
-  source.cells["cell-2"].session = {
+  const sourceWindow = activeChartWorkspaceWindow(source);
+  Object.assign(source, replaceChartWorkspaceWindow(source, {
+    ...sourceWindow,
+    layoutLocked: true,
+    activeCellId: "cell-2",
+  }));
+  chartWorkspaceCell(source, "cell-2").session = {
     exchange: "okx",
     marketType: "futures",
     symbol: "ETHUSDT",
     interval: "30m",
   };
-  source.cells["cell-2"].indicators = [{ id: "rsi", params: { length: 7 } }];
+  chartWorkspaceCell(source, "cell-2").indicators = [{ id: "rsi", params: { length: 7 } }];
 
   const document = createTemplateChartWorkspaceDocument("quad", source);
 
-  assert.equal(detectChartWorkspaceLayout(document.layoutTree), "quad");
-  assert.equal(document.activeCellId, "cell-1");
-  assert.equal(document.maximizedCellId, null);
-  assert.equal(document.layoutLocked, false);
+  const window = activeChartWorkspaceWindow(document);
+  assert.equal(detectChartWorkspaceLayout(window.layoutTree), "quad");
+  assert.equal(window.activeCellId, "cell-1");
+  assert.equal(window.maximizedCellId, null);
+  assert.equal(window.layoutLocked, false);
   assert.deepEqual(
     Object.values(document.cells).map((cell) => [
       cell.session.exchange,
@@ -44,46 +54,47 @@ test("workspace templates inherit the active market and chart preferences withou
     ]),
     Array.from({ length: 4 }, () => ["okx", "futures", "ETHUSDT"]),
   );
-  assert.equal(document.cells["cell-1"].session.interval, "30m");
+  assert.equal(chartWorkspaceCell(document, "cell-1").session.interval, "30m");
   assert.deepEqual(
-    ["cell-2", "cell-3", "cell-4"].map((id) => document.cells[id as keyof typeof document.cells].session.interval),
+    ["cell-2", "cell-3", "cell-4"].map((id) => chartWorkspaceCell(document, id).session.interval),
     ["15m", "4h", "1d"],
   );
-  assert.deepEqual(document.cells["cell-1"].indicators, source.cells["cell-2"].indicators);
-  assert.notEqual(document.cells["cell-1"].indicators, source.cells["cell-2"].indicators);
-  assert.notEqual(document.cells["cell-1"].indicators[0]?.params, source.cells["cell-2"].indicators[0]?.params);
+  assert.deepEqual(chartWorkspaceCell(document, "cell-1").indicators, chartWorkspaceCell(source, "cell-2").indicators);
+  assert.notEqual(chartWorkspaceCell(document, "cell-1").indicators, chartWorkspaceCell(source, "cell-2").indicators);
+  assert.notEqual(chartWorkspaceCell(document, "cell-1").indicators[0]?.params, chartWorkspaceCell(source, "cell-2").indicators[0]?.params);
 });
 
 test("main and confirmation template uses one primary and two higher-timeframe confirmation cells", () => {
   const source = createDefaultChartWorkspace();
-  source.cells["cell-1"].session.interval = "30m";
+  chartWorkspaceCell(source, "cell-1").session.interval = "30m";
   const document = createTemplateChartWorkspaceDocument("main-confirmation", source);
+  const window = activeChartWorkspaceWindow(document);
 
-  assert.equal(detectChartWorkspaceLayout(document.layoutTree), "main-confirmation");
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+  assert.equal(detectChartWorkspaceLayout(window.layoutTree), "main-confirmation");
+  assert.deepEqual(visibleCellIds(window.layoutTree), ["cell-1", "cell-2", "cell-3"]);
   assert.deepEqual([
-    document.cells["cell-1"].session.interval,
-    document.cells["cell-2"].session.interval,
-    document.cells["cell-3"].session.interval,
+    chartWorkspaceCell(document, "cell-1").session.interval,
+    chartWorkspaceCell(document, "cell-2").session.interval,
+    chartWorkspaceCell(document, "cell-3").session.interval,
   ], ["30m", "4h", "1d"]);
-  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-1"), "main");
-  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-2"), "confirmation");
-  assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-3"), "confirmation");
+  assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-1"), "main");
+  assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-2"), "confirmation");
+  assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-3"), "confirmation");
   assert.deepEqual([
-    document.cells["cell-1"].linkRole,
-    document.cells["cell-2"].linkRole,
-    document.cells["cell-3"].linkRole,
+    chartWorkspaceCell(document, "cell-1").linkRole,
+    chartWorkspaceCell(document, "cell-2").linkRole,
+    chartWorkspaceCell(document, "cell-3").linkRole,
   ], ["source", "destination", "destination"]);
 });
 
-test("library normalization repairs one malformed cell without discarding valid siblings", () => {
+test("library normalization fails a structurally malformed v6 document closed", () => {
   const record = createDefaultChartWorkspaceRecord(100);
   const raw = structuredClone(record) as unknown as Record<string, unknown>;
   const rawDocument = raw.document as Record<string, unknown>;
   const rawCells = rawDocument.cells as Record<string, unknown>;
   rawCells["cell-2"] = { session: { symbol: 42 }, indicators: "bad" };
   rawCells["cell-3"] = {
-    ...record.document.cells["cell-3"],
+    ...chartWorkspaceCell(record.document, "cell-3"),
     session: {
       exchange: "binance",
       marketType: "spot",
@@ -98,9 +109,10 @@ test("library normalization repairs one malformed cell without discarding valid 
   }, record, 200);
 
   assert.equal(library.workspaces.length, 1);
-  assert.equal(library.workspaces[0]!.document.cells["cell-2"].session.symbol, "BTCUSDT");
-  assert.deepEqual(library.workspaces[0]!.document.cells["cell-2"].indicators, []);
-  assert.equal(library.workspaces[0]!.document.cells["cell-3"].session.symbol, "SOLUSDT");
+  const normalized = library.workspaces[0]!.document;
+  assert.deepEqual(Object.keys(normalized.cells), ["cell-1", "cell-2", "cell-3", "cell-4"]);
+  assert.equal(chartWorkspaceCell(normalized, "cell-2").session.symbol, "BTCUSDT");
+  assert.notEqual(chartWorkspaceCell(normalized, "cell-3").session.symbol, "SOLUSDT");
 });
 
 test("workspace names remain unique and deleting the active workspace selects a stable neighbor", () => {

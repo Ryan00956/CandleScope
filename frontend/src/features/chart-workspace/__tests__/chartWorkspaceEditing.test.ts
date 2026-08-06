@@ -13,34 +13,41 @@ import {
   splitChartWorkspaceDocument,
   swapChartWorkspaceDocumentCells,
   undoChartWorkspaceLayoutEdit,
+  type ChartWorkspaceEditOptions,
 } from "../chartWorkspaceEditing.js";
+import { activeChartWorkspaceWindow, chartWorkspaceCell, replaceChartWorkspaceWindow } from "../chartWorkspaceDocument.js";
 import { visibleCellIds } from "../chartWorkspaceLayout.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import type { ChartCellId, ChartWorkspaceDocument } from "../chartWorkspaceTypes.js";
+
+const windowOf = (document: ChartWorkspaceDocument) => activeChartWorkspaceWindow(document);
+const cellOf = (document: ChartWorkspaceDocument, id: ChartCellId) => chartWorkspaceCell(document, id);
+const visible = (document: ChartWorkspaceDocument) => visibleCellIds(windowOf(document).layoutTree);
 
 test("copy split duplicates cell configuration into the first unused stable cell", () => {
   const document = createDefaultChartWorkspace();
-  document.cells["cell-1"].linkGroup = "B";
-  document.cells["cell-1"].indicators = [{ id: "copy-me", params: { length: 21 } }];
+  cellOf(document, "cell-1").linkGroup = "B";
+  cellOf(document, "cell-1").indicators = [{ id: "copy-me", params: { length: 21 } }];
   const result = splitChartWorkspaceDocument(document, "cell-1", "columns", "copy");
 
-  assert.deepEqual(visibleCellIds(result.document.layoutTree), ["cell-1", "cell-2"]);
-  assert.equal(result.document.activeCellId, "cell-2");
+  assert.deepEqual(visible(result.document), ["cell-1", "cell-2"]);
+  assert.equal(windowOf(result.document).activeCellId, "cell-2");
   assert.deepEqual(result.restoreCellIds, ["cell-2"]);
-  assert.equal(result.document.cells["cell-2"].linkGroup, "B");
-  assert.deepEqual(result.document.cells["cell-2"].session, document.cells["cell-1"].session);
-  assert.deepEqual(result.document.cells["cell-2"].indicators, document.cells["cell-1"].indicators);
-  assert.notEqual(result.document.cells["cell-2"].indicators, document.cells["cell-1"].indicators);
+  assert.equal(cellOf(result.document, "cell-2").linkGroup, "B");
+  assert.deepEqual(cellOf(result.document, "cell-2").session, cellOf(document, "cell-1").session);
+  assert.deepEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
+  assert.notEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
 });
 
 test("blank split keeps market context while clearing links, indicators, and price transforms", () => {
   const document = createDefaultChartWorkspace();
-  document.cells["cell-1"].linkGroup = "C";
-  document.cells["cell-1"].priceScale = { invertScale: true, priceScaleMode: 2 };
-  document.cells["cell-1"].indicators = [{ id: "do-not-copy" }];
+  cellOf(document, "cell-1").linkGroup = "C";
+  cellOf(document, "cell-1").priceScale = { invertScale: true, priceScaleMode: 2 };
+  cellOf(document, "cell-1").indicators = [{ id: "do-not-copy" }];
   const result = splitChartWorkspaceDocument(document, "cell-1", "rows", "blank");
-  const blank = result.document.cells["cell-2"];
+  const blank = cellOf(result.document, "cell-2");
 
-  assert.deepEqual(blank.session, document.cells["cell-1"].session);
+  assert.deepEqual(blank.session, cellOf(document, "cell-1").session);
   assert.equal(blank.linkGroup, null);
   assert.equal(blank.linkRole, "bidirectional");
   assert.deepEqual(blank.indicators, []);
@@ -48,66 +55,53 @@ test("blank split keeps market context while clearing links, indicators, and pri
 });
 
 test("close collapses parent splits without deleting the hidden cell state", () => {
-  const document = createDefaultChartWorkspace();
-  const first = splitChartWorkspaceDocument(document, "cell-1", "columns", "copy").document;
+  const first = splitChartWorkspaceDocument(createDefaultChartWorkspace(), "cell-1", "columns", "copy").document;
   const second = splitChartWorkspaceDocument(first, "cell-2", "rows", "copy").document;
-  const closedCell = second.cells["cell-2"];
+  const closedCell = cellOf(second, "cell-2");
   const result = closeChartWorkspaceDocument(second, "cell-2");
 
-  assert.deepEqual(visibleCellIds(result.document.layoutTree), ["cell-1", "cell-3"]);
-  assert.equal(result.document.activeCellId, "cell-3");
-  assert.equal(result.document.cells["cell-2"], closedCell);
+  assert.deepEqual(visible(result.document), ["cell-1", "cell-3"]);
+  assert.equal(windowOf(result.document).activeCellId, "cell-3");
+  assert.equal(cellOf(result.document, "cell-2"), closedCell);
 });
 
 test("swap moves stable cell identities in the tree without exchanging their state", () => {
-  const document = splitChartWorkspaceDocument(
-    createDefaultChartWorkspace(),
-    "cell-1",
-    "columns",
-    "copy",
-  ).document;
-  const firstState = document.cells["cell-1"];
-  const secondState = document.cells["cell-2"];
+  const document = splitChartWorkspaceDocument(createDefaultChartWorkspace(), "cell-1", "columns", "copy").document;
+  const firstState = cellOf(document, "cell-1");
+  const secondState = cellOf(document, "cell-2");
   const result = swapChartWorkspaceDocumentCells(document, "cell-1", "cell-2");
 
-  assert.deepEqual(visibleCellIds(result.document.layoutTree), ["cell-2", "cell-1"]);
-  assert.equal(result.document.cells["cell-1"], firstState);
-  assert.equal(result.document.cells["cell-2"], secondState);
+  assert.deepEqual(visible(result.document), ["cell-2", "cell-1"]);
+  assert.equal(cellOf(result.document, "cell-1"), firstState);
+  assert.equal(cellOf(result.document, "cell-2"), secondState);
 });
 
-test("one-step undo restores overwritten new-cell state but preserves later source edits", () => {
+test("one-step undo restores overwritten legacy cell state but preserves later source edits", () => {
   const before = createDefaultChartWorkspace();
-  const previousCellTwo = structuredClone(before.cells["cell-2"]);
+  const previousCellTwo = structuredClone(cellOf(before, "cell-2"));
   const split = splitChartWorkspaceDocument(before, "cell-1", "columns", "copy");
   const undo = createChartWorkspaceLayoutUndoEntry(before, split.restoreCellIds);
-  const afterUserEdit = {
+  const source = cellOf(split.document, "cell-1");
+  const afterUserEdit: ChartWorkspaceDocument = {
     ...split.document,
     cells: {
       ...split.document.cells,
-      "cell-1": {
-        ...split.document.cells["cell-1"],
-        session: { ...split.document.cells["cell-1"].session, interval: "5m" },
-      },
+      "cell-1": { ...source, session: { ...source.session, interval: "5m" } },
     },
   };
   const restored = applyChartWorkspaceLayoutUndo(afterUserEdit, undo);
 
-  assert.deepEqual(visibleCellIds(restored.layoutTree), ["cell-1"]);
-  assert.equal(restored.cells["cell-1"].session.interval, "5m");
-  assert.deepEqual(restored.cells["cell-2"], previousCellTwo);
+  assert.deepEqual(visible(restored), ["cell-1"]);
+  assert.equal(cellOf(restored, "cell-1").session.interval, "5m");
+  assert.deepEqual(cellOf(restored, "cell-2"), previousCellTwo);
 });
 
 test("reset keeps the current active chart as the sole mounted cell", () => {
-  const split = splitChartWorkspaceDocument(
-    createDefaultChartWorkspace(),
-    "cell-1",
-    "columns",
-    "copy",
-  ).document;
-  assert.equal(split.activeCellId, "cell-2");
+  const split = splitChartWorkspaceDocument(createDefaultChartWorkspace(), "cell-1", "columns", "copy").document;
+  assert.equal(windowOf(split).activeCellId, "cell-2");
   const reset = resetChartWorkspaceDocumentLayout(split);
-  assert.deepEqual(visibleCellIds(reset.document.layoutTree), ["cell-2"]);
-  assert.equal(reset.document.activeCellId, "cell-2");
+  assert.deepEqual(visible(reset.document), ["cell-2"]);
+  assert.equal(windowOf(reset.document).activeCellId, "cell-2");
 });
 
 test("bounded layout history supports repeated undo and redo in stack order", () => {
@@ -121,24 +115,24 @@ test("bounded layout history supports repeated undo and redo in stack order", ()
   apply(splitChartWorkspaceDocument(document, "cell-1", "columns", "copy"));
   apply(splitChartWorkspaceDocument(document, "cell-2", "rows", "blank"));
   apply(swapChartWorkspaceDocumentCells(document, "cell-1", "cell-3"));
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-3", "cell-2", "cell-1"]);
+  assert.deepEqual(visible(document), ["cell-3", "cell-2", "cell-1"]);
   assert.equal(history.past.length, 3);
 
   const undoSwap = undoChartWorkspaceLayoutEdit(document, history);
   assert.ok(undoSwap);
   ({ document, history } = undoSwap);
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+  assert.deepEqual(visible(document), ["cell-1", "cell-2", "cell-3"]);
 
   const undoThirdCell = undoChartWorkspaceLayoutEdit(document, history);
   assert.ok(undoThirdCell);
   ({ document, history } = undoThirdCell);
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2"]);
+  assert.deepEqual(visible(document), ["cell-1", "cell-2"]);
   assert.equal(history.future.length, 2);
 
   const redoThirdCell = redoChartWorkspaceLayoutEdit(document, history);
   assert.ok(redoThirdCell);
   ({ document, history } = redoThirdCell);
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+  assert.deepEqual(visible(document), ["cell-1", "cell-2", "cell-3"]);
   assert.equal(history.past.length, 2);
   assert.equal(history.future.length, 1);
 
@@ -164,21 +158,53 @@ test("layout history retains only the most recent bounded edit steps", () => {
   assert.equal(history.future.length, 0);
 });
 
-test("redo restores cell edits captured after a copy split was undone", () => {
+test("dynamic editing creates 16 unique IDs and never reuses a closed ID", () => {
+  let sequence = 0;
+  const options: ChartWorkspaceEditOptions = {
+    allowDynamicCellIds: true,
+    maxCellsPerWindow: 16,
+    maxCellsPerApp: 64,
+    createCellId: (occupied) => {
+      let id: ChartCellId;
+      do id = `cell-dynamic-${++sequence}`; while (occupied.has(id));
+      return id;
+    },
+  };
+  let document = createDefaultChartWorkspace();
+  while (visible(document).length < 16) {
+    const target = windowOf(document).activeCellId;
+    document = splitChartWorkspaceDocument(document, target, "columns", "copy", options).document;
+  }
+  const uniqueIds = visible(document);
+  assert.equal(uniqueIds.length, 16);
+  assert.equal(new Set(uniqueIds).size, 16);
+  const closedId = windowOf(document).activeCellId;
+  document = closeChartWorkspaceDocument(document, closedId, options).document;
+  const target = windowOf(document).activeCellId;
+  document = splitChartWorkspaceDocument(document, target, "rows", "blank", options).document;
+  assert.equal(visible(document).length, 16);
+  assert.ok(!visible(document).includes(closedId));
+  assert.ok(document.cells[closedId]);
+});
+
+test("dynamic undo and redo restore the same ID and its complete edited snapshot", () => {
+  const options: ChartWorkspaceEditOptions = {
+    allowDynamicCellIds: true,
+    maxCellsPerWindow: 16,
+    createCellId: () => "cell-dynamic-history",
+  };
   const before = createDefaultChartWorkspace();
-  const split = splitChartWorkspaceDocument(before, "cell-1", "columns", "copy");
-  let history = recordChartWorkspaceLayoutEdit(
-    createEmptyChartWorkspaceLayoutHistory(),
-    before,
-    split,
-  );
-  let document = {
+  const split = splitChartWorkspaceDocument(before, "cell-1", "columns", "copy", options);
+  let history = recordChartWorkspaceLayoutEdit(createEmptyChartWorkspaceLayoutHistory(), before, split);
+  const dynamic = cellOf(split.document, "cell-dynamic-history");
+  let document: ChartWorkspaceDocument = {
     ...split.document,
     cells: {
       ...split.document.cells,
-      "cell-2": {
-        ...split.document.cells["cell-2"],
-        session: { ...split.document.cells["cell-2"].session, interval: "5m" },
+      [dynamic.id]: {
+        ...dynamic,
+        indicators: [{ id: "history-indicator", params: { length: 34 } }],
+        session: { ...dynamic.session, interval: "5m" },
       },
     },
   };
@@ -186,25 +212,26 @@ test("redo restores cell edits captured after a copy split was undone", () => {
   const undo = undoChartWorkspaceLayoutEdit(document, history);
   assert.ok(undo);
   ({ document, history } = undo);
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1"]);
-  assert.notEqual(document.cells["cell-2"].session.interval, "5m");
+  assert.deepEqual(visible(document), ["cell-1"]);
 
   const redo = redoChartWorkspaceLayoutEdit(document, history);
   assert.ok(redo);
-  ({ document, history } = redo);
-  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2"]);
-  assert.equal(document.cells["cell-2"].session.interval, "5m");
+  ({ document } = redo);
+  assert.deepEqual(visible(document), ["cell-1", "cell-dynamic-history"]);
+  assert.equal(cellOf(document, "cell-dynamic-history").session.interval, "5m");
+  assert.deepEqual(cellOf(document, "cell-dynamic-history").indicators, [
+    { id: "history-indicator", params: { length: 34 } },
+  ]);
 });
 
-test("locked documents reject every structural edit and history traversal", () => {
+test("locked windows reject every structural edit and history traversal", () => {
   const unlocked = createDefaultChartWorkspace();
   const split = splitChartWorkspaceDocument(unlocked, "cell-1", "columns", "copy");
-  const history = recordChartWorkspaceLayoutEdit(
-    createEmptyChartWorkspaceLayoutHistory(),
-    unlocked,
-    split,
-  );
-  const locked = { ...split.document, layoutLocked: true };
+  const history = recordChartWorkspaceLayoutEdit(createEmptyChartWorkspaceLayoutHistory(), unlocked, split);
+  const locked = replaceChartWorkspaceWindow(split.document, {
+    ...windowOf(split.document),
+    layoutLocked: true,
+  });
 
   assert.equal(splitChartWorkspaceDocument(locked, "cell-2", "rows", "copy").document, locked);
   assert.equal(closeChartWorkspaceDocument(locked, "cell-2").document, locked);

@@ -6,6 +6,7 @@ import {
   summarizeChartDrawingLink,
 } from "../chartWorkspaceDrawingLink.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import { chartWorkspaceCell } from "../chartWorkspaceDocument.js";
 
 const visibleCells = ["cell-1", "cell-2", "cell-3"] as const;
 
@@ -36,9 +37,9 @@ test("linked drawings require both full market identity and the same layer set",
     groupPeerCount: 2,
   });
 
-  document.cells["cell-2"].drawingLayerSet = "2";
-  document.cells["cell-3"].session = {
-    ...document.cells["cell-3"].session,
+  chartWorkspaceCell(document, "cell-2").drawingLayerSet = "2";
+  chartWorkspaceCell(document, "cell-3").session = {
+    ...chartWorkspaceCell(document, "cell-3").session,
     exchange: "okx",
   };
   assert.deepEqual(summarizeChartDrawingLink(document, "cell-1", visibleCells), {

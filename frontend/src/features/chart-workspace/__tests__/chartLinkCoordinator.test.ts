@@ -6,6 +6,7 @@ import {
   type ChartLinkSurface,
 } from "../chartLinkCoordinator.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import { chartWorkspaceCell } from "../chartWorkspaceDocument.js";
 
 function recordingSurface() {
   const crosshair: Array<number | null> = [];
@@ -45,7 +46,7 @@ function recordingSurface() {
 
 test("crosshair and time ranges fan out only to registered cells in the same enabled group", () => {
   const document = createDefaultChartWorkspace();
-  document.cells["cell-4"].linkGroup = "B";
+  chartWorkspaceCell(document, "cell-4").linkGroup = "B";
   const coordinator = new ChartLinkCoordinator(document);
   const cell1 = recordingSurface();
   const cell2 = recordingSurface();
@@ -72,10 +73,10 @@ test("direction roles route viewport events only from publishers to receivers", 
   const document = createDefaultChartWorkspace();
   document.linkGroups.A.dateRange = false;
   document.linkGroups.A.timeAnchor = true;
-  document.cells["cell-1"].linkRole = "source";
-  document.cells["cell-2"].linkRole = "source";
-  document.cells["cell-3"].linkRole = "destination";
-  document.cells["cell-4"].linkRole = "bidirectional";
+  chartWorkspaceCell(document, "cell-1").linkRole = "source";
+  chartWorkspaceCell(document, "cell-2").linkRole = "source";
+  chartWorkspaceCell(document, "cell-3").linkRole = "destination";
+  chartWorkspaceCell(document, "cell-4").linkRole = "bidirectional";
   const coordinator = new ChartLinkCoordinator(document);
   const cell1 = recordingSurface();
   const cell2 = recordingSurface();
@@ -235,7 +236,7 @@ test("role and link-setting changes invalidate an ineligible retained viewport",
   const roleDocument = createDefaultChartWorkspace();
   const roleCoordinator = new ChartLinkCoordinator(roleDocument, "workspace-role");
   roleCoordinator.publishDateRange("cell-1", { from: 100, to: 200 });
-  roleDocument.cells["cell-1"].linkRole = "destination";
+  chartWorkspaceCell(roleDocument, "cell-1").linkRole = "destination";
   roleCoordinator.updateDocument(roleDocument, "workspace-role");
   const roleTarget = recordingSurface();
   roleCoordinator.register("cell-2", roleTarget.surface, "workspace-role");

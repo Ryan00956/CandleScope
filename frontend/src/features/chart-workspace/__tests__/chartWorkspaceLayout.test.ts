@@ -9,6 +9,7 @@ import {
   findChartWorkspaceCellRole,
   normalizeChartSplitRatio,
   normalizeChartWorkspaceLayoutTree,
+  parseChartWorkspaceLayoutTree,
   ratioFromPointerPosition,
   resetChartWorkspaceLayout,
   splitChartWorkspaceCell,
@@ -117,4 +118,38 @@ test("reset keeps the active cell identity and still reports a single layout", (
   const tree = resetChartWorkspaceLayout("cell-3");
   assert.deepEqual(visibleCellIds(tree), ["cell-3"]);
   assert.equal(detectChartWorkspaceLayout(tree), "single");
+});
+
+test("dynamic layout parsing accepts opaque IDs and reports dangling and duplicate identities", () => {
+  const valid = {
+    kind: "split",
+    id: "dynamic-root",
+    direction: "columns",
+    ratio: 0.5,
+    first: { kind: "cell", cellId: "cell-opaque-a" },
+    second: { kind: "cell", cellId: "cell-opaque-b" },
+  };
+  const parsed = parseChartWorkspaceLayoutTree(valid, {
+    knownCellIds: new Set(["cell-opaque-a", "cell-opaque-b"]),
+    maxCells: 16,
+  });
+  assert.deepEqual(visibleCellIds(parsed.tree!), ["cell-opaque-a", "cell-opaque-b"]);
+  assert.deepEqual(parsed.diagnostics, []);
+
+  const dangling = parseChartWorkspaceLayoutTree(valid, {
+    knownCellIds: new Set(["cell-opaque-a"]),
+    maxCells: 16,
+  });
+  assert.equal(dangling.tree, null);
+  assert.ok(dangling.diagnostics.some((diagnostic) => diagnostic.code === "dangling-cell-id"));
+
+  const duplicate = parseChartWorkspaceLayoutTree({
+    ...valid,
+    second: { kind: "cell", cellId: "cell-opaque-a" },
+  }, {
+    knownCellIds: new Set(["cell-opaque-a"]),
+    maxCells: 16,
+  });
+  assert.equal(duplicate.tree, null);
+  assert.ok(duplicate.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-cell-id"));
 });

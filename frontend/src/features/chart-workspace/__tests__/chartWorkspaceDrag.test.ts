@@ -21,17 +21,17 @@ function dataTransferFixture(): DataTransfer {
   return transfer as unknown as DataTransfer;
 }
 
-test("chart-cell drag payload round-trips only stable cell identities", () => {
+test("chart-cell drag payload round-trips validated opaque cell identities", () => {
   const transfer = dataTransferFixture();
-  writeChartCellDragData(transfer, "cell-3");
+  writeChartCellDragData(transfer, "cell-opaque-99");
   assert.equal(transfer.effectAllowed, "move");
   assert.equal(hasChartCellDragData(transfer), true);
-  assert.equal(transfer.getData(CHART_CELL_DRAG_MIME), "cell-3");
-  assert.equal(readChartCellDragData(transfer), "cell-3");
+  assert.equal(transfer.getData(CHART_CELL_DRAG_MIME), "cell-opaque-99");
+  assert.equal(readChartCellDragData(transfer), "cell-opaque-99");
 });
 
 test("malformed drag payloads fail closed", () => {
   const transfer = dataTransferFixture();
-  transfer.setData(CHART_CELL_DRAG_MIME, "cell-99");
+  transfer.setData(CHART_CELL_DRAG_MIME, "not-a-cell");
   assert.equal(readChartCellDragData(transfer), null);
 });

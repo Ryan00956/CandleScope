@@ -173,7 +173,8 @@ export class ChartLinkCoordinator {
     option: LinkOption,
   ): ChartLinkGroupId | null {
     const sourceCell = this.document.cells[sourceCellId];
-    const sourceGroup = sourceCell?.linkGroup ?? null;
+    if (!sourceCell) return null;
+    const sourceGroup = sourceCell.linkGroup;
     if (sourceGroup === null
       || !canPublishChartLinks(sourceCell.linkRole)
       || !this.document.linkGroups[sourceGroup]?.[option]) return null;
@@ -190,8 +191,9 @@ export class ChartLinkCoordinator {
     for (const [cellId, registration] of this.surfaces) {
       if (registration.scopeKey !== this.scopeKey) continue;
       const cell = this.document.cells[cellId];
-      if (cellId === sourceCellId
-        || cell?.linkGroup !== group
+      if (!cell
+        || cellId === sourceCellId
+        || cell.linkGroup !== group
         || !canReceiveChartLinks(cell.linkRole)) continue;
       targets.push({ cellId, surface: registration.surface });
     }
@@ -207,10 +209,10 @@ export class ChartLinkCoordinator {
     }
     for (const cellId of state.deliveredByCell.keys()) {
       const cell = this.document.cells[cellId];
-      const event = cell?.linkGroup == null
+      const event = !cell || cell.linkGroup == null
         ? null
         : state.latestByGroup.get(cell.linkGroup) ?? null;
-      if (!event || !canReceiveChartLinks(cell.linkRole)) {
+      if (!cell || !event || !canReceiveChartLinks(cell.linkRole)) {
         state.deliveredByCell.delete(cellId);
         state.readinessGenerationByCell.delete(cellId);
       }
@@ -324,7 +326,8 @@ export class ChartLinkCoordinator {
     const registration = this.surfaces.get(cellId);
     if (!registration || registration.scopeKey !== this.scopeKey) return false;
     const cell = this.document.cells[cellId];
-    const group = cell?.linkGroup ?? null;
+    if (!cell) return false;
+    const group = cell.linkGroup;
     if (group === null || !canReceiveChartLinks(cell.linkRole)) return false;
     const state = this.viewportState();
     const event = state.latestByGroup.get(group);

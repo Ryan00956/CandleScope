@@ -1,12 +1,22 @@
 import {
-  CHART_CELL_IDS,
   type ChartCellCreationMode,
   type ChartCellId,
   type ChartCellState,
+  type ChartWindowId,
+  type ChartWindowState,
   type ChartWorkspaceDocument,
-  type ChartWorkspaceLayoutNode,
   type ChartWorkspaceSplitDirection,
 } from "./chartWorkspaceTypes.js";
+import {
+  LEGACY_VISIBLE_CELLS_PER_WINDOW,
+  MAX_CELLS_PER_APP,
+  MAX_CELLS_PER_WINDOW,
+} from "./chartWorkspaceCapacity.js";
+import { createChartCellId } from "./chartWorkspaceIdentity.js";
+import {
+  chartWorkspaceWindow,
+  replaceChartWorkspaceWindow,
+} from "./chartWorkspaceDocument.js";
 import {
   closeChartWorkspaceCell,
   firstAvailableChartCellId,
@@ -21,10 +31,16 @@ export interface ChartWorkspaceEditResult {
   restoreCellIds: readonly ChartCellId[];
 }
 
+export interface ChartWorkspaceEditOptions {
+  windowId?: ChartWindowId;
+  allowDynamicCellIds?: boolean;
+  maxCellsPerWindow?: number;
+  maxCellsPerApp?: number;
+  createCellId?: (occupied: ReadonlySet<ChartCellId>) => ChartCellId | null;
+}
+
 export interface ChartWorkspaceLayoutUndoEntry {
-  layoutTree: ChartWorkspaceLayoutNode;
-  activeCellId: ChartCellId;
-  maximizedCellId: ChartCellId | null;
+  window: ChartWindowState;
   restoredCells: Partial<Record<ChartCellId, ChartCellState>>;
 }
 
@@ -59,11 +75,11 @@ function copiedCell(source: ChartCellState, id: ChartCellId): ChartCellState {
 
 function blankCell(
   source: ChartCellState,
-  existing: ChartCellState,
+  existing: ChartCellState | undefined,
   id: ChartCellId,
 ): ChartCellState {
   return {
-    ...cloneSerializable(existing),
+    ...cloneSerializable(existing ?? source),
     id,
     linkGroup: null,
     linkRole: "bidirectional",
@@ -73,61 +89,92 @@ function blankCell(
   };
 }
 
+function editWindow(
+  document: ChartWorkspaceDocument,
+  options: ChartWorkspaceEditOptions,
+): ChartWindowState {
+  return chartWorkspaceWindow(document, options.windowId ?? document.activeWindowId);
+}
+
+function allocateCellId(
+  document: ChartWorkspaceDocument,
+  window: ChartWindowState,
+  options: ChartWorkspaceEditOptions,
+): ChartCellId | null {
+  const maxCellsPerWindow = Math.min(
+    MAX_CELLS_PER_WINDOW,
+    Math.max(1, options.maxCellsPerWindow ?? LEGACY_VISIBLE_CELLS_PER_WINDOW),
+  );
+  if (visibleCellIds(window.layoutTree).length >= maxCellsPerWindow) return null;
+  if (!options.allowDynamicCellIds) return firstAvailableChartCellId(window.layoutTree);
+  const occupied = new Set(Object.keys(document.cells));
+  const maxCellsPerApp = Math.min(
+    MAX_CELLS_PER_APP,
+    Math.max(1, options.maxCellsPerApp ?? MAX_CELLS_PER_APP),
+  );
+  if (occupied.size >= maxCellsPerApp) return null;
+  return (options.createCellId ?? createChartCellId)(occupied);
+}
+
 export function splitChartWorkspaceDocument(
   document: ChartWorkspaceDocument,
   cellId: ChartCellId,
   direction: ChartWorkspaceSplitDirection,
   creationMode: ChartCellCreationMode,
+  options: ChartWorkspaceEditOptions = {},
 ): ChartWorkspaceEditResult {
-  if (document.layoutLocked) return { document, restoreCellIds: [] };
-  const newCellId = firstAvailableChartCellId(document.layoutTree);
+  const window = editWindow(document, options);
+  if (window.layoutLocked) return { document, restoreCellIds: [] };
+  const newCellId = allocateCellId(document, window, options);
   if (!newCellId) return { document, restoreCellIds: [] };
+  const maxCellsPerWindow = options.maxCellsPerWindow ?? LEGACY_VISIBLE_CELLS_PER_WINDOW;
   const layoutTree = splitChartWorkspaceCell(
-    document.layoutTree,
+    window.layoutTree,
     cellId,
     newCellId,
     direction,
+    maxCellsPerWindow,
   );
-  if (layoutTree === document.layoutTree) return { document, restoreCellIds: [] };
+  if (layoutTree === window.layoutTree) return { document, restoreCellIds: [] };
   const source = document.cells[cellId];
+  if (!source) return { document, restoreCellIds: [] };
+  const previous = document.cells[newCellId];
   const nextCell = creationMode === "copy"
     ? copiedCell(source, newCellId)
-    : blankCell(source, document.cells[newCellId], newCellId);
+    : blankCell(source, previous, newCellId);
   return {
-    document: {
+    document: replaceChartWorkspaceWindow({
       ...document,
+      cells: { ...document.cells, [newCellId]: nextCell },
+    }, {
+      ...window,
       layoutTree,
       activeCellId: newCellId,
       maximizedCellId: null,
-      cells: {
-        ...document.cells,
-        [newCellId]: nextCell,
-      },
-    },
-    restoreCellIds: [newCellId],
+    }),
+    restoreCellIds: previous ? [newCellId] : [],
   };
 }
 
 export function closeChartWorkspaceDocument(
   document: ChartWorkspaceDocument,
   cellId: ChartCellId,
+  options: ChartWorkspaceEditOptions = {},
 ): ChartWorkspaceEditResult {
-  if (document.layoutLocked) return { document, restoreCellIds: [] };
-  const layoutTree = closeChartWorkspaceCell(document.layoutTree, cellId);
-  if (layoutTree === document.layoutTree) return { document, restoreCellIds: [] };
+  const window = editWindow(document, options);
+  if (window.layoutLocked) return { document, restoreCellIds: [] };
+  const layoutTree = closeChartWorkspaceCell(window.layoutTree, cellId);
+  if (layoutTree === window.layoutTree) return { document, restoreCellIds: [] };
   const remaining = visibleCellIds(layoutTree);
-  const activeCellId = document.activeCellId === cellId
-    ? remaining[0] ?? document.activeCellId
-    : document.activeCellId;
   return {
-    document: {
-      ...document,
+    document: replaceChartWorkspaceWindow(document, {
+      ...window,
       layoutTree,
-      activeCellId,
-      maximizedCellId: document.maximizedCellId === cellId
-        ? null
-        : document.maximizedCellId,
-    },
+      activeCellId: window.activeCellId === cellId
+        ? remaining[0] ?? window.activeCellId
+        : window.activeCellId,
+      maximizedCellId: window.maximizedCellId === cellId ? null : window.maximizedCellId,
+    }),
     restoreCellIds: [],
   };
 }
@@ -136,34 +183,37 @@ export function swapChartWorkspaceDocumentCells(
   document: ChartWorkspaceDocument,
   firstCellId: ChartCellId,
   secondCellId: ChartCellId,
+  options: ChartWorkspaceEditOptions = {},
 ): ChartWorkspaceEditResult {
-  if (document.layoutLocked) return { document, restoreCellIds: [] };
-  const layoutTree = swapChartWorkspaceCells(
-    document.layoutTree,
-    firstCellId,
-    secondCellId,
-  );
-  return layoutTree === document.layoutTree
+  const window = editWindow(document, options);
+  if (window.layoutLocked) return { document, restoreCellIds: [] };
+  const layoutTree = swapChartWorkspaceCells(window.layoutTree, firstCellId, secondCellId);
+  return layoutTree === window.layoutTree
     ? { document, restoreCellIds: [] }
-    : { document: { ...document, layoutTree }, restoreCellIds: [] };
+    : {
+      document: replaceChartWorkspaceWindow(document, { ...window, layoutTree }),
+      restoreCellIds: [],
+    };
 }
 
 export function resetChartWorkspaceDocumentLayout(
   document: ChartWorkspaceDocument,
+  options: ChartWorkspaceEditOptions = {},
 ): ChartWorkspaceEditResult {
-  if (document.layoutLocked) return { document, restoreCellIds: [] };
-  const layoutTree = resetChartWorkspaceLayout(document.activeCellId);
-  if (document.layoutTree.kind === "cell"
-    && document.layoutTree.cellId === document.activeCellId
-    && document.maximizedCellId === null) {
+  const window = editWindow(document, options);
+  if (window.layoutLocked) return { document, restoreCellIds: [] };
+  const layoutTree = resetChartWorkspaceLayout(window.activeCellId);
+  if (window.layoutTree.kind === "cell"
+    && window.layoutTree.cellId === window.activeCellId
+    && window.maximizedCellId === null) {
     return { document, restoreCellIds: [] };
   }
   return {
-    document: {
-      ...document,
+    document: replaceChartWorkspaceWindow(document, {
+      ...window,
       layoutTree,
       maximizedCellId: null,
-    },
+    }),
     restoreCellIds: [],
   };
 }
@@ -171,16 +221,17 @@ export function resetChartWorkspaceDocumentLayout(
 export function createChartWorkspaceLayoutUndoEntry(
   document: ChartWorkspaceDocument,
   restoreCellIds: readonly ChartCellId[],
+  windowId: ChartWindowId = document.activeWindowId,
 ): ChartWorkspaceLayoutUndoEntry {
   const snapshot = cloneSerializable(document);
+  const restoredCells: Partial<Record<ChartCellId, ChartCellState>> = {};
+  for (const cellId of restoreCellIds) {
+    const cell = snapshot.cells[cellId];
+    if (cell) restoredCells[cellId] = cell;
+  }
   return {
-    layoutTree: snapshot.layoutTree,
-    activeCellId: snapshot.activeCellId,
-    maximizedCellId: snapshot.maximizedCellId,
-    restoredCells: Object.fromEntries(restoreCellIds.map((cellId) => [
-      cellId,
-      snapshot.cells[cellId],
-    ])) as Partial<Record<ChartCellId, ChartCellState>>,
+    window: chartWorkspaceWindow(snapshot, windowId),
+    restoredCells,
   };
 }
 
@@ -188,22 +239,18 @@ export function applyChartWorkspaceLayoutUndo(
   document: ChartWorkspaceDocument,
   undo: ChartWorkspaceLayoutUndoEntry,
 ): ChartWorkspaceDocument {
-  return {
+  const restoredCells: Record<ChartCellId, ChartCellState> = { ...document.cells };
+  for (const [cellId, cell] of Object.entries(cloneSerializable(undo.restoredCells))) {
+    if (cell) restoredCells[cellId] = cell;
+  }
+  return replaceChartWorkspaceWindow({
     ...document,
-    layoutTree: cloneSerializable(undo.layoutTree),
-    activeCellId: undo.activeCellId,
-    maximizedCellId: undo.maximizedCellId,
-    cells: {
-      ...document.cells,
-      ...cloneSerializable(undo.restoredCells),
-    },
-  };
+    cells: restoredCells,
+  }, cloneSerializable(undo.window));
 }
 
-function restoredCellIds(
-  entry: ChartWorkspaceLayoutUndoEntry,
-): ChartCellId[] {
-  return CHART_CELL_IDS.filter((cellId) => entry.restoredCells[cellId] !== undefined);
+function restoredCellIds(entry: ChartWorkspaceLayoutUndoEntry): ChartCellId[] {
+  return Object.keys(entry.restoredCells);
 }
 
 function boundedHistory(
@@ -234,26 +281,22 @@ function traverseChartWorkspaceLayoutHistory(
   history: ChartWorkspaceLayoutHistory,
   direction: "undo" | "redo",
 ): ChartWorkspaceLayoutHistoryStep | null {
-  if (document.layoutLocked) return null;
+  const window = chartWorkspaceWindow(document);
+  if (window.layoutLocked) return null;
   const source = direction === "undo" ? history.past : history.future;
   const entry = source.at(-1);
   if (!entry) return null;
   const inverse = createChartWorkspaceLayoutUndoEntry(
     document,
     restoredCellIds(entry),
+    entry.window.id,
   );
   const remaining = source.slice(0, -1);
   return {
     document: applyChartWorkspaceLayoutUndo(document, entry),
     history: direction === "undo"
-      ? {
-        past: remaining,
-        future: boundedHistory([...history.future, inverse]),
-      }
-      : {
-        past: boundedHistory([...history.past, inverse]),
-        future: remaining,
-      },
+      ? { past: remaining, future: boundedHistory([...history.future, inverse]) }
+      : { past: boundedHistory([...history.past, inverse]), future: remaining },
   };
 }
 

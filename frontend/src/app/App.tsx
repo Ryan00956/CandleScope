@@ -33,6 +33,7 @@ import {
   summarizeChartDrawingLink,
   type ChartDrawingLinkSummary,
 } from "../features/chart-workspace/chartWorkspaceDrawingLink.js";
+import { chartWorkspaceCell } from "../features/chart-workspace/chartWorkspaceDocument.js";
 import WorkspaceLayoutTree from "../features/chart-workspace/WorkspaceLayoutTree.js";
 import WorkspaceSwitcher from "../features/chart-workspace/WorkspaceSwitcher.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
@@ -436,14 +437,14 @@ function LiveWorkspaceApp() {
 
   const toggleWorkspaceMaximize = workspace.actions.toggleMaximize;
   useEffect(() => {
-    if (workspace.view.document.maximizedCellId == null) return undefined;
+    if (workspace.view.window.maximizedCellId == null) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      toggleWorkspaceMaximize(workspace.view.document.maximizedCellId!);
+      toggleWorkspaceMaximize(workspace.view.window.maximizedCellId!);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleWorkspaceMaximize, workspace.view.document.maximizedCellId]);
+  }, [toggleWorkspaceMaximize, workspace.view.window.maximizedCellId]);
 
   const undoWorkspaceLayout = workspace.actions.undoLayout;
   const redoWorkspaceLayout = workspace.actions.redoLayout;
@@ -586,7 +587,7 @@ function LiveWorkspaceApp() {
   const gridClassName = [
     "multi-chart-grid",
     `layout-${workspace.view.layout}`,
-    workspace.view.document.maximizedCellId ? "has-maximized-cell" : "",
+    workspace.view.window.maximizedCellId ? "has-maximized-cell" : "",
   ].filter(Boolean).join(" ");
 
   return (
@@ -608,8 +609,8 @@ function LiveWorkspaceApp() {
                 aria-busy={!workspace.view.ready}
               >
                 <WorkspaceLayoutTree
-                  tree={workspace.view.document.layoutTree}
-                  maximizedCellId={workspace.view.document.maximizedCellId}
+                  tree={workspace.view.window.layoutTree}
+                  maximizedCellId={workspace.view.window.maximizedCellId}
                   disabled={!workspace.view.ready || workspace.view.layoutLocked}
                   onSplitRatioChange={workspace.actions.setLayoutRatio}
                   onCellDrop={workspace.actions.swapCells}
@@ -617,7 +618,7 @@ function LiveWorkspaceApp() {
                     <LiveChartCell
                       key={`${workspace.view.runtimeKey}:${cellId}`}
                       workspaceId={workspace.view.activeWorkspaceId}
-                      cell={workspace.view.document.cells[cellId]}
+                      cell={chartWorkspaceCell(workspace.view.document, cellId)}
                       linkedDrawingScopeBase={chartCellDrawingScopeBase(
                         workspace.view.activeWorkspaceId,
                         workspace.view.document,
@@ -625,7 +626,7 @@ function LiveWorkspaceApp() {
                       )}
                       layoutRole={layoutRole}
                       active={workspace.view.activeCellId === cellId}
-                      maximized={workspace.view.document.maximizedCellId === cellId}
+                      maximized={workspace.view.window.maximizedCellId === cellId}
                       layoutCellIds={workspace.view.layoutCellIds}
                       layoutEditingDisabled={!workspace.view.ready || workspace.view.layoutLocked}
                       pageExportRef={pageExportRef}

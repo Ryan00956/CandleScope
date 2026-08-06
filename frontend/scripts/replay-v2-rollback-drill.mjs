@@ -852,20 +852,36 @@ async function main() {
 
     const replayStreamsBeforeDisabledDocument = replayCapture.webSockets.filter((url) => /\/api\/v1\/stream\/replay\//.test(url)).length;
     const transitionRejectedReplaySocketAttempts = replayStreamsBeforeDisabledDocument - replayStreamsBeforeRestart;
+    const disabledRun = await request(`${currentBackendOrigin}/api/v1/replay/runs/${runId}`);
+    assert(
+      disabledRun.status === 503
+        && disabledRun.body?.protocol === REPLAY_TRAINING_PROTOCOL
+        && disabledRun.body?.error?.code === "REPLAY_TRAINING_UNAVAILABLE",
+      "disabled Run API did not fail closed",
+      disabledRun,
+    );
     await replay.cdp.send("Page.navigate", { url: sessionUrl });
     await waitForValue(
       replay.cdp,
-      `document.querySelector('[data-replay-state="error"][data-replay-error="REPLAY_TRAINING_UNAVAILABLE"]') !== null`,
+      `(() => {
+        const title = document.querySelector(".training-hub-heading h1")?.textContent?.trim();
+        const message = document.querySelector(".training-hub-heading p")?.textContent?.trim();
+        return title === "无法打开回放"
+          && message === "Replay training runtime is unavailable"
+          && document.querySelectorAll("canvas").length === 0;
+      })()`,
       args.timeoutMs,
       "open replay training unavailable state",
     );
     const disabledReplay = await evaluate(replay.cdp, `({
-      error: document.querySelector('[data-replay-state="error"]')?.getAttribute("data-replay-error") || "",
+      title: document.querySelector(".training-hub-heading h1")?.textContent?.trim() || "",
+      message: document.querySelector(".training-hub-heading p")?.textContent?.trim() || "",
       canvasCount: document.querySelectorAll("canvas").length,
       text: (document.body?.innerText || "").slice(0, 500),
     })`);
     assert(
-      disabledReplay.error === "REPLAY_TRAINING_UNAVAILABLE"
+      disabledReplay.title === "无法打开回放"
+        && disabledReplay.message === "Replay training runtime is unavailable"
         && disabledReplay.canvasCount === 0,
       "open replay page did not fail closed",
       disabledReplay,
@@ -985,7 +1001,11 @@ async function main() {
         liveAfterDisable.replayEntryState === "disabled"
         && liveAfterDisable.replayEntryDisabled === true,
       open_replay_training_failed_closed:
-        disabledReplay.error === "REPLAY_TRAINING_UNAVAILABLE"
+        disabledRun.status === 503
+        && disabledRun.body?.protocol === REPLAY_TRAINING_PROTOCOL
+        && disabledRun.body?.error?.code === "REPLAY_TRAINING_UNAVAILABLE"
+        && disabledReplay.title === "无法打开回放"
+        && disabledReplay.message === "Replay training runtime is unavailable"
         && disabledReplay.canvasCount === 0,
       live_identity_preserved: liveAfterDisable.symbol === liveBefore.symbol && liveAfterDisable.interval === liveBefore.interval && liveAfterDisable.prefs === liveBefore.prefs,
       live_data_and_settings_preserved: currentKlines.count > 0 && currentSettings.mode === "none",
@@ -1029,6 +1049,7 @@ async function main() {
         },
         disabled: {
           capabilities: disabledCapabilities,
+          runApi: disabledRun,
           liveAfter: liveAfterDisable,
           replayPage: disabledReplay,
           transitionRejectedReplaySocketAttempts,

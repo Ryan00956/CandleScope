@@ -85,7 +85,8 @@ test("rollback follows the current two-stage Run and market contract", () => {
   assert.match(source, /REPLAY_TRAINING_PROTOCOL = "replay\.v3"/);
   assert.match(source, /data-replay-entry="disabled"/);
   assert.match(source, /disabled_entry_failed_closed/);
-  assert.match(source, /data-replay-error="REPLAY_TRAINING_UNAVAILABLE"/);
+  assert.match(source, /disabledRun\.body\?\.error\?\.code === "REPLAY_TRAINING_UNAVAILABLE"/);
+  assert.match(source, /message === "Replay training runtime is unavailable"/);
   assert.match(source, /open_replay_training_failed_closed/);
   assert.doesNotMatch(source, /hidden replay entry after rollback/);
   assert.doesNotMatch(source, /创建并进入训练/);

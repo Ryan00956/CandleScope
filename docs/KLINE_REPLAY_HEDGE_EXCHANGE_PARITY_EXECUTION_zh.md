@@ -1,6 +1,6 @@
 # CandleScope K 线回放交易所级双向持仓与强平硬切换执行文档
 
-状态：`DRAFT_FOR_EXECUTION / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
+状态：`PHASE_0_BLOCKED_DATA_CONTRACT / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
 
 日期：2026-08-06
 
@@ -11,6 +11,8 @@
 现有总执行文档：[`KLINE_REPLAY_TRAINING_EXECUTION_zh.md`](KLINE_REPLAY_TRAINING_EXECUTION_zh.md)
 
 本文不是完成声明。它冻结下一轮实现范围、顺序、硬门禁和最终启用方式。只有本文最后的全部验收门禁在同一 clean HEAD 上通过后，才能把“交易所级双向持仓与强平”标记为完成。
+
+Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md`](KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT_zh.md)。当前 Binance USD-M 官方公开与 USER_DATA 合同不能提供任意历史区间的保险基金逐变动账本或全市场 ADL 参与队列，因此按本文第 8 节 Phase 0 硬门禁停止，未进入 Phase 1。
 
 ---
 

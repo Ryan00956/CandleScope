@@ -69,7 +69,7 @@ function rulesPayload() {
     },
   };
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.run-rules.v1",
     run_id: "run-17",
     effective_cursor: cursor,
@@ -173,7 +173,7 @@ function eventPayload() {
 
 function reviewPayload() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.timeline.v1",
     review_id: "review-17",
     run_id: "run-17",
@@ -225,7 +225,7 @@ test("Phase 17 ReviewMode strictly parses cursor controls and rejects private ar
   assert.equal(review.projection.viewer_state.display_interval, "15m");
   assert.equal(review.immutability_proof.verified, true);
   const control = parseReplayReviewControlResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.timeline.v1",
     review_id: "review-17",
     run_id: "run-17",
@@ -276,7 +276,7 @@ test("Phase 17 ReviewMode strictly parses cursor controls and rejects private ar
 
 test("Phase 17 Review Fork requires immutable lineage and exact child identity", () => {
   const fork = parseReplayReviewForkResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     parent_run_id: "run-17",
     parent_event_id: "review-event-00000007",
     parent_timeline_sequence: 7,
@@ -310,7 +310,7 @@ test("Phase 17 API client binds every review mutation to run-scoped strict proto
         payload = rulesPayload();
       } else if (url.endsWith("/drawings/current")) {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           schema_version: "replay.review.drawing-current.v1",
           run_id: "run-17",
           document_hash: digest("6"),
@@ -327,7 +327,7 @@ test("Phase 17 API client binds every review mutation to run-scoped strict proto
         };
       } else if (url.endsWith("/drawings")) {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           schema_version: "replay.review.drawing-document.v1",
           run_id: "run-17",
           document_hash: digest("6"),
@@ -338,7 +338,7 @@ test("Phase 17 API client binds every review mutation to run-scoped strict proto
         };
       } else if (url.endsWith("/markers")) {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           schema_version: "replay.review.marker.v1",
           run_id: "run-17",
           marker_id: "marker-1",
@@ -354,7 +354,7 @@ test("Phase 17 API client binds every review mutation to run-scoped strict proto
         payload = reviewPayload();
       } else if (url.endsWith("/cursor")) {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           schema_version: "replay.review.timeline.v1",
           review_id: "review-17",
           run_id: "run-17",
@@ -381,7 +381,7 @@ test("Phase 17 API client binds every review mutation to run-scoped strict proto
         };
       } else if (url.endsWith("/fork")) {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           parent_run_id: "run-17",
           parent_event_id: "review-event-00000007",
           parent_timeline_sequence: 7,

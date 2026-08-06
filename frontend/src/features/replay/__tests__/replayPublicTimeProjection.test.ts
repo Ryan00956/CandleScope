@@ -18,7 +18,7 @@ function response(
   values: readonly number[],
 ): ReplayPublicTimeBatchResponse {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: runId,
     policy,
     items: values.map((value, index) => ({

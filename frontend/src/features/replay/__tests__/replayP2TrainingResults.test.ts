@@ -9,7 +9,7 @@ import {
 
 function plannedPreview() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.order-preview.v2",
     run_id: "run-1",
     track_id: "track-1",
@@ -65,7 +65,7 @@ function plannedPreview() {
 
 function trainingResults() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.training-results.v1",
     run_id: "run-1",
     summary: {

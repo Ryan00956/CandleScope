@@ -35,7 +35,7 @@ export interface ReplayPeriodSummaryStatus {
 }
 
 export interface ReplayPeriodSummaryStatusResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly run_id: string;
   readonly enabled: boolean;
   readonly status: ReplayPeriodSummaryStatus;
@@ -208,11 +208,11 @@ export function parseReplayPeriodSummaryStatus(
     "enabled",
     "status",
   ]);
-  if (response.protocol !== "replay.v2" || typeof response.enabled !== "boolean") {
+  if (response.protocol !== "replay.v3" || typeof response.enabled !== "boolean") {
     throw new TypeError("period summary response envelope is incompatible");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: identifier(response.run_id, "period summary run_id"),
     enabled: response.enabled,
     status: statusValue(response.status, response.enabled),
@@ -229,7 +229,7 @@ export function parseReplayPeriodSummaryPrepare(
     "build",
     "status",
   ]);
-  if (response.protocol !== "replay.v2" || response.enabled !== true) {
+  if (response.protocol !== "replay.v3" || response.enabled !== true) {
     throw new TypeError("period summary prepare envelope is incompatible");
   }
   const build = exact(response.build, "period summary build", [
@@ -247,7 +247,7 @@ export function parseReplayPeriodSummaryPrepare(
     throw new TypeError("period summary prepare did not return READY");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: identifier(response.run_id, "period summary run_id"),
     enabled: true,
     build: {

@@ -7,8 +7,8 @@ import sqlite3
 from app.replay.canonical import canonical_sha256
 
 
-TRAINING_SCHEMA_VERSION = 13
-TRAINING_SCHEMA_ID = "replay.training.v1"
+TRAINING_SCHEMA_VERSION = 14
+TRAINING_SCHEMA_ID = "replay.training.v2"
 TIME_COMMITMENT_SCHEMA_VERSION = "replay.time-commitment.v1"
 START_SELECTION_SCHEMA_VERSION = "replay.start-selection.v1"
 SELECTION_PREPARATION_SCHEMA_VERSION = "replay.selection-preparation.v1"
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS replay_training_run (
     run_id TEXT PRIMARY KEY,
     adapter_session_id TEXT UNIQUE
         REFERENCES replay_session(session_id) ON DELETE SET NULL,
-    protocol TEXT NOT NULL CHECK (protocol = 'replay.v2'),
-    schema_version TEXT NOT NULL CHECK (schema_version = 'replay.training.v1'),
+    protocol TEXT NOT NULL CHECK (protocol = 'replay.v3'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'replay.training.v2'),
     name TEXT NOT NULL,
     state TEXT NOT NULL,
     source_kind TEXT NOT NULL CHECK (source_kind IN ('BAR', 'AGG_TRADE')),
@@ -34,7 +34,19 @@ CREATE TABLE IF NOT EXISTS replay_training_run (
     time_disclosure_policy TEXT NOT NULL,
     book_mode TEXT NOT NULL,
     margin_mode TEXT NOT NULL,
+    position_mode TEXT NOT NULL CHECK (position_mode IN ('ONE_WAY', 'HEDGE')),
     funding_mode TEXT NOT NULL,
+    account_data_mode TEXT NOT NULL CHECK (
+        account_data_mode IN (
+            'APPROX_PROXY', 'HISTORICAL_EXACT', 'DETERMINISTIC_SIMULATION'
+        )
+    ),
+    hedge_public_history_ref_json TEXT,
+    simulation_manifest_ref_json TEXT,
+    simulation_contract_hash TEXT,
+    simulation_model_version TEXT,
+    account_fidelity TEXT,
+    insurance_adl_fidelity TEXT,
     execution_model TEXT NOT NULL,
     allow_rule_changes INTEGER NOT NULL CHECK (allow_rule_changes IN (0, 1)),
     exchange TEXT,
@@ -434,34 +446,6 @@ CREATE TABLE IF NOT EXISTS replay_training_funding_settlement (
     PRIMARY KEY (run_id, track_id, settlement_time_ms)
 );
 
-CREATE TABLE IF NOT EXISTS replay_training_liquidation_event (
-    run_id TEXT NOT NULL
-        REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
-    liquidation_id TEXT NOT NULL,
-    track_id TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('PENDING', 'COMPLETED', 'FAILED')),
-    trigger_virtual_time_ms INTEGER NOT NULL CHECK (trigger_virtual_time_ms >= 0),
-    trigger_source_sequence INTEGER NOT NULL CHECK (trigger_source_sequence >= 0),
-    mark_price TEXT NOT NULL,
-    position_quantity TEXT NOT NULL,
-    position_notional TEXT NOT NULL,
-    maintenance_margin TEXT NOT NULL,
-    account_equity_before TEXT NOT NULL,
-    bankruptcy_price TEXT,
-    liquidation_fee TEXT NOT NULL,
-    fidelity TEXT NOT NULL,
-    canceled_order_ids_json TEXT NOT NULL,
-    close_order_id TEXT,
-    account_equity_after TEXT,
-    reason TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
-    PRIMARY KEY (run_id, liquidation_id),
-    UNIQUE (run_id, track_id, trigger_source_sequence)
-);
-
-CREATE INDEX IF NOT EXISTS idx_replay_training_liquidation_pending
-ON replay_training_liquidation_event(run_id, state, created_at_ms);
 """
 
 
@@ -987,7 +971,9 @@ CREATE TABLE IF NOT EXISTS replay_training_account_history (
     run_id TEXT PRIMARY KEY
         REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
     account_data_mode TEXT NOT NULL
-        CHECK (account_data_mode IN ('APPROX_PROXY', 'HISTORICAL_EXACT')),
+        CHECK (account_data_mode IN (
+            'APPROX_PROXY', 'HISTORICAL_EXACT', 'DETERMINISTIC_SIMULATION'
+        )),
     status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'DEGRADED', 'PAUSED')),
     fidelity TEXT NOT NULL,
     archive_proof_hash TEXT
@@ -1013,7 +999,8 @@ CREATE TABLE IF NOT EXISTS replay_training_account_history (
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     CHECK (
-        (account_data_mode = 'APPROX_PROXY' AND archive_proof_hash IS NULL)
+        (account_data_mode IN ('APPROX_PROXY', 'DETERMINISTIC_SIMULATION')
+            AND archive_proof_hash IS NULL)
         OR
         (account_data_mode = 'HISTORICAL_EXACT' AND archive_proof_hash IS NOT NULL)
     )
@@ -1586,6 +1573,386 @@ ON replay_training_trade_result(run_id, exit_time_ms DESC, track_id, trade_id);
 """
 
 
+TRAINING_SCHEMA_V14_HEDGE = """
+CREATE TABLE IF NOT EXISTS replay_training_position_leg (
+    run_id TEXT NOT NULL,
+    track_id TEXT NOT NULL,
+    position_side TEXT NOT NULL CHECK (position_side IN ('LONG', 'SHORT')),
+    signed_quantity TEXT NOT NULL,
+    absolute_quantity TEXT NOT NULL,
+    entry_price TEXT,
+    mark_price TEXT,
+    notional TEXT NOT NULL,
+    realized_pnl TEXT NOT NULL,
+    unrealized_pnl TEXT NOT NULL,
+    initial_margin TEXT NOT NULL,
+    maintenance_margin TEXT NOT NULL,
+    leverage TEXT NOT NULL,
+    margin_mode TEXT NOT NULL CHECK (margin_mode IN ('CROSS', 'ISOLATED')),
+    isolated_wallet TEXT NOT NULL,
+    liquidation_price TEXT,
+    bankruptcy_price TEXT,
+    accumulated_funding TEXT NOT NULL,
+    trading_fees TEXT NOT NULL,
+    liquidation_fees TEXT NOT NULL,
+    risk_tier INTEGER NOT NULL CHECK (risk_tier >= 1),
+    rule_revision INTEGER NOT NULL CHECK (rule_revision >= 1),
+    protection_json TEXT NOT NULL,
+    component_revision INTEGER NOT NULL CHECK (component_revision >= 0),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, track_id, position_side),
+    FOREIGN KEY (run_id, track_id)
+        REFERENCES replay_training_market_track(run_id, track_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_margin_bucket (
+    run_id TEXT NOT NULL,
+    bucket_id TEXT NOT NULL,
+    bucket_kind TEXT NOT NULL CHECK (
+        bucket_kind IN ('CROSS', 'ISOLATED_LEG', 'OPEN_ORDER', 'POSITION')
+    ),
+    track_id TEXT,
+    position_side TEXT CHECK (position_side IS NULL OR position_side IN ('LONG', 'SHORT')),
+    asset TEXT NOT NULL,
+    wallet_balance TEXT NOT NULL,
+    initial_margin TEXT NOT NULL,
+    maintenance_margin TEXT NOT NULL,
+    reserved_margin TEXT NOT NULL,
+    available_balance TEXT NOT NULL,
+    component_revision INTEGER NOT NULL CHECK (component_revision >= 0),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, bucket_id),
+    UNIQUE (run_id, bucket_kind, track_id, position_side, asset),
+    FOREIGN KEY (run_id) REFERENCES replay_training_run(run_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, track_id, position_side)
+        REFERENCES replay_training_position_leg(run_id, track_id, position_side)
+        ON DELETE CASCADE,
+    CHECK (
+        (bucket_kind = 'CROSS' AND track_id IS NULL AND position_side IS NULL)
+        OR (bucket_kind != 'CROSS' AND track_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_risk_snapshot (
+    run_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    snapshot_sequence INTEGER NOT NULL CHECK (snapshot_sequence >= 1),
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    account_status TEXT NOT NULL CHECK (
+        account_status IN ('ACTIVE', 'RISK_BREACH_DETECTED', 'LIQUIDATING', 'BANKRUPT', 'FAILED_CLOSED')
+    ),
+    equity TEXT NOT NULL,
+    available_balance TEXT NOT NULL,
+    total_initial_margin TEXT NOT NULL,
+    total_maintenance_margin TEXT NOT NULL,
+    risk_ratio TEXT,
+    active_rule_revision INTEGER NOT NULL CHECK (active_rule_revision >= 1),
+    public_input_hash TEXT NOT NULL CHECK (
+        length(public_input_hash) = 71 AND public_input_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, snapshot_id),
+    UNIQUE (run_id, snapshot_sequence),
+    UNIQUE (run_id, virtual_time_ms, source_sequence, component_hash),
+    FOREIGN KEY (run_id) REFERENCES replay_training_run(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_case (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    case_sequence INTEGER NOT NULL CHECK (case_sequence >= 1),
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'RISK_BREACH_DETECTED', 'CANCELING_ORDERS', 'RISK_RECHECK',
+            'PARTIAL_LIQUIDATION', 'FULL_LIQUIDATION', 'BANKRUPTCY_TRANSFER',
+            'INSURANCE_FUND_SETTLEMENT', 'ADL', 'RECOVERED_AFTER_CANCEL',
+            'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED'
+        )
+    ),
+    trigger_snapshot_id TEXT NOT NULL,
+    final_snapshot_id TEXT,
+    trigger_virtual_time_ms INTEGER NOT NULL CHECK (trigger_virtual_time_ms >= 0),
+    trigger_source_sequence INTEGER NOT NULL CHECK (trigger_source_sequence >= 0),
+    reason TEXT NOT NULL,
+    fidelity TEXT NOT NULL,
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id),
+    UNIQUE (run_id, case_sequence),
+    UNIQUE (run_id, trigger_snapshot_id),
+    FOREIGN KEY (run_id, trigger_snapshot_id)
+        REFERENCES replay_training_risk_snapshot(run_id, snapshot_id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id, final_snapshot_id)
+        REFERENCES replay_training_risk_snapshot(run_id, snapshot_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_training_liquidation_case_state
+ON replay_training_liquidation_case(run_id, state, case_sequence);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_leg (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    liquidation_leg_id TEXT NOT NULL,
+    leg_sequence INTEGER NOT NULL CHECK (leg_sequence >= 1),
+    track_id TEXT NOT NULL,
+    position_side TEXT NOT NULL CHECK (position_side IN ('LONG', 'SHORT')),
+    trigger_quantity TEXT NOT NULL,
+    trigger_notional TEXT NOT NULL,
+    maintenance_margin TEXT NOT NULL,
+    bankruptcy_price TEXT,
+    takeover_price TEXT,
+    liquidation_fee TEXT NOT NULL,
+    target_quantity TEXT NOT NULL,
+    completed_quantity TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'PARTIAL', 'CLOSED', 'TRANSFERRED', 'FAILED_CLOSED')),
+    component_hash TEXT NOT NULL CHECK (
+        length(component_hash) = 71 AND component_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    PRIMARY KEY (run_id, case_id, liquidation_leg_id),
+    UNIQUE (run_id, case_id, leg_sequence),
+    UNIQUE (run_id, case_id, track_id, position_side),
+    FOREIGN KEY (run_id, case_id)
+        REFERENCES replay_training_liquidation_case(run_id, case_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_step (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL CHECK (step_sequence >= 1),
+    step_type TEXT NOT NULL CHECK (
+        step_type IN (
+            'CANCEL_ORDERS', 'RISK_RECHECK', 'PARTIAL_LIQUIDATION',
+            'FULL_LIQUIDATION', 'BANKRUPTCY_TRANSFER',
+            'INSURANCE_FUND_SETTLEMENT', 'ADL', 'COMPLETE', 'FAILED_CLOSED'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'APPLIED', 'FAILED_CLOSED')),
+    before_snapshot_id TEXT NOT NULL,
+    after_snapshot_id TEXT,
+    reason TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    step_hash TEXT NOT NULL CHECK (
+        length(step_hash) = 71 AND step_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    committed_at_ms INTEGER CHECK (committed_at_ms IS NULL OR committed_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, step_sequence),
+    UNIQUE (run_id, idempotency_key),
+    UNIQUE (run_id, case_id, step_hash),
+    FOREIGN KEY (run_id, case_id)
+        REFERENCES replay_training_liquidation_case(run_id, case_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, before_snapshot_id)
+        REFERENCES replay_training_risk_snapshot(run_id, snapshot_id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id, after_snapshot_id)
+        REFERENCES replay_training_risk_snapshot(run_id, snapshot_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_order (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL,
+    order_id TEXT NOT NULL,
+    liquidation_leg_id TEXT NOT NULL,
+    order_sequence INTEGER NOT NULL CHECK (order_sequence >= 1),
+    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    order_type TEXT NOT NULL CHECK (order_type IN ('MARKET', 'LIMIT')),
+    requested_quantity TEXT NOT NULL,
+    filled_quantity TEXT NOT NULL,
+    remaining_quantity TEXT NOT NULL,
+    average_price TEXT,
+    state TEXT NOT NULL CHECK (state IN ('NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'FAILED_CLOSED')),
+    order_hash TEXT NOT NULL CHECK (
+        length(order_hash) = 71 AND order_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, order_id),
+    UNIQUE (run_id, case_id, step_sequence, order_sequence),
+    FOREIGN KEY (run_id, case_id, step_sequence)
+        REFERENCES replay_training_liquidation_step(run_id, case_id, step_sequence)
+        ON DELETE CASCADE,
+    FOREIGN KEY (run_id, case_id, liquidation_leg_id)
+        REFERENCES replay_training_liquidation_leg(run_id, case_id, liquidation_leg_id)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_liquidation_fill (
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    fill_id TEXT NOT NULL,
+    fill_sequence INTEGER NOT NULL CHECK (fill_sequence >= 1),
+    price TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    notional TEXT NOT NULL,
+    trading_fee TEXT NOT NULL,
+    liquidation_fee TEXT NOT NULL,
+    book_level INTEGER CHECK (book_level IS NULL OR book_level >= 0),
+    virtual_time_ms INTEGER NOT NULL CHECK (virtual_time_ms >= 0),
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    fill_hash TEXT NOT NULL CHECK (
+        length(fill_hash) = 71 AND fill_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, case_id, order_id, fill_id),
+    UNIQUE (run_id, case_id, order_id, fill_sequence),
+    UNIQUE (run_id, fill_hash),
+    FOREIGN KEY (run_id, case_id, order_id)
+        REFERENCES replay_training_liquidation_order(run_id, case_id, order_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_insurance_fund (
+    run_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    opening_balance TEXT NOT NULL,
+    current_balance TEXT NOT NULL,
+    ledger_tail_hash TEXT NOT NULL CHECK (
+        length(ledger_tail_hash) = 71 AND ledger_tail_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, asset),
+    FOREIGN KEY (run_id) REFERENCES replay_training_run(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_insurance_posting (
+    run_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    posting_sequence INTEGER NOT NULL CHECK (posting_sequence >= 1),
+    posting_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL,
+    cash_delta TEXT NOT NULL,
+    balance_after TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_hash TEXT NOT NULL CHECK (
+        length(previous_hash) = 71 AND previous_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    posting_hash TEXT NOT NULL CHECK (
+        length(posting_hash) = 71 AND posting_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, asset, posting_sequence),
+    UNIQUE (run_id, posting_id),
+    UNIQUE (run_id, posting_hash),
+    FOREIGN KEY (run_id, asset)
+        REFERENCES replay_training_insurance_fund(run_id, asset) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, case_id, step_sequence)
+        REFERENCES replay_training_liquidation_step(run_id, case_id, step_sequence)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_adl_snapshot (
+    run_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    cohort_sequence INTEGER NOT NULL CHECK (cohort_sequence >= 1),
+    model_version TEXT NOT NULL,
+    input_hash TEXT NOT NULL CHECK (
+        length(input_hash) = 71 AND input_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    snapshot_hash TEXT NOT NULL CHECK (
+        length(snapshot_hash) = 71 AND snapshot_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, snapshot_id),
+    UNIQUE (run_id, case_id, cohort_sequence),
+    UNIQUE (run_id, snapshot_hash),
+    FOREIGN KEY (run_id, case_id, step_sequence)
+        REFERENCES replay_training_liquidation_step(run_id, case_id, step_sequence)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_adl_candidate (
+    run_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 1),
+    position_side TEXT NOT NULL CHECK (position_side IN ('LONG', 'SHORT')),
+    quantity TEXT NOT NULL,
+    entry_price TEXT NOT NULL,
+    mark_price TEXT NOT NULL,
+    profit_ratio TEXT NOT NULL,
+    effective_leverage TEXT NOT NULL,
+    score TEXT NOT NULL,
+    candidate_hash TEXT NOT NULL CHECK (
+        length(candidate_hash) = 71 AND candidate_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    PRIMARY KEY (run_id, snapshot_id, candidate_id),
+    UNIQUE (run_id, snapshot_id, rank),
+    UNIQUE (run_id, snapshot_id, candidate_hash),
+    FOREIGN KEY (run_id, snapshot_id)
+        REFERENCES replay_training_adl_snapshot(run_id, snapshot_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_adl_event (
+    run_id TEXT NOT NULL,
+    adl_event_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    step_sequence INTEGER NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    required_notional TEXT NOT NULL,
+    completed_notional TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'COMPLETED', 'FAILED_CLOSED')),
+    event_hash TEXT NOT NULL CHECK (
+        length(event_hash) = 71 AND event_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    PRIMARY KEY (run_id, adl_event_id),
+    UNIQUE (run_id, case_id, step_sequence),
+    UNIQUE (run_id, event_hash),
+    FOREIGN KEY (run_id, case_id, step_sequence)
+        REFERENCES replay_training_liquidation_step(run_id, case_id, step_sequence)
+        ON DELETE CASCADE,
+    FOREIGN KEY (run_id, snapshot_id)
+        REFERENCES replay_training_adl_snapshot(run_id, snapshot_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS replay_training_adl_selection (
+    run_id TEXT NOT NULL,
+    adl_event_id TEXT NOT NULL,
+    selection_sequence INTEGER NOT NULL CHECK (selection_sequence >= 1),
+    candidate_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    price TEXT NOT NULL,
+    notional TEXT NOT NULL,
+    cash_delta TEXT NOT NULL,
+    selection_hash TEXT NOT NULL CHECK (
+        length(selection_hash) = 71 AND selection_hash GLOB 'sha256:[0-9a-f]*'
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (run_id, adl_event_id, selection_sequence),
+    UNIQUE (run_id, adl_event_id, candidate_id),
+    UNIQUE (run_id, selection_hash),
+    FOREIGN KEY (run_id, adl_event_id)
+        REFERENCES replay_training_adl_event(run_id, adl_event_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, snapshot_id, candidate_id)
+        REFERENCES replay_training_adl_candidate(run_id, snapshot_id, candidate_id)
+        ON DELETE RESTRICT
+);
+"""
+
+
 def data_policy_hash(
     *,
     indicator_warmup_bars: int,
@@ -1738,6 +2105,7 @@ def migrate_training_schema(connection: sqlite3.Connection, *, now_ms: int) -> N
         TRAINING_SCHEMA_ARCHIVE_PIN_ADDITIVE,
         TRAINING_SCHEMA_SELECTION_PREPARATION_ADDITIVE,
         TRAINING_SCHEMA_P2_TRAINING_RESULTS_ADDITIVE,
+        TRAINING_SCHEMA_V14_HEDGE,
     ):
         _execute_script(connection, script)
     connection.execute(

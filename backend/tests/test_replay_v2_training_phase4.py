@@ -62,7 +62,7 @@ async def _request(
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 4 integrity",
             "source_kind": "BAR",
@@ -88,6 +88,8 @@ async def _request(
             "time_disclosure_policy": disclosure,
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": bool(allowed_mutations),
             "allowed_mutations": list(allowed_mutations),
@@ -109,7 +111,7 @@ def _command(
     revision = snapshot["revision"]
     assert isinstance(revision, int)
     return ReplayV2Command(
-        protocol="replay.v2",
+        protocol="replay.v3",
         run_id=run_id,
         command_id=command_id,
         client_instance_id="phase4-browser",

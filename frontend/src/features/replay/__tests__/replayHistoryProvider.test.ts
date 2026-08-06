@@ -57,7 +57,7 @@ function bar(openTimeMs: number, intervalMs = 60_000) {
 
 function response(overrides: Record<string, unknown> = {}) {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.history.v3",
     run_id: "run-1",
     session_id: "adapter-1",

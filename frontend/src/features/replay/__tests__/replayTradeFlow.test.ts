@@ -10,7 +10,7 @@ import { ReplayV2ApiClient } from "../replayV2Api.js";
 
 function tradeFlowPage() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.trade-flow.v1",
     run_id: "run-1",
     track_id: "track-1",

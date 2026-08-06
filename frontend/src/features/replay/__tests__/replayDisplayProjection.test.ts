@@ -10,7 +10,7 @@ const CLOSE_MS = OPEN_MS + 7 * 86_400_000 - 1;
 
 function response() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.display-projection.v1",
     run_id: "run-1",
     session_id: "session-1",

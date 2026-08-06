@@ -64,7 +64,7 @@ async def _request(
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": name,
             "source_kind": "BAR",
@@ -88,7 +88,9 @@ async def _request(
             "time_disclosure_policy": time_disclosure_policy,
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
             "funding_mode": "OFF",
+            "account_data_mode": "APPROX_PROXY",
             "allow_rule_changes": False,
         }
     )
@@ -269,7 +271,7 @@ async def test_create_run_atomically_persists_adapter_track_rule_action_and_pin(
     service = await _service(path)
     try:
         created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
-        assert created["protocol"] == "replay.v2"
+        assert created["protocol"] == "replay.v3"
         run = created["run"]
         assert run["run_id"] == "run-1"
         assert run["adapter_session_id"] == "adapter-1"
@@ -566,7 +568,7 @@ async def test_return_to_hub_pauses_checkpoints_releases_and_recovers(
         )
         returned = await service.training.return_to_hub(run_id)  # type: ignore[union-attr]
         assert returned == {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": "run-1",
             "state": "PAUSED",
             "checkpointed": True,
@@ -646,7 +648,7 @@ async def test_ended_run_card_is_labeled_for_review_instead_of_continue(
         }
         returned = await training.return_to_hub(run_id)
         assert returned == {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": "run-1",
             "state": "ENDED",
             "checkpointed": True,

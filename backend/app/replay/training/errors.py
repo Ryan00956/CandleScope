@@ -7,7 +7,7 @@ from typing import Mapping
 
 
 class TrainingRunError(Exception):
-    """Stable replay.v2 domain failure with an HTTP-safe status."""
+    """Stable replay.v3 domain failure with an HTTP-safe status."""
 
     def __init__(
         self,
@@ -25,7 +25,7 @@ class TrainingRunError(Exception):
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "error": {
                 "code": self.code,
                 "message": self.message,

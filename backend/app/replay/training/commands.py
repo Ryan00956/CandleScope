@@ -1,4 +1,4 @@
-"""Strict replay.v2 command envelope; reducers arrive in later phases."""
+"""Strict replay.v3 command envelope."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Replay v2 product routes and its gated internal adapter transport."""
+"""Replay v3 product routes and its gated internal adapter transport."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ from app.replay.service import ReplayService
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.commands import ReplayV2Command
 from app.replay.training.models import (
+    HEDGE_ACCOUNT_FIDELITY,
+    HEDGE_INSURANCE_ADL_FIDELITY,
     REPLAY_V2_PROTOCOL,
     AccountDataMode,
     BookMode,
@@ -239,8 +241,24 @@ class AccountHistoryRefPayload(_StrictModel):
     checksum_sha256: str = Field(min_length=71, max_length=71)
 
 
+class HedgePublicHistoryRefPayload(_StrictModel):
+    schema_version: Literal["replay.hedge-public-history-ref.v1"]
+    archive_id: str = Field(min_length=1, max_length=128)
+    dataset_epoch: str = Field(min_length=71, max_length=71)
+    checksum_sha256: str = Field(min_length=71, max_length=71)
+
+
+class HedgeSimulationManifestRefPayload(_StrictModel):
+    schema_version: Literal["replay.hedge-simulation-manifest-ref.v1"]
+    manifest_id: str = Field(min_length=1, max_length=128)
+    dataset_epoch: str = Field(min_length=71, max_length=71)
+    checksum_sha256: str = Field(min_length=71, max_length=71)
+    contract_hash: str = Field(min_length=71, max_length=71)
+    model_version: str = Field(min_length=1, max_length=128)
+
+
 class TrainingRunPreparationPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
+    protocol: Literal["replay.v3"]
     catalog_epoch: str = Field(min_length=71, max_length=71)
     name: str | None = Field(default=None, min_length=1, max_length=80)
     source_kind: ReplaySource
@@ -274,10 +292,20 @@ class TrainingRunPreparationPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    position_mode: PositionMode = PositionMode.ONE_WAY
+    position_mode: PositionMode = PositionMode.HEDGE
     funding_mode: FundingMode
-    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
     account_history_ref: AccountHistoryRefPayload | None = None
+    hedge_public_history_ref: HedgePublicHistoryRefPayload | None = None
+    simulation_manifest_ref: HedgeSimulationManifestRefPayload | None = None
+    account_fidelity: str | None = Field(
+        default=HEDGE_ACCOUNT_FIDELITY,
+        max_length=128,
+    )
+    insurance_adl_fidelity: str | None = Field(
+        default=HEDGE_INSURANCE_ADL_FIDELITY,
+        max_length=128,
+    )
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
     funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
     allow_rule_changes: bool
@@ -286,7 +314,7 @@ class TrainingRunPreparationPayload(_StrictModel):
 
 
 class TrainingRunSetupPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
+    protocol: Literal["replay.v3"]
     name: str | None = Field(default=None, min_length=1, max_length=80)
     source_kind: ReplaySource
     start_mode: StartMode
@@ -310,9 +338,11 @@ class TrainingRunSetupPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    position_mode: PositionMode = PositionMode.ONE_WAY
+    position_mode: PositionMode = PositionMode.HEDGE
     funding_mode: FundingMode
-    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
+    account_fidelity: str | None = Field(default=None, max_length=128)
+    insurance_adl_fidelity: str | None = Field(default=None, max_length=128)
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
     funding_interval_ms: int | None = Field(default=None, ge=60_000, le=2_592_000_000)
     allow_rule_changes: bool
@@ -328,6 +358,8 @@ class TrainingRunMarketSelectionPayload(_StrictModel):
     base_interval: str = Field(min_length=1, max_length=128)
     display_interval: str = Field(min_length=1, max_length=128)
     account_history_ref: AccountHistoryRefPayload | None = None
+    hedge_public_history_ref: HedgePublicHistoryRefPayload | None = None
+    simulation_manifest_ref: HedgeSimulationManifestRefPayload | None = None
 
 
 class TrainingCursorPayload(_StrictModel):
@@ -337,7 +369,7 @@ class TrainingCursorPayload(_StrictModel):
 
 
 class ReplayV2CommandPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
+    protocol: Literal["replay.v3"]
     run_id: str = Field(min_length=1, max_length=128)
     command_id: str = Field(min_length=1, max_length=128)
     client_instance_id: str = Field(min_length=1, max_length=128)
@@ -374,7 +406,7 @@ class ReplayTradePlanDraftPayload(_StrictModel):
 
 
 class ReplayOrderPreviewPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
+    protocol: Literal["replay.v3"]
     expected_revision: int = Field(ge=0, le=MAX_COUNTER)
     expected_cursor: TrainingCursorPayload
     position_intent: Literal["NET", "OPEN"]
@@ -398,7 +430,7 @@ class ReplayOrderCapacityContextPayload(_StrictModel):
 
 
 class ReplayOrderCapacityPayload(_StrictModel):
-    protocol: Literal["replay.v2"]
+    protocol: Literal["replay.v3"]
     expected_revision: int = Field(ge=0, le=MAX_COUNTER)
     expected_cursor: TrainingCursorPayload
     position_intent: Literal["NET", "OPEN"]

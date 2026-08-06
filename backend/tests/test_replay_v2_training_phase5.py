@@ -226,7 +226,7 @@ async def _trade_request(service: ReplayService) -> TrainingRunCreateRequest:
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 5 AGG multi market",
             "source_kind": "AGG_TRADE",
@@ -250,6 +250,8 @@ async def _trade_request(service: ReplayService) -> TrainingRunCreateRequest:
             "time_disclosure_policy": "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -265,7 +267,7 @@ async def _request(service: ReplayService) -> TrainingRunCreateRequest:
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 5 multi market",
             "source_kind": "BAR",
@@ -289,6 +291,8 @@ async def _request(service: ReplayService) -> TrainingRunCreateRequest:
             "time_disclosure_policy": "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -308,7 +312,7 @@ def _command(
     assert isinstance(cursor, dict)
     revision = int(snapshot["revision"])
     return ReplayV2Command(
-        protocol="replay.v2",
+        protocol="replay.v3",
         run_id=run_id,
         command_id=command_id,
         client_instance_id="phase5-browser",

@@ -1,0 +1,29 @@
+{
+  "schema_version": "replay.hedge-protocol-phase1-golden.v1",
+  "canonical_payload": {
+    "protocol": "replay.v3",
+    "schema_version": "replay.contract.v3.phase1",
+    "position_mode": "HEDGE",
+    "account_data_mode": "DETERMINISTIC_SIMULATION",
+    "margin_mode": "CROSS",
+    "funding_mode": "HISTORICAL_EXACT",
+    "book_mode": "BOOK_ASSISTED_REQUIRED",
+    "hedge_public_history_ref": {
+      "schema_version": "replay.hedge-public-history-ref.v1",
+      "archive_id": "phase1-public-btcusdt-v1",
+      "dataset_epoch": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "checksum_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "simulation_manifest_ref": {
+      "schema_version": "replay.hedge-simulation-manifest-ref.v1",
+      "manifest_id": "phase0-btcusdt-v1",
+      "dataset_epoch": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "checksum_sha256": "sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236",
+      "contract_hash": "sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b",
+      "model_version": "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1"
+    },
+    "account_fidelity": "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE",
+    "insurance_adl_fidelity": "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT"
+  },
+  "canonical_hash": "sha256:e60521bf4746cc33885930d75be02d5cbcce474eb6046704334dee8ccfeb562f"
+}

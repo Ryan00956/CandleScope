@@ -57,7 +57,7 @@ async def _request(app: FastAPI, method: str, path: str, **kwargs):
 
 def _setup_payload() -> dict[str, object]:
     return {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "name": "不绑定商品的训练",
         "source_kind": "BAR",
         "start_mode": "MANUAL",
@@ -79,6 +79,7 @@ def _setup_payload() -> dict[str, object]:
         "time_disclosure_policy": "HIDE_ALL",
         "book_mode": "OFF",
         "margin_mode": "CROSS",
+        "position_mode": "ONE_WAY",
         "funding_mode": "OFF",
         "account_data_mode": "APPROX_PROXY",
         "fixed_funding_rate": None,

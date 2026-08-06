@@ -603,7 +603,7 @@ def test_websocket_internal_adapter_is_closed_when_training_is_unavailable() -> 
     with TestClient(_app(service)) as client:
         with client.websocket_connect("/api/v1/stream/replay/session-1") as websocket:
             error = websocket.receive_json()
-            assert error["protocol"] == "replay.v2"
+            assert error["protocol"] == "replay.v3"
             assert error["error"]["code"] == "REPLAY_TRAINING_UNAVAILABLE"
             with pytest.raises(WebSocketDisconnect) as closed:
                 websocket.receive_json()
@@ -618,7 +618,7 @@ def test_websocket_rejects_unowned_adapter_before_actor_handoff() -> None:
             "/api/v1/stream/replay/bare-session"
         ) as websocket:
             error = websocket.receive_json()
-            assert error["protocol"] == "replay.v2"
+            assert error["protocol"] == "replay.v3"
             assert error["error"] == {
                 "code": "TRAINING_RUN_NOT_FOUND",
                 "message": "training adapter session does not exist",

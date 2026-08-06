@@ -189,7 +189,7 @@ class ReplayTradeFlowAdapter:
             "data_epoch": data_epoch,
         }
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "schema_version": REPLAY_TRADE_FLOW_SCHEMA_VERSION,
             "run_id": run_id,
             "track_id": track_id,

@@ -46,14 +46,14 @@ test("training state fails closed when the global clock outlives its controller 
 
 test("v2 training exports preserve integrity policy and hide actual history until reveal", () => {
   const response = {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-0001",
     data_fidelity: "EXACT_BAR_COVERAGE",
     execution_fidelity: "BAR_CONSERVATIVE",
     revealed: false,
     report: replayReport(),
     integrity: {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: "run-0001",
       integrity_mode: "CHALLENGE",
       configured_time_disclosure_policy: "HIDE_ALL",
@@ -100,7 +100,7 @@ test("v2 training exports preserve integrity policy and hide actual history unti
       mutations: [],
     },
     public_time_index: {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: "run-0001",
       policy: "HIDE_ALL",
       items: [],
@@ -128,7 +128,7 @@ test("v2 training exports preserve integrity policy and hide actual history unti
     },
   } satisfies ReplayTrainingReportResponse;
   const exported = buildReplayTrainingReportExport(response);
-  assert.equal(exported.protocol, "replay.v2");
+  assert.equal(exported.protocol, "replay.v3");
   assert.equal(Object.hasOwn(exported, "actual_history"), false);
   assert.equal((exported.integrity as ReplayTrainingReportResponse["integrity"]).result_label, "STRICT_CHALLENGE");
   const csv = replayTrainingReportToCsv(response);

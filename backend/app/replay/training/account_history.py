@@ -1,4 +1,4 @@
-"""Immutable historical account inputs for replay.v2 exact modelled accounts."""
+"""Immutable historical account inputs for replay.v3 modelled accounts."""
 
 from __future__ import annotations
 

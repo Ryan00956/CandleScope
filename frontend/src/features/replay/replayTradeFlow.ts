@@ -18,7 +18,7 @@ export interface ReplayTradeFlowTapeItem {
 }
 
 export interface ReplayTradeFlowPage {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.trade-flow.v1";
   readonly run_id: string;
   readonly track_id: string;
@@ -245,7 +245,7 @@ export function parseReplayTradeFlowPage(value: unknown): ReplayTradeFlowPage {
     throw new TypeError("trade flow page summary does not match its tape");
   }
   return {
-    protocol: literal(page.protocol, "replay.v2", "trade flow protocol"),
+    protocol: literal(page.protocol, "replay.v3", "trade flow protocol"),
     schema_version: literal(page.schema_version, "replay.trade-flow.v1", "trade flow schema"),
     run_id: text(page.run_id, "trade flow run_id"),
     track_id: text(page.track_id, "trade flow track_id"),

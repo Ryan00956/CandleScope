@@ -1,1 +1,1 @@
-"""Frozen replay.v2 contracts; Phase 0 intentionally contains no runtime."""
+"""Replay v3 training contracts and runtime."""

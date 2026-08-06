@@ -71,7 +71,7 @@ async def _request(
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 3 controls",
             "source_kind": "BAR",
@@ -95,6 +95,8 @@ async def _request(
             "time_disclosure_policy": "HIDE_ALL" if blind_mode else "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -113,7 +115,7 @@ def _v2_command(
     cursor = snapshot["snapshot"]["cursor"]  # type: ignore[index]
     revision = snapshot["snapshot"]["revision"]  # type: ignore[index]
     return ReplayV2Command(
-        protocol="replay.v2",
+        protocol="replay.v3",
         run_id=run_id,
         command_id=command_id,
         client_instance_id=client_instance_id,
@@ -758,7 +760,7 @@ async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Trade controls",
                 "source_kind": "AGG_TRADE",
@@ -782,6 +784,8 @@ async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }

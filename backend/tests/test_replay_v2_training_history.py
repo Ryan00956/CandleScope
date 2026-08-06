@@ -131,7 +131,7 @@ async def _create_run(
         history_fields = {"warmup_bars": 2}
     request = TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 2 history",
             "source_kind": "BAR",
@@ -155,6 +155,8 @@ async def _create_run(
             "time_disclosure_policy": disclosure,
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -188,7 +190,7 @@ async def test_history_pages_are_snapshot_bound_revealed_only_and_repository_fre
             history_epoch=None,
         )
 
-        assert first["protocol"] == "replay.v2"
+        assert first["protocol"] == "replay.v3"
         assert first["schema_version"] == "replay.history.v3"
         assert first["excluded_ranges"] == []
         assert first["history_boundary_ms"] <= first["revealed_boundary_ms"]
@@ -426,7 +428,7 @@ async def test_agg_trade_training_all_available_history_uses_chart_only_bars(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Trade history",
                 "source_kind": "AGG_TRADE",
@@ -454,6 +456,8 @@ async def test_agg_trade_training_all_available_history_uses_chart_only_bars(
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }

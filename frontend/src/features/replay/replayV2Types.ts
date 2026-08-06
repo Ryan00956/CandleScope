@@ -1,5 +1,9 @@
-export const REPLAY_V2_PROTOCOL = "replay.v2" as const;
-export const REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0" as const;
+export const REPLAY_V2_PROTOCOL = "replay.v3" as const;
+export const REPLAY_V2_SCHEMA_VERSION = "replay.contract.v3.phase1" as const;
+export const HEDGE_ACCOUNT_FIDELITY =
+  "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE" as const;
+export const HEDGE_INSURANCE_ADL_FIDELITY =
+  "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT" as const;
 
 function enumValues<const T extends readonly string[]>(...values: T): Readonly<T> {
   return Object.freeze(values);
@@ -64,7 +68,11 @@ export const REPLAY_V2_ENUMS = Object.freeze({
   margin_mode: enumValues("CROSS", "ISOLATED"),
   position_mode: enumValues("ONE_WAY", "HEDGE"),
   funding_mode: enumValues("OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"),
-  account_data_mode: enumValues("APPROX_PROXY", "HISTORICAL_EXACT"),
+  account_data_mode: enumValues(
+    "APPROX_PROXY",
+    "HISTORICAL_EXACT",
+    "DETERMINISTIC_SIMULATION",
+  ),
   execution_model: enumValues("TOUCH_OR_TAPE_V2"),
   advance_basis: enumValues(
     "DISPLAY_BAR",
@@ -228,6 +236,36 @@ export interface ReplayAccountHistoryRef {
   readonly checksum_sha256: `sha256:${string}`;
 }
 
+export interface ReplayHedgePublicHistoryRef {
+  readonly schema_version: "replay.hedge-public-history-ref.v1";
+  readonly archive_id: string;
+  readonly dataset_epoch: `sha256:${string}`;
+  readonly checksum_sha256: `sha256:${string}`;
+}
+
+export interface ReplayHedgeSimulationManifestRef {
+  readonly schema_version: "replay.hedge-simulation-manifest-ref.v1";
+  readonly manifest_id: string;
+  readonly dataset_epoch: `sha256:${string}`;
+  readonly checksum_sha256: `sha256:${string}`;
+  readonly contract_hash: `sha256:${string}`;
+  readonly model_version: string;
+}
+
+export interface ReplayHedgeRunBinding {
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
+  readonly schema_version: typeof REPLAY_V2_SCHEMA_VERSION;
+  readonly position_mode: "HEDGE";
+  readonly account_data_mode: "DETERMINISTIC_SIMULATION";
+  readonly margin_mode: ReplayV2MarginMode;
+  readonly funding_mode: ReplayV2FundingMode;
+  readonly book_mode: ReplayV2BookMode;
+  readonly hedge_public_history_ref: ReplayHedgePublicHistoryRef;
+  readonly simulation_manifest_ref: ReplayHedgeSimulationManifestRef;
+  readonly account_fidelity: typeof HEDGE_ACCOUNT_FIDELITY;
+  readonly insurance_adl_fidelity: typeof HEDGE_INSURANCE_ADL_FIDELITY;
+}
+
 export interface ReplayAccountHistoryBindingProjection {
   readonly track_id: string;
   readonly archive_id: string;
@@ -249,7 +287,8 @@ export interface ReplayAccountHistoryProjection {
   readonly status: "ACTIVE" | "DEGRADED";
   readonly fidelity:
     | "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
-    | "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT";
+    | "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+    | typeof HEDGE_ACCOUNT_FIDELITY;
   readonly archive_proof_hash: `sha256:${string}` | null;
   readonly bindings: readonly ReplayAccountHistoryBindingProjection[];
   readonly auditor: {
@@ -275,6 +314,7 @@ export interface ReplayLiquidationChannelProjection {
   readonly fidelity:
     | "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
     | "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
+    | typeof HEDGE_INSURANCE_ADL_FIDELITY
     | "UNSUPPORTED_NO_HISTORY";
 }
 
@@ -336,6 +376,7 @@ export interface ReplayTrainingContractPortfolio {
   readonly isolated_allocations: Readonly<Record<string, ReplayV2Json>>;
   readonly next_funding_time_ms: number | null;
   readonly liquidations: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly hedge_state: Readonly<Record<string, ReplayV2Json>>;
   readonly account_history: ReplayAccountHistoryProjection;
   readonly liquidation_channels: {
     readonly simulated_account: ReplayLiquidationChannelProjection;
@@ -351,7 +392,7 @@ export type ReplayAccountRecordType = "ORDERS" | "FILLS" | "LEDGER";
 export type ReplayAccountOrderScope = "ACTIVE" | "HISTORY" | "ALL";
 
 export interface ReplayAccountRecordPage {
-  readonly protocol: "replay.v2";
+  readonly protocol: typeof REPLAY_V2_PROTOCOL;
   readonly schema_version: "replay.training.account-record-page.v1";
   readonly run_id: string;
   readonly record_type: ReplayAccountRecordType;
@@ -1099,6 +1140,93 @@ export function parseReplayAccountHistoryRef(
   };
 }
 
+export function parseReplayHedgePublicHistoryRef(
+  value: unknown,
+  fieldName = "hedge_public_history_ref",
+): ReplayHedgePublicHistoryRef {
+  const reference = exactObject(value, fieldName, [
+    "schema_version",
+    "archive_id",
+    "dataset_epoch",
+    "checksum_sha256",
+  ]);
+  if (reference.schema_version !== "replay.hedge-public-history-ref.v1") {
+    throw new TypeError(`${fieldName}.schema_version is unsupported`);
+  }
+  return {
+    schema_version: "replay.hedge-public-history-ref.v1",
+    archive_id: identifier(reference.archive_id, `${fieldName}.archive_id`),
+    dataset_epoch: digest(reference.dataset_epoch, `${fieldName}.dataset_epoch`),
+    checksum_sha256: digest(reference.checksum_sha256, `${fieldName}.checksum_sha256`),
+  };
+}
+
+export function parseReplayHedgeSimulationManifestRef(
+  value: unknown,
+  fieldName = "simulation_manifest_ref",
+): ReplayHedgeSimulationManifestRef {
+  const reference = exactObject(value, fieldName, [
+    "schema_version",
+    "manifest_id",
+    "dataset_epoch",
+    "checksum_sha256",
+    "contract_hash",
+    "model_version",
+  ]);
+  if (reference.schema_version !== "replay.hedge-simulation-manifest-ref.v1") {
+    throw new TypeError(`${fieldName}.schema_version is unsupported`);
+  }
+  return {
+    schema_version: "replay.hedge-simulation-manifest-ref.v1",
+    manifest_id: identifier(reference.manifest_id, `${fieldName}.manifest_id`),
+    dataset_epoch: digest(reference.dataset_epoch, `${fieldName}.dataset_epoch`),
+    checksum_sha256: digest(reference.checksum_sha256, `${fieldName}.checksum_sha256`),
+    contract_hash: digest(reference.contract_hash, `${fieldName}.contract_hash`),
+    model_version: identifier(reference.model_version, `${fieldName}.model_version`),
+  };
+}
+
+export function parseReplayHedgeRunBinding(value: unknown): ReplayHedgeRunBinding {
+  const binding = exactObject(value, "hedge run binding", [
+    "protocol",
+    "schema_version",
+    "position_mode",
+    "account_data_mode",
+    "margin_mode",
+    "funding_mode",
+    "book_mode",
+    "hedge_public_history_ref",
+    "simulation_manifest_ref",
+    "account_fidelity",
+    "insurance_adl_fidelity",
+  ]);
+  if (binding.protocol !== REPLAY_V2_PROTOCOL
+    || binding.schema_version !== REPLAY_V2_SCHEMA_VERSION
+    || binding.position_mode !== "HEDGE"
+    || binding.account_data_mode !== "DETERMINISTIC_SIMULATION"
+    || binding.account_fidelity !== HEDGE_ACCOUNT_FIDELITY
+    || binding.insurance_adl_fidelity !== HEDGE_INSURANCE_ADL_FIDELITY) {
+    throw new TypeError("hedge run binding does not match the replay.v3 contract");
+  }
+  return {
+    protocol: REPLAY_V2_PROTOCOL,
+    schema_version: REPLAY_V2_SCHEMA_VERSION,
+    position_mode: "HEDGE",
+    account_data_mode: "DETERMINISTIC_SIMULATION",
+    margin_mode: enumValue(binding.margin_mode, REPLAY_V2_ENUMS.margin_mode, "margin_mode"),
+    funding_mode: enumValue(binding.funding_mode, REPLAY_V2_ENUMS.funding_mode, "funding_mode"),
+    book_mode: enumValue(binding.book_mode, REPLAY_V2_ENUMS.book_mode, "book_mode"),
+    hedge_public_history_ref: parseReplayHedgePublicHistoryRef(
+      binding.hedge_public_history_ref,
+    ),
+    simulation_manifest_ref: parseReplayHedgeSimulationManifestRef(
+      binding.simulation_manifest_ref,
+    ),
+    account_fidelity: HEDGE_ACCOUNT_FIDELITY,
+    insurance_adl_fidelity: HEDGE_INSURANCE_ADL_FIDELITY,
+  };
+}
+
 export function parseReplayAccountAuditResponse(
   value: unknown,
 ): ReplayAccountAuditResponse {
@@ -1161,6 +1289,7 @@ function parseReplayAccountHistoryProjection(
     enumValues(
       "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT",
       "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+      HEDGE_ACCOUNT_FIDELITY,
     ),
     "portfolio.account_history.fidelity",
   );
@@ -1243,6 +1372,10 @@ function parseReplayAccountHistoryProjection(
       && (fidelity !== "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
         || archiveProof !== null
         || bindings.length !== 0))
+    || (mode === "DETERMINISTIC_SIMULATION"
+      && (fidelity !== HEDGE_ACCOUNT_FIDELITY
+        || archiveProof !== null
+        || bindings.length !== 0))
   ) {
     throw new TypeError("portfolio account-history fidelity proof is inconsistent");
   }
@@ -1288,6 +1421,7 @@ function parseReplayLiquidationChannels(
         enumValues(
           "AVAILABLE_APPROX_SIMULATED_ACCOUNT",
           "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT",
+          HEDGE_INSURANCE_ADL_FIDELITY,
           "UNSUPPORTED_NO_HISTORY",
         ),
         `${field}.fidelity`,
@@ -1304,7 +1438,9 @@ function parseReplayLiquidationChannels(
   );
   const expectedSimulatedFidelity = accountMode === "HISTORICAL_EXACT"
     ? "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
-    : "AVAILABLE_APPROX_SIMULATED_ACCOUNT";
+    : accountMode === "DETERMINISTIC_SIMULATION"
+      ? HEDGE_INSURANCE_ADL_FIDELITY
+      : "AVAILABLE_APPROX_SIMULATED_ACCOUNT";
   if (
     simulated.source !== "MODELLED_ACCOUNT"
     || simulated.fidelity !== expectedSimulatedFidelity
@@ -1362,6 +1498,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       "isolated_allocations",
       "next_funding_time_ms",
       "liquidations",
+      "hedge_state",
       "account_history",
       "liquidation_channels",
       "ledger",
@@ -1510,6 +1647,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         ? null
         : counter(portfolio.next_funding_time_ms, "portfolio.next_funding_time_ms"),
       liquidations: objectArray(rawLiquidations, "portfolio.liquidations"),
+      hedge_state: jsonObject(portfolio.hedge_state, "portfolio.hedge_state"),
       account_history: accountHistory,
       liquidation_channels: liquidationChannels,
       ledger: jsonObject(portfolio.ledger, "portfolio.ledger"),
@@ -2132,7 +2270,7 @@ export interface TrainingRunCard {
 
 export interface TrainingRunListResponse {
   readonly protocol: typeof REPLAY_V2_PROTOCOL;
-  readonly schema_version: "replay.training.v1";
+  readonly schema_version: "replay.training.v2";
   readonly items: readonly TrainingRunCard[];
   readonly next_cursor: string | null;
 }
@@ -2749,6 +2887,8 @@ export interface TrainingRunCreatePayload {
   readonly position_mode: ReplayV2PositionMode;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly account_data_mode: ReplayV2AccountDataMode;
+  readonly account_fidelity: typeof HEDGE_ACCOUNT_FIDELITY | null;
+  readonly insurance_adl_fidelity: typeof HEDGE_INSURANCE_ADL_FIDELITY | null;
   readonly fixed_funding_rate: string | null;
   readonly funding_interval_ms: number | null;
   readonly allow_rule_changes: boolean;
@@ -2771,6 +2911,8 @@ export interface TrainingRunMarketSelectionPayload {
   readonly base_interval: string;
   readonly display_interval: string;
   readonly account_history_ref: ReplayAccountHistoryRef | null;
+  readonly hedge_public_history_ref: ReplayHedgePublicHistoryRef | null;
+  readonly simulation_manifest_ref: ReplayHedgeSimulationManifestRef | null;
 }
 
 export interface TrainingRunPreparationPayload {
@@ -2806,6 +2948,10 @@ export interface TrainingRunPreparationPayload {
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
   readonly account_data_mode: ReplayV2AccountDataMode;
   readonly account_history_ref: ReplayAccountHistoryRef | null;
+  readonly hedge_public_history_ref: ReplayHedgePublicHistoryRef | null;
+  readonly simulation_manifest_ref: ReplayHedgeSimulationManifestRef | null;
+  readonly account_fidelity: typeof HEDGE_ACCOUNT_FIDELITY | null;
+  readonly insurance_adl_fidelity: typeof HEDGE_INSURANCE_ADL_FIDELITY | null;
   readonly fixed_funding_rate: string | null;
   readonly funding_interval_ms: number | null;
   readonly allow_rule_changes: boolean;
@@ -2931,7 +3077,7 @@ export function parseTrainingRunListResponse(value: unknown): TrainingRunListRes
   if (payload.protocol !== REPLAY_V2_PROTOCOL) {
     throw new TypeError(`protocol must be ${REPLAY_V2_PROTOCOL}`);
   }
-  if (payload.schema_version !== "replay.training.v1") {
+  if (payload.schema_version !== "replay.training.v2") {
     throw new TypeError("run list schema_version is unsupported");
   }
   if (!Array.isArray(payload.items)) throw new TypeError("run list items must be an array");
@@ -2944,7 +3090,7 @@ export function parseTrainingRunListResponse(value: unknown): TrainingRunListRes
   }
   return {
     protocol: REPLAY_V2_PROTOCOL,
-    schema_version: "replay.training.v1",
+    schema_version: "replay.training.v2",
     items: payload.items.map((item, index) => parseTrainingRunCard(item, `run list.items[${index}]`)),
     next_cursor: nextCursor,
   };

@@ -153,6 +153,8 @@ function ReplayInitialMarketPicker({
         base_interval: entry.selected_base_interval,
         display_interval: entry.selected_base_interval,
         account_history_ref: null,
+        hedge_public_history_ref: null,
+        simulation_manifest_ref: null,
       };
       const plan = await defaultReplayV2Api.planInitialMarket(
         run.run_id,

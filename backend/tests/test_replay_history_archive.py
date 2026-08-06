@@ -620,7 +620,7 @@ async def test_failed_random_preparation_retries_immutable_remote_revision(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Immutable retry",
                 "source_kind": "BAR",
@@ -644,6 +644,8 @@ async def test_failed_random_preparation_retries_immutable_remote_revision(
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -725,7 +727,7 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Paged forward cache",
                 "source_kind": "BAR",
@@ -753,6 +755,8 @@ async def test_forward_cache_boundary_pages_same_revision_without_ending_run(
                 "time_disclosure_policy": "HIDE_ALL",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -963,7 +967,7 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Verified Binance halt",
                 "source_kind": "BAR",
@@ -991,6 +995,8 @@ async def test_verified_binance_halt_advances_clock_and_pages_to_first_resume_ba
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -1149,7 +1155,7 @@ async def test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail(
         )
         early_request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Unverified future gap",
                 "source_kind": "BAR",
@@ -1177,6 +1183,8 @@ async def test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail(
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -1184,7 +1192,7 @@ async def test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail(
         assert service.training is not None
         with pytest.raises(TrainingRunError) as early_rejected:
             await service.training.create_run(early_request)
-        assert early_rejected.value.code == "TRAINING_RUN_CREATE_FAILED"
+        assert early_rejected.value.code == "MARKET_UNSUPPORTED_AT_COMMITTED_START"
         assert early_rejected.value.details["reason"] == "NO_ELIGIBLE_WINDOW"
 
         reachable_floor_ms = START_MS + 13 * INTERVAL_MS
@@ -1892,7 +1900,7 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
         assert "source_revision" not in catalog["entries"][0]
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Archive revision history",
                 "source_kind": "BAR",
@@ -1920,6 +1928,8 @@ async def test_all_available_history_uses_the_run_bound_archive_revision(
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -2068,7 +2078,7 @@ async def test_all_available_history_crosses_a_revision_declared_archive_gap(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Archive maintenance gap history",
                 "source_kind": "BAR",
@@ -2096,6 +2106,8 @@ async def test_all_available_history_crosses_a_revision_declared_archive_gap(
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -2190,7 +2202,7 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Pinned native display history",
                 "source_kind": "BAR",
@@ -2218,6 +2230,8 @@ async def test_all_available_history_pins_native_display_revision_before_seam(
                 "time_disclosure_policy": "HIDE_ALL",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -2382,7 +2396,7 @@ async def test_weekly_native_gap_fails_before_pin_then_accepts_continuous_revisi
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Fail closed gappy weekly history",
                 "source_kind": "BAR",
@@ -2410,6 +2424,8 @@ async def test_weekly_native_gap_fails_before_pin_then_accepts_continuous_revisi
                 "time_disclosure_policy": "NONE",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -2561,7 +2577,7 @@ async def test_blind_native_daily_history_uses_source_bucket_ordinal_mapping(
         )
         request = TrainingRunCreateRequest.from_dict(
             {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "catalog_epoch": catalog["catalog_epoch"],
                 "name": "Blind native daily phase mapping",
                 "source_kind": "BAR",
@@ -2589,6 +2605,8 @@ async def test_blind_native_daily_history_uses_source_bucket_ordinal_mapping(
                 "time_disclosure_policy": "HIDE_ALL",
                 "book_mode": "OFF",
                 "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
                 "funding_mode": "OFF",
                 "allow_rule_changes": False,
             }
@@ -2728,7 +2746,7 @@ async def test_duration_projection_uses_pinned_three_day_source_phase(
             blind_mode=True,
         )
         request_payload = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Duration three-day phase projection",
             "source_kind": "BAR",
@@ -2752,6 +2770,8 @@ async def test_duration_projection_uses_pinned_three_day_source_phase(
             "time_disclosure_policy": "HIDE_ALL",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -2774,7 +2794,7 @@ async def test_duration_projection_uses_pinned_three_day_source_phase(
             assert isinstance(cursor, dict)
             revision = int(snapshot["revision"])
             return ReplayV2Command(
-                protocol="replay.v2",
+                protocol="replay.v3",
                 run_id=run_id,
                 command_id=command_id,
                 client_instance_id="three-day-phase-browser",

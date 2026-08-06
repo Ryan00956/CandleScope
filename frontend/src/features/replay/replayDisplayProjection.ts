@@ -14,7 +14,7 @@ export interface ReplayDisplayProjectionIdentity {
 }
 
 export interface ReplayDisplayProjectionResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.display-projection.v1";
   readonly run_id: string;
   readonly session_id: string;
@@ -113,7 +113,7 @@ export function parseReplayDisplayProjection(
     "bars",
     "has_more",
   ], "display projection");
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.display-projection.v1") {
     throw new TypeError("display projection protocol is unsupported");
   }
@@ -151,7 +151,7 @@ export function parseReplayDisplayProjection(
     throw new TypeError("display projection interval identity is inconsistent");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.display-projection.v1",
     run_id: text(source.run_id, "display projection.run_id"),
     session_id: text(source.session_id, "display projection.session_id"),

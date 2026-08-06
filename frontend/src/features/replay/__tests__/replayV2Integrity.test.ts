@@ -86,7 +86,7 @@ function phase17ReviewResponse() {
     },
   };
   const rules = {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.run-rules.v1",
     run_id: "run-1",
     effective_cursor: cursor,
@@ -142,7 +142,7 @@ function phase17ReviewResponse() {
     domain: { equity: "10000", order_count: 0, fill_count: 0 },
   };
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.timeline.v1",
     review_id: "review-1",
     run_id: "run-1",
@@ -203,7 +203,7 @@ function phase17ReviewResponse() {
 
 test("Phase 4 integrity parser keeps only public time and audited mutation values", () => {
   const response = parseReplayIntegrityResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     integrity_mode: "PRACTICE",
     configured_time_disclosure_policy: "HIDE_DAY",
@@ -275,7 +275,7 @@ test("Phase 4 integrity parser keeps only public time and audited mutation value
 
 test("equity parser and polyline remain bounded and Decimal-backed", () => {
   const response = parseReplayEquityResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     resolution: "EVENT",
     bounded: true,

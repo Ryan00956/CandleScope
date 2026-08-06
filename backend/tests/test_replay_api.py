@@ -118,7 +118,7 @@ async def test_http_routes_parse_strict_models_and_map_domain_errors() -> None:
     )
     assert conflict.status_code == 409
     assert conflict.json() == {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "error": {
             "code": "TRAINING_RUN_INVALID",
             "message": "training run request is invalid",
@@ -133,7 +133,7 @@ async def test_http_routes_parse_strict_models_and_map_domain_errors() -> None:
         json={**_command(), "future_field": True},
     )
     assert unknown.status_code == 422
-    assert unknown.json()["protocol"] == "replay.v2"
+    assert unknown.json()["protocol"] == "replay.v3"
     assert unknown.json()["error"]["code"] == "TRAINING_RUN_INVALID"
 
     snapshot = await _request(
@@ -150,7 +150,7 @@ async def test_http_routes_parse_strict_models_and_map_domain_errors() -> None:
         "/api/v1/replay/runs/session/bare-session",
     )
     assert bare.status_code == 404
-    assert bare.json()["protocol"] == "replay.v2"
+    assert bare.json()["protocol"] == "replay.v3"
     assert bare.json()["error"]["code"] == "TRAINING_RUN_NOT_FOUND"
 
     retired = await _request(
@@ -170,7 +170,7 @@ async def test_internal_adapter_routes_fail_closed_without_training_runtime() ->
         "/api/v1/replay/runs/session/session-1",
     )
     assert response.status_code == 503
-    assert response.json()["protocol"] == "replay.v2"
+    assert response.json()["protocol"] == "replay.v3"
     assert response.json()["error"]["code"] == "REPLAY_TRAINING_UNAVAILABLE"
 
 

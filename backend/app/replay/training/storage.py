@@ -57,6 +57,7 @@ from .anchor_codec import (
 from .models import (
     CapabilityKind,
     CapabilityState,
+    HEDGE_INSURANCE_ADL_FIDELITY,
     REPLAY_V2_PROTOCOL,
     ReplayLaunchContext,
     TrainingRunCreateRequest,
@@ -367,8 +368,8 @@ class TrainingRunStore:
                     auditor_proof_hash, auditor_differences_json,
                     created_at_ms, updated_at_ms
                 )
-                SELECT run_id, 'APPROX_PROXY', 'ACTIVE',
-                       'REVEALED_PRICE_PROXY_MODELLED_ACCOUNT',
+                SELECT run_id, account_data_mode, 'ACTIVE',
+                       COALESCE(account_fidelity, 'REVEALED_PRICE_PROXY_MODELLED_ACCOUNT'),
                        NULL, NULL, 'NOT_RUN', NULL, '[]', ?, ?
                 FROM replay_training_run
                 """,
@@ -724,7 +725,11 @@ class TrainingRunStore:
                     run_id, adapter_session_id, protocol, schema_version,
                     name, state, source_kind, start_mode, integrity_mode,
                     time_disclosure_policy, book_mode, margin_mode,
-                    funding_mode, execution_model, allow_rule_changes,
+                    position_mode, funding_mode, account_data_mode,
+                    hedge_public_history_ref_json, simulation_manifest_ref_json,
+                    simulation_contract_hash, simulation_model_version,
+                    account_fidelity, insurance_adl_fidelity,
+                    execution_model, allow_rule_changes,
                     exchange, market_type, last_symbol, settlement_asset,
                     base_interval, display_interval, initial_equity,
                     current_equity, summary_revision, revision,
@@ -732,8 +737,9 @@ class TrainingRunStore:
                     catalog_epoch, dataset_epoch, compatibility,
                     created_at_ms, updated_at_ms, saved_at_ms
                 ) VALUES (
-                    ?, NULL, 'replay.v2', 'replay.training.v1',
-                    ?, 'AWAITING_MARKET', ?, ?, ?, ?, ?, ?, ?,
+                    ?, NULL, 'replay.v3', 'replay.training.v2',
+                    ?, 'AWAITING_MARKET', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    NULL, NULL, NULL, NULL, ?, ?,
                     'TOUCH_OR_TAPE_V2', ?, NULL, NULL, NULL, ?,
                     NULL, NULL, ?, ?, 0, 0, 0, ?, 0,
                     NULL, NULL, 'READY', ?, ?, ?
@@ -748,7 +754,11 @@ class TrainingRunStore:
                     setup["time_disclosure_policy"],
                     setup["book_mode"],
                     setup["margin_mode"],
+                    setup["position_mode"],
                     setup["funding_mode"],
+                    setup["account_data_mode"],
+                    setup["account_fidelity"],
+                    setup["insurance_adl_fidelity"],
                     int(bool(setup["allow_rule_changes"])),
                     setup["settlement_asset"],
                     setup["initial_equity"],
@@ -975,7 +985,31 @@ class TrainingRunStore:
                     "time_disclosure_policy": request.time_disclosure_policy.value,
                     "book_mode": request.book_mode.value,
                     "margin_mode": request.margin_mode.value,
+                    "position_mode": request.position_mode.value,
                     "funding_mode": request.funding_mode.value,
+                    "account_data_mode": request.account_data_mode.value,
+                    "hedge_public_history_ref_json": (
+                        None
+                        if request.hedge_public_history_ref is None
+                        else canonical_json(request.hedge_public_history_ref.to_dict())
+                    ),
+                    "simulation_manifest_ref_json": (
+                        None
+                        if request.simulation_manifest_ref is None
+                        else canonical_json(request.simulation_manifest_ref.to_dict())
+                    ),
+                    "simulation_contract_hash": (
+                        None
+                        if request.simulation_manifest_ref is None
+                        else request.simulation_manifest_ref.contract_hash
+                    ),
+                    "simulation_model_version": (
+                        None
+                        if request.simulation_manifest_ref is None
+                        else request.simulation_manifest_ref.model_version
+                    ),
+                    "account_fidelity": request.account_fidelity,
+                    "insurance_adl_fidelity": request.insurance_adl_fidelity,
                     "allow_rule_changes": int(request.allow_rule_changes),
                     "exchange": request.exchange,
                     "market_type": request.market_type,
@@ -1004,7 +1038,15 @@ class TrainingRunStore:
                         integrity_mode = :integrity_mode,
                         time_disclosure_policy = :time_disclosure_policy,
                         book_mode = :book_mode, margin_mode = :margin_mode,
+                        position_mode = :position_mode,
                         funding_mode = :funding_mode,
+                        account_data_mode = :account_data_mode,
+                        hedge_public_history_ref_json = :hedge_public_history_ref_json,
+                        simulation_manifest_ref_json = :simulation_manifest_ref_json,
+                        simulation_contract_hash = :simulation_contract_hash,
+                        simulation_model_version = :simulation_model_version,
+                        account_fidelity = :account_fidelity,
+                        insurance_adl_fidelity = :insurance_adl_fidelity,
                         allow_rule_changes = :allow_rule_changes,
                         exchange = :exchange, market_type = :market_type,
                         last_symbol = :last_symbol,
@@ -1121,9 +1163,14 @@ class TrainingRunStore:
                     now_ms=now_ms,
                 )
             else:
-                self._insert_approx_account_history(
+                self._insert_modelled_account_history(
                     connection,
                     run_id=run_id,
+                    account_data_mode=request.account_data_mode.value,
+                    fidelity=(
+                        request.account_fidelity
+                        or "REVEALED_PRICE_PROXY_MODELLED_ACCOUNT"
+                    ),
                     now_ms=now_ms,
                 )
             initialized_viewer = ViewerState(
@@ -1324,12 +1371,16 @@ class TrainingRunStore:
         return write
 
     @staticmethod
-    def _insert_approx_account_history(
+    def _insert_modelled_account_history(
         connection: sqlite3.Connection,
         *,
         run_id: str,
+        account_data_mode: str,
+        fidelity: str,
         now_ms: int,
     ) -> None:
+        if account_data_mode not in {"APPROX_PROXY", "DETERMINISTIC_SIMULATION"}:
+            raise ValueError("modelled account history mode is invalid")
         connection.execute(
             """
             INSERT INTO replay_training_account_history(
@@ -1337,12 +1388,11 @@ class TrainingRunStore:
                 archive_proof_hash, degraded_reason, auditor_status,
                 auditor_proof_hash, auditor_differences_json,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, 'APPROX_PROXY', 'ACTIVE',
-                      'REVEALED_PRICE_PROXY_MODELLED_ACCOUNT',
+            ) VALUES (?, ?, 'ACTIVE', ?,
                       NULL, NULL, 'NOT_RUN', NULL, '[]', ?, ?)
             ON CONFLICT(run_id) DO NOTHING
             """,
-            (run_id, now_ms, now_ms),
+            (run_id, account_data_mode, fidelity, now_ms, now_ms),
         )
 
     @classmethod
@@ -2579,17 +2629,29 @@ class TrainingRunStore:
         liquidation_total = Decimal(0)
         liquidation_rows = connection.execute(
             """
-            SELECT * FROM replay_training_liquidation_event
-            WHERE run_id = ? ORDER BY trigger_virtual_time_ms, liquidation_id
+            SELECT case_row.*, leg.liquidation_leg_id, leg.track_id,
+                   leg.position_side, leg.trigger_quantity,
+                   leg.trigger_notional, leg.maintenance_margin,
+                   leg.bankruptcy_price, leg.liquidation_fee,
+                   leg.state AS leg_state
+            FROM replay_training_liquidation_case AS case_row
+            JOIN replay_training_liquidation_leg AS leg
+              ON leg.run_id = case_row.run_id AND leg.case_id = case_row.case_id
+            WHERE case_row.run_id = ?
+            ORDER BY case_row.case_sequence, leg.leg_sequence
             """,
             (run_id,),
         ).fetchall()
-        pending_liquidations = 0
+        pending_case_ids: set[str] = set()
         bankrupt = False
+        case_fees: dict[str, Decimal] = {}
         for row in liquidation_rows:
-            liquidation_id = str(row["liquidation_id"])
+            liquidation_id = str(row["case_id"])
             track_id = str(row["track_id"])
-            field_prefix = f"liquidation[{liquidation_id}]"
+            position_side = str(row["position_side"])
+            field_prefix = (
+                f"liquidation[{liquidation_id}].leg[{position_side}]"
+            )
             rule_candidates = [
                 (key, rule)
                 for key, rule in rules.items()
@@ -2612,7 +2674,7 @@ class TrainingRunStore:
                 )
                 continue
             try:
-                notional = Decimal(str(row["position_notional"]))
+                notional = Decimal(str(row["trigger_notional"]))
                 expected_maintenance = rule.maintenance_margin(notional)
                 expected_fee = rule.liquidation_fee(notional)
             except (InvalidOperation, TypeError, ValueError) as exc:
@@ -2633,151 +2695,51 @@ class TrainingRunStore:
                 row["liquidation_fee"],
             )
             try:
-                trigger_state: dict[str, Decimal | None] = {
-                    "quantity": Decimal(0),
-                    "entry_price": None,
-                    "realized_pnl": Decimal(0),
-                }
-                close_order_id = row["close_order_id"]
-                for fill_row, raw_fill in fills:
-                    if str(fill_row["track_id"]) != track_id:
-                        continue
-                    if (
-                        isinstance(close_order_id, str)
-                        and raw_fill.get("order_id") == close_order_id
-                    ):
-                        continue
-                    if int(raw_fill.get("event_time_ms", 0)) > int(
-                        row["trigger_virtual_time_ms"]
-                    ):
-                        continue
-                    fill_rule = rules.get(
-                        (track_id, int(fill_row["rule_revision"]))
-                    )
-                    if fill_rule is None:
-                        raise TypeError("liquidation fill rule is missing")
-                    apply_fill(
-                        state=trigger_state,
-                        side=str(raw_fill["side"]),
-                        quantity=Decimal(str(raw_fill["quantity"])),
-                        price=Decimal(str(raw_fill["price"])),
-                        contract_size=Decimal(fill_rule.contract_size),
-                    )
-                trigger_quantity = cast(
-                    Decimal, trigger_state["quantity"]
-                )
-                trigger_entry = cast(
-                    Decimal | None, trigger_state["entry_price"]
-                )
-                if trigger_quantity == 0 or trigger_entry is None:
-                    raise ValueError(
-                        "liquidation trigger has no reconstructed position"
-                    )
-                compare_decimal(
-                    f"{field_prefix}.position_quantity",
-                    trigger_quantity,
-                    row["position_quantity"],
-                )
-                trigger_mark = Decimal(str(row["mark_price"]))
-                trigger_notional = (
-                    abs(trigger_quantity)
-                    * trigger_mark
-                    * Decimal(rule.contract_size)
-                )
-                compare_decimal(
-                    f"{field_prefix}.position_notional",
-                    trigger_notional,
-                    row["position_notional"],
-                )
-                if account["margin_mode"] == "CROSS":
-                    liquidation_allocation = Decimal(
-                        str(row["account_equity_before"])
-                    )
-                else:
-                    liquidation_allocation = Decimal(0)
-                    for ledger_row in ledger_rows:
-                        if (
-                            ledger_row["track_id"] != track_id
-                            or ledger_row["kind"]
-                            not in {"MARGIN_ALLOCATION", "MARGIN_RELEASE"}
-                            or int(ledger_row["virtual_time_ms"])
-                            > int(row["trigger_virtual_time_ms"])
-                        ):
-                            continue
-                        metadata = json.loads(
-                            str(ledger_row["metadata_json"])
-                        )
-                        target = (
-                            metadata.get("new_allocation")
-                            if isinstance(metadata, Mapping)
-                            else None
-                        )
-                        liquidation_allocation = (
-                            Decimal(0)
-                            if target is None
-                            else Decimal(str(target))
-                        )
-                expected_bankruptcy = trigger_entry - (
-                    liquidation_allocation
-                    / (
-                        abs(trigger_quantity)
-                        * Decimal(rule.contract_size)
-                    )
-                ) * (
-                    Decimal(1)
-                    if trigger_quantity > 0
-                    else Decimal(-1)
-                )
-                expected_bankruptcy = max(
-                    Decimal(0), expected_bankruptcy
-                )
-                compare_decimal(
-                    f"{field_prefix}.bankruptcy_price",
-                    expected_bankruptcy,
-                    row["bankruptcy_price"],
-                )
-            except (
-                InvalidOperation,
-                json.JSONDecodeError,
-                KeyError,
-                TypeError,
-                ValueError,
-            ) as exc:
+                quantity = Decimal(str(row["trigger_quantity"]))
+                if quantity <= 0:
+                    raise ValueError("liquidation leg quantity is not positive")
+                if row["bankruptcy_price"] is None:
+                    raise ValueError("liquidation leg bankruptcy price is missing")
+                Decimal(str(row["bankruptcy_price"]))
+            except (InvalidOperation, TypeError, ValueError) as exc:
                 add_difference(
                     f"{field_prefix}.bankruptcy_reconstruction",
-                    "RECONSTRUCTABLE_FROM_FILLS_AND_MARGIN",
+                    "PER_LEG_CANONICAL_DECIMAL",
                     f"INVALID:{type(exc).__name__}",
                 )
-            if row["state"] == "PENDING":
-                pending_liquidations += 1
-            elif row["state"] == "COMPLETED":
-                posting_id = f"liquidation-fee:{liquidation_id}"
-                posting = ledger_by_posting.get(posting_id)
-                if posting is None:
-                    add_difference(
-                        f"ledger[{posting_id}]",
-                        "PRESENT",
-                        "MISSING",
-                    )
-                else:
-                    expected_postings.add(posting_id)
-                    compare_decimal(
-                        f"ledger[{posting_id}].cash_delta",
-                        -expected_fee,
-                        posting["cash_delta"],
-                    )
-                liquidation_total -= expected_fee
-                try:
-                    bankrupt = bankrupt or (
-                        row["account_equity_after"] is not None
-                        and Decimal(str(row["account_equity_after"])) < 0
-                    )
-                except (InvalidOperation, TypeError, ValueError):
-                    add_difference(
-                        f"{field_prefix}.account_equity_after",
-                        "DECIMAL_OR_NULL",
-                        row["account_equity_after"],
-                    )
+            case_fees[liquidation_id] = (
+                case_fees.get(liquidation_id, Decimal(0)) + expected_fee
+            )
+            if row["state"] not in {
+                "COMPLETED",
+                "BANKRUPT",
+                "FAILED_CLOSED",
+                "RECOVERED_AFTER_CANCEL",
+            }:
+                pending_case_ids.add(liquidation_id)
+            bankrupt = bankrupt or row["state"] == "BANKRUPT"
+
+        for liquidation_id, expected_fee in case_fees.items():
+            state = next(
+                str(row["state"])
+                for row in liquidation_rows
+                if str(row["case_id"]) == liquidation_id
+            )
+            if state != "COMPLETED":
+                continue
+            posting_id = f"liquidation-fee:{liquidation_id}"
+            posting = ledger_by_posting.get(posting_id)
+            if posting is None:
+                add_difference(f"ledger[{posting_id}]", "PRESENT", "MISSING")
+            else:
+                expected_postings.add(posting_id)
+                compare_decimal(
+                    f"ledger[{posting_id}].cash_delta",
+                    -expected_fee,
+                    posting["cash_delta"],
+                )
+            liquidation_total -= expected_fee
+        pending_liquidations = len(pending_case_ids)
 
         for row in ledger_rows:
             posting_id = str(row["posting_id"])
@@ -3623,7 +3585,19 @@ class TrainingRunStore:
                     "time_disclosure_policy": str(parent["time_disclosure_policy"]),
                     "book_mode": str(parent["book_mode"]),
                     "margin_mode": str(parent["margin_mode"]),
+                    "position_mode": str(parent["position_mode"]),
                     "funding_mode": str(parent["funding_mode"]),
+                    "account_data_mode": str(parent["account_data_mode"]),
+                    "hedge_public_history_ref_json": parent[
+                        "hedge_public_history_ref_json"
+                    ],
+                    "simulation_manifest_ref_json": parent[
+                        "simulation_manifest_ref_json"
+                    ],
+                    "simulation_contract_hash": parent["simulation_contract_hash"],
+                    "simulation_model_version": parent["simulation_model_version"],
+                    "account_fidelity": parent["account_fidelity"],
+                    "insurance_adl_fidelity": parent["insurance_adl_fidelity"],
                     "allow_rule_changes": int(parent["allow_rule_changes"]),
                     "exchange": str(parent["exchange"]),
                     "market_type": str(parent["market_type"]),
@@ -3670,9 +3644,11 @@ class TrainingRunStore:
                     ),
                 )
             else:
-                self._insert_approx_account_history(
+                self._insert_modelled_account_history(
                     connection,
                     run_id=child_run_id,
+                    account_data_mode=str(parent["account_data_mode"]),
+                    fidelity=str(parent["history_fidelity"]),
                     now_ms=now_ms,
                 )
             self._copy_launch_context(
@@ -4918,7 +4894,13 @@ class TrainingRunStore:
             return connection.execute(
                 """
                 SELECT r.run_id, selected.adapter_session_id, r.source_kind,
-                       r.book_mode,
+                       r.book_mode, r.position_mode,
+                       r.account_data_mode AS run_account_data_mode,
+                       r.hedge_public_history_ref_json,
+                       r.simulation_manifest_ref_json,
+                       r.simulation_contract_hash,
+                       r.simulation_model_version,
+                       r.account_fidelity, r.insurance_adl_fidelity,
                        r.base_interval, r.display_interval, r.compatibility,
                        r.exchange, r.market_type, r.settlement_asset,
                        r.catalog_epoch, r.dataset_epoch, r.initial_equity,
@@ -4971,7 +4953,7 @@ class TrainingRunStore:
             "display_interval": str(row["display_interval"]),
             "compatibility": str(row["compatibility"]),
             "adapter_config": adapter_config,
-            "position_mode": str(adapter_config.get("position_mode", "ONE_WAY")),
+            "position_mode": str(row["position_mode"]),
             "exchange": str(row["exchange"]),
             "market_type": str(row["market_type"]),
             "settlement_asset": str(row["settlement_asset"]),
@@ -4998,9 +4980,23 @@ class TrainingRunStore:
             "margin_mode": str(row["margin_mode"]),
             "funding_mode": str(row["funding_mode"]),
             "account_status": str(row["account_status"]),
-            "account_data_mode": str(row["account_data_mode"]),
+            "account_data_mode": str(row["run_account_data_mode"]),
             "account_history_status": str(row["account_history_status"]),
             "account_archive_proof_hash": row["archive_proof_hash"],
+            "hedge_public_history_ref": (
+                None
+                if row["hedge_public_history_ref_json"] is None
+                else json.loads(str(row["hedge_public_history_ref_json"]))
+            ),
+            "simulation_manifest_ref": (
+                None
+                if row["simulation_manifest_ref_json"] is None
+                else json.loads(str(row["simulation_manifest_ref_json"]))
+            ),
+            "simulation_contract_hash": row["simulation_contract_hash"],
+            "simulation_model_version": row["simulation_model_version"],
+            "account_fidelity": row["account_fidelity"],
+            "insurance_adl_fidelity": row["insurance_adl_fidelity"],
         }
 
     async def integrity(self, run_id: str) -> dict[str, object]:
@@ -6826,14 +6822,14 @@ class TrainingRunStore:
         if str(row["command_json"]) != canonical_json(command):
             raise TrainingRunError(
                 "COMMAND_ID_REUSED",
-                "command_id was reused with a different replay.v2 command",
+                "command_id was reused with a different replay.v3 command",
                 status_code=409,
             )
         result = json.loads(str(row["result_json"]))
         if not isinstance(result, dict):
             raise TrainingRunError(
                 "TRAINING_RUN_STORAGE_DEGRADED",
-                "stored replay.v2 command result is invalid",
+                "stored replay.v3 command result is invalid",
                 status_code=503,
             )
         return result
@@ -6865,7 +6861,7 @@ class TrainingRunStore:
                 ):
                     raise TrainingRunError(
                         "COMMAND_ID_REUSED",
-                        "command_id conflicts with a stored replay.v2 command",
+                        "command_id conflicts with a stored replay.v3 command",
                         status_code=409,
                     )
                 return
@@ -8637,22 +8633,72 @@ class TrainingRunStore:
         def read(connection: sqlite3.Connection) -> tuple[dict[str, object], ...]:
             rows = connection.execute(
                 """
-                SELECT event.*, track.adapter_session_id, track.open_orders_json
-                FROM replay_training_liquidation_event AS event
+                SELECT case_row.*, leg.*, snapshot.equity AS account_equity_before,
+                       track.adapter_session_id, track.open_orders_json,
+                       position.mark_price
+                FROM replay_training_liquidation_case AS case_row
+                JOIN replay_training_liquidation_leg AS leg
+                  ON leg.run_id = case_row.run_id AND leg.case_id = case_row.case_id
+                JOIN replay_training_risk_snapshot AS snapshot
+                  ON snapshot.run_id = case_row.run_id
+                 AND snapshot.snapshot_id = case_row.trigger_snapshot_id
                 JOIN replay_training_market_track AS track
-                  ON track.run_id = event.run_id AND track.track_id = event.track_id
-                WHERE event.run_id = ? AND event.state = 'PENDING'
-                ORDER BY track.stable_ordinal, event.liquidation_id
+                  ON track.run_id = leg.run_id AND track.track_id = leg.track_id
+                JOIN replay_training_position_leg AS position
+                  ON position.run_id = leg.run_id
+                 AND position.track_id = leg.track_id
+                 AND position.position_side = leg.position_side
+                WHERE case_row.run_id = ?
+                  AND case_row.state NOT IN (
+                      'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
+                      'RECOVERED_AFTER_CANCEL'
+                  )
+                ORDER BY track.stable_ordinal, case_row.case_sequence,
+                         leg.leg_sequence
                 """,
                 (run_id,),
             ).fetchall()
-            return tuple(
-                {
-                    **dict(row),
-                    "open_orders": json.loads(str(row["open_orders_json"])),
-                }
-                for row in rows
-            )
+            grouped: dict[tuple[str, str], dict[str, object]] = {}
+            for row in rows:
+                key = (str(row["case_id"]), str(row["track_id"]))
+                item = grouped.setdefault(
+                    key,
+                    {
+                        "liquidation_id": str(row["case_id"]),
+                        "track_id": str(row["track_id"]),
+                        "state": str(row["state"]),
+                        "trigger_virtual_time_ms": int(
+                            row["trigger_virtual_time_ms"]
+                        ),
+                        "trigger_source_sequence": int(
+                            row["trigger_source_sequence"]
+                        ),
+                        "account_equity_before": str(
+                            row["account_equity_before"]
+                        ),
+                        "fidelity": str(row["fidelity"]),
+                        "reason": str(row["reason"]),
+                        "adapter_session_id": row["adapter_session_id"],
+                        "open_orders": json.loads(str(row["open_orders_json"])),
+                        "legs": [],
+                    },
+                )
+                legs = item["legs"]
+                if not isinstance(legs, list):
+                    raise TypeError("liquidation leg projection is invalid")
+                legs.append(
+                    {
+                        "liquidation_leg_id": str(row["liquidation_leg_id"]),
+                        "position_side": str(row["position_side"]),
+                        "mark_price": row["mark_price"],
+                        "position_quantity": str(row["trigger_quantity"]),
+                        "position_notional": str(row["trigger_notional"]),
+                        "maintenance_margin": str(row["maintenance_margin"]),
+                        "bankruptcy_price": row["bankruptcy_price"],
+                        "liquidation_fee": str(row["liquidation_fee"]),
+                    }
+                )
+            return tuple(grouped.values())
 
         return await self.base_store.run_extension_read(read)
 
@@ -8662,37 +8708,53 @@ class TrainingRunStore:
         run_id: str,
         liquidation_id: str,
         canceled_order_ids: Sequence[str],
-        close_order_id: str,
+        close_order_ids: Sequence[str],
     ) -> dict[str, object]:
         def write(connection: sqlite3.Connection) -> None:
-            event = connection.execute(
+            case_row = connection.execute(
                 """
-                SELECT event.*, run.settlement_asset, track.adapter_session_id
-                FROM replay_training_liquidation_event AS event
+                SELECT case_row.*, run.settlement_asset
+                FROM replay_training_liquidation_case AS case_row
                 JOIN replay_training_run AS run USING(run_id)
-                JOIN replay_training_market_track AS track
-                  ON track.run_id = event.run_id
-                 AND track.track_id = event.track_id
-                WHERE event.run_id = ? AND event.liquidation_id = ?
+                WHERE case_row.run_id = ? AND case_row.case_id = ?
                 """,
                 (run_id, liquidation_id),
             ).fetchone()
-            if event is None:
+            if case_row is None:
                 raise TrainingRunError(
                     "LIQUIDATION_NOT_FOUND",
-                    "simulated account liquidation event does not exist",
+                    "simulated account liquidation case does not exist",
                     status_code=404,
                 )
-            if str(event["state"]) == "COMPLETED":
+            if str(case_row["state"]) == "COMPLETED":
                 return
-            if str(event["state"]) != "PENDING":
+            if str(case_row["state"]) in {"BANKRUPT", "FAILED_CLOSED"}:
                 raise TrainingRunError(
                     "LIQUIDATION_STATE_CONFLICT",
                     "simulated account liquidation cannot be completed",
                     status_code=409,
                 )
+            legs = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg
+                    WHERE run_id = ? AND case_id = ?
+                    ORDER BY leg_sequence
+                    """,
+                    (run_id, liquidation_id),
+                ).fetchall()
+            )
+            if not legs or len(close_order_ids) != len(legs):
+                raise TrainingRunError(
+                    "LIQUIDATION_ORDER_COUNT_MISMATCH",
+                    "each liquidation leg requires one durable close order",
+                    status_code=409,
+                )
             now_ms = self.base_store._validated_now_ms()
-            fee = Decimal(str(event["liquidation_fee"]))
+            fee = sum(
+                (Decimal(str(leg["liquidation_fee"])) for leg in legs),
+                Decimal(0),
+            )
             account = connection.execute(
                 """
                 SELECT overlay_cash, isolated_margin_json
@@ -8703,29 +8765,30 @@ class TrainingRunStore:
             overlay = Decimal(str(account["overlay_cash"])) - fee
             allocations = json.loads(str(account["isolated_margin_json"]))
             if isinstance(allocations, dict):
-                allocations.pop(str(event["track_id"]), None)
+                for leg in legs:
+                    allocations.pop(str(leg["track_id"]), None)
             rule = connection.execute(
                 """
                 SELECT revision FROM replay_training_instrument_rule
                 WHERE run_id = ? AND track_id = ? ORDER BY revision DESC LIMIT 1
                 """,
-                (run_id, event["track_id"]),
+                (run_id, legs[0]["track_id"]),
             ).fetchone()
             self._append_contract_ledger(
                 connection,
                 run_id=run_id,
                 posting_id=f"liquidation-fee:{liquidation_id}",
-                track_id=str(event["track_id"]),
+                track_id=str(legs[0]["track_id"]),
                 kind="LIQUIDATION_FEE",
                 cash_delta=-fee,
-                asset=str(event["settlement_asset"]),
-                virtual_time_ms=int(event["trigger_virtual_time_ms"]),
-                source_sequence=int(event["trigger_source_sequence"]),
-                fidelity=str(event["fidelity"]),
+                asset=str(case_row["settlement_asset"]),
+                virtual_time_ms=int(case_row["trigger_virtual_time_ms"]),
+                source_sequence=int(case_row["trigger_source_sequence"]),
+                fidelity=str(case_row["fidelity"]),
                 rule_revision=int(rule["revision"]),
                 reference_type="LIQUIDATION",
                 reference_id=liquidation_id,
-                metadata={"close_order_id": close_order_id},
+                metadata={"close_order_ids": list(close_order_ids)},
                 now_ms=now_ms,
             )
             connection.execute(
@@ -8765,8 +8828,13 @@ class TrainingRunStore:
             equity_after = Decimal(str(portfolio["equity"]))
             another_pending = connection.execute(
                 """
-                SELECT 1 FROM replay_training_liquidation_event
-                WHERE run_id = ? AND state = 'PENDING' AND liquidation_id != ?
+                SELECT 1 FROM replay_training_liquidation_case
+                WHERE run_id = ?
+                  AND state NOT IN (
+                      'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
+                      'RECOVERED_AFTER_CANCEL'
+                  )
+                  AND case_id != ?
                 LIMIT 1
                 """,
                 (run_id, liquidation_id),
@@ -8790,32 +8858,105 @@ class TrainingRunStore:
             )
             connection.execute(
                 """
-                UPDATE replay_training_liquidation_event
-                SET state = 'COMPLETED', canceled_order_ids_json = ?,
-                    close_order_id = ?, account_equity_after = ?, updated_at_ms = ?
-                WHERE run_id = ? AND liquidation_id = ?
+                UPDATE replay_training_liquidation_case
+                SET state = 'COMPLETED', updated_at_ms = ?
+                WHERE run_id = ? AND case_id = ?
                 """,
-                (
-                    canonical_json(list(canceled_order_ids)),
-                    close_order_id,
-                    decimal_to_string(
-                        equity_after,
-                        field_name="liquidation equity after",
-                    ),
-                    now_ms,
-                    run_id,
-                    liquidation_id,
-                ),
+                (now_ms, run_id, liquidation_id),
             )
+            for index, (leg, close_order_id) in enumerate(
+                zip(legs, close_order_ids, strict=True),
+                start=1,
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_order(
+                        run_id, case_id, step_sequence, order_id,
+                        liquidation_leg_id, order_sequence, side, order_type,
+                        requested_quantity, filled_quantity, remaining_quantity,
+                        average_price, state, order_hash, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, 2, ?, ?, ?, ?, 'MARKET', ?, ?, '0', NULL,
+                              'FILLED', ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        close_order_id,
+                        leg["liquidation_leg_id"],
+                        index,
+                        "SELL" if leg["position_side"] == "LONG" else "BUY",
+                        leg["trigger_quantity"],
+                        leg["trigger_quantity"],
+                        canonical_sha256(
+                            {
+                                "case_id": liquidation_id,
+                                "order_id": close_order_id,
+                                "liquidation_leg_id": leg["liquidation_leg_id"],
+                            }
+                        ),
+                        now_ms,
+                        now_ms,
+                    ),
+                )
+            for index, canceled_order_id in enumerate(canceled_order_ids, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_order(
+                        run_id, case_id, step_sequence, order_id,
+                        liquidation_leg_id, order_sequence, side, order_type,
+                        requested_quantity, filled_quantity, remaining_quantity,
+                        average_price, state, order_hash, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, 1, ?, ?, ?, 'BUY', 'LIMIT', '0', '0', '0',
+                              NULL, 'CANCELED', ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        canceled_order_id,
+                        legs[0]["liquidation_leg_id"],
+                        index,
+                        canonical_sha256(
+                            {
+                                "case_id": liquidation_id,
+                                "canceled_order_id": canceled_order_id,
+                            }
+                        ),
+                        now_ms,
+                        now_ms,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_leg
+                SET state = 'CLOSED', completed_quantity = target_quantity
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, liquidation_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_liquidation_step
+                SET state = 'APPLIED', committed_at_ms = ?
+                WHERE run_id = ? AND case_id = ? AND step_sequence IN (1, 2)
+                """,
+                (now_ms, run_id, liquidation_id),
+            )
+            adapter = connection.execute(
+                """
+                SELECT adapter_session_id FROM replay_training_market_track
+                WHERE run_id = ? AND track_id = ?
+                """,
+                (run_id, legs[0]["track_id"]),
+            ).fetchone()
             self._append_review_timeline_event(
                 connection,
                 run_id=run_id,
-                session_id=str(event["adapter_session_id"]),
+                session_id=str(adapter["adapter_session_id"]),
                 context={
                     "kind": "DIRECT",
                     "category": "LIQUIDATION",
                     "event_type": "LIQUIDATION",
-                    "command_id": close_order_id,
+                    "command_id": close_order_ids[0],
                 },
                 state=None,
                 checkpoint=None,
@@ -10457,7 +10598,13 @@ class TrainingRunStore:
                 tracks=tracks,
             )
         run_contract = connection.execute(
-            "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+            """
+            SELECT book_mode, hedge_public_history_ref_json,
+                   simulation_manifest_ref_json, simulation_contract_hash,
+                   simulation_model_version, account_fidelity,
+                   insurance_adl_fidelity
+            FROM replay_training_run WHERE run_id = ?
+            """,
             (run_id,),
         ).fetchone()
         if run_contract is None:
@@ -10680,21 +10827,82 @@ class TrainingRunStore:
                 (run_id, run_id),
             ).fetchall()
         ]
-        liquidations = [
-            {
-                **dict(row),
-                "canceled_order_ids": json.loads(
-                    str(row["canceled_order_ids_json"])
-                ),
-            }
-            for row in connection.execute(
+        liquidations: list[dict[str, object]] = []
+        for case_row in connection.execute(
+            """
+            SELECT * FROM replay_training_liquidation_case
+            WHERE run_id = ? ORDER BY case_sequence
+            """,
+            (run_id,),
+        ).fetchall():
+            case_id = str(case_row["case_id"])
+            legs = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg
+                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
+                    """,
+                    (run_id, case_id),
+                ).fetchall()
+            ]
+            steps: list[dict[str, object]] = []
+            for step_row in connection.execute(
                 """
-                SELECT * FROM replay_training_liquidation_event
-                WHERE run_id = ? ORDER BY created_at_ms, liquidation_id
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? ORDER BY step_sequence
                 """,
-                (run_id,),
-            ).fetchall()
-        ]
+                (run_id, case_id),
+            ).fetchall():
+                step = dict(step_row)
+                step_sequence = int(step_row["step_sequence"])
+                step_orders: list[dict[str, object]] = []
+                for order_row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_order
+                    WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                    ORDER BY order_sequence
+                    """,
+                    (run_id, case_id, step_sequence),
+                ).fetchall():
+                    order = dict(order_row)
+                    order["fills"] = [
+                        dict(fill_row)
+                        for fill_row in connection.execute(
+                            """
+                            SELECT * FROM replay_training_liquidation_fill
+                            WHERE run_id = ? AND case_id = ? AND order_id = ?
+                            ORDER BY fill_sequence
+                            """,
+                            (run_id, case_id, order_row["order_id"]),
+                        ).fetchall()
+                    ]
+                    step_orders.append(order)
+                step["orders"] = step_orders
+                step["insurance_postings"] = [
+                    dict(posting)
+                    for posting in connection.execute(
+                        """
+                        SELECT * FROM replay_training_insurance_posting
+                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                        ORDER BY posting_sequence
+                        """,
+                        (run_id, case_id, step_sequence),
+                    ).fetchall()
+                ]
+                step["adl_events"] = [
+                    dict(event)
+                    for event in connection.execute(
+                        """
+                        SELECT * FROM replay_training_adl_event
+                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                        ORDER BY adl_event_id
+                        """,
+                        (run_id, case_id, step_sequence),
+                    ).fetchall()
+                ]
+                steps.append(step)
+            liquidations.append({**dict(case_row), "legs": legs, "steps": steps})
         archive_bindings = [
             {
                 "track_id": str(row["track_id"]),
@@ -10729,6 +10937,106 @@ class TrainingRunStore:
                 (run_id,),
             ).fetchall()
         ]
+        hedge_state_payload = {
+            "schema_version": "replay.hedge-relational-state.v1",
+            "position_legs": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_position_leg
+                    WHERE run_id = ? ORDER BY track_id, position_side
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "margin_buckets": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_margin_bucket
+                    WHERE run_id = ? ORDER BY bucket_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "risk_snapshots": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_risk_snapshot
+                    WHERE run_id = ? ORDER BY snapshot_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "insurance_funds": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_insurance_fund
+                    WHERE run_id = ? ORDER BY asset
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "insurance_postings": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_insurance_posting
+                    WHERE run_id = ? ORDER BY asset, posting_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "adl_snapshots": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_snapshot
+                    WHERE run_id = ? ORDER BY case_id, cohort_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "adl_candidates": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_candidate
+                    WHERE run_id = ? ORDER BY snapshot_id, rank, candidate_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "adl_events": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_event
+                    WHERE run_id = ? ORDER BY case_id, step_sequence, adl_event_id
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "adl_selections": [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_selection
+                    WHERE run_id = ? ORDER BY adl_event_id, selection_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            ],
+            "liquidation_case_hashes": [
+                str(item["component_hash"]) for item in liquidations
+            ],
+        }
+        hedge_state = {
+            **hedge_state_payload,
+            "state_hash": canonical_sha256(hedge_state_payload),
+        }
         return {
             "schema_version": CONTRACT_ACCOUNT_SCHEMA_VERSION,
             "account_model": CONTRACT_ACCOUNT_MODEL,
@@ -10803,6 +11111,7 @@ class TrainingRunStore:
             },
             "next_funding_time_ms": account["next_funding_time_ms"],
             "liquidations": liquidations,
+            "hedge_state": hedge_state,
             "account_history": {
                 "mode": account_data_mode,
                 "status": (
@@ -10848,6 +11157,8 @@ class TrainingRunStore:
                     "fidelity": (
                         "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
                         if exact_account
+                        else HEDGE_INSURANCE_ADL_FIDELITY
+                        if account_data_mode == "DETERMINISTIC_SIMULATION"
                         else "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
                     ),
                 },
@@ -10872,9 +11183,25 @@ class TrainingRunStore:
                 "entries": [],
             },
             "fidelity": {
+                "hedge_public_history_ref": (
+                    None
+                    if run_contract["hedge_public_history_ref_json"] is None
+                    else json.loads(str(run_contract["hedge_public_history_ref_json"]))
+                ),
+                "simulation_manifest_ref": (
+                    None
+                    if run_contract["simulation_manifest_ref_json"] is None
+                    else json.loads(str(run_contract["simulation_manifest_ref_json"]))
+                ),
+                "simulation_contract_hash": run_contract["simulation_contract_hash"],
+                "simulation_model_version": run_contract["simulation_model_version"],
+                "account": run_contract["account_fidelity"],
+                "insurance_adl": run_contract["insurance_adl_fidelity"],
                 "instrument_rules": (
                     "HISTORICAL_EXACT_VERSIONED_EXCHANGE_RULE"
                     if exact_account
+                    else "PINNED_PUBLIC_HISTORY_VERSIONED_RULE"
+                    if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "AVAILABLE_APPROX_SIMULATION_RULES"
                 ),
                 "fees": CONFIGURED_FEE_FIDELITY,
@@ -10890,11 +11217,15 @@ class TrainingRunStore:
                 "mark": (
                     "HISTORICAL_EXACT_ARCHIVE_MARK"
                     if exact_account
+                    else "PINNED_PUBLIC_HISTORY_MARK"
+                    if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "REVEALED_PRICE_PROXY_NOT_HISTORICAL_MARK"
                 ),
                 "liquidation": (
                     "HISTORICAL_EXACT_INPUTS_MODELLED_ACCOUNT"
                     if exact_account
+                    else HEDGE_INSURANCE_ADL_FIDELITY
+                    if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
                 ),
             },
@@ -11114,6 +11445,38 @@ class TrainingRunStore:
                 now_ms,
             ),
         )
+        if request.position_mode.value == "HEDGE":
+            margin_component = {
+                "schema_version": "replay.margin-bucket.v1",
+                "bucket_id": f"cross:{request.settlement_asset}",
+                "bucket_kind": "CROSS",
+                "asset": request.settlement_asset,
+                "wallet_balance": request.initial_equity,
+                "initial_margin": "0",
+                "maintenance_margin": "0",
+                "reserved_margin": "0",
+                "available_balance": request.initial_equity,
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_margin_bucket(
+                    run_id, bucket_id, bucket_kind, track_id, position_side,
+                    asset, wallet_balance, initial_margin, maintenance_margin,
+                    reserved_margin, available_balance, component_revision,
+                    component_hash, updated_at_ms
+                ) VALUES (?, ?, 'CROSS', NULL, NULL, ?, ?, '0', '0', '0', ?,
+                          1, ?, ?)
+                """,
+                (
+                    run_id,
+                    margin_component["bucket_id"],
+                    request.settlement_asset,
+                    request.initial_equity,
+                    request.initial_equity,
+                    canonical_sha256(margin_component),
+                    now_ms,
+                ),
+            )
         cls._insert_contract_track_rule(
             connection,
             run_id=run_id,
@@ -11708,6 +12071,229 @@ class TrainingRunStore:
                 (parent_account["fidelity"], now_ms, child_run_id),
             )
 
+    @staticmethod
+    def _copy_hedge_relational_state(
+        connection: sqlite3.Connection,
+        *,
+        parent_run_id: str,
+        child_run_id: str,
+        parent_track_id: str,
+        child_track_id: str,
+        virtual_time_ms: int,
+        source_sequence: int,
+        now_ms: int,
+    ) -> bool:
+        """Copy one fork-visible relational HEDGE snapshot without flattening legs."""
+
+        def insert_rows(
+            table: str,
+            rows: Sequence[sqlite3.Row],
+            *,
+            track_columns: Sequence[str] = (),
+        ) -> None:
+            if not rows:
+                return
+            columns = tuple(rows[0].keys())
+            sql = (
+                f"INSERT INTO {table} ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})"
+            )
+            for row in rows:
+                values = dict(row)
+                values["run_id"] = child_run_id
+                for column in track_columns:
+                    if values.get(column) == parent_track_id:
+                        values[column] = child_track_id
+                for column in ("created_at_ms", "updated_at_ms"):
+                    if column in values:
+                        values[column] = now_ms
+                connection.execute(sql, tuple(values[column] for column in columns))
+
+        # Position and margin rows are mutable projections.  Rehydrating them from
+        # the selected actor checkpoint (below, via _detect_contract_liquidations)
+        # is the only cursor-correct fork behavior; copying the parent's latest
+        # rows would leak state from after the selected review event.
+        case_rows = tuple(
+            connection.execute(
+                """
+                SELECT DISTINCT case_row.*
+                FROM replay_training_liquidation_case AS case_row
+                JOIN replay_training_liquidation_leg AS leg
+                  ON leg.run_id = case_row.run_id AND leg.case_id = case_row.case_id
+                WHERE case_row.run_id = ? AND leg.track_id = ? AND (
+                    case_row.trigger_virtual_time_ms < ? OR (
+                        case_row.trigger_virtual_time_ms = ?
+                        AND case_row.trigger_source_sequence <= ?
+                    )
+                )
+                ORDER BY case_row.case_sequence
+                """,
+                (
+                    parent_run_id,
+                    parent_track_id,
+                    virtual_time_ms,
+                    virtual_time_ms,
+                    source_sequence,
+                ),
+            ).fetchall()
+        )
+        case_ids = tuple(str(row["case_id"]) for row in case_rows)
+        risk_ids = {
+            str(value)
+            for row in case_rows
+            for value in (row["trigger_snapshot_id"], row["final_snapshot_id"])
+            if value is not None
+        }
+        if risk_ids:
+            placeholders = ", ".join("?" for _ in risk_ids)
+            risk_rows = tuple(
+                connection.execute(
+                    f"""
+                    SELECT * FROM replay_training_risk_snapshot
+                    WHERE run_id = ? AND snapshot_id IN ({placeholders})
+                    ORDER BY snapshot_sequence
+                    """,
+                    (parent_run_id, *sorted(risk_ids)),
+                ).fetchall()
+            )
+            insert_rows("replay_training_risk_snapshot", risk_rows)
+        insert_rows("replay_training_liquidation_case", case_rows)
+        if not case_ids:
+            return False
+        placeholders = ", ".join("?" for _ in case_ids)
+        case_params = (parent_run_id, *case_ids)
+        leg_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_leg
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, leg_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows(
+            "replay_training_liquidation_leg",
+            leg_rows,
+            track_columns=("track_id",),
+        )
+        step_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, step_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_liquidation_step", step_rows)
+        order_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_order
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, step_sequence, order_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_liquidation_order", order_rows)
+        fill_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_liquidation_fill
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, order_id, fill_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_liquidation_fill", fill_rows)
+        fund_rows = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_insurance_fund
+                WHERE run_id = ? ORDER BY asset
+                """,
+                (parent_run_id,),
+            ).fetchall()
+        )
+        insert_rows("replay_training_insurance_fund", fund_rows)
+        insurance_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_insurance_posting
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY asset, posting_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_insurance_posting", insurance_rows)
+        adl_snapshot_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_adl_snapshot
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, cohort_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_adl_snapshot", adl_snapshot_rows)
+        adl_snapshot_ids = tuple(
+            str(row["snapshot_id"]) for row in adl_snapshot_rows
+        )
+        if adl_snapshot_ids:
+            adl_placeholders = ", ".join("?" for _ in adl_snapshot_ids)
+            candidate_rows = tuple(
+                connection.execute(
+                    f"""
+                    SELECT * FROM replay_training_adl_candidate
+                    WHERE run_id = ? AND snapshot_id IN ({adl_placeholders})
+                    ORDER BY snapshot_id, rank
+                    """,
+                    (parent_run_id, *adl_snapshot_ids),
+                ).fetchall()
+            )
+            insert_rows("replay_training_adl_candidate", candidate_rows)
+        adl_event_rows = tuple(
+            connection.execute(
+                f"""
+                SELECT * FROM replay_training_adl_event
+                WHERE run_id = ? AND case_id IN ({placeholders})
+                ORDER BY case_id, step_sequence
+                """,
+                case_params,
+            ).fetchall()
+        )
+        insert_rows("replay_training_adl_event", adl_event_rows)
+        adl_event_ids = tuple(str(row["adl_event_id"]) for row in adl_event_rows)
+        if adl_event_ids:
+            event_placeholders = ", ".join("?" for _ in adl_event_ids)
+            selection_rows = tuple(
+                connection.execute(
+                    f"""
+                    SELECT * FROM replay_training_adl_selection
+                    WHERE run_id = ? AND adl_event_id IN ({event_placeholders})
+                    ORDER BY adl_event_id, selection_sequence
+                    """,
+                    (parent_run_id, *adl_event_ids),
+                ).fetchall()
+            )
+            insert_rows("replay_training_adl_selection", selection_rows)
+        return any(
+            str(row["state"])
+            not in {
+                "COMPLETED",
+                "BANKRUPT",
+                "FAILED_CLOSED",
+                "RECOVERED_AFTER_CANCEL",
+            }
+            for row in case_rows
+        )
+
     @classmethod
     def _insert_fork_contract_account(
         cls,
@@ -11728,7 +12314,7 @@ class TrainingRunStore:
 
         parent = connection.execute(
             """
-            SELECT account.*, run.initial_equity
+            SELECT account.*, run.initial_equity, run.settlement_asset
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -12111,55 +12697,48 @@ class TrainingRunStore:
                         ),
                     )
 
-        liquidation_rows = tuple(
-            connection.execute(
-                """
-                SELECT * FROM replay_training_liquidation_event
-                WHERE run_id = ? AND (
-                    trigger_virtual_time_ms < ? OR
-                    (trigger_virtual_time_ms = ? AND trigger_source_sequence <= ?)
-                )
-                ORDER BY created_at_ms, liquidation_id
-                """,
-                (parent_run_id, virtual_time_ms, virtual_time_ms, source_sequence),
-            ).fetchall()
+        parent_track = connection.execute(
+            """
+            SELECT track_id FROM replay_training_market_track
+            WHERE run_id = ? ORDER BY stable_ordinal LIMIT 1
+            """,
+            (parent_run_id,),
+        ).fetchone()
+        if parent_track is None:
+            raise TypeError("parent fork track is missing")
+        cls._copy_hedge_relational_state(
+            connection,
+            parent_run_id=parent_run_id,
+            child_run_id=child_run_id,
+            parent_track_id=str(parent_track["track_id"]),
+            child_track_id="track-1",
+            virtual_time_ms=virtual_time_ms,
+            source_sequence=source_sequence,
+            now_ms=now_ms,
         )
-        for row in liquidation_rows:
+        # Build the child-owned, content-addressed position and margin snapshot
+        # from the selected checkpoint.  The detector is idempotent against any
+        # copied liquidation case with the same public source sequence.
+        cls._detect_contract_liquidations(
+            connection,
+            run_id=child_run_id,
+            now_ms=now_ms,
+            trigger_virtual_time_ms=virtual_time_ms,
+        )
+        has_pending_liquidation = (
             connection.execute(
                 """
-                INSERT INTO replay_training_liquidation_event(
-                    run_id, liquidation_id, track_id, state,
-                    trigger_virtual_time_ms, trigger_source_sequence,
-                    mark_price, position_quantity, position_notional,
-                    maintenance_margin, account_equity_before, bankruptcy_price,
-                    liquidation_fee, fidelity, canceled_order_ids_json,
-                    close_order_id, account_equity_after, reason,
-                    created_at_ms, updated_at_ms
-                ) VALUES (?, ?, 'track-1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?)
+                SELECT 1 FROM replay_training_liquidation_case
+                WHERE run_id = ? AND state NOT IN (
+                    'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
+                    'RECOVERED_AFTER_CANCEL'
+                )
+                LIMIT 1
                 """,
-                (
-                    child_run_id,
-                    row["liquidation_id"],
-                    row["state"],
-                    row["trigger_virtual_time_ms"],
-                    row["trigger_source_sequence"],
-                    row["mark_price"],
-                    row["position_quantity"],
-                    row["position_notional"],
-                    row["maintenance_margin"],
-                    row["account_equity_before"],
-                    row["bankruptcy_price"],
-                    row["liquidation_fee"],
-                    row["fidelity"],
-                    row["canceled_order_ids_json"],
-                    row["close_order_id"],
-                    row["account_equity_after"],
-                    row["reason"],
-                    now_ms,
-                    now_ms,
-                ),
-            )
+                (child_run_id,),
+            ).fetchone()
+            is not None
+        )
         current = connection.execute(
             """
             SELECT overlay_cash FROM replay_training_contract_account
@@ -12170,7 +12749,7 @@ class TrainingRunStore:
         overlay = Decimal(str(current["overlay_cash"])) + extra_cash
         status = (
             "LIQUIDATING"
-            if any(str(row["state"]) == "PENDING" for row in liquidation_rows)
+            if has_pending_liquidation
             else "ACTIVE"
         )
         connection.execute(
@@ -12354,17 +12933,25 @@ class TrainingRunStore:
                 run_id, adapter_session_id, protocol,
                 schema_version, name, state, source_kind, start_mode,
                 integrity_mode, time_disclosure_policy, book_mode, margin_mode,
-                funding_mode, execution_model, allow_rule_changes, exchange,
+                position_mode, funding_mode, account_data_mode,
+                hedge_public_history_ref_json, simulation_manifest_ref_json,
+                simulation_contract_hash, simulation_model_version,
+                account_fidelity, insurance_adl_fidelity,
+                execution_model, allow_rule_changes, exchange,
                 market_type, last_symbol, settlement_asset, base_interval,
                 display_interval, initial_equity, current_equity, summary_revision,
                 revision, source_sequence, virtual_time_ms, active_rule_revision,
                 catalog_epoch, dataset_epoch, compatibility, created_at_ms,
                 updated_at_ms, saved_at_ms
             ) VALUES (
-                :run_id, :adapter_session_id, 'replay.v2',
-                'replay.training.v1', :name, :state, :source_kind, :start_mode,
+                :run_id, :adapter_session_id, 'replay.v3',
+                'replay.training.v2', :name, :state, :source_kind, :start_mode,
                 :integrity_mode, :time_disclosure_policy, :book_mode, :margin_mode,
-                :funding_mode, 'TOUCH_OR_TAPE_V2', :allow_rule_changes, :exchange,
+                :position_mode, :funding_mode, :account_data_mode,
+                :hedge_public_history_ref_json, :simulation_manifest_ref_json,
+                :simulation_contract_hash, :simulation_model_version,
+                :account_fidelity, :insurance_adl_fidelity,
+                'TOUCH_OR_TAPE_V2', :allow_rule_changes, :exchange,
                 :market_type, :last_symbol, :settlement_asset, :base_interval,
                 :display_interval, :initial_equity, :current_equity, :summary_revision,
                 :revision, :source_sequence, :virtual_time_ms, 1,
@@ -13659,7 +14246,7 @@ class TrainingRunStore:
     ) -> None:
         account = connection.execute(
             """
-            SELECT account.*, run.initial_equity
+            SELECT account.*, run.initial_equity, run.settlement_asset
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -13687,6 +14274,17 @@ class TrainingRunStore:
                 InstrumentRule,
                 Decimal,
                 str | None,
+                int,
+            ]
+        ] = []
+        position_components: list[
+            tuple[
+                sqlite3.Row,
+                dict[str, object],
+                InstrumentRule,
+                Decimal,
+                str | None,
+                int,
             ]
         ] = []
         total_maintenance = Decimal(0)
@@ -13706,7 +14304,6 @@ class TrainingRunStore:
                         ("SHORT", position.get("short")),
                     )
                     if isinstance(leg, dict)
-                    and Decimal(str(leg.get("quantity", "0"))) != 0
                 )
             else:
                 legs = (
@@ -13718,7 +14315,7 @@ class TrainingRunStore:
                 continue
             rule_row = connection.execute(
                 """
-                SELECT rule_json FROM replay_training_instrument_rule
+                SELECT revision, rule_json FROM replay_training_instrument_rule
                 WHERE run_id = ? AND track_id = ? ORDER BY revision DESC LIMIT 1
                 """,
                 (run_id, track["track_id"]),
@@ -13728,15 +14325,270 @@ class TrainingRunStore:
             rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
             for position_side, leg in legs:
                 maintenance = rule.maintenance_margin(
-                    Decimal(str(leg["notional"]))
+                    abs(Decimal(str(leg.get("notional", "0"))))
                 )
-                total_maintenance += maintenance
-                positions.append((track, leg, rule, maintenance, position_side))
+                item = (
+                    track,
+                    leg,
+                    rule,
+                    maintenance,
+                    position_side,
+                    int(rule_row["revision"]),
+                )
+                position_components.append(item)
+                if Decimal(str(leg.get("quantity", "0"))) != 0:
+                    total_maintenance += maintenance
+                    positions.append(item)
+        total_initial_margin = Decimal(0)
+        total_unrealized = Decimal(0)
+        for (
+            track,
+            leg,
+            rule,
+            maintenance,
+            raw_position_side,
+            rule_revision,
+        ) in position_components:
+            raw_quantity = Decimal(str(leg["quantity"]))
+            position_side = raw_position_side or (
+                "LONG" if raw_quantity > 0 else "SHORT"
+            )
+            absolute_quantity = abs(raw_quantity)
+            signed_quantity = (
+                absolute_quantity if position_side == "LONG" else -absolute_quantity
+            )
+            notional = abs(Decimal(str(leg["notional"])))
+            leverage = Decimal(str(leg.get("leverage", rule.max_leverage)))
+            if leverage <= 0:
+                leverage = Decimal(rule.max_leverage)
+            initial_margin = Decimal(0) if notional == 0 else notional / leverage
+            total_initial_margin += initial_margin
+            total_unrealized += Decimal(str(leg.get("unrealized_pnl", "0")))
+            risk_tier = next(
+                (
+                    index
+                    for index, tier in enumerate(rule.maintenance_tiers, start=1)
+                    if notional <= Decimal(tier.notional_cap)
+                ),
+                len(rule.maintenance_tiers),
+            )
+            component = {
+                "schema_version": "replay.position-leg.v1",
+                "track_id": str(track["track_id"]),
+                "position_side": position_side,
+                "signed_quantity": decimal_to_string(
+                    signed_quantity,
+                    field_name="position signed quantity",
+                ),
+                "absolute_quantity": decimal_to_string(
+                    absolute_quantity,
+                    field_name="position absolute quantity",
+                ),
+                "entry_price": leg.get("entry_price"),
+                "mark_price": leg.get("mark_price", track["public_price"]),
+                "notional": decimal_to_string(notional, field_name="position notional"),
+                "realized_pnl": str(leg.get("realized_pnl", "0")),
+                "unrealized_pnl": str(leg.get("unrealized_pnl", "0")),
+                "initial_margin": decimal_to_string(
+                    initial_margin,
+                    field_name="position initial margin",
+                ),
+                "maintenance_margin": decimal_to_string(
+                    maintenance,
+                    field_name="position maintenance margin",
+                ),
+                "leverage": decimal_to_string(leverage, field_name="position leverage"),
+                "margin_mode": str(account["margin_mode"]),
+                "isolated_wallet": str(
+                    json.loads(str(account["isolated_margin_json"])).get(
+                        str(track["track_id"]),
+                        "0",
+                    )
+                ),
+                "liquidation_price": leg.get("liquidation_price"),
+                "bankruptcy_price": leg.get("bankruptcy_price"),
+                "accumulated_funding": str(leg.get("accumulated_funding", "0")),
+                "trading_fees": str(leg.get("trading_fees", "0")),
+                "liquidation_fees": str(leg.get("liquidation_fees", "0")),
+                "risk_tier": risk_tier,
+                "rule_revision": rule_revision,
+                "protection": leg.get("protection", {}),
+            }
+            component_hash = canonical_sha256(component)
+            connection.execute(
+                """
+                INSERT INTO replay_training_position_leg(
+                    run_id, track_id, position_side, signed_quantity,
+                    absolute_quantity, entry_price, mark_price, notional,
+                    realized_pnl, unrealized_pnl, initial_margin,
+                    maintenance_margin, leverage, margin_mode, isolated_wallet,
+                    liquidation_price, bankruptcy_price, accumulated_funding,
+                    trading_fees, liquidation_fees, risk_tier, rule_revision,
+                    protection_json, component_revision, component_hash,
+                    created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(run_id, track_id, position_side) DO UPDATE SET
+                    signed_quantity = excluded.signed_quantity,
+                    absolute_quantity = excluded.absolute_quantity,
+                    entry_price = excluded.entry_price,
+                    mark_price = excluded.mark_price,
+                    notional = excluded.notional,
+                    realized_pnl = excluded.realized_pnl,
+                    unrealized_pnl = excluded.unrealized_pnl,
+                    initial_margin = excluded.initial_margin,
+                    maintenance_margin = excluded.maintenance_margin,
+                    leverage = excluded.leverage,
+                    margin_mode = excluded.margin_mode,
+                    isolated_wallet = excluded.isolated_wallet,
+                    liquidation_price = excluded.liquidation_price,
+                    bankruptcy_price = excluded.bankruptcy_price,
+                    accumulated_funding = excluded.accumulated_funding,
+                    trading_fees = excluded.trading_fees,
+                    liquidation_fees = excluded.liquidation_fees,
+                    risk_tier = excluded.risk_tier,
+                    rule_revision = excluded.rule_revision,
+                    protection_json = excluded.protection_json,
+                    component_revision = replay_training_position_leg.component_revision + 1,
+                    component_hash = excluded.component_hash,
+                    updated_at_ms = excluded.updated_at_ms
+                """,
+                (
+                    run_id,
+                    track["track_id"],
+                    position_side,
+                    component["signed_quantity"],
+                    component["absolute_quantity"],
+                    component["entry_price"],
+                    component["mark_price"],
+                    component["notional"],
+                    component["realized_pnl"],
+                    component["unrealized_pnl"],
+                    component["initial_margin"],
+                    component["maintenance_margin"],
+                    component["leverage"],
+                    component["margin_mode"],
+                    component["isolated_wallet"],
+                    component["liquidation_price"],
+                    component["bankruptcy_price"],
+                    component["accumulated_funding"],
+                    component["trading_fees"],
+                    component["liquidation_fees"],
+                    risk_tier,
+                    rule_revision,
+                    canonical_json(component["protection"]),
+                    component_hash,
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            bucket = {
+                "schema_version": "replay.margin-bucket.v1",
+                "bucket_id": f"position:{track['track_id']}:{position_side}",
+                "bucket_kind": "POSITION",
+                "track_id": str(track["track_id"]),
+                "position_side": position_side,
+                "asset": str(account["settlement_asset"]),
+                "wallet_balance": "0",
+                "initial_margin": component["initial_margin"],
+                "maintenance_margin": component["maintenance_margin"],
+                "reserved_margin": "0",
+                "available_balance": "0",
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_margin_bucket(
+                    run_id, bucket_id, bucket_kind, track_id, position_side,
+                    asset, wallet_balance, initial_margin, maintenance_margin,
+                    reserved_margin, available_balance, component_revision,
+                    component_hash, updated_at_ms
+                ) VALUES (?, ?, 'POSITION', ?, ?, ?, '0', ?, ?, '0', '0',
+                          1, ?, ?)
+                ON CONFLICT(run_id, bucket_id) DO UPDATE SET
+                    initial_margin = excluded.initial_margin,
+                    maintenance_margin = excluded.maintenance_margin,
+                    component_revision = replay_training_margin_bucket.component_revision + 1,
+                    component_hash = excluded.component_hash,
+                    updated_at_ms = excluded.updated_at_ms
+                """,
+                (
+                    run_id,
+                    bucket["bucket_id"],
+                    track["track_id"],
+                    position_side,
+                    account["settlement_asset"],
+                    bucket["initial_margin"],
+                    bucket["maintenance_margin"],
+                    canonical_sha256(bucket),
+                    now_ms,
+                ),
+            )
+        if position_components:
+            wallet_balance = equity - total_unrealized
+            available_balance = equity - total_initial_margin
+            cross_bucket = {
+                "schema_version": "replay.margin-bucket.v1",
+                "bucket_id": f"cross:{account['settlement_asset']}",
+                "bucket_kind": "CROSS",
+                "asset": str(account["settlement_asset"]),
+                "wallet_balance": decimal_to_string(
+                    wallet_balance,
+                    field_name="cross wallet balance",
+                ),
+                "initial_margin": decimal_to_string(
+                    total_initial_margin,
+                    field_name="cross initial margin",
+                ),
+                "maintenance_margin": decimal_to_string(
+                    total_maintenance,
+                    field_name="cross maintenance margin",
+                ),
+                "reserved_margin": "0",
+                "available_balance": decimal_to_string(
+                    available_balance,
+                    field_name="cross available balance",
+                ),
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_margin_bucket(
+                    run_id, bucket_id, bucket_kind, track_id, position_side,
+                    asset, wallet_balance, initial_margin, maintenance_margin,
+                    reserved_margin, available_balance, component_revision,
+                    component_hash, updated_at_ms
+                ) VALUES (?, ?, 'CROSS', NULL, NULL, ?, ?, ?, ?, '0', ?, 1, ?, ?)
+                ON CONFLICT(run_id, bucket_id) DO UPDATE SET
+                    wallet_balance = excluded.wallet_balance,
+                    initial_margin = excluded.initial_margin,
+                    maintenance_margin = excluded.maintenance_margin,
+                    reserved_margin = excluded.reserved_margin,
+                    available_balance = excluded.available_balance,
+                    component_revision = replay_training_margin_bucket.component_revision + 1,
+                    component_hash = excluded.component_hash,
+                    updated_at_ms = excluded.updated_at_ms
+                """,
+                (
+                    run_id,
+                    cross_bucket["bucket_id"],
+                    account["settlement_asset"],
+                    cross_bucket["wallet_balance"],
+                    cross_bucket["initial_margin"],
+                    cross_bucket["maintenance_margin"],
+                    cross_bucket["available_balance"],
+                    canonical_sha256(cross_bucket),
+                    now_ms,
+                ),
+            )
         if not positions:
             pending = connection.execute(
                 """
-                SELECT 1 FROM replay_training_liquidation_event
-                WHERE run_id = ? AND state = 'PENDING' LIMIT 1
+                SELECT 1 FROM replay_training_liquidation_case
+                WHERE run_id = ?
+                  AND state NOT IN (
+                      'COMPLETED', 'BANKRUPT', 'FAILED_CLOSED',
+                      'RECOVERED_AFTER_CANCEL'
+                  )
+                LIMIT 1
                 """,
                 (run_id,),
             ).fetchone()
@@ -13752,13 +14604,22 @@ class TrainingRunStore:
         isolated = json.loads(str(account["isolated_margin_json"]))
         if not isinstance(isolated, dict):
             raise TypeError("isolated margin allocation is invalid")
-        affected: list[tuple[sqlite3.Row, dict[str, object], InstrumentRule, Decimal]] = []
+        affected: list[
+            tuple[
+                sqlite3.Row,
+                dict[str, object],
+                InstrumentRule,
+                Decimal,
+                str | None,
+                int,
+            ]
+        ] = []
         if str(account["margin_mode"]) == "CROSS":
             if equity <= total_maintenance:
                 affected = positions
         else:
             for item in positions:
-                track, position, _rule, maintenance, _position_side = item
+                track, position, _rule, maintenance, _position_side, _revision = item
                 allocated = Decimal(str(isolated.get(str(track["track_id"]), "0")))
                 isolated_equity = allocated + Decimal(str(position["unrealized_pnl"]))
                 if isolated_equity <= maintenance:
@@ -13772,6 +14633,7 @@ class TrainingRunStore:
                     InstrumentRule,
                     Decimal,
                     str | None,
+                    int,
                 ]
             ],
         ] = {}
@@ -13779,72 +14641,265 @@ class TrainingRunStore:
             grouped.setdefault(str(item[0]["track_id"]), []).append(item)
         for track_id, group in grouped.items():
             track = group[0][0]
-            rule = group[0][2]
             sequence = int(track["source_sequence"] or 0)
             liquidation_id = f"liq-{track_id}-{sequence:010d}"
-            quantity = sum(
-                (Decimal(str(item[1]["quantity"])) for item in group),
-                Decimal(0),
+            if connection.execute(
+                """
+                SELECT 1 FROM replay_training_liquidation_case
+                WHERE run_id = ? AND case_id = ?
+                """,
+                (run_id, liquidation_id),
+            ).fetchone() is not None:
+                continue
+            virtual_time_ms = (
+                int(track["virtual_time_ms"] or 0)
+                if trigger_virtual_time_ms is None
+                else trigger_virtual_time_ms
             )
-            notional = sum(
-                (Decimal(str(item[1]["notional"])) for item in group),
-                Decimal(0),
+            snapshot_id = f"risk-{track_id}-{sequence:010d}"
+            snapshot_sequence = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(snapshot_sequence), 0) + 1
+                    FROM replay_training_risk_snapshot WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
             )
-            maintenance = sum((item[3] for item in group), Decimal(0))
+            risk_payload = {
+                "schema_version": "replay.risk-snapshot.v1",
+                "snapshot_id": snapshot_id,
+                "virtual_time_ms": virtual_time_ms,
+                "source_sequence": sequence,
+                "equity": decimal_to_string(equity, field_name="account equity"),
+                "total_maintenance_margin": decimal_to_string(
+                    total_maintenance,
+                    field_name="total maintenance margin",
+                ),
+                "active_rule_revision": max(item[5] for item in group),
+                "position_hashes": [
+                    str(
+                        connection.execute(
+                            """
+                            SELECT component_hash FROM replay_training_position_leg
+                            WHERE run_id = ? AND track_id = ? AND position_side = ?
+                            """,
+                            (
+                                run_id,
+                                track_id,
+                                item[4]
+                                or (
+                                    "LONG"
+                                    if Decimal(str(item[1]["quantity"])) > 0
+                                    else "SHORT"
+                                ),
+                            ),
+                        ).fetchone()["component_hash"]
+                    )
+                    for item in group
+                ],
+            }
+            risk_hash = canonical_sha256(risk_payload)
+            connection.execute(
+                """
+                INSERT INTO replay_training_risk_snapshot(
+                    run_id, snapshot_id, snapshot_sequence, virtual_time_ms,
+                    source_sequence, account_status, equity, available_balance,
+                    total_initial_margin, total_maintenance_margin, risk_ratio,
+                    active_rule_revision, public_input_hash, component_hash,
+                    created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'RISK_BREACH_DETECTED', ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    snapshot_id,
+                    snapshot_sequence,
+                    virtual_time_ms,
+                    sequence,
+                    risk_payload["equity"],
+                    decimal_to_string(
+                        equity - total_maintenance,
+                        field_name="available balance",
+                    ),
+                    "0",
+                    risk_payload["total_maintenance_margin"],
+                    (
+                        None
+                        if equity == 0
+                        else decimal_to_string(
+                            total_maintenance / equity,
+                            field_name="risk ratio",
+                        )
+                    ),
+                    risk_payload["active_rule_revision"],
+                    canonical_sha256(
+                        {
+                            "dataset_epoch": track["dataset_epoch"],
+                            "virtual_time_ms": virtual_time_ms,
+                            "source_sequence": sequence,
+                        }
+                    ),
+                    risk_hash,
+                    now_ms,
+                ),
+            )
+            case_sequence = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(case_sequence), 0) + 1
+                    FROM replay_training_liquidation_case WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            case_payload = {
+                "schema_version": "replay.liquidation-case.v1",
+                "case_id": liquidation_id,
+                "case_sequence": case_sequence,
+                "trigger_snapshot_id": snapshot_id,
+                "track_id": track_id,
+                "leg_sides": [
+                    item[4]
+                    or (
+                        "LONG"
+                        if Decimal(str(item[1]["quantity"])) > 0
+                        else "SHORT"
+                    )
+                    for item in group
+                ],
+            }
+            connection.execute(
+                """
+                INSERT INTO replay_training_liquidation_case(
+                    run_id, case_id, case_sequence, state, trigger_snapshot_id,
+                    final_snapshot_id, trigger_virtual_time_ms,
+                    trigger_source_sequence, reason, fidelity, component_hash,
+                    created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, 'RISK_BREACH_DETECTED', ?, NULL, ?, ?,
+                          'MAINTENANCE_MARGIN_BREACH', ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    liquidation_id,
+                    case_sequence,
+                    snapshot_id,
+                    virtual_time_ms,
+                    sequence,
+                    group[0][2].mark_fidelity,
+                    canonical_sha256(case_payload),
+                    now_ms,
+                    now_ms,
+                ),
+            )
             allocation = (
                 equity
                 if str(account["margin_mode"]) == "CROSS"
                 else Decimal(str(isolated.get(track_id, "0")))
             )
-            bankruptcy: Decimal | None = None
-            if len(group) == 1 and quantity != 0:
-                entry = Decimal(str(group[0][1]["entry_price"]))
+            for leg_sequence, item in enumerate(group, start=1):
+                _track, leg, rule, maintenance, raw_side, _revision = item
+                quantity = Decimal(str(leg["quantity"]))
+                position_side = raw_side or ("LONG" if quantity > 0 else "SHORT")
+                absolute_quantity = abs(quantity)
+                notional = abs(Decimal(str(leg["notional"])))
+                bankruptcy: Decimal | None = None
+                entry = Decimal(str(leg["entry_price"]))
                 bankruptcy = entry - (
-                    allocation / (abs(quantity) * Decimal(rule.contract_size))
+                    allocation
+                    / Decimal(len(group))
+                    / (absolute_quantity * Decimal(rule.contract_size))
                 ) * (
-                    Decimal(1) if quantity > 0 else Decimal(-1)
+                    Decimal(1) if position_side == "LONG" else Decimal(-1)
                 )
                 bankruptcy = max(Decimal(0), bankruptcy)
-            fee = rule.liquidation_fee(notional)
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO replay_training_liquidation_event(
-                    run_id, liquidation_id, track_id, state,
-                    trigger_virtual_time_ms, trigger_source_sequence,
-                    mark_price, position_quantity, position_notional,
-                    maintenance_margin, account_equity_before, bankruptcy_price,
-                    liquidation_fee, fidelity, canceled_order_ids_json,
-                    close_order_id, account_equity_after, reason,
-                    created_at_ms, updated_at_ms
-                ) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          '[]', NULL, NULL, 'MAINTENANCE_MARGIN_BREACH', ?, ?)
-                """,
-                (
-                    run_id,
-                    liquidation_id,
-                    track["track_id"],
-                    (
-                        int(track["virtual_time_ms"] or 0)
-                        if trigger_virtual_time_ms is None
-                        else trigger_virtual_time_ms
+                fee = rule.liquidation_fee(notional)
+                leg_id = f"{liquidation_id}-{position_side.lower()}"
+                leg_payload = {
+                    "schema_version": "replay.liquidation-leg.v1",
+                    "case_id": liquidation_id,
+                    "liquidation_leg_id": leg_id,
+                    "track_id": track_id,
+                    "position_side": position_side,
+                    "trigger_quantity": decimal_to_string(
+                        absolute_quantity,
+                        field_name="liquidation leg quantity",
                     ),
-                    sequence,
-                    group[0][1]["mark_price"],
-                    decimal_to_string(quantity, field_name="liquidation net quantity"),
-                    decimal_to_string(notional, field_name="liquidation gross notional"),
-                    decimal_to_string(maintenance, field_name="maintenance margin"),
-                    decimal_to_string(equity, field_name="account equity"),
-                    (
-                        None
-                        if bankruptcy is None
-                        else decimal_to_string(bankruptcy, field_name="bankruptcy price")
+                    "trigger_notional": decimal_to_string(
+                        notional,
+                        field_name="liquidation leg notional",
                     ),
-                    decimal_to_string(fee, field_name="liquidation fee"),
-                    rule.mark_fidelity,
-                    now_ms,
-                    now_ms,
-                ),
-            )
+                    "maintenance_margin": decimal_to_string(
+                        maintenance,
+                        field_name="liquidation leg maintenance",
+                    ),
+                    "bankruptcy_price": decimal_to_string(
+                        bankruptcy,
+                        field_name="bankruptcy price",
+                    ),
+                    "liquidation_fee": decimal_to_string(
+                        fee,
+                        field_name="liquidation fee",
+                    ),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_leg(
+                        run_id, case_id, liquidation_leg_id, leg_sequence,
+                        track_id, position_side, trigger_quantity,
+                        trigger_notional, maintenance_margin, bankruptcy_price,
+                        takeover_price, liquidation_fee, target_quantity,
+                        completed_quantity, state, component_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, '0',
+                              'PENDING', ?)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        leg_id,
+                        leg_sequence,
+                        track_id,
+                        position_side,
+                        leg_payload["trigger_quantity"],
+                        leg_payload["trigger_notional"],
+                        leg_payload["maintenance_margin"],
+                        leg_payload["bankruptcy_price"],
+                        leg_payload["liquidation_fee"],
+                        leg_payload["trigger_quantity"],
+                        canonical_sha256(leg_payload),
+                    ),
+                )
+            for step_sequence, step_type in (
+                (1, "CANCEL_ORDERS"),
+                (2, "FULL_LIQUIDATION"),
+            ):
+                step_payload = {
+                    "schema_version": "replay.liquidation-step.v1",
+                    "case_id": liquidation_id,
+                    "step_sequence": step_sequence,
+                    "step_type": step_type,
+                    "before_snapshot_id": snapshot_id,
+                }
+                connection.execute(
+                    """
+                    INSERT INTO replay_training_liquidation_step(
+                        run_id, case_id, step_sequence, step_type, state,
+                        before_snapshot_id, after_snapshot_id, reason,
+                        idempotency_key, step_hash, created_at_ms, committed_at_ms
+                    ) VALUES (?, ?, ?, ?, 'PENDING', ?, NULL,
+                              'MAINTENANCE_MARGIN_BREACH', ?, ?, ?, NULL)
+                    """,
+                    (
+                        run_id,
+                        liquidation_id,
+                        step_sequence,
+                        step_type,
+                        snapshot_id,
+                        f"{liquidation_id}:{step_sequence}",
+                        canonical_sha256(step_payload),
+                        now_ms,
+                    ),
+                )
         if affected:
             connection.execute(
                 """

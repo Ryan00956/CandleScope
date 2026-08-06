@@ -173,7 +173,7 @@ async def _base_request(service: ReplayService) -> TrainingRunCreateRequest:
     )
     return TrainingRunCreateRequest.from_dict(
         {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "catalog_epoch": catalog["catalog_epoch"],
             "name": "Phase 16 exact account",
             "source_kind": "BAR",
@@ -197,6 +197,8 @@ async def _base_request(service: ReplayService) -> TrainingRunCreateRequest:
             "time_disclosure_policy": "NONE",
             "book_mode": "OFF",
             "margin_mode": "CROSS",
+            "position_mode": "ONE_WAY",
+            "account_data_mode": "APPROX_PROXY",
             "funding_mode": "OFF",
             "allow_rule_changes": False,
         }
@@ -218,6 +220,7 @@ def _exact_request(
             "account_history_ref": reference,
             "funding_mode": "HISTORICAL_EXACT" if funding else "OFF",
             "margin_mode": margin_mode,
+            "position_mode": "ONE_WAY",
         }
     )
     if initial_equity is not None:
@@ -1090,10 +1093,17 @@ async def test_exact_mark_drives_modelled_liquidation_not_market_feed(
             limit=50,
         )
         entry_fill = next(fill for fill in fill_page["items"] if fill["side"] == "BUY")
-        assert Decimal(liquidation["bankruptcy_price"]) == (
+        assert len(liquidation["legs"]) == 1
+        leg = liquidation["legs"][0]
+        risk_snapshot = next(
+            snapshot
+            for snapshot in portfolio["hedge_state"]["risk_snapshots"]
+            if snapshot["snapshot_id"] == liquidation["trigger_snapshot_id"]
+        )
+        assert Decimal(leg["bankruptcy_price"]) == (
             Decimal(entry_fill["price"])
-            - Decimal(liquidation["account_equity_before"])
-            / (abs(Decimal(liquidation["position_quantity"])) * Decimal("10"))
+            - Decimal(risk_snapshot["equity"])
+            / (Decimal(leg["trigger_quantity"]) * Decimal("10"))
         ), liquidation
         assert (
             portfolio["liquidation_channels"]["simulated_account"]["fidelity"]

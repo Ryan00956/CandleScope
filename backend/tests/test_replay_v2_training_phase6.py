@@ -33,6 +33,8 @@ from app.replay.training.account import (
 )
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import (
+    HEDGE_ACCOUNT_FIDELITY,
+    HEDGE_INSURANCE_ADL_FIDELITY,
     POLICY_MUTATION_VALUES,
     ReplayV2CommandType,
     TrainingRunCreateRequest,
@@ -936,10 +938,14 @@ async def test_simulated_liquidation_closes_normally_and_stays_distinct(
         assert len(portfolio["liquidations"]) == 1
         event = portfolio["liquidations"][0]
         assert event["state"] == "COMPLETED"
-        assert event["close_order_id"] is not None
+        assert len(event["legs"]) == 1
+        assert any(
+            step["step_type"] == "FULL_LIQUIDATION" and step["orders"]
+            for step in event["steps"]
+        )
         assert event["reason"] == "MAINTENANCE_MARGIN_BREACH"
         assert event["fidelity"] == "REVEALED_BAR_CLOSE_PROXY"
-        assert event["account_equity_after"] == portfolio["equity"]
+        assert portfolio["equity"] == portfolio["cash_balance"]
         assert portfolio["fidelity"]["liquidation"] == (
             "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
         )
@@ -956,7 +962,29 @@ async def test_cross_hedge_liquidation_closes_and_records_each_leg(
             await _request(service),
             initial_equity="100",
         ).to_dict()
-        request_payload["position_mode"] = "HEDGE"
+        request_payload.update(
+            {
+                "position_mode": "HEDGE",
+                "account_data_mode": "DETERMINISTIC_SIMULATION",
+                "account_history_ref": None,
+                "hedge_public_history_ref": {
+                    "schema_version": "replay.hedge-public-history-ref.v1",
+                    "archive_id": "phase1-public-btcusdt-v1",
+                    "dataset_epoch": "sha256:" + "2" * 64,
+                    "checksum_sha256": "sha256:" + "3" * 64,
+                },
+                "simulation_manifest_ref": {
+                    "schema_version": "replay.hedge-simulation-manifest-ref.v1",
+                    "manifest_id": "phase0-btcusdt-v1",
+                    "dataset_epoch": "sha256:" + "1" * 64,
+                    "checksum_sha256": "sha256:a5fe1beb59b87a6a000faa6f46d9871394288c48acd84f2a7295b710d92a1236",
+                    "contract_hash": "sha256:eb93972d289057909f7c8fd8ef66376876f7e0c60b2e46dbe6c5ca4c609f9c4b",
+                    "model_version": "BINANCE_USDM_LINEAR_HEDGE_DETERMINISTIC_SIMULATION_V1",
+                },
+                "account_fidelity": HEDGE_ACCOUNT_FIDELITY,
+                "insurance_adl_fidelity": HEDGE_INSURANCE_ADL_FIDELITY,
+            }
+        )
         created = await service.training.create_run(  # type: ignore[union-attr]
             TrainingRunCreateRequest.from_dict(request_payload)
         )
@@ -1012,10 +1040,56 @@ async def test_cross_hedge_liquidation_closes_and_records_each_leg(
         assert portfolio["positions"] == []
         events = portfolio["liquidations"]
         assert len(events) == 1
-        assert events[0]["position_quantity"] == "2"
-        assert events[0]["position_notional"] == "141.4"
-        assert events[0]["bankruptcy_price"] is None
-        assert all(item["state"] == "COMPLETED" for item in events)
-        assert all(item["close_order_id"] is not None for item in events)
+        event = events[0]
+        assert event["state"] == "COMPLETED"
+        assert {
+            (leg["position_side"], leg["trigger_quantity"])
+            for leg in event["legs"]
+        } == {("LONG", "2.4"), ("SHORT", "0.4")}
+        close_orders = [
+            order
+            for step in event["steps"]
+            if step["step_type"] == "FULL_LIQUIDATION"
+            for order in step["orders"]
+        ]
+        assert len(close_orders) == 2
+        assert {order["liquidation_leg_id"] for order in close_orders} == {
+            leg["liquidation_leg_id"] for leg in event["legs"]
+        }
+        review = await service.training.start_review(  # type: ignore[union-attr]
+            run_id,
+            event_id=None,
+        )
+        forked = await service.training.fork_run(  # type: ignore[union-attr]
+            run_id,
+            event_id=str(review["selected_event_id"]),
+        )
+        child_run_id = str(forked["run"]["run_id"])
+        child_portfolio = (
+            await service.training.get_market_tracks(child_run_id)  # type: ignore[union-attr]
+        )["portfolio"]
+        assert child_portfolio["positions"] == []
+        child_events = child_portfolio["liquidations"]
+        assert len(child_events) == 1
+        assert child_events[0]["run_id"] == child_run_id
+        assert {
+            key: child_events[0][key]
+            for key in ("case_id", "state", "reason", "component_hash")
+        } == {
+            key: event[key]
+            for key in ("case_id", "state", "reason", "component_hash")
+        }
+        assert [
+            (leg["position_side"], leg["trigger_quantity"], leg["component_hash"])
+            for leg in child_events[0]["legs"]
+        ] == [
+            (leg["position_side"], leg["trigger_quantity"], leg["component_hash"])
+            for leg in event["legs"]
+        ]
+        assert {
+            (leg["position_side"], leg["absolute_quantity"])
+            for leg in child_portfolio["hedge_state"]["position_legs"]
+        } == {("LONG", "0"), ("SHORT", "0")}
+        assert child_portfolio["hedge_state"]["state_hash"].startswith("sha256:")
     finally:
         await service.shutdown(step_timeout=1.0)

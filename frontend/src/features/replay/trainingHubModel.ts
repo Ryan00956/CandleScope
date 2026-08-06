@@ -15,6 +15,10 @@ import type {
   TrainingRunCreatePayload,
   TrainingRunPreparationPayload,
 } from "./replayV2Types.js";
+import {
+  HEDGE_ACCOUNT_FIDELITY,
+  HEDGE_INSURANCE_ADL_FIDELITY,
+} from "./replayV2Types.js";
 import { intervalTiles, parseIntervalSeconds } from "../../utils/intervals.js";
 import type { ReplaySegmentPreparePlan } from "./replaySegmentTypes.js";
 import {
@@ -127,9 +131,9 @@ export function createTrainingRunDraft(
     takerFeeBps: "5",
     marketSlippageBps: "1",
     marginMode: "CROSS",
-    positionMode: "ONE_WAY",
+    positionMode: "HEDGE",
     fundingMode: "OFF",
-    accountDataMode: "APPROX_PROXY",
+    accountDataMode: "DETERMINISTIC_SIMULATION",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
     bookMode: "OFF",
@@ -347,11 +351,12 @@ export function evaluateTrainingRunDraft(
     }
   }
   if (draft.fundingMode === "HISTORICAL_EXACT") {
-    if (draft.accountDataMode !== "HISTORICAL_EXACT") {
-      errors.push("历史精确资金费必须同时选择精确账户历史");
-    } else if (accountHistoryPlan === null
+    if (draft.accountDataMode !== "HISTORICAL_EXACT"
+      && draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
+      errors.push("历史精确资金费必须使用固定历史输入");
+    } else if (draft.accountDataMode === "HISTORICAL_EXACT" && (accountHistoryPlan === null
       || accountHistoryPlan.capability_state !== "AVAILABLE_EXACT"
-      || !accountHistoryPlan.historical_funding_exact) {
+      || !accountHistoryPlan.historical_funding_exact)) {
       errors.push("当前精确账户归档没有完整 funding 与同刻 mark");
     }
   } else if (draft.fundingMode === "SANDBOX_FIXED") {
@@ -368,10 +373,11 @@ export function evaluateTrainingRunDraft(
     }
   }
   if (draft.positionMode === "HEDGE") {
-    if (draft.accountDataMode !== "APPROX_PROXY") errors.push("双向持仓目前仅支持近似模拟账户");
-    if (draft.marginMode !== "CROSS") errors.push("双向持仓目前仅支持全仓保证金");
-    if (draft.fundingMode !== "OFF") errors.push("双向持仓目前要求关闭资金费");
-    if (draft.bookMode !== "OFF") errors.push("双向持仓目前仅支持 Touch/Tape 撮合");
+    if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
+      errors.push("双向持仓必须使用版本化确定性模拟账户");
+    }
+  } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
+    errors.push("确定性双向模拟账户不能用于单向持仓");
   }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
@@ -468,8 +474,9 @@ export function evaluateTrainingRunSetupDraft(
     }
   }
   if (draft.fundingMode === "HISTORICAL_EXACT"
-    && draft.accountDataMode !== "HISTORICAL_EXACT") {
-    errors.push("历史精确资金费必须同时选择精确账户历史");
+    && draft.accountDataMode !== "HISTORICAL_EXACT"
+    && draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
+    errors.push("历史精确资金费必须使用固定历史输入");
   } else if (draft.fundingMode === "SANDBOX_FIXED") {
     if (draft.integrityMode !== "SANDBOX") {
       errors.push("固定资金费只允许用于 Sandbox 近似练习");
@@ -484,10 +491,11 @@ export function evaluateTrainingRunSetupDraft(
     }
   }
   if (draft.positionMode === "HEDGE") {
-    if (draft.accountDataMode !== "APPROX_PROXY") errors.push("双向持仓目前仅支持近似模拟账户");
-    if (draft.marginMode !== "CROSS") errors.push("双向持仓目前仅支持全仓保证金");
-    if (draft.fundingMode !== "OFF") errors.push("双向持仓目前要求关闭资金费");
-    if (draft.bookMode !== "OFF") errors.push("双向持仓目前仅支持 Touch/Tape 撮合");
+    if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
+      errors.push("双向持仓必须使用版本化确定性模拟账户");
+    }
+  } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
+    errors.push("确定性双向模拟账户不能用于单向持仓");
   }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
@@ -518,7 +526,7 @@ export function buildTrainingRunPreparationRequest(
     throw new TypeError("training run draft is not ready to submit");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     catalog_epoch: catalog.catalog_epoch,
     name: draft.name.trim(),
     source_kind: draft.sourceKind,
@@ -552,6 +560,12 @@ export function buildTrainingRunPreparationRequest(
     account_history_ref: draft.accountDataMode === "HISTORICAL_EXACT"
       ? evaluation.accountHistoryRef
       : null,
+    hedge_public_history_ref: null,
+    simulation_manifest_ref: null,
+    account_fidelity: draft.positionMode === "HEDGE" ? HEDGE_ACCOUNT_FIDELITY : null,
+    insurance_adl_fidelity: draft.positionMode === "HEDGE"
+      ? HEDGE_INSURANCE_ADL_FIDELITY
+      : null,
     fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
       ? draft.fixedFundingRate
       : null,
@@ -583,7 +597,7 @@ export function buildTrainingRunCreateRequest(
     throw new TypeError("training run setup is not ready to submit");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     name: draft.name.trim(),
     source_kind: draft.sourceKind,
     start_mode: draft.startMode,
@@ -610,6 +624,10 @@ export function buildTrainingRunCreateRequest(
     position_mode: draft.positionMode,
     funding_mode: draft.fundingMode,
     account_data_mode: draft.accountDataMode,
+    account_fidelity: draft.positionMode === "HEDGE" ? HEDGE_ACCOUNT_FIDELITY : null,
+    insurance_adl_fidelity: draft.positionMode === "HEDGE"
+      ? HEDGE_INSURANCE_ADL_FIDELITY
+      : null,
     fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"
       ? draft.fixedFundingRate
       : null,

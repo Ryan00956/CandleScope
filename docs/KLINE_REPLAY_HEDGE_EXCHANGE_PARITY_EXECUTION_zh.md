@@ -339,6 +339,13 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 
 预估：4–6 个工程日。
 
+状态：`COMPLETE`。wire 已硬切到 `replay.v3`，training schema 已硬切到
+v14 / `replay.training.v2`，默认 HEDGE + DETERMINISTIC_SIMULATION；旧 HEDGE
+近似/历史 exact payload 与旧协议均 fail-closed。单行 liquidation event 已从 fresh
+schema 和生产路径删除，14 张 HEDGE 关系表成为 checkpoint、fork、review、audit、
+portfolio/export 的权威来源。阶段证据见
+[`evidence/KLINE_REPLAY_HEDGE_PHASE1_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE1_RESULT_20260806_zh.md)。
+
 ### Phase 2：双向账户、杠杆与保证金核心
 
 工作内容：

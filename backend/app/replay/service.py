@@ -37,7 +37,11 @@ from .bars.builder import ReplayBarBuilder, assess_bar_builder_capability
 from .bars.trade_builder import TradeReplayBarBuilder
 from .broker.execution import ConservativeBarBroker
 from .broker.models import (
+    AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
+    AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION,
     Account,
+    BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
+    BAR_TOUCH_OR_TAPE_MODEL_VERSION,
     BrokerConfig,
     BrokerLimits,
     InstrumentFilters,
@@ -46,6 +50,7 @@ from .broker.models import (
     PAPER_LINEAR_EXECUTION_MODE,
     PositionMode,
     ReplayOrder,
+    TOUCH_OR_TAPE_EXECUTION_MODE,
     position_state_from_dict,
 )
 from .broker.risk import build_order_capacity, build_order_preview
@@ -1289,7 +1294,7 @@ class ReplayService:
         target_time_ms: int,
         max_events: int,
     ) -> dict[str, object]:
-        """Return one bounded, read-only source scan plan for replay.v2."""
+        """Return one bounded, read-only source scan plan for training replay."""
 
         async with self._lease_handle(session_id) as handle:
             return await handle.actor.source_chunk_plan(
@@ -1313,7 +1318,7 @@ class ReplayService:
             )
 
     async def summary_authority(self, session_id: str) -> dict[str, object]:
-        """Expose trusted hashes to the replay.v2 planner, never component data."""
+        """Expose trusted hashes to the training planner, never component data."""
 
         async with self._lease_handle(session_id) as handle:
             return await handle.actor.summary_authority()
@@ -2360,6 +2365,12 @@ class ReplayService:
                 actual_dataset,
             )
         broker = broker_config or self._broker_config(actor_config, actor_dataset)
+        if restore_checkpoint is not None:
+            checkpoint_execution_mode = self._checkpoint_execution_mode(
+                restore_checkpoint
+            )
+            if checkpoint_execution_mode is not None:
+                execution_mode = checkpoint_execution_mode
         if config.source_kind is SourceKind.AGG_TRADE and trade_dataset_ref is None:
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_INCOMPLETE,
@@ -2696,6 +2707,10 @@ class ReplayService:
                     actual_dataset=actual_dataset,
                     max_closed_bars_override=self._checkpoint_max_closed_bars(
                         checkpoint.payload
+                    ),
+                    execution_mode=(
+                        self._checkpoint_execution_mode(checkpoint.payload)
+                        or PAPER_LINEAR_EXECUTION_MODE
                     ),
                 )
                 candidate = self._actor(
@@ -3672,6 +3687,27 @@ class ReplayService:
         if not isinstance(component_state, Mapping):
             return None
         return cls._component_max_closed_bars(component_state)
+
+    @staticmethod
+    def _checkpoint_execution_mode(checkpoint: bytes) -> str | None:
+        """Recover the internal broker execution contract from immutable state."""
+
+        try:
+            payload = CheckpointCodec().decode(checkpoint)
+        except (CheckpointError, TypeError, ValueError):
+            return None
+        component_state = payload.get("component_state")
+        if not isinstance(component_state, Mapping):
+            return None
+        model_version = component_state.get("model_version")
+        if model_version in {
+            BAR_TOUCH_OR_TAPE_MODEL_VERSION,
+            AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION,
+            BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
+            AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
+        }:
+            return TOUCH_OR_TAPE_EXECUTION_MODE
+        return None
 
     @staticmethod
     def _broker_config(

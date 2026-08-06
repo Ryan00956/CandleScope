@@ -30,7 +30,7 @@ function activeBuild() {
 
 function statusResponse() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     enabled: true,
     status: {
@@ -88,7 +88,7 @@ test("Phase 15 period-summary parsers are strict and expose no component payload
   }), /SHA-256/);
 
   const disabled = parseReplayPeriodSummaryStatus({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     enabled: false,
     status: {

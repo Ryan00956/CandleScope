@@ -30,7 +30,7 @@ function viewerState() {
 
 function commandResult() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     session_id: "adapter-1",
     command_id: "step-display-1",
@@ -53,7 +53,7 @@ function commandResult() {
 
 function orderPreview() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.order-preview.v1",
     run_id: "run-1",
     track_id: "track-1",
@@ -92,7 +92,7 @@ function orderPreview() {
 function orderCapacity() {
   const preview = orderPreview();
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.order-capacity.v1",
     run_id: preview.run_id,
     track_id: preview.track_id,
@@ -118,14 +118,14 @@ function orderCapacity() {
 
 test("Phase 3 viewer and command response parsers are strict at the network boundary", () => {
   const viewer = parseReplayViewerStateResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     viewer_state: viewerState(),
   });
   assert.equal(viewer.viewer_state.display_interval, "15m");
   assert.equal(parseReplayV2CommandResult(commandResult()).data.consumed, 14);
 
   assert.throws(() => parseReplayViewerStateResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     viewer_state: { ...viewerState(), domain_hash: "forbidden" },
   }), /unknown/);
   assert.throws(() => parseReplayV2CommandResult({
@@ -177,7 +177,7 @@ test("order preview API is run-scoped and sends the cursor-bound intent", async 
     },
   });
   const payload: ReplayOrderPreviewRequest = {
-    protocol: "replay.v2" as const,
+    protocol: "replay.v3" as const,
     expected_revision: 6,
     expected_cursor: orderPreview().cursor,
     position_intent: "OPEN" as const,
@@ -212,7 +212,7 @@ test("order capacity API is run-scoped and never sends a draft quantity", async 
     },
   });
   const payload: ReplayOrderCapacityRequest = {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     expected_revision: 6,
     expected_cursor: orderCapacity().cursor,
     position_intent: "OPEN",
@@ -241,12 +241,12 @@ test("Phase 3 API uses run-scoped viewer, command, and progress routes", async (
       });
       let payload: unknown;
       if (url.endsWith("/viewer")) {
-        payload = { protocol: "replay.v2", viewer_state: viewerState() };
+        payload = { protocol: "replay.v3", viewer_state: viewerState() };
       } else if (url.endsWith("/commands")) {
         payload = commandResult();
       } else {
         payload = {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           run_id: "run-1",
           command_id: "step-display-1",
           progress: {
@@ -267,7 +267,7 @@ test("Phase 3 API uses run-scoped viewer, command, and progress routes", async (
     },
   });
   const command: ReplayV2Command = {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     command_id: "step-display-1",
     client_instance_id: "browser-1",

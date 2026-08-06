@@ -41,7 +41,7 @@ export interface ReplayHistoryExcludedRange {
 }
 
 export interface ReplayHistoryPage {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.history.v3";
   readonly run_id: string;
   readonly session_id: string;
@@ -513,7 +513,7 @@ function parsePage(
     "history_epoch", "history_boundary_ms", "history_policy", "revealed_boundary_ms",
     "bars", "excluded_ranges", "next_before_ms", "has_more",
   ], "history");
-  if (source.protocol !== "replay.v2") fail("history.protocol", "must be replay.v2");
+  if (source.protocol !== "replay.v3") fail("history.protocol", "must be replay.v3");
   if (source.schema_version !== "replay.history.v3") fail("history.schema_version", "is unsupported");
   const parsedSession = string(source.session_id, "history.session_id");
   const parsedTrack = string(source.track_id, "history.track_id");
@@ -574,7 +574,7 @@ function parsePage(
     fail("history.next_before_ms", "must point at the oldest returned bar");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.history.v3",
     run_id: string(source.run_id, "history.run_id"),
     session_id: parsedSession,

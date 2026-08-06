@@ -12,7 +12,7 @@ export function buildReplayTrainingReportExport(
 ): Readonly<Record<string, unknown>> {
   return {
     schema_version: "candlescope-replay-training-report.v2",
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: response.run_id,
     fidelity: {
       data: response.data_fidelity,

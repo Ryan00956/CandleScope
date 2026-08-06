@@ -1,4 +1,4 @@
-"""Phase 3 interval alignment and replay.v2 control planning primitives."""
+"""Interval alignment and replay.v3 control planning primitives."""
 
 from __future__ import annotations
 

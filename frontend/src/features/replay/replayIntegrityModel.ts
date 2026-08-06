@@ -51,7 +51,7 @@ export interface ReplayPublicTimeBatchItem {
 }
 
 export interface ReplayPublicTimeBatchResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly run_id: string;
   readonly policy: ReplayV2TimeDisclosurePolicy;
   readonly items: readonly ReplayPublicTimeBatchItem[];
@@ -85,7 +85,7 @@ export interface ReplayIntegrityMutation {
 }
 
 export interface ReplayIntegrityResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly run_id: string;
   readonly integrity_mode: ReplayV2IntegrityMode;
   readonly configured_time_disclosure_policy: ReplayV2TimeDisclosurePolicy;
@@ -115,7 +115,7 @@ export interface ReplayEquitySample {
 }
 
 export interface ReplayEquityResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly run_id: string;
   readonly resolution: ReplayEquityResolution;
   readonly samples: readonly ReplayEquitySample[];
@@ -185,7 +185,7 @@ export interface ReplayRunInstrumentRule {
 }
 
 export interface ReplayRunRulesResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.run-rules.v1";
   readonly run_id: string;
   readonly effective_cursor: {
@@ -245,7 +245,7 @@ export interface ReplayReviewImmutabilityProof {
 }
 
 export interface ReplayReviewResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.review.timeline.v1";
   readonly review_id: string;
   readonly run_id: string;
@@ -275,7 +275,7 @@ export interface ReplayReviewResponse {
 }
 
 export interface ReplayReviewControlResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.review.timeline.v1";
   readonly review_id: string;
   readonly run_id: string;
@@ -302,7 +302,7 @@ export interface ReplayReviewControlResponse {
 }
 
 export interface ReplayReviewForkResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly parent_run_id: string;
   readonly parent_event_id: string;
   readonly parent_timeline_sequence: number;
@@ -318,7 +318,7 @@ export interface ReplayReviewForkResponse {
 }
 
 export interface ReplayDrawingDocumentResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.review.drawing-document.v1";
   readonly run_id: string;
   readonly document_hash: `sha256:${string}`;
@@ -329,7 +329,7 @@ export interface ReplayDrawingDocumentResponse {
 }
 
 export interface ReplayCurrentDrawingDocumentResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.review.drawing-current.v1";
   readonly run_id: string;
   readonly document_hash: `sha256:${string}` | null;
@@ -340,7 +340,7 @@ export interface ReplayCurrentDrawingDocumentResponse {
 }
 
 export interface ReplayReviewMarkerResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly schema_version: "replay.review.marker.v1";
   readonly run_id: string;
   readonly marker_id: string;
@@ -354,7 +354,7 @@ export interface ReplayReviewMarkerResponse {
 }
 
 export interface ReplayTrainingReportResponse {
-  readonly protocol: "replay.v2";
+  readonly protocol: "replay.v3";
   readonly run_id: string;
   readonly data_fidelity: ReplayReportResponse["data_fidelity"];
   readonly execution_fidelity: ReplayReportResponse["execution_fidelity"];
@@ -566,7 +566,7 @@ export function parseReplayRunRulesResponse(value: unknown): ReplayRunRulesRespo
     "leverage_policy", "funding_policy", "instrument_rules",
     "effective_leverage_by_track", "history",
   ]);
-  if (source.protocol !== "replay.v2" || source.schema_version !== "replay.run-rules.v1") {
+  if (source.protocol !== "replay.v3" || source.schema_version !== "replay.run-rules.v1") {
     throw new TypeError("run_rules schema is unsupported");
   }
   const fee = parseRuleRevision(source.fee_policy, "run_rules.fee_policy");
@@ -619,7 +619,7 @@ export function parseReplayRunRulesResponse(value: unknown): ReplayRunRulesRespo
     parseRuleRevision(item, `run_rules.history[${index}]`)
   ));
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.run-rules.v1",
     run_id: identifier(source.run_id, "run_rules.run_id"),
     effective_cursor: parseCursor(source.effective_cursor, "run_rules.effective_cursor"),
@@ -756,7 +756,7 @@ export function parseReplayPublicTimeBatchResponse(
   const source = exactObject(value, "public_times", [
     "protocol", "run_id", "policy", "items",
   ]);
-  if (source.protocol !== "replay.v2") {
+  if (source.protocol !== "replay.v3") {
     throw new TypeError("public_times.protocol is unsupported");
   }
   if (!Array.isArray(source.items)
@@ -776,7 +776,7 @@ export function parseReplayPublicTimeBatchResponse(
     return { input_timeline_ms: input, public_time: publicTime };
   });
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: identifier(source.run_id, "public_times.run_id"),
     policy,
     items,
@@ -871,7 +871,7 @@ export function parseReplayIntegrityResponse(value: unknown): ReplayIntegrityRes
     "allowed_mutations", "result_label", "active_rule_revision", "active_rule_hash",
     "active_rule", "start_selection", "public_time", "mutations",
   ]);
-  if (source.protocol !== "replay.v2") throw new TypeError("integrity.protocol is unsupported");
+  if (source.protocol !== "replay.v3") throw new TypeError("integrity.protocol is unsupported");
   if (!Array.isArray(source.allowed_mutations)) throw new TypeError("integrity.allowed_mutations must be an array");
   const allowed = source.allowed_mutations.map((item, index) => (
     enumValue(item, REPLAY_POLICY_MUTATIONS, `integrity.allowed_mutations[${index}]`)
@@ -889,7 +889,7 @@ export function parseReplayIntegrityResponse(value: unknown): ReplayIntegrityRes
     throw new TypeError("integrity effective disclosure contradicts reveal state");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: identifier(source.run_id, "integrity.run_id"),
     integrity_mode: enumValue(source.integrity_mode, INTEGRITY_MODES, "integrity.integrity_mode"),
     configured_time_disclosure_policy: enumValue(
@@ -914,7 +914,7 @@ export function parseReplayIntegrityResponse(value: unknown): ReplayIntegrityRes
 
 export function parseReplayEquityResponse(value: unknown): ReplayEquityResponse {
   const source = exactObject(value, "equity", ["protocol", "run_id", "resolution", "samples", "bounded", "limits"]);
-  if (source.protocol !== "replay.v2") throw new TypeError("equity.protocol is unsupported");
+  if (source.protocol !== "replay.v3") throw new TypeError("equity.protocol is unsupported");
   if (source.bounded !== true) throw new TypeError("equity must be bounded");
   if (!Array.isArray(source.samples)) throw new TypeError("equity.samples must be an array");
   const limits = exactObject(source.limits, "equity.limits", ["EVENT", "1M", "15M", "1H"]);
@@ -944,7 +944,7 @@ export function parseReplayEquityResponse(value: unknown): ReplayEquityResponse 
   });
   if (samples.length > parsedLimits[resolution]) throw new TypeError("equity.samples exceeds its declared bound");
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: identifier(source.run_id, "equity.run_id"),
     resolution,
     samples,
@@ -961,7 +961,7 @@ export function parseReplayReviewResponse(value: unknown): ReplayReviewResponse 
     "playback_state", "playback_rate", "projection", "drawing_document",
     "immutability_proof", "budget", "events", "jump_targets",
   ]);
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.review.timeline.v1") {
     throw new TypeError("review schema is unsupported");
   }
@@ -1023,7 +1023,7 @@ export function parseReplayReviewResponse(value: unknown): ReplayReviewResponse 
     throw new TypeError("review projection run identity drifted");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.timeline.v1",
     review_id: identifier(source.review_id, "review.review_id"),
     run_id: runId,
@@ -1063,7 +1063,7 @@ export function parseReplayReviewControlResponse(value: unknown): ReplayReviewCo
     "original_state_hash", "cursor_revision", "playback_state", "playback_rate",
     "selected_event", "projection", "drawing_document", "immutability_proof", "budget",
   ]);
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.review.timeline.v1"
     || source.read_only !== true) {
     throw new TypeError("review control schema is unsupported");
@@ -1089,7 +1089,7 @@ export function parseReplayReviewControlResponse(value: unknown): ReplayReviewCo
     throw new TypeError("review control projection run identity drifted");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.timeline.v1",
     review_id: identifier(source.review_id, "review_control.review_id"),
     run_id: runId,
@@ -1148,11 +1148,11 @@ export function parseReplayReviewForkResponse(value: unknown): ReplayReviewForkR
     "protocol", "parent_run_id", "parent_event_id", "parent_timeline_sequence",
     "anchor_set_hash", "run", "tracks", "account_audit",
   ]);
-  if (source.protocol !== "replay.v2") throw new TypeError("fork.protocol is unsupported");
+  if (source.protocol !== "replay.v3") throw new TypeError("fork.protocol is unsupported");
   const run = jsonObject(source.run, "fork.run");
   if (!Array.isArray(source.tracks)) throw new TypeError("fork.tracks must be an array");
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     parent_run_id: identifier(source.parent_run_id, "fork.parent_run_id"),
     parent_event_id: identifier(source.parent_event_id, "fork.parent_event_id"),
     parent_timeline_sequence: counter(
@@ -1183,12 +1183,12 @@ export function parseReplayDrawingDocumentResponse(
     "protocol", "schema_version", "run_id", "document_hash", "revision",
     "entity_count", "deduplicated", "budget",
   ]);
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.review.drawing-document.v1") {
     throw new TypeError("drawing document response schema is unsupported");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.drawing-document.v1",
     run_id: identifier(source.run_id, "drawing_document.run_id"),
     document_hash: digest(source.document_hash, "drawing_document.document_hash"),
@@ -1206,7 +1206,7 @@ export function parseReplayCurrentDrawingDocumentResponse(
     "protocol", "schema_version", "run_id", "document_hash", "revision",
     "entity_count", "document", "budget",
   ]);
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.review.drawing-current.v1") {
     throw new TypeError("current drawing response schema is unsupported");
   }
@@ -1224,7 +1224,7 @@ export function parseReplayCurrentDrawingDocumentResponse(
       throw new TypeError("empty current drawing metadata is inconsistent");
     }
     return {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       schema_version: "replay.review.drawing-current.v1",
       run_id: runId,
       document_hash: null,
@@ -1252,7 +1252,7 @@ export function parseReplayCurrentDrawingDocumentResponse(
     throw new TypeError("current drawing document is not a bounded canonical record");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.drawing-current.v1",
     run_id: runId,
     document_hash: digest(
@@ -1273,12 +1273,12 @@ export function parseReplayReviewMarkerResponse(
     "protocol", "schema_version", "run_id", "marker_id", "command_id", "text",
     "content_hash", "event_id", "timeline_sequence", "deduplicated", "budget",
   ]);
-  if (source.protocol !== "replay.v2"
+  if (source.protocol !== "replay.v3"
     || source.schema_version !== "replay.review.marker.v1") {
     throw new TypeError("review marker response schema is unsupported");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     schema_version: "replay.review.marker.v1",
     run_id: identifier(source.run_id, "review_marker.run_id"),
     marker_id: identifier(source.marker_id, "review_marker.marker_id"),
@@ -1303,7 +1303,7 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     "integrity", "public_time_index", "modelled_account", "account_audit",
     "liquidation_channel_contract", ...(hasActual ? ["actual_history"] : []),
   ]);
-  if (exact.protocol !== "replay.v2") throw new TypeError("training_report.protocol is unsupported");
+  if (exact.protocol !== "replay.v3") throw new TypeError("training_report.protocol is unsupported");
   const runId = identifier(exact.run_id, "training_report.run_id");
   const parsed = parseReplayReportResponse({
     protocol: "replay.v1",
@@ -1344,7 +1344,7 @@ export function parseReplayTrainingReportResponse(value: unknown): ReplayTrainin
     throw new TypeError("training report account/liquidation audit contract is inconsistent");
   }
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: runId,
     data_fidelity: parsed.data_fidelity,
     execution_fidelity: parsed.execution_fidelity,

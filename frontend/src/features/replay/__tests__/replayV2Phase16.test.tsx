@@ -30,7 +30,7 @@ const START_MS = 1_710_000_000_000;
 
 test("Phase 16 polls and exposes cancellation only for guaranteed cancelable advances", () => {
   const command = (type: "advance" | "advance_by" | "advance_to", basis: string) => ({
-    protocol: "replay.v2" as const,
+    protocol: "replay.v3" as const,
     run_id: "run-16",
     command_id: `command-${type}-${basis}`,
     client_instance_id: "browser-16",
@@ -225,6 +225,10 @@ function exactPortfolioRaw() {
     isolated_allocations: {},
     next_funding_time_ms: START_MS + 28_800_000,
     liquidations: [],
+    hedge_state: {
+      schema_version: "replay.hedge-relational-state.v1",
+      state_hash: replayDigest("7"),
+    },
     account_history: {
       mode: "HISTORICAL_EXACT",
       status: "ACTIVE",
@@ -313,6 +317,7 @@ test("Phase 16 launcher pins the exact plan ref and rejects every implicit proxy
     startMode: "MANUAL" as const,
     requestedStartMs: START_MS,
     accountDataMode: "HISTORICAL_EXACT" as const,
+    positionMode: "ONE_WAY" as const,
     fundingMode: "HISTORICAL_EXACT" as const,
   };
   const withoutPlan = evaluateTrainingRunDraft(draft, capabilities, catalog);
@@ -395,14 +400,14 @@ test("Phase 16 account audit API is run-scoped, POST-only, and strictly parsed",
 
 test("Phase 16 report and CSV retain archive/auditor proof and both liquidation domains", () => {
   const response = parseReplayTrainingReportResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-16",
     data_fidelity: "EXACT_BAR_COVERAGE",
     execution_fidelity: "BAR_CONSERVATIVE",
     revealed: false,
     report: replayReport(),
     integrity: {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: "run-16",
       integrity_mode: "CHALLENGE",
       configured_time_disclosure_policy: "HIDE_ALL",
@@ -431,7 +436,7 @@ test("Phase 16 report and CSV retain archive/auditor proof and both liquidation 
       mutations: [],
     },
     public_time_index: {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: "run-16",
       policy: "HIDE_ALL",
       items: [],
@@ -462,6 +467,7 @@ test("Phase 16 Hub defers exact archive binding until a market is selected", () 
     startMode: "MANUAL" as const,
     requestedStartMs: START_MS,
     accountDataMode: "HISTORICAL_EXACT" as const,
+    positionMode: "ONE_WAY" as const,
     fundingMode: "HISTORICAL_EXACT" as const,
   };
   const evaluation = evaluateTrainingRunSetupDraft(draft, capabilities);

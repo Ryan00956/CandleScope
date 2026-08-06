@@ -195,27 +195,27 @@ function parseErrorEnvelope(value: unknown): {
   readonly details: Readonly<Record<string, unknown>>;
 } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("replay.v2 error must be an object");
+    throw new TypeError("replay.v3 error must be an object");
   }
   const envelope = value as Record<string, unknown>;
-  if (Object.keys(envelope).sort().join(",") !== "error,protocol" || envelope.protocol !== "replay.v2") {
-    throw new TypeError("replay.v2 error envelope is invalid");
+  if (Object.keys(envelope).sort().join(",") !== "error,protocol" || envelope.protocol !== "replay.v3") {
+    throw new TypeError("replay.v3 error envelope is invalid");
   }
   if (envelope.error === null || typeof envelope.error !== "object" || Array.isArray(envelope.error)) {
-    throw new TypeError("replay.v2 error body is invalid");
+    throw new TypeError("replay.v3 error body is invalid");
   }
   const error = envelope.error as Record<string, unknown>;
   if (Object.keys(error).sort().join(",") !== "code,details,message") {
-    throw new TypeError("replay.v2 error fields are invalid");
+    throw new TypeError("replay.v3 error fields are invalid");
   }
   if (typeof error.code !== "string" || !/^[A-Z][A-Z0-9_]{1,127}$/.test(error.code)) {
-    throw new TypeError("replay.v2 error code is invalid");
+    throw new TypeError("replay.v3 error code is invalid");
   }
   if (typeof error.message !== "string" || error.message.length < 1 || error.message.length > 1024) {
-    throw new TypeError("replay.v2 error message is invalid");
+    throw new TypeError("replay.v3 error message is invalid");
   }
   if (error.details === null || typeof error.details !== "object" || Array.isArray(error.details)) {
-    throw new TypeError("replay.v2 error details are invalid");
+    throw new TypeError("replay.v3 error details are invalid");
   }
   return {
     code: error.code,
@@ -418,7 +418,7 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/${safeSegment(runId, "run id")}`,
       (value) => ({ run: parseTrainingRunMutationResponse({
-        protocol: "replay.v2",
+        protocol: "replay.v3",
         created: false,
         run: value,
       }).run }),
@@ -888,7 +888,7 @@ export class ReplayV2ApiClient {
       });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
-      throw new ReplayV2ApiError("REPLAY_V2_TRANSPORT_ERROR", "replay.v2 request failed", { cause: error });
+      throw new ReplayV2ApiError("REPLAY_V2_TRANSPORT_ERROR", "replay.v3 request failed", { cause: error });
     }
 
     let payload: unknown;
@@ -897,7 +897,7 @@ export class ReplayV2ApiClient {
     } catch (error) {
       throw new ReplayV2ApiError(
         "REPLAY_V2_PROTOCOL_ERROR",
-        "replay.v2 response is not valid JSON",
+        "replay.v3 response is not valid JSON",
         { status: response.status, cause: error },
       );
     }
@@ -912,7 +912,7 @@ export class ReplayV2ApiClient {
         if (error instanceof ReplayV2ApiError) throw error;
         throw new ReplayV2ApiError(
           "REPLAY_V2_PROTOCOL_ERROR",
-          "replay.v2 error response violates the contract",
+          "replay.v3 error response violates the contract",
           { status: response.status, cause: error },
         );
       }
@@ -922,7 +922,7 @@ export class ReplayV2ApiClient {
     } catch (error) {
       throw new ReplayV2ApiError(
         "REPLAY_V2_PROTOCOL_ERROR",
-        "replay.v2 response violates the contract",
+        "replay.v3 response violates the contract",
         { status: response.status, cause: error },
       );
     }

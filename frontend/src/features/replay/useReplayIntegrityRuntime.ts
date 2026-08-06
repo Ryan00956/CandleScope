@@ -239,10 +239,10 @@ export function useReplayIntegrityRuntime(
     const currentViewer = viewerRef.current.viewerState;
     const virtualTimeMs = currentRuntime.store.virtualTimeMs;
     if (currentViewer === null || virtualTimeMs === null) {
-      throw new Error("replay.v2 integrity runtime is not command-ready");
+      throw new Error("replay.v3 integrity runtime is not command-ready");
     }
     return {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: currentViewer.run_id,
       command_id: commandId(prefix),
       client_instance_id: currentRuntime.clientInstanceId,
@@ -325,7 +325,7 @@ export function useReplayIntegrityRuntime(
     entityCount: number,
   ): Promise<void> => {
     const currentRunId = replayRunId(viewerRef.current);
-    if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
+    if (currentRunId === null) throw new Error("replay.v3 run is unavailable");
     setOperation("drawing");
     setError(null);
     try {
@@ -359,7 +359,7 @@ export function useReplayIntegrityRuntime(
 
   const addMarker = useCallback(async (text: string): Promise<void> => {
     const currentRunId = replayRunId(viewerRef.current);
-    if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
+    if (currentRunId === null) throw new Error("replay.v3 run is unavailable");
     setOperation("marker");
     setError(null);
     try {
@@ -379,7 +379,7 @@ export function useReplayIntegrityRuntime(
 
   const startReview = useCallback(async (eventId: string | null = null): Promise<ReplayReviewResponse> => {
     const currentRunId = replayRunId(viewerRef.current);
-    if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
+    if (currentRunId === null) throw new Error("replay.v3 run is unavailable");
     setOperation("review");
     setError(null);
     try {
@@ -477,7 +477,7 @@ export function useReplayIntegrityRuntime(
 
   const forkReview = useCallback(async (eventId: string): Promise<ReplayReviewForkResponse> => {
     const currentRunId = replayRunId(viewerRef.current);
-    if (currentRunId === null) throw new Error("replay.v2 run is unavailable");
+    if (currentRunId === null) throw new Error("replay.v3 run is unavailable");
     setOperation("fork");
     setError(null);
     try {

@@ -73,7 +73,7 @@ async def _request(
         blind_mode=start_mode == "RANDOM" and disclosure != "NONE",
     )
     payload: dict[str, object] = {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "catalog_epoch": catalog["catalog_epoch"],
         "name": f"Phase 12 {disclosure}",
         "source_kind": "BAR",
@@ -98,6 +98,8 @@ async def _request(
         "time_disclosure_policy": disclosure,
         "book_mode": "OFF",
         "margin_mode": "CROSS",
+        "position_mode": "ONE_WAY",
+        "account_data_mode": "APPROX_PROXY",
         "funding_mode": "OFF",
         "allow_rule_changes": False,
         "allowed_mutations": [],

@@ -68,7 +68,7 @@ async def _payload(service: ReplayService) -> dict[str, object]:
         blind_mode=True,
     )
     return {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "catalog_epoch": catalog["catalog_epoch"],
         "name": "API 训练",
         "source_kind": "BAR",
@@ -92,7 +92,11 @@ async def _payload(service: ReplayService) -> dict[str, object]:
         "time_disclosure_policy": "HIDE_ALL",
         "book_mode": "OFF",
         "margin_mode": "CROSS",
+        "position_mode": "ONE_WAY",
         "funding_mode": "OFF",
+        "account_data_mode": "APPROX_PROXY",
+        "account_fidelity": None,
+        "insurance_adl_fidelity": None,
         "allow_rule_changes": False,
     }
 
@@ -135,8 +139,11 @@ def _setup_payload(payload: dict[str, object]) -> dict[str, object]:
         "time_disclosure_policy": payload["time_disclosure_policy"],
         "book_mode": payload["book_mode"],
         "margin_mode": payload["margin_mode"],
+        "position_mode": payload.get("position_mode", "ONE_WAY"),
         "funding_mode": payload["funding_mode"],
         "account_data_mode": payload.get("account_data_mode", "APPROX_PROXY"),
+        "account_fidelity": payload.get("account_fidelity"),
+        "insurance_adl_fidelity": payload.get("insurance_adl_fidelity"),
         "fixed_funding_rate": payload.get("fixed_funding_rate"),
         "funding_interval_ms": payload.get("funding_interval_ms"),
         "allow_rule_changes": payload["allow_rule_changes"],
@@ -227,7 +234,7 @@ async def test_v2_http_create_list_detail_and_return_to_hub(tmp_path: Path) -> N
         )
         assert records.status_code == 200
         assert records.json() == {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "schema_version": "replay.training.account-record-page.v1",
             "run_id": "run-1",
             "record_type": "ORDERS",
@@ -333,7 +340,7 @@ async def test_v2_http_delete_archive_removes_run_and_adapter_session(
         deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
         assert deleted.status_code == 200
         assert deleted.json() == {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "deleted": True,
             "run_id": "run-1",
             "session_ids": ["adapter-1"],
@@ -614,7 +621,7 @@ async def test_phase17_rules_drawing_marker_review_control_and_fork_routes(
             "POST",
             f"/api/v1/replay/runs/{run_id}/drawings",
             json={
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "command_id": "phase17-api-drawing-invalid",
                 "document_hash": canonical_sha256(document),
                 "document": document,
@@ -743,7 +750,7 @@ async def test_phase17_rules_drawing_marker_review_control_and_fork_routes(
             f"/api/v1/replay/runs/{run_id}/fork",
             json={"event_id": review_body["selected_event_id"]},
         )
-        assert forked.status_code == 201
+        assert forked.status_code == 201, forked.text
         assert forked.json()["parent_run_id"] == run_id
         assert forked.json()["parent_timeline_sequence"] == (
             review_body["selected_timeline_sequence"]
@@ -890,7 +897,7 @@ async def test_v2_history_route_binds_track_epoch_and_public_cursor(tmp_path: Pa
             },
         )
         assert stale.status_code == 409
-        assert stale.json()["protocol"] == "replay.v2"
+        assert stale.json()["protocol"] == "replay.v3"
         assert stale.json()["error"]["code"] == "HISTORY_EPOCH_MISMATCH"
     finally:
         await service.shutdown(step_timeout=1.0)
@@ -923,7 +930,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
         assert viewer_state["display_interval"] == "15m"
 
         command = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": run["run_id"],
             "command_id": "phase3-api-viewer",
             "client_instance_id": "phase3-api",
@@ -965,7 +972,7 @@ async def test_v2_viewer_and_command_routes_keep_display_outside_domain_state(
             json={**command, "future_field": True},
         )
         assert malformed.status_code == 422
-        assert malformed.json()["protocol"] == "replay.v2"
+        assert malformed.json()["protocol"] == "replay.v3"
         assert malformed.json()["error"]["code"] == "TRAINING_RUN_INVALID"
     finally:
         await service.shutdown(step_timeout=1.0)
@@ -992,7 +999,7 @@ async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
         assert by_session.status_code == by_run.status_code == 200
         assert by_session.json() == by_run.json()
         payload = by_run.json()
-        assert payload["protocol"] == "replay.v2"
+        assert payload["protocol"] == "replay.v3"
         assert payload["ordering_version"] == "replay.global-order.v1"
         assert payload["tracks"][0]["subscription_tier"] == "FULL"
         assert payload["tracks"][0]["forced_full_reasons"] == ["VIEWED"]
@@ -1092,7 +1099,7 @@ async def test_v2_validation_and_catalog_drift_use_v2_error_envelopes(
             json={**_setup_payload(payload), "future_field": True},
         )
         assert invalid.status_code == 422
-        assert invalid.json()["protocol"] == "replay.v2"
+        assert invalid.json()["protocol"] == "replay.v3"
         assert invalid.json()["error"]["code"] == "TRAINING_RUN_INVALID"
 
         created = await _create_empty_run(app, service, payload)
@@ -1131,7 +1138,7 @@ async def test_unowned_adapter_session_has_no_training_migration_or_delete_surfa
             app,
             "POST",
             f"/api/v1/replay/runs/{session_id}/migrate",
-            json={"protocol": "replay.v2", "name": "retired"},
+            json={"protocol": "replay.v3", "name": "retired"},
         )
         assert migration.status_code == 404
 
@@ -1154,7 +1161,7 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
         session_path = f"/api/v1/replay/runs/session/{run['adapter_session_id']}"
         before = (await _request(app, "GET", session_path)).json()["snapshot"]
         preview_payload = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "expected_revision": before["revision"],
             "expected_cursor": {
                 "virtual_time_ms": before["cursor"]["virtual_time_ms"],
@@ -1174,7 +1181,7 @@ async def test_order_preview_route_is_strict_cursor_bound_and_read_only(
             },
         }
         capacity_payload = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "expected_revision": before["revision"],
             "expected_cursor": preview_payload["expected_cursor"],
             "position_intent": "OPEN",

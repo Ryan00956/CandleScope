@@ -1,6 +1,6 @@
 {
-  "protocol": "replay.v2",
-  "schema_version": "replay.contract.v2.phase0",
+  "protocol": "replay.v3",
+  "schema_version": "replay.contract.v3.phase1",
   "enums": {
     "run_state": ["AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"],
     "track_state": ["DORMANT", "PREPARING", "READY", "DEGRADED", "ERROR"],
@@ -53,7 +53,7 @@
     "margin_mode": ["CROSS", "ISOLATED"],
     "position_mode": ["ONE_WAY", "HEDGE"],
     "funding_mode": ["OFF", "HISTORICAL_EXACT", "SANDBOX_FIXED"],
-    "account_data_mode": ["APPROX_PROXY", "HISTORICAL_EXACT"],
+    "account_data_mode": ["APPROX_PROXY", "HISTORICAL_EXACT", "DETERMINISTIC_SIMULATION"],
     "execution_model": ["TOUCH_OR_TAPE_V2"],
     "advance_basis": ["DISPLAY_BAR", "BASE_BAR", "SOURCE_EVENT", "VIRTUAL_TIME"],
     "command_type": [
@@ -126,7 +126,7 @@
     ]
   },
   "sample_run": {
-    "protocol": "replay.v2",
+    "protocol": "replay.v3",
     "run_id": "run-01J00000000000000000000000",
     "state": "PAUSED",
     "source_kind": "BAR",
@@ -160,7 +160,7 @@
     }
   },
   "sample_command": {
-    "protocol": "replay.v2",
+    "protocol": "replay.v3",
     "run_id": "run-01J00000000000000000000000",
     "command_id": "cmd-01J00000000000000000000000",
     "client_instance_id": "browser-tab-01",
@@ -174,7 +174,7 @@
     "payload": {"basis": "BASE_BAR", "count": 1}
   },
   "sample_event": {
-    "protocol": "replay.v2",
+    "protocol": "replay.v3",
     "run_id": "run-01J00000000000000000000000",
     "sequence": 1,
     "revision": 0,

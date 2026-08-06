@@ -858,9 +858,9 @@ class ReviewRecorder:
                  WHERE run_id = ?) AS ledger_count,
                 (SELECT COUNT(*) FROM replay_training_funding_settlement
                  WHERE run_id = ?) AS funding_count,
-                (SELECT COUNT(*) FROM replay_training_liquidation_event
+                (SELECT COUNT(*) FROM replay_training_liquidation_case
                  WHERE run_id = ?) AS liquidation_count,
-                (SELECT COUNT(*) FROM replay_training_liquidation_event
+                (SELECT COUNT(*) FROM replay_training_liquidation_case
                  WHERE run_id = ? AND state = 'COMPLETED')
                     AS completed_liquidation_count
             """,
@@ -1007,42 +1007,97 @@ class ReviewRecorder:
                 (run_id,),
             ).fetchall()
         ]
-        liquidations = [
-            {
-                "liquidation_id": str(row["liquidation_id"]),
-                "track_id": str(row["track_id"]),
-                "state": str(row["state"]),
-                "reason": str(row["reason"]),
-                "trigger_cursor": {
-                    "virtual_time_ms": int(row["trigger_virtual_time_ms"]),
-                    "source_sequence": int(row["trigger_source_sequence"]),
-                },
-                "maintenance_margin": str(row["maintenance_margin"]),
-                "account_equity_before": str(row["account_equity_before"]),
-                "liquidation_fee": str(row["liquidation_fee"]),
-                "fidelity": str(row["fidelity"]),
-                "canceled_order_ids": json.loads(
-                    str(row["canceled_order_ids_json"])
-                ),
-                "close_order_id": (
-                    None
-                    if row["close_order_id"] is None
-                    else str(row["close_order_id"])
-                ),
-                "account_equity_after": (
-                    None
-                    if row["account_equity_after"] is None
-                    else str(row["account_equity_after"])
-                ),
-            }
-            for row in connection.execute(
+        liquidations: list[dict[str, object]] = []
+        for case_row in connection.execute(
+            """
+            SELECT * FROM replay_training_liquidation_case
+            WHERE run_id = ? ORDER BY case_sequence
+            """,
+            (run_id,),
+        ).fetchall():
+            case_id = str(case_row["case_id"])
+            legs = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM replay_training_liquidation_leg
+                    WHERE run_id = ? AND case_id = ? ORDER BY leg_sequence
+                    """,
+                    (run_id, case_id),
+                ).fetchall()
+            ]
+            steps: list[dict[str, object]] = []
+            for step_row in connection.execute(
                 """
-                SELECT * FROM replay_training_liquidation_event
-                WHERE run_id = ? ORDER BY liquidation_id
+                SELECT * FROM replay_training_liquidation_step
+                WHERE run_id = ? AND case_id = ? ORDER BY step_sequence
                 """,
-                (run_id,),
-            ).fetchall()
-        ]
+                (run_id, case_id),
+            ).fetchall():
+                step = dict(step_row)
+                step_sequence = int(step_row["step_sequence"])
+                step["orders"] = [
+                    {
+                        **dict(order_row),
+                        "fills": [
+                            dict(fill_row)
+                            for fill_row in connection.execute(
+                                """
+                                SELECT * FROM replay_training_liquidation_fill
+                                WHERE run_id = ? AND case_id = ? AND order_id = ?
+                                ORDER BY fill_sequence
+                                """,
+                                (run_id, case_id, order_row["order_id"]),
+                            ).fetchall()
+                        ],
+                    }
+                    for order_row in connection.execute(
+                        """
+                        SELECT * FROM replay_training_liquidation_order
+                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                        ORDER BY order_sequence
+                        """,
+                        (run_id, case_id, step_sequence),
+                    ).fetchall()
+                ]
+                step["insurance_postings"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT * FROM replay_training_insurance_posting
+                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                        ORDER BY posting_sequence
+                        """,
+                        (run_id, case_id, step_sequence),
+                    ).fetchall()
+                ]
+                step["adl_events"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT * FROM replay_training_adl_event
+                        WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                        ORDER BY adl_event_id
+                        """,
+                        (run_id, case_id, step_sequence),
+                    ).fetchall()
+                ]
+                steps.append(step)
+            liquidations.append(
+                {
+                    "liquidation_id": case_id,
+                    "state": str(case_row["state"]),
+                    "reason": str(case_row["reason"]),
+                    "trigger_cursor": {
+                        "virtual_time_ms": int(case_row["trigger_virtual_time_ms"]),
+                        "source_sequence": int(case_row["trigger_source_sequence"]),
+                    },
+                    "fidelity": str(case_row["fidelity"]),
+                    "component_hash": str(case_row["component_hash"]),
+                    "legs": legs,
+                    "steps": steps,
+                }
+            )
         viewer_state = {
             "run_id": run_id,
             "selected_track_id": str(viewer["selected_track_id"]),

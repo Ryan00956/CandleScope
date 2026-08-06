@@ -1,4 +1,4 @@
-"""Deterministic replay.v2 multi-market coordination primitives."""
+"""Deterministic replay.v3 multi-market coordination primitives."""
 
 from __future__ import annotations
 

@@ -223,8 +223,8 @@ function baseApi(
   return {
     async listRuns() {
       return {
-        protocol: "replay.v2",
-        schema_version: "replay.training.v1",
+            protocol: "replay.v3",
+            schema_version: "replay.training.v2",
         items: [],
         next_cursor: null,
       };
@@ -297,8 +297,8 @@ test("Training Hub loads storage lazily, clears stale plan confirmation and abor
     async listRuns() {
       calls.push("runs");
       return {
-        protocol: "replay.v2",
-        schema_version: "replay.training.v1",
+        protocol: "replay.v3",
+        schema_version: "replay.training.v2",
         items: [],
         next_cursor: null,
       };

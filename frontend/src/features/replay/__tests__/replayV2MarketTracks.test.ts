@@ -39,7 +39,7 @@ function bookOff() {
 
 function marketTracksResponse() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-1",
     ordering_version: "replay.global-order.v1",
     launch_context: {
@@ -263,6 +263,10 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         state: "COMPLETED",
         fidelity: "REVEALED_BAR_CLOSE_PROXY",
       }],
+      hedge_state: {
+        schema_version: "replay.hedge-relational-state.v1",
+        state_hash: `sha256:${"d".repeat(64)}`,
+      },
       account_history: {
         mode: "APPROX_PROXY",
         status: "ACTIVE",
@@ -421,7 +425,7 @@ test("account records API binds type, scope, cursor, and page limit", async () =
     fetcher: async (input) => {
       requests.push(String(input));
       return new Response(JSON.stringify({
-        protocol: "replay.v2",
+        protocol: "replay.v3",
         schema_version: "replay.training.account-record-page.v1",
         run_id: "run-1",
         record_type: "ORDERS",

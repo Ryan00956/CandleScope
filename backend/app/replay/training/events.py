@@ -1,4 +1,4 @@
-"""Strict replay.v2 event envelope; transport projection arrives later."""
+"""Strict replay.v3 event envelope."""
 
 from __future__ import annotations
 

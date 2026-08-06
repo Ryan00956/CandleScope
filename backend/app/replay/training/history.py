@@ -2709,7 +2709,7 @@ def build_history_page(
             has_more,
         )
     return {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "schema_version": HISTORY_SCHEMA_VERSION,
         "run_id": str(binding["run_id"]),
         "session_id": str(binding["session_id"]),
@@ -3067,7 +3067,7 @@ def build_display_projection(
         }
     )
     return {
-        "protocol": "replay.v2",
+        "protocol": "replay.v3",
         "schema_version": "replay.display-projection.v1",
         "run_id": str(binding["run_id"]),
         "session_id": str(binding["session_id"]),

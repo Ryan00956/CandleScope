@@ -1,4 +1,4 @@
-"""Pure replay.v2 value objects and the Phase 0 enum registry."""
+"""Pure replay.v3 value objects and the hard-cutover enum registry."""
 
 from __future__ import annotations
 
@@ -18,11 +18,17 @@ from app.replay.models import (
 )
 
 
-REPLAY_V2_PROTOCOL = "replay.v2"
-REPLAY_V2_SCHEMA_VERSION = "replay.contract.v2.phase0"
+REPLAY_V2_PROTOCOL = "replay.v3"
+REPLAY_V2_SCHEMA_VERSION = "replay.contract.v3.phase1"
 REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION = "replay.launch-context.v1"
 REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION = "replay.watchlist-snapshot.v1"
 REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION = "replay.account-history-ref.v1"
+REPLAY_HEDGE_PUBLIC_HISTORY_REF_SCHEMA_VERSION = "replay.hedge-public-history-ref.v1"
+REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION = (
+    "replay.hedge-simulation-manifest-ref.v1"
+)
+HEDGE_ACCOUNT_FIDELITY = "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE"
+HEDGE_INSURANCE_ADL_FIDELITY = "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT"
 MAX_REPLAY_WATCHLIST_GROUPS = 32
 MAX_REPLAY_WATCHLIST_ITEMS = 100
 MAX_V2_COUNTER = (1 << 53) - 1
@@ -109,9 +115,7 @@ class CapabilityKind(_StringEnum):
 class CapabilityState(_StringEnum):
     AVAILABLE_EXACT = "AVAILABLE_EXACT"
     AVAILABLE_APPROX = "AVAILABLE_APPROX"
-    AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT = (
-        "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT"
-    )
+    AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT = "AVAILABLE_EXACT_INPUTS_MODELLED_ACCOUNT"
     UNSUPPORTED_NO_HISTORY = "UNSUPPORTED_NO_HISTORY"
     UNSUPPORTED_SOURCE_MODE = "UNSUPPORTED_SOURCE_MODE"
     LOADING = "LOADING"
@@ -149,6 +153,7 @@ class FundingMode(_StringEnum):
 class AccountDataMode(_StringEnum):
     APPROX_PROXY = "APPROX_PROXY"
     HISTORICAL_EXACT = "HISTORICAL_EXACT"
+    DETERMINISTIC_SIMULATION = "DETERMINISTIC_SIMULATION"
 
 
 class ExecutionModelV2(_StringEnum):
@@ -248,7 +253,10 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
 )
 
 REPLAY_V2_ENUMS: Mapping[str, tuple[str, ...]] = MappingProxyType(
-    {name: tuple(member.value for member in enum_type) for name, enum_type in _ENUM_TYPES}
+    {
+        name: tuple(member.value for member in enum_type)
+        for name, enum_type in _ENUM_TYPES
+    }
 )
 
 ADAPTER_STORAGE_CONTRACT: dict[str, object] = {
@@ -291,9 +299,7 @@ def expect_exact_keys(payload: Mapping[str, object], expected: set[str]) -> None
         raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
 
 
-def coerce_enum(
-    enum_type: type[_EnumT], value: object, *, field_name: str
-) -> _EnumT:
+def coerce_enum(enum_type: type[_EnumT], value: object, *, field_name: str) -> _EnumT:
     if isinstance(value, enum_type):
         return value
     if not isinstance(value, str):
@@ -379,9 +385,7 @@ def capabilities_to_dict(
     return {kind.value: state.value for kind, state in capabilities.items()}
 
 
-_DISCLOSURE_RANK = {
-    policy: rank for rank, policy in enumerate(TimeDisclosurePolicy)
-}
+_DISCLOSURE_RANK = {policy: rank for rank, policy in enumerate(TimeDisclosurePolicy)}
 
 
 def ensure_time_disclosure_not_weakened(
@@ -399,7 +403,9 @@ def ensure_time_disclosure_not_weakened(
         field_name="candidate time_disclosure_policy",
     )
     if _DISCLOSURE_RANK[candidate_policy] < _DISCLOSURE_RANK[authoritative_policy]:
-        raise ValueError("time_disclosure_policy downgrade requires an audited reveal event")
+        raise ValueError(
+            "time_disclosure_policy downgrade requires an audited reveal event"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,7 +418,9 @@ class TrainingCursor:
         object.__setattr__(
             self,
             "virtual_time_ms",
-            validate_timestamp_ms(self.virtual_time_ms, field_name="cursor.virtual_time_ms"),
+            validate_timestamp_ms(
+                self.virtual_time_ms, field_name="cursor.virtual_time_ms"
+            ),
         )
         object.__setattr__(
             self,
@@ -521,10 +529,16 @@ class ViewerState:
             visible_range=(
                 None
                 if payload["visible_range"] is None
-                else expect_mapping(payload["visible_range"], field_name="visible_range")
+                else expect_mapping(
+                    payload["visible_range"], field_name="visible_range"
+                )
             ),
-            pane_layout=expect_mapping(payload["pane_layout"], field_name="pane_layout"),
-            rail_layout=expect_mapping(payload["rail_layout"], field_name="rail_layout"),
+            pane_layout=expect_mapping(
+                payload["pane_layout"], field_name="pane_layout"
+            ),
+            rail_layout=expect_mapping(
+                payload["rail_layout"], field_name="rail_layout"
+            ),
             semantic_view_revision=payload["semantic_view_revision"],  # type: ignore[arg-type]
         )
 
@@ -572,7 +586,9 @@ class TrainingRunContract:
             object.__setattr__(
                 self,
                 field_name,
-                coerce_enum(enum_type, getattr(self, field_name), field_name=field_name),
+                coerce_enum(
+                    enum_type, getattr(self, field_name), field_name=field_name
+                ),
             )
         object.__setattr__(
             self,
@@ -731,9 +747,7 @@ class MarketTrackContract:
         }
 
 
-def validate_track_source(
-    run: TrainingRunContract, track: MarketTrackContract
-) -> None:
+def validate_track_source(run: TrainingRunContract, track: MarketTrackContract) -> None:
     if run.run_id != track.run_id:
         raise ValueError("track run_id does not match TrainingRun")
     if run.source_kind is not track.source_kind:
@@ -764,9 +778,7 @@ def _market_identity_string(value: object, *, field_name: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field_name} must be a string")
     if not _MARKET_IDENTITY.fullmatch(value):
-        raise ValueError(
-            f"{field_name} must contain 1-128 market identity characters"
-        )
+        raise ValueError(f"{field_name} must contain 1-128 market identity characters")
     return value
 
 
@@ -861,7 +873,9 @@ class ReplayLaunchWatchlistGroup:
             id=payload["id"],  # type: ignore[arg-type]
             name=payload["name"],  # type: ignore[arg-type]
             color=payload["color"],  # type: ignore[arg-type]
-            items=tuple(ReplayLaunchWatchlistItem.from_dict(item) for item in raw_items),
+            items=tuple(
+                ReplayLaunchWatchlistItem.from_dict(item) for item in raw_items
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -887,7 +901,9 @@ class ReplayWatchlistSnapshot:
         if not isinstance(self.groups, (tuple, list)):
             raise TypeError("watchlist snapshot groups must be an array")
         normalized = tuple(self.groups)
-        if any(not isinstance(group, ReplayLaunchWatchlistGroup) for group in normalized):
+        if any(
+            not isinstance(group, ReplayLaunchWatchlistGroup) for group in normalized
+        ):
             raise TypeError("watchlist snapshot groups must be launch watchlist groups")
         if len(normalized) > MAX_REPLAY_WATCHLIST_GROUPS:
             raise ValueError(
@@ -913,7 +929,9 @@ class ReplayWatchlistSnapshot:
             raise TypeError("watchlist snapshot groups must be an array")
         return cls(
             schema_version=payload["schema_version"],  # type: ignore[arg-type]
-            groups=tuple(ReplayLaunchWatchlistGroup.from_dict(group) for group in raw_groups),
+            groups=tuple(
+                ReplayLaunchWatchlistGroup.from_dict(group) for group in raw_groups
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1078,13 +1096,13 @@ class AccountHistoryRef:
 
     def __post_init__(self) -> None:
         if self.schema_version != REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION:
-            raise ValueError(
-                "account history ref schema_version is unsupported"
-            )
+            raise ValueError("account history ref schema_version is unsupported")
         object.__setattr__(
             self,
             "archive_id",
-            validate_identifier(self.archive_id, field_name="account_history_ref.archive_id"),
+            validate_identifier(
+                self.archive_id, field_name="account_history_ref.archive_id"
+            ),
         )
         for field_name in ("dataset_epoch", "checksum_sha256"):
             value = getattr(self, field_name)
@@ -1117,8 +1135,119 @@ class AccountHistoryRef:
 
 
 @dataclass(frozen=True, slots=True)
+class HedgePublicHistoryRef:
+    """Pinned aggregate of the public inputs required by the HEDGE model."""
+
+    schema_version: str
+    archive_id: str
+    dataset_epoch: str
+    checksum_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_HEDGE_PUBLIC_HISTORY_REF_SCHEMA_VERSION:
+            raise ValueError("hedge public history ref schema_version is unsupported")
+        object.__setattr__(
+            self,
+            "archive_id",
+            validate_identifier(
+                self.archive_id,
+                field_name="hedge_public_history_ref.archive_id",
+            ),
+        )
+        for field_name in ("dataset_epoch", "checksum_sha256"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                raise ValueError(
+                    f"hedge_public_history_ref.{field_name} must be a sha256 digest"
+                )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "HedgePublicHistoryRef":
+        payload = expect_mapping(value, field_name="hedge_public_history_ref")
+        expect_exact_keys(
+            payload,
+            {"schema_version", "archive_id", "dataset_epoch", "checksum_sha256"},
+        )
+        return cls(**payload)  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "schema_version": self.schema_version,
+            "archive_id": self.archive_id,
+            "dataset_epoch": self.dataset_epoch,
+            "checksum_sha256": self.checksum_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HedgeSimulationManifestRef:
+    """Content-addressed binding to one materialized private-state simulation."""
+
+    schema_version: str
+    manifest_id: str
+    dataset_epoch: str
+    checksum_sha256: str
+    contract_hash: str
+    model_version: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION:
+            raise ValueError(
+                "hedge simulation manifest ref schema_version is unsupported"
+            )
+        object.__setattr__(
+            self,
+            "manifest_id",
+            validate_identifier(
+                self.manifest_id,
+                field_name="simulation_manifest_ref.manifest_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "model_version",
+            validate_identifier(
+                self.model_version,
+                field_name="simulation_manifest_ref.model_version",
+            ),
+        )
+        for field_name in ("dataset_epoch", "checksum_sha256", "contract_hash"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+                raise ValueError(
+                    f"simulation_manifest_ref.{field_name} must be a sha256 digest"
+                )
+
+    @classmethod
+    def from_dict(cls, value: object) -> "HedgeSimulationManifestRef":
+        payload = expect_mapping(value, field_name="simulation_manifest_ref")
+        expect_exact_keys(
+            payload,
+            {
+                "schema_version",
+                "manifest_id",
+                "dataset_epoch",
+                "checksum_sha256",
+                "contract_hash",
+                "model_version",
+            },
+        )
+        return cls(**payload)  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "schema_version": self.schema_version,
+            "manifest_id": self.manifest_id,
+            "dataset_epoch": self.dataset_epoch,
+            "checksum_sha256": self.checksum_sha256,
+            "contract_hash": self.contract_hash,
+            "model_version": self.model_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingRunCreateRequest:
-    """Replay training create contract mapped to one replay.v1 adapter session."""
+    """Replay training create contract mapped to one internal adapter session."""
 
     protocol: str
     catalog_epoch: str
@@ -1146,9 +1275,13 @@ class TrainingRunCreateRequest:
     margin_mode: MarginMode
     funding_mode: FundingMode
     allow_rule_changes: bool
-    position_mode: PositionMode = PositionMode.ONE_WAY
-    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
+    position_mode: PositionMode = PositionMode.HEDGE
+    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
     account_history_ref: "AccountHistoryRef | None" = None
+    hedge_public_history_ref: "HedgePublicHistoryRef | None" = None
+    simulation_manifest_ref: "HedgeSimulationManifestRef | None" = None
+    account_fidelity: str | None = None
+    insurance_adl_fidelity: str | None = None
     fixed_funding_rate: str | None = None
     funding_interval_ms: int | None = None
     allowed_mutations: tuple[str, ...] = ()
@@ -1183,7 +1316,9 @@ class TrainingRunCreateRequest:
             object.__setattr__(
                 self,
                 field_name,
-                coerce_enum(enum_type, getattr(self, field_name), field_name=field_name),
+                coerce_enum(
+                    enum_type, getattr(self, field_name), field_name=field_name
+                ),
             )
         for field_name in ("exchange", "market_type", "symbol"):
             object.__setattr__(
@@ -1239,9 +1374,7 @@ class TrainingRunCreateRequest:
                 duration_ms=warmup * interval_ms,
             )
         elif not isinstance(visible_history, VisibleHistoryLookback):
-            raise TypeError(
-                "visible_history_lookback must be a VisibleHistoryLookback"
-            )
+            raise TypeError("visible_history_lookback must be a VisibleHistoryLookback")
         object.__setattr__(self, "visible_history_lookback", visible_history)
         for field_name in ("initial_equity", "max_leverage"):
             object.__setattr__(
@@ -1290,11 +1423,11 @@ class TrainingRunCreateRequest:
         object.__setattr__(self, "allowed_mutations", allowed)
         if self.funding_mode is FundingMode.SANDBOX_FIXED:
             if self.integrity_mode is not IntegrityMode.SANDBOX:
-                raise ValueError("SANDBOX_FIXED funding requires SANDBOX integrity mode")
-            if self.fixed_funding_rate is None or self.funding_interval_ms is None:
                 raise ValueError(
-                    "SANDBOX_FIXED funding requires rate and interval"
+                    "SANDBOX_FIXED funding requires SANDBOX integrity mode"
                 )
+            if self.fixed_funding_rate is None or self.funding_interval_ms is None:
+                raise ValueError("SANDBOX_FIXED funding requires rate and interval")
             object.__setattr__(
                 self,
                 "fixed_funding_rate",
@@ -1310,7 +1443,9 @@ class TrainingRunCreateRequest:
             if interval < 60_000 or interval > 30 * 86_400_000:
                 raise ValueError("funding_interval_ms is outside supported bounds")
             object.__setattr__(self, "funding_interval_ms", interval)
-        elif self.fixed_funding_rate is not None or self.funding_interval_ms is not None:
+        elif (
+            self.fixed_funding_rate is not None or self.funding_interval_ms is not None
+        ):
             raise ValueError(
                 "fixed funding fields are available only for SANDBOX_FIXED"
             )
@@ -1319,28 +1454,77 @@ class TrainingRunCreateRequest:
             AccountHistoryRef,
         ):
             raise TypeError("account_history_ref must be an AccountHistoryRef or null")
+        if self.hedge_public_history_ref is not None and not isinstance(
+            self.hedge_public_history_ref,
+            HedgePublicHistoryRef,
+        ):
+            raise TypeError(
+                "hedge_public_history_ref must be a HedgePublicHistoryRef or null"
+            )
+        if self.simulation_manifest_ref is not None and not isinstance(
+            self.simulation_manifest_ref,
+            HedgeSimulationManifestRef,
+        ):
+            raise TypeError(
+                "simulation_manifest_ref must be a HedgeSimulationManifestRef or null"
+            )
         if self.account_data_mode is AccountDataMode.APPROX_PROXY:
             if self.account_history_ref is not None:
                 raise ValueError(
                     "APPROX_PROXY account data cannot carry an exact history ref"
                 )
-        elif self.funding_mode is FundingMode.SANDBOX_FIXED:
+        elif (
+            self.account_data_mode is AccountDataMode.HISTORICAL_EXACT
+            and self.funding_mode is FundingMode.SANDBOX_FIXED
+        ):
             raise ValueError(
                 "HISTORICAL_EXACT account data cannot use synthetic Sandbox funding"
             )
         if self.position_mode is PositionMode.HEDGE:
-            if self.account_data_mode is not AccountDataMode.APPROX_PROXY:
+            if self.account_data_mode is not AccountDataMode.DETERMINISTIC_SIMULATION:
                 raise ValueError(
-                    "HEDGE position mode currently requires APPROX_PROXY account data"
+                    "HEDGE position mode requires DETERMINISTIC_SIMULATION account data; "
+                    "legacy HEDGE account modes are not compatible with replay.v3"
                 )
-            if self.margin_mode is not MarginMode.CROSS:
-                raise ValueError("HEDGE position mode currently requires CROSS margin")
-            if self.funding_mode is not FundingMode.OFF:
-                raise ValueError("HEDGE position mode currently requires funding OFF")
-            if self.book_mode is not BookMode.OFF:
+            placeholder = self.symbol == "UNSELECTED"
+            if not placeholder and self.hedge_public_history_ref is None:
                 raise ValueError(
-                    "HEDGE position mode currently requires touch-or-tape execution"
+                    "HEDGE position mode requires a pinned hedge_public_history_ref"
                 )
+            if not placeholder and self.simulation_manifest_ref is None:
+                raise ValueError(
+                    "HEDGE position mode requires a pinned simulation_manifest_ref"
+                )
+            if self.account_history_ref is not None:
+                raise ValueError(
+                    "HEDGE deterministic simulation cannot carry legacy account_history_ref"
+                )
+            if self.account_fidelity != HEDGE_ACCOUNT_FIDELITY:
+                raise ValueError(
+                    "HEDGE account_fidelity does not match the v1 contract"
+                )
+            if self.insurance_adl_fidelity != HEDGE_INSURANCE_ADL_FIDELITY:
+                raise ValueError(
+                    "HEDGE insurance_adl_fidelity does not match the v1 contract"
+                )
+        else:
+            if self.account_data_mode is AccountDataMode.DETERMINISTIC_SIMULATION:
+                raise ValueError(
+                    "DETERMINISTIC_SIMULATION account data is reserved for HEDGE mode"
+                )
+            if self.hedge_public_history_ref is not None:
+                raise ValueError(
+                    "ONE_WAY position mode cannot carry hedge_public_history_ref"
+                )
+            if self.simulation_manifest_ref is not None:
+                raise ValueError(
+                    "ONE_WAY position mode cannot carry simulation_manifest_ref"
+                )
+            if (
+                self.account_fidelity is not None
+                or self.insurance_adl_fidelity is not None
+            ):
+                raise ValueError("ONE_WAY position mode cannot claim HEDGE fidelity")
         if self.launch_context is not None:
             if not isinstance(self.launch_context, ReplayLaunchContext):
                 raise TypeError("launch_context must be a ReplayLaunchContext or null")
@@ -1393,27 +1577,33 @@ class TrainingRunCreateRequest:
                 "exactly one of warmup_bars or indicator_warmup_bars is required"
             )
         missing = required - set(payload)
-        unknown = set(payload) - required - {
-            "warmup_bars",
-            "indicator_warmup_bars",
-            "visible_history_lookback",
-            "random_seed",
-            "allowed_mutations",
-            "fixed_funding_rate",
-            "funding_interval_ms",
-            "account_data_mode",
-            "account_history_ref",
-            "launch_context",
-            "position_mode",
-        }
+        unknown = (
+            set(payload)
+            - required
+            - {
+                "warmup_bars",
+                "indicator_warmup_bars",
+                "visible_history_lookback",
+                "random_seed",
+                "allowed_mutations",
+                "fixed_funding_rate",
+                "funding_interval_ms",
+                "account_data_mode",
+                "account_history_ref",
+                "hedge_public_history_ref",
+                "simulation_manifest_ref",
+                "account_fidelity",
+                "insurance_adl_fidelity",
+                "launch_context",
+                "position_mode",
+            }
+        )
         if missing:
             raise ValueError(f"missing field(s): {', '.join(sorted(missing))}")
         if unknown:
             raise ValueError(f"unknown field(s): {', '.join(sorted(unknown))}")
         normalized = dict(payload)
-        normalized["warmup_bars"] = normalized.pop(
-            next(iter(warmup_fields))
-        )
+        normalized["warmup_bars"] = normalized.pop(next(iter(warmup_fields)))
         normalized.pop("indicator_warmup_bars", None)
         raw_visible_history = normalized.get("visible_history_lookback")
         normalized["visible_history_lookback"] = (
@@ -1432,13 +1622,34 @@ class TrainingRunCreateRequest:
             if raw_launch_context is None
             else ReplayLaunchContext.from_dict(raw_launch_context)
         )
-        normalized.setdefault("account_data_mode", AccountDataMode.APPROX_PROXY.value)
-        normalized.setdefault("position_mode", PositionMode.ONE_WAY.value)
+        normalized.setdefault(
+            "account_data_mode",
+            AccountDataMode.DETERMINISTIC_SIMULATION.value,
+        )
+        normalized.setdefault("position_mode", PositionMode.HEDGE.value)
+        if normalized["position_mode"] == PositionMode.HEDGE.value:
+            normalized.setdefault("account_fidelity", HEDGE_ACCOUNT_FIDELITY)
+            normalized.setdefault(
+                "insurance_adl_fidelity",
+                HEDGE_INSURANCE_ADL_FIDELITY,
+            )
         raw_account_history_ref = normalized.get("account_history_ref")
         normalized["account_history_ref"] = (
             None
             if raw_account_history_ref is None
             else AccountHistoryRef.from_dict(raw_account_history_ref)
+        )
+        raw_public_ref = normalized.get("hedge_public_history_ref")
+        normalized["hedge_public_history_ref"] = (
+            None
+            if raw_public_ref is None
+            else HedgePublicHistoryRef.from_dict(raw_public_ref)
+        )
+        raw_manifest_ref = normalized.get("simulation_manifest_ref")
+        normalized["simulation_manifest_ref"] = (
+            None
+            if raw_manifest_ref is None
+            else HedgeSimulationManifestRef.from_dict(raw_manifest_ref)
         )
         return cls(**normalized)  # type: ignore[arg-type]
 
@@ -1496,6 +1707,18 @@ class TrainingRunCreateRequest:
                 if self.account_history_ref is None
                 else self.account_history_ref.to_dict()
             ),
+            "hedge_public_history_ref": (
+                None
+                if self.hedge_public_history_ref is None
+                else self.hedge_public_history_ref.to_dict()
+            ),
+            "simulation_manifest_ref": (
+                None
+                if self.simulation_manifest_ref is None
+                else self.simulation_manifest_ref.to_dict()
+            ),
+            "account_fidelity": self.account_fidelity,
+            "insurance_adl_fidelity": self.insurance_adl_fidelity,
             "fixed_funding_rate": self.fixed_funding_rate,
             "funding_interval_ms": self.funding_interval_ms,
             "allow_rule_changes": self.allow_rule_changes,
@@ -1514,6 +1737,8 @@ class TrainingRunMarketSelectionRequest:
     base_interval: str
     display_interval: str
     account_history_ref: AccountHistoryRef | None = None
+    hedge_public_history_ref: HedgePublicHistoryRef | None = None
+    simulation_manifest_ref: HedgeSimulationManifestRef | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.catalog_epoch, str) or not _DIGEST.fullmatch(
@@ -1540,6 +1765,20 @@ class TrainingRunMarketSelectionRequest:
             AccountHistoryRef,
         ):
             raise TypeError("account_history_ref must be an AccountHistoryRef or null")
+        if self.hedge_public_history_ref is not None and not isinstance(
+            self.hedge_public_history_ref,
+            HedgePublicHistoryRef,
+        ):
+            raise TypeError(
+                "hedge_public_history_ref must be a HedgePublicHistoryRef or null"
+            )
+        if self.simulation_manifest_ref is not None and not isinstance(
+            self.simulation_manifest_ref,
+            HedgeSimulationManifestRef,
+        ):
+            raise TypeError(
+                "simulation_manifest_ref must be a HedgeSimulationManifestRef or null"
+            )
 
     @classmethod
     def from_dict(cls, value: object) -> "TrainingRunMarketSelectionRequest":
@@ -1554,9 +1793,13 @@ class TrainingRunMarketSelectionRequest:
                 "base_interval",
                 "display_interval",
                 "account_history_ref",
+                "hedge_public_history_ref",
+                "simulation_manifest_ref",
             },
         )
         raw_ref = payload["account_history_ref"]
+        raw_public_ref = payload["hedge_public_history_ref"]
+        raw_manifest_ref = payload["simulation_manifest_ref"]
         return cls(
             catalog_epoch=payload["catalog_epoch"],  # type: ignore[arg-type]
             exchange=payload["exchange"],  # type: ignore[arg-type]
@@ -1566,6 +1809,16 @@ class TrainingRunMarketSelectionRequest:
             display_interval=payload["display_interval"],  # type: ignore[arg-type]
             account_history_ref=(
                 None if raw_ref is None else AccountHistoryRef.from_dict(raw_ref)
+            ),
+            hedge_public_history_ref=(
+                None
+                if raw_public_ref is None
+                else HedgePublicHistoryRef.from_dict(raw_public_ref)
+            ),
+            simulation_manifest_ref=(
+                None
+                if raw_manifest_ref is None
+                else HedgeSimulationManifestRef.from_dict(raw_manifest_ref)
             ),
         )
 
@@ -1581,6 +1834,16 @@ class TrainingRunMarketSelectionRequest:
                 None
                 if self.account_history_ref is None
                 else self.account_history_ref.to_dict()
+            ),
+            "hedge_public_history_ref": (
+                None
+                if self.hedge_public_history_ref is None
+                else self.hedge_public_history_ref.to_dict()
+            ),
+            "simulation_manifest_ref": (
+                None
+                if self.simulation_manifest_ref is None
+                else self.simulation_manifest_ref.to_dict()
             ),
         }
 
@@ -1604,7 +1867,19 @@ class TrainingRunSetupRequest:
         payload = dict(expect_mapping(value, field_name="training run setup"))
         payload.setdefault("random_range_start_ms", None)
         payload.setdefault("random_range_end_ms", None)
-        payload.setdefault("position_mode", PositionMode.ONE_WAY.value)
+        payload.setdefault("position_mode", PositionMode.HEDGE.value)
+        payload.setdefault(
+            "account_data_mode",
+            AccountDataMode.DETERMINISTIC_SIMULATION.value,
+        )
+        if payload["position_mode"] == PositionMode.HEDGE.value:
+            if payload.get("account_fidelity") is None:
+                payload["account_fidelity"] = HEDGE_ACCOUNT_FIDELITY
+            if payload.get("insurance_adl_fidelity") is None:
+                payload["insurance_adl_fidelity"] = HEDGE_INSURANCE_ADL_FIDELITY
+        else:
+            payload.setdefault("account_fidelity", None)
+            payload.setdefault("insurance_adl_fidelity", None)
         required = {
             "protocol",
             "name",
@@ -1630,6 +1905,8 @@ class TrainingRunSetupRequest:
             "position_mode",
             "funding_mode",
             "account_data_mode",
+            "account_fidelity",
+            "insurance_adl_fidelity",
             "fixed_funding_rate",
             "funding_interval_ms",
             "allow_rule_changes",
@@ -1638,15 +1915,12 @@ class TrainingRunSetupRequest:
         }
         expect_exact_keys(payload, required)
         raw_hint = payload["market_selection_hint"]
-        hint = (
-            None
-            if raw_hint is None
-            else ReplayLaunchContext.from_dict(raw_hint)
-        )
+        hint = None if raw_hint is None else ReplayLaunchContext.from_dict(raw_hint)
         candidate_payload = {
             key: item
             for key, item in payload.items()
-            if key not in {
+            if key
+            not in {
                 "market_selection_hint",
                 "random_range_start_ms",
                 "random_range_end_ms",
@@ -1661,6 +1935,8 @@ class TrainingRunSetupRequest:
                 "base_interval": "1m",
                 "display_interval": "1m",
                 "account_history_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
             }
         )
         candidate = TrainingRunCreateRequest.from_dict(candidate_payload)
@@ -1684,12 +1960,12 @@ class TrainingRunSetupRequest:
             if range_end < range_start:
                 raise ValueError("random time range end cannot precede its start")
             if (range_end - range_start) % 60_000 != 0:
-                raise ValueError("random time range endpoints must share a UTC-minute grid")
+                raise ValueError(
+                    "random time range endpoints must share a UTC-minute grid"
+                )
         setup["random_range_start_ms"] = range_start
         setup["random_range_end_ms"] = range_end
-        setup["market_selection_hint"] = (
-            None if hint is None else hint.to_dict()
-        )
+        setup["market_selection_hint"] = None if hint is None else hint.to_dict()
         return cls(settings=setup)
 
     @classmethod
@@ -1708,12 +1984,12 @@ class TrainingRunSetupRequest:
             "base_interval",
             "display_interval",
             "account_history_ref",
+            "hedge_public_history_ref",
+            "simulation_manifest_ref",
         ):
             settings.pop(field_name, None)
         settings["market_selection_hint"] = (
-            None
-            if request.launch_context is None
-            else request.launch_context.to_dict()
+            None if request.launch_context is None else request.launch_context.to_dict()
         )
         settings["random_range_start_ms"] = None
         settings["random_range_end_ms"] = None
@@ -1749,9 +2025,40 @@ class TrainingRunSetupRequest:
         return thaw_json(self.settings)  # type: ignore[return-value]
 
 
+def hedge_run_binding(request: TrainingRunCreateRequest) -> dict[str, object]:
+    """Return the cross-language canonical binding for one replay.v3 HEDGE Run."""
+
+    if not isinstance(request, TrainingRunCreateRequest):
+        raise TypeError("request must be a TrainingRunCreateRequest")
+    if request.position_mode is not PositionMode.HEDGE:
+        raise ValueError("canonical HEDGE binding requires HEDGE position mode")
+    if (
+        request.hedge_public_history_ref is None
+        or request.simulation_manifest_ref is None
+    ):
+        raise ValueError("canonical HEDGE binding requires both pinned references")
+    return {
+        "protocol": REPLAY_V2_PROTOCOL,
+        "schema_version": REPLAY_V2_SCHEMA_VERSION,
+        "position_mode": request.position_mode.value,
+        "account_data_mode": request.account_data_mode.value,
+        "margin_mode": request.margin_mode.value,
+        "funding_mode": request.funding_mode.value,
+        "book_mode": request.book_mode.value,
+        "hedge_public_history_ref": request.hedge_public_history_ref.to_dict(),
+        "simulation_manifest_ref": request.simulation_manifest_ref.to_dict(),
+        "account_fidelity": request.account_fidelity,
+        "insurance_adl_fidelity": request.insurance_adl_fidelity,
+    }
+
+
 __all__ = [
     "AccountDataMode",
     "AccountHistoryRef",
+    "HEDGE_ACCOUNT_FIDELITY",
+    "HEDGE_INSURANCE_ADL_FIDELITY",
+    "HedgePublicHistoryRef",
+    "HedgeSimulationManifestRef",
     "AdvanceBasis",
     "BookMode",
     "CapabilityKind",
@@ -1769,6 +2076,8 @@ __all__ = [
     "REPLAY_V2_SCHEMA_VERSION",
     "REPLAY_LAUNCH_CONTEXT_SCHEMA_VERSION",
     "REPLAY_ACCOUNT_HISTORY_REF_SCHEMA_VERSION",
+    "REPLAY_HEDGE_PUBLIC_HISTORY_REF_SCHEMA_VERSION",
+    "REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION",
     "REPLAY_WATCHLIST_SNAPSHOT_SCHEMA_VERSION",
     "ReplayLaunchContext",
     "ReplayLaunchWatchlistGroup",
@@ -1793,5 +2102,6 @@ __all__ = [
     "VisibleHistoryMode",
     "ViewerState",
     "ensure_time_disclosure_not_weakened",
+    "hedge_run_binding",
     "validate_track_source",
 ]

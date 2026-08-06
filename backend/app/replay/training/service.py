@@ -1,4 +1,4 @@
-"""TrainingRun lifecycle, ViewerState, and replay.v2 control adaptation."""
+"""TrainingRun lifecycle, ViewerState, and replay.v3 control adaptation."""
 
 from __future__ import annotations
 
@@ -325,7 +325,7 @@ class TrainingRunService:
             field_name="preparation_id",
         )
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "preparation": await self.store.selection_preparation(normalized),
         }
 
@@ -1423,7 +1423,7 @@ class TrainingRunService:
                     summary=candidate,
                 )
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": normalized,
             "plan": self._fast_forward_plan_payload(
                 decision,
@@ -1962,7 +1962,7 @@ class TrainingRunService:
         binding = await self.store.run_binding(normalized)
         journal = await self.replay_service.journal(str(binding["adapter_session_id"]))
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": normalized,
             "entries": journal["entries"],
             "integrity": await self.store.integrity(normalized),
@@ -2022,7 +2022,7 @@ class TrainingRunService:
             market_projection = await self.store.get_market_tracks(normalized)
             portfolio = market_projection.get("portfolio")
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": normalized,
             "data_fidelity": report["data_fidelity"],
             "execution_fidelity": report["execution_fidelity"],
@@ -2312,7 +2312,7 @@ class TrainingRunService:
         card = await self.store.get_run(child_run_id)
         child_tracks = await self.store.get_market_tracks(child_run_id)
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "parent_run_id": normalized,
             "parent_event_id": normalized_event,
             "parent_timeline_sequence": event["timeline_sequence"],
@@ -2391,7 +2391,11 @@ class TrainingRunService:
         )
         if (
             request.funding_mode is FundingMode.HISTORICAL_EXACT
-            and request.account_data_mode is not AccountDataMode.HISTORICAL_EXACT
+            and request.account_data_mode
+            not in {
+                AccountDataMode.HISTORICAL_EXACT,
+                AccountDataMode.DETERMINISTIC_SIMULATION,
+            }
         ):
             raise TrainingRunError(
                 "HISTORICAL_FUNDING_UNAVAILABLE",
@@ -2628,7 +2632,7 @@ class TrainingRunService:
             raise
         run = await self.store.get_run(run_id)
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "created": True,
             "run": run,
         }
@@ -2704,7 +2708,7 @@ class TrainingRunService:
                     },
                 )
         result: dict[str, object] = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": run_id,
             "state": run_state,
             "checkpointed": True,
@@ -3674,7 +3678,7 @@ class TrainingRunService:
             )
             viewer = await self.store.get_viewer_state(normalized_run)
             return {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "run_id": normalized_run,
                 "session_id": session_id,
                 "command_id": command.command_id,
@@ -4012,7 +4016,7 @@ class TrainingRunService:
             )
         viewer = await self.store.get_viewer_state(normalized_run)
         result = {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": normalized_run,
             "session_id": session_id,
             "command_id": command.command_id,
@@ -5496,7 +5500,7 @@ class TrainingRunService:
                     run_id=run_id,
                     liquidation_id=liquidation_id,
                     canceled_order_ids=canceled,
-                    close_order_id=close_order_ids[0],
+                    close_order_ids=close_order_ids,
                 )
                 completed += 1
             except (ReplayDomainError, TrainingRunError) as exc:
@@ -6531,7 +6535,7 @@ class TrainingRunService:
                     if target is not None:
                         tick = actor.next_playback_tick(generation)
                         internal = ReplayV2Command(
-                            protocol="replay.v2",
+                            protocol="replay.v3",
                             run_id=run_id,
                             command_id=f"ordered-play-{generation}-{tick}",
                             client_instance_id=str(actor.playback_client_id),
@@ -7596,7 +7600,7 @@ class TrainingRunService:
         data: Mapping[str, object],
     ) -> dict[str, object]:
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": command.run_id,
             "session_id": session_id,
             "command_id": command.command_id,
@@ -7957,7 +7961,7 @@ class TrainingRunService:
                 status_code=503,
             )
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": command.run_id,
             "session_id": session_id,
             "command_id": command.command_id,
@@ -8202,7 +8206,7 @@ class TrainingRunService:
                 status_code=404,
             )
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": normalized_run,
             "command_id": normalized_command,
             "progress": self._public_progress(job),
@@ -8735,7 +8739,7 @@ class TrainingRunService:
                 job["cancelable"] = False
             progress = self._public_progress(job)
             result = {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "run_id": command.run_id,
                 "session_id": session_id,
                 "command_id": command.command_id,
@@ -8841,7 +8845,7 @@ class TrainingRunService:
         current = current_response["snapshot"]
         viewer = await self.store.get_viewer_state(command.run_id)
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": command.run_id,
             "session_id": session_id,
             "command_id": command.command_id,
@@ -8977,7 +8981,7 @@ class TrainingRunService:
         )
         cursor = dict(snapshot["cursor"])  # type: ignore[arg-type]
         return {
-            "protocol": "replay.v2",
+            "protocol": "replay.v3",
             "run_id": command.run_id,
             "session_id": snapshot["session_id"],
             "command_id": command.command_id,

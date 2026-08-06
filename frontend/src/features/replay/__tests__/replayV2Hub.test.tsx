@@ -58,8 +58,8 @@ function runCard(overrides: Record<string, unknown> = {}) {
 
 function listResponse(items = [runCard()], nextCursor: string | null = null) {
   return {
-    protocol: "replay.v2",
-    schema_version: "replay.training.v1",
+    protocol: "replay.v3",
+    schema_version: "replay.training.v2",
     items,
     next_cursor: nextCursor,
   };
@@ -67,7 +67,7 @@ function listResponse(items = [runCard()], nextCursor: string | null = null) {
 
 function mutationResponse() {
   return {
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     created: true,
     run: runCard(),
   };
@@ -256,7 +256,7 @@ test("run-delete API uses the bounded archive route and strict response parser",
     fetcher: async (input, init) => {
       requests.push({ url: String(input), method: init?.method });
       return new Response(JSON.stringify({
-        protocol: "replay.v2",
+        protocol: "replay.v3",
         deleted: true,
         run_id: "run-1",
         session_ids: ["adapter-1", "adapter-track-2"],
@@ -268,19 +268,19 @@ test("run-delete API uses the bounded archive route and strict response parser",
   });
   const deleted = await client.deleteRun("run-1");
   assert.deepEqual(deleted, parseTrainingRunDeleteResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     deleted: true,
     run_id: "run-1",
     session_ids: ["adapter-1", "adapter-track-2"],
   }));
   assert.deepEqual(requests, [{ url: "/api/v1/replay/runs/run-1", method: "DELETE" }]);
   assert.throws(() => parseTrainingRunDeleteResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     deleted: true,
     run_id: "run-1",
   }));
   assert.throws(() => parseTrainingRunDeleteResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     deleted: true,
     run_id: "run-1",
     session_ids: ["adapter-1", "adapter-1"],
@@ -305,7 +305,7 @@ test("Hub clears the run and every server-returned session scope after a matchin
       },
       async deleteRun() {
         return parseTrainingRunDeleteResponse({
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           deleted: true,
           run_id: "run-1",
           session_ids: ["adapter-1", "adapter-track-2"],
@@ -560,7 +560,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
   });
   const request = buildTrainingRunCreateRequest(draft, evaluation);
-  assert.equal(request.protocol, "replay.v2");
+  assert.equal(request.protocol, "replay.v3");
   assert.equal(Object.hasOwn(request, "catalog_epoch"), false);
   assert.equal(Object.hasOwn(request, "symbol"), false);
   assert.equal(request.time_disclosure_policy, "HIDE_ALL");
@@ -568,17 +568,17 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.random_range_end_ms, draft.randomRangeEndMs);
   assert.equal(request.integrity_mode, "CHALLENGE");
   assert.equal(request.funding_mode, "OFF");
-  assert.equal(request.account_data_mode, "APPROX_PROXY");
+  assert.equal(request.account_data_mode, "DETERMINISTIC_SIMULATION");
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
-  assert.equal(request.position_mode, "ONE_WAY");
+  assert.equal(request.position_mode, "HEDGE");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
 });
 
-test("Phase 6 create model enables isolated Sandbox funding but rejects historical exact", () => {
+test("HEDGE create model enables isolated Sandbox and pinned historical funding inputs", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const base = createTrainingRunDraft(catalog);
@@ -603,11 +603,10 @@ test("Phase 6 create model enables isolated Sandbox funding but rejects historic
     capabilities,
     catalog,
   );
-  assert.equal(exact.canSubmit, false);
-  assert.match(exact.errors.join("\n"), /精确资金费.*精确账户历史/);
+  assert.equal(exact.canSubmit, true);
 });
 
-test("HEDGE create mode is explicit and fails closed outside its first-release matrix", () => {
+test("HEDGE create mode is the default and accepts the exchange-parity policy matrix", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = blindCatalog();
   const base = createTrainingRunDraft(catalog);
@@ -616,14 +615,16 @@ test("HEDGE create mode is explicit and fails closed outside its first-release m
   assert.equal(evaluation.canSubmit, true);
   assert.equal(buildTrainingRunCreateRequest(hedge, evaluation).position_mode, "HEDGE");
 
-  for (const invalid of [
+  for (const supported of [
     { ...hedge, marginMode: "ISOLATED" as const },
     { ...hedge, fundingMode: "SANDBOX_FIXED" as const, integrityMode: "SANDBOX" as const },
-    { ...hedge, bookMode: "BOOK_ASSISTED_REQUIRED" as const },
-    { ...hedge, accountDataMode: "HISTORICAL_EXACT" as const },
   ]) {
-    assert.equal(evaluateTrainingRunSetupDraft(invalid, capabilities).canSubmit, false);
+    assert.equal(evaluateTrainingRunSetupDraft(supported, capabilities).canSubmit, true);
   }
+  assert.equal(evaluateTrainingRunSetupDraft({
+    ...hedge,
+    accountDataMode: "HISTORICAL_EXACT" as const,
+  }, capabilities).canSubmit, false);
 });
 
 test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan", () => {
@@ -797,7 +798,7 @@ test("return-to-hub waits for the server checkpoint before navigation", async ()
       async returnToHub(runId) {
         calls.push(`checkpoint:${runId}`);
         return {
-          protocol: "replay.v2",
+          protocol: "replay.v3",
           run_id: "run-1",
           state: "PAUSED",
           checkpointed: true,
@@ -813,7 +814,7 @@ test("return-to-hub waits for the server checkpoint before navigation", async ()
 test("return-to-hub preserves terminal durable states and still navigates", async () => {
   for (const state of ["ENDED", "ERROR"] as const) {
     const parsed = parseTrainingRunReturnResponse({
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: `run-${state.toLowerCase()}`,
       state,
       checkpointed: true,
@@ -828,7 +829,7 @@ test("return-to-hub preserves terminal durable states and still navigates", asyn
     assert.deepEqual(calls, ["/replay.html"]);
   }
   assert.throws(() => parseTrainingRunReturnResponse({
-    protocol: "replay.v2",
+    protocol: "replay.v3",
     run_id: "run-playing",
     state: "PLAYING",
     checkpointed: true,

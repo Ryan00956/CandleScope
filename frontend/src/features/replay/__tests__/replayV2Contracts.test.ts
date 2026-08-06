@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { resolveReplayEntry } from "../replayEntry.js";
+import { canonicalReplayJson, canonicalReplaySha256 } from "../replayCanonical.js";
 import {
   REPLAY_V2_ENUMS,
   assertReplayV2NoDisclosureDowngrade,
@@ -10,10 +11,15 @@ import {
   parseReplayV2Event,
   parseReplayV2MarketTrack,
   parseReplayV2TrainingRun,
+  parseReplayHedgeRunBinding,
 } from "../replayV2Types.js";
 
 const GOLDEN_URL = new URL(
   "../../../../../backend/tests/fixtures/replay/v2_contract_golden.json",
+  import.meta.url,
+);
+const HEDGE_PHASE1_GOLDEN_URL = new URL(
+  "../../../../../backend/tests/fixtures/replay/hedge_protocol_phase1_golden.json",
   import.meta.url,
 );
 
@@ -29,6 +35,37 @@ function asObject(value: unknown, fieldName: string): JsonObject {
 function golden(): JsonObject {
   return asObject(JSON.parse(readFileSync(GOLDEN_URL, "utf8")), "golden");
 }
+
+function hedgePhase1Golden(): JsonObject {
+  return asObject(
+    JSON.parse(readFileSync(HEDGE_PHASE1_GOLDEN_URL, "utf8")),
+    "hedge phase1 golden",
+  );
+}
+
+test("replay.v3 HEDGE binding has Python/TypeScript canonical JSON and hash parity", async () => {
+  const fixture = hedgePhase1Golden();
+  const parsed = parseReplayHedgeRunBinding(fixture.canonical_payload);
+  assert.deepEqual(parsed, fixture.canonical_payload);
+  assert.equal(
+    canonicalReplayJson(parsed),
+    canonicalReplayJson(fixture.canonical_payload),
+  );
+  assert.equal(await canonicalReplaySha256(parsed), fixture.canonical_hash);
+});
+
+test("replay.v3 rejects legacy or unpinned HEDGE bindings", () => {
+  for (const [field, value] of [
+    ["protocol", "replay.v2"],
+    ["account_data_mode", "APPROX_PROXY"],
+    ["hedge_public_history_ref", null],
+    ["simulation_manifest_ref", null],
+  ] as const) {
+    const payload = cloneObject(hedgePhase1Golden().canonical_payload, "hedge binding");
+    payload[field] = value;
+    assert.throws(() => parseReplayHedgeRunBinding(payload));
+  }
+});
 
 function cloneObject(value: unknown, fieldName: string): JsonObject {
   return asObject(structuredClone(value), fieldName);

@@ -739,10 +739,10 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     const viewer = viewerRef.current;
     const store = runtime.store;
     if (viewer === null || store.virtualTimeMs === null || store.sessionId === null) {
-      throw new Error("replay.v2 viewer is not command-ready");
+      throw new Error("replay.v3 viewer is not command-ready");
     }
     return {
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: viewer.run_id,
       command_id: commandId(prefix),
       client_instance_id: runtime.clientInstanceId,
@@ -761,7 +761,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     type: ReplayPhase3ControlType,
     payload: Readonly<Record<string, ReplayV2Json>>,
   ): Promise<ReplayV2CommandResult> => {
-    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (controlRef.current !== null) throw new Error("another replay.v3 control is pending");
     const viewer = viewerRef.current;
     if (viewer === null) throw new Error("ViewerState is unavailable");
     const canonicalDisplayBinding = (
@@ -820,7 +820,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     interval: string,
   ): Promise<ReplayV2CommandResult | null> => {
     if (viewerCommandRef.current !== null) {
-      throw new Error("another replay.v2 viewer command is pending");
+      throw new Error("another replay.v3 viewer command is pending");
     }
     const viewer = viewerRef.current;
     if (viewer === null) throw new Error("ViewerState is unavailable");
@@ -884,9 +884,9 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     payload: Readonly<Record<string, ReplayV2Json>>,
     prefix: string,
   ): Promise<ReplayV2CommandResult> => {
-    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (controlRef.current !== null) throw new Error("another replay.v3 control is pending");
     if (viewerCommandRef.current !== null) {
-      throw new Error("another replay.v2 viewer command is pending");
+      throw new Error("another replay.v3 viewer command is pending");
     }
     const command = buildCommand(type, payload, prefix);
     viewerCommandRef.current = command.command_id;
@@ -960,7 +960,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       && candidate.market_type === identity.marketType
       && candidate.symbol === identity.symbol
     ));
-    if (track === undefined) throw new Error("created MarketTrack is missing from replay.v2");
+    if (track === undefined) throw new Error("created MarketTrack is missing from replay.v3");
     return selectTrack(track.track_id);
   }, [refreshMarketTracks, selectTrack, submitTrackCommand]);
 
@@ -968,9 +968,9 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     type: ReplayPhase5TradeType,
     payload: Readonly<Record<string, ReplayV2Json>>,
   ): Promise<ReplayV2CommandResult> => {
-    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (controlRef.current !== null) throw new Error("another replay.v3 control is pending");
     if (viewerCommandRef.current !== null) {
-      throw new Error("another replay.v2 viewer command is pending");
+      throw new Error("another replay.v3 viewer command is pending");
     }
     const command = buildCommand(type, payload, "trade");
     viewerCommandRef.current = command.command_id;
@@ -1002,12 +1002,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     const viewer = viewerRef.current;
     const store = runtime.store;
     if (viewer === null || store.virtualTimeMs === null || store.sessionId === null) {
-      throw new Error("replay.v2 viewer is not preview-ready");
+      throw new Error("replay.v3 viewer is not preview-ready");
     }
     return defaultReplayV2Api.previewOrder(
       viewer.run_id,
       {
-        protocol: "replay.v2",
+        protocol: "replay.v3",
         expected_revision: store.revision,
         expected_cursor: {
           virtual_time_ms: store.virtualTimeMs,
@@ -1030,12 +1030,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     const viewer = viewerRef.current;
     const store = runtime.store;
     if (viewer === null || store.virtualTimeMs === null || store.sessionId === null) {
-      throw new Error("replay.v2 viewer is not capacity-ready");
+      throw new Error("replay.v3 viewer is not capacity-ready");
     }
     return defaultReplayV2Api.orderCapacity(
       viewer.run_id,
       {
-        protocol: "replay.v2",
+        protocol: "replay.v3",
         expected_revision: store.revision,
         expected_cursor: {
           virtual_time_ms: store.virtualTimeMs,
@@ -1052,7 +1052,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const resyncHistoricalBook = useCallback(async (): Promise<void> => {
     const runId = viewerRef.current?.run_id;
     if (runId === undefined) throw new Error("ViewerState is unavailable");
-    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (controlRef.current !== null) throw new Error("another replay.v3 control is pending");
     setViewerPending(true);
     setError(null);
     try {
@@ -1070,7 +1070,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const auditAccount = useCallback(async (): Promise<ReplayAccountAuditResponse> => {
     const runId = viewerRef.current?.run_id;
     if (runId === undefined) throw new Error("ViewerState is unavailable");
-    if (controlRef.current !== null) throw new Error("another replay.v2 control is pending");
+    if (controlRef.current !== null) throw new Error("another replay.v3 control is pending");
     setViewerPending(true);
     setError(null);
     try {

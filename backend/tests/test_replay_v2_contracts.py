@@ -236,7 +236,7 @@ async def test_training_http_paths_fail_closed_without_a_started_runtime(
             response = await client.request(method, "/api/v1/replay/runs", json={})
             assert response.status_code == 503
             assert response.json() == {
-                "protocol": "replay.v2",
+                    "protocol": "replay.v3",
                 "error": {
                     "code": "REPLAY_TRAINING_UNAVAILABLE",
                     "message": "Replay training runtime is unavailable",
@@ -283,10 +283,10 @@ def test_training_websocket_path_fails_without_a_started_runtime(
     )
     with TestClient(_app()) as client:
         with client.websocket_connect(
-            "/api/v1/stream/replay/run-1?protocol=replay.v2"
+            "/api/v1/stream/replay/run-1?protocol=replay.v3"
         ) as websocket:
             assert websocket.receive_json() == {
-                "protocol": "replay.v2",
+                "protocol": "replay.v3",
                 "error": {
                     "code": "REPLAY_TRAINING_UNAVAILABLE",
                     "message": "Replay training runtime is unavailable",

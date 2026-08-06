@@ -1,4 +1,4 @@
-"""Deterministic Decimal rules for replay.v2 contract-account projections."""
+"""Deterministic Decimal rules for replay.v3 contract-account projections."""
 
 from __future__ import annotations
 

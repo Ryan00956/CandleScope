@@ -145,8 +145,8 @@ test("Hub creates a product-independent Run without reading or rebinding catalog
     api: {
       async listRuns() {
         return {
-          protocol: "replay.v2",
-          schema_version: "replay.training.v1",
+              protocol: "replay.v3",
+              schema_version: "replay.training.v2",
           items: [],
           next_cursor: null,
         };
@@ -269,7 +269,7 @@ test("public-time parser and formatter use exact server labels and fail closed o
   ] as const;
   for (const [policy, label] of labels) {
     const parsed = parseReplayPublicTimeBatchResponse({
-      protocol: "replay.v2",
+      protocol: "replay.v3",
       run_id: "run-1",
       policy,
       items: [{

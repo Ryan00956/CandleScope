@@ -406,6 +406,28 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
           input_chain_hash: `sha256:${String(index + 1).repeat(64)}`,
           component_hash: `sha256:${String(index + 3).repeat(64)}`,
         })),
+        track_public: [{
+          track_id: "track-1",
+          archive_id: "hedge-public-1",
+          generation: 1,
+          dataset_epoch: `sha256:${"1".repeat(64)}`,
+          checksum_sha256: `sha256:${"2".repeat(64)}`,
+          event_chain_tail: `sha256:${"3".repeat(64)}`,
+          input_proof_hash: `sha256:${"b".repeat(64)}`,
+          status: "ACTIVE",
+          degraded_reason: null,
+          projection: {
+            schema_version: "replay.hedge-track-public-projection.v1",
+            run_id: "run-1",
+            track_id: "track-1",
+            last_event_sequence: 1,
+            as_of_actual_time_ms: 1_710_000_000_000,
+            as_of_virtual_time_ms: 1_710_000_000_000,
+            state: {},
+            input_chain_hash: `sha256:${"c".repeat(64)}`,
+            component_hash: `sha256:${"d".repeat(64)}`,
+          },
+        }],
         auditor: {
           status: "PASS",
           proof_hash: `sha256:${"a".repeat(64)}`,
@@ -419,7 +441,9 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
     assert.fail("HEDGE contract portfolio did not survive parsing");
   }
   const parsedHedgeInputs = parsedHedge.portfolio.hedge_inputs;
-  assert.equal(parsedHedgeInputs?.input_proof_hash, hedgeProof);
+  assert.ok(parsedHedgeInputs);
+  assert.equal(parsedHedgeInputs.input_proof_hash, hedgeProof);
+  assert.equal(parsedHedgeInputs.track_public[0]?.track_id, "track-1");
   assert.throws(() => parseReplayMarketTracksResponse({
     ...payload,
     portfolio: {
@@ -431,6 +455,20 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
       },
     },
   }), /SHA-256/);
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      position_mode: "HEDGE",
+      hedge_inputs: {
+        ...parsedHedgeInputs,
+        track_public: [
+          parsedHedgeInputs.track_public[0],
+          parsedHedgeInputs.track_public[0],
+        ],
+      },
+    },
+  }), /unique and canonical/);
   assert.throws(() => parseReplayMarketTracksResponse({
     ...payload,
     portfolio: { ...payload.portfolio, account_model: "TOUCH_OR_TAPE_V2" },

@@ -1365,6 +1365,7 @@ export interface ReplayHedgeInputView {
   readonly public: Readonly<Record<string, ReplayV2Json>>;
   readonly simulation: Readonly<Record<string, ReplayV2Json>>;
   readonly projections: readonly Readonly<Record<string, ReplayV2Json>>[];
+  readonly track_public: readonly Readonly<Record<string, ReplayV2Json>>[];
   readonly auditor: {
     readonly status: "NOT_RUN" | "PASS" | "FAIL";
     readonly proof_hash: `sha256:${string}` | null;
@@ -1699,6 +1700,7 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
     "public",
     "simulation",
     "projections",
+    "track_public",
     "auditor",
   ]);
   if (input.schema_version !== "replay.hedge-input-view.v1") {
@@ -1817,6 +1819,87 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
   if (sourceKinds[0] !== "PUBLIC" || sourceKinds[1] !== "SIMULATION") {
     throw new TypeError("portfolio.hedge_inputs projections are not canonical");
   }
+  if (!Array.isArray(input.track_public) || input.track_public.length < 1) {
+    throw new TypeError("portfolio.hedge_inputs.track_public must contain a binding");
+  }
+  const trackPublic = input.track_public.map((raw, index) => {
+    const field = `portfolio.hedge_inputs.track_public[${index}]`;
+    const binding = exactObject(raw, field, [
+      "track_id",
+      "archive_id",
+      "generation",
+      "dataset_epoch",
+      "checksum_sha256",
+      "event_chain_tail",
+      "input_proof_hash",
+      "status",
+      "degraded_reason",
+      "projection",
+    ]);
+    const trackId = identifier(binding.track_id, `${field}.track_id`);
+    identifier(binding.archive_id, `${field}.archive_id`);
+    const generation = counter(binding.generation, `${field}.generation`);
+    if (generation < 1) throw new TypeError(`${field}.generation must be positive`);
+    digest(binding.dataset_epoch, `${field}.dataset_epoch`);
+    digest(binding.checksum_sha256, `${field}.checksum_sha256`);
+    digest(binding.event_chain_tail, `${field}.event_chain_tail`);
+    digest(binding.input_proof_hash, `${field}.input_proof_hash`);
+    const bindingStatus = enumValue(
+      binding.status,
+      ["ACTIVE", "PAUSED", "QUARANTINED"] as const,
+      `${field}.status`,
+    );
+    if (
+      binding.degraded_reason !== null
+      && (typeof binding.degraded_reason !== "string" || binding.degraded_reason.length === 0)
+    ) {
+      throw new TypeError(`${field}.degraded_reason is invalid`);
+    }
+    if (
+      (bindingStatus === "ACTIVE" && binding.degraded_reason !== null)
+      || (bindingStatus !== "ACTIVE" && binding.degraded_reason === null)
+    ) {
+      throw new TypeError(`${field} status and reason are inconsistent`);
+    }
+    const projection = exactObject(binding.projection, `${field}.projection`, [
+      "schema_version",
+      "run_id",
+      "track_id",
+      "last_event_sequence",
+      "as_of_actual_time_ms",
+      "as_of_virtual_time_ms",
+      "state",
+      "input_chain_hash",
+      "component_hash",
+    ]);
+    if (projection.schema_version !== "replay.hedge-track-public-projection.v1") {
+      throw new TypeError(`${field}.projection.schema_version is unsupported`);
+    }
+    identifier(projection.run_id, `${field}.projection.run_id`);
+    if (identifier(projection.track_id, `${field}.projection.track_id`) !== trackId) {
+      throw new TypeError(`${field}.projection track identity is inconsistent`);
+    }
+    counter(projection.last_event_sequence, `${field}.projection.last_event_sequence`);
+    timestamp(projection.as_of_actual_time_ms, `${field}.projection.as_of_actual_time_ms`);
+    const projectionVirtualTime = timestamp(
+      projection.as_of_virtual_time_ms,
+      `${field}.projection.as_of_virtual_time_ms`,
+    );
+    if (projectionVirtualTime < rangeStart || projectionVirtualTime > rangeEnd) {
+      throw new TypeError(`${field}.projection virtual time is outside the bound range`);
+    }
+    jsonObject(projection.state, `${field}.projection.state`);
+    digest(projection.input_chain_hash, `${field}.projection.input_chain_hash`);
+    digest(projection.component_hash, `${field}.projection.component_hash`);
+    return jsonObject(binding, field);
+  });
+  const trackIds = trackPublic.map((binding) => String(binding.track_id));
+  if (
+    new Set(trackIds).size !== trackIds.length
+    || trackIds.some((trackId, index) => index > 0 && trackId <= String(trackIds[index - 1]))
+  ) {
+    throw new TypeError("portfolio.hedge_inputs.track_public is not unique and canonical");
+  }
   const rawAuditor = exactObject(input.auditor, "portfolio.hedge_inputs.auditor", [
     "status",
     "proof_hash",
@@ -1850,6 +1933,7 @@ function parseReplayHedgeInputView(value: unknown): ReplayHedgeInputView | null 
     public: parseObjectReceipt(input.public, "public"),
     simulation: parseObjectReceipt(input.simulation, "simulation"),
     projections,
+    track_public: trackPublic,
     auditor: {
       status: auditorStatus,
       proof_hash: auditorProof,

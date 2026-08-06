@@ -2528,6 +2528,7 @@ async function main() {
       REPLAY_IDLE_TTL_SECONDS: "1",
       KLINES_DB_PATH: path.join(tempRoot, "candlescope.db"),
       REPLAY_DB_PATH: path.join(tempRoot, "replay.db"),
+      REPLAY_HISTORY_ARCHIVE_DIR: path.join(tempRoot, "replay-history"),
       CANDLE_DATA_DIR: path.join(tempRoot, "data"),
       BINANCE_BASE_URL: offlineOrigin,
       BINANCE_WS_URL: "ws://127.0.0.1:9",

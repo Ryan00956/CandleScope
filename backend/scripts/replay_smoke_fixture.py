@@ -297,6 +297,103 @@ def _seed_klines(
     return live_window_rows
 
 
+def _seed_replay_history_archive() -> list[dict[str, object]]:
+    """Publish the isolated K-line fixture through the production archive seam."""
+
+    from app.replay.catalog import ReplaySeriesIdentity
+    from app.replay.history_archive import (
+        ReplayHistoryArchiveWriter,
+        ReplayHistoryImportBatch,
+    )
+
+    database = Path(os.environ["KLINES_DB_PATH"]).expanduser().resolve()
+    archive_root = Path(
+        os.environ.get(
+            "REPLAY_HISTORY_ARCHIVE_DIR",
+            str(
+                Path(os.environ["CANDLE_DATA_DIR"]).expanduser().resolve()
+                / "replay-history"
+            ),
+        )
+    ).expanduser().resolve()
+    writer = ReplayHistoryArchiveWriter(archive_root)
+    manifests: list[dict[str, object]] = []
+    with closing(sqlite3.connect(database)) as connection:
+        connection.row_factory = sqlite3.Row
+        series = connection.execute(
+            """
+            SELECT DISTINCT exchange, market_type, symbol, interval
+            FROM klines
+            ORDER BY exchange, market_type, symbol, interval
+            """
+        ).fetchall()
+        for item in series:
+            identity = ReplaySeriesIdentity(
+                exchange=str(item["exchange"]),
+                market_type=str(item["market_type"]),
+                symbol=str(item["symbol"]),
+            )
+            interval = str(item["interval"])
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT open_time, close_time, open, high, low, close,
+                           volume, quote_volume, trades, taker_buy_base,
+                           taker_buy_quote, source
+                    FROM klines
+                    WHERE exchange = ? AND market_type = ?
+                      AND symbol = ? AND interval = ?
+                    ORDER BY open_time
+                    """,
+                    (
+                        identity.exchange,
+                        identity.market_type,
+                        identity.symbol,
+                        interval,
+                    ),
+                ).fetchall()
+            ]
+            content_sha256 = "sha256:" + sha256(
+                json.dumps(
+                    rows,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            manifest = writer.import_batches(
+                identity,
+                interval,
+                [
+                    ReplayHistoryImportBatch(
+                        rows=rows,
+                        source_provider="replay-browser-qa-verified-sqlite-v1",
+                        source_object_key=(
+                            f"{identity.exchange}/{identity.market_type}/"
+                            f"{identity.symbol}/{interval}"
+                        ),
+                        source_period="bounded-release-fixture",
+                        source_content_sha256=content_sha256,
+                        source_row_count=len(rows),
+                    )
+                ],
+                merge_current=False,
+                listing_boundary_source="verified_fixture_first_bar",
+            )
+            manifests.append(
+                {
+                    "exchange": identity.exchange,
+                    "market_type": identity.market_type,
+                    "symbol": identity.symbol,
+                    "interval": interval,
+                    "catalog_epoch": manifest.catalog_epoch,
+                    "total_count": manifest.total_count,
+                }
+            )
+    return manifests
+
+
 def _load_real_kline_profile(
     source_path: Path,
     *,
@@ -927,6 +1024,7 @@ def main() -> None:
         if args.historical_book
         else {}
     )
+    replay_history_manifests = _seed_replay_history_archive()
     if args.disable_gap_maintenance:
         _disable_fixture_gap_maintenance()
 
@@ -1002,6 +1100,7 @@ def main() -> None:
             "gap_maintenance_enabled": not args.disable_gap_maintenance,
             "agg_trade_rows": agg_trade_rows,
             "historical_book_bar_rows": historical_book_bar_rows,
+            "replay_history_manifests": replay_history_manifests,
             "historical_book": historical_book_archives or None,
             "hedge_inputs": hedge_inputs,
         }

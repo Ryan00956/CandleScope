@@ -52,6 +52,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.doesNotMatch(soak, /创建 Run 并选择商品/);
   assert.match(soak, /Run market search readiness/);
   assert.match(soak, /market-picker-readiness/);
+  assert.match(soak, /data-training-field="requested-start-utc"/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {
@@ -576,12 +577,16 @@ test("formal HEDGE soak binds both exact public/L2 archives and one simulation m
     BTCUSDT: { archive_id: "btc-book" },
     ETHUSDT: { archive_id: "eth-book" },
   };
+  const rangeStartMs = 1_700_000_040_000;
+  const rangeEndMs = rangeStartMs + 43_400 * 60_000;
   const fixture = {
     source_profile: "HEDGE_EXACT_ARCHIVE_QA",
     historical_book: historicalBook,
     hedge_inputs: {
       fidelity: "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION",
       fallback_applied: false,
+      range_start_ms: rangeStartMs,
+      range_end_ms: rangeEndMs,
       public_refs: publicRefs,
       simulation_ref: simulationRef,
     },
@@ -592,6 +597,7 @@ test("formal HEDGE soak binds both exact public/L2 archives and one simulation m
     symbol: "BTCUSDT",
     secondarySymbol: "ETHUSDT",
     interval: "1m",
+    requestedStartMs: rangeStartMs + 200 * 60_000,
     forwardCacheMs: 2_592_000_000,
     warmupBars: 200,
     requiredRows: 43_400,
@@ -605,6 +611,16 @@ test("formal HEDGE soak binds both exact public/L2 archives and one simulation m
     () => selectFormalV2HedgeTrainingPlan({
       ...fixture,
       hedge_inputs: { ...fixture.hedge_inputs, fallback_applied: true },
+    }),
+    /exact per-symbol public\/L2 inputs/,
+  );
+  assert.throws(
+    () => selectFormalV2HedgeTrainingPlan({
+      ...fixture,
+      hedge_inputs: {
+        ...fixture.hedge_inputs,
+        range_end_ms: rangeEndMs - 60_000,
+      },
     }),
     /exact per-symbol public\/L2 inputs/,
   );

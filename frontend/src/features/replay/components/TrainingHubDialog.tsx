@@ -164,6 +164,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <label>
               开始时间（UTC）
               <input
+                data-training-field="requested-start-utc"
                 type="datetime-local"
                 step={60}
                 value={formatUtcReplayStartInput(draft.requestedStartMs)}

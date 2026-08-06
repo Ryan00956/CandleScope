@@ -162,10 +162,20 @@ export function selectFormalV2RealTrainingPlan(realSourceEvidence) {
 export function selectFormalV2HedgeTrainingPlan(fixture) {
   const hedge = fixture?.hedge_inputs;
   const historicalBook = fixture?.historical_book;
+  const rangeStartMs = hedge?.range_start_ms;
+  const rangeEndMs = hedge?.range_end_ms;
+  const requestedStartMs = Number.isSafeInteger(rangeStartMs)
+    ? rangeStartMs + FORMAL_V2_WARMUP_BARS * FORMAL_V2_BASE_INTERVAL_MS
+    : Number.NaN;
   assert(
     fixture?.source_profile === HEDGE_BROWSER_SOURCE_PROFILE
       && hedge?.fidelity === "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
       && hedge?.fallback_applied === false
+      && Number.isSafeInteger(rangeStartMs)
+      && Number.isSafeInteger(rangeEndMs)
+      && Number.isSafeInteger(requestedStartMs)
+      && rangeStartMs >= 0
+      && rangeEndMs >= requestedStartMs + FORMAL_V2_FORWARD_CACHE_MS
       && hedge?.public_refs?.BTCUSDT
       && hedge?.public_refs?.ETHUSDT
       && hedge?.simulation_ref
@@ -180,6 +190,7 @@ export function selectFormalV2HedgeTrainingPlan(fixture) {
     symbol: "BTCUSDT",
     secondarySymbol: "ETHUSDT",
     interval: "1m",
+    requestedStartMs,
     forwardCacheMs: FORMAL_V2_FORWARD_CACHE_MS,
     warmupBars: FORMAL_V2_WARMUP_BARS,
     requiredRows: FORMAL_V2_REAL_WINDOW_ROWS,
@@ -635,6 +646,24 @@ async function keyboardActivateButton(cdp, { action = null, text: buttonText = n
 }
 
 async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
+  const requestedStartValue = new Date(plan.requestedStartMs).toISOString().slice(0, 19);
+  const start = await evaluate(cdp, `(() => {
+    const input = document.querySelector('[data-training-field="requested-start-utc"]');
+    if (!(input instanceof HTMLInputElement)) return { configured: false, reason: "requested-start-control-missing" };
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (typeof setter !== "function") return { configured: false, reason: "requested-start-setter-missing" };
+    setter.call(input, ${JSON.stringify(requestedStartValue)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return { configured: true, value: input.value };
+  })()`, { userGesture: true });
+  assert(start?.configured === true, "formal replay.v2 requested start selection failed", start);
+  await waitForValue(
+    cdp,
+    `document.querySelector('[data-training-field="requested-start-utc"]')?.value === ${JSON.stringify(requestedStartValue)}`,
+    timeoutMs,
+    "formal replay.v2 requested start selection",
+  );
   const horizonValue = String(plan.forwardCacheMs);
   const horizon = await evaluate(cdp, `(() => {
     const input = document.querySelector('[data-training-field="forward-cache-ms"]');
@@ -664,6 +693,8 @@ async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
     "formal replay.v2 configured create readiness",
   );
   return {
+    requestedStartMs: plan.requestedStartMs,
+    start,
     forwardCacheMs: plan.forwardCacheMs,
     horizon,
   };

@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 import { freeHarnessPort } from "./replay-harness-port.mjs";
 import { captureReplayReleaseEvidence } from "./replay-release-evidence.mjs";
 
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const scriptPath = fileURLToPath(import.meta.url);
+const scriptDirectory = path.dirname(scriptPath);
 const frontendRoot = path.resolve(scriptDirectory, "..");
 const repositoryRoot = path.resolve(frontendRoot, "..");
 const backendRoot = path.join(repositoryRoot, "backend");
@@ -174,6 +175,22 @@ function runSync(command, args, { cwd = repositoryRoot, env = process.env } = {}
   return String(result.stdout || "").trim();
 }
 
+export function buildBackendPythonPath({ root, baseline, inherited = "" }) {
+  if (baseline) return root;
+  const sdkSource = path.join(
+    path.resolve(root, ".."),
+    "packages",
+    "candlescope-plugin-sdk",
+    "src",
+  );
+  assert(
+    fs.existsSync(sdkSource),
+    "Current rollback backend is missing the bundled plugin SDK source",
+    { sdkSource },
+  );
+  return [sdkSource, inherited].filter(Boolean).join(path.delimiter);
+}
+
 function startBackend({ python, root, port, enabled, paths, baseline = false }) {
   const backendEnv = {
     ...process.env,
@@ -191,6 +208,11 @@ function startBackend({ python, root, port, enabled, paths, baseline = false }) 
     RAW_AGG_TRADE_ARCHIVE_ENABLED: "0",
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
+    PYTHONPATH: buildBackendPythonPath({
+      root,
+      baseline,
+      inherited: process.env.PYTHONPATH || "",
+    }),
   };
   const args = baseline
     ? [
@@ -208,7 +230,6 @@ function startBackend({ python, root, port, enabled, paths, baseline = false }) 
         "--live-window",
         "--disable-gap-maintenance",
       ];
-  if (baseline) backendEnv.PYTHONPATH = root;
   const child = spawn(python, args, {
     cwd: root,
     env: backendEnv,
@@ -1022,7 +1043,9 @@ async function main() {
   return result;
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message || error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(scriptPath)) {
+  main().catch((error) => {
+    console.error(error.stack || error.message || error);
+    process.exitCode = 1;
+  });
+}

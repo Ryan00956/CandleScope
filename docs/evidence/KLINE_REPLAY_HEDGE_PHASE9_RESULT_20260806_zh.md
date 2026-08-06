@@ -52,6 +52,7 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - `END_SESSION` 和数据耗尽的终态现在都在原命令/源事件原子提交中持久化 checkpoint，并把终态 checkpoint 记入 actor ring；只有提交成功后才对调用方确认 `ENDED`。
 - 对已经 `ENDED` 的 actor，shutdown 明确是纯资源屏障：关闭投影批次和 actor task，但不再调用 flush、checkpoint 或 `shutdown` mutation 持久化钩子。活跃的 `PLAYING/PAUSED` actor 仍保持原有 shutdown pause 与持久化合同。
 - actor 回归测试用会主动失败的 flush/checkpoint 钩子证明终态回收不触碰外部持久化；service 回归测试用会拒绝 `shutdown` mutation 的真实 SQLite service 证明容量回收、报告恢复和 5 秒 handoff grace 均正常，且 `reaper_failures=0`。
+- WebSocket 建立后不再长期占用 service 的请求 lease，但 actor 的 subscriber token 本身就是活跃页面所有权。reaper 现在在候选筛选和最终 claim 两处都拒绝回收仍有 subscriber 的 actor；断线/关闭触发 unsubscribe 后，终态 actor 才重新满足容量与 TTL 回收条件，避免报告页在 HTTP + WebSocket 交接中反复 recovery/eviction。
 
 ## 3. 候选提交前验证
 
@@ -81,7 +82,8 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 
 - actor 定向 shutdown 合同：`3 passed`。
 - service 终态回收/报告 handoff：`2 passed`。
-- 完整 actor、service 与全部 HEDGE 文件：`146 passed`。
+- WebSocket stream 生命周期：`13 passed`。
+- 完整 actor、service、stream 与全部 HEDGE 文件：`159 passed`。
 - Ruff：通过。
 
 ### 3.5 冻结性能门槛

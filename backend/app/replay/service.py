@@ -3345,6 +3345,7 @@ class ReplayService:
                     session_id not in self._pending_recoveries
                     and not handle.evicting
                     and handle.in_flight == 0
+                    and not handle.actor.has_active_subscribers()
                 )
             )
         for session_id, handle, observed_generation in candidates:
@@ -3373,6 +3374,7 @@ class ReplayService:
                     or self._sessions.get(session_id) is not handle
                     or handle.evicting
                     or handle.in_flight != 0
+                    or handle.actor.has_active_subscribers()
                     or handle.activity_generation != observed_generation
                 ):
                     continue

@@ -969,6 +969,11 @@ class ReplaySessionActor:
     def projections(self) -> tuple[ProjectionBatch, ...]:
         return tuple(self._projection_buffer)
 
+    def has_active_subscribers(self) -> bool:
+        """Return whether this event-loop-confined actor has a live stream owner."""
+
+        return bool(self._subscribers)
+
     def diagnostics(self) -> dict[str, object]:
         projection = self._coalescer.diagnostics()
         return {

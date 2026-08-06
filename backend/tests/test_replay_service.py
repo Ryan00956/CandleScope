@@ -237,7 +237,12 @@ async def test_ended_session_is_reclaimed_after_stream_snapshot_and_remains_reco
     # Regression: subscribing used to leave a PAUSED snapshot in the actor cache.
     # The capacity reaper then missed the later ENDED transition and rejected the
     # next session even though this one was reclaimable.
-    await service.subscribe(first_id, after_sequence=None, data_epoch=None)
+    stream_actor, subscription = await service.subscribe(
+        first_id,
+        after_sequence=None,
+        data_epoch=None,
+    )
+    await stream_actor.unsubscribe(subscription.token)
     acquired = await service.command(
         first_id,
         _command("acquire-first", CommandType.ACQUIRE_CONTROLLER, revision=0),
@@ -372,7 +377,17 @@ async def test_background_reaper_preserves_ended_report_handoff_grace(
     assert second_report["report"] == first_report["report"]
     assert service.diagnostics()["sessions_recovered"] == 1
 
+    stream_actor, subscription = await service.subscribe(
+        session_id,
+        after_sequence=None,
+        data_epoch=None,
+    )
     now[0] += 5_001
+    await service._prune_reclaimable_sessions(capacity_pressure=False)
+    assert service._sessions[session_id] is recovered
+    assert service.diagnostics()["ended_sessions_evicted"] == 1
+
+    await stream_actor.unsubscribe(subscription.token)
     await service._prune_reclaimable_sessions(capacity_pressure=False)
     assert session_id not in service._sessions
     assert service.diagnostics()["ended_sessions_evicted"] == 2

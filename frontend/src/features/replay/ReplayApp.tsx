@@ -4,6 +4,7 @@ import type { ReplayEntry } from "./replayEntry.js";
 import type { ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
 import type { TrainingRunCard } from "./replayV2Types.js";
 import { defaultReplayV2Api, ReplayV2ApiError } from "./replayV2Api.js";
+import { selectReplayInitialMarketWithEpochRetry } from "./replayInitialMarket.js";
 import TrainingHubDialog from "./components/TrainingHubDialog.js";
 import ReplayTrainingPageShell from "./ReplayTrainingPageShell.js";
 import { useReplaySharedIndicatorRuntime } from "./useReplaySharedIndicatorRuntime.js";
@@ -122,7 +123,16 @@ function ReplayInitialMarketPicker({
     });
   };
 
-  useEffect(loadCatalog, [run.run_id]);
+  useEffect(() => {
+    const abort = new AbortController();
+    void defaultReplayV2Api.marketCatalog(run.run_id, abort.signal)
+      .then(setCatalog)
+      .catch((reason: unknown) => {
+        if (abort.signal.aborted) return;
+        setError(reason instanceof Error ? reason.message : "商品目录读取失败");
+      });
+    return () => abort.abort();
+  }, [run.run_id]);
 
   const entries = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -145,52 +155,14 @@ function ReplayInitialMarketPicker({
     setSelecting(entry.identity.symbol);
     setError(null);
     try {
-      const selection = {
-        catalog_epoch: catalog.catalog_epoch,
-        exchange: entry.identity.exchange,
-        market_type: entry.identity.market_type,
-        symbol: entry.identity.symbol,
-        base_interval: entry.selected_base_interval,
-        display_interval: entry.selected_base_interval,
-        account_history_ref: null,
-        hedge_public_history_ref: null,
-        simulation_manifest_ref: null,
-      };
-      const plan = await defaultReplayV2Api.planInitialMarket(
-        run.run_id,
-        selection,
-      );
-      if (!plan.history_policy.accepted) {
-        throw new Error(`历史策略不可用：${plan.history_policy.blocked_reason ?? "UNKNOWN"}`);
-      }
-      if (plan.historical_book.requested_mode === "BOOK_ASSISTED_REQUIRED"
-        && plan.historical_book.capability_state !== "AVAILABLE_EXACT") {
-        throw new Error(`历史盘口不可用：${plan.historical_book.reason}`);
-      }
-      if (plan.account_history.requested_mode === "HISTORICAL_EXACT"
-        && (plan.account_history.capability_state !== "AVAILABLE_EXACT"
-          || plan.account_history.account_history_ref === null)) {
-        throw new Error(`精确账户历史不可用：${plan.account_history.reason}`);
-      }
-      if (plan.hedge_inputs.requested_position_mode === "HEDGE"
-        && (plan.hedge_inputs.capability_state !== "AVAILABLE_EXACT"
-          || plan.hedge_inputs.hedge_public_history_ref === null
-          || plan.hedge_inputs.simulation_manifest_ref === null)) {
-        throw new Error(`双向持仓输入不可用：${plan.hedge_inputs.reason}`);
-      }
-      const result = await defaultReplayV2Api.selectInitialMarket(run.run_id, {
-        ...selection,
-        account_history_ref: plan.account_history.requested_mode === "HISTORICAL_EXACT"
-          ? plan.account_history.account_history_ref
-          : null,
-        hedge_public_history_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
-          ? plan.hedge_inputs.hedge_public_history_ref
-          : null,
-        simulation_manifest_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
-          ? plan.hedge_inputs.simulation_manifest_ref
-          : null,
+      const result = await selectReplayInitialMarketWithEpochRetry({
+        api: defaultReplayV2Api,
+        runId: run.run_id,
+        catalog,
+        entry,
       });
-      onInitialized(result.run);
+      setCatalog(result.catalog);
+      onInitialized(result.response.run);
     } catch (reason) {
       const message = reason instanceof ReplayV2ApiError
         ? `${reason.code}: ${reason.message}`

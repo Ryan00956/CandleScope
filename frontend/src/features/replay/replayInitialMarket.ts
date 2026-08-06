@@ -1,0 +1,131 @@
+import type { ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
+import { ReplayV2ApiError } from "./replayV2Api.js";
+import type { ReplayV2ApiClient } from "./replayV2Api.js";
+import type {
+  TrainingRunMarketSelectionPayload,
+  TrainingRunMarketSelectionResponse,
+} from "./replayV2Types.js";
+
+
+type ReplayInitialMarketApi = Pick<
+  ReplayV2ApiClient,
+  "marketCatalog" | "planInitialMarket" | "selectInitialMarket"
+>;
+
+export interface ReplayInitialMarketSelectionResult {
+  readonly response: TrainingRunMarketSelectionResponse;
+  readonly catalog: ReplayCatalog;
+  readonly catalogRefreshes: 0 | 1;
+}
+
+function sameMarket(left: ReplayCatalogEntry, right: ReplayCatalogEntry): boolean {
+  return left.identity.exchange === right.identity.exchange
+    && left.identity.market_type === right.identity.market_type
+    && left.identity.symbol === right.identity.symbol;
+}
+
+function selectionFromEntry(
+  catalog: ReplayCatalog,
+  entry: ReplayCatalogEntry,
+): TrainingRunMarketSelectionPayload {
+  if (entry.selected_base_interval === null) {
+    throw new Error("所选商品没有可用基础周期");
+  }
+  return {
+    catalog_epoch: catalog.catalog_epoch,
+    exchange: entry.identity.exchange,
+    market_type: entry.identity.market_type,
+    symbol: entry.identity.symbol,
+    base_interval: entry.selected_base_interval,
+    display_interval: entry.selected_base_interval,
+    account_history_ref: null,
+    hedge_public_history_ref: null,
+    simulation_manifest_ref: null,
+  };
+}
+
+function selectionWithPreparedInputs(
+  selection: TrainingRunMarketSelectionPayload,
+  plan: Awaited<ReturnType<ReplayInitialMarketApi["planInitialMarket"]>>,
+): TrainingRunMarketSelectionPayload {
+  if (!plan.history_policy.accepted) {
+    throw new Error(`历史策略不可用：${plan.history_policy.blocked_reason ?? "UNKNOWN"}`);
+  }
+  if (plan.historical_book.requested_mode === "BOOK_ASSISTED_REQUIRED"
+    && plan.historical_book.capability_state !== "AVAILABLE_EXACT") {
+    throw new Error(`历史盘口不可用：${plan.historical_book.reason}`);
+  }
+  if (plan.account_history.requested_mode === "HISTORICAL_EXACT"
+    && (plan.account_history.capability_state !== "AVAILABLE_EXACT"
+      || plan.account_history.account_history_ref === null)) {
+    throw new Error(`精确账户历史不可用：${plan.account_history.reason}`);
+  }
+  if (plan.hedge_inputs.requested_position_mode === "HEDGE"
+    && (plan.hedge_inputs.capability_state !== "AVAILABLE_EXACT"
+      || plan.hedge_inputs.hedge_public_history_ref === null
+      || plan.hedge_inputs.simulation_manifest_ref === null)) {
+    throw new Error(`双向持仓输入不可用：${plan.hedge_inputs.reason}`);
+  }
+  return {
+    ...selection,
+    account_history_ref: plan.account_history.requested_mode === "HISTORICAL_EXACT"
+      ? plan.account_history.account_history_ref
+      : null,
+    hedge_public_history_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
+      ? plan.hedge_inputs.hedge_public_history_ref
+      : null,
+    simulation_manifest_ref: plan.hedge_inputs.requested_position_mode === "HEDGE"
+      ? plan.hedge_inputs.simulation_manifest_ref
+      : null,
+  };
+}
+
+/**
+ * Prepare and select the first market against one catalog epoch at a time.
+ * Archive preparation can legitimately advance the capability epoch. Only
+ * that conflict is refreshed and retried, exactly once, with a new plan.
+ */
+export async function selectReplayInitialMarketWithEpochRetry({
+  api,
+  runId,
+  catalog,
+  entry,
+}: {
+  readonly api: ReplayInitialMarketApi;
+  readonly runId: string;
+  readonly catalog: ReplayCatalog;
+  readonly entry: ReplayCatalogEntry;
+}): Promise<ReplayInitialMarketSelectionResult> {
+  let activeCatalog = catalog;
+  let activeEntry = entry;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const selection = selectionFromEntry(activeCatalog, activeEntry);
+      const plan = await api.planInitialMarket(runId, selection);
+      const response = await api.selectInitialMarket(
+        runId,
+        selectionWithPreparedInputs(selection, plan),
+      );
+      return {
+        response,
+        catalog: activeCatalog,
+        catalogRefreshes: attempt as 0 | 1,
+      };
+    } catch (reason) {
+      if (!(reason instanceof ReplayV2ApiError)
+        || reason.code !== "CATALOG_EPOCH_MISMATCH"
+        || attempt !== 0) {
+        throw reason;
+      }
+      activeCatalog = await api.marketCatalog(runId);
+      const refreshedEntry = activeCatalog.entries.find((candidate) => (
+        sameMarket(candidate, entry)
+      ));
+      if (refreshedEntry === undefined || refreshedEntry.selected_base_interval === null) {
+        throw new Error("能力目录刷新后所选商品不再可用");
+      }
+      activeEntry = refreshedEntry;
+    }
+  }
+  throw new Error("商品初始化重试状态不可达");
+}

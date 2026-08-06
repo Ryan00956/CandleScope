@@ -7,6 +7,7 @@ import TrainingHubDialog, {
   TrainingRunDeleteConfirmation,
 } from "../components/TrainingHubDialog.js";
 import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
+import { selectReplayInitialMarketWithEpochRetry } from "../replayInitialMarket.js";
 import {
   buildTrainingRunCreateRequest,
   buildTrainingRunPreparationRequest,
@@ -22,6 +23,7 @@ import {
 import {
   parseTrainingRunDeleteResponse,
   parseTrainingRunListResponse,
+  parseTrainingRunMarketSelectionResponse,
   parseTrainingRunMutationResponse,
   parseTrainingRunReturnResponse,
 } from "../replayV2Types.js";
@@ -228,6 +230,59 @@ function hedgeCatalog() {
     }],
   });
 }
+
+test("initial market selection replans exactly once after capability epoch drift", async () => {
+  const initialCatalog = blindCatalog();
+  const refreshedEpoch: `sha256:${string}` = `sha256:${"b".repeat(64)}`;
+  const refreshedCatalog = {
+    ...initialCatalog,
+    catalog_epoch: refreshedEpoch,
+    entries: initialCatalog.entries.map((entry) => ({
+      ...entry,
+      catalog_epoch: refreshedEpoch,
+    })),
+  };
+  const plannedEpochs: string[] = [];
+  const selectedEpochs: string[] = [];
+  let catalogRefreshes = 0;
+  const result = await selectReplayInitialMarketWithEpochRetry({
+    runId: "run-1",
+    catalog: initialCatalog,
+    entry: initialCatalog.entries[0]!,
+    api: {
+      async marketCatalog() {
+        catalogRefreshes += 1;
+        return refreshedCatalog;
+      },
+      async planInitialMarket(_runId, selection) {
+        plannedEpochs.push(selection.catalog_epoch);
+        return parseReplaySegmentPreparePlan(segmentPlanResponse());
+      },
+      async selectInitialMarket(_runId, selection) {
+        selectedEpochs.push(selection.catalog_epoch);
+        if (selectedEpochs.length === 1) {
+          throw new ReplayV2ApiError(
+            "CATALOG_EPOCH_MISMATCH",
+            "data capability changed after validation; refresh and try again",
+            { status: 409 },
+          );
+        }
+        return parseTrainingRunMarketSelectionResponse({
+          protocol: "replay.v3",
+          initialized: true,
+          run: runCard(),
+        });
+      },
+    },
+  });
+
+  assert.equal(result.catalogRefreshes, 1);
+  assert.equal(result.catalog.catalog_epoch, refreshedEpoch);
+  assert.equal(result.response.run.run_id, "run-1");
+  assert.equal(catalogRefreshes, 1);
+  assert.deepEqual(plannedEpochs, [initialCatalog.catalog_epoch, refreshedEpoch]);
+  assert.deepEqual(selectedEpochs, [initialCatalog.catalog_epoch, refreshedEpoch]);
+});
 
 function exactHedgeInputPlan() {
   return {

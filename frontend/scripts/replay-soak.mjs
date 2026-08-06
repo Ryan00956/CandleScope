@@ -777,7 +777,7 @@ function accountContinuityProjection(response) {
 
 async function readServerAccountProof(backendOrigin, runId) {
   const response = await readJson(
-    `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/markets`,
+    `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/tracks`,
   );
   const projection = accountContinuityProjection(response);
   return {
@@ -3100,7 +3100,7 @@ async function main() {
       await waitForReplayStatus(replay.cdp, `(value) => value.state === "PAUSED"`, args.timeoutMs, "final soak pause");
     }
     const finalAccountResponse = await readJson(
-      `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/markets`,
+      `${backendOrigin}/api/v1/replay/runs/${encodeURIComponent(runId)}/tracks`,
     );
     const finalAccountProof = await readServerAccountProof(backendOrigin, runId);
     const finalHedgeLegs = [...new Set(

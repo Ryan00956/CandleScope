@@ -52,6 +52,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /process\.env\.PYTHONPATH/);
   assert.match(soak, /确认时间并创建 Run/);
   assert.doesNotMatch(soak, /创建 Run 并选择商品/);
+  assert.doesNotMatch(soak, /hubKeyboard\?\.created\?\.active\?\.text === "创建并进入训练"/);
   assert.match(soak, /Run market search readiness/);
   assert.match(soak, /market-picker-readiness/);
   assert.match(soak, /data-training-field="requested-start-utc"/);
@@ -59,6 +60,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.doesNotMatch(soak, /text: "纸面交易"/);
   assert.match(soak, /data-replay-action="place-order"/);
   assert.match(soak, /data-side="\$\{side\}"/);
+  assert.match(soak, /\{ action: "place-order", side: "SELL" \}/);
+  assert.match(soak, /order\?\.active\?\.side === "SELL"/);
   assert.match(soak, /training order side \$\{side\} readiness/);
   assert.doesNotMatch(soak, /\.replay-order-ticket/);
   const endConfirmationOffset = soak.indexOf("soak session end");

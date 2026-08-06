@@ -618,7 +618,7 @@ async function pressKey(cdp, key, { shift = false } = {}) {
 
 async function keyboardActivateButton(
   cdp,
-  { action = null, railView = null, text: buttonText = null },
+  { action = null, railView = null, side = null, text: buttonText = null },
   timeoutMs,
 ) {
   await evaluate(cdp, `(() => {
@@ -634,12 +634,14 @@ async function keyboardActivateButton(
         action: item.dataset.replayAction || null,
         disabled: item.disabled,
         railView: item.dataset.railView || null,
+        side: item.dataset.side || null,
         text: item.textContent?.trim() || "",
       } : null;
     })()`);
     if (active && !active.disabled
       && (action === null || active.action === action)
       && (railView === null || active.railView === railView)
+      && (side === null || active.side === side)
       && (buttonText === null || active.text === buttonText)) {
       // Space activates a focused native button on key-up. Unlike Enter, it
       // does not require a text/char CDP event to reach Chromium's default
@@ -650,7 +652,7 @@ async function keyboardActivateButton(
     await pressKey(cdp, "Tab");
     tabs += 1;
   }
-  throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, railView, text: buttonText, tabs })}`);
+  throw new Error(`Keyboard traversal could not activate button: ${JSON.stringify({ action, railView, side, text: buttonText, tabs })}`);
 }
 
 async function configureFormalV2TrainingPlan(cdp, plan, timeoutMs) {
@@ -1957,7 +1959,14 @@ async function v2AccessibilityAudit(cdp, timeoutMs) {
     "paper trading keyboard tab activation",
   );
   const beforeOrder = await replayStatus(cdp);
-  const orderKeyboard = await keyboardActivateButton(cdp, { action: "place-order" }, timeoutMs);
+  // The first training action cycle explicitly opens LONG with BUY. Exercise
+  // the other native button here so even the one-cycle smoke proves that the
+  // real HEDGE account can retain LONG and SHORT simultaneously.
+  const orderKeyboard = await keyboardActivateButton(
+    cdp,
+    { action: "place-order", side: "SELL" },
+    timeoutMs,
+  );
   const ordered = await waitForReplayStatus(
     cdp,
     `(value) => value.orderCount > ${beforeOrder.orderCount} && value.fillCount > ${beforeOrder.fillCount}`,
@@ -3602,9 +3611,10 @@ async function main() {
       )),
       v2_keyboard_accessible: (
         hubKeyboard?.opened?.active?.text === "新建训练"
-        && hubKeyboard?.created?.active?.text === "创建并进入训练"
+        && hubKeyboard?.created?.active?.text === "确认时间并创建 Run"
         && accessibility?.keyboardOnly?.paperTab?.active?.railView === "replay-paper"
         && accessibility?.keyboardOnly?.order?.active?.action === "place-order"
+        && accessibility?.keyboardOnly?.order?.active?.side === "SELL"
         && accessibility?.dangerDialog?.initialAction === "cancel-end"
         && accessibility?.dangerDialog?.confirmFocused === true
         && accessibility?.dangerDialog?.wrapped === true

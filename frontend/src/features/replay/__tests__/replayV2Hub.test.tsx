@@ -674,8 +674,15 @@ test("HEDGE create model rejects Sandbox funding and keeps pinned historical inp
       pinnable: true,
       ready_archive_bytes: 1_024,
     },
+    account_history: {
+      ...segmentPlanResponse().account_history,
+      feature_enabled: true,
+      requested_mode: "DETERMINISTIC_SIMULATION",
+      reason: "NO_COMPLETE_PINNABLE_ARCHIVE",
+    },
     hedge_inputs: exactHedgeInputPlan(),
   }));
+  assert.equal(exactPlan.account_history.requested_mode, "DETERMINISTIC_SIMULATION");
   const exact = evaluateTrainingRunDraft(
     base,
     capabilities,

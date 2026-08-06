@@ -380,7 +380,8 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
   if (accountHistory.protocol !== "replay.account-history.archive.v1"
     || typeof accountHistory.feature_enabled !== "boolean"
     || (accountHistory.requested_mode !== "APPROX_PROXY"
-      && accountHistory.requested_mode !== "HISTORICAL_EXACT")
+      && accountHistory.requested_mode !== "HISTORICAL_EXACT"
+      && accountHistory.requested_mode !== "DETERMINISTIC_SIMULATION")
     || ![
       "AVAILABLE_EXACT",
       "UNSUPPORTED_NO_HISTORY",

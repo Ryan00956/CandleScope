@@ -10,6 +10,8 @@ from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.training.historical_book import verify_historical_book_archive
 from scripts.replay_smoke_fixture import (
     FIXTURE_SYMBOLS,
+    HEDGE_BROWSER_BOOK_FIXTURE_MINUTES,
+    HEDGE_BROWSER_FIXTURE_MINUTES,
     HISTORICAL_BOOK_FIXTURE_MINUTES,
     INTERVAL_MS,
     LEGACY_LIVE_TAIL_ROWS,
@@ -24,6 +26,10 @@ from scripts.replay_smoke_fixture import (
     _smoke_live_tail_required,
     _soak_live_window_rows,
 )
+
+
+def test_hedge_browser_book_covers_the_terminal_execution_boundary() -> None:
+    assert HEDGE_BROWSER_BOOK_FIXTURE_MINUTES == HEDGE_BROWSER_FIXTURE_MINUTES + 1
 
 def test_real_kline_profile_honors_the_explicit_bounded_window(
     tmp_path: Path,

@@ -157,6 +157,39 @@ archive 包含 instrument rule、mark/index、funding 和统一事件链，但�
 
 因此不能通过当前 aggTrade/trade archive 反向推导保险基金接管或 ADL 成交。
 
+### 3.7 用户数据流与持续采集不能补齐全局状态
+
+官方 USD-M 用户数据流只能观察 API key 所属账户，不能观察全市场保险基金账本或其他账户的 ADL 候选状态：
+
+- `ACCOUNT_UPDATE` 只在“用户自己的账户”余额、仓位或保证金类型发生变化时推送，且只携带发生变化的仓位；
+- `INSURANCE_CLEAR` 是 `ACCOUNT_UPDATE.m` 的一个账户变动原因码，不是全局保险基金 debit/credit posting，也没有 fund balance、对手方、sequence 或完整事件标识；
+- `ORDER_TRADE_UPDATE` 用 `autoclose-XXX` 标识该账户已发生强平，用 `adl_autoclose` 标识该账户已发生 ADL，只能证明调用账户的已实现结果；
+- `MARGIN_CALL` 明确只是风险提示；官方说明在高波动时，事件推送时仓位可能已经同时被强平，不能把它当作权威触发顺序；
+- `GET /fapi/v1/income` 与异步 transaction-history download 均标记为 `USER_DATA`，仍是调用账户的收入历史，不是保险基金全局账本。
+
+来源：
+
+- [USD-M WebSocket User Data Streams](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams)
+- [Binance Official Full API Documentation](https://developers.binance.com/en/docs/llms-full.txt)
+
+即使从现在起不间断采集一个真实账户，也只能重放该账户此后实际收到的 balance/order 结果。它仍不能回答一个持仓路径不同的反事实训练账户是否进入 ADL、排在何处、被减多少仓。扩大到多个 API key 也不能证明全市场参与者覆盖完整；采集开始前的历史同样无法恢复。
+
+### 3.8 公共强平流是有意丢失事件的快照
+
+官方 `<symbol>@forceOrder` 与 `!forceOrder@arr` 文档规定：每个 symbol 在 1000ms 内只推送一笔 liquidation order snapshot；无事件时不推送。2026-04-10 官方变更日志进一步把描述从“latest one”改为“largest one”。因此：
+
+- 同一秒同一 symbol 的其余强平订单会被省略；
+- payload 没有可证明全量的 sequence，也没有 REST gap-repair 接口；
+- 流里的 liquidation snapshot 不是保险基金 posting，也不是 ADL participant queue；
+- 普通 aggTrade 流又明确排除 insurance fund trades 和 ADL trades，无法用成交流补齐被省略部分。
+
+来源：
+
+- [USD-M WebSocket Market Streams](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams)
+- [Binance Derivatives Change Log](https://developers.binance.com/en/docs/derivatives/change-log)
+
+所以公共强平流可以用于市场强平活动可视化或统计，不能作为执行合同要求的无遗漏保险基金/ADL 状态机输入。
+
 ---
 
 ## 4. Binance 官方公共下载数据审计
@@ -177,6 +210,10 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 | 定时采集一个账户的 ADL quantile | 只有五档粗分位，没有全局参与者和同档顺序 |
 | 使用 symbolAdlRisk | 只有 low/medium/high，不能决定 ADL selection 或 quantity |
 | 使用用户 forceOrders | 只能重放实际历史，不能支持训练账户的反事实仓位 |
+| 持续采集 `ACCOUNT_UPDATE` / `ORDER_TRADE_UPDATE` | 只覆盖 API key 所属账户的已实现结果；拿不到全局 fund posting、participant set 和严格队列 |
+| 使用 `INSURANCE_CLEAR` 原因码 | 只是私有账户 balance-update reason，不是保险基金余额或逐变动账本 |
+| 使用 `MARGIN_CALL` 作为触发器 | 官方定义为风险提示，高波动时事件到达时可能已经强平，不能证明触发和执行顺序 |
+| 使用 `!forceOrder@arr` / `<symbol>@forceOrder` | 每 symbol 每 1000ms 只给一笔快照，省略其余事件且没有 gap repair |
 | 从 L2、OI、long/short ratio 推导 | 缺少参与者逐账户 leverage、PnL、margin utilization 和 position concentration |
 | 从普通 trades/aggTrades 推导 | 官方明确排除 insurance fund 和 ADL trades |
 | 创建 synthetic participant cohort | 属于模拟/近似 ADL，违反用户的无灰度、无近似要求 |
@@ -218,8 +255,9 @@ Binance 官方 `binance-public-data` 仓库列出的 USD-M 数据包括普通 ag
 
 - 核对本地 exact account、historical book、liquidation schema 和 fixture；
 - 核对 Binance USD-M current account、position mode、leverage bracket、insurance balance、ADL risk、ADL quantile 和 force-order 官方合同；
+- 核对 Binance USD-M `ACCOUNT_UPDATE`、`ORDER_TRADE_UPDATE`、`MARGIN_CALL`、income history 和公共 liquidation stream；
 - 核对 Binance 官方公共下载数据；
-- 排除 sampling、proxy、synthetic cohort 和普通成交反推方案。
+- 排除单账户/多账户持续采集、公共强平快照、sampling、proxy、synthetic cohort 和普通成交反推方案。
 
 未执行：
 

@@ -28,10 +28,12 @@ import {
 import {
   CELL_CHART_SETTING_KEYS,
   type ChartCellChartSettings,
+  type ChartDrawingLayerSetId,
   type ChartCellId,
   type ChartCellPriceScale,
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
+  type ChartLinkRole,
   type ChartWorkspaceDocument,
   type ChartWorkspaceId,
   type ChartWorkspaceLayout,
@@ -46,8 +48,11 @@ import {
   visibleCellIds,
 } from "./chartWorkspaceLayout.js";
 import {
+  applyChartLinkSettingsPatch,
   applyLinkedSessionUpdate,
   assignCellLinkGroup,
+  assignCellLinkRole,
+  preferredChartLinkPublisher,
 } from "./chartWorkspaceLinkModel.js";
 
 export type ChartWorkspaceSaveState = "loading" | "saving" | "saved" | "error";
@@ -75,6 +80,8 @@ export interface ChartWorkspaceRuntime {
     setActiveCell(cellId: ChartCellId): void;
     toggleMaximize(cellId: ChartCellId): void;
     setCellLinkGroup(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
+    setCellLinkRole(cellId: ChartCellId, role: ChartLinkRole): void;
+    setCellDrawingLayerSet(cellId: ChartCellId, layerSet: ChartDrawingLayerSetId): void;
     updateLinkGroupSettings(
       group: ChartLinkGroupId,
       patch: Partial<ChartLinkGroupSettings>,
@@ -377,22 +384,46 @@ export function useChartWorkspaceRuntime(
     updateActiveDocument((current) => assignCellLinkGroup(current, cellId, group));
   }, [updateActiveDocument]);
 
+  const setCellLinkRole = useCallback((cellId: ChartCellId, role: ChartLinkRole) => {
+    updateActiveDocument((current) => assignCellLinkRole(current, cellId, role));
+  }, [updateActiveDocument]);
+
+  const setCellDrawingLayerSet = useCallback((
+    cellId: ChartCellId,
+    drawingLayerSet: ChartDrawingLayerSetId,
+  ) => {
+    updateActiveDocument((current) => {
+      const cell = current.cells[cellId];
+      if (cell.drawingLayerSet === drawingLayerSet) return current;
+      return {
+        ...current,
+        cells: {
+          ...current.cells,
+          [cellId]: { ...cell, drawingLayerSet },
+        },
+      };
+    });
+  }, [updateActiveDocument]);
+
   const updateLinkGroupSettings = useCallback((
     group: ChartLinkGroupId,
     patch: Partial<ChartLinkGroupSettings>,
   ) => {
     updateActiveDocument((current) => {
       const previous = current.linkGroups[group];
-      const nextSettings = { ...previous, ...patch };
+      const nextSettings = applyChartLinkSettingsPatch(previous, patch);
+      if ((Object.keys(nextSettings) as Array<keyof ChartLinkGroupSettings>).every((key) => (
+        nextSettings[key] === previous[key]
+      ))) return current;
       let next: ChartWorkspaceDocument = {
         ...current,
         linkGroups: { ...current.linkGroups, [group]: nextSettings },
       };
-      const activeCell = current.cells[current.activeCellId];
       const enablesSessionLink = (patch.market === true && !previous.market)
         || (patch.interval === true && !previous.interval);
-      if (enablesSessionLink && activeCell.linkGroup === group) {
-        next = applyLinkedSessionUpdate(next, current.activeCellId, activeCell.session);
+      const anchor = preferredChartLinkPublisher(next, group);
+      if (enablesSessionLink && anchor) {
+        next = applyLinkedSessionUpdate(next, anchor.id, anchor.session);
       }
       return next;
     });
@@ -495,6 +526,8 @@ export function useChartWorkspaceRuntime(
       setActiveCell,
       toggleMaximize,
       setCellLinkGroup,
+      setCellLinkRole,
+      setCellDrawingLayerSet,
       updateLinkGroupSettings,
       setLayoutRatio,
       updateCellSession,

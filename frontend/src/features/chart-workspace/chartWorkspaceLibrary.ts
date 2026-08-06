@@ -136,7 +136,12 @@ export function createTemplateChartWorkspaceDocument(
   });
   document.cells = Object.fromEntries(CHART_CELL_IDS.map((cellId, index) => [
     cellId,
-    copyCellPreferences(document.cells[cellId], index),
+    {
+      ...copyCellPreferences(document.cells[cellId], index),
+      linkRole: templateId === "main-confirmation"
+        ? index === 0 ? "source" : index < 3 ? "destination" : "bidirectional"
+        : "bidirectional",
+    },
   ])) as ChartWorkspaceDocument["cells"];
   document.layoutTree = createChartWorkspaceLayoutTree(templateId);
   document.activeCellId = "cell-1";

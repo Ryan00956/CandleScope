@@ -1291,6 +1291,9 @@ export function useDrawingPersistenceLifecycle({
       adapter,
       renderer,
       store,
+      ...(sceneDocumentOnlyEnabled ? {
+        synchronizePublishedDocument: (document) => renderer.reconcile(document),
+      } : {}),
       projectScene: projectDrawingScene,
       isVisible: () => !hiddenRef.current,
       selectedId: () => visibleSceneSelectedId(selectedIdRef.current, dynamicOverlayEnabled),
@@ -1370,7 +1373,7 @@ export function useDrawingPersistenceLifecycle({
         return result;
       } } : {}),
     });
-  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef, visibleScenePublicationListeners]);
+  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime, selectedIdRef, visibleScenePublicationListeners]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,

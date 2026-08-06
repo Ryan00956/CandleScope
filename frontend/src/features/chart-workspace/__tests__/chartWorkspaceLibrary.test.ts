@@ -67,6 +67,11 @@ test("main and confirmation template uses one primary and two higher-timeframe c
   assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-1"), "main");
   assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-2"), "confirmation");
   assert.equal(findChartWorkspaceCellRole(document.layoutTree, "cell-3"), "confirmation");
+  assert.deepEqual([
+    document.cells["cell-1"].linkRole,
+    document.cells["cell-2"].linkRole,
+    document.cells["cell-3"].linkRole,
+  ], ["source", "destination", "destination"]);
 });
 
 test("library normalization repairs one malformed cell without discarding valid siblings", () => {

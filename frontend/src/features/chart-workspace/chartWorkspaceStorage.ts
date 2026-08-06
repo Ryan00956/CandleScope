@@ -12,7 +12,9 @@ import { loadActiveIndicators } from "../indicators/activeIndicatorStore.js";
 import {
   CELL_CHART_SETTING_KEYS,
   CHART_CELL_IDS,
+  CHART_DRAWING_LAYER_SET_IDS,
   CHART_LINK_GROUP_IDS,
+  CHART_LINK_ROLES,
   CHART_WORKSPACE_SCHEMA_VERSION,
   CHART_WORKSPACE_TEMPLATE_IDS,
   DEFAULT_CHART_LINK_GROUP_SETTINGS,
@@ -21,8 +23,10 @@ import {
   type ChartCellId,
   type ChartCellPriceScale,
   type ChartCellState,
+  type ChartDrawingLayerSetId,
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
+  type ChartLinkRole,
   type ChartWorkspaceDocument,
   type ChartWorkspaceLayoutRatios,
   type ChartWorkspaceTemplateId,
@@ -36,6 +40,7 @@ import {
 
 export const CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v2";
 export const LEGACY_CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v1";
+const RECURSIVE_LAYOUT_SCHEMA_VERSION = 3;
 
 export interface ChartWorkspaceStorageLike {
   getItem(key: string): string | null;
@@ -108,6 +113,15 @@ function normalizeLinkGroup(value: unknown, fallback: ChartLinkGroupId | null): 
 
 function normalizeLinkGroupSettings(value: unknown): ChartLinkGroupSettings {
   const source = isRecord(value) ? value : {};
+  const legacyTimeRange = typeof source.timeRange === "boolean"
+    ? source.timeRange
+    : DEFAULT_CHART_LINK_GROUP_SETTINGS.dateRange;
+  const dateRange = typeof source.dateRange === "boolean"
+    ? source.dateRange
+    : legacyTimeRange;
+  const requestedTimeAnchor = typeof source.timeAnchor === "boolean"
+    ? source.timeAnchor
+    : DEFAULT_CHART_LINK_GROUP_SETTINGS.timeAnchor;
   return {
     market: typeof source.market === "boolean"
       ? source.market
@@ -118,10 +132,24 @@ function normalizeLinkGroupSettings(value: unknown): ChartLinkGroupSettings {
     crosshair: typeof source.crosshair === "boolean"
       ? source.crosshair
       : DEFAULT_CHART_LINK_GROUP_SETTINGS.crosshair,
-    timeRange: typeof source.timeRange === "boolean"
-      ? source.timeRange
-      : DEFAULT_CHART_LINK_GROUP_SETTINGS.timeRange,
+    timeAnchor: dateRange ? false : requestedTimeAnchor,
+    dateRange,
+    drawings: typeof source.drawings === "boolean"
+      ? source.drawings
+      : DEFAULT_CHART_LINK_GROUP_SETTINGS.drawings,
   };
+}
+
+function normalizeLinkRole(value: unknown): ChartLinkRole {
+  return CHART_LINK_ROLES.includes(value as ChartLinkRole)
+    ? value as ChartLinkRole
+    : "bidirectional";
+}
+
+function normalizeDrawingLayerSet(value: unknown): ChartDrawingLayerSetId {
+  return CHART_DRAWING_LAYER_SET_IDS.includes(value as ChartDrawingLayerSetId)
+    ? value as ChartDrawingLayerSetId
+    : "1";
 }
 
 function normalizeLayoutRatios(value: unknown): ChartWorkspaceLayoutRatios {
@@ -157,6 +185,8 @@ function defaultCell(
   return {
     id,
     linkGroup: "A",
+    linkRole: "bidirectional",
+    drawingLayerSet: "1",
     session: {
       ...baseSession,
       interval: index === 0 ? baseSession.interval : interval,
@@ -212,6 +242,12 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
       linkGroup: hasLinkGroups
         ? normalizeLinkGroup(source.linkGroup, defaultValue.linkGroup)
         : null,
+      linkRole: sourceSchemaVersion >= 4
+        ? normalizeLinkRole(source.linkRole)
+        : "bidirectional",
+      drawingLayerSet: sourceSchemaVersion >= 4
+        ? normalizeDrawingLayerSet(source.drawingLayerSet)
+        : "1",
       session: normalizeSession(source.session, defaultValue.session),
       chartSettings: normalizeCellChartSettings(source.chartSettings),
       priceScale: normalizePriceScale(source.priceScale),
@@ -221,7 +257,10 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
   const legacyLayout = normalizeLegacyLayout(value.layout);
   const legacyRatios = normalizeLayoutRatios(value.layoutRatios);
   const legacyTree = createChartWorkspaceLayoutTree(legacyLayout, legacyRatios);
-  const layoutTree = sourceSchemaVersion >= CHART_WORKSPACE_SCHEMA_VERSION
+  // Recursive layout trees were introduced in v3. Later schema bumps must
+  // preserve that tree instead of routing v3 documents through the v2
+  // layout/ratio migration and silently losing per-split ratios.
+  const layoutTree = sourceSchemaVersion >= RECURSIVE_LAYOUT_SCHEMA_VERSION
     ? normalizeChartWorkspaceLayoutTree(value.layoutTree, legacyTree)
     : legacyTree;
   const requestedActiveCellId = normalizeCellId(value.activeCellId, "cell-1");

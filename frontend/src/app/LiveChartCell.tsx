@@ -91,6 +91,7 @@ export interface ActiveChartEnvironment {
 export interface LiveChartCellProps {
   workspaceId: ChartWorkspaceId;
   cell: ChartCellState;
+  linkedDrawingScopeBase: string;
   layoutRole: ChartWorkspaceCellRole | null;
   active: boolean;
   maximized: boolean;
@@ -117,6 +118,7 @@ export interface LiveChartCellProps {
 function LiveChartCell({
   workspaceId,
   cell,
+  linkedDrawingScopeBase,
   layoutRole,
   active,
   maximized,
@@ -173,7 +175,7 @@ function LiveChartCell({
     dataMeta: marketData.view.meta,
     seriesStore: marketData.view.seriesStore,
   });
-  const drawingScopeBase = `workspace:${cellStorageScope}:${chartSession.view.exchange}:${chartSession.view.marketType}:${chartSession.view.symbol}`;
+  const drawingScopeBase = linkedDrawingScopeBase;
   const drawings = useDrawingRuntime({
     chartSurfaceActions: chartSurface.actions,
     drawingScopeBase,
@@ -398,7 +400,10 @@ function LiveChartCell({
   }, [cell.id, linkCoordinator]);
   const handleLinkedViewportRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
     upstreamViewportRangeChangeRef.current?.(range);
-    if (range.time) linkCoordinator.publishTimeRange(cell.id, range.time);
+    if (typeof range.rightmostTime === "number") {
+      linkCoordinator.publishTimeAnchor(cell.id, range.rightmostTime);
+    }
+    if (range.time) linkCoordinator.publishDateRange(cell.id, range.time);
   }, [cell.id, linkCoordinator]);
 
   const chartModel = useMemo(() => ({
@@ -471,6 +476,7 @@ function LiveChartCell({
         data-active={active ? "true" : "false"}
         data-layout-role={layoutRole ?? "standard"}
         data-link-group={cell.linkGroup ?? "none"}
+        data-link-role={cell.linkRole}
         onPointerDown={activate}
       >
         <header className="multi-chart-cell-header" onDoubleClick={toggleMaximize}>
@@ -487,6 +493,21 @@ function LiveChartCell({
           </span>
           <label className="multi-chart-cell-link" data-link-group={cell.linkGroup ?? "none"}>
             <span className="sr-only">联动组</span>
+            {cell.linkGroup && (
+              <span
+                className="multi-chart-cell-link-role"
+                aria-label={cell.linkRole === "source"
+                  ? "源图"
+                  : cell.linkRole === "destination" ? "目标图" : "双向图"}
+                title={cell.linkRole === "source"
+                  ? "源图：只发送品种、周期与视图联动"
+                  : cell.linkRole === "destination"
+                    ? "目标图：只接收品种、周期与视图联动"
+                    : "双向发送和接收品种、周期与视图联动"}
+              >
+                {cell.linkRole === "source" ? "源" : cell.linkRole === "destination" ? "目" : "↔"}
+              </span>
+            )}
             <select
               aria-label={`${cell.id} 联动组`}
               value={cell.linkGroup ?? ""}

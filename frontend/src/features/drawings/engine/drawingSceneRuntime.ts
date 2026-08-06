@@ -128,6 +128,14 @@ export interface DrawingSceneRuntimeBinding {
   readonly adapter: DrawingSceneFrameAdapter;
   readonly renderer: LegacyPrimitiveRenderer;
   readonly store: DrawingDocumentStore;
+  /**
+   * Document-only scene registries have no controller-owned primitive adoption
+   * step on another linked chart. Let those surfaces synchronously accept an
+   * externally published canonical document before the scene rebuild runs.
+   * Legacy/shadow bindings omit this callback and retain their existing
+   * store-publication-before-adoption guard.
+   */
+  readonly synchronizePublishedDocument?: (document: DrawingDocument) => boolean;
   readonly projectScene: DrawingSceneProjector;
   readonly isVisible?: () => boolean;
   readonly selectedId?: () => string | null;
@@ -1781,7 +1789,19 @@ export function createDrawingSceneRuntime({
     } else {
       unsubscribeScenePainted = nextBinding.subscribeScenePainted?.(acceptScenePainted) ?? null;
     }
-    unsubscribeDocument = nextBinding.store.subscribe(() => {
+    unsubscribeDocument = nextBinding.store.subscribe((document) => {
+      if (nextBinding.renderer.documentSnapshot() !== document
+        && nextBinding.synchronizePublishedDocument) {
+        let synchronized = false;
+        try {
+          synchronized = nextBinding.synchronizePublishedDocument(document);
+        } catch {
+          synchronized = false;
+        }
+        if (!synchronized || nextBinding.renderer.documentSnapshot() !== document) {
+          onSkipped?.("published-document-synchronization-failed");
+        }
+      }
       rejectInvalidatedExactPaintWaiters(nextBinding);
       lodToleranceClass = "settledExact";
       exactRequestedAt = now();

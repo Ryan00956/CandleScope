@@ -2537,6 +2537,37 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }
   }, [paneCrosshairStore, publishMainLegendCrosshair]);
 
+  const setLinkedVisibleTimeAnchor = useCallback((time: number): boolean => {
+    if (!Number.isFinite(time)) return false;
+    const currentRange = captureVisibleRange();
+    const logical = currentRange?.logical;
+    if (!logical) return false;
+    const span = logical.to - logical.from;
+    const targetIndex = findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
+    if (!Number.isFinite(span) || span <= 0 || targetIndex < 0) return false;
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (!viewportControllerRef.current?.restoreProjectionRange({
+        from: targetIndex - span,
+        to: targetIndex,
+      }, {
+        ...(currentRange?.barSpacing === undefined
+          ? {}
+          : { barSpacing: currentRange.barSpacing }),
+        immediate: true,
+      })) return false;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+    const visibleRange = captureVisibleRange();
+    publishViewportRangeChange(visibleRange);
+    scheduleVisibleRangeSave(visibleRange);
+    return true;
+  }, [captureVisibleRange, publishViewportRangeChange, scheduleVisibleRangeSave]);
+
   const setLinkedVisibleTimeRange = useCallback((
     range: ChartSurfaceLinkedTimeRange,
   ): boolean => {
@@ -4942,6 +4973,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useImperativeHandle(ref, () => ({
     getVisibleRange: captureVisibleRange,
     setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     captureViewportTransfer,
     clearAllDrawings,
@@ -5010,6 +5042,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     resetAutoScale,
     seriesReady,
     setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
     setLinkedVisibleTimeRange,
     setDrawingsHidden,
     updateSelectedDrawingStyle,

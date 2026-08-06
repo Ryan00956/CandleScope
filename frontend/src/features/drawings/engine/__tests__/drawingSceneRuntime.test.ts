@@ -2903,6 +2903,38 @@ test("a store publication cannot race ahead of legacy adoption", () => {
   assert.equal(runtime.snapshot().plan?.stamp.documentRevision, 1);
 });
 
+test("a document-only linked surface synchronizes an external store publication", () => {
+  const initial = documentWithRevision();
+  const store = createDrawingDocumentStore(initial);
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let synchronized = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    synchronizePublishedDocument: (document) => {
+      synchronized += 1;
+      renderer.setDocument(document);
+      return true;
+    },
+    projectScene: project,
+    publishScene: () => true,
+  });
+  assert.equal(runtime.flushNow(), true);
+
+  const next = documentWithRevision(1);
+  assert.equal(store.loadDocument(next).ok, true);
+  assert.equal(synchronized, 1);
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(runtime.snapshot().plan?.stamp.documentRevision, 1);
+});
+
 test("frame loss fails closed and disposal is idempotent", () => {
   const store = createDrawingDocumentStore(documentWithRevision());
   const adapter = fakeAdapter();

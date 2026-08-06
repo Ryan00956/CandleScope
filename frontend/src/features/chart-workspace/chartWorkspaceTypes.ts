@@ -2,13 +2,17 @@ import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 
-export const CHART_WORKSPACE_SCHEMA_VERSION = 3 as const;
+export const CHART_WORKSPACE_SCHEMA_VERSION = 4 as const;
 export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
 export const CHART_CELL_IDS = ["cell-1", "cell-2", "cell-3", "cell-4"] as const;
 export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
+export const CHART_LINK_ROLES = ["bidirectional", "source", "destination"] as const;
+export const CHART_DRAWING_LAYER_SET_IDS = ["1", "2", "3", "4"] as const;
 
 export type ChartCellId = (typeof CHART_CELL_IDS)[number];
 export type ChartLinkGroupId = (typeof CHART_LINK_GROUP_IDS)[number];
+export type ChartLinkRole = (typeof CHART_LINK_ROLES)[number];
+export type ChartDrawingLayerSetId = (typeof CHART_DRAWING_LAYER_SET_IDS)[number];
 
 export type ChartWorkspaceTemplateId =
   | "single"
@@ -68,7 +72,9 @@ export interface ChartLinkGroupSettings {
   market: boolean;
   interval: boolean;
   crosshair: boolean;
-  timeRange: boolean;
+  timeAnchor: boolean;
+  dateRange: boolean;
+  drawings: boolean;
 }
 
 export interface ChartWorkspaceLayoutRatios {
@@ -81,6 +87,8 @@ export interface ChartWorkspaceLayoutRatios {
 export interface ChartCellState {
   id: ChartCellId;
   linkGroup: ChartLinkGroupId | null;
+  linkRole: ChartLinkRole;
+  drawingLayerSet: ChartDrawingLayerSetId;
   session: ChartSession;
   chartSettings: ChartCellChartSettings;
   priceScale: ChartCellPriceScale;
@@ -122,7 +130,9 @@ export const DEFAULT_CHART_LINK_GROUP_SETTINGS: ChartLinkGroupSettings = Object.
   market: true,
   interval: false,
   crosshair: true,
-  timeRange: true,
+  timeAnchor: false,
+  dateRange: true,
+  drawings: false,
 });
 
 export const DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS: ChartWorkspaceLayoutRatios = Object.freeze({

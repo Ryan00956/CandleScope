@@ -3,8 +3,10 @@ import test from "node:test";
 
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
 import {
+  applyChartLinkSettingsPatch,
   applyLinkedSessionUpdate,
   assignCellLinkGroup,
+  assignCellLinkRole,
 } from "../chartWorkspaceLinkModel.js";
 
 test("market linking preserves each target interval when interval linking is disabled", () => {
@@ -57,4 +59,57 @@ test("joining a populated group aligns enabled fields without overwriting indepe
   assert.equal(next.cells["cell-4"].session.symbol, workspace.cells["cell-1"].session.symbol);
   assert.equal(next.cells["cell-4"].session.exchange, workspace.cells["cell-1"].session.exchange);
   assert.equal(next.cells["cell-4"].session.interval, "1d");
+});
+
+test("source, destination, and bidirectional roles constrain session propagation", () => {
+  const workspace = createDefaultChartWorkspace();
+  workspace.cells["cell-1"].linkRole = "source";
+  workspace.cells["cell-2"].linkRole = "source";
+  workspace.cells["cell-3"].linkRole = "destination";
+  workspace.cells["cell-4"].linkRole = "bidirectional";
+
+  const fromSource = applyLinkedSessionUpdate(workspace, "cell-1", {
+    ...workspace.cells["cell-1"].session,
+    symbol: "ETHUSDT",
+  });
+  assert.notEqual(fromSource.cells["cell-2"].session.symbol, "ETHUSDT");
+  assert.equal(fromSource.cells["cell-3"].session.symbol, "ETHUSDT");
+  assert.equal(fromSource.cells["cell-4"].session.symbol, "ETHUSDT");
+
+  const fromDestination = applyLinkedSessionUpdate(fromSource, "cell-3", {
+    ...fromSource.cells["cell-3"].session,
+    symbol: "SOLUSDT",
+  });
+  assert.equal(fromDestination.cells["cell-3"].session.symbol, "SOLUSDT");
+  assert.equal(fromDestination.cells["cell-1"].session.symbol, "ETHUSDT");
+  assert.equal(fromDestination.cells["cell-4"].session.symbol, "ETHUSDT");
+});
+
+test("a cell becoming a destination aligns from the group's explicit source", () => {
+  const workspace = createDefaultChartWorkspace();
+  workspace.cells["cell-1"].linkRole = "source";
+  workspace.cells["cell-1"].session = {
+    ...workspace.cells["cell-1"].session,
+    symbol: "ETHUSDT",
+  };
+  workspace.cells["cell-2"].session = {
+    ...workspace.cells["cell-2"].session,
+    symbol: "SOLUSDT",
+  };
+
+  const next = assignCellLinkRole(workspace, "cell-2", "destination");
+  assert.equal(next.cells["cell-2"].linkRole, "destination");
+  assert.equal(next.cells["cell-2"].session.symbol, "ETHUSDT");
+  assert.equal(next.cells["cell-2"].session.interval, workspace.cells["cell-2"].session.interval);
+});
+
+test("time-anchor and date-range settings remain mutually exclusive", () => {
+  const workspace = createDefaultChartWorkspace();
+  const anchor = applyChartLinkSettingsPatch(workspace.linkGroups.A, { timeAnchor: true });
+  assert.equal(anchor.timeAnchor, true);
+  assert.equal(anchor.dateRange, false);
+
+  const range = applyChartLinkSettingsPatch(anchor, { dateRange: true });
+  assert.equal(range.dateRange, true);
+  assert.equal(range.timeAnchor, false);
 });

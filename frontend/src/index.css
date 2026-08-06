@@ -9642,7 +9642,17 @@ body {
 }
 
 .multi-chart-cell-link {
+  display: flex;
+  align-items: center;
+  gap: 3px;
   margin-left: auto;
+}
+
+.multi-chart-cell-link-role {
+  min-width: 16px;
+  color: var(--chart-link-group-color);
+  font: 700 9px var(--font-mono);
+  text-align: center;
 }
 
 .multi-chart-cell-link select {
@@ -10114,6 +10124,7 @@ body {
 }
 
 .workspace-link-controls {
+  position: relative;
   gap: 4px;
   margin-right: 4px;
 }
@@ -10137,6 +10148,101 @@ body {
 
 .workspace-link-setting-list {
   gap: 2px;
+}
+
+.workspace-link-advanced {
+  position: relative;
+}
+
+.workspace-link-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--chart-link-group-color) 42%, var(--border-color));
+  border-radius: 5px;
+  color: var(--chart-link-group-color);
+  background: color-mix(in srgb, var(--chart-link-group-color) 8%, var(--bg-secondary));
+  font-size: 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.workspace-link-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-link-advanced[open] > summary {
+  border-color: var(--chart-link-group-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--chart-link-group-color) 24%, transparent);
+}
+
+.workspace-link-popover {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 304px;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--chart-link-group-color) 46%, var(--border-color));
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-secondary) 96%, black);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+}
+
+.workspace-link-popover > strong {
+  color: var(--chart-link-group-color);
+  font-size: 12px;
+}
+
+.workspace-link-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.workspace-link-field select {
+  min-width: 112px;
+  height: 27px;
+  padding: 0 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  outline: 0;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  font-size: 11px;
+}
+
+.workspace-link-popover .workspace-link-setting-list {
+  flex-wrap: wrap;
+  padding-block: 7px;
+  border-block: 1px solid var(--border-color);
+}
+
+.workspace-link-help,
+.workspace-link-status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.workspace-link-status[data-state="linked"] {
+  color: var(--candle-up);
+}
+
+.workspace-link-status[data-state="market-mismatch"],
+.workspace-link-status[data-state="layer-mismatch"],
+.workspace-link-status.warning {
+  color: #f59e0b;
 }
 
 .workspace-link-setting {

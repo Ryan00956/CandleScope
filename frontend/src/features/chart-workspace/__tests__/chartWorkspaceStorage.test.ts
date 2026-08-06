@@ -38,11 +38,19 @@ test("workspace defaults to four stable cells with one visible tree leaf", () =>
   const workspace = createDefaultChartWorkspace();
   assert.deepEqual(Object.keys(workspace.cells), ["cell-1", "cell-2", "cell-3", "cell-4"]);
   assert.deepEqual(Object.values(workspace.cells).map((cell) => cell.linkGroup), ["A", "A", "A", "A"]);
+  assert.deepEqual(Object.values(workspace.cells).map((cell) => cell.linkRole), [
+    "bidirectional",
+    "bidirectional",
+    "bidirectional",
+    "bidirectional",
+  ]);
   assert.deepEqual(workspace.linkGroups.A, {
     market: true,
     interval: false,
     crosshair: true,
-    timeRange: true,
+    timeAnchor: false,
+    dateRange: true,
+    drawings: false,
   });
   assert.deepEqual(visibleCellIds(workspace.layoutTree), ["cell-1"]);
   assert.deepEqual(visibleCellIds(createChartWorkspaceLayoutTree("split-vertical")), ["cell-1", "cell-2"]);
@@ -68,17 +76,23 @@ test("workspace persistence keeps recursive split ratios and cell-scoped state",
   };
   workspace.cells["cell-2"].priceScale = { invertScale: true, priceScaleMode: 2 };
   workspace.cells["cell-2"].linkGroup = "B";
+  workspace.cells["cell-2"].linkRole = "destination";
+  workspace.cells["cell-2"].drawingLayerSet = "3";
   workspace.linkGroups.B.interval = true;
+  workspace.linkGroups.B.drawings = true;
   saveChartWorkspace(workspace, storage);
 
   const restored = loadChartWorkspace(storage);
-  assert.equal(restored.schemaVersion, 3);
+  assert.equal(restored.schemaVersion, 4);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "quad");
   assert.equal(restored.activeCellId, "cell-2");
   assert.deepEqual(restored.cells["cell-2"].session, workspace.cells["cell-2"].session);
   assert.deepEqual(restored.cells["cell-2"].priceScale, { invertScale: true, priceScaleMode: 2 });
   assert.equal(restored.cells["cell-2"].linkGroup, "B");
+  assert.equal(restored.cells["cell-2"].linkRole, "destination");
+  assert.equal(restored.cells["cell-2"].drawingLayerSet, "3");
   assert.equal(restored.linkGroups.B.interval, true);
+  assert.equal(restored.linkGroups.B.drawings, true);
   assert.deepEqual(splitRatios(restored.layoutTree), {
     "quad-root": 0.42,
     "quad-top": 0.64,
@@ -103,7 +117,7 @@ test("v2 migration turns shared legacy ratios into independent recursive split n
   const restored = loadChartWorkspace(memoryStorage({
     [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
   }));
-  assert.equal(restored.schemaVersion, 3);
+  assert.equal(restored.schemaVersion, 4);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "quad");
   assert.deepEqual(splitRatios(restored.layoutTree), {
     "quad-root": 0.42,
@@ -125,10 +139,53 @@ test("v1 workspace migration preserves cells and receives safe tree and link def
     [LEGACY_CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
   });
   const restored = loadChartWorkspace(storage);
-  assert.equal(restored.schemaVersion, 3);
+  assert.equal(restored.schemaVersion, 4);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "split-horizontal");
   assert.deepEqual(Object.values(restored.cells).map((cell) => cell.linkGroup), [null, null, null, null]);
   assert.deepEqual(splitRatios(restored.layoutTree), { "split-horizontal-root": 0.5 });
+});
+
+test("v3 migration preserves legacy date-range behavior and adds safe advanced-link defaults", () => {
+  const workspace = createDefaultChartWorkspace();
+  const legacyDocument = structuredClone(workspace) as unknown as Record<string, unknown>;
+  legacyDocument.schemaVersion = 3;
+  let legacyTree = createChartWorkspaceLayoutTree("quad");
+  legacyTree = updateChartWorkspaceSplitRatio(legacyTree, "quad-root", 0.37);
+  legacyTree = updateChartWorkspaceSplitRatio(legacyTree, "quad-top", 0.61);
+  legacyTree = updateChartWorkspaceSplitRatio(legacyTree, "quad-bottom", 0.54);
+  legacyDocument.layoutTree = legacyTree;
+  const legacyGroups = legacyDocument.linkGroups as Record<string, Record<string, unknown>>;
+  legacyGroups.A = {
+    market: true,
+    interval: false,
+    crosshair: true,
+    timeRange: true,
+  };
+  const legacyCells = legacyDocument.cells as Record<string, Record<string, unknown>>;
+  delete legacyCells["cell-1"]!.linkRole;
+  delete legacyCells["cell-1"]!.drawingLayerSet;
+
+  const restored = loadChartWorkspace(memoryStorage({
+    [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
+  }));
+
+  assert.equal(restored.schemaVersion, 4);
+  assert.deepEqual(restored.linkGroups.A, {
+    market: true,
+    interval: false,
+    crosshair: true,
+    timeAnchor: false,
+    dateRange: true,
+    drawings: false,
+  });
+  assert.equal(restored.cells["cell-1"].linkRole, "bidirectional");
+  assert.equal(restored.cells["cell-1"].drawingLayerSet, "1");
+  assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "quad");
+  assert.deepEqual(splitRatios(restored.layoutTree), {
+    "quad-root": 0.37,
+    "quad-top": 0.61,
+    "quad-bottom": 0.54,
+  });
 });
 
 test("malformed workspace storage fails closed to defaults", () => {

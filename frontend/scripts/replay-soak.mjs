@@ -839,7 +839,7 @@ async function addAndSelectHedgeSecondaryMarket(cdp, symbol, timeoutMs) {
   })()`, timeoutMs, "HEDGE secondary market select acknowledgement");
 }
 
-async function waitForServerSelectedMarket(backendOrigin, runId, symbol, timeoutMs) {
+async function waitForServerSelectedMarket(backendOrigin, runId, cdp, symbol, timeoutMs) {
   const started = Date.now();
   let lastResponse = null;
   let lastError = null;
@@ -860,8 +860,28 @@ async function waitForServerSelectedMarket(backendOrigin, runId, symbol, timeout
           adapterSessionId: target.adapter_session_id,
         };
       }
+      const commandError = await evaluate(
+        cdp,
+        "document.querySelector('.replay-command-error')?.textContent?.trim() || null",
+      ).catch(() => null);
+      if (commandError) {
+        throw new Error(`HEDGE market selection command failed: ${JSON.stringify({
+          symbol,
+          commandError,
+          selectedTrackId: lastResponse?.viewer_state?.selected_track_id ?? null,
+          viewerRevision: lastResponse?.viewer_state?.semantic_view_revision ?? null,
+          tracks: lastResponse?.tracks?.map((track) => ({
+            trackId: track.track_id,
+            symbol: track.symbol,
+            state: track.state,
+            tier: track.subscription_tier,
+            degradedReason: track.degraded_reason,
+          })) ?? null,
+        })}`);
+      }
       lastError = null;
     } catch (error) {
+      if (error?.message?.startsWith("HEDGE market selection command failed:")) throw error;
       lastError = error;
     }
     await wait(100);
@@ -894,6 +914,7 @@ async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs)
   const authoritative = await waitForServerSelectedMarket(
     backendOrigin,
     runId,
+    cdp,
     symbol,
     timeoutMs,
   );

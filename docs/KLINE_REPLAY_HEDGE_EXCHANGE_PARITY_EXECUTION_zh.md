@@ -529,6 +529,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 预估：4–6 个工程日。
 
+完成记录（2026-08-06）：已完成。七个强平 durable transition 的提交前崩溃和提交后响应丢失均覆盖真实服务关闭/重开，修复了历史 L2 close 在重启后用新 revision 重构相同 command ID 导致 `COMMAND_ID_REUSED` 的问题；现在重用并严格校验原始持久化 command envelope。账户审计新增 insurance 与 ADL 的独立重建和完整 hash chain 校验，任一证据损坏会暂停 HEDGE Run 并将账户置为 `FAILED_CLOSED`。SQLite busy exhaustion 不推进 projection，WAL 重开恢复与 reference hash 一致；active public/simulation/L2 archive rehydrate、fork/review 父 hash 和多 FULL track 时钟/顺序门禁通过。完整 replay 后端 `900 passed`，前端 `329 passed`，typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据见 [`evidence/KLINE_REPLAY_HEDGE_PHASE8_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE8_RESULT_20260806_zh.md)。
+
 ### Phase 9：性能、长稳与发布验收
 
 工作内容：

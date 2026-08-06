@@ -301,7 +301,9 @@ async def test_cross_margin_breach_creates_one_account_case_across_full_tracks(
             )
         store = service.training.store  # type: ignore[union-attr]
 
-        def seed_and_detect(connection: object) -> tuple[int, set[str]]:
+        def seed_and_detect(
+            connection: object,
+        ) -> tuple[int, set[str], list[tuple[int, str, str]], int]:
             track = connection.execute(  # type: ignore[attr-defined]
                 "SELECT * FROM replay_training_market_track WHERE run_id = ? AND track_id = 'track-1'",
                 (run_id,),
@@ -410,18 +412,51 @@ async def test_cross_margin_breach_creates_one_account_case_across_full_tracks(
             ).fetchall()
             legs = connection.execute(  # type: ignore[attr-defined]
                 """
-                SELECT track_id FROM replay_training_liquidation_leg
-                WHERE run_id = ? AND case_id = ?
+                SELECT leg.leg_sequence, leg.track_id, leg.position_side,
+                       track.stable_ordinal
+                FROM replay_training_liquidation_leg AS leg
+                JOIN replay_training_market_track AS track
+                  ON track.run_id = leg.run_id AND track.track_id = leg.track_id
+                WHERE leg.run_id = ? AND leg.case_id = ?
+                ORDER BY leg.leg_sequence
                 """,
                 (run_id, cases[0]["case_id"]),
             ).fetchall()
-            return len(cases), {str(row["track_id"]) for row in legs}
+            clock_count = int(
+                connection.execute(  # type: ignore[attr-defined]
+                    """
+                    SELECT COUNT(DISTINCT virtual_time_ms)
+                    FROM replay_training_market_track
+                    WHERE run_id = ? AND subscription_tier = 'FULL'
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+            ordered_legs = [
+                (
+                    int(row["stable_ordinal"]),
+                    str(row["track_id"]),
+                    str(row["position_side"]),
+                )
+                for row in legs
+            ]
+            return (
+                len(cases),
+                {str(row["track_id"]) for row in legs},
+                ordered_legs,
+                clock_count,
+            )
 
-        case_count, leg_tracks = await store.base_store.run_extension_write(
-            seed_and_detect
+        case_count, leg_tracks, ordered_legs, clock_count = (
+            await store.base_store.run_extension_write(seed_and_detect)
         )
         assert case_count == 1
         assert leg_tracks == {"track-1", "track-2"}
+        assert clock_count == 1
+        assert ordered_legs == sorted(
+            ordered_legs,
+            key=lambda item: (0 if item[2] == "LONG" else 1, item[0], item[1]),
+        )
     finally:
         await service.shutdown(step_timeout=1.0)
 

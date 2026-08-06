@@ -6580,6 +6580,674 @@ class TrainingRunStore:
             },
         }
 
+    @classmethod
+    def _audit_hedge_insurance_and_adl(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        differences: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Independently rebuild simulated insurance and ADL evidence chains."""
+
+        def difference(field: str, expected: object, actual: object) -> None:
+            differences.append({"field": field, "expected": expected, "actual": actual})
+
+        def compare(field: str, expected: object, actual: object) -> None:
+            if expected != actual:
+                difference(field, expected, actual)
+
+        def normalized_decimal(value: object, *, field: str) -> str | None:
+            try:
+                return decimal_to_string(Decimal(str(value)), field_name=field)
+            except (InvalidOperation, TypeError, ValueError):
+                difference(field, "VALID_DECIMAL", value)
+                return None
+
+        insurance_funds = tuple(
+            connection.execute(
+                """
+                SELECT * FROM replay_training_insurance_fund
+                WHERE run_id = ? ORDER BY asset
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        insurance_posting_count = 0
+        insurance_tails: dict[str, str] = {}
+        for fund in insurance_funds:
+            asset = str(fund["asset"])
+            prefix = f"insurance_fund[{asset}]"
+            try:
+                current_balance = Decimal(str(fund["opening_balance"]))
+            except (InvalidOperation, TypeError, ValueError):
+                difference(
+                    f"{prefix}.opening_balance",
+                    "VALID_NON_NEGATIVE_DECIMAL",
+                    fund["opening_balance"],
+                )
+                continue
+            if current_balance < 0:
+                difference(
+                    f"{prefix}.opening_balance",
+                    "NON_NEGATIVE_DECIMAL",
+                    fund["opening_balance"],
+                )
+
+            postings = tuple(
+                connection.execute(
+                    """
+                    SELECT posting.*, case_row.trigger_virtual_time_ms
+                    FROM replay_training_insurance_posting AS posting
+                    JOIN replay_training_liquidation_case AS case_row
+                      ON case_row.run_id = posting.run_id
+                     AND case_row.case_id = posting.case_id
+                    WHERE posting.run_id = ? AND posting.asset = ?
+                    ORDER BY posting.posting_sequence
+                    """,
+                    (run_id, asset),
+                ).fetchall()
+            )
+            input_events = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_input_applied_event
+                    WHERE run_id = ? AND source_kind = 'SIMULATION'
+                      AND event_kind = 'INSURANCE_INPUT'
+                    ORDER BY applied_virtual_time_ms, event_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+            actions: list[tuple[int, int, int, str, sqlite3.Row]] = []
+            actions.extend(
+                (
+                    int(row["applied_virtual_time_ms"]),
+                    0,
+                    int(row["event_sequence"]),
+                    "INPUT",
+                    row,
+                )
+                for row in input_events
+            )
+            actions.extend(
+                (
+                    int(row["trigger_virtual_time_ms"]),
+                    1,
+                    int(row["posting_sequence"]),
+                    "POSTING",
+                    row,
+                )
+                for row in postings
+            )
+            actions.sort(key=lambda item: item[:3])
+            expected_tail: str | None = None
+            expected_revision = 0
+            expected_posting_sequence = 0
+            for _virtual_time, _phase, _sequence, action_type, row in actions:
+                if action_type == "INPUT":
+                    try:
+                        payload = json.loads(str(row["payload_json"]))
+                    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                        difference(
+                            f"{prefix}.input[{row['event_sequence']}]",
+                            "VALID_JSON_OBJECT",
+                            type(exc).__name__,
+                        )
+                        continue
+                    if not isinstance(payload, Mapping):
+                        difference(
+                            f"{prefix}.input[{row['event_sequence']}]",
+                            "JSON_OBJECT",
+                            type(payload).__name__,
+                        )
+                        continue
+                    balance = normalized_decimal(
+                        payload.get("balance_after"),
+                        field=f"{prefix}.input[{row['event_sequence']}].balance_after",
+                    )
+                    if balance is None:
+                        continue
+                    current_balance = Decimal(balance)
+                    expected_tail = str(row["source_event_hash"])
+                    expected_revision += 1
+                    continue
+
+                expected_posting_sequence += 1
+                insurance_posting_count += 1
+                posting_prefix = (
+                    f"{prefix}.posting[{row['posting_sequence']}:"
+                    f"{row['posting_id']}]"
+                )
+                compare(
+                    f"{posting_prefix}.posting_sequence",
+                    expected_posting_sequence,
+                    int(row["posting_sequence"]),
+                )
+                if expected_tail is None:
+                    # The start projection hash is independently verified by the
+                    # HEDGE input audit; the first posting durably anchors it here.
+                    expected_tail = str(row["previous_hash"])
+                compare(
+                    f"{posting_prefix}.previous_hash",
+                    expected_tail,
+                    str(row["previous_hash"]),
+                )
+                cash_delta = normalized_decimal(
+                    row["cash_delta"], field=f"{posting_prefix}.cash_delta"
+                )
+                if cash_delta is None:
+                    continue
+                expected_balance = current_balance + Decimal(cash_delta)
+                expected_balance_text = decimal_to_string(
+                    expected_balance, field_name=f"{posting_prefix}.balance_after"
+                )
+                compare(
+                    f"{posting_prefix}.balance_after",
+                    expected_balance_text,
+                    str(row["balance_after"]),
+                )
+                payload = {
+                    "posting_id": str(row["posting_id"]),
+                    "case_id": str(row["case_id"]),
+                    "step_sequence": int(row["step_sequence"]),
+                    "cash_delta": cash_delta,
+                    "balance_after": expected_balance_text,
+                    "reason": str(row["reason"]),
+                }
+                expected_hash = ledger_chain_hash(
+                    previous_hash=expected_tail,
+                    ledger_sequence=expected_posting_sequence,
+                    posting=payload,
+                )
+                compare(
+                    f"{posting_prefix}.posting_hash",
+                    expected_hash,
+                    str(row["posting_hash"]),
+                )
+                current_balance = expected_balance
+                expected_tail = expected_hash
+                expected_revision += 1
+
+            current_balance_text = decimal_to_string(
+                current_balance, field_name=f"{prefix}.current_balance"
+            )
+            compare(
+                f"{prefix}.current_balance",
+                current_balance_text,
+                str(fund["current_balance"]),
+            )
+            compare(
+                f"{prefix}.revision",
+                expected_revision,
+                int(fund["revision"]),
+            )
+            if expected_tail is not None:
+                compare(
+                    f"{prefix}.ledger_tail_hash",
+                    expected_tail,
+                    str(fund["ledger_tail_hash"]),
+                )
+            insurance_tails[asset] = str(fund["ledger_tail_hash"])
+
+            insurance_steps = tuple(
+                connection.execute(
+                    """
+                    SELECT step.* FROM replay_training_liquidation_step AS step
+                    WHERE step.run_id = ?
+                      AND step.step_type = 'INSURANCE_FUND_SETTLEMENT'
+                    ORDER BY step.case_id, step.step_sequence
+                    """,
+                    (run_id,),
+                ).fetchall()
+            )
+            for step in insurance_steps:
+                step_prefix = (
+                    f"insurance_step[{step['case_id']}:{step['step_sequence']}]"
+                )
+                try:
+                    reason = json.loads(str(step["reason"]))
+                    plan = reason["plan"]
+                    deficit = Decimal(str(plan["bankruptcy_deficit"]))
+                except (
+                    InvalidOperation,
+                    json.JSONDecodeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    difference(step_prefix, "VALID_INSURANCE_PLAN", type(exc).__name__)
+                    continue
+                step_postings = tuple(
+                    row
+                    for row in postings
+                    if str(row["case_id"]) == str(step["case_id"])
+                    and int(row["step_sequence"]) == int(step["step_sequence"])
+                )
+                fee_rows = connection.execute(
+                    """
+                    SELECT liquidation_fee
+                    FROM replay_training_liquidation_fill
+                    WHERE run_id = ? AND case_id = ?
+                    """,
+                    (run_id, step["case_id"]),
+                ).fetchall()
+                fee_inflow = sum(
+                    (Decimal(str(row["liquidation_fee"])) for row in fee_rows),
+                    Decimal(0),
+                )
+                if step_postings:
+                    first = step_postings[0]
+                    balance_before = Decimal(str(first["balance_after"])) - Decimal(
+                        str(first["cash_delta"])
+                    )
+                    settlement = settle_insurance_fund(
+                        balance=decimal_to_string(
+                            balance_before, field_name=f"{step_prefix}.balance_before"
+                        ),
+                        deficit=decimal_to_string(
+                            deficit, field_name=f"{step_prefix}.deficit"
+                        ),
+                        liquidation_fee_inflow=decimal_to_string(
+                            fee_inflow, field_name=f"{step_prefix}.fee_inflow"
+                        ),
+                    )
+                    expected_postings: list[tuple[str, str]] = []
+                    if fee_inflow > 0:
+                        expected_postings.append(
+                            (
+                                "LIQUIDATION_FEE_INFLOW",
+                                decimal_to_string(
+                                    fee_inflow,
+                                    field_name=f"{step_prefix}.fee_inflow",
+                                ),
+                            )
+                        )
+                    coverage = Decimal(str(settlement["coverage"]))
+                    if coverage > 0:
+                        expected_postings.append(
+                            (
+                                "BANKRUPTCY_DEFICIT_DEBIT",
+                                decimal_to_string(
+                                    -coverage,
+                                    field_name=f"{step_prefix}.coverage",
+                                ),
+                            )
+                        )
+                    actual_postings = [
+                        (str(row["reason"]), str(row["cash_delta"]))
+                        for row in step_postings
+                    ]
+                    compare(
+                        f"{step_prefix}.postings",
+                        expected_postings,
+                        actual_postings,
+                    )
+                elif fee_inflow > 0:
+                    difference(
+                        f"{step_prefix}.postings",
+                        "LIQUIDATION_FEE_INFLOW",
+                        "MISSING",
+                    )
+
+        projection = connection.execute(
+            """
+            SELECT * FROM replay_hedge_input_projection
+            WHERE run_id = ? AND source_kind = 'SIMULATION'
+            """,
+            (run_id,),
+        ).fetchone()
+        raw_snapshots: dict[str, Mapping[str, object]] = {}
+        input_chain_hashes: set[str] = set()
+        if projection is not None:
+            input_chain_hashes.add(str(projection["input_chain_hash"]))
+            try:
+                state = json.loads(str(projection["state_json"]))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                state = None
+            snapshots = state.get("adl_snapshots") if isinstance(state, Mapping) else None
+            if isinstance(snapshots, Mapping):
+                for raw in snapshots.values():
+                    if isinstance(raw, Mapping) and isinstance(
+                        raw.get("snapshot_hash"), str
+                    ):
+                        raw_snapshots[str(raw["snapshot_hash"])] = raw
+        for row in connection.execute(
+            """
+            SELECT * FROM replay_hedge_input_applied_event
+            WHERE run_id = ? AND source_kind = 'SIMULATION'
+            ORDER BY event_sequence
+            """,
+            (run_id,),
+        ).fetchall():
+            input_chain_hashes.add(str(row["source_event_hash"]))
+            if row["event_kind"] != "ADL_COHORT_INPUT":
+                continue
+            try:
+                raw = json.loads(str(row["payload_json"]))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(raw, Mapping) and isinstance(raw.get("snapshot_hash"), str):
+                raw_snapshots[str(raw["snapshot_hash"])] = raw
+
+        adl_snapshots = tuple(
+            connection.execute(
+                """
+                SELECT snapshot.*, step.reason
+                FROM replay_training_adl_snapshot AS snapshot
+                JOIN replay_training_liquidation_step AS step
+                  ON step.run_id = snapshot.run_id
+                 AND step.case_id = snapshot.case_id
+                 AND step.step_sequence = snapshot.step_sequence
+                WHERE snapshot.run_id = ?
+                ORDER BY snapshot.case_id, snapshot.step_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        )
+        adl_candidate_count = 0
+        adl_selection_count = 0
+        adl_counterparty_count = 0
+        for snapshot in adl_snapshots:
+            snapshot_prefix = f"adl_snapshot[{snapshot['snapshot_id']}]"
+            try:
+                reason = json.loads(str(snapshot["reason"]))
+                plan = cast(Mapping[str, object], reason["plan"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                difference(snapshot_prefix, "VALID_ADL_PLAN", type(exc).__name__)
+                continue
+            raw = next(
+                (
+                    candidate
+                    for candidate in raw_snapshots.values()
+                    if candidate.get("symbol") == snapshot["symbol"]
+                    and candidate.get("snapshot_hash")
+                    and isinstance(candidate.get("candidates"), list)
+                    and any(
+                        canonical_sha256(
+                            {
+                                "source_snapshot_hash": candidate["snapshot_hash"],
+                                "input_chain_hash": chain_hash,
+                            }
+                        )
+                        == snapshot["input_hash"]
+                        for chain_hash in input_chain_hashes
+                    )
+                ),
+                None,
+            )
+            if raw is None:
+                difference(
+                    f"{snapshot_prefix}.input_hash",
+                    "REHYDRATABLE_PINNED_ADL_INPUT",
+                    snapshot["input_hash"],
+                )
+                continue
+            chain_hash = next(
+                chain
+                for chain in input_chain_hashes
+                if canonical_sha256(
+                    {
+                        "source_snapshot_hash": raw["snapshot_hash"],
+                        "input_chain_hash": chain,
+                    }
+                )
+                == snapshot["input_hash"]
+            )
+            try:
+                ranked = rank_adl_candidates(
+                    cast(Sequence[Mapping[str, object]], raw["candidates"]),
+                    bankrupt_position_side=str(plan["bankrupt_position_side"]),
+                    quote_step=plan["quote_step"],
+                )
+                selected = select_adl_candidates(
+                    cast(Sequence[Mapping[str, object]], raw["candidates"]),
+                    bankrupt_position_side=str(plan["bankrupt_position_side"]),
+                    takeover_quantity=plan["takeover_quantity"],
+                    quote_step=plan["quote_step"],
+                )
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                difference(snapshot_prefix, "VALID_ADL_INPUT", type(exc).__name__)
+                continue
+            compare(
+                f"{snapshot_prefix}.model_version",
+                ADL_MODEL_VERSION,
+                str(snapshot["model_version"]),
+            )
+            snapshot_payload = {
+                "snapshot_id": str(snapshot["snapshot_id"]),
+                "case_id": str(snapshot["case_id"]),
+                "step_sequence": int(snapshot["step_sequence"]),
+                "symbol": str(snapshot["symbol"]),
+                "model_version": ADL_MODEL_VERSION,
+                "source_snapshot_hash": raw["snapshot_hash"],
+                "input_chain_hash": chain_hash,
+                "ranked_candidate_ids": [item["candidate_id"] for item in ranked],
+            }
+            compare(
+                f"{snapshot_prefix}.snapshot_hash",
+                canonical_sha256(snapshot_payload),
+                str(snapshot["snapshot_hash"]),
+            )
+            candidate_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_candidate
+                    WHERE run_id = ? AND snapshot_id = ? ORDER BY rank
+                    """,
+                    (run_id, snapshot["snapshot_id"]),
+                ).fetchall()
+            )
+            adl_candidate_count += len(candidate_rows)
+            compare(
+                f"{snapshot_prefix}.candidate_count",
+                len(ranked),
+                len(candidate_rows),
+            )
+            for rank, candidate in enumerate(ranked, start=1):
+                if rank > len(candidate_rows):
+                    break
+                row = candidate_rows[rank - 1]
+                candidate_payload = {
+                    "snapshot_id": str(snapshot["snapshot_id"]),
+                    "candidate_id": candidate["candidate_id"],
+                    "rank": rank,
+                    "position_side": candidate["position_side"],
+                    "quantity": candidate["quantity"],
+                    "entry_price": candidate["entry_price"],
+                    "mark_price": candidate["mark_price"],
+                    "profit_ratio": candidate["profit_ratio"],
+                    "effective_leverage": candidate["effective_leverage"],
+                    "score": candidate["score"],
+                }
+                for field, expected in candidate_payload.items():
+                    actual = int(row[field]) if field == "rank" else str(row[field])
+                    compare(
+                        f"{snapshot_prefix}.candidate[{rank}].{field}",
+                        expected,
+                        actual,
+                    )
+                compare(
+                    f"{snapshot_prefix}.candidate[{rank}].candidate_hash",
+                    canonical_sha256(candidate_payload),
+                    str(row["candidate_hash"]),
+                )
+
+            event = connection.execute(
+                """
+                SELECT * FROM replay_training_adl_event
+                WHERE run_id = ? AND case_id = ? AND step_sequence = ?
+                """,
+                (run_id, snapshot["case_id"], snapshot["step_sequence"]),
+            ).fetchone()
+            if event is None:
+                difference(f"{snapshot_prefix}.event", "PRESENT", "MISSING")
+                continue
+            takeover_price = Decimal(str(plan["takeover_price"]))
+            takeover_quantity = Decimal(str(plan["takeover_quantity"]))
+            contract_size = Decimal(str(plan["contract_size"]))
+            completed_notional = decimal_to_string(
+                takeover_price * takeover_quantity * contract_size,
+                field_name=f"{snapshot_prefix}.completed_notional",
+            )
+            event_payload = {
+                "adl_event_id": str(event["adl_event_id"]),
+                "case_id": str(snapshot["case_id"]),
+                "step_sequence": int(snapshot["step_sequence"]),
+                "snapshot_id": str(snapshot["snapshot_id"]),
+                "required_notional": str(plan["uncovered_deficit"]),
+                "completed_notional": completed_notional,
+            }
+            for field, expected in event_payload.items():
+                actual = int(event[field]) if field == "step_sequence" else str(event[field])
+                compare(f"adl_event[{event['adl_event_id']}].{field}", expected, actual)
+            compare(
+                f"adl_event[{event['adl_event_id']}].state",
+                "COMPLETED",
+                str(event["state"]),
+            )
+            compare(
+                f"adl_event[{event['adl_event_id']}].event_hash",
+                canonical_sha256(event_payload),
+                str(event["event_hash"]),
+            )
+            expected_selected = cast(list[dict[str, str]], selected["selected"])
+            selection_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_selection
+                    WHERE run_id = ? AND adl_event_id = ?
+                    ORDER BY selection_sequence
+                    """,
+                    (run_id, event["adl_event_id"]),
+                ).fetchall()
+            )
+            counterparty_rows = tuple(
+                connection.execute(
+                    """
+                    SELECT * FROM replay_training_adl_counterparty_ledger
+                    WHERE run_id = ? AND adl_event_id = ? ORDER BY ledger_sequence
+                    """,
+                    (run_id, event["adl_event_id"]),
+                ).fetchall()
+            )
+            adl_selection_count += len(selection_rows)
+            adl_counterparty_count += len(counterparty_rows)
+            compare(
+                f"adl_event[{event['adl_event_id']}].selection_count",
+                len(expected_selected),
+                len(selection_rows),
+            )
+            compare(
+                f"adl_event[{event['adl_event_id']}].counterparty_count",
+                len(expected_selected),
+                len(counterparty_rows),
+            )
+            ranked_by_id = {str(item["candidate_id"]): item for item in ranked}
+            previous_hash = "sha256:" + "0" * 64
+            for sequence, item in enumerate(expected_selected, start=1):
+                if sequence > len(selection_rows) or sequence > len(counterparty_rows):
+                    break
+                candidate = ranked_by_id[str(item["candidate_id"])]
+                quantity = Decimal(str(item["quantity"]))
+                entry_price = Decimal(str(candidate["entry_price"]))
+                notional = decimal_to_string(
+                    quantity * takeover_price * contract_size,
+                    field_name=f"adl_event[{event['adl_event_id']}].notional",
+                )
+                cash_delta_value = (
+                    (takeover_price - entry_price) * quantity
+                    if candidate["position_side"] == "LONG"
+                    else (entry_price - takeover_price) * quantity
+                ) * contract_size
+                cash_delta = decimal_to_string(
+                    cash_delta_value,
+                    field_name=f"adl_event[{event['adl_event_id']}].cash_delta",
+                )
+                selection_payload = {
+                    "adl_event_id": str(event["adl_event_id"]),
+                    "selection_sequence": sequence,
+                    "candidate_id": str(item["candidate_id"]),
+                    "quantity": str(item["quantity"]),
+                    "price": str(plan["takeover_price"]),
+                    "notional": notional,
+                    "cash_delta": cash_delta,
+                }
+                selection_row = selection_rows[sequence - 1]
+                for field, expected in selection_payload.items():
+                    actual = (
+                        int(selection_row[field])
+                        if field == "selection_sequence"
+                        else str(selection_row[field])
+                    )
+                    compare(
+                        f"adl_event[{event['adl_event_id']}].selection[{sequence}].{field}",
+                        expected,
+                        actual,
+                    )
+                compare(
+                    f"adl_event[{event['adl_event_id']}].selection[{sequence}].hash",
+                    canonical_sha256(selection_payload),
+                    str(selection_row["selection_hash"]),
+                )
+                quantity_before = Decimal(str(candidate["quantity"]))
+                quantity_after = decimal_to_string(
+                    quantity_before - quantity,
+                    field_name=f"adl_event[{event['adl_event_id']}].quantity_after",
+                )
+                counterparty_payload = {
+                    "adl_event_id": str(event["adl_event_id"]),
+                    "ledger_sequence": sequence,
+                    "candidate_id": str(item["candidate_id"]),
+                    "position_side": str(candidate["position_side"]),
+                    "quantity_before": str(candidate["quantity"]),
+                    "quantity_delta": decimal_to_string(
+                        -quantity,
+                        field_name=f"adl_event[{event['adl_event_id']}].quantity_delta",
+                    ),
+                    "quantity_after": quantity_after,
+                    "takeover_price": str(plan["takeover_price"]),
+                    "cash_delta": cash_delta,
+                }
+                counterparty_row = counterparty_rows[sequence - 1]
+                for field, expected in counterparty_payload.items():
+                    actual = (
+                        int(counterparty_row[field])
+                        if field == "ledger_sequence"
+                        else str(counterparty_row[field])
+                    )
+                    compare(
+                        f"adl_event[{event['adl_event_id']}].counterparty[{sequence}].{field}",
+                        expected,
+                        actual,
+                    )
+                compare(
+                    f"adl_event[{event['adl_event_id']}].counterparty[{sequence}].previous_hash",
+                    previous_hash,
+                    str(counterparty_row["previous_hash"]),
+                )
+                expected_entry_hash = ledger_chain_hash(
+                    previous_hash=previous_hash,
+                    ledger_sequence=sequence,
+                    posting=counterparty_payload,
+                )
+                compare(
+                    f"adl_event[{event['adl_event_id']}].counterparty[{sequence}].entry_hash",
+                    expected_entry_hash,
+                    str(counterparty_row["entry_hash"]),
+                )
+                previous_hash = expected_entry_hash
+
+        return {
+            "insurance_fund_count": len(insurance_funds),
+            "insurance_posting_count": insurance_posting_count,
+            "insurance_ledger_tails": insurance_tails,
+            "adl_snapshot_count": len(adl_snapshots),
+            "adl_candidate_count": adl_candidate_count,
+            "adl_selection_count": adl_selection_count,
+            "adl_counterparty_ledger_count": adl_counterparty_count,
+        }
+
     @staticmethod
     def _audit_historical_book_liquidations(
         connection: sqlite3.Connection,
@@ -7007,6 +7675,13 @@ class TrainingRunStore:
                 portfolio=portfolio,
                 differences=differences,
             )
+            independent_state["insurance_and_adl"] = (
+                cls._audit_hedge_insurance_and_adl(
+                    connection,
+                    run_id=run_id,
+                    differences=differences,
+                )
+            )
             independent_state["historical_l2_liquidation_proof_count"] = (
                 cls._audit_historical_book_liquidations(
                     connection,
@@ -7265,6 +7940,33 @@ class TrainingRunStore:
                 run_id,
             ),
         )
+        if status == "FAIL" and run["position_mode"] == "HEDGE":
+            connection.execute(
+                """
+                UPDATE replay_training_contract_account
+                SET status = 'FAILED_CLOSED', updated_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (now_ms, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_training_run
+                SET state = 'PAUSED', compatibility = 'DEGRADED',
+                    updated_at_ms = ?, saved_at_ms = ?
+                WHERE run_id = ?
+                """,
+                (now_ms, now_ms, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE replay_hedge_input_binding
+                SET status = 'PAUSED', degraded_reason = 'ACCOUNT_AUDIT_FAILED',
+                    updated_at_ms = ?
+                WHERE run_id = ? AND status = 'ACTIVE'
+                """,
+                (now_ms, run_id),
+            )
         return {
             "schema_version": ACCOUNT_AUDIT_SCHEMA_VERSION,
             "status": status,

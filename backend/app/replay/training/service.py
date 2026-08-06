@@ -783,7 +783,20 @@ class TrainingRunService:
             normalized,
             authoritative_projections=authoritative,
         )
-        return {**account_audit, "hedge_input_audit": hedge_input_audit}
+        account_status = str(account_audit.get("status"))
+        hedge_input_status = str(hedge_input_audit.get("status"))
+        combined_status = (
+            "PASS"
+            if account_status == "PASS"
+            and hedge_input_status in {"PASS", "NOT_APPLICABLE"}
+            else "FAIL"
+        )
+        return {
+            **account_audit,
+            "status": combined_status,
+            "account_audit_status": account_status,
+            "hedge_input_audit": hedge_input_audit,
+        }
 
     async def list_data_segments(
         self, *, run_id: str | None = None
@@ -5865,6 +5878,10 @@ class TrainingRunService:
                                 type=CommandType.CANCEL_ORDER,
                                 payload={"order_id": order_id},
                             )
+                            cancel = await self._resume_durable_liquidation_command(
+                                session_id=session_id,
+                                proposed=cancel,
+                            )
                             await self.replay_service.command(session_id, cancel)
                             canceled.append(
                                 {"track_id": track_id, "order_id": order_id}
@@ -5940,6 +5957,10 @@ class TrainingRunService:
                                 if isinstance(book_execution, Mapping)
                                 else {"quantity": str(plan["quantity"])}
                             ),
+                        )
+                        close = await self._resume_durable_liquidation_command(
+                            session_id=session_id,
+                            proposed=close,
                         )
                         closed = await self.replay_service.command(
                             session_id,
@@ -6043,6 +6064,40 @@ class TrainingRunService:
             "liquidation state machine exceeded its deterministic step budget",
             status_code=409,
         )
+
+    async def _resume_durable_liquidation_command(
+        self,
+        *,
+        session_id: str,
+        proposed: ReplayCommand,
+    ) -> ReplayCommand:
+        """Reuse the exact durable broker envelope after response/process loss."""
+
+        stored = await self.replay_service.store.get_command(
+            session_id,
+            proposed.command_id,
+        )
+        if stored is None:
+            return proposed
+        try:
+            durable = ReplayCommand.from_persisted_dict(stored.command)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrainingRunError(
+                "LIQUIDATION_COMMAND_EVIDENCE_INVALID",
+                "durable liquidation command envelope is invalid",
+                status_code=503,
+            ) from exc
+        proposed_payload = proposed.to_dict()
+        durable_payload = durable.to_dict()
+        for field in ("protocol", "command_id", "type", "payload"):
+            if durable_payload[field] != proposed_payload[field]:
+                raise TrainingRunError(
+                    "LIQUIDATION_COMMAND_CONFLICT",
+                    "durable liquidation command no longer matches its immutable plan",
+                    status_code=409,
+                    details={"field": field, "command_id": proposed.command_id},
+                )
+        return durable
 
     @staticmethod
     def _assert_shared_settlement_reservation(

@@ -900,7 +900,14 @@ async function waitForServerSelectedMarket(backendOrigin, runId, cdp, symbol, ti
   })}`);
 }
 
-async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs) {
+async function selectTrackedMarket(
+  backendOrigin,
+  runId,
+  cdp,
+  replayCapture,
+  symbol,
+  timeoutMs,
+) {
   const registeredTrackId = await waitForValue(cdp, `(() => {
     const expected = ${JSON.stringify(symbol)};
     const row = [...document.querySelectorAll('.replay-watchlist-row')]
@@ -912,6 +919,11 @@ async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs)
       ? trackId
       : null;
   })()`, timeoutMs, `registered HEDGE market ${symbol} readiness`);
+  const captureCursor = {
+    requests: replayCapture.requests.length,
+    responses: replayCapture.responses.length,
+    responseBodies: replayCapture.responseBodies.length,
+  };
   const clicked = await evaluate(cdp, `(() => {
     const expected = ${JSON.stringify(symbol)};
     const registeredTrackId = ${JSON.stringify(registeredTrackId)};
@@ -924,13 +936,37 @@ async function selectTrackedMarket(backendOrigin, runId, cdp, symbol, timeoutMs)
     return true;
   })()`, { userGesture: true });
   assert(clicked === true, `tracked HEDGE market ${symbol} was not selectable`);
-  const authoritative = await waitForServerSelectedMarket(
-    backendOrigin,
-    runId,
-    cdp,
-    symbol,
-    timeoutMs,
-  );
+  let authoritative;
+  try {
+    authoritative = await waitForServerSelectedMarket(
+      backendOrigin,
+      runId,
+      cdp,
+      symbol,
+      timeoutMs,
+    );
+  } catch (error) {
+    await replayCapture.settle();
+    const replayOnly = (items) => items.filter((item) => (
+      item.url?.includes("/api/v1/replay")
+    )).slice(-10);
+    const page = await evaluate(cdp, `({
+      url: location.href,
+      intervalMessage: document.querySelector('.interval-panel-message.error')?.textContent || null,
+      commandError: document.querySelector('.replay-command-error')?.textContent || null,
+      activeTrackId: document.querySelector('.replay-watchlist-row.active')?.getAttribute('data-replay-track-id') || null,
+    })`).catch((diagnosticError) => ({
+      diagnosticError: diagnosticError?.message || String(diagnosticError),
+    }));
+    throw new Error(`${error.message}; dispatch=${JSON.stringify({
+      page,
+      requests: replayOnly(replayCapture.requests.slice(captureCursor.requests)),
+      responses: replayOnly(replayCapture.responses.slice(captureCursor.responses)),
+      responseBodies: replayOnly(
+        replayCapture.responseBodies.slice(captureCursor.responseBodies),
+      ),
+    })}`);
+  }
   assert(
     authoritative.selectedTrackId === registeredTrackId,
     `tracked HEDGE market ${symbol} switched to an unexpected identity`,
@@ -979,6 +1015,7 @@ async function selectReplayInterval(cdp, interval, timeoutMs) {
 async function hedgeBrowserAccountContinuityAudit({
   backendOrigin,
   cdp,
+  replayCapture,
   runId,
   sessionId,
   timeoutMs,
@@ -989,7 +1026,14 @@ async function hedgeBrowserAccountContinuityAudit({
     timeoutMs,
   );
   const baseline = await readServerAccountProof(backendOrigin, runId);
-  await selectTrackedMarket(backendOrigin, runId, cdp, "BTCUSDT", timeoutMs);
+  await selectTrackedMarket(
+    backendOrigin,
+    runId,
+    cdp,
+    replayCapture,
+    "BTCUSDT",
+    timeoutMs,
+  );
   const afterProductSwitch = await readServerAccountProof(backendOrigin, runId);
   await selectReplayInterval(cdp, "5m", timeoutMs);
   await selectReplayInterval(cdp, "1m", timeoutMs);
@@ -2924,6 +2968,7 @@ async function main() {
     const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({
       backendOrigin,
       cdp: replay.cdp,
+      replayCapture,
       runId,
       sessionId,
       timeoutMs: args.timeoutMs,

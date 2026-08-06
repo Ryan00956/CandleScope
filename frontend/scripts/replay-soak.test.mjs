@@ -58,6 +58,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.doesNotMatch(soak, /text: "纸面交易"/);
   assert.match(soak, /data-replay-action="place-order"/);
   assert.match(soak, /data-side="\$\{side\}"/);
+  assert.match(soak, /training order side \$\{side\} readiness/);
   assert.doesNotMatch(soak, /\.replay-order-ticket/);
   const endConfirmationOffset = soak.indexOf("soak session end");
   const integrityDrawerOffset = soak.indexOf(

@@ -1612,11 +1612,10 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   await waitForCommandReady(cdp, timeoutMs);
 
   const side = index % 2 === 0 ? "BUY" : "SELL";
-  const sideReady = await evaluate(cdp, `(() => {
+  await waitForValue(cdp, `(() => {
     const button = document.querySelector('[data-replay-action="place-order"][data-side="${side}"]');
     return button instanceof HTMLButtonElement && !button.disabled;
-  })()`);
-  assert(sideReady, "training order side action was unavailable", { index, side });
+  })()`, timeoutMs, `training order side ${side} readiness`);
   const beforeOrder = await waitForAuthoritativeReplayStatus(
     cdp,
     `(value) => value.state === "PAUSED"`,

@@ -2986,7 +2986,20 @@ async function main() {
     });
     assert(await evaluate(replay.cdp, "window.opener === null"), "primary replay target retained opener");
     const blindInitialDom = await evaluate(replay.cdp, "document.body.innerText");
-    assert(!/\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/.test(String(blindInitialDom)), "blind replay DOM rendered a calendar date before reveal");
+    const blindInitialDomText = String(blindInitialDom);
+    const blindCalendarDates = [...blindInitialDomText.matchAll(
+      /\b20\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月]))/g,
+    )].map((match) => ({
+      value: match[0],
+      context: blindInitialDomText.slice(
+        Math.max(0, (match.index ?? 0) - 120),
+        Math.min(blindInitialDomText.length, (match.index ?? 0) + match[0].length + 120),
+      ),
+    }));
+    assert(
+      blindCalendarDates.length === 0,
+      `blind replay DOM rendered a calendar date before reveal: ${JSON.stringify(blindCalendarDates)}`,
+    );
     const accessibility = await v2AccessibilityAudit(replay.cdp, args.timeoutMs);
 
     // Establish the live/replay coexistence proof only after the archive session

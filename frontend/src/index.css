@@ -9537,6 +9537,11 @@ body {
   box-shadow: 0 0 7px color-mix(in srgb, var(--accent-blue) 56%, transparent);
 }
 
+.workspace-split-handle[aria-disabled="true"] {
+  pointer-events: none;
+  cursor: default;
+}
+
 .workspace-split-handle-vertical {
   top: 0;
   bottom: 0;
@@ -10451,6 +10456,15 @@ body {
   border-color: color-mix(in srgb, var(--accent-blue) 58%, var(--border-color));
   background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
   color: var(--accent-blue);
+}
+
+.workspace-layout-lock-button {
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.workspace-layout-controls[data-layout-locked="true"] .workspace-layout-button:disabled {
+  cursor: not-allowed;
 }
 
 @media (max-width: 1280px) {

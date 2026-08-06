@@ -207,6 +207,7 @@ export function createDefaultChartWorkspace(): ChartWorkspaceDocument {
   return {
     schemaVersion: CHART_WORKSPACE_SCHEMA_VERSION,
     layoutTree: createChartWorkspaceLayoutTree("single"),
+    layoutLocked: false,
     activeCellId: "cell-1",
     maximizedCellId: null,
     linkGroups: Object.fromEntries(CHART_LINK_GROUP_IDS.map((group) => [
@@ -280,6 +281,7 @@ export function normalizeChartWorkspace(value: unknown): ChartWorkspaceDocument 
   return {
     schemaVersion: CHART_WORKSPACE_SCHEMA_VERSION,
     layoutTree,
+    layoutLocked: sourceSchemaVersion >= 5 && value.layoutLocked === true,
     activeCellId,
     maximizedCellId,
     linkGroups,

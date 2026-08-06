@@ -72,27 +72,40 @@ const LAYOUT_OPTIONS: ReadonlyArray<{
 function WorkspaceLayoutControls({
   layout,
   disabled,
+  locked,
   canUndo,
+  canRedo,
   onChange,
   onUndo,
+  onRedo,
   onReset,
+  onLockChange,
 }: {
   layout: ChartWorkspaceLayout;
   disabled?: boolean;
+  locked: boolean;
   canUndo: boolean;
+  canRedo: boolean;
   onChange(layout: ChartWorkspaceTemplateId): void;
   onUndo(): void;
+  onRedo(): void;
   onReset(): void;
+  onLockChange(locked: boolean): void;
 }) {
   return (
-    <div className="workspace-layout-controls" role="group" aria-label="图表布局">
+    <div
+      className="workspace-layout-controls"
+      role="group"
+      aria-label="图表布局"
+      data-layout-locked={locked ? "true" : "false"}
+    >
       {LAYOUT_OPTIONS.map((option) => (
         <button
           key={option.id}
           type="button"
           className={`workspace-layout-button${layout === option.id ? " active" : ""}`}
           onClick={() => onChange(option.id)}
-          disabled={disabled}
+          disabled={disabled || locked}
           aria-pressed={layout === option.id}
           aria-label={option.label}
           title={option.label}
@@ -105,7 +118,7 @@ function WorkspaceLayoutControls({
         type="button"
         className="workspace-layout-button workspace-layout-history-button"
         onClick={onUndo}
-        disabled={disabled || !canUndo}
+        disabled={disabled || locked || !canUndo}
         aria-label="撤销上一次布局修改"
         title="撤销上一次布局修改（Ctrl+Z）"
       >
@@ -113,13 +126,34 @@ function WorkspaceLayoutControls({
       </button>
       <button
         type="button"
+        className="workspace-layout-button workspace-layout-history-button"
+        onClick={onRedo}
+        disabled={disabled || locked || !canRedo}
+        aria-label="重做上一次布局修改"
+        title="重做上一次布局修改（Ctrl+Shift+Z / Ctrl+Y）"
+      >
+        ↷
+      </button>
+      <button
+        type="button"
         className="workspace-layout-button workspace-layout-reset-button"
         onClick={onReset}
-        disabled={disabled}
+        disabled={disabled || locked}
         aria-label="只保留当前图表"
         title="重置布局，只保留当前图表"
       >
         ⟲
+      </button>
+      <button
+        type="button"
+        className={`workspace-layout-button workspace-layout-lock-button${locked ? " active" : ""}`}
+        onClick={() => onLockChange(!locked)}
+        disabled={disabled}
+        aria-label={locked ? "解锁布局" : "锁定布局"}
+        aria-pressed={locked}
+        title={locked ? "布局已锁定；点击解锁" : "锁定布局，防止误拖、误关或误调整"}
+      >
+        {locked ? "🔒" : "🔓"}
       </button>
     </div>
   );
@@ -412,21 +446,38 @@ function LiveWorkspaceApp() {
   }, [toggleWorkspaceMaximize, workspace.view.document.maximizedCellId]);
 
   const undoWorkspaceLayout = workspace.actions.undoLayout;
+  const redoWorkspaceLayout = workspace.actions.redoLayout;
+  const layoutLocked = workspace.view.layoutLocked;
   const canUndoWorkspaceLayout = workspace.view.canUndoLayout;
+  const canRedoWorkspaceLayout = workspace.view.canRedoLayout;
   useEffect(() => {
-    if (!canUndoWorkspaceLayout) return undefined;
+    if (layoutLocked || (!canUndoWorkspaceLayout && !canRedoWorkspaceLayout)) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key.toLocaleLowerCase() !== "z"
-        || (!event.ctrlKey && !event.metaKey)
+      if ((!event.ctrlKey && !event.metaKey)
         || event.altKey
-        || event.shiftKey
         || isEditableKeyboardTarget(event.target)) return;
+      const key = event.key.toLocaleLowerCase();
+      const command = key === "z" && !event.shiftKey
+        ? "undo"
+        : (key === "y" && !event.shiftKey) || (key === "z" && event.shiftKey)
+          ? "redo"
+          : null;
+      if (command === null
+        || (command === "undo" && !canUndoWorkspaceLayout)
+        || (command === "redo" && !canRedoWorkspaceLayout)) return;
       event.preventDefault();
-      undoWorkspaceLayout();
+      if (command === "undo") undoWorkspaceLayout();
+      else redoWorkspaceLayout();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canUndoWorkspaceLayout, undoWorkspaceLayout]);
+  }, [
+    canRedoWorkspaceLayout,
+    canUndoWorkspaceLayout,
+    layoutLocked,
+    redoWorkspaceLayout,
+    undoWorkspaceLayout,
+  ]);
 
   const [topBarHost, setTopBarHost] = useState<HTMLElement | null>(null);
   const [intervalSelectorHost, setIntervalSelectorHost] = useState<HTMLElement | null>(null);
@@ -468,10 +519,14 @@ function LiveWorkspaceApp() {
       <WorkspaceLayoutControls
         layout={workspace.view.layout}
         disabled={!workspace.view.ready}
+        locked={workspace.view.layoutLocked}
         canUndo={workspace.view.canUndoLayout}
+        canRedo={workspace.view.canRedoLayout}
         onChange={workspace.actions.setLayout}
         onUndo={workspace.actions.undoLayout}
+        onRedo={workspace.actions.redoLayout}
         onReset={workspace.actions.resetLayout}
+        onLockChange={workspace.actions.setLayoutLocked}
       />
       <WorkspaceLinkControls
         activeCellId={workspace.view.activeCellId}
@@ -499,10 +554,12 @@ function LiveWorkspaceApp() {
     workspace.actions.deleteWorkspace,
     workspace.actions.duplicateWorkspace,
     workspace.actions.renameWorkspace,
+    workspace.actions.redoLayout,
     workspace.actions.setCellLinkGroup,
     workspace.actions.setCellDrawingLayerSet,
     workspace.actions.setCellLinkRole,
     workspace.actions.setLayout,
+    workspace.actions.setLayoutLocked,
     workspace.actions.resetLayout,
     workspace.actions.switchWorkspace,
     workspace.actions.updateLinkGroupSettings,
@@ -517,7 +574,9 @@ function LiveWorkspaceApp() {
     workspace.view.activeWorkspaceId,
     workspace.view.activeWorkspaceName,
     workspace.view.layout,
+    workspace.view.canRedoLayout,
     workspace.view.canUndoLayout,
+    workspace.view.layoutLocked,
     workspace.view.document,
     workspace.view.ready,
     workspace.view.visibleCellIds,
@@ -545,12 +604,13 @@ function LiveWorkspaceApp() {
                 className={gridClassName}
                 data-workspace-layout={workspace.view.layout}
                 data-workspace-id={workspace.view.activeWorkspaceId}
+                data-layout-locked={workspace.view.layoutLocked ? "true" : "false"}
                 aria-busy={!workspace.view.ready}
               >
                 <WorkspaceLayoutTree
                   tree={workspace.view.document.layoutTree}
                   maximizedCellId={workspace.view.document.maximizedCellId}
-                  disabled={!workspace.view.ready}
+                  disabled={!workspace.view.ready || workspace.view.layoutLocked}
                   onSplitRatioChange={workspace.actions.setLayoutRatio}
                   onCellDrop={workspace.actions.swapCells}
                   renderCell={(cellId, layoutRole) => (
@@ -567,7 +627,7 @@ function LiveWorkspaceApp() {
                       active={workspace.view.activeCellId === cellId}
                       maximized={workspace.view.document.maximizedCellId === cellId}
                       layoutCellIds={workspace.view.layoutCellIds}
-                      layoutEditingDisabled={!workspace.view.ready}
+                      layoutEditingDisabled={!workspace.view.ready || workspace.view.layoutLocked}
                       pageExportRef={pageExportRef}
                       foregroundPreloadGate={foregroundPreloadGate}
                       globalSettings={settings}

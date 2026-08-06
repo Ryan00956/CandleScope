@@ -38,6 +38,7 @@ function splitRatios(tree: ChartWorkspaceLayoutNode): Record<string, number> {
 
 test("workspace defaults to four stable cells with one visible tree leaf", () => {
   const workspace = createDefaultChartWorkspace();
+  assert.equal(workspace.layoutLocked, false);
   assert.deepEqual(Object.keys(workspace.cells), ["cell-1", "cell-2", "cell-3", "cell-4"]);
   assert.deepEqual(Object.values(workspace.cells).map((cell) => cell.linkGroup), ["A", "A", "A", "A"]);
   assert.deepEqual(Object.values(workspace.cells).map((cell) => cell.linkRole), [
@@ -69,6 +70,7 @@ test("workspace persistence keeps recursive split ratios and cell-scoped state",
   tree = updateChartWorkspaceSplitRatio(tree, "quad-top", 0.64);
   tree = updateChartWorkspaceSplitRatio(tree, "quad-bottom", 0.58);
   workspace.layoutTree = tree;
+  workspace.layoutLocked = true;
   workspace.activeCellId = "cell-2";
   workspace.cells["cell-2"].session = {
     exchange: "binance",
@@ -85,7 +87,8 @@ test("workspace persistence keeps recursive split ratios and cell-scoped state",
   saveChartWorkspace(workspace, storage);
 
   const restored = loadChartWorkspace(storage);
-  assert.equal(restored.schemaVersion, 4);
+  assert.equal(restored.schemaVersion, 5);
+  assert.equal(restored.layoutLocked, true);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "quad");
   assert.equal(restored.activeCellId, "cell-2");
   assert.deepEqual(restored.cells["cell-2"].session, workspace.cells["cell-2"].session);
@@ -136,7 +139,8 @@ test("v2 migration turns shared legacy ratios into independent recursive split n
   const restored = loadChartWorkspace(memoryStorage({
     [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
   }));
-  assert.equal(restored.schemaVersion, 4);
+  assert.equal(restored.schemaVersion, 5);
+  assert.equal(restored.layoutLocked, false);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "quad");
   assert.deepEqual(splitRatios(restored.layoutTree), {
     "quad-root": 0.42,
@@ -158,7 +162,8 @@ test("v1 workspace migration preserves cells and receives safe tree and link def
     [LEGACY_CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
   });
   const restored = loadChartWorkspace(storage);
-  assert.equal(restored.schemaVersion, 4);
+  assert.equal(restored.schemaVersion, 5);
+  assert.equal(restored.layoutLocked, false);
   assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "split-horizontal");
   assert.deepEqual(Object.values(restored.cells).map((cell) => cell.linkGroup), [null, null, null, null]);
   assert.deepEqual(splitRatios(restored.layoutTree), { "split-horizontal-root": 0.5 });
@@ -188,7 +193,8 @@ test("v3 migration preserves legacy date-range behavior and adds safe advanced-l
     [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
   }));
 
-  assert.equal(restored.schemaVersion, 4);
+  assert.equal(restored.schemaVersion, 5);
+  assert.equal(restored.layoutLocked, false);
   assert.deepEqual(restored.linkGroups.A, {
     market: true,
     interval: false,
@@ -205,6 +211,21 @@ test("v3 migration preserves legacy date-range behavior and adds safe advanced-l
     "quad-top": 0.61,
     "quad-bottom": 0.54,
   });
+});
+
+test("v4 migration keeps the recursive layout and starts safely unlocked", () => {
+  const legacyDocument = structuredClone(createDefaultChartWorkspace()) as unknown as Record<string, unknown>;
+  legacyDocument.schemaVersion = 4;
+  delete legacyDocument.layoutLocked;
+  legacyDocument.layoutTree = createChartWorkspaceLayoutTree("main-confirmation");
+
+  const restored = loadChartWorkspace(memoryStorage({
+    [CHART_WORKSPACE_STORAGE_KEY]: JSON.stringify(legacyDocument),
+  }));
+
+  assert.equal(restored.schemaVersion, 5);
+  assert.equal(restored.layoutLocked, false);
+  assert.equal(detectChartWorkspaceLayout(restored.layoutTree), "main-confirmation");
 });
 
 test("malformed workspace storage fails closed to defaults", () => {

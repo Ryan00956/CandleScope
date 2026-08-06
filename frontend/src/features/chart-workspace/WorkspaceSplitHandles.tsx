@@ -50,6 +50,7 @@ export default function WorkspaceSplitHandle({
       aria-valuemin={Math.round(MIN_CHART_SPLIT_RATIO * 100)}
       aria-valuemax={Math.round(MAX_CHART_SPLIT_RATIO * 100)}
       aria-valuenow={Math.round(ratio * 100)}
+      aria-disabled={disabled}
       tabIndex={disabled ? -1 : 0}
       onPointerDown={(event) => {
         if (disabled || event.button !== 0) return;
@@ -87,6 +88,7 @@ export default function WorkspaceSplitHandle({
         previewRatio(ratio);
       }}
       onDoubleClick={(event) => {
+        if (disabled) return;
         event.preventDefault();
         event.stopPropagation();
         previewRatio(0.5);

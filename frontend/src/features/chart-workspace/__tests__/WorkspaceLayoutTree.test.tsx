@@ -44,3 +44,20 @@ test("maximized recursive layout renders only the requested cell and no split ha
   assert.doesNotMatch(html, /data-rendered-cell="cell-1"/);
   assert.doesNotMatch(html, /role="separator"/);
 });
+
+test("locked recursive layouts expose their split handles as disabled and unfocusable", () => {
+  const html = renderToStaticMarkup(
+    <WorkspaceLayoutTree
+      tree={createChartWorkspaceLayoutTree("split-vertical")}
+      maximizedCellId={null}
+      disabled
+      renderCell={(cellId) => <article data-rendered-cell={cellId} />}
+      onSplitRatioChange={() => {}}
+      onCellDrop={() => {}}
+    />,
+  );
+
+  assert.match(html, /role="separator"/);
+  assert.match(html, /aria-disabled="true"/);
+  assert.match(html, /tabindex="-1"/);
+});

@@ -41,9 +41,10 @@ export default function WorkspaceCellLayoutMenu({
   const canSplit = layoutCellIds.length < 4;
   const canClose = layoutCellIds.length > 1;
   const swapTargets = layoutCellIds.filter((candidate) => candidate !== cellId);
+  const menuOpen = open && !disabled;
 
   useEffect(() => {
-    if (!open) return undefined;
+    if (!menuOpen) return undefined;
     const handlePointerDown = (event: PointerEvent) => {
       if (rootRef.current?.contains(event.target as Node)) return;
       setOpen(false);
@@ -61,7 +62,7 @@ export default function WorkspaceCellLayoutMenu({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open]);
+  }, [menuOpen]);
 
   const runAndClose = (action: () => void) => {
     action();
@@ -80,7 +81,7 @@ export default function WorkspaceCellLayoutMenu({
         className="multi-chart-cell-layout-trigger"
         aria-label={`图 ${cellNumber(cellId)} 布局操作`}
         aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-expanded={menuOpen}
         title="拆分、关闭或交换图表"
         disabled={disabled}
         onClick={(event) => {
@@ -90,7 +91,7 @@ export default function WorkspaceCellLayoutMenu({
       >
         ⋯
       </button>
-      {open && (
+      {menuOpen && (
         <div
           className="workspace-cell-layout-popover"
           role="dialog"

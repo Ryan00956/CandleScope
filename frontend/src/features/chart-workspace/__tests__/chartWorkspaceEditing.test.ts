@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHART_WORKSPACE_LAYOUT_HISTORY_LIMIT,
   applyChartWorkspaceLayoutUndo,
   closeChartWorkspaceDocument,
+  createEmptyChartWorkspaceLayoutHistory,
   createChartWorkspaceLayoutUndoEntry,
+  recordChartWorkspaceLayoutEdit,
+  redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
   splitChartWorkspaceDocument,
   swapChartWorkspaceDocumentCells,
+  undoChartWorkspaceLayoutEdit,
 } from "../chartWorkspaceEditing.js";
 import { visibleCellIds } from "../chartWorkspaceLayout.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
@@ -103,4 +108,108 @@ test("reset keeps the current active chart as the sole mounted cell", () => {
   const reset = resetChartWorkspaceDocumentLayout(split);
   assert.deepEqual(visibleCellIds(reset.document.layoutTree), ["cell-2"]);
   assert.equal(reset.document.activeCellId, "cell-2");
+});
+
+test("bounded layout history supports repeated undo and redo in stack order", () => {
+  let document = createDefaultChartWorkspace();
+  let history = createEmptyChartWorkspaceLayoutHistory();
+  const apply = (result: ReturnType<typeof splitChartWorkspaceDocument>) => {
+    history = recordChartWorkspaceLayoutEdit(history, document, result);
+    document = result.document;
+  };
+
+  apply(splitChartWorkspaceDocument(document, "cell-1", "columns", "copy"));
+  apply(splitChartWorkspaceDocument(document, "cell-2", "rows", "blank"));
+  apply(swapChartWorkspaceDocumentCells(document, "cell-1", "cell-3"));
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-3", "cell-2", "cell-1"]);
+  assert.equal(history.past.length, 3);
+
+  const undoSwap = undoChartWorkspaceLayoutEdit(document, history);
+  assert.ok(undoSwap);
+  ({ document, history } = undoSwap);
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+
+  const undoThirdCell = undoChartWorkspaceLayoutEdit(document, history);
+  assert.ok(undoThirdCell);
+  ({ document, history } = undoThirdCell);
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2"]);
+  assert.equal(history.future.length, 2);
+
+  const redoThirdCell = redoChartWorkspaceLayoutEdit(document, history);
+  assert.ok(redoThirdCell);
+  ({ document, history } = redoThirdCell);
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2", "cell-3"]);
+  assert.equal(history.past.length, 2);
+  assert.equal(history.future.length, 1);
+
+  const close = closeChartWorkspaceDocument(document, "cell-2");
+  history = recordChartWorkspaceLayoutEdit(history, document, close);
+  assert.equal(history.future.length, 0);
+});
+
+test("layout history retains only the most recent bounded edit steps", () => {
+  let document = createDefaultChartWorkspace();
+  let history = createEmptyChartWorkspaceLayoutHistory();
+  const split = splitChartWorkspaceDocument(document, "cell-1", "columns", "copy");
+  history = recordChartWorkspaceLayoutEdit(history, document, split);
+  document = split.document;
+
+  for (let index = 0; index < CHART_WORKSPACE_LAYOUT_HISTORY_LIMIT + 7; index += 1) {
+    const swap = swapChartWorkspaceDocumentCells(document, "cell-1", "cell-2");
+    history = recordChartWorkspaceLayoutEdit(history, document, swap);
+    document = swap.document;
+  }
+
+  assert.equal(history.past.length, CHART_WORKSPACE_LAYOUT_HISTORY_LIMIT);
+  assert.equal(history.future.length, 0);
+});
+
+test("redo restores cell edits captured after a copy split was undone", () => {
+  const before = createDefaultChartWorkspace();
+  const split = splitChartWorkspaceDocument(before, "cell-1", "columns", "copy");
+  let history = recordChartWorkspaceLayoutEdit(
+    createEmptyChartWorkspaceLayoutHistory(),
+    before,
+    split,
+  );
+  let document = {
+    ...split.document,
+    cells: {
+      ...split.document.cells,
+      "cell-2": {
+        ...split.document.cells["cell-2"],
+        session: { ...split.document.cells["cell-2"].session, interval: "5m" },
+      },
+    },
+  };
+
+  const undo = undoChartWorkspaceLayoutEdit(document, history);
+  assert.ok(undo);
+  ({ document, history } = undo);
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1"]);
+  assert.notEqual(document.cells["cell-2"].session.interval, "5m");
+
+  const redo = redoChartWorkspaceLayoutEdit(document, history);
+  assert.ok(redo);
+  ({ document, history } = redo);
+  assert.deepEqual(visibleCellIds(document.layoutTree), ["cell-1", "cell-2"]);
+  assert.equal(document.cells["cell-2"].session.interval, "5m");
+});
+
+test("locked documents reject every structural edit and history traversal", () => {
+  const unlocked = createDefaultChartWorkspace();
+  const split = splitChartWorkspaceDocument(unlocked, "cell-1", "columns", "copy");
+  const history = recordChartWorkspaceLayoutEdit(
+    createEmptyChartWorkspaceLayoutHistory(),
+    unlocked,
+    split,
+  );
+  const locked = { ...split.document, layoutLocked: true };
+
+  assert.equal(splitChartWorkspaceDocument(locked, "cell-2", "rows", "copy").document, locked);
+  assert.equal(closeChartWorkspaceDocument(locked, "cell-2").document, locked);
+  assert.equal(swapChartWorkspaceDocumentCells(locked, "cell-1", "cell-2").document, locked);
+  assert.equal(resetChartWorkspaceDocumentLayout(locked).document, locked);
+  assert.equal(undoChartWorkspaceLayoutEdit(locked, history), null);
+  assert.equal(redoChartWorkspaceLayoutEdit(locked, history), null);
 });

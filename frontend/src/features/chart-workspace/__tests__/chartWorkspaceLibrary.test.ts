@@ -20,6 +20,7 @@ import {
 
 test("workspace templates inherit the active market and chart preferences without sharing objects", () => {
   const source = createDefaultChartWorkspace();
+  source.layoutLocked = true;
   source.activeCellId = "cell-2";
   source.cells["cell-2"].session = {
     exchange: "okx",
@@ -34,6 +35,7 @@ test("workspace templates inherit the active market and chart preferences withou
   assert.equal(detectChartWorkspaceLayout(document.layoutTree), "quad");
   assert.equal(document.activeCellId, "cell-1");
   assert.equal(document.maximizedCellId, null);
+  assert.equal(document.layoutLocked, false);
   assert.deepEqual(
     Object.values(document.cells).map((cell) => [
       cell.session.exchange,

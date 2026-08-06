@@ -50,14 +50,16 @@ import {
   visibleCellIds,
 } from "./chartWorkspaceLayout.js";
 import {
-  applyChartWorkspaceLayoutUndo,
   closeChartWorkspaceDocument,
-  createChartWorkspaceLayoutUndoEntry,
+  createEmptyChartWorkspaceLayoutHistory,
+  recordChartWorkspaceLayoutEdit,
+  redoChartWorkspaceLayoutEdit,
   resetChartWorkspaceDocumentLayout,
   splitChartWorkspaceDocument,
   swapChartWorkspaceDocumentCells,
+  undoChartWorkspaceLayoutEdit,
   type ChartWorkspaceEditResult,
-  type ChartWorkspaceLayoutUndoEntry,
+  type ChartWorkspaceLayoutHistory,
 } from "./chartWorkspaceEditing.js";
 import {
   applyChartLinkSettingsPatch,
@@ -81,7 +83,9 @@ export interface ChartWorkspaceRuntime {
     activeCell: ChartWorkspaceDocument["cells"][ChartCellId];
     layoutCellIds: ChartCellId[];
     visibleCellIds: ChartCellId[];
+    layoutLocked: boolean;
     canUndoLayout: boolean;
+    canRedoLayout: boolean;
     ready: boolean;
   };
   actions: {
@@ -99,7 +103,9 @@ export interface ChartWorkspaceRuntime {
     closeCell(cellId: ChartCellId): void;
     swapCells(firstCellId: ChartCellId, secondCellId: ChartCellId): void;
     resetLayout(): void;
+    setLayoutLocked(locked: boolean): void;
     undoLayout(): void;
+    redoLayout(): void;
     setActiveCell(cellId: ChartCellId): void;
     toggleMaximize(cellId: ChartCellId): void;
     setCellLinkGroup(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
@@ -139,7 +145,7 @@ interface PersistenceStatus {
 
 interface WorkspaceRuntimeState {
   library: ChartWorkspaceLibrarySnapshot;
-  layoutUndoByWorkspace: Partial<Record<ChartWorkspaceId, ChartWorkspaceLayoutUndoEntry>>;
+  layoutHistoryByWorkspace: Partial<Record<ChartWorkspaceId, ChartWorkspaceLayoutHistory>>;
 }
 
 type ChartWorkspaceLibraryUpdate = ChartWorkspaceLibrarySnapshot
@@ -167,7 +173,7 @@ export function useChartWorkspaceRuntime(
   }));
   const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(() => ({
     library: services.repository.loadBootstrapLibrary(),
-    layoutUndoByWorkspace: {},
+    layoutHistoryByWorkspace: {},
   }));
   const library = runtimeState.library;
   const setLibrary = useCallback((update: ChartWorkspaceLibraryUpdate) => {
@@ -314,9 +320,12 @@ export function useChartWorkspaceRuntime(
     const updatedAt = services.now();
     setRuntimeState((currentState) => {
       const workspace = activeWorkspace(currentState.library);
+      if (workspace.document.layoutLocked) return currentState;
       const result = updater(workspace.document);
       if (result.document === workspace.document) return currentState;
       const updated = { ...workspace, document: result.document, updatedAt };
+      const history = currentState.layoutHistoryByWorkspace[workspace.id]
+        ?? createEmptyChartWorkspaceLayoutHistory();
       return {
         library: {
           ...currentState.library,
@@ -324,11 +333,12 @@ export function useChartWorkspaceRuntime(
             candidate.id === updated.id ? updated : candidate
           )),
         },
-        layoutUndoByWorkspace: {
-          ...currentState.layoutUndoByWorkspace,
-          [workspace.id]: createChartWorkspaceLayoutUndoEntry(
+        layoutHistoryByWorkspace: {
+          ...currentState.layoutHistoryByWorkspace,
+          [workspace.id]: recordChartWorkspaceLayoutEdit(
+            history,
             workspace.document,
-            result.restoreCellIds,
+            result,
           ),
         },
       };
@@ -410,8 +420,14 @@ export function useChartWorkspaceRuntime(
   }, [services, setLibrary]);
 
   const deleteWorkspace = useCallback((workspaceId: ChartWorkspaceId) => {
-    setLibrary((current) => removeChartWorkspace(current, workspaceId));
-  }, [setLibrary]);
+    setRuntimeState((currentState) => {
+      const library = removeChartWorkspace(currentState.library, workspaceId);
+      if (library === currentState.library) return currentState;
+      const layoutHistoryByWorkspace = { ...currentState.layoutHistoryByWorkspace };
+      delete layoutHistoryByWorkspace[workspaceId];
+      return { library, layoutHistoryByWorkspace };
+    });
+  }, []);
 
   const setLayout = useCallback((layout: ChartWorkspaceTemplateId) => {
     updateActiveLayoutDocument((current) => {
@@ -465,22 +481,54 @@ export function useChartWorkspaceRuntime(
     updateActiveLayoutDocument(resetChartWorkspaceDocumentLayout);
   }, [updateActiveLayoutDocument]);
 
+  const setLayoutLocked = useCallback((locked: boolean) => {
+    updateActiveDocument((current) => current.layoutLocked === locked
+      ? current
+      : { ...current, layoutLocked: locked });
+  }, [updateActiveDocument]);
+
   const undoLayout = useCallback(() => {
     const updatedAt = services.now();
     setRuntimeState((currentState) => {
       const workspace = activeWorkspace(currentState.library);
-      const undo = currentState.layoutUndoByWorkspace[workspace.id];
-      if (!undo) return currentState;
-      const document = applyChartWorkspaceLayoutUndo(workspace.document, undo);
-      const { [workspace.id]: _discarded, ...remainingUndo } = currentState.layoutUndoByWorkspace;
+      const history = currentState.layoutHistoryByWorkspace[workspace.id]
+        ?? createEmptyChartWorkspaceLayoutHistory();
+      const step = undoChartWorkspaceLayoutEdit(workspace.document, history);
+      if (!step) return currentState;
       return {
         library: {
           ...currentState.library,
           workspaces: currentState.library.workspaces.map((candidate) => candidate.id === workspace.id
-            ? { ...workspace, document, updatedAt }
+            ? { ...workspace, document: step.document, updatedAt }
             : candidate),
         },
-        layoutUndoByWorkspace: remainingUndo,
+        layoutHistoryByWorkspace: {
+          ...currentState.layoutHistoryByWorkspace,
+          [workspace.id]: step.history,
+        },
+      };
+    });
+  }, [services]);
+
+  const redoLayout = useCallback(() => {
+    const updatedAt = services.now();
+    setRuntimeState((currentState) => {
+      const workspace = activeWorkspace(currentState.library);
+      const history = currentState.layoutHistoryByWorkspace[workspace.id]
+        ?? createEmptyChartWorkspaceLayoutHistory();
+      const step = redoChartWorkspaceLayoutEdit(workspace.document, history);
+      if (!step) return currentState;
+      return {
+        library: {
+          ...currentState.library,
+          workspaces: currentState.library.workspaces.map((candidate) => candidate.id === workspace.id
+            ? { ...workspace, document: step.document, updatedAt }
+            : candidate),
+        },
+        layoutHistoryByWorkspace: {
+          ...currentState.layoutHistoryByWorkspace,
+          [workspace.id]: step.history,
+        },
       };
     });
   }, [services]);
@@ -629,6 +677,8 @@ export function useChartWorkspaceRuntime(
     () => summarizeChartWorkspaces(library.workspaces),
     [library.workspaces],
   );
+  const layoutHistory = runtimeState.layoutHistoryByWorkspace[workspace.id]
+    ?? createEmptyChartWorkspaceLayoutHistory();
 
   return {
     view: {
@@ -642,7 +692,9 @@ export function useChartWorkspaceRuntime(
       activeCell,
       layoutCellIds,
       visibleCellIds: renderedCellIds,
-      canUndoLayout: Boolean(runtimeState.layoutUndoByWorkspace[workspace.id]),
+      layoutLocked: document.layoutLocked,
+      canUndoLayout: layoutHistory.past.length > 0,
+      canRedoLayout: layoutHistory.future.length > 0,
       ready,
     },
     actions: {
@@ -656,7 +708,9 @@ export function useChartWorkspaceRuntime(
       closeCell,
       swapCells,
       resetLayout,
+      setLayoutLocked,
       undoLayout,
+      redoLayout,
       setActiveCell,
       toggleMaximize,
       setCellLinkGroup,

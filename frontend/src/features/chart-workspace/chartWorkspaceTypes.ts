@@ -2,7 +2,7 @@ import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 
-export const CHART_WORKSPACE_SCHEMA_VERSION = 4 as const;
+export const CHART_WORKSPACE_SCHEMA_VERSION = 5 as const;
 export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
 export const CHART_CELL_IDS = ["cell-1", "cell-2", "cell-3", "cell-4"] as const;
 export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
@@ -99,6 +99,7 @@ export interface ChartCellState {
 export interface ChartWorkspaceDocument {
   schemaVersion: typeof CHART_WORKSPACE_SCHEMA_VERSION;
   layoutTree: ChartWorkspaceLayoutNode;
+  layoutLocked: boolean;
   activeCellId: ChartCellId;
   maximizedCellId: ChartCellId | null;
   linkGroups: Record<ChartLinkGroupId, ChartLinkGroupSettings>;

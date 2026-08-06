@@ -27,6 +27,7 @@ FIXTURE_ROWS = 4_000
 INTERVAL_MS = 60_000
 LEGACY_LIVE_TAIL_ROWS = 10
 SOAK_LIVE_SYMBOL = "QAUSDT"
+SOAK_LIVE_SOURCE = "backfill"
 SOAK_LIVE_HISTORY_ROWS = 2_000
 SOAK_LIVE_FUTURE_MS = 5 * 60 * 60 * 1_000
 SOAK_LIVE_INTERVALS: tuple[tuple[str, int], ...] = (
@@ -285,7 +286,12 @@ def _seed_klines(
                 SOAK_LIVE_SYMBOL,
                 interval,
                 rows,
-                source="replay-soak-live-window",
+                # The synthetic provider is the soak lane's complete offline
+                # history authority.  Rows are exposed only after their
+                # buckets close, so use the same trusted-final provenance as
+                # a normal provider backfill instead of an unknown fixture
+                # label that correctly triggers finality repair.
+                source=SOAK_LIVE_SOURCE,
                 exchange="binance",
                 market_type="spot",
             )

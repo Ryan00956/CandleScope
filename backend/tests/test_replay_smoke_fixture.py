@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from app.core import config
+from app.data_engine.kline_quality import source_is_trusted_final
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.training.historical_book import verify_historical_book_archive
 from scripts.replay_smoke_fixture import (
@@ -17,6 +18,7 @@ from scripts.replay_smoke_fixture import (
     LEGACY_LIVE_TAIL_ROWS,
     SOAK_LIVE_FUTURE_MS,
     SOAK_LIVE_HISTORY_ROWS,
+    SOAK_LIVE_SOURCE,
     _force_offline_upstreams,
     _legacy_live_tail_rows,
     _legacy_live_tail_required,
@@ -308,6 +310,10 @@ def test_phase10_soak_live_window_covers_history_and_the_formal_horizon() -> Non
         int(right["open_time"]) - int(left["open_time"]) == interval_ms
         for left, right in zip(rows, rows[1:])
     )
+
+
+def test_phase10_soak_live_window_has_trusted_final_provider_provenance() -> None:
+    assert source_is_trusted_final(SOAK_LIVE_SOURCE)
 
 
 def test_phase9_smoke_fixture_builds_verified_opt_in_historical_book(

@@ -2536,6 +2536,10 @@ async function main() {
       REQUEST_TIMEOUT: "1",
       MAX_RETRIES: "0",
       RAW_AGG_TRADE_ARCHIVE_ENABLED: "0",
+      PYTHONPATH: [
+        path.join(repositoryRoot, "packages", "candlescope-plugin-sdk", "src"),
+        process.env.PYTHONPATH || "",
+      ].filter(Boolean).join(path.delimiter),
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
     },

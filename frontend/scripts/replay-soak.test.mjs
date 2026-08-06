@@ -46,6 +46,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(powershellRollback, /replay-v2-rollback-drill\.mjs/);
   assert.match(soak, /\/api\/v1\/replay\/runs\/session\/\$\{encodeURIComponent\(sessionId\)\}/);
   assert.doesNotMatch(soak, /\/api\/v1\/replay\/sessions(?:\/|\$\{)/);
+  assert.match(soak, /packages", "candlescope-plugin-sdk", "src"/);
+  assert.match(soak, /process\.env\.PYTHONPATH/);
 });
 
 test("adapter eviction evidence keys the target Hub eviction amid background reaping", () => {

@@ -5,6 +5,8 @@ import {
   evaluateAlertExpression,
   fetchAlertHistory,
   fetchAlertRules,
+  fetchAlertStatus,
+  setAlertHistoryAcknowledged,
   setAlertRuleEnabled,
   updateAlertRule,
 } from "../../features/alerts/alertsClient";
@@ -16,11 +18,17 @@ import {
   createDefaultAlertDraft,
   createDraftFromRule,
   describeAlertChannels,
-  describeExpression,
+  describeAlertDraftExpression,
+  describeAlertDispatch,
   describeAlertRule,
   expressionDraftReducer,
   formatAlertTime,
 } from "../../features/alerts/alertRuleModel";
+import {
+  ALERT_RULE_STATE_CHANGED_EVENT,
+  primeAlertSound,
+  requestBrowserAlertPermission,
+} from "../../features/alerts/alertDeliveryClient.js";
 import { parseSymbolKey } from "../../utils/symbolKey";
 import type {
   Dispatch,
@@ -42,6 +50,7 @@ import type {
   AlertLogicalOperator,
   AlertProductInput,
   AlertRule,
+  AlertSystemStatus,
   AlertTraceNode as AlertTraceNodeData,
   AlertTriggerOn,
 } from "../../features/alerts/alertTypes.js";
@@ -49,6 +58,8 @@ import type { WatchlistGroup } from "../../features/watchlist/watchlistTypes.js"
 
 type AlertTab = "add" | "all" | "history";
 type AlertStatusFilter = "all" | "enabled" | "paused" | "expired";
+type AlertHistoryRange = "today" | "7d" | "30d";
+type AlertAcknowledgementFilter = "all" | "unread" | "ack";
 type TestContextBucket = "previous" | "values";
 type TestValueField = "close" | "last" | "rsi" | "macdHist" | "ma20" | "volume";
 
@@ -188,16 +199,29 @@ interface ProductSummaryProps {
   fallbackSymbol?: string;
   fallbackMarketType?: string;
   fallbackExchange?: string;
-  currentProductMissing: boolean;
 }
 
-function ProductSummary({ product, fallbackSymbol, fallbackMarketType, fallbackExchange, currentProductMissing }: ProductSummaryProps) {
+function alertRuntimeRuleStateLabel(state: string | undefined, enabled: boolean): string {
+  const labels: Record<string, string> = {
+    ready: "就绪",
+    warming: "指标预热中",
+    recovering: "连接恢复中",
+    degraded: "运行异常",
+    disabled: "已停用",
+    expired: "已过期",
+    exhausted: "已达到触发上限",
+  };
+  if (state && labels[state]) return labels[state];
+  return enabled ? "等待运行状态" : "已停用";
+}
+
+function ProductSummary({ product, fallbackSymbol, fallbackMarketType, fallbackExchange }: ProductSummaryProps) {
   const symbol = product?.symbol || fallbackSymbol || "--";
   const marketType = product?.marketType || fallbackMarketType || "spot";
   const exchange = product?.exchange || fallbackExchange || "binance";
 
   return (
-    <div className={`alert-selected-product ${currentProductMissing ? "is-missing" : ""}`}>
+    <div className="alert-selected-product">
       <div className="alert-selected-product-main">
         <span className="alert-product-avatar">{symbol.slice(0, 1) || "?"}</span>
         <div>
@@ -209,7 +233,6 @@ function ProductSummary({ product, fallbackSymbol, fallbackMarketType, fallbackE
         {product?.listNames?.slice(0, 2).map((name) => (
           <span key={name} className="alert-mini-tag">{name}</span>
         ))}
-        {currentProductMissing && <span className="alert-mini-tag warn">未在自选</span>}
       </div>
     </div>
   );
@@ -449,12 +472,31 @@ interface ExpirationAndNotificationProps {
 }
 
 function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotificationProps) {
+  const [channelSetupMessage, setChannelSetupMessage] = useState("");
   const update = (patch: Partial<AlertDraft>) => onDraftChange((prev) => ({ ...prev, ...patch }));
   const updateChannel = (key: keyof AlertChannelState, checked: boolean) => {
-    onDraftChange((prev) => ({
-      ...prev,
-      channels: { ...prev.channels, [key]: checked },
-    }));
+    void (async () => {
+      let enabled = checked;
+      if (checked && key === "browser") {
+        const permission = await requestBrowserAlertPermission();
+        enabled = permission === "granted";
+        setChannelSetupMessage(enabled ? "浏览器通知权限已授权。" : `浏览器通知未启用：${permission}。`);
+      } else if (checked && key === "sound") {
+        enabled = await primeAlertSound();
+        setChannelSetupMessage(enabled ? "声音提醒已解锁。" : "当前浏览器无法启用声音提醒。");
+      }
+      onDraftChange((prev) => ({
+        ...prev,
+        channels: { ...prev.channels, [key]: enabled },
+      }));
+    })();
+  };
+  const updateAfterTrigger = (value: AlertDraft["afterTrigger"]) => {
+    update({
+      afterTrigger: value,
+      ...(value === "keep" ? { maxTriggerMode: "unlimited" as const } : {}),
+      ...(value === "pause" ? { maxTriggerMode: "once" as const } : {}),
+    });
   };
 
   return (
@@ -474,7 +516,7 @@ function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotifi
           </label>
           <label className="alert-field">
             <span>触发次数</span>
-            <select value={draft.maxTriggerMode} onChange={(event) => update({ maxTriggerMode: event.target.value as AlertDraft["maxTriggerMode"] })}>
+            <select value={draft.maxTriggerMode} disabled={draft.afterTrigger !== "auto-disable"} onChange={(event) => update({ maxTriggerMode: event.target.value as AlertDraft["maxTriggerMode"] })}>
               <option value="once">仅一次</option>
               <option value="3">3 次</option>
               <option value="custom">自定义次数</option>
@@ -505,7 +547,7 @@ function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotifi
           )}
           <label className="alert-field">
             <span>触发后行为</span>
-            <select value={draft.afterTrigger} onChange={(event) => update({ afterTrigger: event.target.value })}>
+            <select value={draft.afterTrigger} onChange={(event) => updateAfterTrigger(event.target.value as AlertDraft["afterTrigger"])}>
               <option value="auto-disable">达到限制后自动停用</option>
               <option value="keep">始终保持启用</option>
               <option value="pause">触发后暂停</option>
@@ -536,6 +578,7 @@ function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotifi
             </label>
           ))}
         </div>
+        {channelSetupMessage && <div className="alert-channel-setup-message">{channelSetupMessage}</div>}
         <label className="alert-field alert-message-template">
           <span>消息模板</span>
           <textarea value={draft.messageTemplate} onChange={(event) => update({ messageTemplate: event.target.value })} rows={3} />
@@ -576,7 +619,7 @@ function RulePreview({ draft, product, fallbackSymbol, interval }: RulePreviewPr
     <div className="alert-rule-preview-box">
       <div className="alert-preview-label">规则摘要预览</div>
       <div className="alert-preview-text">
-        {symbol} {interval}：当 {describeExpression(draft.expression)} 时提醒；{maxTriggers}，冷却策略 {draft.cooldownMode}。
+        {symbol} {interval}：当 {describeAlertDraftExpression(draft.expression)} 时提醒；{maxTriggers}，冷却策略 {draft.cooldownMode}。
       </div>
     </div>
   );
@@ -691,7 +734,7 @@ function RuleTestPanel({
         <div className="alert-test-result">
           <div className="alert-test-summary">
             <strong>{testResult.result ? "这组样本会触发警报" : "这组样本不会触发警报"}</strong>
-            <span>结果由后端 evaluator 返回，和未来实时触发判断共用同一套逻辑。</span>
+            <span>结果由后端 evaluator 返回，和实时触发判断共用同一套逻辑。</span>
           </div>
           <AlertTraceNode node={testResult.trace} />
         </div>
@@ -746,10 +789,23 @@ interface HistoryItemProps {
   title: string;
   value: string;
   channels: string;
+  acknowledged: boolean;
+  busy: boolean;
+  onAcknowledge(): void;
   onViewRule?: () => void;
 }
 
-function HistoryItem({ time, symbol, title, value, channels, onViewRule }: HistoryItemProps) {
+function HistoryItem({
+  time,
+  symbol,
+  title,
+  value,
+  channels,
+  acknowledged,
+  busy,
+  onAcknowledge,
+  onViewRule,
+}: HistoryItemProps) {
   return (
     <div className="alert-history-item">
       <div className="alert-timeline-dot" />
@@ -758,7 +814,9 @@ function HistoryItem({ time, symbol, title, value, channels, onViewRule }: Histo
         <div className="alert-timeline-desc">{symbol} · 触发值 {value}</div>
         <div className="alert-timeline-time">{time} · {channels}</div>
         <div className="alert-history-actions">
-          <button type="button" disabled>确认</button>
+          <button type="button" onClick={onAcknowledge} disabled={busy}>
+            {acknowledged ? "取消确认" : "确认"}
+          </button>
           <button type="button" onClick={onViewRule} disabled={!onViewRule}>查看规则</button>
         </div>
       </div>
@@ -805,11 +863,14 @@ export default function AlertsPanel({
   const [selectedInterval, setSelectedInterval] = useState("");
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [history, setHistory] = useState<AlertHistoryEvent[]>([]);
+  const [systemStatus, setSystemStatus] = useState<AlertSystemStatus | null>(null);
   const [alertLoading, setAlertLoading] = useState(false);
   const [alertSaving, setAlertSaving] = useState(false);
   const [alertError, setAlertError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<AlertStatusFilter>("all");
+  const [historyRange, setHistoryRange] = useState<AlertHistoryRange>("7d");
+  const [acknowledgementFilter, setAcknowledgementFilter] = useState<AlertAcknowledgementFilter>("all");
   const [editingRuleId, setEditingRuleId] = useState("");
   const [draft, setDraft] = useState(() => createDefaultAlertDraft({
     ...(currentSymbol === undefined ? {} : { symbol: currentSymbol }),
@@ -832,15 +893,73 @@ export default function AlertsPanel({
     ...(currentMarketType === undefined ? {} : { marketType: currentMarketType }),
     ...(currentExchange === undefined ? {} : { exchange: currentExchange }),
   });
-  const currentWatchProduct = watchlistProducts.find((item) => item.key === currentProductKey) || null;
-  const selectedProductExists = watchlistProducts.some((item) => item.key === selectedProductKey);
-  const defaultProductKey = currentWatchProduct?.key || watchlistProducts[0]?.key || "";
+  const alertProducts = useMemo(() => {
+    const products = new Map<string, WatchlistAlertProduct>();
+    for (const item of watchlistProducts) products.set(item.key, { ...item, listNames: [...item.listNames] });
+
+    let currentChartProduct: WatchlistAlertProduct | null = null;
+    if (currentSymbol) {
+      const existing = products.get(currentProductKey);
+      currentChartProduct = {
+        symbol: currentSymbol.toUpperCase(),
+        marketType: currentMarketType || "spot",
+        exchange: normalizedExchange,
+        key: currentProductKey,
+        listNames: Array.from(new Set(["当前图表", ...(existing?.listNames || [])])),
+        color: existing?.color || "#3b82f6",
+      };
+      products.delete(currentProductKey);
+    }
+
+    for (const rule of rules) {
+      const target = rule.target;
+      if (!target?.symbol) continue;
+      const key = buildProductKey(target);
+      if (key === currentProductKey || products.has(key)) continue;
+      products.set(key, {
+        symbol: target.symbol,
+        marketType: target.marketType || "spot",
+        exchange: target.exchange || "binance",
+        key,
+        listNames: ["已有规则"],
+        color: "#64748b",
+      });
+    }
+
+    return [
+      ...(currentChartProduct ? [currentChartProduct] : []),
+      ...Array.from(products.values()).sort((a, b) => a.symbol.localeCompare(b.symbol)),
+    ];
+  }, [currentMarketType, currentProductKey, currentSymbol, normalizedExchange, rules, watchlistProducts]);
+  const selectedProductExists = alertProducts.some((item) => item.key === selectedProductKey);
+  const defaultProductKey = currentSymbol ? currentProductKey : (alertProducts[0]?.key || "");
   const effectiveSelectedProductKey = selectedProductExists ? selectedProductKey : defaultProductKey;
-  const selectedProduct = watchlistProducts.find((item) => item.key === effectiveSelectedProductKey) || null;
-  const currentProductMissing = Boolean(currentSymbol) && !currentWatchProduct;
+  const selectedProduct = alertProducts.find((item) => item.key === effectiveSelectedProductKey) || null;
   const effectiveInterval = selectedInterval || (intervalLabel !== "--" ? intervalLabel : "1m");
   const canCreateAlert = Boolean(selectedProduct?.symbol || currentSymbol) && !alertSaving;
   const editorModeLabel = editingRuleId ? "更新警报" : "创建警报";
+  const runtimeRuleStates = useMemo(() => systemStatus?.runtime.rules || [], [systemStatus]);
+  const runtimeRuleStateById = useMemo(
+    () => new Map(runtimeRuleStates.map((item) => [item.ruleId, item])),
+    [runtimeRuleStates],
+  );
+  const warmingRuleCount = runtimeRuleStates.filter((item) => item.state === "warming").length;
+  const degradedRuleCount = runtimeRuleStates.filter((item) => ["degraded", "recovering"].includes(item.state)).length;
+  const runtimeStatusLabel = systemStatus?.runtime.status === "running"
+    ? `运行中 · ${systemStatus.runtime.subscriptions.length} 个订阅${warmingRuleCount ? ` · ${warmingRuleCount} 条预热中` : ""}`
+    : (systemStatus?.runtime.status === "error"
+      ? `运行异常${degradedRuleCount ? ` · ${degradedRuleCount} 条恢复中` : ""}`
+      : "运行状态不可用");
+
+  const historySinceMs = useMemo(() => {
+    const now = new Date();
+    if (historyRange === "today") {
+      now.setHours(0, 0, 0, 0);
+      return now.getTime();
+    }
+    const days = historyRange === "30d" ? 30 : 7;
+    return Date.now() - days * 24 * 60 * 60 * 1000;
+  }, [historyRange]);
 
   const loadAlerts = useCallback(async (signal?: AbortSignal) => {
     setAlertLoading(true);
@@ -849,17 +968,29 @@ export default function AlertsPanel({
       const requestOptions = signal === undefined ? {} : { signal };
       const [nextRules, nextHistory] = await Promise.all([
         fetchAlertRules(requestOptions),
-        fetchAlertHistory({ limit: 100 }, requestOptions),
+        fetchAlertHistory({
+          limit: 100,
+          sinceMs: historySinceMs,
+          ...(acknowledgementFilter === "all"
+            ? {}
+            : { acknowledged: acknowledgementFilter === "ack" }),
+        }, requestOptions),
       ]);
       setRules(Array.isArray(nextRules) ? nextRules : []);
       setHistory(Array.isArray(nextHistory) ? nextHistory : []);
+      try {
+        setSystemStatus(await fetchAlertStatus(requestOptions));
+      } catch (statusError: unknown) {
+        setSystemStatus(null);
+        console.warn("警报运行状态读取失败", statusError);
+      }
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setAlertError(errorMessage(err, "警报数据加载失败"));
     } finally {
       setAlertLoading(false);
     }
-  }, []);
+  }, [acknowledgementFilter, historySinceMs]);
 
   const filteredRules = useMemo(() => {
     const needle = searchTerm.trim().toLowerCase();
@@ -1024,11 +1155,11 @@ export default function AlertsPanel({
       marketType: target.marketType,
       exchange: target.exchange,
     });
-    if (watchlistProducts.some((item) => item.key === nextProductKey)) {
+    if (alertProducts.some((item) => item.key === nextProductKey)) {
       setSelectedProductKey(nextProductKey);
     }
     setTab("add");
-  }, [watchlistProducts]);
+  }, [alertProducts]);
 
   const toggleRule = useCallback(async (rule: AlertRule) => {
     if (!rule?.id) return;
@@ -1037,12 +1168,13 @@ export default function AlertsPanel({
     try {
       const updated = await setAlertRuleEnabled(rule.id, !rule.enabled);
       setRules((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      await loadAlerts();
     } catch (err: unknown) {
       setAlertError(errorMessage(err, "更新警报状态失败"));
     } finally {
       setAlertSaving(false);
     }
-  }, []);
+  }, [loadAlerts]);
 
   const removeRule = useCallback(async (rule: AlertRule) => {
     if (!rule?.id) return;
@@ -1051,13 +1183,33 @@ export default function AlertsPanel({
     try {
       await deleteAlertRule(rule.id);
       setRules((prev) => prev.filter((item) => item.id !== rule.id));
-      setHistory((prev) => prev.filter((item) => item.ruleId !== rule.id));
     } catch (err: unknown) {
       setAlertError(errorMessage(err, "删除警报失败"));
     } finally {
       setAlertSaving(false);
     }
   }, []);
+
+  const acknowledgeEvent = useCallback(async (event: AlertHistoryEvent) => {
+    setAlertSaving(true);
+    setAlertError("");
+    try {
+      const updated = await setAlertHistoryAcknowledged(event.id, event.acknowledgedAt === null);
+      setHistory((current) => {
+        if (acknowledgementFilter === "unread" && updated.acknowledgedAt !== null) {
+          return current.filter((item) => item.id !== updated.id);
+        }
+        if (acknowledgementFilter === "ack" && updated.acknowledgedAt === null) {
+          return current.filter((item) => item.id !== updated.id);
+        }
+        return current.map((item) => (item.id === updated.id ? updated : item));
+      });
+    } catch (err: unknown) {
+      setAlertError(errorMessage(err, "更新确认状态失败"));
+    } finally {
+      setAlertSaving(false);
+    }
+  }, [acknowledgementFilter]);
 
   const duplicateRule = useCallback(async (rule: AlertRule) => {
     if (!rule) return;
@@ -1123,6 +1275,17 @@ export default function AlertsPanel({
     return () => controller.abort();
   }, [isOpen, loadAlerts]);
 
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const refreshTriggeredRule = () => {
+      void loadAlerts();
+    };
+    window.addEventListener(ALERT_RULE_STATE_CHANGED_EVENT, refreshTriggeredRule);
+    return () => {
+      window.removeEventListener(ALERT_RULE_STATE_CHANGED_EVENT, refreshTriggeredRule);
+    };
+  }, [isOpen, loadAlerts]);
+
   if (!isOpen) return null;
 
   return (
@@ -1144,6 +1307,9 @@ export default function AlertsPanel({
               <span className="alert-layout-pill">{rules.length} 条规则</span>
             </h3>
             <div className="alert-panel-subtitle">规则保存 · 触发历史 · 当前图表上下文</div>
+            <div className={`alert-runtime-status status-${systemStatus?.runtime.status || "unknown"}`}>
+              {runtimeStatusLabel}
+            </div>
           </div>
           <button className="alert-panel-close" onClick={onClose} type="button">✕</button>
         </div>
@@ -1192,9 +1358,9 @@ export default function AlertsPanel({
               <section className="alert-editor-card alert-product-section">
                 <SectionHeader
                   kicker="步骤 1"
-                  title="选择自选商品"
-                  desc="警报优先只对自选模块里的商品创建。当前商品不在自选时，可使用引导按钮。"
-                  action={<span className="alert-chip">自选限定</span>}
+                  title="选择警报商品"
+                  desc="可直接使用当前图表商品，也可切换到自选列表或已有规则中的商品。"
+                  action={<span className="alert-chip">当前图表 / 自选</span>}
                 />
 
                 <ProductSummary
@@ -1202,15 +1368,14 @@ export default function AlertsPanel({
                   fallbackSymbol={symbolLabel}
                   {...(currentMarketType === undefined ? {} : { fallbackMarketType: currentMarketType })}
                   fallbackExchange={normalizedExchange}
-                  currentProductMissing={currentProductMissing && !selectedProduct}
                 />
 
-                {watchlistProducts.length > 0 ? (
+                {alertProducts.length > 0 ? (
                   <div className="alert-product-picker-row">
                     <label className="alert-field">
-                      <span>自选商品</span>
+                      <span>警报商品</span>
                       <select value={effectiveSelectedProductKey} onChange={(event) => setSelectedProductKey(event.target.value)}>
-                        {watchlistProducts.map((item) => (
+                        {alertProducts.map((item) => (
                           <option key={item.key} value={item.key}>
                             {item.symbol} · {formatMarket(item.exchange, item.marketType)} · {item.listNames.join(" / ")}
                           </option>
@@ -1229,18 +1394,8 @@ export default function AlertsPanel({
                 ) : (
                   <div className="alert-empty-state compact">
                     <div className="alert-empty-icon">☆</div>
-                    <div className="alert-empty-title">自选列表为空</div>
-                    <div className="alert-empty-desc">请先把商品添加到自选模块，然后再为它创建警报。</div>
-                  </div>
-                )}
-
-                {currentProductMissing && (
-                  <div className="alert-guidance-box">
-                    <div>
-                      <strong>{symbolLabel} 还不在自选列表中</strong>
-                      <span>后续会支持一键加入自选并继续创建警报。</span>
-                    </div>
-                    <button className="alert-btn alert-btn-primary" type="button" disabled>加入自选并继续</button>
+                    <div className="alert-empty-title">没有可用商品</div>
+                    <div className="alert-empty-desc">请先打开一个有效商品图表，或把商品加入自选列表。</div>
                   </div>
                 )}
 
@@ -1327,7 +1482,7 @@ export default function AlertsPanel({
                   title={rule.name}
                   symbol={rule.target?.symbol || "--"}
                   summary={describeAlertRule(rule)}
-                  status={`${rule.enabled ? "启用" : "停用"} · 已触发 ${rule.triggerCount || 0} 次`}
+                  status={`${alertRuntimeRuleStateLabel(runtimeRuleStateById.get(rule.id)?.state, rule.enabled)} · 已触发 ${rule.triggerCount || 0} 次`}
                   expiry={rule.maxTriggers ? `最多 ${rule.maxTriggers} 次` : "无限制"}
                   channels={describeAlertChannels(rule)}
                   enabled={rule.enabled}
@@ -1344,7 +1499,7 @@ export default function AlertsPanel({
               {filteredRules.length === 0 && (
                 <div className="alert-empty-state compact">
                   <div className="alert-empty-title">{rules.length === 0 ? "暂无警报规则" : "没有匹配的警报"}</div>
-                  <div className="alert-empty-desc">可以从当前商品快速创建第一条规则，后续触发引擎接入后会自动记录命中历史。</div>
+                  <div className="alert-empty-desc">可以从当前商品快速创建第一条规则；运行状态正常时会自动求值并记录命中历史。</div>
                 </div>
               )}
             </div>
@@ -1359,12 +1514,12 @@ export default function AlertsPanel({
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
                 />
-                <select className="alert-filter-select" defaultValue="7d">
+                <select className="alert-filter-select" value={historyRange} onChange={(event) => setHistoryRange(event.target.value as AlertHistoryRange)}>
                   <option value="today">今天</option>
                   <option value="7d">最近 7 天</option>
                   <option value="30d">最近 30 天</option>
                 </select>
-                <select className="alert-filter-select" defaultValue="all">
+                <select className="alert-filter-select" value={acknowledgementFilter} onChange={(event) => setAcknowledgementFilter(event.target.value as AlertAcknowledgementFilter)}>
                   <option value="all">全部记录</option>
                   <option value="unread">未确认</option>
                   <option value="ack">已确认</option>
@@ -1385,7 +1540,10 @@ export default function AlertsPanel({
                       symbol={target.symbol || rule?.target?.symbol || "--"}
                       title={event.message || `${rule?.name || "警报"} 命中`}
                       value={String(valueText)}
-                      channels={rule ? describeAlertChannels(rule) : "历史"}
+                      channels={describeAlertDispatch(event)}
+                      acknowledged={event.acknowledgedAt !== null}
+                      busy={alertSaving}
+                      onAcknowledge={() => { void acknowledgeEvent(event); }}
                       {...(rule
                         ? {
                             onViewRule: () => {
@@ -1402,7 +1560,7 @@ export default function AlertsPanel({
               {filteredHistory.length === 0 && (
                 <div className="alert-empty-state compact">
                   <div className="alert-empty-title">暂无触发历史</div>
-                  <div className="alert-empty-desc">触发逻辑接入后，这里会展示命中条件、触发值、通知渠道和确认状态。</div>
+                  <div className="alert-empty-desc">当前筛选范围内没有命中记录。</div>
                 </div>
               )}
             </div>

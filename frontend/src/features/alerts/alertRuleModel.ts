@@ -13,6 +13,7 @@ import type {
   AlertRight,
   AlertRule,
   AlertRulePayload,
+  AlertHistoryEvent,
 } from "./alertTypes.js";
 import { parseAlertExpression } from "./alertTypes.js";
 
@@ -100,23 +101,6 @@ export function createDefaultExpressionDraft(price?: unknown): AlertGroupDraft {
         rightType: "number",
         rightValue: Number.isFinite(threshold) ? String(threshold) : "",
       }),
-      createGroupNode({
-        op: "OR",
-        children: [
-          createConditionNode({
-            left: "rsi",
-            comparator: ">",
-            rightType: "number",
-            rightValue: "70",
-          }),
-          createConditionNode({
-            left: "macdHist",
-            comparator: "crossesAbove",
-            rightType: "number",
-            rightValue: "0",
-          }),
-        ],
-      }),
     ],
   });
 }
@@ -126,8 +110,8 @@ export function createDefaultAlertDraft({
   price,
 }: { symbol?: string; interval?: string; price?: unknown } = {}): AlertDraft {
   return {
-    name: `${symbol || "未选商品"} 价格 + 指标组合警报`,
-    description: "由警报面板创建的组合规则。",
+    name: `${symbol || "未选商品"} 价格警报`,
+    description: "由警报面板创建的价格规则；可按需添加已预热指标。",
     enabled: true,
     triggerOn: "bar_close",
     expression: createDefaultExpressionDraft(price),
@@ -204,7 +188,8 @@ export function buildAlertPayloadFromDraft({
     actions: buildActionsPayload(draft),
     cooldownMs: resolveCooldownMs(draft),
     expiresAt: resolveExpiresAt(draft.expiresMode, draft.customExpiresAt),
-    maxTriggers: resolveMaxTriggers(draft.maxTriggerMode, draft.customMaxTriggers),
+    maxTriggers: resolveMaxTriggers(draft),
+    afterTrigger: normalizeAfterTrigger(draft.afterTrigger),
     tags: ["frontend-editor"],
   };
 }
@@ -247,7 +232,9 @@ export function createDraftFromRule(rule: AlertRule): AlertDraft {
     customMaxTriggers: Number.isFinite(maxTriggers) && maxTriggers > 0 ? maxTriggers : 5,
     expiresMode: rule?.expiresAt ? "custom" : "never",
     customExpiresAt: rule?.expiresAt ? toDatetimeLocalValue(rule.expiresAt) : "",
-    afterTrigger: "auto-disable",
+    afterTrigger: rule?.afterTrigger === "keep"
+      ? "keep"
+      : (rule?.afterTrigger === "pause" ? "pause" : "auto-disable"),
     cooldownMode: cooldownMs === 0 ? "always" : (cooldownMs === 30_000 ? "30s" : (cooldownMs === 300_000 ? "5m" : "custom")),
     customCooldownSeconds: Number.isFinite(cooldownMs) && cooldownMs > 0 ? Math.round(cooldownMs / 1000) : 60,
     messageTemplate: messageTemplateFromActions(rule.actions)
@@ -433,7 +420,11 @@ function actionsToChannelState(actions: AlertAction[] = []): AlertChannelState {
   return state;
 }
 
-function resolveMaxTriggers(mode: AlertDraft["maxTriggerMode"], customValue: string | number): number | null {
+function resolveMaxTriggers(draft: AlertDraft): number | null {
+  if (draft.afterTrigger === "keep") return null;
+  if (draft.afterTrigger === "pause") return 1;
+  const mode = draft.maxTriggerMode;
+  const customValue = draft.customMaxTriggers;
   if (mode === "unlimited") return null;
   if (mode === "3") return 3;
   if (mode === "custom") {
@@ -441,6 +432,34 @@ function resolveMaxTriggers(mode: AlertDraft["maxTriggerMode"], customValue: str
     return value;
   }
   return 1;
+}
+
+export function describeAlertDraftExpression(expression: AlertExpressionDraft): string {
+  try {
+    return describeExpression(buildExpressionPayload(expression));
+  } catch {
+    return "未配置触发条件";
+  }
+}
+
+export function describeAlertDispatch(event: AlertHistoryEvent): string {
+  if (!event.dispatch || event.dispatch.length === 0) return "仅记录历史";
+  return event.dispatch.map((outcome) => {
+    const channel = outcome.type === "in_app"
+      ? "应用内"
+      : (outcome.type === "browser" ? "浏览器" : (outcome.type === "sound" ? "声音" : outcome.type));
+    const status = outcome.status === "delivered"
+      ? "已送达"
+      : (outcome.status === "published"
+        ? "待客户端确认"
+        : (outcome.status === "unavailable" ? "无活动客户端" : outcome.status));
+    return `${channel}: ${status}`;
+  }).join(" / ");
+}
+
+function normalizeAfterTrigger(value: AlertDraft["afterTrigger"]): "auto_disable" | "keep" | "pause" {
+  if (value === "keep" || value === "pause") return value;
+  return "auto_disable";
 }
 
 function resolveCooldownMs(draft: AlertDraft): number {

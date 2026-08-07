@@ -21,6 +21,7 @@ VALID_ACTION_TYPES = {
     "webhook",
     "trading_signal",
 }
+DELIVERABLE_ACTION_TYPES = {"in_app", "browser", "sound"}
 
 
 class AlertTarget(BaseModel):
@@ -49,11 +50,21 @@ class AlertRulePayload(BaseModel):
     cooldownMs: int = 30_000
     expiresAt: int | None = None
     maxTriggers: int | None = 1
+    afterTrigger: str = "auto_disable"
     tags: list[str] = Field(default_factory=list)
 
 
 class AlertEnabledPatch(BaseModel):
     enabled: bool
+
+
+class AlertAcknowledgedPatch(BaseModel):
+    acknowledged: bool = True
+
+
+class AlertDispatchReceiptPayload(BaseModel):
+    status: str
+    detail: str = ""
 
 
 class AlertTriggerPayload(BaseModel):

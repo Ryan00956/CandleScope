@@ -34,6 +34,8 @@ import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/u
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability.js";
 import { useDrawingToolSelectionState } from "../features/drawings/drawingToolState.js";
 import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext.js";
+import AlertNotificationCenter from "../components/alerts/AlertNotificationCenter.js";
+import { requestAlertPanelOpen } from "../features/alerts/alertDeliveryClient.js";
 import AppProviders from "./AppProviders.js";
 import LiveChartCell from "./LiveChartCell.js";
 import type {
@@ -664,6 +666,7 @@ function LiveWorkspaceApp() {
         featureSurfaces={<div className="workspace-portal-host" ref={setFeatureSurfacesHost} />}
         statusBar={<div className="workspace-portal-host" ref={setStatusBarHost} />}
       />
+      <AlertNotificationCenter onOpenAlerts={requestAlertPanelOpen} />
       {featureSurfacesHost && workspacePanelOpen && createPortal(
         <Suspense fallback={(
           <div className="workspace-panel-overlay">

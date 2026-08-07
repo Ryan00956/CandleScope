@@ -172,7 +172,9 @@ async def _init_data_manager() -> None:
         try:
             alert_facade = AlertFacade()
             alert_runtime = AlertRuntimeEngine(
-                facade=alert_facade, data_manager=runtime.data_manager
+                facade=alert_facade,
+                data_manager=runtime.data_manager,
+                backfill_coordinator=runtime.backfill_coordinator,
             )
             app.state.alert_facade = alert_facade
             app.state.alert_runtime = alert_runtime
@@ -533,6 +535,22 @@ async def root() -> dict:
 async def health_check() -> dict:
     dm = getattr(app.state, "data_manager", None)
     result: dict = {"status": "ok"}
+    alert_runtime = getattr(app.state, "alert_runtime", None)
+    alert_facade = getattr(app.state, "alert_facade", None)
+    if alert_runtime is not None:
+        runtime_snapshot = alert_runtime.snapshot()
+        result["alerts"] = {
+            **(alert_facade.status() if alert_facade is not None else {}),
+            "runtime": runtime_snapshot,
+        }
+        if runtime_snapshot.get("status") == "error":
+            result["status"] = "degraded"
+    elif alert_facade is not None:
+        result["alerts"] = {
+            **alert_facade.status(),
+            "runtime": {"status": "unavailable", "started": False},
+        }
+        result["status"] = "degraded"
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
         result["plugin_runtimes"] = plugin_runtime_host.health_summary()

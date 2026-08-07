@@ -1,6 +1,8 @@
 export const ALERT_EXPRESSION_MAX_DEPTH = 32;
+export const ALERT_EXPRESSION_MAX_NODES = 256;
 
 export type AlertTriggerOn = "realtime" | "bar_update" | "bar_close";
+export type AlertAfterTrigger = "auto_disable" | "keep" | "pause";
 export type AlertLogicalOperator = "AND" | "OR";
 export type AlertComparator =
   | "crossesAbove"
@@ -81,6 +83,7 @@ export interface AlertRulePayload {
   cooldownMs: number;
   expiresAt: number | null;
   maxTriggers: number | null;
+  afterTrigger: AlertAfterTrigger;
   tags: string[];
 }
 
@@ -103,6 +106,68 @@ export interface AlertHistoryEvent {
   actions: AlertAction[];
   createdAt: number;
   acknowledgedAt: number | null;
+  dispatch: AlertDispatchOutcome[];
+}
+
+export interface AlertDispatchOutcome {
+  type: string;
+  status: string;
+  dispatchId?: string;
+  reason?: string;
+  detail?: string;
+  subscriberCount?: number;
+  receiptAt?: number;
+}
+
+export interface AlertNotificationMessage {
+  schemaVersion: 1;
+  dispatchId: string;
+  eventId: string;
+  ruleId: string;
+  action: {
+    type: "in_app" | "browser" | "sound";
+    config: Record<string, unknown>;
+  };
+  message: string;
+  target: Partial<AlertTarget>;
+  values: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface AlertRuntimeStatus {
+  started: boolean;
+  dataManager: boolean;
+  status: string;
+  subscriptions: Array<{ ruleId: string; target: Partial<AlertTarget> }>;
+  rules: AlertRuntimeRuleState[];
+  eventsEvaluated?: number;
+  triggersEmitted?: number;
+  evaluationErrors?: number;
+  lastError?: string | null;
+}
+
+export interface AlertRuntimeRuleState {
+  ruleId: string;
+  state: string;
+  enabled: boolean;
+  subscribed: boolean;
+  requiredFields: string[];
+  indicatorReady: Record<string, boolean>;
+  historyBars: number;
+  lastEvaluatedAt: number | null;
+  lastEventType: string | null;
+  lastError: string | null;
+}
+
+export interface AlertSystemStatus {
+  registeredChannels: string[];
+  notificationBroker: {
+    subscribers: number;
+    queueSize: number;
+    published: number;
+    dropped: number;
+  };
+  runtime: AlertRuntimeStatus;
 }
 
 export interface AlertEvaluationContext {
@@ -176,7 +241,7 @@ export interface AlertDraft {
   customMaxTriggers: string | number;
   expiresMode: "never" | "1h" | "today" | "7d" | "custom";
   customExpiresAt: string;
-  afterTrigger: "auto-disable" | string;
+  afterTrigger: "auto-disable" | "keep" | "pause";
   cooldownMode: "always" | "30s" | "5m" | "custom";
   customCooldownSeconds: string | number;
   messageTemplate: string;
@@ -216,6 +281,8 @@ export interface AlertRequestOptions {
 export interface AlertHistoryQuery {
   limit?: number;
   ruleId?: string;
+  sinceMs?: number;
+  acknowledged?: boolean;
 }
 
 export class AlertPayloadError extends TypeError {
@@ -311,6 +378,24 @@ function parseActions(value: unknown, path: string): AlertAction[] {
   return value.map((item, index) => parseAction(item, `${path}[${index}]`));
 }
 
+function parseDispatchOutcomes(value: unknown, path: string): AlertDispatchOutcome[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new AlertPayloadError(path, "expected an array");
+  return value.map((item, index) => {
+    const record = expectRecord(item, `${path}[${index}]`);
+    const outcome: AlertDispatchOutcome = {
+      type: expectNonEmptyString(record.type, `${path}[${index}].type`),
+      status: expectNonEmptyString(record.status, `${path}[${index}].status`),
+    };
+    if (record.dispatchId !== undefined) outcome.dispatchId = expectNonEmptyString(record.dispatchId, `${path}[${index}].dispatchId`);
+    if (record.reason !== undefined) outcome.reason = expectString(record.reason, `${path}[${index}].reason`);
+    if (record.detail !== undefined) outcome.detail = expectString(record.detail, `${path}[${index}].detail`);
+    if (record.subscriberCount !== undefined) outcome.subscriberCount = expectNonNegativeInteger(record.subscriberCount, `${path}[${index}].subscriberCount`);
+    if (record.receiptAt !== undefined) outcome.receiptAt = expectNonNegativeInteger(record.receiptAt, `${path}[${index}].receiptAt`);
+    return outcome;
+  });
+}
+
 function parseComparator(value: unknown, path: string): AlertComparator {
   const comparators: readonly string[] = [
     "crossesAbove", "crossesBelow", ">", "<", ">=", "<=", "==", "!=",
@@ -325,10 +410,13 @@ function parseComparator(value: unknown, path: string): AlertComparator {
 function parseRight(value: unknown, path: string): AlertRight {
   const record = expectRecord(value, path);
   if (record.type === "range") {
+    const min = expectFiniteNumber(record.min, `${path}.min`);
+    const max = expectFiniteNumber(record.max, `${path}.max`);
+    if (min > max) throw new AlertPayloadError(path, "range minimum exceeds maximum");
     return {
       type: "range",
-      min: expectFiniteNumber(record.min, `${path}.min`),
-      max: expectFiniteNumber(record.max, `${path}.max`),
+      min,
+      max,
     };
   }
   if (record.type === "field" || record.type === "indicator") {
@@ -351,9 +439,14 @@ function parseExpressionNode(
   path: string,
   depth: number,
   ancestors: WeakSet<object>,
+  state: { nodes: number },
 ): AlertExpression {
   if (depth > ALERT_EXPRESSION_MAX_DEPTH) {
     throw new AlertPayloadError(path, `expression exceeds ${ALERT_EXPRESSION_MAX_DEPTH} levels`);
+  }
+  state.nodes += 1;
+  if (state.nodes > ALERT_EXPRESSION_MAX_NODES) {
+    throw new AlertPayloadError(path, `expression exceeds ${ALERT_EXPRESSION_MAX_NODES} nodes`);
   }
   const record = expectRecord(value, path);
   if (ancestors.has(record)) throw new AlertPayloadError(path, "cyclic expression");
@@ -367,7 +460,7 @@ function parseExpressionNode(
       return {
         op: rawOp,
         children: record.children.map((child, index) => (
-          parseExpressionNode(child, `${path}.children[${index}]`, depth + 1, ancestors)
+          parseExpressionNode(child, `${path}.children[${index}]`, depth + 1, ancestors, state)
         )),
       };
     }
@@ -377,7 +470,7 @@ function parseExpressionNode(
       }
       return {
         op: "NOT",
-        children: [parseExpressionNode(record.children[0], `${path}.children[0]`, depth + 1, ancestors)],
+        children: [parseExpressionNode(record.children[0], `${path}.children[0]`, depth + 1, ancestors, state)],
       };
     }
     if (rawOp !== undefined) throw new AlertPayloadError(`${path}.op`, "unsupported operator");
@@ -392,12 +485,18 @@ function parseExpressionNode(
 }
 
 export function parseAlertExpression(value: unknown, path = "expression"): AlertExpression {
-  return parseExpressionNode(value, path, 0, new WeakSet());
+  return parseExpressionNode(value, path, 0, new WeakSet(), { nodes: 0 });
 }
 
 function parseTriggerOn(value: unknown, path: string): AlertTriggerOn {
   if (value === "realtime" || value === "bar_update" || value === "bar_close") return value;
   throw new AlertPayloadError(path, "unsupported trigger mode");
+}
+
+function parseAfterTrigger(value: unknown, path: string): AlertAfterTrigger {
+  if (value === undefined || value === "auto-disable") return "auto_disable";
+  if (value === "auto_disable" || value === "keep" || value === "pause") return value;
+  throw new AlertPayloadError(path, "unsupported post-trigger behavior");
 }
 
 export function parseAlertRule(value: unknown, path = "rule"): AlertRule {
@@ -417,6 +516,7 @@ export function parseAlertRule(value: unknown, path = "rule"): AlertRule {
     maxTriggers: record.maxTriggers === null
       ? null
       : expectNonNegativeInteger(record.maxTriggers, `${path}.maxTriggers`),
+    afterTrigger: parseAfterTrigger(record.afterTrigger, `${path}.afterTrigger`),
     tags: parseStringArray(record.tags, `${path}.tags`),
     triggerCount: expectNonNegativeInteger(record.triggerCount, `${path}.triggerCount`),
     lastTriggeredAt: expectNullableTimestamp(record.lastTriggeredAt, `${path}.lastTriggeredAt`),
@@ -442,12 +542,99 @@ export function parseAlertHistoryEvent(value: unknown, path = "history"): AlertH
     actions: parseActions(record.actions, `${path}.actions`),
     createdAt: expectNonNegativeInteger(record.createdAt, `${path}.createdAt`),
     acknowledgedAt: expectNullableTimestamp(record.acknowledgedAt, `${path}.acknowledgedAt`),
+    dispatch: parseDispatchOutcomes(record.dispatch, `${path}.dispatch`),
   };
 }
 
 export function parseAlertHistory(value: unknown, path = "history"): AlertHistoryEvent[] {
   if (!Array.isArray(value)) throw new AlertPayloadError(path, "expected an array");
   return value.map((item, index) => parseAlertHistoryEvent(item, `${path}[${index}]`));
+}
+
+export function parseAlertNotificationMessage(value: unknown, path = "notification"): AlertNotificationMessage {
+  const record = expectRecord(value, path);
+  const action = expectRecord(record.action, `${path}.action`);
+  if (action.type !== "in_app" && action.type !== "browser" && action.type !== "sound") {
+    throw new AlertPayloadError(`${path}.action.type`, "unsupported client action");
+  }
+  const schemaVersion = expectNonNegativeInteger(record.schemaVersion, `${path}.schemaVersion`);
+  if (schemaVersion !== 1) throw new AlertPayloadError(`${path}.schemaVersion`, "unsupported schema version");
+  return {
+    schemaVersion: 1,
+    dispatchId: expectNonEmptyString(record.dispatchId, `${path}.dispatchId`),
+    eventId: expectNonEmptyString(record.eventId, `${path}.eventId`),
+    ruleId: expectNonEmptyString(record.ruleId, `${path}.ruleId`),
+    action: {
+      type: action.type,
+      config: expectRecord(action.config, `${path}.action.config`),
+    },
+    message: expectString(record.message, `${path}.message`),
+    target: parsePartialTarget(record.target, `${path}.target`),
+    values: expectRecord(record.values, `${path}.values`),
+    createdAt: expectNonNegativeInteger(record.createdAt, `${path}.createdAt`),
+  };
+}
+
+export function parseAlertSystemStatus(value: unknown, path = "status"): AlertSystemStatus {
+  const record = expectRecord(value, path);
+  const broker = expectRecord(record.notificationBroker, `${path}.notificationBroker`);
+  const runtime = expectRecord(record.runtime, `${path}.runtime`);
+  const rawSubscriptions = runtime.subscriptions;
+  if (!Array.isArray(rawSubscriptions)) throw new AlertPayloadError(`${path}.runtime.subscriptions`, "expected an array");
+  const rawRules = runtime.rules === undefined ? [] : runtime.rules;
+  if (!Array.isArray(rawRules)) throw new AlertPayloadError(`${path}.runtime.rules`, "expected an array");
+  return {
+    registeredChannels: parseStringArray(record.registeredChannels, `${path}.registeredChannels`),
+    notificationBroker: {
+      subscribers: expectNonNegativeInteger(broker.subscribers, `${path}.notificationBroker.subscribers`),
+      queueSize: expectNonNegativeInteger(broker.queueSize, `${path}.notificationBroker.queueSize`),
+      published: expectNonNegativeInteger(broker.published, `${path}.notificationBroker.published`),
+      dropped: expectNonNegativeInteger(broker.dropped, `${path}.notificationBroker.dropped`),
+    },
+    runtime: {
+      started: expectBoolean(runtime.started, `${path}.runtime.started`),
+      dataManager: expectBoolean(runtime.dataManager, `${path}.runtime.dataManager`),
+      status: expectString(runtime.status, `${path}.runtime.status`),
+      subscriptions: rawSubscriptions.map((item, index) => {
+        const subscription = expectRecord(item, `${path}.runtime.subscriptions[${index}]`);
+        return {
+          ruleId: expectNonEmptyString(subscription.ruleId, `${path}.runtime.subscriptions[${index}].ruleId`),
+          target: parsePartialTarget(subscription.target, `${path}.runtime.subscriptions[${index}].target`),
+        };
+      }),
+      rules: rawRules.map((item, index) => {
+        const rulePath = `${path}.runtime.rules[${index}]`;
+        const rule = expectRecord(item, rulePath);
+        const rawReadiness = expectRecord(rule.indicatorReady, `${rulePath}.indicatorReady`);
+        const indicatorReady = Object.fromEntries(Object.entries(rawReadiness).map(([key, ready]) => [
+          key,
+          expectBoolean(ready, `${rulePath}.indicatorReady.${key}`),
+        ]));
+        return {
+          ruleId: expectNonEmptyString(rule.ruleId, `${rulePath}.ruleId`),
+          state: expectString(rule.state, `${rulePath}.state`),
+          enabled: expectBoolean(rule.enabled, `${rulePath}.enabled`),
+          subscribed: expectBoolean(rule.subscribed, `${rulePath}.subscribed`),
+          requiredFields: parseStringArray(rule.requiredFields, `${rulePath}.requiredFields`),
+          indicatorReady,
+          historyBars: expectNonNegativeInteger(rule.historyBars, `${rulePath}.historyBars`),
+          lastEvaluatedAt: rule.lastEvaluatedAt === null
+            ? null
+            : expectNonNegativeInteger(rule.lastEvaluatedAt, `${rulePath}.lastEvaluatedAt`),
+          lastEventType: rule.lastEventType === null
+            ? null
+            : expectString(rule.lastEventType, `${rulePath}.lastEventType`),
+          lastError: rule.lastError === null
+            ? null
+            : expectString(rule.lastError, `${rulePath}.lastError`),
+        };
+      }),
+      ...(runtime.eventsEvaluated === undefined ? {} : { eventsEvaluated: expectNonNegativeInteger(runtime.eventsEvaluated, `${path}.runtime.eventsEvaluated`) }),
+      ...(runtime.triggersEmitted === undefined ? {} : { triggersEmitted: expectNonNegativeInteger(runtime.triggersEmitted, `${path}.runtime.triggersEmitted`) }),
+      ...(runtime.evaluationErrors === undefined ? {} : { evaluationErrors: expectNonNegativeInteger(runtime.evaluationErrors, `${path}.runtime.evaluationErrors`) }),
+      ...(runtime.lastError === undefined ? {} : { lastError: runtime.lastError === null ? null : expectString(runtime.lastError, `${path}.runtime.lastError`) }),
+    },
+  };
 }
 
 function parseTraceNode(value: unknown, path: string, depth: number): AlertTraceNode {

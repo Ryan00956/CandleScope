@@ -9,12 +9,23 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.alerts.models import VALID_ACTION_TYPES, VALID_TRIGGER_ON
+from app.alerts.models import DELIVERABLE_ACTION_TYPES, VALID_ACTION_TYPES, VALID_TRIGGER_ON
+from app.alerts.validation import normalize_after_trigger, validate_alert_expression
 from app.core.config import DATA_DIR
 
 
 class AlertStore:
     """Small local-first alert store with atomic writes."""
+
+    _LIFECYCLE_FIELDS = (
+        "target",
+        "triggerOn",
+        "expression",
+        "cooldownMs",
+        "expiresAt",
+        "maxTriggers",
+        "afterTrigger",
+    )
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (DATA_DIR / "alerts.json")
@@ -40,6 +51,17 @@ class AlertStore:
             rule_id = str(item.get("id") or "").strip() or self._new_rule_id()
             existing = rules.get(rule_id, {})
 
+            after_trigger = normalize_after_trigger(
+                self._pick(item, existing, "afterTrigger", "auto_disable")
+            )
+            max_triggers = self._optional_int(
+                self._pick(item, existing, "maxTriggers", 1)
+            )
+            if after_trigger == "keep":
+                max_triggers = None
+            elif after_trigger == "pause":
+                max_triggers = 1
+
             record = {
                 "schemaVersion": int(self._pick(item, existing, "schemaVersion", 1)),
                 "id": rule_id,
@@ -52,13 +74,26 @@ class AlertStore:
                 "actions": self._normalize_actions(self._pick(item, existing, "actions", [])),
                 "cooldownMs": max(0, int(self._pick(item, existing, "cooldownMs", 30_000) or 0)),
                 "expiresAt": self._optional_int(self._pick(item, existing, "expiresAt", None)),
-                "maxTriggers": self._optional_int(self._pick(item, existing, "maxTriggers", 1)),
+                "maxTriggers": max_triggers,
+                "afterTrigger": after_trigger,
                 "tags": self._normalize_tags(self._pick(item, existing, "tags", [])),
-                "triggerCount": int(existing.get("triggerCount") or item.get("triggerCount") or 0),
-                "lastTriggeredAt": existing.get("lastTriggeredAt") or item.get("lastTriggeredAt"),
+                "triggerCount": int(
+                    existing.get("triggerCount", item.get("triggerCount", 0)) or 0
+                ),
+                "lastTriggeredAt": existing.get("lastTriggeredAt", item.get("lastTriggeredAt")),
                 "createdAt": int(existing.get("createdAt") or item.get("createdAt") or now),
                 "updatedAt": now,
             }
+
+            if existing and (
+                (record["enabled"] and not bool(existing.get("enabled", True)))
+                or self._lifecycle_changed(existing, record)
+            ):
+                # Enabling a paused/one-shot rule and materially editing a rule
+                # both arm a new lifecycle.  Keeping the old count would make
+                # the apparently enabled rule permanently ineligible.
+                record["triggerCount"] = 0
+                record["lastTriggeredAt"] = None
 
             self._validate_rule(record)
             rules[rule_id] = record
@@ -71,7 +106,11 @@ class AlertStore:
             rule = data["rules"].get(rule_id)
             if rule is None:
                 return None
+            was_enabled = bool(rule.get("enabled", True))
             rule["enabled"] = bool(enabled)
+            if enabled and not was_enabled:
+                rule["triggerCount"] = 0
+                rule["lastTriggeredAt"] = None
             rule["updatedAt"] = int(time.time() * 1000)
             self._save(data)
             return rule
@@ -85,11 +124,26 @@ class AlertStore:
             self._save(data)
             return True
 
-    def list_history(self, *, limit: int = 100, rule_id: str | None = None) -> list[dict[str, Any]]:
+    def list_history(
+        self,
+        *,
+        limit: int = 100,
+        rule_id: str | None = None,
+        since_ms: int | None = None,
+        acknowledged: bool | None = None,
+    ) -> list[dict[str, Any]]:
         with self._lock:
             items = self._load()["history"]
             if rule_id:
                 items = [item for item in items if item.get("ruleId") == rule_id]
+            if since_ms is not None:
+                items = [item for item in items if int(item.get("createdAt") or 0) >= since_ms]
+            if acknowledged is not None:
+                items = [
+                    item
+                    for item in items
+                    if (item.get("acknowledgedAt") is not None) is acknowledged
+                ]
             return sorted(items, key=lambda item: item.get("createdAt", 0), reverse=True)[:limit]
 
     def append_history(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -107,6 +161,7 @@ class AlertStore:
                 "actions": event.get("actions") if isinstance(event.get("actions"), list) else [],
                 "createdAt": int(event.get("createdAt") or now),
                 "acknowledgedAt": event.get("acknowledgedAt"),
+                "dispatch": event.get("dispatch") if isinstance(event.get("dispatch"), list) else [],
             }
             if not record["ruleId"]:
                 raise ValueError("Alert history ruleId is required")
@@ -119,6 +174,124 @@ class AlertStore:
                 rule["updatedAt"] = now
             self._save(data)
             return record
+
+    def append_history_if_eligible(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Atomically enforce rule state, expiry, count, and cooldown."""
+        with self._lock:
+            data = self._load()
+            rule_id = str(event.get("ruleId") or "").strip()
+            rule = data["rules"].get(rule_id)
+            if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+                return None
+
+            now = int(time.time() * 1000)
+            created_at = int(event.get("createdAt") or now)
+            expires_at = rule.get("expiresAt")
+            if expires_at is not None and int(expires_at) <= now:
+                rule["enabled"] = False
+                rule["updatedAt"] = now
+                self._save(data)
+                return None
+
+            max_triggers = rule.get("maxTriggers")
+            trigger_count = int(rule.get("triggerCount") or 0)
+            if max_triggers is not None and trigger_count >= int(max_triggers):
+                if rule.get("afterTrigger", "auto_disable") == "auto_disable":
+                    rule["enabled"] = False
+                    rule["updatedAt"] = now
+                    self._save(data)
+                return None
+
+            last_triggered_at = rule.get("lastTriggeredAt")
+            cooldown_ms = max(0, int(rule.get("cooldownMs") or 0))
+            if (
+                last_triggered_at is not None
+                and cooldown_ms > 0
+                and created_at - int(last_triggered_at) < cooldown_ms
+            ):
+                return None
+
+            record = self._history_record(event, now=now)
+            data["history"].append(record)
+            trigger_count += 1
+            rule["triggerCount"] = trigger_count
+            rule["lastTriggeredAt"] = record["createdAt"]
+            rule["updatedAt"] = now
+            if rule.get("afterTrigger", "auto_disable") == "pause" or (
+                rule.get("afterTrigger", "auto_disable") == "auto_disable"
+                and max_triggers is not None
+                and trigger_count >= int(max_triggers)
+            ):
+                rule["enabled"] = False
+            self._save(data)
+            return record
+
+    def update_history_dispatch(
+        self,
+        event_id: str,
+        outcomes: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._load()
+            for item in data["history"]:
+                if item.get("id") == event_id:
+                    item["dispatch"] = outcomes
+                    self._save(data)
+                    return item
+            return None
+
+    def update_dispatch_receipt(
+        self,
+        event_id: str,
+        dispatch_id: str,
+        *,
+        status: str,
+        detail: str = "",
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._load()
+            for item in data["history"]:
+                if item.get("id") != event_id:
+                    continue
+                outcomes = item.get("dispatch") if isinstance(item.get("dispatch"), list) else []
+                for outcome in outcomes:
+                    if isinstance(outcome, dict) and outcome.get("dispatchId") == dispatch_id:
+                        outcome["status"] = str(status or "unknown")
+                        outcome["detail"] = str(detail or "")
+                        outcome["receiptAt"] = int(time.time() * 1000)
+                        self._save(data)
+                        return item
+                return None
+            return None
+
+    def acknowledge_history(self, event_id: str, acknowledged: bool) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._load()
+            for item in data["history"]:
+                if item.get("id") == event_id:
+                    item["acknowledgedAt"] = int(time.time() * 1000) if acknowledged else None
+                    self._save(data)
+                    return item
+            return None
+
+    @classmethod
+    def _history_record(cls, event: dict[str, Any], *, now: int) -> dict[str, Any]:
+        event_id = str(event.get("id") or "").strip() or cls._new_event_id()
+        record = {
+            "id": event_id,
+            "ruleId": str(event.get("ruleId") or "").strip(),
+            "eventType": event.get("eventType") or "alert.triggered",
+            "target": event.get("target") if isinstance(event.get("target"), dict) else {},
+            "message": event.get("message") or "",
+            "values": event.get("values") if isinstance(event.get("values"), dict) else {},
+            "actions": event.get("actions") if isinstance(event.get("actions"), list) else [],
+            "createdAt": int(event.get("createdAt") or now),
+            "acknowledgedAt": event.get("acknowledgedAt"),
+            "dispatch": event.get("dispatch") if isinstance(event.get("dispatch"), list) else [],
+        }
+        if not record["ruleId"]:
+            raise ValueError("Alert history ruleId is required")
+        return record
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -175,6 +348,14 @@ class AlertStore:
             return existing[key]
         return default
 
+    @classmethod
+    def _lifecycle_changed(
+        cls,
+        existing: dict[str, Any],
+        record: dict[str, Any],
+    ) -> bool:
+        return any(existing.get(field) != record.get(field) for field in cls._LIFECYCLE_FIELDS)
+
     @staticmethod
     def _optional_int(value: Any) -> int | None:
         if value is None or value == "":
@@ -226,9 +407,16 @@ class AlertStore:
             raise ValueError("Alert target symbol is required")
         if not isinstance(item.get("expression"), dict) or not item["expression"]:
             raise ValueError("Alert expression must be a non-empty object")
+        validate_alert_expression(item["expression"])
+        normalize_after_trigger(item.get("afterTrigger"))
+        max_triggers = item.get("maxTriggers")
+        if max_triggers is not None and int(max_triggers) <= 0:
+            raise ValueError("Alert maxTriggers must be positive or null")
         for action in item.get("actions") or []:
             if action.get("type") not in VALID_ACTION_TYPES:
                 raise ValueError(f"Unsupported alert action type: {action.get('type')}")
+            if action.get("enabled", True) and action.get("type") not in DELIVERABLE_ACTION_TYPES:
+                raise ValueError(f"Alert action channel is not available: {action.get('type')}")
 
     @staticmethod
     def _new_rule_id() -> str:

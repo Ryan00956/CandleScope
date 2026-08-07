@@ -67,6 +67,7 @@ import PluginPlatformToolbar from "../features/plugins/PluginPlatformToolbar.js"
 import PluginPlatformStatus from "../features/plugins/PluginPlatformStatus.js";
 import PluginLiveControl from "../features/plugins/PluginLiveControl.js";
 import { LIVE_RAIL_VIEW_IDS } from "../shared/marketRailLayout.js";
+import { ALERT_PANEL_OPEN_REQUEST_EVENT } from "../features/alerts/alertDeliveryClient.js";
 import { buildAppShellViewModel } from "./appShellViewModel.js";
 import type {
   AlertsShellRuntime,
@@ -325,6 +326,12 @@ function LiveChartCell({
   const openAlertsPanel = useCallback(() => setShowAlertsPanel(true), []);
   const closeAlertsPanel = useCallback(() => setShowAlertsPanel(false), []);
   const toggleAlertsPanel = useCallback(() => setShowAlertsPanel((value) => !value), []);
+  useEffect(() => {
+    if (!active) return undefined;
+    const handleOpenRequest = () => openAlertsPanel();
+    window.addEventListener(ALERT_PANEL_OPEN_REQUEST_EVENT, handleOpenRequest);
+    return () => window.removeEventListener(ALERT_PANEL_OPEN_REQUEST_EVENT, handleOpenRequest);
+  }, [active, openAlertsPanel]);
   const indicatorStreamIdentity = useMemo(
     () => ({ workspaceId, windowId, cellId: cell.id }),
     [cell.id, windowId, workspaceId],

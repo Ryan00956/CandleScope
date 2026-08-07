@@ -3,8 +3,10 @@ import { API_BASE } from "./apiConfig.js";
 import {
   parseAlertEvaluateResult,
   parseAlertHistory,
+  parseAlertHistoryEvent,
   parseAlertRule,
   parseAlertRules,
+  parseAlertSystemStatus,
   parseDeleteAlertRuleResponse,
 } from "../features/alerts/alertTypes.js";
 import type {
@@ -12,6 +14,7 @@ import type {
   AlertEvaluateResult,
   AlertHistoryEvent,
   AlertHistoryQuery,
+  AlertSystemStatus,
   AlertRequestOptions,
   AlertRule,
   AlertRulePayload,
@@ -124,13 +127,55 @@ export function deleteAlertRule(
 }
 
 export function fetchAlertHistory(
-  { limit = 100, ruleId = "" }: AlertHistoryQuery = {},
+  { limit = 100, ruleId = "", sinceMs, acknowledged }: AlertHistoryQuery = {},
   options: AlertRequestOptions = {},
 ): Promise<AlertHistoryEvent[]> {
   return request("/alerts/history", parseAlertHistory, {
-    params: { limit, rule_id: ruleId },
+    params: { limit, rule_id: ruleId, since_ms: sinceMs, acknowledged },
     ...alertSignalOptions(options.signal),
   });
+}
+
+export function setAlertHistoryAcknowledged(
+  eventId: string,
+  acknowledged: boolean,
+  options: AlertRequestOptions = {},
+): Promise<AlertHistoryEvent> {
+  return request(
+    `/alerts/history/${encodeURIComponent(eventId)}/acknowledged`,
+    parseAlertHistoryEvent,
+    {
+      method: "PATCH",
+      body: { acknowledged },
+      ...alertSignalOptions(options.signal),
+    },
+  );
+}
+
+export function recordAlertDispatchReceipt(
+  eventId: string,
+  dispatchId: string,
+  status: "delivered" | "denied" | "unsupported" | "error",
+  detail = "",
+  options: AlertRequestOptions = {},
+): Promise<AlertHistoryEvent> {
+  return request(
+    `/alerts/events/${encodeURIComponent(eventId)}/dispatch/${encodeURIComponent(dispatchId)}/receipt`,
+    parseAlertHistoryEvent,
+    {
+      method: "POST",
+      body: { status, detail },
+      ...alertSignalOptions(options.signal),
+    },
+  );
+}
+
+export function fetchAlertStatus(options: AlertRequestOptions = {}): Promise<AlertSystemStatus> {
+  return request("/alerts/status", parseAlertSystemStatus, alertSignalOptions(options.signal));
+}
+
+export function buildAlertEventStreamUrl(): string {
+  return buildUrl("/alerts/events/stream");
 }
 
 export function evaluateAlertExpression(

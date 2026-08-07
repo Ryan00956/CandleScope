@@ -23,6 +23,10 @@ class AlertActionDispatcher:
     def register(self, channel: AlertActionChannel) -> None:
         self._channels[channel.action_type] = channel
 
+    @property
+    def registered_types(self) -> list[str]:
+        return sorted(self._channels)
+
     async def dispatch(self, event: dict[str, Any], actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         outcomes: list[dict[str, Any]] = []
         for action in actions:
@@ -33,7 +37,7 @@ class AlertActionDispatcher:
             action_type = str(action.get("type") or "")
             channel = self._channels.get(action_type)
             if channel is None:
-                outcomes.append({"type": action_type, "status": "queued", "reason": "channel_not_registered"})
+                outcomes.append({"type": action_type, "status": "unsupported", "reason": "channel_not_registered"})
                 continue
 
             try:

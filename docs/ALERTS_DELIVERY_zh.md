@@ -55,16 +55,41 @@ HMAC_SHA256(secret, timestamp + "." + raw_request_body)
 快速重启/重试门禁：
 
 ```powershell
-python backend/scripts/soak_alerts_delivery.py --cycles 1000 --restart-every 25
+python backend/scripts/soak_alerts_delivery.py `
+  --cycles 1000 `
+  --restart-every 25 `
+  --crash-every 100 `
+  --retain-delivered 100 `
+  --sample-every-seconds 5 `
+  --report output/alerts-delivery-soak-quick.json
 ```
 
-正式 24 小时门禁：
+快速门禁故意只保留 100 条已送达 Outbox 记录，最终通过条件使用 SQLite
+中的累计计数；因此它会实际覆盖 retention，而不会把正常清理误报成丢失。
+
+正式 24 小时门禁必须从已提交的干净 HEAD 启动，并把状态与报告写到仓库外、
+按 Git SHA 隔离的 release-evidence 目录：
 
 ```powershell
+$sha = (git rev-parse HEAD).Trim()
+$evidence = "H:\program\CandleScope-alerts-release-evidence\$sha\alerts"
+New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+
 python backend/scripts/soak_alerts_delivery.py `
   --duration-seconds 86400 `
   --restart-every 25 `
-  --report output/alerts-delivery-soak-24h.json
+  --crash-every 100 `
+  --sample-every-seconds 30 `
+  --require-clean-head `
+  --state-dir "$evidence\state" `
+  --report "$evidence\alerts-delivery-soak-24h.json"
 ```
 
 该脚本不会访问外网；它使用生产 Facade、SQLite Outbox、worker 生命周期、历史回执与退避调度，并注入可重试的确定性失败。
+每次 `--crash-every` 会轮换制造 `staged`、已 claim 的 `processing`、已排期的
+`retrying`，子进程随后通过 `os._exit` 异常退出，父进程再用生产 worker 恢复。
+
+报告在运行中周期性原子更新，包含 Git SHA/脏工作树状态、累计投递/尝试/重试/
+死信计数、队列峰值、异常恢复次数、SQLite 文件大小以及进程 RSS 趋势。
+只有最终 `status=passed`、`passed=true` 和进程退出码 `0` 同时成立才算通过；
+`status=running` 只表示门禁尚在执行。

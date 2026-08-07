@@ -54,6 +54,12 @@ class AlertOutboxStore:
 
     def _ensure_schema(self) -> None:
         with self._connection() as connection:
+            metrics_existed = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'alert_delivery_metrics'
+                """
+            ).fetchone() is not None
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS alert_delivery_outbox (
@@ -75,8 +81,52 @@ class AlertOutboxStore:
                     ON alert_delivery_outbox(status, next_attempt_at, created_at);
                 CREATE INDEX IF NOT EXISTS idx_alert_delivery_event
                     ON alert_delivery_outbox(event_id);
+                CREATE TABLE IF NOT EXISTS alert_delivery_metrics (
+                    metric_key TEXT PRIMARY KEY,
+                    metric_value INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO alert_delivery_metrics (metric_key, metric_value)
+                VALUES (?, 0)
+                """,
+                (
+                    ("attempts",),
+                    ("delivered",),
+                    ("retry_scheduled",),
+                    ("dead_letter",),
+                ),
+            )
+            if not metrics_existed:
+                connection.execute(
+                    """
+                    UPDATE alert_delivery_metrics
+                    SET metric_value = MAX(
+                        metric_value,
+                        COALESCE((
+                            SELECT SUM(attempts) FROM alert_delivery_outbox
+                        ), 0)
+                    )
+                    WHERE metric_key = 'attempts'
+                    """,
+                )
+                for metric_key, status in (
+                    ("delivered", "delivered"),
+                    ("dead_letter", "dead_letter"),
+                ):
+                    connection.execute(
+                        """
+                        UPDATE alert_delivery_metrics
+                        SET metric_value = MAX(
+                            metric_value,
+                            (SELECT COUNT(*) FROM alert_delivery_outbox WHERE status = ?)
+                        )
+                        WHERE metric_key = ?
+                        """,
+                        (status, metric_key),
+                    )
 
     def stage(self, event: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
         config = action.get("config") if isinstance(action.get("config"), dict) else {}
@@ -177,14 +227,18 @@ class AlertOutboxStore:
             if row is None:
                 connection.commit()
                 return None
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE alert_delivery_outbox
                 SET status = 'processing', attempts = attempts + 1, updated_at = ?
-                WHERE delivery_id = ?
+                WHERE delivery_id = ? AND status IN ('pending', 'retrying')
                 """,
                 (now, row["delivery_id"]),
             )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return None
+            self._increment_metric(connection, "attempts")
             connection.commit()
             item = dict(row)
             item["status"] = "processing"
@@ -208,14 +262,16 @@ class AlertOutboxStore:
     def mark_retry(self, delivery_id: str, detail: str, next_attempt_at: int) -> None:
         now = int(time.time() * 1000)
         with self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE alert_delivery_outbox
                 SET status = 'retrying', next_attempt_at = ?, last_error = ?, updated_at = ?
-                WHERE delivery_id = ?
+                WHERE delivery_id = ? AND status = 'processing'
                 """,
                 (int(next_attempt_at), self._bounded_detail(detail), now, delivery_id),
             )
+            if cursor.rowcount == 1:
+                self._increment_metric(connection, "retry_scheduled")
 
     def prune_terminal(self, *, retain_delivered: int, retain_dead_letter: int) -> int:
         removed = 0
@@ -249,14 +305,38 @@ class AlertOutboxStore:
         delivered_at: int | None = None,
     ) -> None:
         with self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE alert_delivery_outbox
                 SET status = ?, last_error = ?, updated_at = ?, delivered_at = ?
-                WHERE delivery_id = ?
+                WHERE delivery_id = ? AND status NOT IN ('delivered', 'dead_letter')
                 """,
-                (status, self._bounded_detail(detail), now, delivered_at, delivery_id),
+                (
+                    status,
+                    self._bounded_detail(detail),
+                    now,
+                    delivered_at,
+                    delivery_id,
+                ),
             )
+            if cursor.rowcount == 1:
+                self._increment_metric(connection, status)
+
+    @staticmethod
+    def _increment_metric(
+        connection: sqlite3.Connection,
+        metric_key: str,
+        amount: int = 1,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO alert_delivery_metrics (metric_key, metric_value)
+            VALUES (?, ?)
+            ON CONFLICT(metric_key) DO UPDATE
+            SET metric_value = metric_value + excluded.metric_value
+            """,
+            (metric_key, int(amount)),
+        )
 
     def list_entries(self, *, limit: int = 100) -> list[dict[str, Any]]:
         safe_limit = min(1_000, max(1, int(limit)))
@@ -277,6 +357,12 @@ class AlertOutboxStore:
                 str(row["status"]): int(row["count"])
                 for row in connection.execute(
                     "SELECT status, COUNT(*) AS count FROM alert_delivery_outbox GROUP BY status"
+                ).fetchall()
+            }
+            totals = {
+                str(row["metric_key"]): int(row["metric_value"])
+                for row in connection.execute(
+                    "SELECT metric_key, metric_value FROM alert_delivery_metrics"
                 ).fetchall()
             }
             oldest = connection.execute(
@@ -300,6 +386,10 @@ class AlertOutboxStore:
             "retrying": counts.get("retrying", 0),
             "delivered": counts.get("delivered", 0),
             "deadLetter": counts.get("dead_letter", 0),
+            "totalAttempts": totals.get("attempts", 0),
+            "totalDelivered": totals.get("delivered", 0),
+            "totalRetryScheduled": totals.get("retry_scheduled", 0),
+            "totalDeadLetter": totals.get("dead_letter", 0),
             "oldestQueuedAt": oldest["value"] if oldest is not None else None,
             "nextAttemptAt": next_due["value"] if next_due is not None else None,
         }

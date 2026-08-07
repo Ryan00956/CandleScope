@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -269,6 +270,57 @@ def test_outbox_prunes_only_terminal_rows(tmp_path: Path) -> None:
     assert snapshot["delivered"] == 2
     assert snapshot["deadLetter"] == 0
     assert snapshot["staged"] == 1
+    assert snapshot["totalDelivered"] == 4
+    assert snapshot["totalDeadLetter"] == 1
+
+
+def test_outbox_cumulative_metrics_are_idempotent_and_survive_reopen(tmp_path: Path) -> None:
+    store_path = tmp_path / "metrics-outbox.sqlite3"
+    store = AlertOutboxStore(store_path)
+    entry = store.stage(
+        {"id": "event-metrics", "ruleId": "rule-1", "message": "hit"},
+        {"type": "webhook", "config": {"url": "https://hooks.example.com/a"}},
+    )
+    store.activate_event("event-metrics")
+    claimed = store.claim_due(now_ms=entry["nextAttemptAt"] + 1_000)
+    assert claimed is not None
+    store.mark_retry(entry["deliveryId"], "http_503", entry["nextAttemptAt"] + 2_000)
+    retried = store.claim_due(now_ms=entry["nextAttemptAt"] + 3_000)
+    assert retried is not None
+    store.mark_delivered(entry["deliveryId"], "http_204")
+    store.mark_delivered(entry["deliveryId"], "duplicate completion")
+    assert store.prune_terminal(retain_delivered=0, retain_dead_letter=0) == 1
+
+    snapshot = AlertOutboxStore(store_path).snapshot()
+
+    assert snapshot["delivered"] == 0
+    assert snapshot["totalAttempts"] == 2
+    assert snapshot["totalRetryScheduled"] == 1
+    assert snapshot["totalDelivered"] == 1
+    assert snapshot["totalDeadLetter"] == 0
+
+
+def test_outbox_backfills_cumulative_metrics_when_upgrading_legacy_database(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "legacy-outbox.sqlite3"
+    store = AlertOutboxStore(store_path)
+    entry = store.stage(
+        {"id": "legacy-event", "ruleId": "rule-1", "message": "hit"},
+        {"type": "webhook", "config": {"url": "https://hooks.example.com/a"}},
+    )
+    store.activate_event("legacy-event")
+    assert store.claim_due(now_ms=entry["nextAttemptAt"] + 1_000) is not None
+    store.mark_delivered(entry["deliveryId"], "http_204")
+    with sqlite3.connect(store_path) as connection:
+        connection.execute("DROP TABLE alert_delivery_metrics")
+
+    snapshot = AlertOutboxStore(store_path).snapshot()
+
+    assert snapshot["totalAttempts"] == 1
+    assert snapshot["totalDelivered"] == 1
+    assert snapshot["totalRetryScheduled"] == 0
+    assert snapshot["totalDeadLetter"] == 0
 
 
 def test_retry_schedule_survives_worker_recreation(tmp_path: Path) -> None:

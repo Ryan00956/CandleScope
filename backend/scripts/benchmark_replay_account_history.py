@@ -13,6 +13,7 @@ import statistics
 import sys
 import tempfile
 import time
+from contextlib import closing
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -385,7 +386,7 @@ async def _run_case(root: Path, *, track_count: int, iterations: int) -> dict[st
             ),
             "global_events_recorded": bool(global_events),
         }
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection, connection:
             quick_check = connection.execute("PRAGMA quick_check").fetchone()
             foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
             database_page_bytes = (

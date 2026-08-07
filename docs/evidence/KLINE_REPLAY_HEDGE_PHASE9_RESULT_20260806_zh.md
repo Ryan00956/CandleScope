@@ -136,6 +136,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 修复后定向集 `15 passed`，Ruff 通过；基线一致的 Python `3.13.9`、1/2/4/8 FULL、每轨持仓、20 次迭代实跑全部 PASS。8 轨 normal p95 `191.464 ms`，低于冻结 `500 ms` 上限；所有 case 的 auditor、账本对账、资金费累计、持久化结算、SQLite quick/foreign-key checks 均通过。
 - 本节提交会再次生成新 HEAD，因此 `d1e8d60c` 的全部 PASS/FAIL artifacts 只作为诊断记录，不能进入最终 manifest；新 HEAD 仍须从真实来源、全量 checks、rollback、smoke、formal benchmark 到 4 小时 soak 全部重跑。
 
+### 3.9 formal benchmark 第二轮 Windows 清理失败处置
+
+- `def46cf105047daf47c5e4001adca4e1ec8d49fd` 的真实来源、全量 checks（backend `3246 passed`、frontend Node `2950 tests`）、完整构建 rollback 与浏览器短 smoke 均通过。formal benchmark 的 core、multi-track、segments、fast-forward 和 historical-book 也先后通过；其中 BAR `5617.42 events/s`、AGG_TRADE `946.12 events/s`，fast-forward 优化路径 `279.591 s`、完整参考路径 `7043.801 s` 且状态完全等价。随后 account-history 的全部 case 已执行完，但 Windows 删除最后一个 `positioned-8.db` 时返回 `WinError 32`，编排器正确停止且未生成顶层 benchmark PASS。
+- 第一轮已修复归档源 connection，但容量脚本自身的诊断查询仍使用 `with sqlite3.connect(database)`。Python SQLite connection context 只负责 commit/rollback，不负责关闭连接；删除之前手工 `connection.close()` 后，文件句柄在 `TemporaryDirectory` 退出时仍存活。
+- 诊断 connection 现同样使用 `closing(sqlite3.connect(...))` 与 transaction context 双层生命周期。新增端到端回归用例实际运行 1/2/4/8 四个 case，并要求返回后临时根目录为空，不再只验证单个归档源文件可删除。
+- Python `3.13.9` 正式参数复验（1/2/4/8 FULL、20 次迭代）全部 PASS，8 轨 p95 `171.033 ms`，低于冻结 `500 ms`；所有语义、资金费、审计、SQLite 检查通过，命令退出 `0` 且临时根目录 `remaining=0`。
+- 本修复与记录再次产生新 HEAD，因此 `def46cf1` 的上述 PASS 和长耗时组件均只作诊断，不继承到最终 manifest；正式证据必须从头完整重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

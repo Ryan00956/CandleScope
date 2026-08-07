@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from app.replay.canonical import canonical_sha256
 from app.replay.training.models import REPLAY_V2_PROTOCOL
-from scripts.benchmark_replay_account_history import _request
+from scripts.benchmark_replay_account_history import _request, run_benchmark
 from tests.fixtures.replay.account_history import build_account_history_archive
 
 
@@ -50,6 +51,17 @@ def test_account_history_benchmark_checks_authoritative_funding_state() -> None:
     assert 'projection["portfolio"]["funding_cashflow"]' in source
     assert "replay_training_funding_settlement" in source
     assert 'projection["portfolio"]["ledger"]["entries"]' not in source
+
+
+def test_account_history_benchmark_releases_all_temporary_databases(
+    tmp_path: Path,
+) -> None:
+    report = asyncio.run(
+        run_benchmark(iterations=3, temporary_storage_root=tmp_path)
+    )
+
+    assert [case["track_count"] for case in report["cases"]] == [1, 2, 4, 8]
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_positioned_exact_account_capacity_evidence_covers_1_2_4_8_full_tracks(

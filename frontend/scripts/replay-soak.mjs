@@ -1121,6 +1121,11 @@ async function hedgeBrowserAccountContinuityAudit({
   await selectReplayInterval(cdp, "1m", timeoutMs);
   const afterPeriodSwitch = await readServerAccountProof(backendOrigin, runId);
 
+  await waitForReplayIntegrityIdle(
+    cdp,
+    timeoutMs,
+    "HEDGE continuity pre-reload integrity idle",
+  );
   await evaluate(cdp, "globalThis.__CANDLESCOPE_HEDGE_CONTINUITY_OLD_DOCUMENT__ = true");
   await cdp.send("Page.reload", { ignoreCache: true });
   await waitForValue(
@@ -1351,6 +1356,23 @@ async function replayStatus(cdp) {
       bars: Number((status.innerText.match(/([0-9]+) (?:display )?bars/) || [])[1] || 0),
     };
   })()`);
+}
+
+async function waitForReplayIntegrityIdle(cdp, timeoutMs, label) {
+  // State changes schedule an integrity refresh 50 ms later. Let that effect
+  // start before accepting an idle observation, then require the complete
+  // Promise.all projection (integrity/rules/equity/drawing/report) to settle.
+  await wait(100);
+  return waitForValue(cdp, `(() => {
+    const status = document.querySelector('#replay-status-bar, #status-bar[data-runtime-source="replay"]');
+    if (!(status instanceof HTMLElement)) return null;
+    const operation = status.dataset.replayIntegrityOperation || "";
+    const timeDisclosurePolicy = status.dataset.replayTimeDisclosurePolicy || "";
+    const resultLabel = status.dataset.replayResultLabel || "";
+    return operation === "" && timeDisclosurePolicy !== "" && resultLabel !== ""
+      ? { operation, timeDisclosurePolicy, resultLabel }
+      : null;
+  })()`, timeoutMs, label);
 }
 
 async function waitForReplayStatus(cdp, predicateSource, timeoutMs, label) {
@@ -2766,6 +2788,11 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId
     const diagnosticsDuring = await readJson(diagnosticsUrl);
     const subscriberCountDuring = Number(actorDiagnostics(diagnosticsDuring, sessionId)?.subscribers ?? 0);
     const targetCountDuring = (await readJson(`${debugBase}/json/list`)).filter((item) => item.type === "page").length;
+    await waitForReplayIntegrityIdle(
+      page.cdp,
+      timeoutMs,
+      "lifecycle pre-reload integrity idle",
+    );
     await evaluate(page.cdp, "globalThis.__CANDLESCOPE_REPLAY_SOAK_OLD_DOCUMENT__ = true");
     await page.cdp.send("Page.reload", { ignoreCache: true });
     await waitForValue(
@@ -2787,6 +2814,10 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId
       { resume: false },
     );
     assert(capture.exceptions.length === 0, "lifecycle target raised runtime exception", capture.exceptions);
+    const apiFailures = capture.responses.filter((item) => (
+      /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url) && item.status >= 400
+    ));
+    assert(apiFailures.length === 0, "lifecycle replay API returned failures", apiFailures);
     result = {
       elapsedMs: Date.now() - opened,
       before,
@@ -2795,6 +2826,7 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId
       afterMetrics,
       subscriberCountDuring,
       targetCountDuring,
+      apiFailures,
       consoleErrors: capture.consoleErrors,
     };
     return result;

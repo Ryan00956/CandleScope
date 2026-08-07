@@ -48,6 +48,10 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   const historicalRollback = fs.readFileSync(path.join(scriptDirectory, "replay-rollback-drill.mjs"), "utf8");
   const powershellRollback = fs.readFileSync(path.join(scriptDirectory, "replay-rollback-drill.ps1"), "utf8");
   const soak = fs.readFileSync(path.join(scriptDirectory, "replay-soak.mjs"), "utf8");
+  const trainingShell = fs.readFileSync(
+    path.join(frontendRoot, "src", "features", "replay", "ReplayTrainingPageShell.tsx"),
+    "utf8",
+  );
   assert.match(historicalSmoke, /replay-soak\.mjs/);
   assert.match(historicalRollback, /replay-v2-rollback-drill\.mjs/);
   assert.match(powershellRollback, /replay-v2-rollback-drill\.mjs/);
@@ -64,6 +68,13 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /railView: "replay-paper"/);
   assert.doesNotMatch(soak, /text: "纸面交易"/);
   assert.match(soak, /data-replay-action="place-order"/);
+  assert.match(soak, /HEDGE continuity pre-reload integrity idle/);
+  assert.match(soak, /lifecycle pre-reload integrity idle/);
+  assert.match(soak, /lifecycle replay API returned failures/);
+  assert.match(
+    trainingShell,
+    /"data-replay-integrity-operation": integrityRuntime\.operation \?\? ""/,
+  );
   assert.match(soak, /data-side="\$\{side\}"/);
   assert.match(soak, /\{ action: "place-order", side: "SELL" \}/);
   assert.match(soak, /order\?\.active\?\.side === "SELL"/);

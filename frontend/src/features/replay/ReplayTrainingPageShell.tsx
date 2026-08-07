@@ -1271,6 +1271,7 @@ export default function ReplayTrainingPageShell({
             "data-replay-control-pending": review === null
               ? viewer.controlPending?.type ?? ""
               : "",
+            "data-replay-integrity-operation": integrityRuntime.operation ?? "",
             "data-replay-time-disclosure-policy": integrityRuntime.integrity?.effective_time_disclosure_policy ?? "",
             "data-replay-result-label": integrityRuntime.integrity?.result_label ?? "",
             "data-replay-public-time-projections": publicTimeRuntime.projectedCount,

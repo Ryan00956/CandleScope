@@ -208,6 +208,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 修复没有从采样中删数据，也没有放宽 `64 MiB / 32 MiB`：持续 Network inspector 的原始 samples 仍完整保存为 `inspectorObservedHeap`，只用于诊断和盲审；产品泄漏门禁改用三处显式 `Network.disable -> resources clear -> forced GC` 检查点。初始值在 blind runtime 开始前取自主页面，终值在 blind runtime、结束报告和导出全部完成后取自主页面；半程值取最接近 `duration/2` 的全新 lifecycle reload 页面并在关闭前清空 inspector。半程页面没有继承主页面前半程的任何潜在产品泄漏，因此 `final primary - fresh half` 是比同页 late delta 更保守的上界，不会把真实泄漏洗掉；盲审从初始恢复 Network 后开始，到最终停用 Network 前结束，不产生审计空窗。
 - soak 结果顶层 `passed` 现在与 acceptance 的严格布尔汇总一致，失败 partial result 不再出现 `passed=true` 的矛盾状态；非 replay 请求的 boundary-generation bookkeeping 也在 loading finish 时释放。定向 harness 新增 Network 暂停/恢复、最终保持禁用、半程选择/增长计算三组回归，`35 passed`；正式 `tsx` frontend 全量测试 `2957 passed`，双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 通过。修复提交后的 clean HEAD 仍须先通过 40-cycle 压缩复验，再从真实来源、全量 checks、formal benchmark、真实浏览器 smoke、rollback、正式 4 小时 soak 到 release manifest 全部重跑；任何 `327865ad` artifact 都不能进入最终 manifest。
 
+### 3.18 计划重载取消完整性查询的代理 500
+
+- `a54b83d7210272a19f594cd445c04d1fd1d99d40` 的高密度复验完成 40/40 训练动作、archive lifecycle、lifecycle reload、订单成交与适配器恢复/重连，但最终主页面网络门禁发现同一 Run 的 `equity`、`rules`、`integrity` 三个 500，因此正确写入失败 artifact，未把功能轮次完成误报为 PASS。Vite 在同一时刻记录这三个 URL 的 `socket hang up`；服务随后继续完成剩余轮次，每轮 backend health 均通过，未出现 actor、SQLite 或进程退出故障。
+- 三个端点与 `current-drawing`、终态 `report` 同属 `useReplayIntegrityRuntime.refresh()` 的单个 `Promise.all`。产品/周期切换会安排一次 50 ms 延迟刷新，HEDGE 浏览器连续性测试旧流程在验证服务器账户摘要后立即执行 `Page.reload`；如果本批刷新尚未结束，旧 document 被导航撤销，开发代理会把仍在途的 upstream 请求记录为 500。失败三项正是当时尚未结束的批内请求，属于测试计划重载与自身请求并发，而不是允许忽略的 API 业务错误。
+- 状态栏现公开只读 `data-replay-integrity-operation`；主页面连续性重载与每个临时 lifecycle 页面都先等待 50 ms 调度窗口过去，并要求完整性 operation 空闲、时间披露策略和结果标签已经由整批响应填充，再触发计划重载。临时 lifecycle capture 同时新增 replay API `>=400` 硬断言；主页面最终 500 门禁保持原样，没有添加状态码白名单、取消时间窗豁免或代理特判。
+- 增量验证为 soak harness `35 passed`、frontend 全量 `2957 passed`、双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 通过。修复提交后必须从 clean HEAD 重新运行真实浏览器短测和 40-cycle 压缩门禁；只有两级 API 失败断言、原 `64 MiB / 32 MiB` 产品堆阈值以及其余 acceptance 全部通过，才进入正式 4 小时证据链。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

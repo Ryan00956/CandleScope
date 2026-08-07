@@ -23,6 +23,8 @@ interface LogicalBatchSubscription {
   closed: boolean;
   serverState: "absent" | "subscribing" | "subscribed";
   activeIntervals: IntervalString[];
+  retryAttempt: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface BatchKlineStreamCoordinatorOptions {
@@ -57,6 +59,17 @@ export class BatchKlineStreamCoordinator {
   private socket: KlineStreamSocket | null = null;
   private sequence = 0;
   private requestSequence = 0;
+  private readonly counts = {
+    messages: 0,
+    klines: 0,
+    closed: 0,
+    amended: 0,
+    parseErrors: 0,
+    socketOpens: 0,
+    socketCloses: 0,
+    retriesScheduled: 0,
+    retriesSent: 0,
+  };
 
   constructor(options: BatchKlineStreamCoordinatorOptions = {}) {
     this.socketFactory = options.socketFactory || ((url) => new WebSocket(url));
@@ -74,6 +87,8 @@ export class BatchKlineStreamCoordinator {
       closed: false,
       serverState: "absent" as const,
       activeIntervals: [],
+      retryAttempt: 0,
+      retryTimer: null,
     };
     subscription.controller = {
       readyState: () => this.socket?.readyState,
@@ -111,6 +126,15 @@ export class BatchKlineStreamCoordinator {
         0,
       ),
       clientIds: [...this.subscriptions.keys()].sort(),
+      serverStates: [...this.subscriptions.values()].reduce<Record<string, number>>((counts, item) => {
+        counts[item.serverState] = (counts[item.serverState] || 0) + 1;
+        return counts;
+      }, {}),
+      activeLogicalSubscriptions: [...this.subscriptions.values()].reduce(
+        (total, item) => total + item.activeIntervals.length,
+        0,
+      ),
+      counts: { ...this.counts },
     };
   }
 
@@ -119,7 +143,10 @@ export class BatchKlineStreamCoordinator {
   }
 
   closeAll(): void {
-    this.subscriptions.forEach((item) => { item.closed = true; });
+    this.subscriptions.forEach((item) => {
+      item.closed = true;
+      this.clearRetry(item);
+    });
     this.subscriptions.clear();
     const socket = this.socket;
     this.socket = null;
@@ -131,10 +158,14 @@ export class BatchKlineStreamCoordinator {
     const socket = this.socketFactory(this.url);
     this.socket = socket;
     socket.onopen = () => {
+      this.counts.socketOpens += 1;
       const active = [...this.subscriptions.values()].filter((item) => (
         !item.closed && item.intervals.length > 0
       ));
-      active.forEach((item) => item.options.onOpen?.(item.controller));
+      active.forEach((item) => {
+        this.clearRetry(item);
+        item.options.onOpen?.(item.controller);
+      });
       this.sendCommand("subscribe", active);
     };
     socket.onmessage = (event) => this.handleMessage(event);
@@ -142,11 +173,13 @@ export class BatchKlineStreamCoordinator {
       this.subscriptions.forEach((item) => item.options.onError?.(event, item.controller));
     };
     socket.onclose = (event) => {
+      this.counts.socketCloses += 1;
       if (this.socket === socket) this.socket = null;
       this.subscriptions.forEach((item) => {
         item.serverState = "absent";
         item.activeIntervals = [];
         item.options.onClose?.(event, item.controller);
+        this.scheduleRetry(item);
       });
     };
   }
@@ -190,6 +223,7 @@ export class BatchKlineStreamCoordinator {
     if (subscription.closed) return;
     this.sendCommand("unsubscribe", [subscription]);
     subscription.closed = true;
+    this.clearRetry(subscription);
     this.subscriptions.delete(subscription.clientId);
     if (this.subscriptions.size === 0) {
       const socket = this.socket;
@@ -200,6 +234,7 @@ export class BatchKlineStreamCoordinator {
 
   private handleMessage(event: MessageEvent<string>): void {
     if (event.data === "pong") return;
+    this.counts.messages += 1;
     let record: JsonRecord = {};
     try {
       const parsed: unknown = JSON.parse(event.data);
@@ -227,6 +262,11 @@ export class BatchKlineStreamCoordinator {
       } else if (result.kind === "backfill") {
         subscription.options.onBackfillCompleted?.(result.message, subscription.controller);
       } else if (result.kind === "kline") {
+        this.counts.klines += 1;
+        if (result.message.data.is_closed === true) {
+          if (record.event_type === "bar.amended") this.counts.amended += 1;
+          else this.counts.closed += 1;
+        }
         subscription.options.onKline?.({
           interval: result.message.interval,
           tick: result.message.data,
@@ -234,6 +274,7 @@ export class BatchKlineStreamCoordinator {
         }, subscription.controller);
       }
     } catch (error) {
+      this.counts.parseErrors += 1;
       const clientId = text(record?.client_id);
       const subscription = this.subscriptions.get(clientId);
       if (subscription) subscription.options.onParseError?.(error, event, subscription.controller);
@@ -260,6 +301,10 @@ export class BatchKlineStreamCoordinator {
         ? "absent"
         : "subscribed";
       subscription.activeIntervals = active;
+      if (subscription.serverState === "subscribed") {
+        subscription.retryAttempt = 0;
+        this.clearRetry(subscription);
+      }
     } else if (action === "update" && type !== "error") {
       subscription.serverState = "subscribed";
       subscription.activeIntervals = active;
@@ -282,10 +327,35 @@ export class BatchKlineStreamCoordinator {
         .filter((failure) => Boolean(failure.interval)),
     };
     subscription.options.onControlMessage?.(message, subscription.controller);
+    if (action === "subscribe" && subscription.serverState === "absent") {
+      this.scheduleRetry(subscription);
+    }
     if (action === "subscribe"
       && subscription.serverState === "subscribed"
       && JSON.stringify(subscription.activeIntervals) !== JSON.stringify(subscription.intervals)) {
       this.sendCommand("update", [subscription]);
     }
+  }
+
+  private clearRetry(subscription: LogicalBatchSubscription): void {
+    if (subscription.retryTimer !== null) clearTimeout(subscription.retryTimer);
+    subscription.retryTimer = null;
+  }
+
+  private scheduleRetry(subscription: LogicalBatchSubscription): void {
+    if (subscription.closed || subscription.intervals.length === 0 || subscription.retryTimer !== null) return;
+    const delayMs = Math.min(5_000, 250 * (2 ** Math.min(5, subscription.retryAttempt)));
+    subscription.retryAttempt += 1;
+    this.counts.retriesScheduled += 1;
+    subscription.retryTimer = setTimeout(() => {
+      subscription.retryTimer = null;
+      if (subscription.closed || subscription.serverState !== "absent") return;
+      if (!this.isOpen()) {
+        this.ensureSocket();
+        return;
+      }
+      this.counts.retriesSent += 1;
+      this.sendCommand("subscribe", [subscription]);
+    }, delayMs);
   }
 }

@@ -53,7 +53,7 @@ export function chartWorkspaceRuntimeLimits(
     maxWindowsPerWorkspace,
     maxCellsPerApp: flags.multiChart64Enabled
       ? MAX_CELLS_PER_APP
-      : Math.min(MAX_CELLS_PER_APP, maxCellsPerWindow * maxWindowsPerWorkspace),
+      : maxCellsPerWindow,
   };
 }
 

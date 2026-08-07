@@ -31,7 +31,7 @@ export interface MarketDataWorkspaceProviderProps extends PropsWithChildren {
 }
 
 interface WindowBrokerDiagnosticsHandle {
-  snapshot(): Record<string, unknown>;
+  snapshot(options?: { compact?: boolean }): Record<string, unknown>;
 }
 
 export function MarketDataWorkspaceProvider({
@@ -117,16 +117,59 @@ export function MarketDataWorkspaceProvider({
       __CANDLESCOPE_WINDOW_BROKER__?: WindowBrokerDiagnosticsHandle;
     };
     const handle: WindowBrokerDiagnosticsHandle = {
-      snapshot: () => ({
-        enabled: resources.brokerEnabled,
-        klineBatchEnabled: batchStreamEnabled,
-        indicator: resources.indicatorStreamCoordinator?.diagnostics() || null,
-        klineHttp: resources.requestCoordinator?.diagnostics() || null,
-        klineStream: resources.streamCoordinator.diagnostics(),
-        scheduler: resources.workScheduler?.diagnostics() || null,
-        seriesStores: resources.windowRegistry.entries().length,
-        sharedSeries: resources.windowRegistry.sharedSnapshotDiagnostics(),
-      }),
+      snapshot: (options = {}) => {
+        const indicator = resources.indicatorStreamCoordinator?.diagnostics() || null;
+        const klineHttp = resources.requestCoordinator?.diagnostics() || null;
+        const klineStream = resources.streamCoordinator.diagnostics() as Record<string, unknown>;
+        const scheduler = resources.workScheduler?.diagnostics() || null;
+        const common = {
+          enabled: resources.brokerEnabled,
+          klineBatchEnabled: batchStreamEnabled,
+          authoritativeCommits: (scheduler?.cells || []).reduce(
+            (sum, cell) => sum + Number(cell.committed?.["authoritative-final"] || 0),
+            0,
+          ),
+          seriesStores: resources.windowRegistry.entries().length,
+          sharedSeries: resources.windowRegistry.sharedSnapshotDiagnostics(),
+        };
+        if (!options.compact) {
+          return { ...common, indicator, klineHttp, klineStream, scheduler };
+        }
+        return {
+          ...common,
+          indicator: indicator ? {
+            logicalClients: indicator.logicalClients,
+            maxSubscriptions: indicator.maxSubscriptions,
+            physicalShards: indicator.physicalShards,
+            subscriptions: indicator.subscriptions,
+          } : null,
+          klineHttp: klineHttp ? {
+            completedPhysical: klineHttp.completedPhysical,
+            joinedLogical: klineHttp.joinedLogical,
+            logicalInflight: klineHttp.logicalInflight,
+            physicalInflight: klineHttp.physicalInflight,
+            totalLogical: klineHttp.totalLogical,
+            totalPhysical: klineHttp.totalPhysical,
+          } : null,
+          klineStream: {
+            mode: klineStream["mode"],
+            physicalStreams: klineStream["physicalStreams"],
+            open: klineStream["open"],
+            logicalSubscribers: klineStream["logicalSubscribers"],
+            logicalSubscriptions: klineStream["logicalSubscriptions"],
+            activeLogicalSubscriptions: klineStream["activeLogicalSubscriptions"],
+            counts: klineStream["counts"],
+          },
+          scheduler: scheduler ? {
+            activeAsync: scheduler.activeAsync,
+            activeHydration: scheduler.activeHydration,
+            disposed: scheduler.disposed,
+            pendingAsync: scheduler.pendingAsync,
+            pendingFrames: scheduler.pendingFrames,
+            windowVisible: scheduler.windowVisible,
+          } : null,
+        };
+      },
     };
     globalRef.__CANDLESCOPE_WINDOW_BROKER__ = handle;
     return () => {

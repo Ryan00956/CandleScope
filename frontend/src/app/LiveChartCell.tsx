@@ -43,7 +43,10 @@ import {
   type WorkspaceCellDensity,
 } from "../features/chart-workspace/chartWorkspaceGeometry.js";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime.js";
-import { initialViewportCountBackCapForCellCount } from "../features/market-data/useChartInitialLoad.js";
+import {
+  initialViewportCountBackCapForCellCount,
+  shouldEnableWorkspaceIntervalPrefetch,
+} from "../features/market-data/useChartInitialLoad.js";
 import { useMarketDataWorkspaceResources } from "../features/market-data/marketDataWorkspaceContext.js";
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
@@ -239,6 +242,8 @@ function LiveChartCell({
     realtimePriceRef,
     foregroundPreloadGate,
     backgroundPrefetchEnabled: active,
+    intervalPrefetchEnabled: active
+      && shouldEnableWorkspaceIntervalPrefetch(layoutCellIds.length),
     schedulerCellId: cell.id,
     workspaceId,
     windowId,
@@ -299,11 +304,11 @@ function LiveChartCell({
     });
   }, [cell.id, onPriceScaleChange]);
 
-  const [initialIndicators] = useState(cell.indicators);
   const indicatorPersistence = useMemo<ActiveIndicatorPersistence>(() => ({
-    load: () => initialIndicators,
+    controlled: true,
+    load: () => cell.indicators,
     save: (indicators) => onIndicatorsChange(cell.id, indicators),
-  }), [cell.id, initialIndicators, onIndicatorsChange]);
+  }), [cell.id, cell.indicators, onIndicatorsChange]);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
@@ -569,6 +574,12 @@ function LiveChartCell({
         data-density={density}
         data-rendering-paused={obscured ? "true" : "false"}
         data-market-data-ready={marketData.status.barCount > 0 ? "true" : "false"}
+        data-market-data-settled={marketData.status.barCount > 0
+          && !marketData.view.loading
+          && !marketData.status.initialHistoryPending
+          && !marketData.status.loadingMoreLeft
+          ? "true"
+          : "false"}
         data-work-tier={workScheduler?.tier(cell.id) || "fallback"}
         data-active={active ? "true" : "false"}
         data-layout-role={layoutRole ?? "standard"}

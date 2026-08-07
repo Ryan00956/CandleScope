@@ -52,6 +52,16 @@ test("default-off and partially enabled flags can only tighten hard limits", () 
     maxCellsPerApp: 16,
   });
 
+  const sixteenWithNativeWindows = resolveChartWorkspaceFeatureFlags({
+    MULTI_CHART_16_ENABLED: "1",
+    MULTI_WINDOW_ENABLED: "1",
+  });
+  assert.deepEqual(chartWorkspaceRuntimeLimits(sixteenWithNativeWindows), {
+    maxCellsPerWindow: 16,
+    maxWindowsPerWorkspace: 4,
+    maxCellsPerApp: 16,
+  });
+
   const full = resolveChartWorkspaceFeatureFlags({
     MULTI_CHART_16_ENABLED: true,
     MULTI_WINDOW_ENABLED: 1,

@@ -1,6 +1,6 @@
 # CandleScope 单窗口 16 图、四窗口 64 图执行文档
 
-> 状态：`IN_PROGRESS_PHASE_7_COMPLETE_PHASE_6_HARDWARE_GATE_PENDING`。Phase 0～5 已完成并通过各节记录的门禁；Phase 6 的桌面壳实现已通过当前单显示器主机的真实 Electron evidence，但“四个真实显示器及混合 DPI 拔插”仍因本机只暴露 1 个逻辑显示器而待验；Phase 7 的 WorkspaceBus、跨窗 Link、全应用预算、64 路 W1/W2 身份和共享快照恢复已经完成。Phase 8 尚未完成。所有多图、窗口 broker、批量 K 线和原生多窗口 flags 仍默认关闭；本文尚未宣称发布支持四屏 64 图，不自动授权合并、发布或默认启用。
+> 状态：`PHASE_8_IMPLEMENTATION_COMPLETE_HARDWARE_AND_REVIEW_PENDING`。Phase 0～8 的实现、自动化门禁、四原生窗口 64 图 W1～W3/F1～F3 实现矩阵、精确 4 小时 soak、64 → 16 → 4 回滚、当前代码 unpacked package 双 fresh-process 和全量基线差分均已完成。当前主机只暴露 1 个逻辑显示器，因此“四个真实显示器拔插及混合 DPI”仍待外部硬件验收；默认 flag 切换仍待独立 release review。所有多图、窗口 broker、批量 K 线和原生多窗口 flags 继续默认关闭；本文只证明“四窗口 64 图实现候选”，不宣称已发布支持四屏 64 图，也不自动授权合并、发布或默认启用。
 >
 > 起始审查基线：分支 `codex/multi-chart-workspace`，文档起草时 `HEAD=af9233749219f5c0bbc0dd95af2d1f7b3bb9b9f6`（2026-08-06），工作树有 12 个前端布局相关修改。它们已在 Phase 0 前审查、验证并独立冻结为 `035762e8`；Replay 文案基线漂移另行冻结为 `a0129358`。Phase 0 的实际实现基线为 `a012935801c83e583d2e9a53c70ed9112d63582d`。
 
@@ -1003,25 +1003,49 @@ Spike 必须证明：
 
 在四个真实显示器、一个真实 sidecar 和真实浏览器/桌面壳下完成最终容量、恢复和回滚门禁。
 
+### 执行计划（2026-08-07）
+
+1. **冻结终验身份**：W1/W2 沿用 Phase 7 的精确 batch/lease 合同并在 Phase 8 最终代码上重跑；W3 固定为 64 个 Binance Spot/USDT `1m` Series，每 Cell 两个 local builtin（MA20、RSI14），避免把 hosted/Pyne 的远端运行时边界混入 builtin 容量结论。
+2. **补齐可核对计数**：后端 batch transport 与四个 renderer 同时记录 closed/amended 的 sent/received/authoritative-commit 数；Electron 采集每窗 JS heap、private/working set、CPU、long task、真实输入到双 `requestAnimationFrame` 延迟，并合并 sidecar event-loop、private bytes、queue、lease、WS、exchange REST/WS 和 reconnect。
+3. **先短验再长稳**：先运行 W3 短窗口和缩短的 soak，验证 64/64 K 线、128/128 builtin、阈值计算与证据写入；短验通过后才启动不可缩短的 4 小时 4×16 soak，最终 gate 不接受短跑替代。
+4. **故障矩阵**：F1 使用只绑定本机临时端口的受控 HTTP proxy 同时制造 exchange 断线、代理失败和真实 HTTP 429，再恢复 direct；F2 由主进程停止并重启其唯一 sidecar，验证新 PID、四 batch socket 重连、64 lease 恢复且无重复；F3 执行真实窗口越界/主屏回收/重启，并把物理拔屏和混合 DPI 单独作为当前硬件门。
+5. **回滚与数据不变性**：同一 Chromium user-data 依次运行 64、16、4 三个 production build；每层核对可见 Cell/window、v6 64-Cell 文档 SHA-256 和预置 v5 sentinel SHA-256，禁止用重新初始化 profile 冒充回滚。
+6. **发布收口**：聚合器只从原始 evidence 计算 PASS；输出支持矩阵、已知限制、rollback runbook、unpacked/package fresh-process、全量前后端测试和端口/PID 清理。当前主机若仍只有一个逻辑显示器，结果必须保持 `hardware-pending`，默认 flags 也必须等待独立 release review，不能由本阶段自批启用。
+
 ### 任务
 
-- [ ] 8.1 跑 W1～W3、F1～F3 完整矩阵。
-- [ ] 8.2 运行 4 小时 4×16 soak，记录 heap/private bytes、CPU、GPU、event-loop lag、queue、WS 和 reconnect。
-- [ ] 8.3 执行交易所断线、代理失败、HTTP 429、sidecar 重启和单窗口崩溃演练。
-- [ ] 8.4 执行显示器拔插、DPI 改变、窗口越界和应用重启恢复演练。
-- [ ] 8.5 执行三层 flag 回滚：64 → 16 → 4，并证明 Workspace 数据未删除。
-- [ ] 8.6 生成 machine-readable release evidence、支持矩阵、已知限制和回滚 runbook。
-- [ ] 8.7 全量前后端、架构、插件、构建、桌面安装包和 fresh-process 验证全部完成。
+- [x] 8.1 跑 W1～W3、F1～F3 完整实现矩阵；F3 物理显示器部分单列于 8.4，不以 fixture 冒充。
+- [x] 8.2 运行精确 4 小时 4×16 soak，记录 heap/private bytes、CPU、GPU、event-loop lag、queue、WS 和 reconnect。
+- [x] 8.3 执行交易所断线、代理失败、HTTP 429、sidecar 重启和单窗口崩溃演练。
+- [ ] 8.4 执行显示器拔插、DPI 改变、窗口越界和应用重启恢复演练。越界、缺屏 fixture、100%～200% DPI fixture 和真实应用重启已通过；四块物理显示器拔插/真实 mixed-DPI 因本机仅 1 个逻辑显示器待验。
+- [x] 8.5 执行三层 flag 回滚：64 → 16 → 4，并证明 Workspace 数据未删除。
+- [x] 8.6 生成 machine-readable release evidence、支持矩阵、已知限制和回滚 runbook。
+- [x] 8.7 全量前后端、架构、插件、构建、unpacked desktop package 和两次 fresh-process 验证全部完成；已发布签名安装器不在当前声明内。
 
 ### 最终发布条件
 
-- [ ] §6 的 64 图门槛全部 PASS；
-- [ ] 4 小时没有单调内存增长、连接增长或 subscriber 残留；
-- [ ] 0 个 closed/amended bar 丢失；
-- [ ] 0 个静默订阅/指标失败；
-- [ ] 真实回滚恢复 16/4 图且不删除 v6/v5 数据；
+- [x] §6 的 64 图性能、数据和资源门槛全部 PASS；物理四显示器门不包含在此结论。
+- [x] 4 小时没有单调内存增长、连接增长或 subscriber 残留；
+- [x] 0 个 closed/amended bar 丢失；
+- [x] 0 个静默订阅/指标失败；
+- [x] 真实回滚恢复 16/4 图且不删除 v6/v5 数据；
 - [ ] 默认 flag 的切换经过独立 release review；
-- [ ] 文档只宣称实际通过的交易所、指标类型、硬件 profile 和显示器组合。
+- [x] 文档只宣称实际通过的交易所、指标类型、硬件 profile 和显示器组合。
+
+### Phase 8 实施记录（2026-08-07～2026-08-08）
+
+1. Phase 8 在最终代码上重新聚合 Phase 7 W1/W2 精确身份，并运行 W3：四个真实 Electron `BrowserWindow` 各 16 Cell，共 64 个 Binance Spot/USDT `1m` Series、64 个 builtin runtime、128 个定义。W3 ready 为 `4363 ms`、输入 p95 `3.2 ms`、全局/焦点 long task 均为 `0/min`、sidecar event-loop p99 `28 ms`，closed K 线 `61 sent = 61 received = 61 committed`，0 item failure。
+2. 精确 4 小时 soak 实际运行 `14,401,829 ms`、241 个样本。输入 p95 `101.3 ms`，全局 long task `12.948/min`、焦点窗口 `0.033/min`，event-loop p99 `68 ms`；64 runtime/128 定义/0 indicator issue，closed K 线 `14,906 sent = 14,906 received = 14,906 authoritative committed`，0 parse/item/authoritative failure。
+3. 长稳内存门均到达平台期：JS heap 30 分钟 gate 为 `-3.365%`、retained low-watermark 增长 `1.083%`；renderer private retained 增长 `1.031%`；sidecar private 1 小时 gate `3.315%`、retained low-watermark `-1.447%`。连接、lease、subscriber、queue 和 runtime 数量均无单调增长或退出残留。
+4. F1 由仅绑定本机的受控 proxy 真实制造 exchange 断线、proxy failure 和 HTTP 429 后恢复 direct；F2 停止并重启唯一 sidecar，确认新 PID、四个 batch socket、64 lease/128 builtin 恢复且无重复；单窗口强制销毁/同 ID 重建沿用 Phase 7 的共享 snapshot 恢复门。三者均为 PASS。
+5. F3 真实把窗口移到当前 workArea 外并回收到主屏，重启后 64/64 仍 ready；另以确定性 fixtures 覆盖负坐标、缺失显示器和 100%/125%/150%/200% DPI。当前主机 `displayCount=1`，没有观测到真实 `display-removed` 或 `metrics-changed`，因此结果严格为 `implementation-pass-hardware-pending`。
+6. 同一 Chromium `userData` 依次运行 64、16、4 三个 production build：原生窗口/可见 Cell 精确为 `4×16 → 1×16 → 1×4`。三层 v6 文档 semantic SHA-256 相同，64 Cell/4 Window 均未删除；v5 IndexedDB/localStorage sentinel SHA-256 同时保持不变，0 runtime error。
+7. 当前代码重新构建 Windows unpacked validation candidate，并用两个互不复用的 Chromium profile、两个不同 sidecar PID 完成 fresh-process。两轮 ready 为 `4114/4343 ms`、输入 p95 `2.9/12.5 ms`，精确 4×16/128 指标身份和清理门均通过；制品仍是 validation candidate，不冒充已发布签名 installer。
+8. 完整前端门全部通过：architecture、plugin boundary、两个 TypeScript project、ESLint、全量测试、25+ desktop tests 和 production build 均为 0 退出。后端收集 `3160` 项，结果为 `3121 passed, 31 failed, 8 errors, 5 warnings`；非通过节点与 Phase 0 在干净 `a0129358` 复现的 39 项 allowlist 完全相同，新增失败为 0。发布聚合保留 pytest raw exit code `1` 和 JUnit SHA-256，不把既有失败写成“全量通过”。
+9. 全量负载曾暴露 Windows 在隔离损坏 runtime cache 时的短暂 `WinError 5`。隔离 move 现在仅对 `PermissionError` 做 5 次、总计 0.5 秒的有界重试；瞬时锁与永久锁单测分别证明恢复和 fail-closed，最终全量不再产生第 40 个失败。
+10. 最终 `candlescope.multi-chart.phase8-release/1` 的 `implementationPass=true`、`releaseReady=false`，结果为 `implementation-pass-hardware-and-review-pending`。唯一 blockers 是 `physical-four-display-unplug-and-mixed-dpi-gate` 与 `independent-release-review`；`MULTI_CHART_16`、`MULTI_WINDOW`、`MULTI_CHART_64`、window broker 和 K-line batch 全部保持默认关闭。
+11. 容量声明只覆盖 Windows x64、Electron 43.3、Chrome 150、Binance Spot/USDT `1m`、每 Cell MA20+RSI14 local builtin、warm SQLite 和当前固定硬件。macOS/Linux、Futures/OKX、其他周期组合、hosted/community/Pine/Pyne、四物理屏、cold uncached dataset、安装器/自动更新均不在通过范围。
+12. 聚合证据为 `docs/perf-baselines/multi-chart-workspace/phase8-release-20260807.json`；全量测试、package、回滚和已知失败基线分别为 `phase8-full-validation-20260807.json`、`phase8-package-fresh-process-20260807.json`、`phase8-flag-rollback-20260807.json`、`phase8-backend-known-failures-20260807.json`。原始 W3/SOAK/F1/F2/F3、JUnit、profile、日志和数据库保存在相应 `output/playwright/multi-chart-phase8/` 或 evidence 相邻路径。
 
 ### 回滚顺序
 
@@ -1125,29 +1149,29 @@ python -m pytest backend/tests -q
 
 ### 单窗口 16 图完成
 
-- [ ] Workspace schema v6 可回滚迁移；
-- [ ] 单窗口可创建、保存、恢复、编辑 16 Cell；
-- [ ] 第 17 Cell fail closed；
-- [ ] 连接/store/指标任务不按 Cell 盲目复制；
-- [ ] S1～S5、C1 与 1 小时 soak 通过；
-- [ ] 16 → 4 回滚真实通过；
-- [ ] 支持声明与 evidence 一致。
+- [x] Workspace schema v6 可回滚迁移；
+- [x] 单窗口可创建、保存、恢复、编辑 16 Cell；
+- [x] 第 17 Cell fail closed；
+- [x] 连接/store/指标任务不按 Cell 盲目复制；
+- [x] S1～S5、C1 与 1 小时 soak 通过；
+- [x] 16 → 4 回滚真实通过；
+- [x] 支持声明与 evidence 一致。
 
 ### 四窗口 64 图完成
 
-- [ ] 四个原生窗口、一个 sidecar；
-- [ ] bounds/monitor/DPI 恢复通过；
-- [ ] WorkspaceBus 无静默覆盖；
-- [ ] 64 Cell 任务和连接遵守 budget；
-- [ ] W1～W3、F1～F3 与 4 小时 soak 通过；
-- [ ] 64 → 16 → 4 回滚真实通过；
-- [ ] v5/v6 用户数据均未删除；
-- [ ] 发布清单、支持矩阵、已知限制和 runbook 完整。
+- [x] 四个原生窗口、一个 sidecar；
+- [ ] bounds/monitor/DPI 恢复通过；越界/缺屏/DPI fixtures 已通过，四块物理屏拔插与真实 mixed-DPI 待验；
+- [x] WorkspaceBus 无静默覆盖；
+- [x] 64 Cell 任务和连接遵守 budget；
+- [x] W1～W3、F1～F3 实现矩阵与 4 小时 soak 通过；
+- [x] 64 → 16 → 4 回滚真实通过；
+- [x] v5/v6 用户数据均未删除；
+- [x] 发布清单、支持矩阵、已知限制和 runbook 完整。
 
-在以上项目全部完成前，只能分别表述为：
+在物理显示器门和独立 release review 完成前，只能分别表述为：
 
 ```text
-“已有单屏 4 图基础能力”
-“16 图处于实现/验证阶段”
+“单窗口 16 图实现与验证已完成，默认开关仍关闭”
+“四窗口 64 图实现候选已通过，四物理屏硬件门待完成”
 “四屏 64 图尚未发布支持”
 ```

@@ -34,6 +34,24 @@ test("chart demand scope carries stable workspace window and cell ownership", ()
   );
 });
 
+test("chart demand scope hashes long dynamic ownership within the backend limit", () => {
+  const owner = {
+    workspaceId: "workspace-8ec343e5-6f43-454a-8b44-799e2c8d6db2",
+    windowId: "window-1802a500-a615-43de-80b8-f0ee382cdceb",
+    cellId: "cell-9b38ec9a-a897-41a3-92c1-a632d67a1e41",
+  };
+  const scope = formatChartDemandScope("clientid", "runtime-instance", 64, owner);
+  const otherCellScope = formatChartDemandScope("clientid", "runtime-instance", 64, {
+    ...owner,
+    cellId: "cell-2d334872-c273-4a6b-9e66-028b3c7fc032",
+  });
+
+  assert.ok(scope.length <= 128);
+  assert.match(scope, /^chart:clientid:runtime-instance:64:owner:[0-9a-f]{16}$/);
+  assert.notEqual(scope, otherCellScope);
+  assert.equal(formatChartDemandScope("clientid", "runtime-instance", 64, owner), scope);
+});
+
 test("right-window restore commits only for the owning session and epoch", () => {
   const owned = {
     aborted: false,

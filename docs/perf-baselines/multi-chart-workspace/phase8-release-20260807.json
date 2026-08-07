@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase8-release/1",
+  "generatedAt": "2026-08-07T16:11:07.126Z",
+  "scope": "four-native-windows-sixteen-charts-each",
+  "promotionStatus": "blocked",
+  "defaultFlags": {
+    "multiChart16": "off",
+    "multiWindow": "off",
+    "multiChart64": "off",
+    "chartWindowBroker": "off",
+    "klineBatch": "off"
+  },
+  "host": {
+    "displayCount": 1,
+    "electron": "43.3.0",
+    "chrome": "150.0.7871.212",
+    "node": "24.18.1"
+  },
+  "sources": {
+    "phase7": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\phase7-workspace-bus-20260807.json",
+      "sha256": "sha256:4dc945875bd6446b4c6fb8287c32cb64f591975527b8c81aa15ec09b0880c620"
+    },
+    "w3": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\desktop-phase8-w3.json",
+      "sha256": "sha256:5d6298ebe43574fa6eb630ade8eeac34829b6bad11a6e2f00d4abd33a2485d9c"
+    },
+    "soak": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\desktop-phase8-soak.json",
+      "sha256": "sha256:034ad407f9c5e56700409a9757da6cc08e4345e0ceef7e803ba12b2808e123da"
+    },
+    "f1": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\desktop-phase8-f1.json",
+      "sha256": "sha256:aad0713c227a384b847982e0104728d93f907788023f41cd62e9fffafa260c8a"
+    },
+    "f2": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\desktop-phase8-f2.json",
+      "sha256": "sha256:f93c137bc0a85cdf8cf2247b3d8e6efb663fcfc27e1bc8ef61987785fdacdab2"
+    },
+    "f3": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\desktop-phase8-f3.json",
+      "sha256": "sha256:2cbf194de4300001d02dfc568d16ad78c70d5eccfaea604575f7a9af0720c2a1"
+    },
+    "rollback": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\phase8-flag-rollback-20260807.json",
+      "sha256": "sha256:97eeabe613bb6ce83cb5f8e220c9ffef55aa73ab9eb164d93d63b1aca51c5e5e"
+    },
+    "package": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\phase8-package-fresh-process-20260807.json",
+      "sha256": "sha256:9b98930c8c8e47a2d0a44cec3c900b95fa5a53082fa7e3a2d53f3ff1f3f402c2"
+    },
+    "validation": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\phase8-full-validation-20260807.json",
+      "sha256": "sha256:fd1bbb8954d5eb4c6b7e05dc7824c7e891ac6f0309ffdf40c81adcda0eb23009"
+    }
+  },
+  "checks": {
+    "phase7W1W2": true,
+    "w3": true,
+    "soak4h": true,
+    "f1": true,
+    "f2": true,
+    "f3Implementation": true,
+    "f3Physical": false,
+    "rollback": true,
+    "package": true,
+    "fullValidation": true,
+    "independentReleaseReview": false
+  },
+  "implementationPass": true,
+  "releaseReady": false,
+  "result": "implementation-pass-hardware-and-review-pending",
+  "blockers": [
+    "physical-four-display-unplug-and-mixed-dpi-gate",
+    "independent-release-review"
+  ],
+  "limitations": [
+    "Validated capacity scope is Binance Spot USDT 1m with local builtin MA20 and RSI14.",
+    "Hosted, community, and Pyne indicators are not covered by the 64-chart capacity claim.",
+    "The current host exposes one logical display; four physical displays remain unvalidated.",
+    "The unpacked Windows validation candidate is not an installer or published signed release."
+  ]
+}

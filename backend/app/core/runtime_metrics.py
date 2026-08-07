@@ -8,6 +8,9 @@ from threading import Lock
 from typing import Any
 
 
+_HISTOGRAM_MAX_MS = 1_000
+
+
 @dataclass(slots=True)
 class _RollingLatency:
     history_limit: int = 120
@@ -17,6 +20,7 @@ class _RollingLatency:
     max_ms: float = 0.0
     last_ms: float = 0.0
     _values: array = field(init=False, repr=False)
+    _histogram: array = field(init=False, repr=False)
     _stored: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
@@ -29,6 +33,10 @@ class _RollingLatency:
         # monotonic, so retain only packed doubles in a fixed-size ring and
         # derive their sequence from the slot position.
         self._values = array("d", [0.0]) * self.history_limit
+        # Cumulative one-millisecond buckets let a release harness subtract a
+        # baseline and calculate a true multi-hour percentile without retaining
+        # every raw sample.  The last bucket is the >1000 ms overflow bucket.
+        self._histogram = array("Q", [0]) * (_HISTOGRAM_MAX_MS + 2)
 
     def add(self, value_ms: float) -> None:
         value = max(0.0, float(value_ms))
@@ -38,6 +46,8 @@ class _RollingLatency:
         self.last_ms = value
         self._values[(self.samples - 1) % self.history_limit] = value
         self._stored = min(self.history_limit, self._stored + 1)
+        bucket = min(_HISTOGRAM_MAX_MS + 1, int(value) + (value % 1 > 0))
+        self._histogram[bucket] += 1
 
     def _sample(self, sequence: int) -> tuple[int, float]:
         return sequence, self._values[(sequence - 1) % self.history_limit]
@@ -74,6 +84,11 @@ class _RollingLatency:
                 {"sequence": sequence, "value_ms": round(value, 2)}
                 for sequence, value in selected[-self.output_limit:]
             ],
+            "histogram": {
+                "bucket_width_ms": 1,
+                "max_ms": _HISTOGRAM_MAX_MS,
+                "counts": list(self._histogram),
+            },
         }
         if after_sequence is not None:
             normalized_after = max(0, int(after_sequence))

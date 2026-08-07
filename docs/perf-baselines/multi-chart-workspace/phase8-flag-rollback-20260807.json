@@ -1,0 +1,309 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase8-flag-rollback/1",
+  "generatedAt": "2026-08-06T23:09:28.385Z",
+  "sequence": [
+    "64",
+    "16",
+    "4"
+  ],
+  "methodology": "Three production builds reuse one Electron Chromium profile and origin; no profile reset is allowed between stages.",
+  "sources": {
+    "4": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\desktop-phase8-rollback-4-84cd1d6ab8224399ab7dce2b3ea90971.json",
+      "sha256": "sha256:bcb11501ff4d14577915c04959926896c160c506f957f0e5533337043289d6bd"
+    },
+    "16": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\desktop-phase8-rollback-16-84cd1d6ab8224399ab7dce2b3ea90971.json",
+      "sha256": "sha256:cffec79495de521ae816f0ae3c13dbbfec57e276c96ef190497e16ca2a2dd5c0"
+    },
+    "64": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\desktop-phase8-rollback-64-84cd1d6ab8224399ab7dce2b3ea90971.json",
+      "sha256": "sha256:dae5f39e05dc2a43204a0439a12c6a40e8ccc6233c6c48ba6d375661b3d238ae"
+    }
+  },
+  "stages": {
+    "4": {
+      "result": "pass",
+      "build": {
+        "multiChart16Enabled": false,
+        "multiWindowEnabled": false,
+        "multiChart64Enabled": false,
+        "chartWindowBrokerEnabled": false,
+        "klineBatchEnabled": false
+      },
+      "userData": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971",
+      "nativeWindows": 1,
+      "visibleCells": [
+        4
+      ],
+      "storage": {
+        "v6": {
+          "activeId": "workspace-default",
+          "recordCount": 1,
+          "recordsSha256": "sha256:3981c48d6cf9f2fe290f2e6874ce34496b6a03cf2b90ee9570f4eefb55519664",
+          "documentSha256": "sha256:4dbb2c011bf9383bd87af3777b8ad0c2d5190c089c3d95169e1b1e9d39b4496b",
+          "documentContentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cellCount": 64,
+          "windowCount": 4,
+          "revision": 48
+        },
+        "v5": {
+          "recordCount": 1,
+          "sentinel": {
+            "id": "phase8-v5-sentinel",
+            "schemaVersion": 5,
+            "value": "preserve-across-64-16-4",
+            "seededAt": "2026-08-07T00:00:00.000Z"
+          },
+          "sentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "localSentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3"
+        }
+      },
+      "runtimeErrors": []
+    },
+    "16": {
+      "result": "pass",
+      "build": {
+        "multiChart16Enabled": true,
+        "multiWindowEnabled": false,
+        "multiChart64Enabled": false,
+        "chartWindowBrokerEnabled": true,
+        "klineBatchEnabled": true
+      },
+      "userData": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971",
+      "nativeWindows": 1,
+      "visibleCells": [
+        16
+      ],
+      "storage": {
+        "v6": {
+          "activeId": "workspace-default",
+          "recordCount": 1,
+          "recordsSha256": "sha256:3981c48d6cf9f2fe290f2e6874ce34496b6a03cf2b90ee9570f4eefb55519664",
+          "documentSha256": "sha256:4dbb2c011bf9383bd87af3777b8ad0c2d5190c089c3d95169e1b1e9d39b4496b",
+          "documentContentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cellCount": 64,
+          "windowCount": 4,
+          "revision": 48
+        },
+        "v5": {
+          "recordCount": 1,
+          "sentinel": {
+            "id": "phase8-v5-sentinel",
+            "schemaVersion": 5,
+            "value": "preserve-across-64-16-4",
+            "seededAt": "2026-08-07T00:00:00.000Z"
+          },
+          "sentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "localSentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3"
+        }
+      },
+      "runtimeErrors": []
+    },
+    "64": {
+      "result": "pass",
+      "build": {
+        "multiChart16Enabled": true,
+        "multiWindowEnabled": true,
+        "multiChart64Enabled": true,
+        "chartWindowBrokerEnabled": true,
+        "klineBatchEnabled": true
+      },
+      "userData": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971",
+      "nativeWindows": 4,
+      "visibleCells": [
+        16,
+        16,
+        16,
+        16
+      ],
+      "storage": {
+        "v6": {
+          "activeId": "workspace-default",
+          "recordCount": 1,
+          "recordsSha256": "sha256:4eb6f18a0c6ebaf933794b3e77c23c094f51fbd85c4a1e2f2892ac00b5c5fe07",
+          "documentSha256": "sha256:4080f7af3c6ac35449e8deb70c5d98510e3c31463d67cdfd698cf068cb4a48a8",
+          "documentContentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cellCount": 64,
+          "windowCount": 4,
+          "revision": 47
+        },
+        "v5": {
+          "recordCount": 1,
+          "sentinel": {
+            "id": "phase8-v5-sentinel",
+            "schemaVersion": 5,
+            "value": "preserve-across-64-16-4",
+            "seededAt": "2026-08-07T00:00:00.000Z"
+          },
+          "sentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "localSentinelSha256": "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3"
+        }
+      },
+      "runtimeErrors": []
+    }
+  },
+  "checks": {
+    "stageResults": {
+      "actual": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "expected": [
+        "pass",
+        "pass",
+        "pass"
+      ],
+      "passed": true
+    },
+    "exactProjections": {
+      "actual": [
+        {
+          "stage": "64",
+          "nativeWindows": 4,
+          "visibleCells": [
+            16,
+            16,
+            16,
+            16
+          ]
+        },
+        {
+          "stage": "16",
+          "nativeWindows": 1,
+          "visibleCells": [
+            16
+          ]
+        },
+        {
+          "stage": "4",
+          "nativeWindows": 1,
+          "visibleCells": [
+            4
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "stage": "64",
+          "nativeWindows": 4,
+          "visibleCells": [
+            16,
+            16,
+            16,
+            16
+          ]
+        },
+        {
+          "stage": "16",
+          "nativeWindows": 1,
+          "visibleCells": [
+            16
+          ]
+        },
+        {
+          "stage": "4",
+          "nativeWindows": 1,
+          "visibleCells": [
+            4
+          ]
+        }
+      ],
+      "passed": true
+    },
+    "exactBuildLayers": {
+      "actual": [
+        {
+          "multiChart16Enabled": true,
+          "multiWindowEnabled": true,
+          "multiChart64Enabled": true,
+          "chartWindowBrokerEnabled": true,
+          "klineBatchEnabled": true
+        },
+        {
+          "multiChart16Enabled": true,
+          "multiWindowEnabled": false,
+          "multiChart64Enabled": false,
+          "chartWindowBrokerEnabled": true,
+          "klineBatchEnabled": true
+        },
+        {
+          "multiChart16Enabled": false,
+          "multiWindowEnabled": false,
+          "multiChart64Enabled": false,
+          "chartWindowBrokerEnabled": false,
+          "klineBatchEnabled": false
+        }
+      ],
+      "expected": "64 has all flags, 16 retains only multi-chart/broker/batch, 4 disables all capacity flags",
+      "passed": true
+    },
+    "sameChromiumProfile": {
+      "actual": [
+        "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971",
+        "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971",
+        "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\rollback\\electron-user-data-84cd1d6ab8224399ab7dce2b3ea90971"
+      ],
+      "expected": "one non-empty user-data path reused by all three production builds",
+      "passed": true
+    },
+    "v6DocumentPreserved": {
+      "actual": [
+        {
+          "sha256": "sha256:4080f7af3c6ac35449e8deb70c5d98510e3c31463d67cdfd698cf068cb4a48a8",
+          "contentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cells": 64,
+          "windows": 4,
+          "revision": 47
+        },
+        {
+          "sha256": "sha256:4dbb2c011bf9383bd87af3777b8ad0c2d5190c089c3d95169e1b1e9d39b4496b",
+          "contentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cells": 64,
+          "windows": 4,
+          "revision": 48
+        },
+        {
+          "sha256": "sha256:4dbb2c011bf9383bd87af3777b8ad0c2d5190c089c3d95169e1b1e9d39b4496b",
+          "contentSha256": "sha256:b156165289e1a021dbbcdcebe69727696f7a4a6804991b8313b1c6015d76badc",
+          "cells": 64,
+          "windows": 4,
+          "revision": 48
+        }
+      ],
+      "expected": "identical v6 content SHA-256 with 64 cells/4 windows; lower layers have exact raw SHA and shutdown recovery advances revision by at most one",
+      "passed": true
+    },
+    "v5SentinelPreserved": {
+      "actual": {
+        "indexedDb": [
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3"
+        ],
+        "localStorage": [
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3",
+          "sha256:10aba4a39861420d9ba1e12e2436cc05baf148fa59723deae652aa4f6df2e1d3"
+        ]
+      },
+      "expected": "identical non-null v5 sentinel SHA-256 in IndexedDB and localStorage",
+      "passed": true
+    },
+    "zeroRuntimeErrors": {
+      "actual": [
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        [],
+        [],
+        []
+      ],
+      "passed": true
+    }
+  },
+  "result": "pass"
+}

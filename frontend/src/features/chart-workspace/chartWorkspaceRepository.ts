@@ -294,8 +294,8 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
           : new Map<ChartWorkspaceId, number>();
         if (v6Records.length === 0) {
           await this.adapter.compareAndSwapV6Library(snapshot, this.expectedV6Revisions);
+          this.expectedV6Revisions = revisionMap(snapshot);
         }
-        this.expectedV6Revisions = revisionMap(snapshot);
         this.memorySnapshot = snapshot;
         this.writeBootstrap(snapshot);
         return { ...snapshot, persistenceMode: "indexeddb" };

@@ -206,6 +206,36 @@ test("bootstrap journal recovers a revision newer than the debounced library sav
   assert.equal(reloaded.workspaces[0]!.document.revision, 1);
 });
 
+test("a newer bootstrap journal is persisted against the actual IndexedDB revision", async () => {
+  const stored = createChartWorkspaceRecord({
+    id: "recovered",
+    name: "数据库版本",
+    createdAt: 1,
+    updatedAt: 2,
+  });
+  const recovered = createChartWorkspaceRecord({
+    id: stored.id,
+    name: "退出前 journal",
+    document: { ...stored.document, revision: stored.document.revision + 1 },
+    createdAt: 1,
+    updatedAt: 3,
+  });
+  const { storage } = memoryStorage({
+    [CHART_WORKSPACE_BOOTSTRAP_KEY]: JSON.stringify(recovered),
+  });
+  const adapter = new MemoryDualSlotAdapter({ v6: [stored] });
+  const repository = createChartWorkspaceRepository({ adapter, storage, now: () => 100 });
+
+  const loaded = await repository.loadLibrary();
+  assert.equal(loaded.workspaces[0]!.document.revision, recovered.document.revision);
+  assert.equal(loaded.workspaces[0]!.name, "退出前 journal");
+
+  await repository.saveLibrary(loaded);
+  assert.equal(adapter.v6WriteCount, 1);
+  assert.equal((adapter.v6Records[0] as ChartWorkspaceRecord).document.revision, recovered.document.revision);
+  assert.equal((adapter.v6Records[0] as ChartWorkspaceRecord).name, "退出前 journal");
+});
+
 test("two repository writers reject a stale document revision instead of last-write-wins", async () => {
   const initial = createChartWorkspaceRecord({ id: "shared", name: "共享", createdAt: 1, updatedAt: 1 });
   const adapter = new MemoryDualSlotAdapter({ v6: [initial] });

@@ -136,8 +136,13 @@ def _ingestion_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None
     return {
         **{key: value for key, value in snapshot.items() if key != "ingress"},
         "ingress": {
-            "pipelineCount": len(ingress.get("pipelines", {}))
-            if isinstance(ingress.get("pipelines"), dict) else 0,
+            "pipelineCount": int(
+                ingress.get(
+                    "pipeline_detail_total",
+                    len(ingress.get("pipelines", {}))
+                    if isinstance(ingress.get("pipelines"), dict) else 0,
+                )
+            ),
             "shared_ws": {
                 key: value
                 for key, value in (ingress.get("shared_ws") or {}).items()
@@ -156,6 +161,22 @@ def _component_snapshot(component: Any) -> dict[str, Any] | None:
         return None
     value = snapshot()
     return value if isinstance(value, dict) else None
+
+
+def _component_capacity_snapshot(
+    component: Any,
+    *,
+    offset: int,
+    limit: int,
+) -> dict[str, Any] | None:
+    """Prefer a component's bounded capacity view, retaining test compatibility."""
+    if component is None:
+        return None
+    snapshot = getattr(component, "capacity_snapshot", None)
+    if callable(snapshot):
+        value = snapshot(offset=offset, limit=limit)
+        return value if isinstance(value, dict) else None
+    return _component_snapshot(component)
 
 
 def _sha256_file(path: Path) -> str:
@@ -232,6 +253,9 @@ def _database_snapshot(path: Path, *, include_hash: bool) -> dict[str, Any]:
 def _dedicated_upstream_websockets(ingress: dict[str, Any] | None) -> int:
     if not isinstance(ingress, dict):
         return 0
+    prepared_count = ingress.get("dedicated_physical_websockets")
+    if prepared_count is not None:
+        return max(0, int(prepared_count))
     pipelines = ingress.get("pipelines")
     if not isinstance(pipelines, dict):
         return 0
@@ -268,7 +292,11 @@ async def build_capacity_snapshot(
 
     data_manager = getattr(state, "data_manager", None)
     try:
-        manager_snapshot = _component_snapshot(data_manager)
+        manager_snapshot = _component_capacity_snapshot(
+            data_manager,
+            offset=safe_offset,
+            limit=safe_limit,
+        )
     except Exception as exc:  # diagnostics isolate component failures
         manager_snapshot = None
         errors.append({"component": "data_manager", "error": str(exc)})
@@ -286,7 +314,11 @@ async def build_capacity_snapshot(
 
     ingestion_factory = getattr(runtime, "ingestion_factory", None)
     try:
-        ingestion_factory_snapshot = _component_snapshot(ingestion_factory)
+        ingestion_factory_snapshot = _component_capacity_snapshot(
+            ingestion_factory,
+            offset=safe_offset,
+            limit=safe_limit,
+        )
     except Exception as exc:
         ingestion_factory_snapshot = None
         errors.append({"component": "exchange_ingestion", "error": str(exc)})
@@ -429,11 +461,15 @@ async def build_capacity_snapshot(
         limit=safe_limit,
     )
     pipelines = ingress.get("pipelines") if isinstance(ingress, dict) else {}
-    pipeline_page, pipeline_total = _page_mapping(
-        pipelines,
-        offset=safe_offset,
-        limit=safe_limit,
-    )
+    if isinstance(ingress, dict) and ingress.get("pipeline_detail_prepared") is True:
+        pipeline_page = pipelines if isinstance(pipelines, dict) else {}
+        pipeline_total = int(ingress.get("pipeline_detail_total", len(pipeline_page)))
+    else:
+        pipeline_page, pipeline_total = _page_mapping(
+            pipelines,
+            offset=safe_offset,
+            limit=safe_limit,
+        )
     batch_registry = getattr(state, "kline_batch_registry", None)
     try:
         batch_snapshot = (

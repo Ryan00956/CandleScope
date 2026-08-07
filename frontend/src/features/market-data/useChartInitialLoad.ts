@@ -43,6 +43,10 @@ export const INITIAL_VIEWPORT_COUNT_BACK = 500;
 // to the normal 1,500-bar history after first paint.
 export const DENSE_WORKSPACE_VIEWPORT_COUNT_BACK = 64;
 export const DENSE_WORKSPACE_CELL_THRESHOLD = 8;
+
+export function shouldEnableWorkspaceIntervalPrefetch(cellCount: number): boolean {
+  return Math.max(0, Math.floor(Number(cellCount) || 0)) < DENSE_WORKSPACE_CELL_THRESHOLD;
+}
 /**
  * The first viewport request is a non-blocking storage probe. A populated
  * page can paint immediately without occupying one of the browser's limited

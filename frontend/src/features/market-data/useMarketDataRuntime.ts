@@ -55,6 +55,17 @@ const chartDemandScopeRuntimeId = [
   Math.random().toString(36).slice(2, 10),
 ].join("-");
 
+function demandScopeDigest(value: string): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
 export function formatChartDemandScope(
   clientInstanceId: string,
   runtimeId: string,
@@ -67,12 +78,15 @@ export function formatChartDemandScope(
 ): string {
   const base = `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
   if (!owner?.workspaceId && !owner?.windowId && !owner?.cellId) return base;
-  return [
+  const expanded = [
     base,
     "workspace", owner.workspaceId || "_",
     "window", owner.windowId || "_",
     "cell", owner.cellId || "_",
   ].join(":");
+  if (expanded.length <= 128) return expanded;
+  const ownerIdentity = [owner.workspaceId || "_", owner.windowId || "_", owner.cellId || "_"].join("\u0000");
+  return `${base}:owner:${demandScopeDigest(ownerIdentity)}`;
 }
 
 function createChartDemandScope(
@@ -159,6 +173,7 @@ export interface UseMarketDataRuntimeOptions {
   realtimePriceRef: MutableRefObject<number | null>;
   foregroundPreloadGate?: ForegroundPreloadGate;
   backgroundPrefetchEnabled?: boolean;
+  intervalPrefetchEnabled?: boolean;
   schedulerCellId?: string;
   workspaceId?: string;
   windowId?: string;
@@ -172,6 +187,7 @@ export function useMarketDataRuntime({
   realtimePriceRef,
   foregroundPreloadGate,
   backgroundPrefetchEnabled = true,
+  intervalPrefetchEnabled = backgroundPrefetchEnabled,
   schedulerCellId,
   workspaceId,
   windowId,
@@ -506,6 +522,8 @@ export function useMarketDataRuntime({
         Math.max(1, Math.floor(initialViewportCountBackCap)),
       );
   useActiveChartHistoryHydration({
+    // Deepen the active interval after first paint even in a dense workspace;
+    // this is active-chart hydration, not speculative cross-interval warming.
     enabled: backgroundPrefetchEnabled
       && activeChartReady
       && marketDataReady
@@ -797,7 +815,10 @@ export function useMarketDataRuntime({
     schedulerOwner: `chart-background-prefetch:${schedulerCellId || sessionKey}`,
     // Background interval warming must yield while the active chart is still
     // loading history, extending left, or waiting for indicator coverage.
-    enabled: backgroundPrefetchEnabled
+    // Cross-interval warming is optional and disabled by the dense-workspace
+    // policy. Keeping this separate prevents four active cells from walking
+    // the complete interval catalog while 64 charts are converging.
+    enabled: intervalPrefetchEnabled
       && activeChartReady
       && marketDataReady
       && !loading

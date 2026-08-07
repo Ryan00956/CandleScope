@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -63,6 +64,8 @@ MAX_SYSTEM_PROBE_ARG_CHARS = 1024
 MAX_SYSTEM_PATTERN_CHARS = 2048
 DOWNLOAD_TIMEOUT_SECONDS = 120.0
 MIN_FREE_SPACE_MARGIN_BYTES = 16 * 1024 * 1024
+QUARANTINE_REPLACE_ATTEMPTS = 5
+QUARANTINE_REPLACE_RETRY_SECONDS = 0.05
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$")
@@ -89,6 +92,18 @@ _EVIDENCE_SOURCE_JSON_LIMITS = JsonLimits(
     max_container_items=500_000,
     max_string_bytes=4 * 1024 * 1024,
 )
+
+
+def _replace_quarantined_path(source: Path, target: Path) -> None:
+    """Retry only transient permission locks around an atomic quarantine move."""
+    for attempt in range(QUARANTINE_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 >= QUARANTINE_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(QUARANTINE_REPLACE_RETRY_SECONDS * (attempt + 1))
 
 
 def _utc_now() -> str:
@@ -1768,7 +1783,7 @@ class ManagedRuntimeRegistryService:
         target = self.quarantine_directory / label / f"{path.name}-{uuid.uuid4().hex}"
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.replace(path, target)
+            _replace_quarantined_path(path, target)
             _atomic_write_json(
                 target.parent / f"{target.name}.reason.json",
                 {
@@ -1790,7 +1805,7 @@ class ManagedRuntimeRegistryService:
         target = self.quarantine_directory / label / f"{path.name}-{uuid.uuid4().hex}"
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.replace(path, target)
+            _replace_quarantined_path(path, target)
             _atomic_write_json(
                 target.parent / f"{target.name}.reason.json",
                 {

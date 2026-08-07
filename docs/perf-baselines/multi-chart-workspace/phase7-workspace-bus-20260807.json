@@ -1,6 +1,6 @@
 {
   "schemaVersion": "candlescope.multi-chart.phase7-release/1",
-  "generatedAt": "2026-08-06T21:40:02.910Z",
+  "generatedAt": "2026-08-07T00:26:58.325Z",
   "scope": "workspace-bus-cross-window-link-and-64-cell-app-budget",
   "result": "pass",
   "host": {
@@ -44,33 +44,33 @@
           "ready": 16
         },
         {
-          "windowId": "window-1648081c-9f59-47e1-8761-b1efe8a780bc",
+          "windowId": "window-608b43ff-cb93-45a4-929c-d852c2dc74d8",
           "ready": 16
         },
         {
-          "windowId": "window-8cf56919-2423-4511-900f-948a04991207",
+          "windowId": "window-59804845-678b-4f5a-afa2-e4992bd30645",
           "ready": 16
         },
         {
-          "windowId": "window-5aa15bfe-4f5a-4d13-ba1e-7734fafa57fa",
+          "windowId": "window-a57b1b2c-7f2b-4ff4-863c-9661aa83f050",
           "ready": 16
         }
       ],
       "sharedSeries": {
         "entriesAtRecoveryGate": 4,
-        "barsAtRecoveryGate": 450,
-        "publishes": 29,
+        "barsAtRecoveryGate": 240,
+        "publishes": 24,
         "rejects": 0,
         "restoredHydrations": 4,
-        "restoredBars": 451
+        "restoredBars": 259
       },
       "workspaceBus": {
         "bootstrap": 1,
-        "commits": 7,
+        "commits": 4,
         "conflicts": 0,
-        "linkPublished": 165,
-        "crosshairCoalesced": 69,
-        "rebases": 1,
+        "linkPublished": 97,
+        "crosshairCoalesced": 68,
+        "rebases": 0,
         "disconnects": 4
       },
       "appWork": {
@@ -78,7 +78,7 @@
         "maxPerWindow": 6,
         "maxPreviewLanes": 4,
         "rejectedPreview": 0,
-        "reclaimed": 12
+        "reclaimed": 2
       },
       "minimized": {
         "replaceableCommitsBefore": 0,
@@ -88,10 +88,10 @@
       "crashRecovery": {
         "sameWindowId": true,
         "ready": true,
-        "revision": 58,
+        "revision": 62,
         "chartRoots": 16,
         "dataReadyRoots": 16,
-        "canvasCount": 134,
+        "canvasCount": 144,
         "windowState": "normal"
       }
     },
@@ -117,33 +117,33 @@
           "ready": 16
         },
         {
-          "windowId": "window-a52dcf92-7398-4539-9a97-6fe35b29d191",
+          "windowId": "window-c703eb5e-8d18-47b4-9fb0-27d55d2a7ed9",
+          "ready": 6
+        },
+        {
+          "windowId": "window-9cbae2b5-dfd7-43c9-9dc2-509c4e37c7f0",
           "ready": 16
         },
         {
-          "windowId": "window-7da05f2d-394c-4a35-9182-213c635cdd26",
-          "ready": 16
-        },
-        {
-          "windowId": "window-f221c9a4-8806-4000-9300-7de2c7775eb1",
-          "ready": 16
+          "windowId": "window-cbc18dcb-fcd4-4723-8ebb-1bf59801572c",
+          "ready": 13
         }
       ],
       "sharedSeries": {
-        "entriesAtRecoveryGate": 64,
-        "barsAtRecoveryGate": 1814,
-        "publishes": 377,
+        "entriesAtRecoveryGate": 55,
+        "barsAtRecoveryGate": 7357,
+        "publishes": 77,
         "rejects": 0,
         "restoredHydrations": 16,
-        "restoredBars": 83
+        "restoredBars": 1413
       },
       "workspaceBus": {
         "bootstrap": 1,
-        "commits": 5,
+        "commits": 8,
         "conflicts": 0,
-        "linkPublished": 26,
-        "crosshairCoalesced": 3,
-        "rebases": 0,
+        "linkPublished": 25,
+        "crosshairCoalesced": 7,
+        "rebases": 2,
         "disconnects": 4
       },
       "appWork": {
@@ -151,7 +151,7 @@
         "maxPerWindow": 6,
         "maxPreviewLanes": 4,
         "rejectedPreview": 0,
-        "reclaimed": 2
+        "reclaimed": 5
       },
       "minimized": {
         "replaceableCommitsBefore": 0,
@@ -161,10 +161,10 @@
       "crashRecovery": {
         "sameWindowId": true,
         "ready": true,
-        "revision": 222,
+        "revision": 72,
         "chartRoots": 16,
         "dataReadyRoots": 16,
-        "canvasCount": 144,
+        "canvasCount": 136,
         "windowState": "normal"
       }
     }
@@ -172,11 +172,11 @@
   "sources": {
     "W1": {
       "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase7\\desktop-phase7-w1.json",
-      "sha256": "sha256:b5fcfb56cdffe65041ad50d118b371457bddd6f7b5f430175ffa86cb976a58d6"
+      "sha256": "sha256:62163e866b1ea302763cea867407bf29c0c41aa32978f8d30a4d5c411f829880"
     },
     "W2": {
       "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase7\\desktop-phase7-w2.json",
-      "sha256": "sha256:77c44230f1a459690f900aa58521c6d6f208652c11c0c03e0e8c371a1ef072af"
+      "sha256": "sha256:9929e04adaa082f1c3a61c239ba913246ef1aa8cdb2f8ea5358db23747cd7981"
     }
   },
   "limitations": [

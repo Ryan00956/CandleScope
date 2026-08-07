@@ -145,7 +145,8 @@ def test_batch_subscribe_is_idempotent_and_forwards_amendment(
 ) -> None:
     monkeypatch.setattr(config, "KLINE_BATCH_STREAM_ENABLED", True)
     dm = _BatchDataManager(emit=True)
-    with _client(dm).websocket_connect("/api/v1/stream/klines_batch") as ws:
+    client = _client(dm)
+    with client.websocket_connect("/api/v1/stream/klines_batch") as ws:
         connected = ws.receive_json()
         assert connected["type"] == "connected"
         assert connected["capabilities"]["maxSeriesPerClient"] == 64
@@ -178,6 +179,11 @@ def test_batch_subscribe_is_idempotent_and_forwards_amendment(
         assert event["event_type"] == "bar.amended"
         assert event["data"]["is_closed"] is True
 
+        diagnostics = client.app.state.kline_batch_registry.snapshot(limit=10)
+        assert diagnostics["connections"][0]["sent_by_type"]["bar.amended"] == 1
+        assert diagnostics["connections"][0]["sent_by_type"]["subscription_ack"] == 1
+        assert diagnostics["sent_by_type"]["bar.amended"] == 1
+
         ws.send_json({**command, "request_id": "batch-2"})
         replay_ack = ws.receive_json()
         assert replay_ack["ok"] is True
@@ -187,6 +193,9 @@ def test_batch_subscribe_is_idempotent_and_forwards_amendment(
     assert len(dm.subscribe_calls) == 1
     assert len(dm.release_calls) == 1
     assert dm.release_calls[0]["consumer_id"] == dm.ensure_calls[0]["consumer_id"]
+    retained = client.app.state.kline_batch_registry.snapshot(limit=10)
+    assert retained["websocket_connections"] == 0
+    assert retained["sent_by_type"]["bar.amended"] == 1
 
 
 def test_batch_partial_failure_and_item_ack_are_isolated(
@@ -194,7 +203,8 @@ def test_batch_partial_failure_and_item_ack_are_isolated(
 ) -> None:
     monkeypatch.setattr(config, "KLINE_BATCH_STREAM_ENABLED", True)
     dm = _BatchDataManager(fail_interval="7s")
-    with _client(dm).websocket_connect("/api/v1/stream/klines_batch") as ws:
+    client = _client(dm)
+    with client.websocket_connect("/api/v1/stream/klines_batch") as ws:
         ws.receive_json()
         ws.send_json({
             "action": "subscribe",
@@ -206,6 +216,22 @@ def test_batch_partial_failure_and_item_ack_are_isolated(
         })
         first = ws.receive_json()
         second = ws.receive_json()
+        diagnostics = client.app.state.kline_batch_registry.snapshot(limit=10)
+        connection = diagnostics["connections"][0]
+        assert connection["interval_failures"] == 1
+        assert connection["recent_failures"] == [{
+            "action": "subscribe",
+            "client_id": "cell-1",
+            "interval": "7s",
+            "code": "no_exact_base",
+            "message": "cannot reconstruct 7s",
+        }]
+        assert connection["subscriptions_by_client"]["cell-2"] == {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "ETHUSDT",
+            "intervals": ["5m"],
+        }
 
     assert first["status"] == "partial"
     assert first["active_intervals"] == ["1m"]

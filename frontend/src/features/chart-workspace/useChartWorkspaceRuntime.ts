@@ -94,6 +94,10 @@ import {
   type WorkspaceBusClient,
   type WorkspaceBusState,
 } from "./workspaceBus.js";
+import {
+  configureChartWorkspaceCellsCandidate,
+  type ChartWorkspaceCellConfiguration,
+} from "./chartWorkspaceBulkUpdate.js";
 
 export type ChartWorkspaceSaveState = "loading" | "saving" | "saved" | "error";
 
@@ -149,6 +153,7 @@ export interface ChartWorkspaceRuntime {
     updateCellChartSettings(cellId: ChartCellId, settings: ChartSettings | ChartCellChartSettings): void;
     updateCellPriceScale(cellId: ChartCellId, priceScale: ChartCellPriceScale): void;
     updateCellIndicators(cellId: ChartCellId, indicators: IndicatorDefinition[]): void;
+    configureCells(configurations: readonly ChartWorkspaceCellConfiguration[]): void;
     createWindow(): void;
     closeWindow(windowId: ChartWindowId): void;
     updateWindowPlacement(
@@ -284,7 +289,10 @@ export function useChartWorkspaceRuntime(
   useEffect(() => {
     let cancelled = false;
     const applyBusState = (state: WorkspaceBusState) => {
-      if (cancelled || !state.ready || !state.snapshot || state.sequence < busSequenceRef.current) return;
+      // A local edit is intentionally visible before its debounced WorkspaceBus
+      // commit. Re-applying an already-observed sequence during that window would
+      // replace the optimistic document with the stale authoritative snapshot.
+      if (cancelled || !state.ready || !state.snapshot || state.sequence <= busSequenceRef.current) return;
       busSequenceRef.current = state.sequence;
       const snapshot = normalizeChartWorkspaceLibrary(
         state.snapshot,
@@ -803,6 +811,15 @@ export function useChartWorkspaceRuntime(
     });
   }, [updateActiveDocument]);
 
+  const configureCells = useCallback((
+    configurations: readonly ChartWorkspaceCellConfiguration[],
+  ) => {
+    updateActiveDocument((current) => configureChartWorkspaceCellsCandidate(
+      current,
+      configurations,
+    ));
+  }, [updateActiveDocument]);
+
   const createWindow = useCallback(() => {
     if (!CHART_WORKSPACE_FEATURE_FLAGS.multiWindowEnabled) return;
     updateActiveDocument((current) => createChartWorkspaceWindowCandidate(current, {
@@ -921,6 +938,7 @@ export function useChartWorkspaceRuntime(
       updateCellChartSettings,
       updateCellPriceScale,
       updateCellIndicators,
+      configureCells,
       createWindow,
       closeWindow,
       updateWindowPlacement,

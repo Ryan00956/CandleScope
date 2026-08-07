@@ -26,6 +26,19 @@ class _Backfill(_Snapshot):
         return self.value
 
 
+class _BoundedSnapshot:
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def capacity_snapshot(self, *, offset, limit):
+        self.calls.append((offset, limit))
+        return self.value
+
+    def snapshot(self):
+        raise AssertionError("full snapshot must not be used by the capacity endpoint")
+
+
 def _database(path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -175,6 +188,49 @@ async def test_capacity_snapshot_is_fail_closed_when_components_are_absent(
     assert snapshot["dataManager"]["activeSeries"] == 0
     assert snapshot["exchange"]["physicalWebSockets"] == 0
     assert snapshot["database"]["state"] == "missing"
+
+
+async def test_capacity_snapshot_prefers_component_bounded_views(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(capacity, "KLINES_DB_PATH", tmp_path / "missing.sqlite")
+    manager = _BoundedSnapshot({
+        "coordinator": {"streams": []},
+        "event_bus": {},
+        "cache": {"total_series": 0, "total_bars": 0},
+        "stream_leases": {},
+        "runtimePressure": {},
+    })
+    ingestion = _BoundedSnapshot({
+        "initialized": True,
+        "ingress": {
+            "pipeline_detail_prepared": True,
+            "pipeline_detail_total": 120,
+            "dedicated_physical_websockets": 3,
+            "pipelines": {"pipeline-7": {"stream_key": "pipeline-7"}},
+        },
+    })
+
+    snapshot = await capacity.build_capacity_snapshot(
+        SimpleNamespace(
+            data_manager=manager,
+            data_engine_runtime=SimpleNamespace(
+                backfill_coordinator=None,
+                ingestion_factory=ingestion,
+            ),
+        ),
+        detail_offset=7,
+        detail_limit=1,
+    )
+
+    assert manager.calls == [(7, 1)]
+    assert ingestion.calls == [(7, 1)]
+    assert snapshot["exchange"]["pipelineDetailTotal"] == 120
+    assert snapshot["exchange"]["physicalWebSockets"] == 3
+    assert snapshot["exchange"]["pipelines"] == {
+        "pipeline-7": {"stream_key": "pipeline-7"}
+    }
 
 
 async def test_capacity_details_are_paged_and_capped_at_constant_bound(

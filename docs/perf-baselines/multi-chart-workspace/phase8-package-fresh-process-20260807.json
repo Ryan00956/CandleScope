@@ -1,0 +1,206 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase8-package/1",
+  "generatedAt": "2026-08-07T16:10:59.150Z",
+  "scope": "unpacked-validation-candidate-two-fresh-processes",
+  "promotionStatus": "validation-only-independent-release-review-required",
+  "packageFiles": {
+    "executable": {
+      "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\CandleScope.exe",
+      "exists": true,
+      "bytes": 225442304,
+      "sha256": "sha256:35167618a24c4f1bd895b3896f6d2802253b7c5378b404948fc7fa974fe84d6a"
+    },
+    "appAsar": {
+      "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\app.asar",
+      "exists": true,
+      "bytes": 21033315,
+      "sha256": "sha256:07d0b3af3afbadfb3849ed878dd8fac926aa2b59d018e506742a55f68d6c5963"
+    },
+    "backend": {
+      "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\backend\\app\\main.py",
+      "exists": true,
+      "bytes": 25700,
+      "sha256": "sha256:0f2b2d78731d89ce3444533f79371ab01e7fc5b29a3392e08470eaa8982eb3c6"
+    },
+    "pluginSdk": {
+      "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\packages\\candlescope-plugin-sdk\\src\\candlescope_plugin_sdk\\__init__.py",
+      "exists": true,
+      "bytes": 1761,
+      "sha256": "sha256:3f4f1b0b167038c01e677a7db0664d4cc5b6ff6180356b46a09dcb86961a5347"
+    }
+  },
+  "sources": {
+    "first": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\desktop-phase8-package-2b0c80abbdf74424942276a19d5835b5-1.json",
+      "sha256": "sha256:c82bb5c23e2750a0dbcd7d1a6fb4cd8b3f8cbedf384075bb96679c6261223c28"
+    },
+    "second": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\desktop-phase8-package-2b0c80abbdf74424942276a19d5835b5-2.json",
+      "sha256": "sha256:025c31d7e8b364f988b26cb572e4c2333899df83b084b003a01c3a2bea9d95a5"
+    }
+  },
+  "processes": [
+    {
+      "run": 1,
+      "result": "pass",
+      "environment": {
+        "electron": "43.3.0",
+        "chrome": "150.0.7871.212",
+        "node": "24.18.1",
+        "packaged": true,
+        "appVersion": "0.0.0",
+        "updatePolicy": "manual-release-artifact",
+        "userData": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\electron-user-data-2b0c80abbdf74424942276a19d5835b5-1",
+        "displayCount": 1,
+        "backendPort": 18090
+      },
+      "sidecarPid": 63816,
+      "readyMs": 4114,
+      "analysis": {
+        "result": "pass",
+        "gates": {
+          "readyP95": true,
+          "exactIdentity": true,
+          "inputP95": true,
+          "longTasks": true,
+          "eventLoopLag": true,
+          "queues": true,
+          "noSilentFailure": true,
+          "authoritativeExactWhenObserved": true
+        },
+        "measurements": {
+          "durationMs": 31316,
+          "readyMs": 4114,
+          "inputP95Ms": 2.9000000059604645,
+          "inputCount": 4,
+          "globalLongTasksPerMinute": 0,
+          "focusLongTasksPerMinute": 0,
+          "eventLoopLagP99Ms": 24,
+          "itemFailures": 0,
+          "authoritative": {
+            "sentClosed": 0,
+            "sentAmended": 0,
+            "receivedClosed": 0,
+            "receivedAmended": 0,
+            "committed": 0
+          }
+        }
+      }
+    },
+    {
+      "run": 2,
+      "result": "pass",
+      "environment": {
+        "electron": "43.3.0",
+        "chrome": "150.0.7871.212",
+        "node": "24.18.1",
+        "packaged": true,
+        "appVersion": "0.0.0",
+        "updatePolicy": "manual-release-artifact",
+        "userData": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\electron-user-data-2b0c80abbdf74424942276a19d5835b5-2",
+        "displayCount": 1,
+        "backendPort": 18090
+      },
+      "sidecarPid": 33540,
+      "readyMs": 4343,
+      "analysis": {
+        "result": "pass",
+        "gates": {
+          "readyP95": true,
+          "exactIdentity": true,
+          "inputP95": true,
+          "longTasks": true,
+          "eventLoopLag": true,
+          "queues": true,
+          "noSilentFailure": true,
+          "authoritativeExactWhenObserved": true
+        },
+        "measurements": {
+          "durationMs": 31312,
+          "readyMs": 4343,
+          "inputP95Ms": 12.5,
+          "inputCount": 4,
+          "globalLongTasksPerMinute": 0,
+          "focusLongTasksPerMinute": 0,
+          "eventLoopLagP99Ms": 22,
+          "itemFailures": 0,
+          "authoritative": {
+            "sentClosed": 0,
+            "sentAmended": 0,
+            "receivedClosed": 0,
+            "receivedAmended": 0,
+            "committed": 0
+          }
+        }
+      }
+    }
+  ],
+  "checks": {
+    "firstFreshProcess": {
+      "actual": "pass",
+      "expected": "pass with exact packaged W3 identity",
+      "passed": true
+    },
+    "secondFreshProcess": {
+      "actual": "pass",
+      "expected": "pass with exact packaged W3 identity",
+      "passed": true
+    },
+    "independentProcesses": {
+      "actual": {
+        "sidecarPids": [
+          63816,
+          33540
+        ],
+        "userData": [
+          "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\electron-user-data-2b0c80abbdf74424942276a19d5835b5-1",
+          "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-phase8\\package\\electron-user-data-2b0c80abbdf74424942276a19d5835b5-2"
+        ]
+      },
+      "expected": "different sidecar PIDs and different non-empty Chromium profiles",
+      "passed": true
+    },
+    "packageContents": {
+      "actual": {
+        "executable": {
+          "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\CandleScope.exe",
+          "exists": true,
+          "bytes": 225442304,
+          "sha256": "sha256:35167618a24c4f1bd895b3896f6d2802253b7c5378b404948fc7fa974fe84d6a"
+        },
+        "appAsar": {
+          "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\app.asar",
+          "exists": true,
+          "bytes": 21033315,
+          "sha256": "sha256:07d0b3af3afbadfb3849ed878dd8fac926aa2b59d018e506742a55f68d6c5963"
+        },
+        "backend": {
+          "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\backend\\app\\main.py",
+          "exists": true,
+          "bytes": 25700,
+          "sha256": "sha256:0f2b2d78731d89ce3444533f79371ab01e7fc5b29a3392e08470eaa8982eb3c6"
+        },
+        "pluginSdk": {
+          "path": "C:\\Users\\MECHREVO\\AppData\\Local\\Temp\\candlescope-phase8-package-2b0c80abbdf74424942276a19d5835b5\\win-unpacked\\resources\\packages\\candlescope-plugin-sdk\\src\\candlescope_plugin_sdk\\__init__.py",
+          "exists": true,
+          "bytes": 1761,
+          "sha256": "sha256:3f4f1b0b167038c01e677a7db0664d4cc5b6ff6180356b46a09dcb86961a5347"
+        }
+      },
+      "expected": "non-empty executable, app.asar, backend entry point, and plugin SDK source",
+      "passed": true
+    },
+    "zeroRuntimeErrors": {
+      "actual": [
+        [],
+        []
+      ],
+      "expected": [
+        [],
+        []
+      ],
+      "passed": true
+    }
+  },
+  "result": "pass"
+}

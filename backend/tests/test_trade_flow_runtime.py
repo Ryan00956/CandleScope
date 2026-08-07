@@ -449,7 +449,11 @@ async def test_startup_configuration_failure_cleans_already_created_components(
     ingestion_factory = _ShutdownComponent("ingestion-factory", calls)
     market_data_service = _ShutdownComponent("market-data", calls)
 
-    monkeypatch.setattr(runtime_module, "DataManager", lambda: data_manager)
+    monkeypatch.setattr(
+        runtime_module,
+        "DataManager",
+        lambda *_args, **_kwargs: data_manager,
+    )
     monkeypatch.setattr(runtime_module, "KlinesRepoAdapter", object)
     monkeypatch.setattr(runtime_module, "AsyncKlinesRepoAdapter", object)
     monkeypatch.setattr(runtime_module, "GapLedger", object)

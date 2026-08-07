@@ -8,8 +8,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
-import type { ChartSession } from "../features/chart-session/chartSessionTypes.js";
 import { MarketDataWorkspaceProvider } from "../features/market-data/MarketDataWorkspaceProvider.js";
 import { useChartWorkspaceRuntime } from "../features/chart-workspace/useChartWorkspaceRuntime.js";
 import type {
@@ -42,6 +42,7 @@ import { CHART_WORKSPACE_FEATURE_FLAGS } from "../features/chart-workspace/chart
 import { defaultWorkspaceBus } from "../features/chart-workspace/workspaceBus.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime.js";
+import type { IndicatorDefinition } from "../features/indicators/indicatorTypes.js";
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime.js";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime.js";
@@ -82,6 +83,27 @@ const LAYOUT_OPTIONS: ReadonlyArray<{
   { id: "grid-12", label: "十二图（3×4）", glyph: "12" },
   { id: "grid-16", label: "十六图（4×4）", glyph: "16" },
 ];
+
+const PHASE8_BUILTIN_INDICATORS: readonly IndicatorDefinition[] = Object.freeze([
+  Object.freeze({
+    id: "ma",
+    name: "MA",
+    engineName: "MA",
+    kind: "builtin",
+    executionTarget: "local",
+    params: { period: 20 },
+    visible: true,
+  }),
+  Object.freeze({
+    id: "rsi",
+    name: "RSI",
+    engineName: "RSI",
+    kind: "builtin",
+    executionTarget: "local",
+    params: { period: 14 },
+    visible: true,
+  }),
+]);
 
 function WorkspaceLayoutControls({
   layout,
@@ -417,6 +439,12 @@ function LiveWorkspaceApp() {
   const [desktopWindowVisible, setDesktopWindowVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState !== "hidden",
   );
+  const capacityProbeMetricsRef = useRef({
+    startedAt: 0,
+    longTasks: [] as Array<{ startTime: number; duration: number; focused: boolean }>,
+    inputLatencies: [] as number[],
+    longTaskKeys: new Set<string>(),
+  });
   const settings = useChartSettingsRuntime();
   const replayEntry = useReplayEntryCapability();
   const marketRailLayout = useMarketRailLayout();
@@ -517,13 +545,68 @@ function LiveWorkspaceApp() {
     };
   }, [workspaceBus]);
   useEffect(() => {
-    if (new URLSearchParams(location.search).get("capacityProbe") !== "phase7") return undefined;
+    const capacityProbe = new URLSearchParams(location.search).get("capacityProbe");
+    if (capacityProbe !== "phase7" && capacityProbe !== "phase8") return undefined;
+    const metrics = capacityProbeMetricsRef.current;
+    if (metrics.startedAt === 0) metrics.startedAt = performance.now();
+    let longTaskObserver: PerformanceObserver | null = null;
+    try {
+      longTaskObserver = new PerformanceObserver((list) => {
+        list.getEntries().forEach((entry) => {
+          if (entry.startTime < metrics.startedAt) return;
+          const key = `${entry.startTime}:${entry.duration}`;
+          if (metrics.longTaskKeys.has(key)) return;
+          metrics.longTaskKeys.add(key);
+          metrics.longTasks.push({
+            startTime: entry.startTime,
+            duration: entry.duration,
+            focused: document.hasFocus(),
+          });
+        });
+      });
+      longTaskObserver.observe({ type: "longtask", buffered: true });
+    } catch {
+      // Older Chromium builds may not expose the Long Tasks observer.
+    }
+    const recordInput = () => {
+      const startedAt = performance.now();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        metrics.inputLatencies.push(Math.max(0, performance.now() - startedAt));
+      }));
+    };
+    document.addEventListener("mousemove", recordInput, true);
     const target = window as typeof window & {
       __CANDLESCOPE_PHASE7_CONTROL__?: {
         configure64(): void;
+        configureBaseline(symbol?: string): void;
+        configureHealth(symbols: string[]): void;
         configureW2(symbols: string[]): void;
+        configureW3(symbols: string[]): void;
+        resetMetrics(): void;
+        metrics(): unknown;
         snapshot(): unknown;
       };
+    };
+    const configureScenario = (symbols: string[], indicators: readonly IndicatorDefinition[]) => {
+      const cellIds = Object.keys(workspace.view.document.cells).sort();
+      if (cellIds.length !== 64 || symbols.length !== 64) {
+        throw new Error("Phase 8 scenario requires exactly 64 Cell ids and symbols");
+      }
+      flushSync(() => {
+        workspace.actions.configureCells(cellIds.map((cellId, index) => ({
+          cellId,
+          session: {
+            exchange: "binance",
+            marketType: "spot",
+            symbol: symbols[index]!,
+            interval: "1m",
+          },
+          indicators: indicators.map((indicator) => ({
+            ...indicator,
+            params: { ...(indicator.params || {}) },
+          })),
+        })));
+      });
     };
     const handle = {
       configure64: () => {
@@ -532,23 +615,47 @@ function LiveWorkspaceApp() {
         workspace.actions.createWindow();
         workspace.actions.createWindow();
       },
+      configureBaseline: (symbol = "BTCUSDT") => {
+        const cellIds = Object.keys(workspace.view.document.cells).sort();
+        if (cellIds.length !== 64) {
+          throw new Error("Phase 8 baseline requires exactly 64 Cell ids");
+        }
+        configureScenario(cellIds.map(() => symbol), []);
+      },
+      configureHealth: (symbols: string[]) => {
+        if (symbols.length !== 64 || new Set(symbols).size !== 64) {
+          throw new Error("Phase 8 health selection requires exactly 64 unique symbols");
+        }
+        configureScenario(symbols, []);
+      },
       configureW2: (symbols: string[]) => {
         const cellIds = Object.keys(workspace.view.document.cells).sort();
         if (cellIds.length !== 64 || symbols.length !== 64 || new Set(symbols).size !== 64) {
           throw new Error("Phase 7 W2 requires exactly 64 unique Cell ids and symbols");
         }
-        cellIds.forEach((cellId) => workspace.actions.setCellLinkGroup(cellId, null));
-        cellIds.forEach((cellId, index) => workspace.actions.updateCellSession(cellId, {
-          exchange: "binance",
-          marketType: "spot",
-          symbol: symbols[index]!,
-          interval: "1m",
-        } satisfies ChartSession));
+        configureScenario(symbols, []);
         workspace.actions.updateLinkGroupSettings("A", { market: false, interval: false, crosshair: true });
         Object.values(workspace.view.document.windows).forEach((windowState) => {
           workspace.actions.setCellLinkGroup(windowState.activeCellId, "A");
         });
       },
+      configureW3: (symbols: string[]) => {
+        if (symbols.length !== 64 || new Set(symbols).size !== 64) {
+          throw new Error("Phase 8 W3 requires exactly 64 unique symbols");
+        }
+        configureScenario(symbols, PHASE8_BUILTIN_INDICATORS);
+      },
+      resetMetrics: () => {
+        metrics.startedAt = performance.now();
+        metrics.longTasks.length = 0;
+        metrics.inputLatencies.length = 0;
+        metrics.longTaskKeys.clear();
+      },
+      metrics: () => ({
+        durationMs: Math.max(0, performance.now() - metrics.startedAt),
+        longTasks: metrics.longTasks.slice(),
+        inputLatencies: metrics.inputLatencies.slice(),
+      }),
       snapshot: () => ({
         workspaceId: workspace.view.activeWorkspaceId,
         document: workspace.view.document,
@@ -559,6 +666,8 @@ function LiveWorkspaceApp() {
     };
     target.__CANDLESCOPE_PHASE7_CONTROL__ = handle;
     return () => {
+      longTaskObserver?.disconnect();
+      document.removeEventListener("mousemove", recordInput, true);
       if (target.__CANDLESCOPE_PHASE7_CONTROL__ === handle) delete target.__CANDLESCOPE_PHASE7_CONTROL__;
     };
   }, [workspace.actions, workspace.status, workspace.view]);
@@ -587,8 +696,10 @@ function LiveWorkspaceApp() {
         publishDateRange: ChartLinkCoordinator["publishDateRange"];
       };
     };
+    const capacityProbe = new URLSearchParams(location.search).get("capacityProbe");
     if (target.__CANDLESCOPE_MULTI_CHART_CAPACITY__ === undefined
-      && new URLSearchParams(location.search).get("capacityProbe") !== "phase7") return;
+      && capacityProbe !== "phase7"
+      && capacityProbe !== "phase8") return;
     const diagnostics = {
       snapshot: () => linkCoordinator.snapshot(),
       publishCrosshair: linkCoordinator.publishCrosshair.bind(linkCoordinator),

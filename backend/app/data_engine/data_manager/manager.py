@@ -2835,6 +2835,35 @@ class DataManager:
             },
         }
 
+    def capacity_snapshot(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return only the bounded state required by ``/debug/capacity``.
+
+        The full diagnostic snapshot walks every cache entry and several
+        unrelated services.  Rebuilding that object once per soak sample can
+        itself move the Python allocator's private-byte high-water mark.  The
+        capacity endpoint owns no lifecycle state, so keep its observation
+        surface explicit and bounded.
+        """
+        cache = self.cache.health_snapshot()
+        return {
+            "coordinator": self.coordinator.snapshot(),
+            "event_bus": self.event_bus.snapshot(),
+            "cache": {
+                "total_series": int(cache.get("series_count", 0)),
+                "total_bars": int(cache.get("total_bars", 0)),
+            },
+            "stream_leases": self.stream_lease_snapshot(
+                offset=offset,
+                limit=limit,
+            ),
+            "runtimePressure": self.runtime_pressure_snapshot(),
+        }
+
     def stream_lease_snapshot(
         self,
         *,

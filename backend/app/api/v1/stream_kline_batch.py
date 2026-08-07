@@ -109,6 +109,7 @@ class KlineBatchConnectionRegistry:
         self._connections: dict[str, "KlineBatchConnection"] = {}
         self.opened = 0
         self.closed = 0
+        self.sent_by_type: dict[str, int] = {}
 
     def register(self, connection: "KlineBatchConnection") -> None:
         self._connections[connection.connection_id] = connection
@@ -117,6 +118,10 @@ class KlineBatchConnectionRegistry:
     def unregister(self, connection: "KlineBatchConnection") -> None:
         if self._connections.pop(connection.connection_id, None) is not None:
             self.closed += 1
+            for event_type, count in connection.sent_by_type.items():
+                self.sent_by_type[event_type] = (
+                    self.sent_by_type.get(event_type, 0) + int(count)
+                )
 
     def snapshot(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         safe_offset = max(0, int(offset))
@@ -126,6 +131,10 @@ class KlineBatchConnectionRegistry:
             for key in sorted(self._connections)
         ]
         summaries = [connection.snapshot() for connection in ordered]
+        sent_by_type = dict(self.sent_by_type)
+        for summary in summaries:
+            for event_type, count in summary["sent_by_type"].items():
+                sent_by_type[event_type] = sent_by_type.get(event_type, 0) + int(count)
         return {
             "protocol": KLINE_BATCH_PROTOCOL,
             "enabled": bool(config.KLINE_BATCH_STREAM_ENABLED),
@@ -142,8 +151,13 @@ class KlineBatchConnectionRegistry:
             "outbox_authoritative_timeouts": sum(
                 item["outbox"]["authoritative_timeouts"] for item in summaries
             ),
+            "item_failures": sum(item["item_failures"] for item in summaries),
+            "interval_failures": sum(
+                item["interval_failures"] for item in summaries
+            ),
             "opened": self.opened,
             "closed": self.closed,
+            "sent_by_type": dict(sorted(sent_by_type.items())),
             "limits": KlineBatchLimits.from_config().to_wire(),
             "detail_offset": safe_offset,
             "detail_limit": safe_limit,
@@ -186,6 +200,9 @@ class KlineBatchConnection:
         self.commands = 0
         self.item_acks = 0
         self.item_failures = 0
+        self.interval_failures = 0
+        self.recent_failures: list[dict[str, str]] = []
+        self.sent_by_type: dict[str, int] = {}
         self._send_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._reserved_client_ids: set[str] = set()
@@ -238,6 +255,8 @@ class KlineBatchConnection:
         try:
             async with self._send_lock:
                 await send_json_with_timeout(self.websocket, payload)
+            event_type = str(payload.get("event_type") or payload.get("type") or "unknown")
+            self.sent_by_type[event_type] = self.sent_by_type.get(event_type, 0) + 1
             return True
         except Exception:
             self.closed = True
@@ -379,6 +398,7 @@ class KlineBatchConnection:
 
         try:
             failures = await self._add_intervals(subscription, item["intervals"])
+            self._record_interval_failures("subscribe", client_id, failures)
             async with self._state_lock:
                 if subscription.handles:
                     self.subscriptions[client_id] = subscription
@@ -411,6 +431,7 @@ class KlineBatchConnection:
             replacement = self._new_subscription(item)
             self._require_total_capacity(len(requested))
             failures = await self._add_intervals(replacement, item["intervals"])
+            self._record_interval_failures("update", client_id, failures)
             if not replacement.handles:
                 raise _ItemError(
                     "update_failed",
@@ -423,6 +444,7 @@ class KlineBatchConnection:
         additions = requested - current.intervals
         self._require_total_capacity(len(additions))
         failures = await self._add_intervals(current, sorted(additions))
+        self._record_interval_failures("update", client_id, failures)
         successful_requested = requested - {
             failure["interval"] for failure in failures
         }
@@ -683,6 +705,24 @@ class KlineBatchConnection:
             "failed": failed,
         }
 
+    def _record_interval_failures(
+        self,
+        action: str,
+        client_id: str,
+        failures: list[dict[str, str]],
+    ) -> None:
+        self.interval_failures += len(failures)
+        for failure in failures:
+            self.recent_failures.append({
+                "action": action,
+                "client_id": client_id,
+                "interval": str(failure.get("interval") or ""),
+                "code": str(failure.get("code") or "stream_subscription_failed"),
+                "message": str(failure.get("message") or ""),
+            })
+        if len(self.recent_failures) > 20:
+            del self.recent_failures[:-20]
+
     def _failure_ack(
         self,
         action: str,
@@ -739,9 +779,21 @@ class KlineBatchConnection:
             "commands": self.commands,
             "item_acks": self.item_acks,
             "item_failures": self.item_failures,
+            "interval_failures": self.interval_failures,
+            "recent_failures": list(self.recent_failures),
+            "sent_by_type": dict(sorted(self.sent_by_type.items())),
             "closed": self.closed,
             "outbox": self.outbox.snapshot(),
             "subscriptions_by_series": dict(sorted(by_series.items())[:64]),
+            "subscriptions_by_client": {
+                client_id: {
+                    "exchange": subscription.exchange,
+                    "market_type": subscription.market_type,
+                    "symbol": subscription.symbol,
+                    "intervals": sorted(subscription.intervals),
+                }
+                for client_id, subscription in sorted(self.subscriptions.items())[:64]
+            },
         }
 
 

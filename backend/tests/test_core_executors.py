@@ -58,6 +58,8 @@ def test_rolling_latency_uses_a_fixed_packed_ring_and_preserves_sequences() -> N
         {"sequence": 6, "value_ms": 60.0},
     ]
     assert recent["p99_ms"] == 60.0
+    assert sum(recent["histogram"]["counts"]) == 6
+    assert recent["histogram"]["counts"][60] == 1
 
     complete = latency.snapshot(after_sequence=2)
     assert complete["window_complete"] is True
@@ -70,6 +72,21 @@ def test_rolling_latency_uses_a_fixed_packed_ring_and_preserves_sequences() -> N
     truncated = latency.snapshot(after_sequence=1)
     assert truncated["window_complete"] is False
     assert truncated["window_sample_count"] == 4
+
+
+def test_rolling_latency_histogram_is_cumulative_and_bounds_overflow() -> None:
+    latency = _RollingLatency(history_limit=2, output_limit=1)
+    for value in (0, 0.1, 99.1, 100, 1_500):
+        latency.add(value)
+
+    histogram = latency.snapshot()["histogram"]
+    assert histogram["bucket_width_ms"] == 1
+    assert histogram["max_ms"] == 1_000
+    assert sum(histogram["counts"]) == 5
+    assert histogram["counts"][0] == 1
+    assert histogram["counts"][1] == 1
+    assert histogram["counts"][100] == 2
+    assert histogram["counts"][1_001] == 1
 
 
 def test_ws_runtime_metrics_records_timeouts_and_heartbeat_delay() -> None:

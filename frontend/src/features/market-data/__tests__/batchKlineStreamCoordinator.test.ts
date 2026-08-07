@@ -115,6 +115,19 @@ test("different instruments share one batch socket with isolated stable client I
     logicalSubscribers: 2,
     logicalSubscriptions: 2,
     clientIds: [btcId, ethId].sort(),
+    serverStates: { subscribed: 1, subscribing: 1 },
+    activeLogicalSubscriptions: 1,
+    counts: {
+      messages: 2,
+      klines: 1,
+      closed: 0,
+      amended: 0,
+      parseErrors: 0,
+      socketOpens: 1,
+      socketCloses: 0,
+      retriesScheduled: 0,
+      retriesSent: 0,
+    },
   });
 
   btc.close();
@@ -122,6 +135,71 @@ test("different instruments share one batch socket with isolated stable client I
   eth.close();
   assert.equal(socket.closed, true);
   assert.equal(coordinator.activePhysicalStreamCount(), 0);
+});
+
+test("a transient subscribe rejection retries the affected logical client", async () => {
+  const socket = new FakeSocket();
+  const coordinator = new BatchKlineStreamCoordinator({
+    url: "ws://test/stream/klines_batch",
+    socketFactory: () => socket,
+  });
+  coordinator.subscribe(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    { intervals: ["1m"] },
+  );
+  socket.open();
+  const initial = JSON.parse(socket.sent[0]!) as { items: Array<{ clientId: string }> };
+  socket.message({
+    type: "subscription_ack",
+    action: "subscribe",
+    ok: false,
+    status: "failed",
+    code: "kline_app_capacity",
+    client_id: initial.items[0]!.clientId,
+    active_intervals: [],
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(socket.sent.length, 2);
+  const retry = JSON.parse(socket.sent[1]!) as unknown as { action?: unknown };
+  assert.equal(retry.action, "subscribe");
+  const diagnostics = coordinator.diagnostics();
+  assert.deepEqual(diagnostics.serverStates, { subscribing: 1 });
+  assert.equal((diagnostics.counts as Record<string, number>).retriesScheduled, 1);
+  assert.equal((diagnostics.counts as Record<string, number>).retriesSent, 1);
+  coordinator.closeAll();
+});
+
+test("authoritative close and amendment counters remain distinct and parse failures stay visible", () => {
+  const socket = new FakeSocket();
+  const coordinator = new BatchKlineStreamCoordinator({
+    url: "ws://test/stream/klines_batch",
+    socketFactory: () => socket,
+  });
+  coordinator.subscribe(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    { intervals: ["1m"] },
+  );
+  socket.open();
+  const clientId = (JSON.parse(socket.sent[0]!) as { items: Array<{ clientId: string }> }).items[0]!.clientId;
+  const message = (eventType: string) => ({
+    type: "kline",
+    event_type: eventType,
+    protocol: "candlescope.kline-batch/1",
+    client_id: clientId,
+    exchange: "binance",
+    market_type: "spot",
+    symbol: "BTCUSDT",
+    interval: "1m",
+    data: { time: 1, open: 1, high: 2, low: 1, close: 2, volume: 3, is_closed: true },
+  });
+  socket.message(message("bar.closed"));
+  socket.message(message("bar.amended"));
+  socket.onmessage?.({ data: "not-json" } as MessageEvent<string>);
+  const counts = coordinator.diagnostics().counts as Record<string, number>;
+  assert.equal(counts.closed, 1);
+  assert.equal(counts.amended, 1);
+  assert.equal(counts.parseErrors, 1);
 });
 
 test("a Cell mounted after socket open subscribes only after its intervals are known", () => {

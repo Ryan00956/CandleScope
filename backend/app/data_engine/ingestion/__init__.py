@@ -317,3 +317,38 @@ class MarketDataIngress:
                 key: p.snapshot() for key, p in self._pipelines.items()
             },
         }
+
+    def capacity_snapshot(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict:
+        """Build a paged capacity view without materializing every pipeline."""
+        safe_offset = max(0, int(offset))
+        safe_limit = min(100, max(0, int(limit)))
+        ordered = sorted(self._pipelines.items(), key=lambda item: item[0])
+        dedicated_connected = 0
+        for _key, pipeline in ordered:
+            feed = pipeline.feed_control.snapshot()
+            session = feed.get("session") if isinstance(feed, dict) else None
+            if (
+                isinstance(feed, dict)
+                and feed.get("mode") == "websocket"
+                and isinstance(session, dict)
+                and session.get("layer") != "L2_SharedSession"
+                and session.get("health") == "connected"
+            ):
+                dedicated_connected += 1
+        return {
+            "started": self._started,
+            "transport": self._transport.snapshot(),
+            "shared_ws": self._shared_ws.snapshot(),
+            "pipeline_detail_prepared": True,
+            "pipeline_detail_total": len(ordered),
+            "dedicated_physical_websockets": dedicated_connected,
+            "pipelines": {
+                key: pipeline.snapshot()
+                for key, pipeline in ordered[safe_offset:safe_offset + safe_limit]
+            },
+        }

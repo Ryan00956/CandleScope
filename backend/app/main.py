@@ -130,6 +130,15 @@ app.include_router(create_core_plugin_router())
 # ═══════════════════════════════════════════════════════════════
 
 
+async def _init_alert_delivery() -> None:
+    """Start durable alert delivery independently from live market data."""
+    from app.alerts.facade import AlertFacade
+
+    alert_facade = AlertFacade()
+    await alert_facade.start()
+    app.state.alert_facade = alert_facade
+
+
 async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
     from app.data_engine.runtime import (
@@ -170,7 +179,9 @@ async def _init_data_manager() -> None:
             print(f"[startup] IndicatorEngine bridge failed: {exc}")
 
         try:
-            alert_facade = AlertFacade()
+            alert_facade = getattr(app.state, "alert_facade", None)
+            if not isinstance(alert_facade, AlertFacade):
+                raise RuntimeError("Alert delivery facade is unavailable")
             alert_runtime = AlertRuntimeEngine(
                 facade=alert_facade,
                 data_manager=runtime.data_manager,
@@ -331,6 +342,7 @@ async def startup_event() -> None:
     # event runs after a startup exception, so reclaim already-started sidecars
     # before propagating a fatal DataEngine configuration failure.
     try:
+        await _init_alert_delivery()
         await _init_replay_runtime()
         await _init_data_manager()
         data_manager = getattr(app.state, "data_manager", None)
@@ -349,6 +361,9 @@ async def startup_event() -> None:
         )
         await plugin_platform_v2.start()
     except BaseException:
+        alert_facade = getattr(app.state, "alert_facade", None)
+        if alert_facade is not None:
+            await alert_facade.stop()
         await plugin_platform_v2.stop()
         data_runtime = getattr(app.state, "data_engine_runtime", None)
         if data_runtime is not None:
@@ -480,6 +495,14 @@ async def shutdown_event() -> None:
             print("[shutdown] AlertRuntime shut down [ok]")
         except Exception as exc:
             print(f"[shutdown] AlertRuntime shutdown error: {exc}")
+
+    alert_facade = getattr(app.state, "alert_facade", None)
+    if alert_facade is not None:
+        try:
+            await alert_facade.stop()
+            print("[shutdown] Alert delivery outbox shut down [ok]")
+        except Exception as exc:
+            print(f"[shutdown] Alert delivery outbox shutdown error: {exc}")
 
     indicator_runtime_service = getattr(
         app.state,

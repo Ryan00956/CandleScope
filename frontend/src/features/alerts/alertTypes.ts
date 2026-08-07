@@ -117,6 +117,7 @@ export interface AlertDispatchOutcome {
   detail?: string;
   subscriberCount?: number;
   receiptAt?: number;
+  durable?: boolean;
 }
 
 export interface AlertNotificationMessage {
@@ -166,6 +167,30 @@ export interface AlertSystemStatus {
     queueSize: number;
     published: number;
     dropped: number;
+  };
+  webhook: {
+    enabled: boolean;
+    ready: boolean;
+    signatureConfigured: boolean;
+    requireSignature: boolean;
+    allowHttp: boolean;
+    allowPrivateNetwork: boolean;
+    allowedHostCount: number;
+    maxAttempts: number;
+    configurationError: string | null;
+  };
+  outbox: {
+    running: boolean;
+    queued: number;
+    staged: number;
+    pending: number;
+    processing: number;
+    retrying: number;
+    delivered: number;
+    deadLetter: number;
+    oldestQueuedAt: number | null;
+    nextAttemptAt: number | null;
+    lastError: string | null;
   };
   runtime: AlertRuntimeStatus;
 }
@@ -228,6 +253,7 @@ export interface AlertChannelState {
   in_app: boolean;
   browser: boolean;
   sound: boolean;
+  webhook: boolean;
   history: boolean;
 }
 
@@ -245,6 +271,7 @@ export interface AlertDraft {
   cooldownMode: "always" | "30s" | "5m" | "custom";
   customCooldownSeconds: string | number;
   messageTemplate: string;
+  webhookUrl: string;
   channels: AlertChannelState;
 }
 
@@ -392,6 +419,7 @@ function parseDispatchOutcomes(value: unknown, path: string): AlertDispatchOutco
     if (record.detail !== undefined) outcome.detail = expectString(record.detail, `${path}[${index}].detail`);
     if (record.subscriberCount !== undefined) outcome.subscriberCount = expectNonNegativeInteger(record.subscriberCount, `${path}[${index}].subscriberCount`);
     if (record.receiptAt !== undefined) outcome.receiptAt = expectNonNegativeInteger(record.receiptAt, `${path}[${index}].receiptAt`);
+    if (record.durable !== undefined) outcome.durable = expectBoolean(record.durable, `${path}[${index}].durable`);
     return outcome;
   });
 }
@@ -578,6 +606,8 @@ export function parseAlertNotificationMessage(value: unknown, path = "notificati
 export function parseAlertSystemStatus(value: unknown, path = "status"): AlertSystemStatus {
   const record = expectRecord(value, path);
   const broker = expectRecord(record.notificationBroker, `${path}.notificationBroker`);
+  const webhook = expectRecord(record.webhook, `${path}.webhook`);
+  const outbox = expectRecord(record.outbox, `${path}.outbox`);
   const runtime = expectRecord(record.runtime, `${path}.runtime`);
   const rawSubscriptions = runtime.subscriptions;
   if (!Array.isArray(rawSubscriptions)) throw new AlertPayloadError(`${path}.runtime.subscriptions`, "expected an array");
@@ -590,6 +620,34 @@ export function parseAlertSystemStatus(value: unknown, path = "status"): AlertSy
       queueSize: expectNonNegativeInteger(broker.queueSize, `${path}.notificationBroker.queueSize`),
       published: expectNonNegativeInteger(broker.published, `${path}.notificationBroker.published`),
       dropped: expectNonNegativeInteger(broker.dropped, `${path}.notificationBroker.dropped`),
+    },
+    webhook: {
+      enabled: expectBoolean(webhook.enabled, `${path}.webhook.enabled`),
+      ready: expectBoolean(webhook.ready, `${path}.webhook.ready`),
+      signatureConfigured: expectBoolean(webhook.signatureConfigured, `${path}.webhook.signatureConfigured`),
+      requireSignature: expectBoolean(webhook.requireSignature, `${path}.webhook.requireSignature`),
+      allowHttp: expectBoolean(webhook.allowHttp, `${path}.webhook.allowHttp`),
+      allowPrivateNetwork: expectBoolean(webhook.allowPrivateNetwork, `${path}.webhook.allowPrivateNetwork`),
+      allowedHostCount: expectNonNegativeInteger(webhook.allowedHostCount, `${path}.webhook.allowedHostCount`),
+      maxAttempts: expectNonNegativeInteger(webhook.maxAttempts, `${path}.webhook.maxAttempts`),
+      configurationError: webhook.configurationError === null
+        ? null
+        : expectString(webhook.configurationError, `${path}.webhook.configurationError`),
+    },
+    outbox: {
+      running: expectBoolean(outbox.running, `${path}.outbox.running`),
+      queued: expectNonNegativeInteger(outbox.queued, `${path}.outbox.queued`),
+      staged: expectNonNegativeInteger(outbox.staged, `${path}.outbox.staged`),
+      pending: expectNonNegativeInteger(outbox.pending, `${path}.outbox.pending`),
+      processing: expectNonNegativeInteger(outbox.processing, `${path}.outbox.processing`),
+      retrying: expectNonNegativeInteger(outbox.retrying, `${path}.outbox.retrying`),
+      delivered: expectNonNegativeInteger(outbox.delivered, `${path}.outbox.delivered`),
+      deadLetter: expectNonNegativeInteger(outbox.deadLetter, `${path}.outbox.deadLetter`),
+      oldestQueuedAt: expectNullableTimestamp(outbox.oldestQueuedAt, `${path}.outbox.oldestQueuedAt`),
+      nextAttemptAt: expectNullableTimestamp(outbox.nextAttemptAt, `${path}.outbox.nextAttemptAt`),
+      lastError: outbox.lastError === null
+        ? null
+        : expectString(outbox.lastError, `${path}.outbox.lastError`),
     },
     runtime: {
       started: expectBoolean(runtime.started, `${path}.runtime.started`),

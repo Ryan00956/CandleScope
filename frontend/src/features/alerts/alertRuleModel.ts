@@ -123,10 +123,12 @@ export function createDefaultAlertDraft({
     cooldownMode: "30s",
     customCooldownSeconds: 60,
     messageTemplate: "{{symbol}} {{interval}} 命中警报：{{condition}}，当前值 {{value}}",
+    webhookUrl: "",
     channels: {
       in_app: true,
       browser: false,
       sound: false,
+      webhook: false,
       history: true,
     },
   };
@@ -239,6 +241,7 @@ export function createDraftFromRule(rule: AlertRule): AlertDraft {
     customCooldownSeconds: Number.isFinite(cooldownMs) && cooldownMs > 0 ? Math.round(cooldownMs / 1000) : 60,
     messageTemplate: messageTemplateFromActions(rule.actions)
       || "{{symbol}} {{interval}} 命中警报：{{condition}}，当前值 {{value}}",
+    webhookUrl: webhookUrlFromActions(rule.actions),
     channels: actionsToChannelState(rule?.actions),
   };
 }
@@ -277,6 +280,7 @@ export function describeAlertChannels(rule: AlertRule | null | undefined): strin
       if (action.type === "in_app") return "应用内";
       if (action.type === "browser") return "浏览器";
       if (action.type === "sound") return "声音";
+      if (action.type === "webhook") return "Webhook";
       if (action.type === "telegram") return "Telegram";
       if (action.type === "email") return "邮件";
       if (action.type === "trading_signal") return "交易信号";
@@ -374,6 +378,15 @@ function messageTemplateFromActions(actions: AlertAction[]): string {
   return "";
 }
 
+function webhookUrlFromActions(actions: AlertAction[]): string {
+  for (const action of actions) {
+    if (action.type === "webhook" && typeof action.config.url === "string") {
+      return action.config.url;
+    }
+  }
+  return "";
+}
+
 function applyDraftPatch(
   target: AlertExpressionDraft,
   patch: Partial<AlertExpressionDraft>,
@@ -407,13 +420,25 @@ function buildActionsPayload(draft: AlertDraft): AlertAction[] {
     { type: "in_app", enabled: channels.in_app !== false, config: { template: draft.messageTemplate || "" } },
     { type: "browser", enabled: Boolean(channels.browser), config: { template: draft.messageTemplate || "" } },
     { type: "sound", enabled: Boolean(channels.sound), config: {} },
+    { type: "webhook", enabled: Boolean(channels.webhook), config: { url: draft.webhookUrl.trim() } },
   ];
 }
 
 function actionsToChannelState(actions: AlertAction[] = []): AlertChannelState {
-  const state: AlertChannelState = { in_app: false, browser: false, sound: false, history: true };
+  const state: AlertChannelState = {
+    in_app: false,
+    browser: false,
+    sound: false,
+    webhook: false,
+    history: true,
+  };
   for (const action of actions) {
-    if (action.type === "in_app" || action.type === "browser" || action.type === "sound") {
+    if (
+      action.type === "in_app"
+      || action.type === "browser"
+      || action.type === "sound"
+      || action.type === "webhook"
+    ) {
       state[action.type] = action.enabled !== false;
     }
   }
@@ -447,12 +472,18 @@ export function describeAlertDispatch(event: AlertHistoryEvent): string {
   return event.dispatch.map((outcome) => {
     const channel = outcome.type === "in_app"
       ? "应用内"
-      : (outcome.type === "browser" ? "浏览器" : (outcome.type === "sound" ? "声音" : outcome.type));
+      : (outcome.type === "browser"
+        ? "浏览器"
+        : (outcome.type === "sound" ? "声音" : (outcome.type === "webhook" ? "Webhook" : outcome.type)));
     const status = outcome.status === "delivered"
       ? "已送达"
       : (outcome.status === "published"
         ? "待客户端确认"
-        : (outcome.status === "unavailable" ? "无活动客户端" : outcome.status));
+        : (outcome.status === "queued"
+          ? "已入持久队列"
+          : (outcome.status === "retrying"
+            ? "重试中"
+            : (outcome.status === "unavailable" ? "无活动客户端" : outcome.status))));
     return `${channel}: ${status}`;
   }).join(" / ");
 }

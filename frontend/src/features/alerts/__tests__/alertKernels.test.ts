@@ -149,6 +149,8 @@ test("alert expression parser fails closed for malformed, cyclic, and overly dee
 
 test("alert model preserves the backend expression contract and falls back from bad rule data", () => {
   const draft = createDefaultAlertDraft({ symbol: "BTCUSDT", price: 68000 });
+  draft.channels.webhook = true;
+  draft.webhookUrl = "https://hooks.example.com/candlescope";
   const payload = buildAlertPayloadFromDraft({
     draft,
     fallbackSymbol: "BTCUSDT",
@@ -162,6 +164,9 @@ test("alert model preserves the backend expression contract and falls back from 
   assert.equal(payload.afterTrigger, "auto_disable");
   assert.equal("op" in payload.expression ? payload.expression.children.length : 0, 1);
   assert.match(describeAlertDraftExpression(draft.expression), /收盘价 上穿 68000/);
+  const webhook = payload.actions.find((action) => action.type === "webhook");
+  assert.equal(webhook?.enabled, true);
+  assert.equal(webhook?.config.url, "https://hooks.example.com/candlescope");
 
   const restored = createDraftFromRule(malformedFixture<AlertRule>({
     ...rule(),
@@ -169,6 +174,15 @@ test("alert model preserves the backend expression contract and falls back from 
   }));
   assert.equal(restored.expression.type, "group");
   assert.equal(restored.messageTemplate, "hit");
+
+  const restoredWebhook = createDraftFromRule(rule({
+    actions: [
+      { type: "in_app", enabled: true, config: { template: "hit" } },
+      { type: "webhook", enabled: true, config: { url: "https://hooks.example.com/restore" } },
+    ],
+  }));
+  assert.equal(restoredWebhook.channels.webhook, true);
+  assert.equal(restoredWebhook.webhookUrl, "https://hooks.example.com/restore");
 });
 
 test("alerts API validates unknown responses and types enabled/delete contracts", async () => {
@@ -196,6 +210,30 @@ test("alert runtime status parser preserves per-rule readiness", () => {
       published: 2,
       dropped: 0,
     },
+    webhook: {
+      enabled: true,
+      ready: true,
+      signatureConfigured: true,
+      requireSignature: true,
+      allowHttp: false,
+      allowPrivateNetwork: false,
+      allowedHostCount: 1,
+      maxAttempts: 5,
+      configurationError: null,
+    },
+    outbox: {
+      running: true,
+      queued: 2,
+      staged: 0,
+      pending: 1,
+      processing: 0,
+      retrying: 1,
+      delivered: 3,
+      deadLetter: 0,
+      oldestQueuedAt: 1,
+      nextAttemptAt: 2,
+      lastError: null,
+    },
     runtime: {
       started: true,
       dataManager: true,
@@ -222,6 +260,8 @@ test("alert runtime status parser preserves per-rule readiness", () => {
   assert.equal(parsed.runtime.rules[0]?.state, "warming");
   assert.equal(parsed.runtime.rules[0]?.indicatorReady.rsi, false);
   assert.equal(parsed.runtime.rules[0]?.historyBars, 10);
+  assert.equal(parsed.webhook.ready, true);
+  assert.equal(parsed.outbox.retrying, 1);
 });
 
 test("alert notification parser and in-app delivery fail closed", async () => {

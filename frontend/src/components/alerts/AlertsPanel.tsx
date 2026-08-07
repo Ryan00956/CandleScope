@@ -98,6 +98,7 @@ const CHANNEL_OPTIONS: Array<{ key: keyof AlertChannelState; title: string; desc
   { key: "in_app", title: "应用内提示", desc: "右上角 Toast" },
   { key: "browser", title: "浏览器通知", desc: "需要授权后启用" },
   { key: "sound", title: "声音提醒", desc: "默认关闭" },
+  { key: "webhook", title: "Webhook", desc: "持久队列与签名投递" },
   { key: "history", title: "触发历史", desc: "始终记录" },
 ];
 
@@ -469,10 +470,12 @@ function NestedLogicBuilder({ expression, onAction }: NestedLogicBuilderProps) {
 interface ExpirationAndNotificationProps {
   draft: AlertDraft;
   onDraftChange: Dispatch<SetStateAction<AlertDraft>>;
+  availableChannels: string[];
 }
 
-function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotificationProps) {
+function ExpirationAndNotification({ draft, onDraftChange, availableChannels }: ExpirationAndNotificationProps) {
   const [channelSetupMessage, setChannelSetupMessage] = useState("");
+  const webhookAvailable = availableChannels.includes("webhook");
   const update = (patch: Partial<AlertDraft>) => onDraftChange((prev) => ({ ...prev, ...patch }));
   const updateChannel = (key: keyof AlertChannelState, checked: boolean) => {
     void (async () => {
@@ -484,6 +487,9 @@ function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotifi
       } else if (checked && key === "sound") {
         enabled = await primeAlertSound();
         setChannelSetupMessage(enabled ? "声音提醒已解锁。" : "当前浏览器无法启用声音提醒。");
+      } else if (checked && key === "webhook" && !webhookAvailable) {
+        enabled = false;
+        setChannelSetupMessage("Webhook 尚未在后端启用或签名密钥未配置。");
       }
       onDraftChange((prev) => ({
         ...prev,
@@ -568,16 +574,28 @@ function ExpirationAndNotification({ draft, onDraftChange }: ExpirationAndNotifi
               <input
                 type="checkbox"
                 checked={Boolean(draft.channels?.[key])}
-                disabled={key === "history"}
+                disabled={key === "history" || (key === "webhook" && !webhookAvailable)}
                 onChange={(event) => updateChannel(key, event.target.checked)}
               />
               <span>
                 <strong>{title}</strong>
-                <small>{desc}</small>
+                <small>{key === "webhook" && !webhookAvailable ? "后端功能开关关闭" : desc}</small>
               </span>
             </label>
           ))}
         </div>
+        {draft.channels.webhook && (
+          <label className="alert-field alert-message-template">
+            <span>Webhook HTTPS 地址</span>
+            <input
+              type="url"
+              value={draft.webhookUrl}
+              disabled={!webhookAvailable}
+              placeholder="https://example.com/candlescope-alerts"
+              onChange={(event) => update({ webhookUrl: event.target.value })}
+            />
+          </label>
+        )}
         {channelSetupMessage && <div className="alert-channel-setup-message">{channelSetupMessage}</div>}
         <label className="alert-field alert-message-template">
           <span>消息模板</span>
@@ -950,6 +968,11 @@ export default function AlertsPanel({
     : (systemStatus?.runtime.status === "error"
       ? `运行异常${degradedRuleCount ? ` · ${degradedRuleCount} 条恢复中` : ""}`
       : "运行状态不可用");
+  const deliveryStatusLabel = systemStatus?.webhook.enabled
+    ? (systemStatus.webhook.ready
+      ? `Webhook 队列 ${systemStatus.outbox.queued} · 重试 ${systemStatus.outbox.retrying} · 死信 ${systemStatus.outbox.deadLetter}`
+      : `Webhook 配置未就绪：${systemStatus.webhook.configurationError || "未知错误"}`)
+    : "Webhook 默认关闭";
 
   const historySinceMs = useMemo(() => {
     const now = new Date();
@@ -1310,6 +1333,7 @@ export default function AlertsPanel({
             <div className={`alert-runtime-status status-${systemStatus?.runtime.status || "unknown"}`}>
               {runtimeStatusLabel}
             </div>
+            <div className="alert-panel-subtitle">{deliveryStatusLabel}</div>
           </div>
           <button className="alert-panel-close" onClick={onClose} type="button">✕</button>
         </div>
@@ -1421,7 +1445,11 @@ export default function AlertsPanel({
                 <NestedLogicBuilder expression={draft.expression} onAction={applyExpressionAction} />
               </section>
 
-              <ExpirationAndNotification draft={draft} onDraftChange={setDraft} />
+              <ExpirationAndNotification
+                draft={draft}
+                onDraftChange={setDraft}
+                availableChannels={systemStatus?.registeredChannels || []}
+              />
 
               <RulePreview
                 draft={draft}

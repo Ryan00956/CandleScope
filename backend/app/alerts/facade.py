@@ -7,8 +7,10 @@ from typing import Any
 from app.alerts.dispatcher import AlertActionDispatcher
 from app.alerts.evaluator import AlertEvaluator
 from app.alerts.notifications import AlertNotificationBroker, BrowserOwnedAlertChannel
+from app.alerts.outbox import AlertOutboxStore, AlertOutboxWorker, DurableWebhookChannel
 from app.alerts.store import AlertStore
 from app.alerts.validation import validate_alert_expression
+from app.alerts.webhook import WebhookSender, WebhookSettings
 
 
 class AlertFacade:
@@ -22,16 +24,45 @@ class AlertFacade:
         evaluator: AlertEvaluator | None = None,
         notification_broker: AlertNotificationBroker | None = None,
         store_path: Path | None = None,
+        webhook_settings: WebhookSettings | None = None,
+        outbox_store: AlertOutboxStore | None = None,
+        webhook_sender: WebhookSender | None = None,
     ) -> None:
-        self.store = store or AlertStore(store_path)
+        self.webhook_settings = webhook_settings or WebhookSettings.from_env()
+        self.store = store or AlertStore(
+            store_path,
+            webhook_settings=self.webhook_settings,
+        )
         self.notification_broker = notification_broker or AlertNotificationBroker()
         self.dispatcher = dispatcher or AlertActionDispatcher()
+        self.outbox_worker: AlertOutboxWorker | None = None
         if dispatcher is None:
             for action_type in ("in_app", "browser", "sound"):
                 self.dispatcher.register(
                     BrowserOwnedAlertChannel(action_type, self.notification_broker)
                 )
+            if self.webhook_settings.ready:
+                resolved_outbox_path = self.webhook_settings.outbox_path or self.store.path.with_name(
+                    "alerts-outbox.sqlite3"
+                )
+                durable_store = outbox_store or AlertOutboxStore(resolved_outbox_path)
+                sender = webhook_sender or WebhookSender(self.webhook_settings)
+                self.outbox_worker = AlertOutboxWorker(
+                    durable_store,
+                    sender,
+                    self.webhook_settings,
+                    receipt_callback=self.record_dispatch_receipt,
+                )
+                self.dispatcher.register(DurableWebhookChannel(self.outbox_worker))
         self.evaluator = evaluator or AlertEvaluator()
+
+    async def start(self) -> None:
+        if self.outbox_worker is not None:
+            await self.outbox_worker.start()
+
+    async def stop(self) -> None:
+        if self.outbox_worker is not None:
+            await self.outbox_worker.stop()
 
     def list_rules(self) -> list[dict[str, Any]]:
         return self.store.list_rules()
@@ -105,10 +136,26 @@ class AlertFacade:
             actions = rule.get("actions") if isinstance(rule.get("actions"), list) else []
         outcomes = await self.dispatcher.dispatch(record, actions)
         updated = self.store.update_history_dispatch(record["id"], outcomes)
+        if self.outbox_worker is not None:
+            await self.outbox_worker.activate_event(record["id"])
         return updated or {**record, "dispatch": outcomes}
 
     def status(self) -> dict[str, Any]:
         return {
             "registeredChannels": self.dispatcher.registered_types,
             "notificationBroker": self.notification_broker.snapshot(),
+            "webhook": self.webhook_settings.public_status(),
+            "outbox": self.outbox_worker.snapshot() if self.outbox_worker is not None else {
+                "running": False,
+                "queued": 0,
+                "staged": 0,
+                "pending": 0,
+                "processing": 0,
+                "retrying": 0,
+                "delivered": 0,
+                "deadLetter": 0,
+                "oldestQueuedAt": None,
+                "nextAttemptAt": None,
+                "lastError": None,
+            },
         }

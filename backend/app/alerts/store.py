@@ -11,6 +11,7 @@ from typing import Any
 
 from app.alerts.models import DELIVERABLE_ACTION_TYPES, VALID_ACTION_TYPES, VALID_TRIGGER_ON
 from app.alerts.validation import normalize_after_trigger, validate_alert_expression
+from app.alerts.webhook import WebhookSettings, validate_webhook_action_config
 from app.core.config import DATA_DIR
 
 
@@ -27,8 +28,17 @@ class AlertStore:
         "afterTrigger",
     )
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        webhook_settings: WebhookSettings | None = None,
+    ) -> None:
         self.path = path or (DATA_DIR / "alerts.json")
+        self.webhook_settings = webhook_settings or WebhookSettings()
+        self.deliverable_action_types = set(DELIVERABLE_ACTION_TYPES)
+        if self.webhook_settings.ready:
+            self.deliverable_action_types.add("webhook")
         self._lock = threading.RLock()
 
     def list_rules(self) -> list[dict[str, Any]]:
@@ -394,8 +404,7 @@ class AlertStore:
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
-    @staticmethod
-    def _validate_rule(item: dict[str, Any]) -> None:
+    def _validate_rule(self, item: dict[str, Any]) -> None:
         if not item.get("id"):
             raise ValueError("Alert rule id is required")
         if not item.get("name"):
@@ -415,8 +424,11 @@ class AlertStore:
         for action in item.get("actions") or []:
             if action.get("type") not in VALID_ACTION_TYPES:
                 raise ValueError(f"Unsupported alert action type: {action.get('type')}")
-            if action.get("enabled", True) and action.get("type") not in DELIVERABLE_ACTION_TYPES:
+            if action.get("enabled", True) and action.get("type") not in self.deliverable_action_types:
                 raise ValueError(f"Alert action channel is not available: {action.get('type')}")
+            if action.get("enabled", True) and action.get("type") == "webhook":
+                config = action.get("config") if isinstance(action.get("config"), dict) else {}
+                validate_webhook_action_config(config, self.webhook_settings)
 
     @staticmethod
     def _new_rule_id() -> str:

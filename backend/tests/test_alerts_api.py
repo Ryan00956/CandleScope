@@ -273,6 +273,11 @@ def test_alert_status_exposes_registered_channels(tmp_path: Path) -> None:
     payload = response.json()
     assert payload["registeredChannels"] == ["browser", "in_app", "sound"]
     assert payload["notificationBroker"]["subscribers"] == 0
+    assert payload["webhook"]["enabled"] is False
+    assert payload["webhook"]["ready"] is False
+    assert payload["webhook"]["allowedHostCount"] == 0
+    assert payload["outbox"]["running"] is False
+    assert payload["outbox"]["queued"] == 0
     assert payload["runtime"]["status"] == "unavailable"
 
 

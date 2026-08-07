@@ -170,6 +170,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 新增 HIDE_ALL 回归实际构造“后置 fill 的虚拟时间小于 funding 实际时间、但 ledger sequence 更大”的条件，并覆盖独立审计、服务重启和 Review Fork 子审计。定向结果为后端 `8 passed`、扩大恢复/Review/benchmark 集 `39 passed`、前端 replay `336 passed`、Ruff、TypeScript typecheck 与 `git diff --check` 全部通过。首次完整 replay 回归诚实暴露两个强平 Fork 子审计失败，补齐父因果序后最终完整回归为 `928 passed, 2323 deselected`；未删除审计、未改阈值、未启用降级。
 - 本修复与本节记录产生新的候选 HEAD；`a4c67bc` 的诊断 artifacts 仅用于根因证据，不能进入最终 manifest。新 HEAD 必须先重新通过同参数 8 分钟恢复复测，再从头生成全部正式证据。
 
+### 3.13 适配器恢复 8 分钟预检通过
+
+- `f499fb54f039d53298aff0801a4397e75f54c088` 在 clean HEAD 上以 `--allow-short --duration-ms 480000 --cycles 4 --projection-events 10000 --sample-ms 60000` 完成恢复预检，运行 `480089 ms`，4/4 训练动作、4/4 archive lifecycle 和 10,000 projection events 全部完成；浏览器 source sequence 推进到 `415`，越过此前稳定失败的 `316 / 319 / 327`。
+- 第 4 次适配器驱逐、重建和重连全部完成，最终仍同时持有 LONG/SHORT 两腿；账户连续性、blind-boundary、replay/backend/live 隔离、archive exact、heap/DOM/listener 等短时验收均通过。projection 吞吐为 `62111.801 events/s`，primary/late heap 增长为 `9,449,400 / 5,666,612 B`，report hash 为 `sha256:fc5bfa0118843c7c684f47c3f5685dd75f09e9a1c94fc9454d9ec86dd6d17ef0`。
+- 该 artifact 位于仓库外，仅证明 3.11 与 3.12 的根因修复已跨过复现窗口。因为使用了 `--allow-short`，`hedge_exact_training_bound` 不构成正式 release acceptance；它不能替代 4 小时、100 次 lifecycle 和 1,000,000 projection events 的正式 soak，也不能进入最终 PASS manifest。
+- 本节记录会形成新的候选 HEAD；正式数据源、checks、benchmark、smoke、4 小时 soak、rollback 与 manifest 必须全部在该新 clean HEAD 上从头生成。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

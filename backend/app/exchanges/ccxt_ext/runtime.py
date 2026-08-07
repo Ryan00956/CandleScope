@@ -126,13 +126,16 @@ class CcxtRuntime:
     async def _rebuild_websocket_state(self) -> None:
         # Closing sockets alone leaves CCXT's in-memory order books and
         # newUpdates caches alive.  A reconnect may then apply fresh deltas to
-        # stale sides and briefly produce a crossed book.  Clean the complete
-        # CCXT instance data and reload markets before any watcher resubscribes.
-        await close_ccxt_exchange(self.exchange)
-        # ``clean_instance_data=True`` clears ``markets`` but intentionally
-        # leaves CCXT's completed ``markets_loading`` task in place.  A plain
-        # load_markets() would await that stale task and leave markets empty.
-        await self.exchange.load_markets(reload=True)
+        # stale sides and briefly produce a crossed book.  Reset all websocket
+        # caches before any watcher resubscribes, while preserving the already
+        # validated markets and REST session.  Reconnect must not depend on a
+        # broad load_markets() call during an upstream outage.
+        closer = getattr(self.exchange, "close_ws_clients", None)
+        cleaner = getattr(self.exchange, "clean_ws_data", None)
+        if not callable(closer) or not callable(cleaner):
+            raise TypeError("CCXT exchange does not expose websocket cache cleanup")
+        await closer()
+        cleaner()
         self._websocket_generation += 1
         self._websocket_recycles += 1
 

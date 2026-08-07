@@ -40,17 +40,16 @@ class _FakeExchange:
             }
         }
         self.load_calls = 0
-        self.reload_calls = 0
         self.close_calls = 0
         self.recycle_calls = 0
+        self.clean_ws_calls = 0
         self.clients: dict[str, object] = {"wss://example.test/ws": object()}
         self.watch_queue: asyncio.Queue[CcxtRawMarketEvent | BaseException] = (
             asyncio.Queue()
         )
 
-    async def load_markets(self, reload: bool = False) -> None:
+    async def load_markets(self) -> None:
         self.load_calls += 1
-        self.reload_calls += int(reload)
         if self.fail_load:
             raise RuntimeError("temporary load-markets failure")
 
@@ -62,6 +61,9 @@ class _FakeExchange:
     async def close_ws_clients(self) -> None:
         self.recycle_calls += 1
         self.clients.clear()
+
+    def clean_ws_data(self) -> None:
+        self.clean_ws_calls += 1
 
 
 class _UpstreamExchange:
@@ -330,14 +332,14 @@ def test_runtime_pool_rebuilds_ccxt_caches_when_recycling_websockets() -> None:
         recycled = await pool.recycle_all_websockets()
 
         assert recycled == {"fake|futures": 1}
-        assert profile.exchange.recycle_calls == 0
-        assert profile.exchange.close_calls == 1
-        assert profile.exchange.load_calls == 2
-        assert profile.exchange.reload_calls == 1
+        assert profile.exchange.recycle_calls == 1
+        assert profile.exchange.clean_ws_calls == 1
+        assert profile.exchange.close_calls == 0
+        assert profile.exchange.load_calls == 1
         assert runtime.snapshot()["websocket_recycles"] == 1
         assert runtime.snapshot()["websocket_generation"] == 1
         await pool.release(runtime)
-        assert profile.exchange.close_calls == 2
+        assert profile.exchange.close_calls == 1
 
     asyncio.run(run())
 

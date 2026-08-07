@@ -300,14 +300,20 @@ class _UnifiedFakeExchange:
         }
         self.results: asyncio.Queue[Any] = asyncio.Queue()
         self.close_calls = 0
+        self.clean_ws_calls = 0
 
-    async def load_markets(self, reload: bool = False) -> None:
-        del reload
+    async def load_markets(self) -> None:
         return None
 
     async def close(self, clean_instance_data: bool = False) -> None:
         del clean_instance_data
         self.close_calls += 1
+
+    async def close_ws_clients(self) -> None:
+        return None
+
+    def clean_ws_data(self) -> None:
+        self.clean_ws_calls += 1
 
 
 class _UnifiedFakeProfile:
@@ -430,7 +436,7 @@ def test_provider_session_rebuilds_runtime_after_crossed_unified_book() -> None:
             {"bids": [[12, 1]], "asks": [[11, 1]]},
         )
         for _attempt in range(100):
-            if profile.exchange.close_calls:
+            if profile.exchange.clean_ws_calls:
                 break
             await asyncio.sleep(0.01)
         await profile.exchange.results.put(
@@ -445,8 +451,9 @@ def test_provider_session_rebuilds_runtime_after_crossed_unified_book() -> None:
         snapshot = session.snapshot()
         assert snapshot["runtime"]["websocket_generation"] == 1
         assert snapshot["metrics"]["counters"]["runtime_rebuilds"] == 1
+        assert profile.exchange.clean_ws_calls == 1
         await session.stop()
-        assert profile.exchange.close_calls == 2
+        assert profile.exchange.close_calls == 1
 
     asyncio.run(run())
 

@@ -45,6 +45,7 @@ class UnifiedStreamAudit:
     max_timestamp_regression_ms: int = 0
     first_event_at_ms: int | None = None
     last_event_at_ms: int | None = None
+    max_receive_gap_ms: int = 0
     last_exchange_time_ms: int | None = None
     last_sequence: int | None = None
     last_kline_open_ms: int | None = None
@@ -66,6 +67,11 @@ class UnifiedStreamAudit:
         now_ms = int(time.time() * 1000)
         self.events += 1
         self.first_event_at_ms = self.first_event_at_ms or now_ms
+        if self.last_event_at_ms is not None:
+            self.max_receive_gap_ms = max(
+                self.max_receive_gap_ms,
+                now_ms - self.last_event_at_ms,
+            )
         self.last_event_at_ms = now_ms
         if (
             event.source != DataSource.PLUGIN
@@ -213,6 +219,7 @@ class UnifiedStreamAudit:
             "max_timestamp_regression_ms": self.max_timestamp_regression_ms,
             "first_event_at_ms": self.first_event_at_ms,
             "last_event_at_ms": self.last_event_at_ms,
+            "max_receive_gap_ms": self.max_receive_gap_ms,
             "last_exchange_time_ms": self.last_exchange_time_ms,
             "last_sequence": self.last_sequence,
             "last_kline_open_ms": self.last_kline_open_ms,
@@ -579,6 +586,11 @@ def unified_soak_failure_reasons(report: dict[str, Any]) -> list[str]:
             failures.append(f"duplicates:{key}")
         if int(stream.get("regressions") or 0) > 0:
             failures.append(f"regressions:{key}")
+        if (
+            stale_after_ms > 0
+            and int(stream.get("max_receive_gap_ms") or 0) > stale_after_ms
+        ):
+            failures.append(f"stale_gap:{key}")
         last_event = stream.get("last_event_at_ms")
         if (
             stale_after_ms > 0

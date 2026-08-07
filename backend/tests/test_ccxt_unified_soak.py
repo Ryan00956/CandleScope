@@ -43,6 +43,16 @@ def test_unified_soak_gate_rejects_stream_fault_recovery_and_cleanup_failures() 
     ]
 
 
+def test_unified_soak_gate_preserves_transient_stale_gap_after_recovery() -> None:
+    report = _clean_report()
+    stream = report["streams"]["bybit:swap.linear:BTC/USDT:USDT@trade"]
+    stream["max_receive_gap_ms"] = 90_001
+
+    assert unified_soak_failure_reasons(report) == [
+        "stale_gap:bybit:swap.linear:BTC/USDT:USDT@trade",
+    ]
+
+
 def _clean_report() -> dict:
     key = "bybit:swap.linear:BTC/USDT:USDT@trade"
     return {
@@ -61,6 +71,7 @@ def _clean_report() -> dict:
                 "regressions": 0,
                 "timestamp_regressions": 3,
                 "max_timestamp_regression_ms": 40,
+                "max_receive_gap_ms": 1_000,
                 "last_event_at_ms": 1_700_000_099_000,
             }
         },

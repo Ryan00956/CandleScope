@@ -151,6 +151,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - actor diagnostics 现累计 `runtime_failures` 并保留最后一次运行时异常的类型与截断消息；取消任务仍沿用独立取消路径，不伪计为业务运行错误。soak 在连接或状态断言失败前抓取对应 actor 与后端健康门禁，写入失败 artifact 的 `phaseDiagnostics`。
 - 本提交只增强 fail-closed 证据，不把 `ERROR` 降级为通过，也不改变执行、HEDGE、强平或默认启用合同。提交后先以 clean HEAD 短时运行越过第 327 个源事件定位根因；完成根因修复后，所有正式证据仍须从最终 clean HEAD 重新生成。
 
+### 3.11 Review artifact 二次增长根因与修复
+
+- `7b859bcfd7286ed9f37048b1eef3b8b95f13bd5d` 的 clean-HEAD 8 分钟诊断跑完成 10,000 projection events，并在第 4 个训练动作周期稳定复现。失败时页面 source sequence 为 `316`、revision 为 `324`，全局时钟原因明确为 `REVIEW_ARTIFACT_BUDGET_EXCEEDED`；对应后端 actor 仍为健康 `PAUSED`、`task_done=false`、`runtime_failures=0`，纠正了首轮只能看到页面 `ERROR` 时对 actor 崩溃的假设。
+- 当时 Review 已保存 395 个关键事件，artifact 为 `134,048,934 / 134,217,728 B`，contract ledger 为 833 条。Phase 4 要求的 HEDGE position/accounting/margin 每次权威变化会写零现金 hash-chained mutation receipt；旧 Review 一方面把任何 `ledger_count` 增长都当成新的关键事件，另一方面在每个事件的 `projection_json` 中再次复制从 T0 开始的完整 ledger prefix，最终形成事件泛滥和近似二次存储增长。
+- 修复没有删除或合并 Phase 4 ledger，也没有提高 128 MiB artifact 或 8,192 critical-event 上限。持久化 Review frame 改为保存由 schema、精确 count 和 ledger tail hash 约束的不可变 ledger-prefix reference；Review、控制跳转、checkpoint 与 Fork 读取时从同一 append-only contract ledger 精确水化完整前缀，并使用水化后的原始 logical projection hash 重算 timeline event hash。reference/count/tail/prefix 或 event chain 任一篡改均以 `REVIEW_PROJECTION_CORRUPT` / `REVIEW_TIMELINE_CORRUPT` fail closed。
+- `POSITION_MUTATION`、`POSITION_ACCOUNTING_MUTATION`、`MARGIN_MUTATION` 继续逐条进入同一 hash chain 和 auditor，但不再单独触发 Review 关键帧；真实现金 posting、fill、funding、liquidation、order/rule/view/drawing/marker、结构性持仓变化和最大回撤仍按原合同保留。HEDGE position identity 现分别计算 LONG/SHORT 的 quantity、entry 与 realized 状态，排除 mark-only 字段，避免旧 one-way descriptor 对嵌套双腿返回空对象。
+- Phase 17 Review/Fork 与 Phase 4 HEDGE 会计扩大定向集为 `16 passed`；新增回归证明 compact row 可精确还原完整 ledger、选中 Review frame 可 Fork 且 child auditor PASS、零现金审计 receipt 不制造关键事件、双腿结构变化仍制造 `POSITION_STATE`，以及 ledger-prefix tamper 明确拒绝。该修复提交后仍须先越过原 8 分钟窗口，再从最终 clean HEAD 重跑全部正式证据。
+- Phase 17/18、HEDGE Phase 0–9 与 22 项矩阵扩大集为 `109 passed`。首轮完整 replay 回归暴露内部 descriptor domain 与完整 projection domain 缺少同构字段，修正后相关集合 `17 passed`；内部 `critical_ledger_count` 在公开投影边界移除，未扩张前端协议。随后一次全量中的单样本 8 轨 normal wave 约 `512.964 ms`，超过冻结 `500 ms`，但相同正式脚本独立全项 PASS、同一单测连续 `12/12` PASS，未放宽阈值或 acceptance；最终原样完整 replay 回归为 `927 passed, 2323 deselected`。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

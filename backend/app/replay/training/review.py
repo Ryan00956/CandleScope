@@ -33,6 +33,14 @@ REVIEW_DRAWING_ENTITY_LIMIT = 512
 REVIEW_DRAWING_DOCUMENT_BYTES_LIMIT = 2_000_000
 REVIEW_DRAWING_FREEHAND_POINT_LIMIT = 32_768
 REVIEW_DRAWING_FREEHAND_SPAN_LIMIT = 16_384
+REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION = "replay.review.ledger-prefix-ref.v1"
+_REVIEW_AUDIT_ONLY_LEDGER_KINDS = frozenset(
+    {
+        "POSITION_MUTATION",
+        "POSITION_ACCOUNTING_MUTATION",
+        "MARGIN_MUTATION",
+    }
+)
 
 _DRAWING_DECIMAL_KEY = "$replay_decimal_v1"
 _DRAWING_MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -786,12 +794,18 @@ class ReviewRecorder:
             "advance_by",
         }
 
-    @staticmethod
-    def _position_descriptor(position: object) -> dict[str, object]:
+    @classmethod
+    def _position_descriptor(cls, position: object) -> dict[str, object]:
         """Exclude mark-only fields from the critical position identity."""
 
         if not isinstance(position, Mapping):
             return {}
+        if position.get("position_mode") == "HEDGE":
+            return {
+                "position_mode": "HEDGE",
+                "long": cls._position_descriptor(position.get("long")),
+                "short": cls._position_descriptor(position.get("short")),
+            }
         return {
             field: position[field]
             for field in (
@@ -802,6 +816,241 @@ class ReviewRecorder:
             )
             if field in position
         }
+
+    @staticmethod
+    def _contract_ledger_projection(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        query = """
+            SELECT * FROM replay_training_contract_ledger
+            WHERE run_id = ? ORDER BY ledger_sequence
+        """
+        parameters: tuple[object, ...] = (run_id,)
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise TypeError("review ledger prefix limit is invalid")
+            query += " LIMIT ?"
+            parameters = (run_id, limit)
+        return [
+            {
+                "ledger_sequence": int(row["ledger_sequence"]),
+                "posting_id": str(row["posting_id"]),
+                "track_id": (
+                    None if row["track_id"] is None else str(row["track_id"])
+                ),
+                "kind": str(row["kind"]),
+                "cash_delta": str(row["cash_delta"]),
+                "asset": str(row["asset"]),
+                "virtual_time_ms": int(row["virtual_time_ms"]),
+                "source_sequence": int(row["source_sequence"]),
+                "fidelity": str(row["fidelity"]),
+                "rule_revision": int(row["rule_revision"]),
+                "reference_type": str(row["reference_type"]),
+                "reference_id": str(row["reference_id"]),
+                "metadata": _decoded_object(
+                    row["metadata_json"], field="review ledger metadata"
+                ),
+                "previous_hash": str(row["previous_hash"]),
+                "entry_hash": str(row["entry_hash"]),
+            }
+            for row in connection.execute(query, parameters).fetchall()
+        ]
+
+    @classmethod
+    def encode_projection(cls, projection: Mapping[str, object]) -> str:
+        """Store a strict projection without quadratically copying its ledger."""
+
+        ledger = projection.get("ledger")
+        domain = projection.get("domain")
+        account = projection.get("account")
+        if (
+            not isinstance(ledger, list)
+            or not isinstance(domain, Mapping)
+            or not isinstance(account, Mapping)
+        ):
+            raise TypeError("review projection ledger contract is incomplete")
+        ledger_count = int(domain.get("ledger_count", -1))
+        if ledger_count != len(ledger):
+            raise TypeError("review projection ledger count does not match")
+        ledger_tail_hash = account.get("ledger_tail_hash")
+        if not isinstance(ledger_tail_hash, str):
+            raise TypeError("review projection ledger tail is missing")
+        if ledger and ledger[-1].get("entry_hash") != ledger_tail_hash:
+            raise TypeError("review projection ledger tail does not match")
+        stored = dict(projection)
+        stored["ledger"] = {
+            "schema_version": REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION,
+            "count": ledger_count,
+            "tail_hash": ledger_tail_hash,
+        }
+        return canonical_json(stored)
+
+    @classmethod
+    def decode_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        projection_json: object,
+        hydrate_ledger: bool = True,
+    ) -> dict[str, object]:
+        """Decode legacy full projections or exact immutable ledger-prefix refs."""
+
+        try:
+            projection = json.loads(str(projection_json))
+        except json.JSONDecodeError as exc:
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection is not valid JSON",
+                status_code=503,
+            ) from exc
+        if not isinstance(projection, dict):
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection is not an object",
+                status_code=503,
+            )
+        ledger_ref = projection.get("ledger")
+        if isinstance(ledger_ref, list):
+            domain = projection.get("domain")
+            account = projection.get("account")
+            if (
+                not isinstance(domain, Mapping)
+                or domain.get("ledger_count") != len(ledger_ref)
+                or not isinstance(account, Mapping)
+                or (
+                    ledger_ref
+                    and (
+                        not isinstance(ledger_ref[-1], Mapping)
+                        or ledger_ref[-1].get("entry_hash")
+                        != account.get("ledger_tail_hash")
+                    )
+                )
+            ):
+                raise TrainingRunError(
+                    "REVIEW_PROJECTION_CORRUPT",
+                    "legacy review projection ledger does not match its frame",
+                    status_code=503,
+                )
+            return projection
+        if not hydrate_ledger:
+            return projection
+        if not isinstance(ledger_ref, Mapping) or set(ledger_ref) != {
+            "schema_version",
+            "count",
+            "tail_hash",
+        }:
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection ledger reference is invalid",
+                status_code=503,
+            )
+        if ledger_ref.get("schema_version") != REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION:
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection ledger reference version is unsupported",
+                status_code=503,
+            )
+        count = ledger_ref.get("count")
+        tail_hash = ledger_ref.get("tail_hash")
+        domain = projection.get("domain")
+        account = projection.get("account")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or not isinstance(tail_hash, str)
+            or not isinstance(domain, Mapping)
+            or domain.get("ledger_count") != count
+            or not isinstance(account, Mapping)
+            or account.get("ledger_tail_hash") != tail_hash
+        ):
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection ledger reference does not match its frame",
+                status_code=503,
+            )
+        ledger = cls._contract_ledger_projection(
+            connection,
+            run_id=run_id,
+            limit=count,
+        )
+        if len(ledger) != count or (ledger and ledger[-1]["entry_hash"] != tail_hash):
+            raise TrainingRunError(
+                "REVIEW_PROJECTION_CORRUPT",
+                "review projection ledger prefix is no longer reconstructable",
+                status_code=503,
+            )
+        projection["ledger"] = ledger
+        return projection
+
+    @classmethod
+    def decode_event_projection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        event: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Hydrate a frame and verify its original logical event commitment."""
+
+        run_id = str(event["run_id"])
+        projection = cls.decode_projection(
+            connection,
+            run_id=run_id,
+            projection_json=event["projection_json"],
+        )
+        material = {
+            "schema_version": REVIEW_TIMELINE_SCHEMA_VERSION,
+            "run_id": run_id,
+            "timeline_sequence": int(event["timeline_sequence"]),
+            "event_id": str(event["event_id"]),
+            "category": str(event["category"]),
+            "event_type": str(event["event_type"]),
+            "command_id": event["command_id"],
+            "track_id": event["track_id"],
+            "virtual_time_ms": int(event["virtual_time_ms"]),
+            "source_sequence": int(event["source_sequence"]),
+            "event_sequence": int(event["event_sequence"]),
+            "state_hash": str(event["state_hash"]),
+            "account_hash": str(event["account_hash"]),
+            "ledger_tail_hash": str(event["ledger_tail_hash"]),
+            "viewer_revision": int(event["viewer_revision"]),
+            "public_time": json.loads(str(event["public_time_json"])),
+            "projection_hash": canonical_sha256(projection),
+            "anchor_set_hash": str(event["anchor_set_hash"]),
+            "previous_event_hash": str(event["previous_event_hash"]),
+        }
+        if canonical_sha256(material) != str(event["event_hash"]):
+            raise TrainingRunError(
+                "REVIEW_TIMELINE_CORRUPT",
+                "review event projection no longer matches its hash chain",
+                status_code=503,
+            )
+        return projection
+
+    @staticmethod
+    def _critical_ledger_count(projection: Mapping[str, object]) -> int:
+        internal = projection.get("_review_descriptor_internal")
+        if isinstance(internal, Mapping):
+            value = internal.get("critical_ledger_count")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        domain = projection.get("domain")
+        if isinstance(domain, Mapping):
+            value = domain.get("critical_ledger_count")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        ledger = projection.get("ledger")
+        if isinstance(ledger, list):
+            return sum(
+                isinstance(entry, Mapping)
+                and entry.get("kind") not in _REVIEW_AUDIT_ONLY_LEDGER_KINDS
+                for entry in ledger
+            )
+        return 0
 
     @staticmethod
     def _descriptor_domain(
@@ -854,6 +1103,13 @@ class ReviewRecorder:
                  WHERE run_id = ?) AS fill_count,
                 (SELECT COUNT(*) FROM replay_training_contract_ledger
                  WHERE run_id = ?) AS ledger_count,
+                (SELECT COUNT(*) FROM replay_training_contract_ledger
+                 WHERE run_id = ?
+                   AND kind NOT IN (
+                       'POSITION_MUTATION',
+                       'POSITION_ACCOUNTING_MUTATION',
+                       'MARGIN_MUTATION'
+                   )) AS critical_ledger_count,
                 (SELECT COUNT(*) FROM replay_training_funding_settlement
                  WHERE run_id = ?) AS funding_count,
                 (SELECT COUNT(*) FROM replay_training_liquidation_case
@@ -862,7 +1118,7 @@ class ReviewRecorder:
                  WHERE run_id = ? AND state = 'COMPLETED')
                     AS completed_liquidation_count
             """,
-            (run_id, run_id, run_id, run_id, run_id),
+            (run_id, run_id, run_id, run_id, run_id, run_id),
         ).fetchone()
         if counts is None:
             raise TypeError("review descriptor counts are incomplete")
@@ -871,6 +1127,7 @@ class ReviewRecorder:
             "order_hash": canonical_sha256(orders),
             "fill_count": int(counts["fill_count"]),
             "ledger_count": int(counts["ledger_count"]),
+            "critical_ledger_count": int(counts["critical_ledger_count"]),
             "funding_count": int(counts["funding_count"]),
             "liquidation_count": int(counts["liquidation_count"]),
             "completed_liquidation_count": int(counts["completed_liquidation_count"]),
@@ -954,34 +1211,10 @@ class ReviewRecorder:
                 (run_id,),
             ).fetchall()
         ]
-        ledger = [
-            {
-                "ledger_sequence": int(row["ledger_sequence"]),
-                "posting_id": str(row["posting_id"]),
-                "track_id": (None if row["track_id"] is None else str(row["track_id"])),
-                "kind": str(row["kind"]),
-                "cash_delta": str(row["cash_delta"]),
-                "asset": str(row["asset"]),
-                "virtual_time_ms": int(row["virtual_time_ms"]),
-                "source_sequence": int(row["source_sequence"]),
-                "fidelity": str(row["fidelity"]),
-                "rule_revision": int(row["rule_revision"]),
-                "reference_type": str(row["reference_type"]),
-                "reference_id": str(row["reference_id"]),
-                "metadata": _decoded_object(
-                    row["metadata_json"], field="review ledger metadata"
-                ),
-                "previous_hash": str(row["previous_hash"]),
-                "entry_hash": str(row["entry_hash"]),
-            }
-            for row in connection.execute(
-                """
-                SELECT * FROM replay_training_contract_ledger
-                WHERE run_id = ? ORDER BY ledger_sequence
-                """,
-                (run_id,),
-            ).fetchall()
-        ]
+        ledger = self._contract_ledger_projection(connection, run_id=run_id)
+        critical_ledger_count = sum(
+            entry["kind"] not in _REVIEW_AUDIT_ONLY_LEDGER_KINDS for entry in ledger
+        )
         markers = [
             {
                 "marker_id": str(row["marker_id"]),
@@ -1043,6 +1276,7 @@ class ReviewRecorder:
                     (run_id,),
                 ).fetchone()[0]
             ),
+            "critical_ledger_count": critical_ledger_count,
             "funding_count": int(
                 connection.execute(
                     "SELECT COUNT(*) FROM replay_training_funding_settlement "
@@ -1207,6 +1441,9 @@ class ReviewRecorder:
             # actual archive timestamps before crossing the disclosure boundary.
             "_account_history_internal": history_inputs,
             "_book_history_internal": book_inputs,
+            "_review_descriptor_internal": {
+                "critical_ledger_count": critical_ledger_count,
+            },
         }
 
     def anchor(
@@ -1357,8 +1594,9 @@ class ReviewRecorder:
         )
         return anchor_id
 
-    @staticmethod
+    @classmethod
     def descriptors(
+        cls,
         context: Mapping[str, object],
         previous: Mapping[str, object] | None,
         projection: Mapping[str, object],
@@ -1409,7 +1647,7 @@ class ReviewRecorder:
                 return descriptors
             if previous is not None:
                 descriptors.extend(
-                    ReviewRecorder.descriptors(
+                    cls.descriptors(
                         {"kind": "SOURCE_EVENT"},
                         previous,
                         projection,
@@ -1430,10 +1668,13 @@ class ReviewRecorder:
             ("completed_liquidation_count", "LIQUIDATION", "LIQUIDATION"),
             ("funding_count", "FUNDING", "FUNDING_SETTLEMENT"),
             ("fill_count", "FILL", "FILL"),
-            ("ledger_count", "POSITION", "LEDGER_POSTING"),
         ):
             if int(new.get(field, 0)) > int(old.get(field, 0)):
                 descriptors.append((category, event_type))
+        if cls._critical_ledger_count(projection) > cls._critical_ledger_count(
+            previous
+        ):
+            descriptors.append(("POSITION", "LEDGER_POSTING"))
         if new.get("order_hash") != old.get("order_hash"):
             descriptors.append(("ORDER", "ORDER_STATE"))
         if new.get("position_hash") != old.get("position_hash"):
@@ -1599,7 +1840,7 @@ class ReviewRecorder:
                     "event_dropped": False,
                 },
             )
-        projection_json = canonical_json(projection)
+        projection_json = self.encode_projection(projection)
         artifact_bytes = int(
             connection.execute(
                 """

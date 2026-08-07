@@ -8637,7 +8637,7 @@ class TrainingRunStore:
             )
             event = connection.execute(
                 """
-                SELECT timeline_sequence, anchor_set_hash, projection_json
+                SELECT *
                 FROM replay_review_timeline_event
                 WHERE run_id = ? AND event_id = ?
                 """,
@@ -8677,7 +8677,12 @@ class TrainingRunStore:
                     parent_event_id,
                     effective_timeline,
                     effective_anchor_set_hash,
-                    canonical_sha256(json.loads(str(event["projection_json"]))),
+                    canonical_sha256(
+                        ReviewRecorder.decode_event_projection(
+                            connection,
+                            event=event,
+                        )
+                    ),
                     now_ms,
                 ),
             )
@@ -10662,6 +10667,10 @@ class TrainingRunStore:
             raise TypeError("review projection is invalid")
         public.pop("_account_history_internal", None)
         public.pop("_book_history_internal", None)
+        public.pop("_review_descriptor_internal", None)
+        domain = public.get("domain")
+        if isinstance(domain, dict):
+            domain.pop("critical_ledger_count", None)
 
         blocked = {
             "archive_id",
@@ -10849,9 +10858,10 @@ class TrainingRunStore:
             selected_row = next(
                 row for row in rows if str(row["event_id"]) == selected["event_id"]
             )
-            selected_projection = json.loads(str(selected_row["projection_json"]))
-            if not isinstance(selected_projection, dict):
-                raise TypeError("review projection is invalid")
+            selected_projection = ReviewRecorder.decode_event_projection(
+                connection,
+                event=selected_row,
+            )
             drawing_document = None
             drawing_hash = selected_projection.get("drawing_document_hash")
             if isinstance(drawing_hash, str):
@@ -11046,7 +11056,11 @@ class TrainingRunStore:
     ) -> dict[str, object]:
         def read(
             connection: sqlite3.Connection,
-        ) -> tuple[sqlite3.Row, tuple[sqlite3.Row, ...]] | None:
+        ) -> tuple[
+            sqlite3.Row,
+            tuple[sqlite3.Row, ...],
+            dict[str, object],
+        ] | None:
             event = connection.execute(
                 """
                 SELECT event.*, run.dataset_epoch, run.adapter_session_id
@@ -11072,7 +11086,11 @@ class TrainingRunStore:
                     (run_id, event["timeline_sequence"]),
                 ).fetchall()
             )
-            return event, anchors
+            projection = ReviewRecorder.decode_event_projection(
+                connection,
+                event=event,
+            )
+            return event, anchors, projection
 
         result = await self.base_store.run_extension_read(read)
         if result is None:
@@ -11081,7 +11099,7 @@ class TrainingRunStore:
                 "review event is not backed by immutable actor anchors",
                 status_code=404,
             )
-        row, anchors = result
+        row, anchors, projection = result
         if not anchors:
             raise TrainingRunError(
                 "REVIEW_ANCHOR_UNAVAILABLE",
@@ -11129,7 +11147,7 @@ class TrainingRunStore:
             "event_sequence": int(row["event_sequence"]),
             "dataset_epoch": str(row["dataset_epoch"]),
             "anchor_set_hash": str(row["anchor_set_hash"]),
-            "projection": json.loads(str(row["projection_json"])),
+            "projection": projection,
             "anchors": [
                 {
                     "track_id": str(anchor["track_id"]),
@@ -11325,9 +11343,10 @@ class TrainingRunStore:
                     review_id,
                 ),
             )
-            projection = json.loads(str(selected["projection_json"]))
-            if not isinstance(projection, dict):
-                raise TypeError("review projection is invalid")
+            projection = ReviewRecorder.decode_event_projection(
+                connection,
+                event=selected,
+            )
             drawing = None
             drawing_hash = projection.get("drawing_document_hash")
             if isinstance(drawing_hash, str):

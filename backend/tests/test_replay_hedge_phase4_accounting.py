@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from decimal import Decimal
@@ -7,9 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from app.replay.canonical import canonical_sha256
+from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.training.account import fee_for_notional
+from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
+from app.replay.training.review import (
+    REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION,
+    ReviewRecorder,
+)
 from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.test_replay_v2_training_phase5 import _acquire, _request
 from tests.test_replay_v2_training_phase6 import (
@@ -20,6 +26,81 @@ from tests.test_replay_v2_training_phase6 import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_review_descriptors_distinguish_hedge_structure_from_audit_receipts() -> (
+    None
+):
+    original = {
+        "position_mode": "HEDGE",
+        "long": {
+            "quantity": "1",
+            "entry_price": "100",
+            "mark_price": "101",
+            "realized_pnl": "0",
+            "unrealized_pnl": "1",
+        },
+        "short": {
+            "quantity": "-1",
+            "entry_price": "100",
+            "mark_price": "101",
+            "realized_pnl": "0",
+            "unrealized_pnl": "-1",
+        },
+    }
+    mark_only = {
+        **original,
+        "long": {**original["long"], "mark_price": "102", "unrealized_pnl": "2"},
+        "short": {**original["short"], "mark_price": "102", "unrealized_pnl": "-2"},
+    }
+    changed_quantity = {
+        **mark_only,
+        "long": {**mark_only["long"], "quantity": "2"},
+    }
+    original_hash = canonical_sha256(ReviewRecorder._position_descriptor(original))
+    assert canonical_sha256(ReviewRecorder._position_descriptor(mark_only)) == (
+        original_hash
+    )
+    changed_hash = canonical_sha256(
+        ReviewRecorder._position_descriptor(changed_quantity)
+    )
+    assert changed_hash != original_hash
+
+    previous = {
+        "domain": {
+            "ledger_count": 10,
+            "position_hash": original_hash,
+            "equity": "10000",
+        },
+        "_review_descriptor_internal": {"critical_ledger_count": 3},
+    }
+    audit_only = {
+        "domain": {
+            "ledger_count": 25,
+            "position_hash": original_hash,
+            "equity": "10000",
+        },
+        "_review_descriptor_internal": {"critical_ledger_count": 3},
+    }
+    assert ReviewRecorder.descriptors(
+        {"kind": "SOURCE_EVENT"}, previous, audit_only
+    ) == []
+    assert ReviewRecorder.descriptors(
+        {"kind": "SOURCE_EVENT"},
+        previous,
+        {
+            **audit_only,
+            "domain": {**audit_only["domain"], "position_hash": changed_hash},
+        },
+    ) == [("POSITION", "POSITION_STATE")]
+    assert ReviewRecorder.descriptors(
+        {"kind": "SOURCE_EVENT"},
+        previous,
+        {
+            **audit_only,
+            "_review_descriptor_internal": {"critical_ledger_count": 4},
+        },
+    ) == [("POSITION", "LEDGER_POSTING")]
 
 
 async def _run_with_opposite_legs(
@@ -143,6 +224,28 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
             for item in report["modelled_account"]["hedge_state"]["leg_accounting"]
         } == {"LONG", "SHORT"}
         review = await training.start_review(run_id, event_id=None)
+        ledger = review["projection"]["ledger"]
+        assert len(ledger) == review["projection"]["domain"]["ledger_count"]
+        logical_projection_bytes = len(
+            canonical_json(review["projection"]).encode("utf-8")
+        )
+        with sqlite3.connect(database) as connection:
+            stored_projection_json = str(
+                connection.execute(
+                    """
+                    SELECT projection_json FROM replay_review_timeline_event
+                    WHERE run_id = ? ORDER BY timeline_sequence DESC LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+            )
+        stored_projection = json.loads(stored_projection_json)
+        assert stored_projection["ledger"] == {
+            "schema_version": REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION,
+            "count": len(ledger),
+            "tail_hash": review["projection"]["account"]["ledger_tail_hash"],
+        }
+        assert len(stored_projection_json.encode("utf-8")) < logical_projection_bytes
         forked = await training.fork_run(
             run_id,
             event_id=str(review["selected_event_id"]),
@@ -211,6 +314,45 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
         assert Decimal(accounting["SHORT"]["accumulated_funding"]) == Decimal("0.01")
     finally:
         await restored.shutdown(step_timeout=1.0)
+
+
+async def test_review_ledger_prefix_reference_tamper_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase4-review-prefix-tamper.db"
+    service = await _risk_service(database)
+    try:
+        run_id, _session_id, _funding_time = await _run_with_opposite_legs(
+            service,
+            tmp_path,
+            prefix="phase4-review-prefix-tamper",
+        )
+        assert service.training is not None
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                """
+                SELECT timeline_sequence, projection_json
+                FROM replay_review_timeline_event
+                WHERE run_id = ? ORDER BY timeline_sequence DESC LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            assert row is not None
+            projection = json.loads(str(row[1]))
+            projection["ledger"]["count"] += 1
+            connection.execute(
+                """
+                UPDATE replay_review_timeline_event SET projection_json = ?
+                WHERE run_id = ? AND timeline_sequence = ?
+                """,
+                (canonical_json(projection), run_id, row[0]),
+            )
+            connection.commit()
+        with pytest.raises(TrainingRunError) as corrupted:
+            await service.training.start_review(run_id, event_id=None)
+        assert corrupted.value.code == "REVIEW_PROJECTION_CORRUPT"
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_account_auditor_names_tampered_hedge_funding_field(

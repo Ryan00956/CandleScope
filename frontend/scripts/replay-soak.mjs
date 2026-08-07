@@ -537,12 +537,32 @@ async function createTarget(debugBase, url = "about:blank") {
   await Promise.all([
     cdp.send("Page.enable"),
     cdp.send("Runtime.enable"),
-    cdp.send("Network.enable"),
     cdp.send("Performance.enable"),
     cdp.send("HeapProfiler.enable"),
   ]);
-  await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+  await enableNetworkInspector(cdp);
   return { target, cdp };
+}
+
+async function enableNetworkInspector(cdp) {
+  await cdp.send("Network.enable");
+  await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+}
+
+export async function withNetworkInspectorSuspended(
+  cdp,
+  operation,
+  { resume = true } = {},
+) {
+  if (typeof operation !== "function") {
+    throw new TypeError("network-inspector suspension requires an operation");
+  }
+  await cdp.send("Network.disable");
+  try {
+    return await operation();
+  } finally {
+    if (resume) await enableNetworkInspector(cdp);
+  }
 }
 
 async function evaluate(cdp, expression, { userGesture = false } = {}) {
@@ -1225,9 +1245,9 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   });
   cdp.on("Network.loadingFinished", (event) => {
     const response = responseByRequest.get(event.requestId);
+    boundaryGenerationByRequest.delete(event.requestId);
     if (!response) return;
     responseByRequest.delete(event.requestId);
-    boundaryGenerationByRequest.delete(event.requestId);
     const task = cdp.send("Network.getResponseBody", { requestId: event.requestId })
       .then((result) => {
         const body = result.base64Encoded
@@ -2563,6 +2583,68 @@ function assertReplayNetwork(capture, frontendOrigin) {
   };
 }
 
+function heapUsedSize(metrics, label) {
+  const value = metrics?.heap?.usedSize;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} heap usedSize must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+export function replayProductHeapEvidence({
+  initialMetrics,
+  finalMetrics,
+  lifecycleCycles,
+  durationMs,
+}) {
+  if (!Number.isSafeInteger(durationMs) || durationMs < 1) {
+    throw new TypeError("product heap evidence duration must be a positive safe integer");
+  }
+  const candidates = (lifecycleCycles || []).filter((cycle) => (
+    Number.isSafeInteger(cycle?.elapsedFromStartMs)
+      && cycle.elapsedFromStartMs >= 0
+      && Number.isSafeInteger(cycle?.index)
+      && cycle.index >= 1
+      && Number.isSafeInteger(cycle?.afterMetrics?.heap?.usedSize)
+      && cycle.afterMetrics.heap.usedSize >= 0
+  ));
+  if (candidates.length === 0) {
+    throw new TypeError("product heap evidence requires a clean lifecycle checkpoint");
+  }
+  const targetElapsedMs = durationMs / 2;
+  const halfCycle = candidates.reduce((best, cycle) => {
+    const distance = Math.abs(cycle.elapsedFromStartMs - targetElapsedMs);
+    const bestDistance = Math.abs(best.elapsedFromStartMs - targetElapsedMs);
+    if (distance < bestDistance) return cycle;
+    if (distance === bestDistance && cycle.index < best.index) return cycle;
+    return best;
+  }, candidates[0]);
+  const initialUsedSize = heapUsedSize(initialMetrics, "initial product");
+  const halfUsedSize = heapUsedSize(halfCycle.afterMetrics, "half product");
+  const finalUsedSize = heapUsedSize(finalMetrics, "final product");
+  return {
+    schema_version: "replay-product-heap-evidence.v1",
+    measurement: "network-inspector-suspended-forced-gc",
+    initial: {
+      source: "primary-before-blind-runtime",
+      metrics: initialMetrics,
+    },
+    half: {
+      source: "fresh-lifecycle-reload-nearest-half",
+      cycleIndex: halfCycle.index,
+      elapsedMs: halfCycle.elapsedFromStartMs,
+      targetElapsedMs,
+      metrics: halfCycle.afterMetrics,
+    },
+    final: {
+      source: "primary-after-blind-runtime-and-report",
+      metrics: finalMetrics,
+    },
+    primaryHeapGrowthBytes: finalUsedSize - initialUsedSize,
+    lateHeapGrowthBytes: finalUsedSize - halfUsedSize,
+  };
+}
+
 async function waitForDownload(directory, timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -2676,7 +2758,11 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId
       "lifecycle recovery snapshot",
     );
     assert(await evaluate(page.cdp, "window.opener === null"), "lifecycle replay target retained opener");
-    const beforeMetrics = await browserMetrics(page.cdp);
+    await capture.settle();
+    const beforeMetrics = await withNetworkInspectorSuspended(
+      page.cdp,
+      () => browserMetrics(page.cdp),
+    );
     const diagnosticsDuring = await readJson(diagnosticsUrl);
     const subscriberCountDuring = Number(actorDiagnostics(diagnosticsDuring, sessionId)?.subscribers ?? 0);
     const targetCountDuring = (await readJson(`${debugBase}/json/list`)).filter((item) => item.type === "page").length;
@@ -2694,7 +2780,12 @@ async function lifecycleCycle({ debugBase, diagnosticsUrl, frontendOrigin, runId
       timeoutMs,
       "lifecycle reload convergence",
     );
-    const afterMetrics = await browserMetrics(page.cdp);
+    await capture.settle();
+    const afterMetrics = await withNetworkInspectorSuspended(
+      page.cdp,
+      () => browserMetrics(page.cdp),
+      { resume: false },
+    );
     assert(capture.exceptions.length === 0, "lifecycle target raised runtime exception", capture.exceptions);
     result = {
       elapsedMs: Date.now() - opened,
@@ -3153,6 +3244,10 @@ async function main() {
     // input and the non-blind Training Hub catalog are deliberately outside the
     // blind runtime contract; every subsequent replay request/frame is audited.
     await replayCapture.settle();
+    const initialProductMetrics = await withNetworkInspectorSuspended(
+      replay.cdp,
+      () => browserMetrics(replay.cdp),
+    );
     replayCapture.startBlindBoundaryAudit();
     const hedgeContinuity = await hedgeBrowserAccountContinuityAudit({
       backendOrigin,
@@ -3586,7 +3681,11 @@ async function main() {
     assert(typeof exportedReportHash === "string" && exportedReportHash.startsWith("sha256:"), "report export hash is missing", exported);
     await wait(300);
     await replayCapture.settle();
-    await replay.cdp.send("Network.disable");
+    const finalProductMetrics = await withNetworkInspectorSuspended(
+      replay.cdp,
+      () => browserMetrics(replay.cdp),
+      { resume: false },
+    );
     await wait(100);
     await replayCapture.settle();
 
@@ -3615,11 +3714,19 @@ async function main() {
     assert(liveAfter.canvasCount > 0 && liveAfter.bars >= liveBefore.bars, "live chart did not remain healthy", { liveBefore, liveAfter });
     assert(!liveCapture.webSockets.some((url) => /\/stream\/replay\//.test(url)), "live target opened replay WebSocket", liveCapture.webSockets);
 
-    const halfSample = samples.reduce((best, sample) => (
+    const inspectorHalfSample = samples.reduce((best, sample) => (
       Math.abs(sample.elapsedMs - args.durationMs / 2) < Math.abs(best.elapsedMs - args.durationMs / 2) ? sample : best
     ), samples[0]);
-    const primaryHeapGrowth = finalMetrics.replay.heap.usedSize - initialMetrics.replay.heap.usedSize;
-    const lateHeapGrowth = finalMetrics.replay.heap.usedSize - halfSample.replay.heap.usedSize;
+    const inspectorPrimaryHeapGrowth = finalMetrics.replay.heap.usedSize - initialMetrics.replay.heap.usedSize;
+    const inspectorLateHeapGrowth = finalMetrics.replay.heap.usedSize - inspectorHalfSample.replay.heap.usedSize;
+    const productHeap = replayProductHeapEvidence({
+      initialMetrics: initialProductMetrics,
+      finalMetrics: finalProductMetrics,
+      lifecycleCycles: cycles,
+      durationMs: args.durationMs,
+    });
+    const primaryHeapGrowth = productHeap.primaryHeapGrowthBytes;
+    const lateHeapGrowth = productHeap.lateHeapGrowthBytes;
     const domGrowth = finalMetrics.replay.dom.elements - initialMetrics.replay.dom.elements;
     const sourceProgress = finalSoakStatus.sourceSequence - playing.sourceSequence;
     const maxTargets = Math.max(
@@ -3714,12 +3821,13 @@ async function main() {
       live_runtime_isolated: !liveCapture.webSockets.some((url) => /\/stream\/replay\//.test(url)),
       live_offline_backfill_quiet: backendLogCounts.backfillFailures === 0,
     };
+    const acceptancePassed = Object.values(checks).every(Boolean);
     result = {
       schema_version: "replay-v2-browser-soak.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
       mode: args.allowShort ? "harness-validation" : "release-4h",
-      passed: true,
+      passed: acceptancePassed,
       config: {
         durationMs: args.durationMs,
         cycles: args.cycles,
@@ -3753,6 +3861,18 @@ async function main() {
         minimumSourceProgress,
         primaryHeapGrowthBytes: primaryHeapGrowth,
         lateHeapGrowthBytes: lateHeapGrowth,
+        productHeap,
+        inspectorObservedHeap: {
+          measurement: "continuous-network-inspector-for-diagnostics-only",
+          initial: initialMetrics.replay.heap,
+          half: {
+            elapsedMs: inspectorHalfSample.elapsedMs,
+            heap: inspectorHalfSample.replay.heap,
+          },
+          final: finalMetrics.replay.heap,
+          primaryHeapGrowthBytes: inspectorPrimaryHeapGrowth,
+          lateHeapGrowthBytes: inspectorLateHeapGrowth,
+        },
         domGrowth,
         targetBaseline,
         maxTargets,
@@ -3802,7 +3922,7 @@ async function main() {
       blindAudit: { passed: blindAuditPassed, boundaries },
       replayNetwork,
       acceptance: {
-        passed: Object.values(checks).every(Boolean),
+        passed: acceptancePassed,
         checks,
         thresholds: {
           projectionRetainedHeapBytes: 64 * MIB,

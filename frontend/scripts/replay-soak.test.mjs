@@ -26,10 +26,12 @@ import {
   replaySubscriberReleaseState,
   replaySoakFrontendPlan,
   replaySoakFrontendProcessEnvironment,
+  replayProductHeapEvidence,
   replayTrainingTargetSpeed,
   restoreCommandReadinessAfterReconnect,
   selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
+  withNetworkInspectorSuspended,
 } from "./replay-soak.mjs";
 
 test("public replay scripts cannot select or launch the retired v1 product", () => {
@@ -604,6 +606,78 @@ test("replay soak blind capture attributes late response bodies to request start
   assert.equal(result.itemCount, 2);
   assert.deepEqual(result.forbiddenMatches, []);
   assert.equal(capture.responseBodies.length, 2);
+});
+
+test("replay soak product heap checkpoints suspend and restore Network inspection", async () => {
+  const calls = [];
+  const cdp = {
+    async send(name, payload = {}) {
+      calls.push({ name, payload });
+      return {};
+    },
+  };
+
+  const value = await withNetworkInspectorSuspended(cdp, async () => {
+    calls.push({ name: "measure", payload: {} });
+    return 42;
+  });
+
+  assert.equal(value, 42);
+  assert.deepEqual(calls, [
+    { name: "Network.disable", payload: {} },
+    { name: "measure", payload: {} },
+    { name: "Network.enable", payload: {} },
+    { name: "Network.setCacheDisabled", payload: { cacheDisabled: true } },
+  ]);
+});
+
+test("replay soak final product heap checkpoint leaves Network inspection disabled", async () => {
+  const calls = [];
+  const cdp = {
+    async send(name) {
+      calls.push(name);
+      return {};
+    },
+  };
+
+  await assert.rejects(
+    () => withNetworkInspectorSuspended(
+      cdp,
+      async () => { throw new Error("heap probe failed"); },
+      { resume: false },
+    ),
+    /heap probe failed/,
+  );
+  assert.deepEqual(calls, ["Network.disable"]);
+});
+
+test("replay soak product heap evidence uses clean lifecycle state nearest half duration", () => {
+  const metrics = (usedSize) => ({ heap: { usedSize } });
+  const evidence = replayProductHeapEvidence({
+    initialMetrics: metrics(10),
+    finalMetrics: metrics(35),
+    durationMs: 1_000,
+    lifecycleCycles: [
+      { index: 1, elapsedFromStartMs: 400, afterMetrics: metrics(20) },
+      { index: 2, elapsedFromStartMs: 600, afterMetrics: metrics(22) },
+      { index: 3, elapsedFromStartMs: 900, afterMetrics: metrics(30) },
+    ],
+  });
+
+  assert.equal(evidence.measurement, "network-inspector-suspended-forced-gc");
+  assert.equal(evidence.half.cycleIndex, 1);
+  assert.equal(evidence.half.targetElapsedMs, 500);
+  assert.equal(evidence.primaryHeapGrowthBytes, 25);
+  assert.equal(evidence.lateHeapGrowthBytes, 15);
+  assert.throws(
+    () => replayProductHeapEvidence({
+      initialMetrics: metrics(10),
+      finalMetrics: metrics(20),
+      durationMs: 1_000,
+      lifecycleCycles: [],
+    }),
+    /requires a clean lifecycle checkpoint/,
+  );
 });
 
 test("replay soak network gate isolates verified host injection without allowing other origins", () => {

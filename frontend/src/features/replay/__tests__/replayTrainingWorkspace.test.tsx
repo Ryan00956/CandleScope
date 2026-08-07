@@ -15,10 +15,12 @@ import {
   saveReplayWorkspacePreferences,
 } from "../replayWorkspacePreferences.js";
 import {
+  createReplayMarketTracksRequestGate,
   createReplayViewerProjectionRequestGate,
   createReplayViewerProjectionRequestScheduler,
   createReplayViewerProjectionScheduler,
   REPLAY_STORE_REVISION_ACK_TIMEOUT_MS,
+  runReplayMarketTracksRequest,
   waitForReplayStoreRevision,
 } from "../useReplayViewerRuntime.js";
 
@@ -404,6 +406,62 @@ test("viewer projection requests are latest-boundary-wins and dedupe committed k
   assert.ok(third);
   gate.cancel();
   assert.equal(third.signal.aborted, true);
+  assert.equal(created.length, 3);
+});
+
+test("MarketTrack polling is single-flight and command refreshes cannot be starved", async () => {
+  const created: AbortController[] = [];
+  const gate = createReplayMarketTracksRequestGate(() => {
+    const request = new AbortController();
+    created.push(request);
+    return request;
+  });
+
+  const published: string[] = [];
+  let resolvePoll!: (value: string) => void;
+  const pollResponse = new Promise<string>((resolve) => { resolvePoll = resolve; });
+  let resolveCommand!: (value: string) => void;
+  const commandResponse = new Promise<string>((resolve) => { resolveCommand = resolve; });
+  const poll = runReplayMarketTracksRequest(
+    gate,
+    "poll",
+    () => pollResponse,
+    (response) => { published.push(response); },
+  );
+  assert.equal(created.length, 1);
+  assert.equal(await runReplayMarketTracksRequest(
+    gate,
+    "poll",
+    async () => "UNREACHABLE",
+    (response) => { published.push(response); },
+  ), null);
+
+  const command = runReplayMarketTracksRequest(
+    gate,
+    "authoritative",
+    () => commandResponse,
+    (response) => { published.push(response); },
+  );
+  assert.equal(created.length, 2);
+  assert.equal(created[0]?.signal.aborted, true);
+  assert.equal(created[1]?.signal.aborted, false);
+  assert.equal(gate.begin("poll"), null);
+
+  // Simulate a transport that still settles after cancellation. The stale
+  // PLAYING projection must not publish or clear the PAUSED request's gate.
+  resolvePoll("PLAYING");
+  assert.equal(await poll, "PLAYING");
+  assert.deepEqual(published, []);
+  assert.equal(gate.begin("poll"), null);
+
+  resolveCommand("PAUSED");
+  assert.equal(await command, "PAUSED");
+  assert.deepEqual(published, ["PAUSED"]);
+  const nextPoll = gate.begin("poll");
+  assert.ok(nextPoll);
+  assert.equal(gate.isCurrent(nextPoll), true);
+  gate.cancel();
+  assert.equal(nextPoll.signal.aborted, true);
   assert.equal(created.length, 3);
 });
 

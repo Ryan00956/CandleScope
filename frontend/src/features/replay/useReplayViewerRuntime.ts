@@ -82,6 +82,60 @@ export interface ReplayViewerProjectionRequestGate {
   readonly cancel: () => void;
 }
 
+export type ReplayMarketTracksRequestKind = "poll" | "authoritative";
+
+export interface ReplayMarketTracksRequestGate {
+  readonly begin: (kind: ReplayMarketTracksRequestKind) => AbortController | null;
+  readonly isCurrent: (request: AbortController) => boolean;
+  readonly finish: (request: AbortController) => void;
+  readonly cancel: () => void;
+}
+
+/**
+ * Keep the growing MarketTrack projection single-flight without allowing a
+ * background poll to supersede a command acknowledgement. Authoritative
+ * refreshes may preempt an old poll; polls only start while the gate is idle.
+ */
+export function createReplayMarketTracksRequestGate(
+  createController: () => AbortController = () => new AbortController(),
+): ReplayMarketTracksRequestGate {
+  let active: AbortController | null = null;
+  return {
+    begin: (kind) => {
+      if (kind === "poll" && active !== null) return null;
+      active?.abort();
+      const request = createController();
+      active = request;
+      return request;
+    },
+    isCurrent: (request) => active === request && !request.signal.aborted,
+    finish: (request) => {
+      if (active === request) active = null;
+    },
+    cancel: () => {
+      active?.abort();
+      active = null;
+    },
+  };
+}
+
+export async function runReplayMarketTracksRequest<T>(
+  gate: ReplayMarketTracksRequestGate,
+  kind: ReplayMarketTracksRequestKind,
+  load: (signal: AbortSignal) => Promise<T>,
+  publish: (response: T) => void,
+): Promise<T | null> {
+  const request = gate.begin(kind);
+  if (request === null) return null;
+  try {
+    const response = await load(request.signal);
+    if (gate.isCurrent(request)) publish(response);
+    return response;
+  } finally {
+    gate.finish(request);
+  }
+}
+
 export function createReplayViewerProjectionRequestGate(
   createController: () => AbortController = () => new AbortController(),
 ): ReplayViewerProjectionRequestGate {
@@ -361,7 +415,11 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   const controlRef = useRef(controlPending);
   controlRef.current = controlPending;
   const viewerCommandRef = useRef<string | null>(null);
-  const marketTracksRequestRef = useRef(0);
+  const marketTracksRequestGateRef = useRef<ReplayMarketTracksRequestGate | null>(null);
+  if (marketTracksRequestGateRef.current === null) {
+    marketTracksRequestGateRef.current = createReplayMarketTracksRequestGate();
+  }
+  const marketTracksRequestGate = marketTracksRequestGateRef.current;
   const sourceStore = runtime.replayStore.seriesStore;
   const sessionId = runtime.store.sessionId;
   const config = runtime.store.sessionConfig;
@@ -502,19 +560,40 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     return () => abort.abort();
   }, [reloadRevision, viewerState?.run_id]);
 
+  useEffect(() => () => marketTracksRequestGate.cancel(), [marketTracksRequestGate]);
+
+  const requestMarketTracks = useCallback(async (
+    runId: string,
+    kind: ReplayMarketTracksRequestKind,
+  ): Promise<ReplayMarketTracksResponse | null> => {
+    return runReplayMarketTracksRequest(
+      marketTracksRequestGate,
+      kind,
+      (signal) => defaultReplayV2Api.tracksRun(runId, signal),
+      (response) => {
+        if (!publishViewerState(response.viewer_state)) {
+          throw new Error("authoritative replay viewer projection could not be prepared");
+        }
+        setMarketTracks(response);
+      },
+    );
+  }, [marketTracksRequestGate, publishViewerState]);
+
   const refreshMarketTracks = useCallback(async (
     runId: string,
   ): Promise<ReplayMarketTracksResponse> => {
-    const requestSequence = marketTracksRequestRef.current + 1;
-    marketTracksRequestRef.current = requestSequence;
-    const response = await defaultReplayV2Api.tracksRun(runId);
-    if (requestSequence !== marketTracksRequestRef.current) return response;
-    if (!publishViewerState(response.viewer_state)) {
-      throw new Error("authoritative replay viewer projection could not be prepared");
+    const response = await requestMarketTracks(runId, "authoritative");
+    if (response === null) {
+      throw new Error("authoritative MarketTrack refresh could not acquire the request gate");
     }
-    setMarketTracks(response);
     return response;
-  }, [publishViewerState]);
+  }, [requestMarketTracks]);
+
+  const pollMarketTracks = useCallback(async (
+    runId: string,
+  ): Promise<ReplayMarketTracksResponse | null> => {
+    return requestMarketTracks(runId, "poll");
+  }, [requestMarketTracks]);
 
   const failClosedAndRefreshMarketTracks = useCallback(async (
     runId: string,
@@ -536,12 +615,13 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
   useEffect(() => {
     if (marketTracks?.global_clock?.state !== "PLAYING") return;
     const timer = setInterval(() => {
-      void refreshMarketTracks(marketTracks.run_id).catch((cause: unknown) => {
+      void pollMarketTracks(marketTracks.run_id).catch((cause: unknown) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
         setError(cause instanceof Error ? cause.message : "全局时钟状态刷新失败");
       });
     }, 250);
     return () => clearInterval(timer);
-  }, [marketTracks?.global_clock?.state, marketTracks?.run_id, refreshMarketTracks]);
+  }, [marketTracks?.global_clock?.state, marketTracks?.run_id, pollMarketTracks]);
 
   useEffect(() => {
     if (requiresSourceBucketProjection) {

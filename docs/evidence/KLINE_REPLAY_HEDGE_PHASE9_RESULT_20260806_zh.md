@@ -184,6 +184,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - exact-binding 判断现抽成可单测的 `isExactHedgeTrainingBound`，在不减少 public refs、simulation ref、fidelity、fallback、rows 或 cache 条件的前提下，对完整表达式显式布尔化。成功只能序列化为 JSON `true`，任一 required ref 缺失只能返回 `false`。
 - 定向 soak 测试 `31 passed`；全部 replay Node scripts `41 passed`；Phase 10/18 Python release-script 集 `20 passed`；双 tsconfig typecheck、全量 ESLint 和 `git diff --check` 均通过。修复提交后先以 real-source 短 smoke 证明 artifact 每项严格等于 `true`，随后全部正式证据从新 clean HEAD 重跑。
 
+### 3.15 长时 MarketTrack 轮询饥饿根因与修复
+
+- `b9f0b73b1af7a8966438f6aa0afb3821b0accec3` 的真实来源、全量 release checks（后端 `3251 passed`、前端 Node `2952 passed`）、formal benchmark、真实浏览器短 smoke 与完整构建 rollback 均通过。formal benchmark 的 8 轨 normal p95 为 `288.649 ms`，8 轨 liquidation p95/max 为 `845.090 ms`，13 项检查全部为真；smoke 的 30 项 acceptance 均为严格 JSON boolean `true`。这些 PASS 只属于该 HEAD，不能继承到修复后的候选提交。
+- 正式 soak 未使用 `--allow-short`，先以 `100266.71 events/s` 完成 1,000,000 projection events，随后在 `elapsedFromStartMs=7626443`（约 127.1 分钟）、第 40 个训练动作周期因 `Timed out waiting for training pause ack` fail closed。页面仍为 `PLAYING`、generation `80`、source sequence `1154`、revision `1234`，暂停按钮可用且无 command/console/page error；对应 actor 已为健康 `PAUSED`、revision `1234`、queue `0`、`runtime_failures=0`，SQLite `transaction_failures=0`。失败现场保存的 `/tracks` 200 响应也明确返回 `global_clock.state=PAUSED`、`reason=USER_PAUSE`、generation `80`、profile revision `158`。因此暂停命令和服务端状态机均已成功，失败边界是浏览器没有发布权威响应。
+- 根因位于 MarketTrack 状态刷新：播放期间每 `250 ms` 无条件发起一次 `/tracks`，每个新请求都会使此前请求失去“最新请求”资格。随着 40 笔订单、40 笔成交和 3,884 条账本证据令响应解析耗时超过轮询周期，后续请求会在前一响应完成前持续启动，使所有已完成响应均被判为过期；暂停命令后的权威 refresh 也会被下一个后台 poll 抢占，形成确定性请求饥饿，而不是 HEDGE、强平、actor 或持久化故障。
+- 修复引入 MarketTrack 请求门和统一执行器：后台 poll 只在无在途请求时启动；命令后的 authoritative refresh 可抢占并取消旧 poll；旧 transport 即使在取消后仍返回，也既不能发布旧 `PLAYING` 投影，也不能清除新命令请求的所有权；命令请求在途期间所有后台 poll 都直接跳过。权威 `PAUSED` 响应发布后，现有 React 状态自然停止轮询。`250 ms` 周期、控制确认超时、soak 时长、100 次 lifecycle、1,000,000 events 和全部 HEDGE acceptance 均未放宽，也没有灰度或降级分支。
+- 新增可控 Promise 竞态回归，覆盖 poll 单飞、authoritative 抢占、取消后旧响应晚返回、旧请求 finish 不清除新请求、命令响应唯一发布和释放后恢复轮询。定向 workspace `23 passed`，完整 frontend replay `337 passed`，soak harness `31 passed`；双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 全部通过。提交后先以高密度 40-cycle clean-HEAD 预检越过原增长边界，再从真实来源、全量 checks、benchmark、smoke、rollback、真实 4 小时 soak 到 manifest 全部重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

@@ -171,7 +171,11 @@ class ContinuityLayer:
                 if self._on_gap:
                     await self._on_gap(gap)
 
-            elif continuity_key < (expected_next or continuity_key):
+            # Live K-lines legitimately revisit the current open_time until
+            # the candle closes.  Only a key behind the emitted cursor is
+            # out of order; comparing it with ``expected_next`` incorrectly
+            # classified every same-candle update as a regression.
+            elif continuity_key < self._last_continuity_key:
                 self._metrics.inc("events_out_of_order")
 
         # ── Emit ──

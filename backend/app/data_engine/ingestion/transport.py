@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
 from typing import Any
 
@@ -174,7 +175,19 @@ class TransportLayer:
         """Initialize shared resources (HTTP session)."""
         if self._http_session is None or self._http_session.closed:
             timeout = aiohttp.ClientTimeout(total=self._cfg.http_timeout)
-            self._http_session = aiohttp.ClientSession(timeout=timeout)
+            connector = None
+            if sys.platform == "win32":
+                # aiohttp prefers aiodns when it is installed.  On the
+                # CandleScope Windows host that resolver cannot reach the OS
+                # DNS configuration, while getaddrinfo succeeds.  Keep the
+                # workaround local to this owned session.
+                connector = aiohttp.TCPConnector(
+                    resolver=aiohttp.ThreadedResolver(),
+                )
+            self._http_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
             logger.info("HTTP session created (timeout=%ss)", self._cfg.http_timeout)
 
     async def stop(self) -> None:

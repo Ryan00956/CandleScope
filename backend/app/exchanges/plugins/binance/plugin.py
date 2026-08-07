@@ -35,6 +35,28 @@ class BinancePlugin(BuiltinExchangePlugin):
         )
 
     @staticmethod
+    def supports_provider_stream(descriptor: Any) -> bool:
+        from app.exchanges.ccxt_ext.profiles import BinanceUsdmCcxtProfile
+
+        return BinanceUsdmCcxtProfile().supports(descriptor)
+
+    @staticmethod
+    def create_stream_session(config: Any, descriptor: Any) -> Any | None:
+        if not getattr(config, "ccxt_stream_enabled", False):
+            return None
+        from app.exchanges.ccxt_ext.profiles import BinanceUsdmCcxtProfile
+        from app.exchanges.ccxt_ext.session import CcxtProviderSession
+
+        profile = BinanceUsdmCcxtProfile()
+        if not profile.supports(descriptor):
+            return None
+        return CcxtProviderSession(
+            config=config,
+            descriptor=descriptor,
+            profile=profile,
+        )
+
+    @staticmethod
     def _normalizer(config: Any, descriptor: Any) -> Any:
         from .normalizer import BinanceNormalizer
 

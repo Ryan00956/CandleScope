@@ -464,8 +464,9 @@ ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
 
 # Full Order Books are rebuilt from a REST seed plus every ordered diff-depth
 # event.  They deliberately have separate, tighter stream limits and explicit
-# per-stream queue/book bounds; a bound violation invalidates the book and
-# triggers resynchronization instead of dropping a delta silently.
+# per-stream queue/book bounds.  The local book retains the best known levels
+# inside this explicit window; exhausting the REST seed's trusted depth still
+# invalidates the book and triggers resynchronization.
 FULL_ORDER_BOOK_MAX_STREAMS = int(
     os.getenv("FULL_ORDER_BOOK_MAX_STREAMS", "16")
 )

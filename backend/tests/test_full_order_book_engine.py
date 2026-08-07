@@ -743,7 +743,7 @@ def test_stream_and_book_capacity_are_hard_fail_closed_bounds() -> None:
         engine.activate_stream(eth)
 
 
-def test_live_level_growth_cannot_exceed_side_capacity() -> None:
+def test_live_level_growth_retains_best_known_side_capacity() -> None:
     engine = FullOrderBookEngine(max_levels_per_side=2)
     epoch = _started(engine)
     engine.apply_delta(IDENTITY, _delta(100, 101, 99), epoch=epoch)
@@ -765,8 +765,75 @@ def test_live_level_growth_cannot_exceed_side_capacity() -> None:
         _delta(103, 103, 102, bids=((98, 1),)),
         epoch=epoch,
     )
-    assert overflow.failure is FullOrderBookFailure.CAPACITY
-    assert engine.snapshot(IDENTITY) is None
+    assert overflow.failure is None
+    assert overflow.state is FullOrderBookState.LIVE
+    assert overflow.snapshot is not None
+    assert [level.price for level in overflow.snapshot.bids] == [100.0, 99.0]
+    assert overflow.snapshot.local_bid_levels_trimmed == 1
+    diagnostics = engine.diagnostics()
+    assert diagnostics["capacity_failures"] == 0
+    assert diagnostics["bid_levels_trimmed"] == 1
+
+
+def test_retained_window_ignores_worse_updates_without_revision_divergence() -> None:
+    engine = FullOrderBookEngine(max_levels_per_side=2)
+    epoch = _started(engine)
+    engine.apply_delta(IDENTITY, _delta(100, 101, 99), epoch=epoch)
+    engine.install_snapshot(
+        IDENTITY,
+        _seed(snapshot_limit=2, bids=((100, 1),), asks=((101, 1),)),
+        epoch=epoch,
+    )
+    engine.apply_delta(
+        IDENTITY,
+        _delta(102, 102, 101, bids=((99, 1),)),
+        epoch=epoch,
+    )
+    engine.apply_delta(
+        IDENTITY,
+        _delta(103, 103, 102, bids=((98, 1),)),
+        epoch=epoch,
+    )
+
+    result = engine.apply_delta(
+        IDENTITY,
+        _delta(104, 104, 103, bids=((100, 2), (97, 3))),
+        epoch=epoch,
+    )
+
+    assert result.snapshot is not None
+    assert [(level.price, level.quantity) for level in result.snapshot.bids] == [
+        (100.0, 2.0),
+        (99.0, 1.0),
+    ]
+    diagnostics = engine.diagnostics()
+    assert diagnostics["updates_outside_retained_window"] == 1
+    assert diagnostics["capacity_failures"] == 0
+
+
+def test_retained_window_fails_closed_if_seed_depth_is_exhausted() -> None:
+    engine = FullOrderBookEngine(max_levels_per_side=2)
+    epoch = _started(engine)
+    engine.apply_delta(IDENTITY, _delta(100, 101, 99), epoch=epoch)
+    engine.install_snapshot(
+        IDENTITY,
+        _seed(
+            snapshot_limit=2,
+            bids=((100, 1), (99, 1)),
+            asks=((101, 1), (102, 1)),
+        ),
+        epoch=epoch,
+    )
+
+    result = engine.apply_delta(
+        IDENTITY,
+        _delta(102, 102, 101, bids=((99, 0),)),
+        epoch=epoch,
+    )
+
+    assert result.failure is FullOrderBookFailure.CAPACITY
+    assert result.state is FullOrderBookState.RESYNC_REQUIRED
+    assert engine.diagnostics()["retention_exhaustions"] == 1
 
 
 def test_delta_and_buffer_limits_are_hard_bounds() -> None:

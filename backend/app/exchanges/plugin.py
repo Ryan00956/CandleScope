@@ -65,6 +65,16 @@ class ExchangePlugin(Protocol):
         ...
 
 
+class ProviderStreamPlugin(Protocol):
+    """Optional Host-owned streaming transport exposed by an exchange plugin."""
+
+    def supports_provider_stream(self, descriptor: Any) -> bool:
+        ...
+
+    def create_stream_session(self, config: Any, descriptor: Any) -> Any | None:
+        ...
+
+
 class DefaultSymbolNormalizer:
     """Default symbol normalizer for exchanges whose canonical symbols are user-facing."""
 

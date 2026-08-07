@@ -15,6 +15,7 @@ import {
   isRecordedAdapterEviction,
   isAuthoritativeReplayStatus,
   inspectReplaySoakFrontendBuild,
+  isExactHedgeTrainingBound,
   primaryReplayFailureDiagnostics,
   readJson,
   replayBackendHealth,
@@ -771,6 +772,37 @@ test("formal HEDGE soak binds both exact public/L2 archives and one simulation m
       },
     }),
     /exact per-symbol public\/L2 inputs/,
+  );
+});
+
+test("formal HEDGE soak emits a strict boolean exact-binding acceptance", () => {
+  const fixture = { source_profile: "HEDGE_EXACT_ARCHIVE_QA" };
+  const binding = {
+    payloadBound: true,
+    requiredRows: 43_400,
+    forwardCacheMs: 2_592_000_000,
+    inputFidelity: "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION",
+    fallbackApplied: false,
+    publicRefs: {
+      BTCUSDT: { archive_id: "btc-public" },
+      ETHUSDT: { archive_id: "eth-public" },
+    },
+    simulationRef: { manifest_id: "simulation-v1" },
+  };
+
+  const accepted = isExactHedgeTrainingBound(fixture, binding);
+  assert.equal(accepted, true);
+  assert.equal(typeof accepted, "boolean");
+  assert.equal(
+    isExactHedgeTrainingBound(fixture, { ...binding, simulationRef: null }),
+    false,
+  );
+  assert.equal(
+    isExactHedgeTrainingBound(fixture, {
+      ...binding,
+      publicRefs: { BTCUSDT: binding.publicRefs.BTCUSDT },
+    }),
+    false,
   );
 });
 

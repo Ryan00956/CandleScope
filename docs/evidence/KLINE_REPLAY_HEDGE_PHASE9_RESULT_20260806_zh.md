@@ -177,6 +177,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 该 artifact 位于仓库外，仅证明 3.11 与 3.12 的根因修复已跨过复现窗口。因为使用了 `--allow-short`，`hedge_exact_training_bound` 不构成正式 release acceptance；它不能替代 4 小时、100 次 lifecycle 和 1,000,000 projection events 的正式 soak，也不能进入最终 PASS manifest。
 - 本节记录会形成新的候选 HEAD；正式数据源、checks、benchmark、smoke、4 小时 soak、rollback 与 manifest 必须全部在该新 clean HEAD 上从头生成。
 
+### 3.14 正式 soak acceptance 严格布尔合同修复
+
+- `157f95832ce3e8a22f539ce0afef2c598420e8b3` 的真实来源、全量 release checks（后端 `3251 passed`、前端 Node `2951 passed`）、formal benchmark、真实浏览器短 smoke 与完整构建 rollback 均通过。formal benchmark 的 8 轨 normal p95 为 `209.726 ms`，8 轨 liquidation p95/max 为 `639.483 ms`，冻结阈值未调整；这些结果只作为本轮发布工具诊断，不继承到下一 HEAD。
+- 启动 4 小时 soak 前的严格类型审计发现，`hedge_exact_training_bound` 的 JavaScript `&&` 表达式在全部条件成立时返回最后一个 `simulationRef` 对象，而不是 boolean `true`。soak 自身使用 truthy 汇总，因而错误地生成顶层 `passed=true`；最终 Python verifier 使用 `value is True`，会正确拒绝该 artifact。旧 smoke 也存在同一问题，只是此前 4 小时失败使 manifest 从未走到该检查。
+- exact-binding 判断现抽成可单测的 `isExactHedgeTrainingBound`，在不减少 public refs、simulation ref、fidelity、fallback、rows 或 cache 条件的前提下，对完整表达式显式布尔化。成功只能序列化为 JSON `true`，任一 required ref 缺失只能返回 `false`。
+- 定向 soak 测试 `31 passed`；全部 replay Node scripts `41 passed`；Phase 10/18 Python release-script 集 `20 passed`；双 tsconfig typecheck、全量 ESLint 和 `git diff --check` 均通过。修复提交后先以 real-source 短 smoke 证明 artifact 每项严格等于 `true`，随后全部正式证据从新 clean HEAD 重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

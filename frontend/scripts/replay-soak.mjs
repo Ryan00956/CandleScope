@@ -204,6 +204,21 @@ export function selectFormalV2HedgeTrainingPlan(fixture) {
   };
 }
 
+export function isExactHedgeTrainingBound(fixture, formalTrainingBinding) {
+  return Boolean(
+    fixture?.source_profile === HEDGE_BROWSER_SOURCE_PROFILE
+    && formalTrainingBinding?.payloadBound === true
+    && formalTrainingBinding?.requiredRows === FORMAL_V2_REAL_WINDOW_ROWS
+    && formalTrainingBinding?.forwardCacheMs === FORMAL_V2_FORWARD_CACHE_MS
+    && formalTrainingBinding?.inputFidelity
+      === "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
+    && formalTrainingBinding?.fallbackApplied === false
+    && formalTrainingBinding?.publicRefs?.BTCUSDT
+    && formalTrainingBinding?.publicRefs?.ETHUSDT
+    && formalTrainingBinding?.simulationRef
+  );
+}
+
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function timeoutError(label, timeoutMs) {
@@ -3596,17 +3611,9 @@ async function main() {
         && fixture.real_source_evidence?.read_only === true
         && fixture.real_source_evidence?.identities?.length >= 2
       ),
-      hedge_exact_training_bound: (
-        fixture.source_profile === HEDGE_BROWSER_SOURCE_PROFILE
-        && formalTrainingBinding.payloadBound === true
-        && formalTrainingBinding.requiredRows === FORMAL_V2_REAL_WINDOW_ROWS
-        && formalTrainingBinding.forwardCacheMs === FORMAL_V2_FORWARD_CACHE_MS
-        && formalTrainingBinding.inputFidelity
-          === "PINNED_PUBLIC_EXACT_PRIVATE_DETERMINISTIC_SIMULATION"
-        && formalTrainingBinding.fallbackApplied === false
-        && formalTrainingBinding.publicRefs?.BTCUSDT
-        && formalTrainingBinding.publicRefs?.ETHUSDT
-        && formalTrainingBinding.simulationRef
+      hedge_exact_training_bound: isExactHedgeTrainingBound(
+        fixture,
+        formalTrainingBinding,
       ),
       hedge_account_continuity: hedgeContinuity?.passed === true,
       hedge_both_legs_active: (

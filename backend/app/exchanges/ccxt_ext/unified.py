@@ -26,6 +26,10 @@ _MAX_SEEN_TRADES = 4096
 _MAX_KLINE_REVISIONS = 8
 
 
+class CcxtUnifiedOrderBookOutOfSync(RuntimeError):
+    """Raised before publication when CCXT exposes an incoherent book cache."""
+
+
 class CcxtUnifiedProjector:
     """Turn one CCXT ``watch_*`` result into bounded normalized envelopes.
 
@@ -183,10 +187,13 @@ class CcxtUnifiedProjector:
     def _project_order_book(self, result: Any) -> list[dict[str, Any]]:
         if not isinstance(result, dict):
             return []
-        bids = result.get("bids")
-        asks = result.get("asks")
-        if not isinstance(bids, (list, tuple)) or not isinstance(asks, (list, tuple)):
-            return []
+        limit = self.descriptor.depth_levels or 0
+        bids = _book_levels(result.get("bids"), limit=limit, reverse=True)
+        asks = _book_levels(result.get("asks"), limit=limit, reverse=False)
+        if not bids or not asks or bids[0][0] >= asks[0][0]:
+            raise CcxtUnifiedOrderBookOutOfSync(
+                f"CCXT order book is empty or crossed for {self.descriptor.key}",
+            )
         # CCXT Pro maintains an order-book cache in place and may return the
         # same mutable bid/ask lists from consecutive watch calls.  A shallow
         # ``dict(result)`` would therefore let a later delta rewrite a message

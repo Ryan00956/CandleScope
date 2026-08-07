@@ -27,7 +27,8 @@ The generic lane owns the integration seams CandleScope must validate:
 - exact market-family and unified-symbol routing;
 - K-line closure transitions and Trade cache deduplication;
 - bounded CCXT-managed order-book snapshots with explicit local revisions;
-- pooled reconnecting Pro sessions and deterministic resource cleanup;
+- pooled reconnecting Pro sessions, full CCXT cache rebuild on connection
+  generation changes, and deterministic resource cleanup;
 - lazy, on-demand symbol discovery so startup never contacts every exchange.
 
 The strict lane additionally owns the seams that CCXT's unified API does not

@@ -49,9 +49,11 @@ class CcxtRuntime:
         self._lifecycle_subscribers: dict[str, LifecycleSubscriber] = {}
         self._started = False
         self._closed = False
+        self._websocket_generation = 0
         self._raw_events = 0
         self._lifecycle_events = 0
         self._websocket_recycles = 0
+        self._recycle_lock = asyncio.Lock()
         self.exchange = profile.create_exchange(
             config,
             raw_event_sink=self._on_raw_event,
@@ -90,8 +92,21 @@ class CcxtRuntime:
     async def watch(self, descriptor: StreamDescriptor, symbol: str) -> Any:
         return await self.profile.watch(self.exchange, descriptor, symbol)
 
+    @property
+    def websocket_generation(self) -> int:
+        return self._websocket_generation
+
+    async def rebuild_if_generation(self, expected_generation: int) -> bool:
+        """Rebuild shared CCXT state once for one failed WS generation."""
+
+        async with self._recycle_lock:
+            if self._closed or self._websocket_generation != expected_generation:
+                return False
+            await self._rebuild_websocket_state()
+            return True
+
     async def recycle_websockets(self) -> int:
-        """Close live WS clients without closing the shared REST/runtime state.
+        """Rebuild CCXT connection/cache state on the shared runtime object.
 
         This is used by controlled recovery drills.  Stream sessions observe
         the cancelled CCXT subscription futures and reconnect through their
@@ -100,22 +115,35 @@ class CcxtRuntime:
 
         if not self._started or self._closed:
             raise RuntimeError("CCXT runtime is not available")
-        clients = getattr(self.exchange, "clients", None)
-        closer = getattr(self.exchange, "close_ws_clients", None)
-        if not isinstance(clients, dict) or not callable(closer):
-            raise TypeError("CCXT exchange does not expose recyclable WS clients")
-        count = len(clients)
-        await closer()
+        async with self._recycle_lock:
+            clients = getattr(self.exchange, "clients", None)
+            if not isinstance(clients, dict):
+                raise TypeError("CCXT exchange does not expose websocket clients")
+            count = len(clients)
+            await self._rebuild_websocket_state()
+            return count
+
+    async def _rebuild_websocket_state(self) -> None:
+        # Closing sockets alone leaves CCXT's in-memory order books and
+        # newUpdates caches alive.  A reconnect may then apply fresh deltas to
+        # stale sides and briefly produce a crossed book.  Clean the complete
+        # CCXT instance data and reload markets before any watcher resubscribes.
+        await close_ccxt_exchange(self.exchange)
+        # ``clean_instance_data=True`` clears ``markets`` but intentionally
+        # leaves CCXT's completed ``markets_loading`` task in place.  A plain
+        # load_markets() would await that stale task and leave markets empty.
+        await self.exchange.load_markets(reload=True)
+        self._websocket_generation += 1
         self._websocket_recycles += 1
-        return count
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._raw_subscribers.clear()
-        self._lifecycle_subscribers.clear()
-        await close_ccxt_exchange(self.exchange)
+        async with self._recycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._raw_subscribers.clear()
+            self._lifecycle_subscribers.clear()
+            await close_ccxt_exchange(self.exchange)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -127,6 +155,7 @@ class CcxtRuntime:
             "raw_events": self._raw_events,
             "lifecycle_events": self._lifecycle_events,
             "websocket_recycles": self._websocket_recycles,
+            "websocket_generation": self._websocket_generation,
         }
 
     def _on_raw_event(self, event: CcxtRawMarketEvent) -> None:

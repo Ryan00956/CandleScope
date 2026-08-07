@@ -17,7 +17,11 @@ from .models import CcxtLifecycleEvent, CcxtRawMarketEvent
 from .okx import CandleScopeOkx, CandleScopeOkxSpot
 from .runtime import CcxtRuntime, CcxtRuntimePool, get_shared_ccxt_runtime_pool
 from .session import CcxtProviderSession, CcxtRawQueueOverflow
-from .unified import CcxtUnifiedNormalizer, CcxtUnifiedProjector
+from .unified import (
+    CcxtUnifiedNormalizer,
+    CcxtUnifiedOrderBookOutOfSync,
+    CcxtUnifiedProjector,
+)
 from .shadow import (
     SHADOW_SCHEMA_VERSION,
     SPOT_SHADOW_SCHEMA_VERSION,
@@ -65,6 +69,7 @@ __all__ = [
     "CcxtRuntime",
     "CcxtRuntimePool",
     "CcxtUnifiedNormalizer",
+    "CcxtUnifiedOrderBookOutOfSync",
     "CcxtUnifiedPlugin",
     "CcxtUnifiedProjector",
     "OkxCcxtShadowComparator",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from app.api.v1.symbols import _catalog_refresh_requests
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import (
@@ -23,6 +25,7 @@ from app.exchanges.ccxt_ext.runtime import CcxtRuntimePool, close_ccxt_exchange
 from app.exchanges.ccxt_ext.session import CcxtProviderSession
 from app.exchanges.ccxt_ext.unified import (
     CcxtUnifiedNormalizer,
+    CcxtUnifiedOrderBookOutOfSync,
     CcxtUnifiedProjector,
 )
 from app.exchanges.registry import bootstrap_default_adapters, get_exchange_registry
@@ -241,6 +244,21 @@ def test_unified_order_book_projection_freezes_ccxt_mutable_cache() -> None:
     assert frozen["asks"] == [[11, 3]]
 
 
+def test_unified_order_book_projection_fails_before_publishing_crossed_cache() -> None:
+    descriptor = _descriptor(StreamType.DEPTH)
+    projector = CcxtUnifiedProjector(
+        exchange_id="bybit",
+        market_type="spot",
+        descriptor=descriptor,
+    )
+
+    with pytest.raises(CcxtUnifiedOrderBookOutOfSync, match="empty or crossed"):
+        projector.project(
+            {"bids": [[12, 1]], "asks": [[11, 1]]},
+            received_at_ms=1_700_000_000_001,
+        )
+
+
 def test_profile_lets_ccxt_choose_venue_depth_before_local_bounding() -> None:
     class Exchange:
         async def watch_order_book(self, symbol: str) -> dict[str, Any]:
@@ -283,10 +301,12 @@ class _UnifiedFakeExchange:
         self.results: asyncio.Queue[Any] = asyncio.Queue()
         self.close_calls = 0
 
-    async def load_markets(self) -> None:
+    async def load_markets(self, reload: bool = False) -> None:
+        del reload
         return None
 
-    async def close(self) -> None:
+    async def close(self, clean_instance_data: bool = False) -> None:
+        del clean_instance_data
         self.close_calls += 1
 
 
@@ -299,7 +319,7 @@ class _UnifiedFakeProfile:
 
     @staticmethod
     def supports(descriptor: StreamDescriptor) -> bool:
-        return descriptor.stream_type == StreamType.TRADE
+        return descriptor.stream_type in {StreamType.TRADE, StreamType.DEPTH}
 
     def create_exchange(
         self,
@@ -382,6 +402,51 @@ def test_provider_session_forwards_unified_watch_results_and_releases_runtime() 
         assert messages[0].payload["schema"] == "candlescope.ccxt.unified/1"
         await session.stop()
         assert profile.exchange.close_calls == 1
+
+    asyncio.run(run())
+
+
+def test_provider_session_rebuilds_runtime_after_crossed_unified_book() -> None:
+    async def run() -> None:
+        profile = _UnifiedFakeProfile()
+        session = CcxtProviderSession(
+            config=IngestionConfig(
+                ws_stale_timeout=1.0,
+                ws_reconnect_delay_initial=0.001,
+                ws_reconnect_delay_max=0.001,
+            ),
+            descriptor=_descriptor(StreamType.DEPTH),
+            profile=profile,
+            pool=CcxtRuntimePool(),
+        )
+        messages: list[RawMessage] = []
+
+        async def on_message(message: RawMessage) -> None:
+            messages.append(message)
+
+        session.on_message(on_message)
+        await session.start()
+        await profile.exchange.results.put(
+            {"bids": [[12, 1]], "asks": [[11, 1]]},
+        )
+        for _attempt in range(100):
+            if profile.exchange.close_calls:
+                break
+            await asyncio.sleep(0.01)
+        await profile.exchange.results.put(
+            {"bids": [[10, 1]], "asks": [[11, 1]]},
+        )
+        for _attempt in range(100):
+            if messages:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(messages) == 1
+        snapshot = session.snapshot()
+        assert snapshot["runtime"]["websocket_generation"] == 1
+        assert snapshot["metrics"]["counters"]["runtime_rebuilds"] == 1
+        await session.stop()
+        assert profile.exchange.close_calls == 2
 
     asyncio.run(run())
 

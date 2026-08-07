@@ -153,6 +153,7 @@ class CcxtProviderSession:
     async def _watch_loop(self) -> None:
         delay = float(self._cfg.ws_reconnect_delay_initial)
         while self._running:
+            watch_generation: int | None = None
             try:
                 if self._overflowed:
                     raise CcxtRawQueueOverflow(
@@ -162,6 +163,7 @@ class CcxtProviderSession:
                     await self._attach_runtime()
                 assert self._runtime is not None
                 assert self._ccxt_symbol is not None
+                watch_generation = self._runtime.websocket_generation
                 result = await asyncio.wait_for(
                     self._runtime.watch(self._descriptor, self._ccxt_symbol),
                     timeout=float(self._cfg.ws_stale_timeout),
@@ -197,6 +199,7 @@ class CcxtProviderSession:
                     self._descriptor.key,
                     exc,
                 )
+                await self._rebuild_runtime_after_failure(watch_generation)
                 await asyncio.sleep(min(delay, self._cfg.ws_reconnect_delay_max))
                 delay = min(delay * 2, self._cfg.ws_reconnect_delay_max)
             except Exception as exc:  # noqa: BLE001 - CCXT exchange/network errors
@@ -214,8 +217,30 @@ class CcxtProviderSession:
                 logger.warning("CCXT stream failed (%s): %s", self._descriptor.key, exc)
                 if self._overflowed or not self._running:
                     break
+                await self._rebuild_runtime_after_failure(watch_generation)
                 await asyncio.sleep(min(delay, self._cfg.ws_reconnect_delay_max))
                 delay = min(delay * 2, self._cfg.ws_reconnect_delay_max)
+
+    async def _rebuild_runtime_after_failure(
+        self,
+        expected_generation: int | None,
+    ) -> None:
+        runtime = self._runtime
+        if runtime is None or expected_generation is None:
+            return
+        self._metrics.inc("runtime_rebuild_requests")
+        try:
+            rebuilt = await runtime.rebuild_if_generation(expected_generation)
+        except Exception as exc:  # noqa: BLE001 - retry loop must remain supervised
+            self._metrics.inc("runtime_rebuild_failures")
+            logger.warning(
+                "CCXT runtime rebuild failed (%s): %s",
+                self._descriptor.key,
+                exc,
+            )
+            return
+        if rebuilt:
+            self._metrics.inc("runtime_rebuilds")
 
     async def _attach_runtime(self) -> None:
         runtime = await self._pool.acquire(self._profile, self._cfg)

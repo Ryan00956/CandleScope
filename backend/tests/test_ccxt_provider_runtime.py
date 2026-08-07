@@ -40,6 +40,7 @@ class _FakeExchange:
             }
         }
         self.load_calls = 0
+        self.reload_calls = 0
         self.close_calls = 0
         self.recycle_calls = 0
         self.clients: dict[str, object] = {"wss://example.test/ws": object()}
@@ -47,13 +48,16 @@ class _FakeExchange:
             asyncio.Queue()
         )
 
-    async def load_markets(self) -> None:
+    async def load_markets(self, reload: bool = False) -> None:
         self.load_calls += 1
+        self.reload_calls += int(reload)
         if self.fail_load:
             raise RuntimeError("temporary load-markets failure")
 
-    async def close(self) -> None:
+    async def close(self, clean_instance_data: bool = False) -> None:
         self.close_calls += 1
+        if clean_instance_data:
+            self.clients.clear()
 
     async def close_ws_clients(self) -> None:
         self.recycle_calls += 1
@@ -316,7 +320,7 @@ def test_runtime_pool_shares_one_exchange_and_closes_at_last_release() -> None:
     asyncio.run(run())
 
 
-def test_runtime_pool_can_recycle_websockets_without_closing_runtime() -> None:
+def test_runtime_pool_rebuilds_ccxt_caches_when_recycling_websockets() -> None:
     async def run() -> None:
         pool = CcxtRuntimePool()
         profile = _FakeProfile()
@@ -326,10 +330,14 @@ def test_runtime_pool_can_recycle_websockets_without_closing_runtime() -> None:
         recycled = await pool.recycle_all_websockets()
 
         assert recycled == {"fake|futures": 1}
-        assert profile.exchange.recycle_calls == 1
-        assert profile.exchange.close_calls == 0
+        assert profile.exchange.recycle_calls == 0
+        assert profile.exchange.close_calls == 1
+        assert profile.exchange.load_calls == 2
+        assert profile.exchange.reload_calls == 1
         assert runtime.snapshot()["websocket_recycles"] == 1
+        assert runtime.snapshot()["websocket_generation"] == 1
         await pool.release(runtime)
+        assert profile.exchange.close_calls == 2
 
     asyncio.run(run())
 
@@ -468,6 +476,7 @@ def test_provider_session_reconnects_when_ccxt_subscription_future_is_cancelled(
         assert SessionHealth.RECONNECTING in health
         assert health[-1] == SessionHealth.CONNECTED
         assert session.snapshot()["metrics"]["counters"]["watch_cancellations"] == 1
+        assert session.snapshot()["metrics"]["counters"]["runtime_rebuilds"] == 1
         await session.stop()
 
     asyncio.run(run())

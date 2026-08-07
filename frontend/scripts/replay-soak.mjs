@@ -2562,6 +2562,15 @@ function actorDiagnostics(payload, sessionId) {
   return payload?.replay?.sessions?.[sessionId] || null;
 }
 
+function primaryReplayFailureDiagnostics({ backend, phase, sessionId, status }) {
+  return {
+    phase,
+    status,
+    actor: actorDiagnostics(backend, sessionId),
+    backendHealth: replayBackendHealth(backend),
+  };
+}
+
 function replaySubscriberReleaseState(payload, sessionId, maximum) {
   const sessions = payload?.replay?.sessions;
   if (sessions === null || typeof sessions !== "object" || Array.isArray(sessions)) {
@@ -3352,6 +3361,17 @@ async function main() {
       }
       if (now >= nextSampleAt || (now >= plannedEndMs && cycleIndex >= args.cycles)) {
         const status = await replayStatus(replay.cdp);
+        if (status?.connection !== "connected" || status.state !== "PLAYING") {
+          const backend = await readJson(diagnosticsUrl).catch((backendError) => ({
+            error: backendError?.message || String(backendError),
+          }));
+          phaseDiagnostics = primaryReplayFailureDiagnostics({
+            backend,
+            phase: "primary-replay-sample",
+            sessionId,
+            status,
+          });
+        }
         assert(status?.connection === "connected", "primary replay connection left connected state", status);
         assert(status.state === "PLAYING", "primary replay stopped during soak", status);
         const sample = {
@@ -3814,6 +3834,7 @@ export {
   createStreamingBoundaryAudit,
   captureTarget,
   isAuthoritativeReplayStatus,
+  primaryReplayFailureDiagnostics,
   replayBackendHealth,
   replaySpeedRequestState,
   replaySubscriberReleaseState,

@@ -594,6 +594,9 @@ class ReplaySessionActor:
             "shutdown_timeouts": 0,
             "shutdown_failures": 0,
             "last_shutdown_error": None,
+            "runtime_failures": 0,
+            "last_runtime_error_type": None,
+            "last_runtime_error_message": None,
             "persistence_failures": 0,
             "subscriber_high_water": 0,
             "subscriber_overflows": 0,
@@ -1060,9 +1063,16 @@ class ReplaySessionActor:
             self._fail_pending(RuntimeError("replay actor task was cancelled"))
             raise
         except BaseException as exc:
+            started = self._ready.is_set()
             self._state = SessionState.ERROR
             self._accepting = False
-            self._startup_error = exc if not self._ready.is_set() else None
+            self._startup_error = exc if not started else None
+            if started:
+                self._metrics["runtime_failures"] = (
+                    int(self._metrics["runtime_failures"] or 0) + 1
+                )
+                self._metrics["last_runtime_error_type"] = type(exc).__name__[:200]
+                self._metrics["last_runtime_error_message"] = str(exc)[:500]
             self._last_snapshot = self._snapshot_value(materialize=False)
             self._ready.set()
             self._fail_pending(exc)

@@ -144,6 +144,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - Python `3.13.9` 正式参数复验（1/2/4/8 FULL、20 次迭代）全部 PASS，8 轨 p95 `171.033 ms`，低于冻结 `500 ms`；所有语义、资金费、审计、SQLite 检查通过，命令退出 `0` 且临时根目录 `remaining=0`。
 - 本修复与记录再次产生新 HEAD，因此 `def46cf1` 的上述 PASS 和长耗时组件均只作诊断，不继承到最终 manifest；正式证据必须从头完整重跑。
 
+### 3.10 4 小时 soak 首轮 actor ERROR 处置
+
+- `1e07d801d7bc5f67ca33ec13ef9616ea3cb32ea5` 的真实来源、formal benchmark、全量 release checks、完整构建 rollback 与真实浏览器短 smoke 均通过；正式 4 小时 soak 未使用 `--allow-short`，完成 1,000,000 projection events 后在约 5 分钟、第 327 个源事件进入 `ERROR`，编排器正确终止且未生成 soak PASS 或 release manifest。
+- 失败 artifact 已保留，但当时的 `phaseDiagnostics` 为 `null`。根因是 actor 启动后捕获 `BaseException` 时只切换 `ERROR` 并结束 task，未把异常类型和消息写入 diagnostics；soak 主采样断言也未在失败前抓取对应 session actor，导致 backend tail 被无关的离线 live websocket 重试噪声淹没。
+- actor diagnostics 现累计 `runtime_failures` 并保留最后一次运行时异常的类型与截断消息；取消任务仍沿用独立取消路径，不伪计为业务运行错误。soak 在连接或状态断言失败前抓取对应 actor 与后端健康门禁，写入失败 artifact 的 `phaseDiagnostics`。
+- 本提交只增强 fail-closed 证据，不把 `ERROR` 降级为通过，也不改变执行、HEDGE、强平或默认启用合同。提交后先以 clean HEAD 短时运行越过第 327 个源事件定位根因；完成根因修复后，所有正式证据仍须从最终 clean HEAD 重新生成。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

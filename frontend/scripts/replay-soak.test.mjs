@@ -15,6 +15,7 @@ import {
   isRecordedAdapterEviction,
   isAuthoritativeReplayStatus,
   inspectReplaySoakFrontendBuild,
+  primaryReplayFailureDiagnostics,
   readJson,
   replayBackendHealth,
   replaySpeedAction,
@@ -919,6 +920,57 @@ test("replay soak treats an evicted actor as zero retained subscribers", () => {
     subscriberCount: 2,
   });
   assert.equal(replaySubscriberReleaseState({}, "missing", 1).ready, false);
+});
+
+test("replay soak failure evidence retains the failed primary actor", () => {
+  const actor = {
+    state: "ERROR",
+    runtime_failures: 1,
+    last_runtime_error_type: "ValueError",
+    last_runtime_error_message: "injected failure",
+  };
+  const backend = {
+    replay: {
+      sessions: { primary: actor },
+      persistence: { degraded: false, transaction_failures: 0 },
+      reaper_failures: 0,
+      recovery_failures: 0,
+      shutdown_failures: 0,
+    },
+  };
+  const status = { connection: "connected", state: "ERROR", sourceSequence: 327 };
+
+  assert.deepEqual(
+    primaryReplayFailureDiagnostics({
+      backend,
+      phase: "primary-replay-sample",
+      sessionId: "primary",
+      status,
+    }),
+    {
+      phase: "primary-replay-sample",
+      status,
+      actor,
+      backendHealth: {
+        checks: {
+          diagnostics_contract: true,
+          persistence_not_degraded: true,
+          persistence_transactions_clean: true,
+          reaper_clean: true,
+          recovery_clean: true,
+          shutdown_clean: true,
+        },
+        passed: true,
+        counters: {
+          persistenceDegraded: false,
+          persistenceTransactionFailures: 0,
+          reaperFailures: 0,
+          recoveryFailures: 0,
+          shutdownFailures: 0,
+        },
+      },
+    },
+  );
 });
 
 test("replay soak fails closed on backend lifecycle and persistence failures", () => {

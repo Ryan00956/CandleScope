@@ -554,6 +554,34 @@ async def test_command_history_capacity_is_checked_before_domain_mutation() -> N
 
 
 @_async_test
+async def test_runtime_failure_after_start_is_retained_in_diagnostics() -> None:
+    class ExplodingReducer(CountingReducer):
+        def apply_source_event(self, event: FixtureEvent):
+            del event
+            raise ValueError("injected post-start reducer failure")
+
+    actor = _actor(reducer=ExplodingReducer())
+    await actor.start()
+    await actor.submit(_command("acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    await actor.submit(_command("play", CommandType.PLAY, revision=1))
+
+    async def wait_for_failure() -> None:
+        while not actor.diagnostics()["task_done"]:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait_for_failure(), timeout=0.5)
+    diagnostics = actor.diagnostics()
+    assert diagnostics["state"] == SessionState.ERROR.value
+    assert diagnostics["runtime_failures"] == 1
+    assert diagnostics["last_runtime_error_type"] == "ValueError"
+    assert (
+        diagnostics["last_runtime_error_message"]
+        == "injected post-start reducer failure"
+    )
+    await actor.shutdown()
+
+
+@_async_test
 async def test_step_preflight_forks_current_source_without_reopening_factory() -> None:
     events = event_fixture()
     calls = 0

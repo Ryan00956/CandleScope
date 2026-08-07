@@ -364,6 +364,18 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
   assert.equal(parsed.portfolio.margin_mode, "ISOLATED");
   assert.equal(parsed.portfolio.ledger.reconciliation_delta, "0");
   assert.equal(parsed.portfolio.liquidations.length, 1);
+  const failedClosed = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: { ...contractPortfolio, status: "FAILED_CLOSED" },
+  });
+  if (failedClosed.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("fail-closed contract portfolio did not survive parsing");
+  }
+  assert.equal(failedClosed.portfolio.status, "FAILED_CLOSED");
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: { ...contractPortfolio, status: "UNKNOWN" },
+  }), /unsupported/);
   const hedgeProof = `sha256:${"9".repeat(64)}`;
   const parsedHedge = parseReplayMarketTracksResponse({
     ...payload,

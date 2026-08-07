@@ -160,6 +160,16 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - Phase 17 Review/Fork 与 Phase 4 HEDGE 会计扩大定向集为 `16 passed`；新增回归证明 compact row 可精确还原完整 ledger、选中 Review frame 可 Fork 且 child auditor PASS、零现金审计 receipt 不制造关键事件、双腿结构变化仍制造 `POSITION_STATE`，以及 ledger-prefix tamper 明确拒绝。该修复提交后仍须先越过原 8 分钟窗口，再从最终 clean HEAD 重跑全部正式证据。
 - Phase 17/18、HEDGE Phase 0–9 与 22 项矩阵扩大集为 `109 passed`。首轮完整 replay 回归暴露内部 descriptor domain 与完整 projection domain 缺少同构字段，修正后相关集合 `17 passed`；内部 `critical_ledger_count` 在公开投影边界移除，未扩张前端协议。随后一次全量中的单样本 8 轨 normal wave 约 `512.964 ms`，超过冻结 `500 ms`，但相同正式脚本独立全项 PASS、同一单测连续 `12/12` PASS，未放宽阈值或 acceptance；最终原样完整 replay 回归为 `927 passed, 2323 deselected`。
 
+### 3.12 适配器恢复后的资金费审计时间域误序与修复
+
+- `a4c67bc1888b44271eb8309960562b3fac46e734` 的 clean-HEAD 8 分钟诊断证明 3.11 的 Review 修复有效：第 4 个动作周期、source sequence `319` 时仅保存 98 个关键事件，anchor 为 `813,280 B`、总 artifact 为 `1,213,149 / 134,217,728 B`，actor 为健康 `PAUSED`、`task_done=false`、`runtime_failures=0`，SQLite transaction failures 为 0。该轮仍在第 4 次适配器驱逐后超时，但已不是存储预算或 actor 崩溃。
+- 恢复前同一 Run 的 account auditor 为 `PASS`；驱逐后重建触发完整审计，空头资金费记录的结算前数量被误算为 `-0.003`，持久化权威值为 `-0.002`，服务端据此正确进入 `ACCOUNT_AUDIT_FAILED` / `FAILED_CLOSED`。历史盘口随后已恢复为 `AVAILABLE_EXACT / READY`，所以此前看到的 `HISTORICAL_BOOK_CAPABILITY_UNAVAILABLE` 只是恢复窗口内的前置 fail-closed 响应，不是最终根因。
+- 根因是账户审计把两种不可直接比较的时钟混排：broker fill 的 `event_time_ms` 属于 Run 虚拟/公开时间，而 pinned funding 的 `actual_settlement_time_ms` 属于真实来源时间。`HIDE_ALL` Run 从较大归档中间启动时，后发生的虚拟成交数值可以小于先发生的实际资金费时间；第 5 笔后置成交因此被错误算入结算前仓位。修复后，普通 Run 统一按 append-only contract ledger sequence 重建成交与资金费先后关系，不再用实际时间和虚拟时间比较因果。
+- Review Fork 会为子 Run 重新生成物理 ledger sequence，不能直接继承父 Run 的数字。Fork 现在把每笔成交费、资金费等复制 posting 的父 Run id 与父 ledger sequence 写进子账本的 hash-chained metadata；子审计验证父 posting 的 kind、reference type/id 与序号一致，再用该不可变父序号重建因果。父 posting 缺失或映射漂移会明确审计失败，不使用时间排序或近似兜底。
+- 服务端合法的组合终态本来就包含 `portfolio.status=FAILED_CLOSED`，前端旧 parser 却只允许 `ACTIVE / LIQUIDATING / BANKRUPT`，使真实 fail-closed 被二次显示为 `replay.v3 response violates the contract`。严格类型和 parser 现显式接收 `FAILED_CLOSED`，仍拒绝任何未知状态；失败现场保存的 13 个 `/tracks` 响应已全部离线通过当前 parser，最终业务状态保持 `FAILED_CLOSED`，不会被吞成协议错误。
+- 新增 HIDE_ALL 回归实际构造“后置 fill 的虚拟时间小于 funding 实际时间、但 ledger sequence 更大”的条件，并覆盖独立审计、服务重启和 Review Fork 子审计。定向结果为后端 `8 passed`、扩大恢复/Review/benchmark 集 `39 passed`、前端 replay `336 passed`、Ruff、TypeScript typecheck 与 `git diff --check` 全部通过。首次完整 replay 回归诚实暴露两个强平 Fork 子审计失败，补齐父因果序后最终完整回归为 `928 passed, 2323 deselected`；未删除审计、未改阈值、未启用降级。
+- 本修复与本节记录产生新的候选 HEAD；`a4c67bc` 的诊断 artifacts 仅用于根因证据，不能进入最终 manifest。新 HEAD 必须先重新通过同参数 8 分钟恢复复测，再从头生成全部正式证据。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

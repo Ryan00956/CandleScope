@@ -6323,7 +6323,47 @@ class TrainingRunStore:
 
         ledger_by_sequence = {int(row["ledger_sequence"]): row for row in ledger_rows}
         ledger_by_posting = {str(row["posting_id"]): row for row in ledger_rows}
-        fill_events: dict[int, tuple[sqlite3.Row, Mapping[str, object]]] = {}
+
+        def causal_ledger_sequence(
+            ledger: sqlite3.Row,
+            metadata: Mapping[str, object],
+        ) -> int:
+            child_sequence = int(ledger["ledger_sequence"])
+            raw_parent_sequence = metadata.get("fork_parent_ledger_sequence")
+            if raw_parent_sequence is None:
+                return child_sequence
+            parent_run_id = metadata.get("fork_parent_run_id")
+            field = f"ledger[{ledger['posting_id']}].fork_parent_ledger_sequence"
+            if (
+                isinstance(raw_parent_sequence, bool)
+                or not isinstance(raw_parent_sequence, int)
+                or raw_parent_sequence < 1
+                or not isinstance(parent_run_id, str)
+                or not parent_run_id
+            ):
+                add_difference(field, "VALID_PARENT_SEQUENCE", raw_parent_sequence)
+                return child_sequence
+            parent = connection.execute(
+                """
+                SELECT kind, reference_type, reference_id
+                FROM replay_training_contract_ledger
+                WHERE run_id = ? AND ledger_sequence = ?
+                """,
+                (parent_run_id, raw_parent_sequence),
+            ).fetchone()
+            if (
+                parent is None
+                or parent["kind"] != ledger["kind"]
+                or parent["reference_type"] != ledger["reference_type"]
+                or parent["reference_id"] != ledger["reference_id"]
+            ):
+                add_difference(field, "MATCHING_IMMUTABLE_PARENT_POSTING", "MISSING")
+            return raw_parent_sequence
+
+        fill_events: dict[
+            int,
+            tuple[sqlite3.Row, Mapping[str, object], int],
+        ] = {}
         configured_fee_by_leg: dict[tuple[str, str], Decimal] = {}
         broker_fee_total = Decimal(0)
         configured_fee_total = Decimal(0)
@@ -6415,7 +6455,11 @@ class TrainingRunStore:
                         expected,
                         actual,
                     )
-            fill_events[int(posting["ledger_sequence"])] = (row, raw)
+            fill_events[int(posting["ledger_sequence"])] = (
+                row,
+                raw,
+                causal_ledger_sequence(posting, metadata or {}),
+            )
 
         funding_rows = tuple(
             connection.execute(
@@ -6485,16 +6529,21 @@ class TrainingRunStore:
             target["realized_pnl"] = cast(Decimal, target["realized_pnl"]) + realized
             return realized
 
-        ordered_fills = sorted(
-            fill_events.values(),
-            key=lambda item: (
-                int(str(item[1].get("event_time_ms", 0))),
-                int(str(item[1].get("source_sequence", 0))),
-                str(item[0]["track_id"]),
-                str(item[0]["fill_id"]),
-            ),
+        # A broker fill is timestamped in the Run's virtual-time domain while
+        # pinned public funding keeps its source's actual event time as well as
+        # the mapped settlement time.  Those clocks are deliberately not
+        # comparable when a Run starts inside a larger frozen archive.  The
+        # append-only contract ledger is the canonical account mutation order,
+        # so both full replay and point-in-time funding reconstruction must use
+        # its sequence rather than sorting the two time domains together.
+        ordered_fills = tuple(
+            (ledger_sequence, fill_row, raw, causal_sequence)
+            for ledger_sequence, (fill_row, raw, causal_sequence) in sorted(
+                fill_events.items(),
+                key=lambda item: (item[1][2], item[0]),
+            )
         )
-        for fill_row, raw in ordered_fills:
+        for _ledger_sequence, fill_row, raw, _causal_sequence in ordered_fills:
             track_id = str(fill_row["track_id"])
             position_side = str(raw["position_side"])
             rule = rules[(track_id, int(fill_row["rule_revision"]))]
@@ -6532,19 +6581,24 @@ class TrainingRunStore:
                 "entry_price": None,
                 "realized_pnl": Decimal(0),
             }
-            funding_boundary = (
-                int(row["actual_settlement_time_ms"]),
-                int(ledger["source_sequence"]),
-            )
-            for fill_row, raw in ordered_fills:
+            try:
+                funding_metadata = json.loads(str(ledger["metadata_json"]))
+            except json.JSONDecodeError:
+                funding_metadata = None
+            if not isinstance(funding_metadata, Mapping):
+                add_difference(f"{prefix}.ledger_metadata", "JSON_OBJECT", "INVALID")
+                funding_metadata = {}
+            funding_boundary = causal_ledger_sequence(ledger, funding_metadata)
+            for (
+                _fill_ledger_sequence,
+                fill_row,
+                raw,
+                fill_causal_sequence,
+            ) in ordered_fills:
                 if (
                     str(fill_row["track_id"]) != track_id
                     or str(raw["position_side"]) != position_side
-                    or (
-                        int(str(raw.get("event_time_ms", 0))),
-                        int(str(raw.get("source_sequence", 0))),
-                    )
-                    >= funding_boundary
+                    or fill_causal_sequence >= funding_boundary
                 ):
                     continue
                 fill_rule = rules[(track_id, int(fill_row["rule_revision"]))]
@@ -14579,6 +14633,8 @@ class TrainingRunStore:
                     ),
                     component_state=component_state,
                     now_ms=now_ms,
+                    fork_parent_run_id=review_parent_run_id,
+                    fork_parent_track_id=review_parent_track_id,
                 )
                 if (
                     history is not None
@@ -19024,6 +19080,8 @@ class TrainingRunStore:
             source_sequence=source_sequence,
             component_state=component_state,
             now_ms=now_ms,
+            fork_parent_run_id=parent_run_id,
+            fork_parent_track_id="track-1",
         )
 
         extra_cash = Decimal(0)
@@ -19041,6 +19099,7 @@ class TrainingRunStore:
             if not isinstance(metadata, dict):
                 raise TypeError("parent contract ledger metadata is invalid")
             metadata["fork_parent_run_id"] = parent_run_id
+            metadata["fork_parent_ledger_sequence"] = int(entry["ledger_sequence"])
             sequence = cls._append_contract_ledger(
                 connection,
                 run_id=child_run_id,
@@ -20320,7 +20379,11 @@ class TrainingRunStore:
         source_sequence: int,
         component_state: Mapping[str, object],
         now_ms: int,
+        fork_parent_run_id: str | None = None,
+        fork_parent_track_id: str | None = None,
     ) -> None:
+        if (fork_parent_run_id is None) != (fork_parent_track_id is None):
+            raise TypeError("fork parent ledger identity must be complete")
         account = connection.execute(
             """
             SELECT account.*, run.settlement_asset, run.position_mode
@@ -20475,6 +20538,32 @@ class TrainingRunStore:
                         now_ms,
                     ),
                 )
+                fork_metadata: dict[str, object] = {}
+                if fork_parent_run_id is not None and fork_parent_track_id is not None:
+                    parent_posting = connection.execute(
+                        """
+                        SELECT ledger_sequence
+                        FROM replay_training_contract_ledger
+                        WHERE run_id = ? AND posting_id = ?
+                        """,
+                        (
+                            fork_parent_run_id,
+                            f"fee:{fork_parent_track_id}:{fill_id}",
+                        ),
+                    ).fetchone()
+                    if parent_posting is None:
+                        raise TrainingRunError(
+                            "REVIEW_FORK_ACCOUNT_LEDGER_MISSING",
+                            "forked fill has no immutable parent fee posting",
+                            status_code=409,
+                            details={"fallback_applied": False},
+                        )
+                    fork_metadata = {
+                        "fork_parent_run_id": fork_parent_run_id,
+                        "fork_parent_ledger_sequence": int(
+                            parent_posting["ledger_sequence"]
+                        ),
+                    }
                 cls._append_contract_ledger(
                     connection,
                     run_id=run_id,
@@ -20500,6 +20589,7 @@ class TrainingRunStore:
                         "position_side": position_side,
                         "broker_fee": str(raw["fee"]),
                         "liquidity": str(raw["liquidity"]),
+                        **fork_metadata,
                     },
                     now_ms=now_ms,
                 )

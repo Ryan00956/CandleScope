@@ -11,7 +11,7 @@ import pytest
 from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.training.account import fee_for_notional
 from app.replay.training.errors import TrainingRunError
-from app.replay.training.models import ReplayV2CommandType
+from app.replay.training.models import ReplayV2CommandType, TimeDisclosurePolicy
 from app.replay.training.review import (
     REVIEW_LEDGER_PREFIX_REF_SCHEMA_VERSION,
     ReviewRecorder,
@@ -108,11 +108,18 @@ async def _run_with_opposite_legs(
     tmp_path: Path,
     *,
     prefix: str,
+    hidden_time: bool = False,
 ) -> tuple[str, str, int]:
+    base_request = _sandbox_request(await _request(service))
+    if hidden_time:
+        base_request = replace(
+            base_request,
+            time_disclosure_policy=TimeDisclosurePolicy.HIDE_ALL,
+        )
     request = await prepare_hedge_request(
         service,
         replace(
-            _sandbox_request(await _request(service)),
+            base_request,
             market_type="futures",
         ),
         root=tmp_path,
@@ -312,6 +319,97 @@ async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
         }
         assert Decimal(accounting["LONG"]["accumulated_funding"]) == Decimal("-0.01")
         assert Decimal(accounting["SHORT"]["accumulated_funding"]) == Decimal("0.01")
+    finally:
+        await restored.shutdown(step_timeout=1.0)
+
+
+async def test_account_auditor_uses_ledger_order_across_public_and_virtual_time(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase4-accounting-time-domains.db"
+    service = await _risk_service(database)
+    run_id = ""
+    try:
+        run_id, session_id, _funding_time = await _run_with_opposite_legs(
+            service,
+            tmp_path,
+            prefix="phase4-accounting-time-domains",
+            hidden_time=True,
+        )
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase4-time-domains-step-funding",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 2},
+        )
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase4-time-domains-later-short",
+            command_type=ReplayV2CommandType.PLACE_ORDER,
+            payload={
+                "client_order_id": "phase4-time-domains-later-short",
+                "side": "SELL",
+                "position_side": "SHORT",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+                "leverage": "2",
+            },
+        )
+        with sqlite3.connect(database) as connection:
+            funding = connection.execute(
+                """
+                SELECT actual_settlement_time_ms, ledger_sequence
+                FROM replay_training_hedge_funding_settlement
+                WHERE run_id = ? AND position_side = 'SHORT'
+                """,
+                (run_id,),
+            ).fetchone()
+            later_fill = connection.execute(
+                """
+                SELECT fill.fill_json, ledger.ledger_sequence
+                FROM replay_training_contract_fill AS fill
+                JOIN replay_training_contract_ledger AS ledger
+                  ON ledger.run_id = fill.run_id
+                 AND ledger.posting_id = 'fee:' || fill.track_id || ':' || fill.fill_id
+                WHERE fill.run_id = ?
+                  AND json_extract(fill.fill_json, '$.position_side') = 'SHORT'
+                ORDER BY ledger.ledger_sequence DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        assert funding is not None
+        assert later_fill is not None
+        fill_payload = json.loads(str(later_fill[0]))
+        assert int(fill_payload["event_time_ms"]) < int(funding[0])
+        assert int(later_fill[1]) > int(funding[1])
+        training = service.training
+        assert training is not None
+        audit = await training.audit_account(run_id)
+        assert audit["status"] == "PASS", audit["differences"]
+        review = await training.start_review(run_id, event_id=None)
+        forked = await training.fork_run(
+            run_id,
+            event_id=str(review["selected_event_id"]),
+        )
+        child_audit = await training.audit_account(str(forked["run"]["run_id"]))
+        assert child_audit["status"] == "PASS", child_audit["differences"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+    restored = await _risk_service(database)
+    try:
+        training = restored.training
+        assert training is not None
+        audit = await training.audit_account(run_id)
+        assert audit["status"] == "PASS", audit["differences"]
     finally:
         await restored.shutdown(step_timeout=1.0)
 

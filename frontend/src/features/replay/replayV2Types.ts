@@ -556,7 +556,7 @@ export interface ReplayTrainingContractPortfolio {
   readonly position_mode: ReplayV2PositionMode;
   readonly margin_mode: EnumValue<typeof REPLAY_V2_ENUMS.margin_mode>;
   readonly funding_mode: EnumValue<typeof REPLAY_V2_ENUMS.funding_mode>;
-  readonly status: "ACTIVE" | "LIQUIDATING" | "BANKRUPT";
+  readonly status: "ACTIVE" | "LIQUIDATING" | "BANKRUPT" | "FAILED_CLOSED";
   readonly initial_equity: string;
   readonly equity: string;
   readonly cash_balance: string;
@@ -2533,7 +2533,9 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
       || (portfolio.execution_fidelity !== "NO_BOOK_TOUCH_OR_TAPE_APPROX"
         && portfolio.execution_fidelity !== "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE")
       || typeof portfolio.settlement_account_shared !== "boolean"
-      || !["ACTIVE", "LIQUIDATING", "BANKRUPT"].includes(String(portfolio.status))
+      || !["ACTIVE", "LIQUIDATING", "BANKRUPT", "FAILED_CLOSED"].includes(
+        String(portfolio.status),
+      )
     ) {
       throw new TypeError("contract portfolio identity is unsupported");
     }
@@ -2709,7 +2711,7 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         : "ONE_WAY",
       margin_mode: enumValue(portfolio.margin_mode, REPLAY_V2_ENUMS.margin_mode, "portfolio.margin_mode"),
       funding_mode: enumValue(portfolio.funding_mode, REPLAY_V2_ENUMS.funding_mode, "portfolio.funding_mode"),
-      status: portfolio.status as "ACTIVE" | "LIQUIDATING" | "BANKRUPT",
+      status: portfolio.status as ReplayTrainingContractPortfolio["status"],
       initial_equity: positiveDecimal(portfolio.initial_equity, "portfolio.initial_equity"),
       cash_balance: canonicalDecimal(portfolio.cash_balance, "portfolio.cash_balance"),
       equity: canonicalDecimal(portfolio.equity, "portfolio.equity"),

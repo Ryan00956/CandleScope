@@ -17,9 +17,12 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
 
   const setOpenViewIds = useCallback((ids: readonly string[]) => {
     setState((current) => {
+      const openViewIds = normalizeOpenViewIds(ids);
       const next = {
         ...current,
-        openViewIds: normalizeOpenViewIds(ids),
+        openViewIds,
+        // Empty selection has nothing to restore; clear hide-only flag.
+        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       };
       saveMarketRailLayout(next, storage);
       return next;
@@ -28,9 +31,25 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
 
   const toggleView = useCallback((viewId: string) => {
     setState((current) => {
+      // Hidden panel + existing selection: activity click restores the full panel.
+      if (current.panelCollapsed) {
+        const openViewIds = current.openViewIds.includes(viewId)
+          ? [...current.openViewIds]
+          : normalizeOpenViewIds([...current.openViewIds, viewId]);
+        const next = {
+          ...current,
+          openViewIds,
+          panelCollapsed: false,
+        };
+        saveMarketRailLayout(next, storage);
+        return next;
+      }
+
+      const openViewIds = toggleOpenViewId(current.openViewIds, viewId);
       const next = {
         ...current,
-        openViewIds: toggleOpenViewId(current.openViewIds, viewId),
+        openViewIds,
+        panelCollapsed: false,
       };
       saveMarketRailLayout(next, storage);
       return next;
@@ -39,10 +58,13 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
 
   const openView = useCallback((viewId: string) => {
     setState((current) => {
-      if (current.openViewIds.includes(viewId)) return current;
+      if (current.openViewIds.includes(viewId) && !current.panelCollapsed) return current;
       const next = {
         ...current,
-        openViewIds: normalizeOpenViewIds([...current.openViewIds, viewId]),
+        openViewIds: current.openViewIds.includes(viewId)
+          ? [...current.openViewIds]
+          : normalizeOpenViewIds([...current.openViewIds, viewId]),
+        panelCollapsed: false,
       };
       saveMarketRailLayout(next, storage);
       return next;
@@ -52,10 +74,37 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
   const closeView = useCallback((viewId: string) => {
     setState((current) => {
       if (!current.openViewIds.includes(viewId)) return current;
+      const openViewIds = current.openViewIds.filter((id) => id !== viewId);
       const next = {
         ...current,
-        openViewIds: current.openViewIds.filter((id) => id !== viewId),
+        openViewIds,
+        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       };
+      saveMarketRailLayout(next, storage);
+      return next;
+    });
+  }, [storage]);
+
+  const setPanelCollapsed = useCallback((collapsed: boolean) => {
+    setState((current) => {
+      // Hiding with no open content is a no-op (nothing to restore later).
+      const panelCollapsed = collapsed && current.openViewIds.length > 0;
+      if (panelCollapsed === current.panelCollapsed) return current;
+      const next = { ...current, panelCollapsed };
+      saveMarketRailLayout(next, storage);
+      return next;
+    });
+  }, [storage]);
+
+  const togglePanelCollapsed = useCallback(() => {
+    setState((current) => {
+      if (current.openViewIds.length === 0) {
+        if (!current.panelCollapsed) return current;
+        const next = { ...current, panelCollapsed: false };
+        saveMarketRailLayout(next, storage);
+        return next;
+      }
+      const next = { ...current, panelCollapsed: !current.panelCollapsed };
       saveMarketRailLayout(next, storage);
       return next;
     });
@@ -83,12 +132,24 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
     toggleView,
     openView,
     closeView,
+    setPanelCollapsed,
+    togglePanelCollapsed,
     setViewHeight,
     isOpen,
-  }), [closeView, isOpen, openView, setOpenViewIds, setViewHeight, toggleView]);
+  }), [
+    closeView,
+    isOpen,
+    openView,
+    setOpenViewIds,
+    setPanelCollapsed,
+    setViewHeight,
+    togglePanelCollapsed,
+    toggleView,
+  ]);
 
   return {
     openViewIds: state.openViewIds,
+    panelCollapsed: state.panelCollapsed,
     viewHeights: state.viewHeights,
     actions,
   };

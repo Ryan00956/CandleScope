@@ -132,13 +132,19 @@ export default function App() {
   const marketRailLayout = useMarketRailLayout();
   const marketRail = useMemo(() => ({
     openViewIds: marketRailLayout.openViewIds,
+    panelCollapsed: marketRailLayout.panelCollapsed,
     onToggleView: marketRailLayout.actions.toggleView,
+    onCloseView: marketRailLayout.actions.closeView,
+    onTogglePanelCollapsed: marketRailLayout.actions.togglePanelCollapsed,
     viewHeights: marketRailLayout.viewHeights,
     onViewHeightChange: marketRailLayout.actions.setViewHeight,
   }), [
+    marketRailLayout.actions.closeView,
     marketRailLayout.actions.setViewHeight,
+    marketRailLayout.actions.togglePanelCollapsed,
     marketRailLayout.actions.toggleView,
     marketRailLayout.openViewIds,
+    marketRailLayout.panelCollapsed,
     marketRailLayout.viewHeights,
   ]);
   const orderBookOpen = marketRailLayout.openViewIds.includes(LIVE_RAIL_VIEW_IDS.orderBook);

@@ -32,7 +32,11 @@ export interface RightMarketRailProps {
   orderBook: OrderBookRuntime;
   tradeFlow: TradeFlowRuntime;
   openViewIds: readonly string[];
+  panelCollapsed?: boolean;
   onToggleView: (viewId: string) => void;
+  /** Close one dock's content (distinct from hiding the whole panel). */
+  onCloseView?: (viewId: string) => void;
+  onTogglePanelCollapsed?: () => void;
   viewHeights: Readonly<Record<string, number>>;
   onViewHeightChange: (viewId: string, height: number) => void;
   /** Optional plugin/extra view renderers keyed by view id. */
@@ -85,7 +89,10 @@ function RightMarketRail({
   orderBook,
   tradeFlow,
   openViewIds,
+  panelCollapsed = false,
   onToggleView,
+  onCloseView,
+  onTogglePanelCollapsed,
   viewHeights,
   onViewHeightChange,
   renderExtraView,
@@ -101,8 +108,13 @@ function RightMarketRail({
   );
 
   const closeView = useCallback((viewId: string) => {
-    if (openViewIds.includes(viewId)) onToggleView(viewId);
-  }, [onToggleView, openViewIds]);
+    if (onCloseView) {
+      onCloseView(viewId);
+      return;
+    }
+    // Fallback for callers that only wire toggle: never expand-from-collapse via X.
+    if (openViewIds.includes(viewId) && !panelCollapsed) onToggleView(viewId);
+  }, [onCloseView, onToggleView, openViewIds, panelCollapsed]);
 
   const renderView = useCallback((viewId: string, height: number) => {
     if (viewId === LIVE_RAIL_VIEW_IDS.watchlist) {
@@ -150,7 +162,11 @@ function RightMarketRail({
       source="live"
       views={views}
       openViewIds={openViewIds}
+      panelCollapsed={panelCollapsed}
       onToggleView={onToggleView}
+      {...(onTogglePanelCollapsed === undefined
+        ? {}
+        : { onTogglePanelCollapsed })}
       renderView={renderView}
       layout={{
         width: watchlist.layout?.width ?? DEFAULT_WATCHLIST_WIDTH,

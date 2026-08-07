@@ -265,6 +265,19 @@ body {
   line-height: 14px;
   text-align: center;
 }
+/* Hide/show whole panel without clearing open views (pinned to bar bottom). */
+.market-activity-collapse {
+  margin-top: auto;
+}
+.market-activity-collapse:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.market-activity-collapse:disabled:hover,
+.market-activity-collapse:disabled:focus-visible {
+  color: var(--text-muted);
+  background: transparent;
+}
 
 .watchlist-pane {
   display: flex;

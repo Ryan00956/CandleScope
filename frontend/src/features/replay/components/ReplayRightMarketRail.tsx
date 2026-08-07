@@ -129,8 +129,8 @@ function ReplayRightMarketRail({
   }, [actions]);
 
   const closeView = useCallback((viewId: string) => {
-    if (preferences.openViewIds.includes(viewId as ReplayRailViewId)) onToggleView(viewId);
-  }, [onToggleView, preferences.openViewIds]);
+    actions.closeView(viewId as ReplayRailViewId);
+  }, [actions]);
 
   const renderView = useCallback((viewId: string) => {
     if (viewId === REPLAY_RAIL_VIEW_IDS.watchlist) {
@@ -225,7 +225,9 @@ function ReplayRightMarketRail({
       ariaLabel="回放自选与市场侧栏"
       views={views}
       openViewIds={preferences.openViewIds}
+      panelCollapsed={preferences.panelCollapsed}
       onToggleView={onToggleView}
+      onTogglePanelCollapsed={actions.togglePanelCollapsed}
       renderView={renderView}
       layout={{
         width: effectiveRailWidth,

@@ -142,6 +142,34 @@ test("right rail can collapse content to activity-bar-only mode", () => {
   assert.doesNotMatch(html, /class="wl-resize-handle/);
 });
 
+test("right rail can hide panel while keeping open views selected for full restore", () => {
+  const html = renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="live"
+      views={sampleViews}
+      openViewIds={["watchlist", "order-book"]}
+      panelCollapsed
+      onToggleView={() => undefined}
+      onTogglePanelCollapsed={() => undefined}
+      renderView={(viewId) => <div data-kept={viewId}>{viewId}</div>}
+      layout={{ width: 360 }}
+    />,
+  );
+  assert.match(html, /panel-collapsed/);
+  assert.match(html, /data-panel-open="false"/);
+  assert.match(html, /data-panel-collapsed="true"/);
+  // Content stays mounted (display:none) so expand restores full UI state.
+  assert.match(html, /data-market-shell-owner="right-rail-panel"/);
+  assert.match(html, /data-kept="watchlist"/);
+  assert.match(html, /data-kept="order-book"/);
+  assert.match(html, /display:\s*none/);
+  assert.doesNotMatch(html, /class="wl-resize-handle/);
+  // Active icons remain lit while panel is only hidden.
+  assert.match(html, /aria-pressed="true"[^>]*data-rail-view="watchlist"/);
+  assert.match(html, /data-rail-action="toggle-panel"/);
+  assert.match(html, /显示侧栏/);
+});
+
 test("right rail keeps undersized stacked views scrollable instead of shrinking them into overlap", () => {
   const styles = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
   assert.match(styles, /\.market-rail-panel \{[\s\S]*?overflow-y: auto;/);

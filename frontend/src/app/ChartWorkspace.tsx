@@ -35,7 +35,10 @@ export interface ChartWorkspaceChartModel {
 
 export interface ChartWorkspaceRailLayout {
   openViewIds: readonly string[];
+  panelCollapsed?: boolean;
   onToggleView: (viewId: string) => void;
+  onCloseView?: (viewId: string) => void;
+  onTogglePanelCollapsed?: () => void;
   viewHeights: Readonly<Record<string, number>>;
   onViewHeightChange: (viewId: string, height: number) => void;
 }
@@ -162,7 +165,14 @@ function ChartWorkspace({
             orderBook={orderBook}
             tradeFlow={tradeFlow}
             openViewIds={marketRail.openViewIds}
+            panelCollapsed={marketRail.panelCollapsed ?? false}
             onToggleView={marketRail.onToggleView}
+            {...(marketRail.onCloseView === undefined
+              ? {}
+              : { onCloseView: marketRail.onCloseView })}
+            {...(marketRail.onTogglePanelCollapsed === undefined
+              ? {}
+              : { onTogglePanelCollapsed: marketRail.onTogglePanelCollapsed })}
             viewHeights={marketRail.viewHeights}
             onViewHeightChange={marketRail.onViewHeightChange}
           />

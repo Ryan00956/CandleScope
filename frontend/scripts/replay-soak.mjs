@@ -2761,6 +2761,33 @@ function writeJson(outputPath, payload) {
   fs.writeFileSync(outputPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+export function browserSoakFailureEvidence({
+  releaseEvidence,
+  error,
+  phaseDiagnostics,
+  partialResult,
+  frontendRuntime,
+  backendTail,
+  viteTail,
+  chromeTail,
+}) {
+  return {
+    schema_version: "replay-v2-browser-soak-failure.v1",
+    recorded_at: releaseEvidence.recorded_at,
+    release_evidence: releaseEvidence.evidence,
+    passed: false,
+    error: error?.stack || error?.message || String(error),
+    phaseDiagnostics,
+    // Acceptance runs only after the complete soak result exists. Preserve it
+    // on rejection so failed heap/runtime gates retain their full sample curve.
+    partialResult,
+    frontendRuntime,
+    backendTail,
+    viteTail,
+    chromeTail,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const useBoundRealProfile = Boolean(args.realKlinesSource);
@@ -3805,13 +3832,11 @@ async function main() {
       reportHash: result.replay.reportHash,
     }, null, 2));
   } catch (error) {
-    const failure = {
-      schema_version: "replay-v2-browser-soak-failure.v1",
-      recorded_at: releaseEvidence.recorded_at,
-      release_evidence: releaseEvidence.evidence,
-      passed: false,
-      error: error.stack || error.message || String(error),
+    const failure = browserSoakFailureEvidence({
+      releaseEvidence,
+      error,
       phaseDiagnostics,
+      partialResult: result,
       frontendRuntime: {
         mode: frontendPlan.runtime,
         explicitEnvironment: frontendPlan.environment,
@@ -3821,7 +3846,7 @@ async function main() {
       backendTail: backendTail(),
       viteTail: viteTail(),
       chromeTail: chromeTail(),
-    };
+    });
     writeJson(`${args.out}.failed.json`, failure);
     throw error;
   } finally {

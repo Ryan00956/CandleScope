@@ -192,6 +192,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 修复引入 MarketTrack 请求门和统一执行器：后台 poll 只在无在途请求时启动；命令后的 authoritative refresh 可抢占并取消旧 poll；旧 transport 即使在取消后仍返回，也既不能发布旧 `PLAYING` 投影，也不能清除新命令请求的所有权；命令请求在途期间所有后台 poll 都直接跳过。权威 `PAUSED` 响应发布后，现有 React 状态自然停止轮询。`250 ms` 周期、控制确认超时、soak 时长、100 次 lifecycle、1,000,000 events 和全部 HEDGE acceptance 均未放宽，也没有灰度或降级分支。
 - 新增可控 Promise 竞态回归，覆盖 poll 单飞、authoritative 抢占、取消后旧响应晚返回、旧请求 finish 不清除新请求、命令响应唯一发布和释放后恢复轮询。定向 workspace `23 passed`，完整 frontend replay `337 passed`，soak harness `31 passed`；双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 全部通过。提交后先以高密度 40-cycle clean-HEAD 预检越过原增长边界，再从真实来源、全量 checks、benchmark、smoke、rollback、真实 4 小时 soak 到 manifest 全部重跑。
 
+### 3.16 正式 4 小时堆门禁失败与证据补全
+
+- `99afdda88ad4969416670b1265e5e57d898021e0` 先后通过真实来源、全量 release checks（后端 `3251 passed`、前端 Node `2953 passed`）、formal benchmark、真实浏览器短 smoke 和完整构建 rollback。formal benchmark 的 8 轨 normal p95 为 `399.743 ms`，8 轨 liquidation p95/max 为 `1298.559 ms`，13 项检查全部为真；smoke 的 30 项及 rollback 的 17 项 acceptance 均为严格布尔真。
+- 正式 soak 未使用 `--allow-short`，运行 `14,599 s`，完成 1,000,000 projection events、100/100 训练动作、100/100 archive lifecycle、100/100 订单与成交、100/100 adapter recovery 和 reconnect。两小时、三小时以及第 100 轮均越过此前暂停响应饥饿边界；actor、持久化、恢复、shutdown、blind boundary、live 隔离、DOM、target 与 subscriber 门禁全部通过。
+- 最终 30 项门禁只有 `primary_retained_heap_bounded` 和 `primary_late_heap_bounded` 为假；冻结上限仍为 `64 MiB / 32 MiB`，未放宽。该正式轮因此是 FAIL，未生成 soak PASS 或 release manifest。
+- 旧失败结构只保存 acceptance map，却丢失验收前已经组装好的 `result`，导致失败 artifact 没有初始、半程与终态堆样本，无法判断固定预热成本和持续增长斜率。失败证据现额外保存 `partialResult`；它不改变采样、GC、阈值或 acceptance，只保证最终门禁拒绝时仍留下完整样本曲线。新增单测证明 acceptance failure 会保留堆摘要和 samples；soak harness `32 passed`、双 tsconfig typecheck 与 `git diff --check` 通过。
+- 本证据增强提交后将以 clean HEAD 运行压缩复现，先读取真实初始/半程/终态曲线，再修复页面实际保留根因。完成根因修复后，真实来源、checks、benchmark、smoke、rollback 和正式 4 小时 soak 仍必须在最终新 HEAD 全部从头重跑；本节列出的 `99afdda8` PASS artifacts 不能继承。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

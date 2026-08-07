@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   auditBoundary,
   assertReplayNetwork,
+  browserSoakFailureEvidence,
   captureTarget,
   CdpConnection,
   createV2ArchiveRun,
@@ -1003,6 +1004,40 @@ test("replay soak failure evidence retains the failed primary actor", () => {
       },
     },
   );
+});
+
+test("replay soak acceptance failure evidence retains the completed result", () => {
+  const partialResult = {
+    schema_version: "replay-v2-browser-soak.v1",
+    passed: false,
+    replay: {
+      primaryHeapGrowthBytes: 70 * 1024 * 1024,
+      lateHeapGrowthBytes: 40 * 1024 * 1024,
+    },
+    samples: [
+      { elapsedMs: 0, replay: { heap: { usedSize: 10 } } },
+      { elapsedMs: 1, replay: { heap: { usedSize: 20 } } },
+    ],
+  };
+  const evidence = browserSoakFailureEvidence({
+    releaseEvidence: {
+      recorded_at: "2026-08-08T00:00:00.000Z",
+      evidence: { commit: "abc" },
+    },
+    error: new Error("browser soak acceptance failed"),
+    phaseDiagnostics: null,
+    partialResult,
+    frontendRuntime: { mode: "production" },
+    backendTail: { lines: [] },
+    viteTail: { lines: [] },
+    chromeTail: { lines: [] },
+  });
+
+  assert.equal(evidence.passed, false);
+  assert.match(evidence.error, /browser soak acceptance failed/);
+  assert.equal(evidence.phaseDiagnostics, null);
+  assert.equal(evidence.partialResult, partialResult);
+  assert.equal(evidence.partialResult.samples.length, 2);
 });
 
 test("replay soak fails closed on backend lifecycle and persistence failures", () => {

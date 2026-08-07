@@ -203,6 +203,14 @@ class IngestionConfig:
     ccxt_stream_enabled: bool = field(
         default_factory=lambda: _env_bool("INGESTION_CCXT_STREAM_ENABLED", False),
     )
+    # Generic CCXT Pro adapters consume CCXT's unified watch_* results.  This
+    # is the default path for exchanges without a stricter raw profile.
+    ccxt_unified_stream_enabled: bool = field(
+        default_factory=lambda: _env_bool(
+            "INGESTION_CCXT_UNIFIED_STREAM_ENABLED",
+            True,
+        ),
+    )
     # Raw hooks run synchronously in CCXT's websocket reader.  Overflow is a
     # hard health failure rather than a silent data drop.
     ccxt_raw_queue_size: int = field(

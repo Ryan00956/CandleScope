@@ -391,8 +391,11 @@ export async function fetchSupportedExchanges(): Promise<ExchangeListPayload> {
   });
 }
 
-export async function refreshExchangeInfo(exchange = ""): Promise<unknown> {
-  return request(buildUrl("/symbols/exchange-info/refresh", { exchange }), { method: "POST" });
+export async function refreshExchangeInfo(exchange = "", marketType = ""): Promise<unknown> {
+  return request(buildUrl("/symbols/exchange-info/refresh", {
+    exchange,
+    market_type: marketType,
+  }), { method: "POST" });
 }
 
 interface ProxySettingsInput {

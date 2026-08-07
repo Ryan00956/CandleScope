@@ -7,6 +7,7 @@ from app.exchanges import (
     get_exchange_registry,
     serialize_exchange_capabilities,
 )
+from app.exchanges.ccxt_ext.catalog import ccxt_catalog_summary
 
 router = APIRouter(prefix="/exchanges", tags=["exchanges"])
 
@@ -22,6 +23,7 @@ async def list_exchanges() -> dict:
     ]
     return {
         "count": len(exchanges),
+        "ccxt": ccxt_catalog_summary(),
         "exchanges": exchanges,
     }
 

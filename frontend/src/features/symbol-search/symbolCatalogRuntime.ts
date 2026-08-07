@@ -64,15 +64,27 @@ export interface SymbolCatalogRuntime {
 
 export function useSymbolCatalogRuntime({
   currentExchange = "binance",
+  requestedMarketType = "spot",
+  requestedExchanges,
   open,
 }: {
   currentExchange?: string;
+  requestedMarketType?: string;
+  requestedExchanges?: ReadonlySet<string>;
   open: boolean;
 }): SymbolCatalogRuntime {
   const [allSymbols, setAllSymbols] = useState<SymbolSearchItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [retryEpoch, setRetryEpoch] = useState(0);
+  const exchangeRequestKey = Array.from(
+    requestedExchanges?.size ? requestedExchanges : [currentExchange],
+  )
+    .map((exchange) => exchange.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+  const marketRequestKey = requestedMarketType.trim().toLowerCase();
 
   useEffect(() => {
     if (!open) return undefined;
@@ -80,18 +92,37 @@ export function useSymbolCatalogRuntime({
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+    const requested = exchangeRequestKey.split(",").filter(Boolean);
 
     const load = async () => {
       if (cancelled) return;
       setLoading(true);
       try {
-        const data = await fetchExchangeInfo();
-        const symbols = symbolList(data);
-        const enriched = enrichSymbols(symbols || []);
+        const responses = await Promise.allSettled(
+          requested.map(async (exchange) => ({
+            exchange,
+            data: await fetchExchangeInfo(marketRequestKey, exchange),
+          })),
+        );
+        const successful = responses.flatMap((result) => (
+          result.status === "fulfilled" ? [result.value] : []
+        ));
+        const enriched = successful.flatMap(({ data }) => enrichSymbols(symbolList(data) || []));
         if (cancelled) return;
         if (enriched.length > 0) {
-          setAllSymbols(enriched);
-          if (!symbolCatalogNeedsRetry(data)) return;
+          const requestedSet = new Set(
+            requested.map((exchange) => `${exchange}:${marketRequestKey}`),
+          );
+          setAllSymbols((previous) => [
+            ...previous.filter(
+              (item) => !requestedSet.has(`${item.exchange}:${item.marketType}`),
+            ),
+            ...enriched,
+          ]);
+          if (
+            successful.length === requested.length
+            && successful.every(({ data }) => !symbolCatalogNeedsRetry(data))
+          ) return;
           console.warn("Exchange symbol catalog is partial or stale; retrying");
         } else {
           console.warn("Exchange symbol catalog returned no usable symbols; retrying");
@@ -113,16 +144,24 @@ export function useSymbolCatalogRuntime({
       cancelled = true;
       if (retryTimer != null) clearTimeout(retryTimer);
     };
-  }, [open, retryEpoch]);
+  }, [exchangeRequestKey, marketRequestKey, open, retryEpoch]);
 
   const refreshSymbols = useCallback(async () => {
+    const selectedExchange = exchangeRequestKey.split(",")[0] || currentExchange;
     setRefreshing(true);
     try {
-      await refreshExchangeInfo(currentExchange);
-      const data = await fetchExchangeInfo();
+      await refreshExchangeInfo(selectedExchange, marketRequestKey);
+      const data = await fetchExchangeInfo(marketRequestKey, selectedExchange);
       const symbols = symbolList(data);
       if (symbols) {
-        setAllSymbols(enrichSymbols(symbols));
+        const enriched = enrichSymbols(symbols);
+        setAllSymbols((previous) => [
+          ...previous.filter((item) => !(
+            item.exchange === selectedExchange
+            && item.marketType === marketRequestKey
+          )),
+          ...enriched,
+        ]);
         if (symbolCatalogNeedsRetry(data)) {
           setRetryEpoch((value) => value + 1);
         }
@@ -132,7 +171,7 @@ export function useSymbolCatalogRuntime({
     } finally {
       setRefreshing(false);
     }
-  }, [currentExchange]);
+  }, [currentExchange, exchangeRequestKey, marketRequestKey]);
 
   return {
     allSymbols,

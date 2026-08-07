@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from collections.abc import Callable
@@ -18,6 +19,20 @@ from .profile import CcxtExchangeProfile
 logger = logging.getLogger("ingestion.ccxt.runtime")
 RawSubscriber = Callable[[CcxtRawMarketEvent], None]
 LifecycleSubscriber = Callable[[CcxtLifecycleEvent], None]
+
+
+async def close_ccxt_exchange(exchange: Any) -> None:
+    """Close CCXT websocket state and its lazily-created REST connector."""
+
+    close = exchange.close
+    try:
+        parameters = inspect.signature(close).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "clean_instance_data" in parameters:
+        await close(clean_instance_data=True)
+        return
+    await close()
 
 
 class CcxtRuntime:
@@ -100,7 +115,7 @@ class CcxtRuntime:
         self._closed = True
         self._raw_subscribers.clear()
         self._lifecycle_subscribers.clear()
-        await self.exchange.close()
+        await close_ccxt_exchange(self.exchange)
 
     def snapshot(self) -> dict[str, Any]:
         return {

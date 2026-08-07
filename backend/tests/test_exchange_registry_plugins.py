@@ -22,8 +22,13 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
 
     assert adapter.id == "binance"
     assert plugin.adapter() is adapter
-    assert [item.id for item in registry.list()] == ["binance", "okx"]
-    assert [item.id for item in registry.list_plugins()] == ["binance", "okx"]
+    adapter_ids = {item.id for item in registry.list()}
+    plugin_ids = {item.id for item in registry.list_plugins()}
+    assert {"binance", "okx", "bybit", "kraken", "bitget", "gate"}.issubset(
+        adapter_ids,
+    )
+    assert plugin_ids == adapter_ids
+    assert len(plugin_ids) == 105
     diagnostics = registry.diagnostics()
     assert diagnostics["count"] >= 2
     statuses = {item["plugin_id"]: item for item in diagnostics["plugins"]}

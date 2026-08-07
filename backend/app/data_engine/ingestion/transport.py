@@ -229,7 +229,15 @@ class TransportLayer:
             if quota_reservation is not None:
                 quota_reservation.record_response(response_unknown=True)
             raise
+        configured_provider_fetch = getattr(
+            plugin,
+            "fetch_history_with_config",
+            None,
+        )
         provider_fetch = getattr(plugin, "fetch_history", None)
+        if callable(configured_provider_fetch):
+            async def provider_fetch(request: TransportRequest) -> list[RawMessage]:
+                return await configured_provider_fetch(request, self._cfg)
         if callable(provider_fetch):
             try:
                 self._metrics.inc("plugin_requests_sent")
@@ -765,7 +773,12 @@ class TransportLayer:
         plugin = self._registry.get_plugin(exchange)
         supports_provider_stream = getattr(plugin, "supports_provider_stream", None)
         if callable(supports_provider_stream) and supports_provider_stream(descriptor):
-            return True
+            provider_enabled = getattr(plugin, "provider_stream_enabled", None)
+            if not callable(provider_enabled) or provider_enabled(
+                self._cfg,
+                descriptor,
+            ):
+                return True
         protocol_support = getattr(plugin.protocol(), "supports_ws", None)
         if callable(protocol_support) and not protocol_support(descriptor):
             return False

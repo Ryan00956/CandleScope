@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.exchanges.ccxt_ext.shadow import (
+    SPOT_SHADOW_SCHEMA_VERSION,
     BinanceCcxtShadowComparator,
     _ccxt_symbol_from_native,
 )
@@ -195,3 +196,45 @@ def test_early_payload_mismatch_survives_retention_window() -> None:
 
 def test_usdt_symbol_conversion_is_explicit() -> None:
     assert _ccxt_symbol_from_native("btcusdt") == "BTC/USDT:USDT"
+
+
+def test_spot_depth_uses_update_ranges_without_futures_previous_link() -> None:
+    comparator = BinanceCcxtShadowComparator(market_type="spot")
+    _observe_pair(comparator, "kline", _kline())
+    _observe_pair(comparator, "aggTrade", _trade(10))
+    first = _depth(105, 100)
+    first.pop("pu")
+    first.pop("T")
+    overlapping = _depth(110, 103)
+    overlapping.pop("pu")
+    overlapping.pop("T")
+    _observe_pair(comparator, "depth", first)
+    _observe_pair(comparator, "depth", overlapping)
+
+    report = comparator.report()
+
+    assert report["schema_version"] == SPOT_SHADOW_SCHEMA_VERSION
+    assert report["overall_verdict"] == "PASS"
+    assert report["channels"]["depth"]["strict_basis"] == "exchange_sequence_range"
+    assert (
+        report["channels"]["depth"]["sources"]["native"]["continuity_violations"] == 0
+    )
+
+
+def test_spot_depth_range_gap_fails_closed() -> None:
+    comparator = BinanceCcxtShadowComparator(market_type="spot")
+    for source in ("native", "ccxt"):
+        first = _depth(105, 100)
+        first.pop("pu")
+        first.pop("T")
+        gap = _depth(112, 108)
+        gap.pop("pu")
+        gap.pop("T")
+        comparator.observe(source, "depth", first, 1_700_000_001_005)
+        comparator.observe(source, "depth", gap, 1_700_000_001_010)
+
+    depth = comparator.report()["channels"]["depth"]
+
+    assert depth["verdict"] == "FAIL"
+    assert depth["sources"]["native"]["continuity_violations"] == 1
+    assert depth["sources"]["native"]["missing_sequence_units"] == 3

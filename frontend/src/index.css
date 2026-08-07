@@ -1925,6 +1925,23 @@ body {
   white-space: nowrap;
 }
 
+.sym-modal-exchange-select {
+  min-width: 170px;
+  max-width: 260px;
+  padding: 5px 30px 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: 600 11px var(--font-sans);
+  cursor: pointer;
+}
+
+.sym-modal-exchange-select:focus {
+  border-color: var(--accent-blue);
+  outline: none;
+}
+
 .sym-modal-chip {
   display: flex;
   align-items: center;

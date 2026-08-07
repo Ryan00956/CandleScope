@@ -22,14 +22,19 @@ from app.data_engine.ingestion.transport import TransportLayer
 
 from .binance_usdm import CandleScopeBinanceUSDM
 from .models import CcxtLifecycleEvent, CcxtRawMarketEvent
+from .runtime import close_ccxt_exchange
 
 SHADOW_SCHEMA_VERSION = "candlescope.ccxt-shadow.binance-usdm/1"
+SPOT_SHADOW_SCHEMA_VERSION = "candlescope.ccxt-shadow.binance-spot/1"
 _SOURCES = ("native", "ccxt")
 _CHANNELS = ("kline", "aggTrade", "depth")
 _REQUIRED_FIELDS = {
     "kline": ("e", "E", "s", "k"),
     "aggTrade": ("e", "E", "s", "a", "p", "q", "f", "l", "T", "m"),
-    "depth": ("e", "E", "s", "U", "u", "pu", "b", "a"),
+}
+_DEPTH_REQUIRED_FIELDS = {
+    "futures": ("e", "E", "s", "U", "u", "pu", "b", "a"),
+    "spot": ("e", "E", "s", "U", "u", "b", "a"),
 }
 _KLINE_FIELDS = (
     "t",
@@ -50,7 +55,10 @@ _KLINE_FIELDS = (
     "Q",
 )
 _AGG_TRADE_FIELDS = ("a", "p", "q", "f", "l", "T", "m")
-_DEPTH_FIELDS = ("U", "u", "pu", "b", "a", "T")
+_DEPTH_FIELDS = {
+    "futures": ("U", "u", "pu", "b", "a", "T"),
+    "spot": ("U", "u", "b", "a"),
+}
 
 
 @dataclass(slots=True)
@@ -115,9 +123,20 @@ class _StrictPairState:
 
 
 class BinanceCcxtShadowComparator:
-    """Compare raw native and CCXT Binance USD-M streams without production wiring."""
+    """Compare raw native and CCXT Binance streams without production wiring."""
 
-    def __init__(self, *, max_records_per_channel: int = 100_000) -> None:
+    def __init__(
+        self,
+        *,
+        market_type: str = "futures",
+        max_records_per_channel: int = 100_000,
+    ) -> None:
+        normalized_market_type = str(market_type).lower().strip()
+        if normalized_market_type not in _DEPTH_REQUIRED_FIELDS:
+            raise ValueError(
+                "Binance shadow comparator market_type must be spot or futures"
+            )
+        self.market_type = normalized_market_type
         self._max_records = max(100, int(max_records_per_channel))
         self._states = {
             source: {
@@ -148,7 +167,7 @@ class BinanceCcxtShadowComparator:
         if not isinstance(payload, dict):
             state.malformed += 1
             return
-        if _missing_required(channel, payload):
+        if _missing_required(channel, payload, self.market_type):
             state.missing_required_fields += 1
             return
 
@@ -156,7 +175,7 @@ class BinanceCcxtShadowComparator:
         if exchange_time is not None:
             state.latencies_ms.append(received_at_ms - exchange_time)
 
-        sequence, fingerprint, closed = _record(channel, payload)
+        sequence, fingerprint, closed = _record(channel, payload, self.market_type)
         if sequence is None or fingerprint is None:
             state.malformed += 1
             return
@@ -171,13 +190,19 @@ class BinanceCcxtShadowComparator:
                 state.continuity_violations += 1
                 state.missing_sequence_units += sequence - previous - 1
         elif channel == "depth" and previous is not None:
-            previous_link = _optional_int(payload.get("pu"))
             if sequence == previous:
                 state.duplicates += 1
             elif sequence < previous:
                 state.out_of_order += 1
-            elif previous_link != previous:
-                state.continuity_violations += 1
+            elif self.market_type == "futures":
+                previous_link = _optional_int(payload.get("pu"))
+                if previous_link != previous:
+                    state.continuity_violations += 1
+            else:
+                first_update = _optional_int(payload.get("U"))
+                if first_update is not None and first_update > previous + 1:
+                    state.continuity_violations += 1
+                    state.missing_sequence_units += first_update - previous - 1
 
         if state.first_sequence is None:
             state.first_sequence = sequence
@@ -214,7 +239,11 @@ class BinanceCcxtShadowComparator:
             )
         )
         return {
-            "schema_version": SHADOW_SCHEMA_VERSION,
+            "schema_version": (
+                SHADOW_SCHEMA_VERSION
+                if self.market_type == "futures"
+                else SPOT_SHADOW_SCHEMA_VERSION
+            ),
             "overall_verdict": overall,
             "timing_note": (
                 "receive_minus_exchange_event_ms includes host/exchange clock offset; "
@@ -336,9 +365,15 @@ class BinanceCcxtShadowComparator:
         return {
             "verdict": verdict,
             "reasons": reasons,
-            "strict_basis": "closed_kline"
-            if channel == "kline"
-            else "exchange_sequence",
+            "strict_basis": (
+                "closed_kline"
+                if channel == "kline"
+                else (
+                    "exchange_sequence_range"
+                    if channel == "depth" and self.market_type == "spot"
+                    else "exchange_sequence"
+                )
+            ),
             "sources": {
                 "native": native.to_wire(),
                 "ccxt": ccxt.to_wire(),
@@ -431,7 +466,7 @@ class BinanceCcxtShadowRunner:
             await asyncio.gather(
                 *(session.stop() for session in sessions), return_exceptions=True
             )
-            await ccxt_exchange.close()
+            await close_ccxt_exchange(ccxt_exchange)
             await transport.stop()
 
         completed_at_ms = int(time.time() * 1000)
@@ -612,8 +647,15 @@ class BinanceCcxtShadowRunner:
         return values
 
 
-def _missing_required(channel: str, payload: Mapping[str, Any]) -> bool:
-    if any(field not in payload for field in _REQUIRED_FIELDS[channel]):
+def _missing_required(
+    channel: str, payload: Mapping[str, Any], market_type: str = "futures"
+) -> bool:
+    required = (
+        _DEPTH_REQUIRED_FIELDS[market_type]
+        if channel == "depth"
+        else _REQUIRED_FIELDS[channel]
+    )
+    if any(field not in payload for field in required):
         return True
     if channel != "kline":
         return False
@@ -624,7 +666,7 @@ def _missing_required(channel: str, payload: Mapping[str, Any]) -> bool:
 
 
 def _record(
-    channel: str, payload: Mapping[str, Any]
+    channel: str, payload: Mapping[str, Any], market_type: str = "futures"
 ) -> tuple[int | None, str | None, bool]:
     if channel == "kline":
         kline = payload.get("k")
@@ -639,7 +681,10 @@ def _record(
         closed = True
     else:
         sequence = _optional_int(payload.get("u"))
-        comparable = {key: payload.get(key) for key in _DEPTH_FIELDS}
+        first_update = _optional_int(payload.get("U"))
+        if sequence is None or first_update is None or first_update > sequence:
+            return None, None, True
+        comparable = {key: payload.get(key) for key in _DEPTH_FIELDS[market_type]}
         closed = True
     if sequence is None:
         return None, None, closed

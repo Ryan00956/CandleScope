@@ -362,6 +362,14 @@ def bootstrap_default_adapters() -> ExchangeRegistry:
         from .plugins.okx import create_plugin
 
         _registry.register(create_plugin(), source="builtin:okx")
+    from .ccxt_ext.binance_usdm import SUPPORTED_CCXT_VERSION
+
+    ccxt_fingerprint = f"builtin:ccxt:{SUPPORTED_CCXT_VERSION}"
+    if not _registry.has_external_loader_fingerprint(ccxt_fingerprint):
+        from .ccxt_ext.generic import register_ccxt_plugins
+
+        register_ccxt_plugins(_registry)
+        _registry.mark_external_loader_fingerprint(ccxt_fingerprint)
     from .loader import load_external_plugins_from_env
 
     load_external_plugins_from_env(_registry)

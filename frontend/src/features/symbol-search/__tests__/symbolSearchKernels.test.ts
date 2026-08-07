@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { loadSymbolFavorites } from "../symbolFavoritesStore.js";
-import { filterSymbols } from "../symbolSearchFilter.js";
+import {
+  buildExchangeChips,
+  buildMarketTabs,
+  filterSymbols,
+} from "../symbolSearchFilter.js";
 import {
   symbolCatalogNeedsRetry,
   symbolCatalogRetryDelayMs,
@@ -82,4 +86,38 @@ test("symbol filter combines market, exchange, quote, search, and favorites", ()
     search: "btc",
     favorites: ["spot:BTCUSDT"],
   }), [symbols[0]]);
+});
+
+test("capability catalog exposes unloaded exchanges and exact CCXT market types", () => {
+  const exchangeCatalog = {
+    aster: { label: "Aster", markets: [] },
+    binance: { label: "Binance", markets: [{ market_type: "spot", label: "Spot" }] },
+    bybit: {
+      label: "Bybit",
+      markets: [
+        { market_type: "spot", label: "Spot" },
+        { market_type: "swap.linear", label: "Perpetual Swap (Linear)" },
+      ],
+    },
+  };
+  assert.deepEqual(
+    buildExchangeChips({
+      allSymbols: [],
+      currentExchange: "binance",
+      exchangeCatalog,
+    }).map((item) => [item.key, item.disabled]),
+    [["aster", true], ["binance", false], ["bybit", false]],
+  );
+  assert.deepEqual(
+    buildMarketTabs({
+      allSymbols: [],
+      exchangeCatalog,
+      exchangeFilter: new Set(["bybit"]),
+    }).map((item) => [item.key, item.label]),
+    [
+      ["favorites", "★ 收藏"],
+      ["spot", "现货"],
+      ["swap.linear", "Perpetual Swap (Linear)"],
+    ],
+  );
 });

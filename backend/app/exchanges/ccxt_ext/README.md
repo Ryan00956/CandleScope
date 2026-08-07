@@ -1,20 +1,37 @@
 # CandleScope CCXT connection provider
 
-This package is an opt-in compatibility layer around the exact CCXT version
-pinned in `backend/requirements.txt`. The production registry exposes it behind
-`INGESTION_CCXT_STREAM_ENABLED`; the flag is off by default.
+This package provides two compatibility lanes around the exact CCXT version
+pinned in `backend/requirements.txt`:
+
+- every pinned CCXT exchange ID is registered from a network-free capability
+  catalog and, when CCXT Pro advertises the method, uses unified `watch_*`
+  results by default (`INGESTION_CCXT_UNIFIED_STREAM_ENABLED=true`);
+- dedicated raw profiles remain available for channels whose correctness
+  requires exchange sequence/checksum fields. They are controlled separately
+  by `INGESTION_CCXT_STREAM_ENABLED`, which remains off by default.
 
 The ownership boundary is:
 
 ```text
-CCXT Pro watch_* + reconnect-capable sockets
-                ↓ complete decoded exchange payload
-CandleScope Normalize → Continuity → Recovery → Delivery
-                                      ↓
-                     native REST + shared quota manager
+CCXT Pro unified watch_* result ─→ generic projection ─┐
+raw-profile decoded exchange payload ─────────────────┤
+                                                      ↓
+                   CandleScope Normalize → Continuity → Delivery
+                                                      ↑
+                         CCXT REST history + shared quota admission
 ```
 
-The extension owns only the seams that CCXT's unified API does not expose:
+The generic lane owns the integration seams CandleScope must validate:
+
+- pinned-version exchange and capability enumeration;
+- exact market-family and unified-symbol routing;
+- K-line closure transitions and Trade cache deduplication;
+- bounded CCXT-managed order-book snapshots with explicit local revisions;
+- pooled reconnecting Pro sessions and deterministic resource cleanup;
+- lazy, on-demand symbol discovery so startup never contacts every exchange.
+
+The strict lane additionally owns the seams that CCXT's unified API does not
+expose:
 
 - a reusable `handle_message` MRO hook for future CCXT exchange profiles;
 - pooled CCXT instances instead of one exchange client per subscription;
@@ -24,8 +41,9 @@ The extension owns only the seams that CCXT's unified API does not expose:
 - admission and response accounting through CandleScope's shared IP budget;
 - deterministic REST cleanup and the Windows threaded-DNS workaround.
 
-CandleScope continues to own normalization, continuity, bounded Kline/aggTrade
-gap repair, stale-state publication, and strict full-order-book reconstruction.
+CandleScope continues to own normalization contracts, continuity, bounded
+Kline/aggTrade gap repair, stale-state publication, and strict
+full-order-book reconstruction.
 Gap repair deliberately uses the existing native REST transport and shared
 quota manager; it does not call CCXT REST and therefore cannot double-reserve
 the IP budget. Consumers feed raw `U/u/pu` depth events to the existing full
@@ -40,14 +58,15 @@ recorded retention boundary. It still fails closed if the retained book falls
 below the trusted REST seed depth; no trimmed book is advertised as an
 exhaustive exchange view.
 
-The first enabled profile is deliberately narrow:
+The first strict raw profile is deliberately narrow:
 
 - exchange/market: Binance USD-M futures;
 - streams: Kline, aggregate trade, full depth;
 - Kline routing includes the raw interval so parallel intervals cannot mix;
 - conflicting full-depth update speeds for one symbol fail closed because the
   raw Binance payload does not identify the requested speed;
-- spot and all other exchanges remain on their existing transports.
+- other pinned exchange IDs use the generic capability-scoped lane and never
+  claim strict `FULL_DEPTH` support.
 
 Local opt-in example:
 
@@ -97,6 +116,66 @@ Timing summaries are reported as local receive time minus Binance event time.
 They include host/exchange clock offset and therefore are diagnostic rather
 than a pure one-way network-latency measurement.
 
+Run the first multi-product admission gate through one shared CCXT profile:
+
+```powershell
+python scripts/ccxt_shadow_matrix.py `
+  --config scripts/ccxt_shadow_matrix.binance-usdm.example.json `
+  --output ../output/ccxt-shadow-matrix-binance-usdm.json
+```
+
+The default matrix concurrently compares BTCUSDT, ETHUSDT, SOLUSDT, and
+DOGEUSDT across K-line, aggregate-trade, and full-depth streams. Each product
+has its own strict comparator and verdict. The matrix fails if any product is
+not ready, any channel fails, a profile route is unmatched or ambiguous, a
+watch call errors, or either transport is interrupted during the measurement
+window. It also reports route-scan work and websocket/session counts so the
+current linear subscriber demultiplexer remains visible as the matrix grows.
+
+The JSON file is the durable run contract. CLI `--symbols`, `--interval`,
+`--depth-update-ms`, `--duration`, and `--startup-timeout` values can override
+it for a controlled probe. A shared network interruption is still an overall
+failure (`runtime.observation_window=INTERRUPTED`); it is never converted into
+a product PASS.
+
+Binance Spot has a separate shadow-only profile and comparator contract:
+
+```powershell
+python scripts/ccxt_shadow_matrix.py `
+  --config scripts/ccxt_shadow_matrix.binance-spot.example.json `
+  --output ../output/ccxt-shadow-matrix-binance-spot.json
+```
+
+Spot depth is not judged with the USD-M `pu` rule. It requires valid `U/u`
+ranges and fails when the next range begins after `previous_u + 1`; overlapping
+ranges remain valid for snapshot/reconnect alignment. The Spot profile is not
+wired into `BinancePlugin.create_stream_session`: passing its shadow gate does
+not silently promote it to a production provider.
+
+The first OKX swap gate stays within the built-in plugin's honest capability
+surface (K-line and ticker only):
+
+```powershell
+python scripts/ccxt_shadow_matrix.py `
+  --config scripts/ccxt_shadow_matrix.okx-swap.example.json `
+  --output ../output/ccxt-shadow-matrix-okx-swap.json
+```
+
+Closed candles compare their full nine-field row by open time. Tickers compare
+the complete row by OKX exchange timestamp. The matrix intentionally does not
+claim OKX trade or order-book parity: those native channels are not exposed by
+the current OKX plugin and require their own recovery/continuity contracts
+before admission.
+
+OKX Spot uses the same currently supported K-line/ticker surface but a separate
+market identity and run contract:
+
+```powershell
+python scripts/ccxt_shadow_matrix.py `
+  --config scripts/ccxt_shadow_matrix.okx-spot.example.json `
+  --output ../output/ccxt-shadow-matrix-okx-spot.json
+```
+
 Run the end-to-end CandleScope kernel soak from `backend`:
 
 ```powershell
@@ -114,3 +193,24 @@ full-book fail-closed resync, and final shutdown paths are exercised. The
 final report is a failure unless each injected disconnect is observed, every
 output sequence is complete, the full book has no capacity failure, and all
 pooled resources close cleanly.
+
+Run the generic unified-provider acceptance or representative soak separately:
+
+```powershell
+python scripts/ccxt_unified_soak.py `
+  --exchange bybit `
+  --market-type swap.linear `
+  --symbol BTC/USDT:USDT `
+  --symbol ETH/USDT:USDT `
+  --duration 14400 `
+  --inject-disconnect-at 900 `
+  --output ../output/ccxt-unified-bybit-linear-4h.json
+```
+
+This gate shares one CCXT runtime across both products and all four generic
+channels. It fails on malformed projection, duplicate Trade IDs, regressing
+K-line/depth revisions, a stream that stops updating, incomplete reconnect,
+queue overflow, residual CCXT tasks, or a non-empty runtime pool after close.
+Exchange timestamps that repeat or briefly move backward are recorded as a
+diagnostic because some unified ticker feeds legitimately exhibit that
+behavior; they are not treated as CandleScope continuity keys.

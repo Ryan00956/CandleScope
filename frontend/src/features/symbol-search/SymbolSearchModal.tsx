@@ -28,7 +28,7 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
     setMarketType,
     setQuoteFilter,
     setHighlightIndex,
-    toggleExchange,
+    selectExchange,
     toggleFavorite,
     selectSymbol,
     openContextMenu,
@@ -108,17 +108,23 @@ export default function SymbolSearchModal(props: SymbolSearchModalProps) {
 
           <div className="sym-modal-filter-row sym-modal-filter-row-chips">
             <div className="sym-modal-chip-group">
-              <span className="sym-modal-chip-label">交易所</span>
-              {exchangeChips.map((exchange) => (
-                <button
-                  key={exchange.key}
-                  className={`sym-modal-chip ${exchangeFilter.has(exchange.key) ? "active" : ""}`}
-                  onClick={() => toggleExchange(exchange.key)}
-                >
-                  {exchange.label}
-                  {exchangeFilter.has(exchange.key) && <span className="sym-modal-chip-check">✓</span>}
-                </button>
-              ))}
+              <label className="sym-modal-chip-label" htmlFor="sym-modal-exchange-select">交易所</label>
+              <select
+                id="sym-modal-exchange-select"
+                className="sym-modal-exchange-select"
+                value={Array.from(exchangeFilter)[0] || currentExchange}
+                onChange={(event) => selectExchange(event.target.value)}
+              >
+                {exchangeChips.map((exchange) => (
+                  <option
+                    key={exchange.key}
+                    value={exchange.key}
+                    disabled={exchange.disabled}
+                  >
+                    {exchange.label}{exchange.disabled ? "（无可路由公共行情）" : ""}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="sym-modal-chip-divider" />

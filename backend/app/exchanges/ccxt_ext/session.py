@@ -52,6 +52,7 @@ class CcxtProviderSession:
         self._runtime: CcxtRuntime | None = None
         self._subscription_token: str | None = None
         self._ccxt_symbol: str | None = None
+        self._result_projector: Any | None = None
         self._queue: asyncio.Queue[CcxtRawMarketEvent] = asyncio.Queue(
             maxsize=max(1, int(config.ccxt_raw_queue_size)),
         )
@@ -161,10 +162,13 @@ class CcxtProviderSession:
                     await self._attach_runtime()
                 assert self._runtime is not None
                 assert self._ccxt_symbol is not None
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self._runtime.watch(self._descriptor, self._ccxt_symbol),
                     timeout=float(self._cfg.ws_stale_timeout),
                 )
+                if self._result_projector is not None:
+                    for event in self._result_projector.project(result):
+                        self._enqueue_raw(event)
                 if self._overflowed:
                     raise CcxtRawQueueOverflow(
                         f"raw queue overflow for {self._descriptor.key}"
@@ -222,12 +226,19 @@ class CcxtProviderSession:
                 self._enqueue_raw,
                 self._observe_lifecycle,
             )
+            projector_factory = getattr(self._profile, "make_projector", None)
+            projector = (
+                projector_factory(self._descriptor)
+                if callable(projector_factory)
+                else None
+            )
         except BaseException:
             await self._pool.release(runtime)
             raise
         self._runtime = runtime
         self._ccxt_symbol = ccxt_symbol
         self._subscription_token = token
+        self._result_projector = projector
 
     async def _detach_runtime(self) -> None:
         runtime = self._runtime
@@ -235,6 +246,7 @@ class CcxtProviderSession:
         self._runtime = None
         self._subscription_token = None
         self._ccxt_symbol = None
+        self._result_projector = None
         if runtime is not None and token is not None:
             runtime.unsubscribe(token)
         if runtime is not None:

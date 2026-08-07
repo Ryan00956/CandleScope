@@ -1,0 +1,27 @@
+{
+  "profile": "binance_usdm",
+  "targets": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    }
+  ],
+  "duration_seconds": 65,
+  "startup_timeout_seconds": 45
+}

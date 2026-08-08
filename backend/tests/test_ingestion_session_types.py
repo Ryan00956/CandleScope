@@ -15,9 +15,9 @@ from app.data_engine.ingestion.models import (
     StreamDescriptor,
     StreamType,
 )
-from app.data_engine.ingestion.session import SessionLayer
 from app.data_engine.ingestion.shared_ws import SharedWsHubRegistry, SharedWsSessionAdapter
 from app.data_engine.ingestion.transport import TransportLayer
+from app.exchanges.ccxt_ext.session import CcxtProviderSession
 
 
 class _FakeTransport:
@@ -242,7 +242,7 @@ def test_shared_ws_hub_registry_uses_exchange_capabilities() -> None:
         exchange="binance",
     )
 
-    assert registry.get_hub(okx_kline) is not None
+    assert registry.get_hub(okx_kline) is None
     assert registry.get_hub(okx_ticker) is None
     assert registry.get_hub(binance_kline) is None
 
@@ -268,8 +268,8 @@ def test_market_data_ingress_session_factory_follows_exchange_capabilities() -> 
 
     assert binance_factory is not None
     assert okx_factory is not None
-    assert isinstance(binance_factory(), SessionLayer)
-    assert isinstance(okx_factory(), SharedWsSessionAdapter)
+    assert isinstance(binance_factory(), CcxtProviderSession)
+    assert isinstance(okx_factory(), CcxtProviderSession)
 
 
 def test_market_data_ingress_keeps_failed_pipeline_registered_for_stop_retry() -> None:

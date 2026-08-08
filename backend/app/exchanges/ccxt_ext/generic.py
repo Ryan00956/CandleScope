@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -45,6 +45,13 @@ _GENERIC_STREAM_METHODS = {
     StreamType.TRADE: ("watchTrades", "fetchTrades"),
     StreamType.DEPTH: ("watchOrderBook", "fetchOrderBook"),
     StreamType.TICKER: ("watchTicker", "fetchTicker"),
+    StreamType.MINI_TICKER: ("watchTicker", "fetchTicker"),
+    StreamType.MARK_PRICE: ("watchMarkPrice", "fetchMarkPrice"),
+    StreamType.INDEX_PRICE: ("watchMarkPrice", "fetchMarkPrice"),
+    StreamType.FUNDING_RATE: ("watchFundingRate", "fetchFundingRateHistory"),
+    StreamType.OPEN_INTEREST: (None, "fetchOpenInterest"),
+    StreamType.LIQUIDATION: ("watchLiquidations", "fetchLiquidations"),
+    StreamType.PREMIUM_INDEX: (None, "fetchPremiumIndexOHLCV"),
 }
 
 
@@ -167,19 +174,20 @@ class CcxtUnifiedAdapter:
         selection = str(market_type or "").strip().lower()
         if not self.entry.market_types:
             return []
-        if selection and selection not in self.entry.market_types:
-            raise ValueError(
-                f"{self.id} does not advertise CCXT market type {selection!r}",
-            )
+        resolved_selection = (
+            resolve_market_selection(self.entry, selection) if selection else ""
+        )
         exchange = _create_exchange(
             self.entry,
             config,
-            market_type=selection or self.entry.market_types[0],
+            market_type=resolved_selection or self.entry.market_types[0],
             websocket=False,
         )
         try:
             await exchange.load_markets()
-            selections = (selection,) if selection else self.entry.market_types
+            selections = (
+                (resolved_selection,) if resolved_selection else self.entry.market_types
+            )
             symbols: list[SymbolInfo] = []
             for market in exchange.markets.values():
                 if market.get("active") is False:
@@ -206,9 +214,9 @@ class CcxtUnifiedAdapter:
                         quote_asset=quote,
                         status="TRADING",
                         exchange=self.id,
-                        market_type=selected,
-                        product_type=_product_type(selected),
-                        contract_type=_contract_type(selected),
+                        market_type=selection or selected,
+                        product_type=_product_type(selection or selected),
+                        contract_type=_contract_type(selection or selected),
                         raw=dict(market),
                         listed_at_ms=_timestamp(market.get("created")),
                         expiry_at_ms=_timestamp(market.get("expiry")),
@@ -281,15 +289,13 @@ class CcxtUnifiedProfile:
 
     entry: CcxtCatalogEntry
     market_type: str
+    selection: str = field(init=False)
 
     def __post_init__(self) -> None:
         self.market_type = str(self.market_type or "").strip().lower()
         if not self.entry.pro:
             raise ValueError(f"{self.entry.exchange_id} has no CCXT Pro class")
-        if self.market_type not in self.entry.market_types:
-            raise ValueError(
-                f"{self.entry.exchange_id} does not advertise {self.market_type}",
-            )
+        self.selection = resolve_market_selection(self.entry, self.market_type)
 
     @property
     def exchange_id(self) -> str:
@@ -298,11 +304,23 @@ class CcxtUnifiedProfile:
     def supports(self, descriptor: StreamDescriptor) -> bool:
         if (
             descriptor.exchange.strip().lower() != self.exchange_id
-            or descriptor.market_type.strip().lower() != self.market_type
+            or resolve_market_selection(
+                self.entry,
+                descriptor.market_type,
+            ) != self.selection
         ):
             return False
         methods = _GENERIC_STREAM_METHODS.get(descriptor.stream_type)
-        if methods is None or not self.entry.supports(methods[0]):
+        if methods is None or methods[0] is None or not self.entry.supports(methods[0]):
+            return False
+        if descriptor.stream_type in {
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+            StreamType.FUNDING_RATE,
+            StreamType.OPEN_INTEREST,
+            StreamType.LIQUIDATION,
+            StreamType.PREMIUM_INDEX,
+        } and market_selection_parts(self.selection)[0] not in {"swap", "future"}:
             return False
         if (
             descriptor.stream_type == StreamType.KLINE
@@ -325,12 +343,16 @@ class CcxtUnifiedProfile:
         return _create_exchange(
             self.entry,
             config,
-            market_type=self.market_type,
+            market_type=self.selection,
             websocket=True,
         )
 
     def resolve_symbol(self, exchange: Any, descriptor: StreamDescriptor) -> str:
-        return resolve_ccxt_symbol(exchange, descriptor)
+        return resolve_ccxt_symbol(
+            exchange,
+            descriptor,
+            market_type=self.selection,
+        )
 
     async def watch(
         self,
@@ -349,6 +371,14 @@ class CcxtUnifiedProfile:
             return await exchange.watch_order_book(ccxt_symbol)
         if descriptor.stream_type == StreamType.TICKER:
             return await exchange.watch_ticker(ccxt_symbol)
+        if descriptor.stream_type == StreamType.MINI_TICKER:
+            return await exchange.watch_ticker(ccxt_symbol)
+        if descriptor.stream_type in {StreamType.MARK_PRICE, StreamType.INDEX_PRICE}:
+            return await exchange.watch_mark_price(ccxt_symbol)
+        if descriptor.stream_type == StreamType.FUNDING_RATE:
+            return await exchange.watch_funding_rate(ccxt_symbol)
+        if descriptor.stream_type == StreamType.LIQUIDATION:
+            return await exchange.watch_liquidations(ccxt_symbol)
         raise ValueError(f"Unsupported CCXT unified stream: {descriptor.stream_type.value}")
 
     @staticmethod
@@ -362,7 +392,7 @@ class CcxtUnifiedProfile:
         return (
             "ccxt-unified",
             self.exchange_id,
-            self.market_type,
+            self.selection,
             config.proxy_mode,
             config.http_proxy or "",
         )
@@ -451,23 +481,36 @@ class CcxtUnifiedPlugin(BuiltinExchangePlugin):
     ) -> list[RawMessage]:
         descriptor = req.descriptor
         methods = _GENERIC_STREAM_METHODS.get(descriptor.stream_type)
-        if methods is None or not self.entry.supports(methods[1]):
+        rest_method = _rest_method_for(req, self.entry)
+        if methods is None or rest_method is None or not self.entry.supports(rest_method):
             raise ValueError(
                 f"{self.id} does not support CCXT REST {descriptor.stream_type.value}",
             )
-        if descriptor.market_type not in self.entry.market_types:
+        selection = resolve_market_selection(self.entry, descriptor.market_type)
+        if descriptor.stream_type in {
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+            StreamType.FUNDING_RATE,
+            StreamType.OPEN_INTEREST,
+            StreamType.LIQUIDATION,
+            StreamType.PREMIUM_INDEX,
+        } and market_selection_parts(selection)[0] not in {"swap", "future"}:
             raise ValueError(
-                f"{self.id} does not advertise {descriptor.market_type}",
+                f"{self.id} derivatives stream requires a contract market",
             )
         exchange = _create_exchange(
             self.entry,
             config,
-            market_type=descriptor.market_type,
+            market_type=selection,
             websocket=False,
         )
         try:
             await exchange.load_markets()
-            symbol = resolve_ccxt_symbol(exchange, descriptor)
+            symbol = resolve_ccxt_symbol(
+                exchange,
+                descriptor,
+                market_type=selection,
+            )
             rows: list[dict[str, Any]] = []
             if descriptor.stream_type == StreamType.KLINE:
                 limit = min(max(1, int(req.limit or 1)), self.entry.history_limit)
@@ -518,9 +561,67 @@ class CcxtUnifiedPlugin(BuiltinExchangePlugin):
                         local_revision=self._rest_book_revision,
                     )
                 ]
-            elif descriptor.stream_type == StreamType.TICKER:
+            elif descriptor.stream_type in {StreamType.TICKER, StreamType.MINI_TICKER}:
                 value = await exchange.fetch_ticker(symbol)
                 rows = [make_unified_payload("ticker", dict(value))]
+            elif descriptor.stream_type in {StreamType.MARK_PRICE, StreamType.INDEX_PRICE}:
+                value = await exchange.fetch_mark_price(symbol)
+                rows = [make_unified_payload("derivatives_summary", dict(value))]
+            elif descriptor.stream_type == StreamType.FUNDING_RATE:
+                if req.history or req.start_ms is not None or req.end_ms is not None:
+                    values = await exchange.fetch_funding_rate_history(
+                        symbol,
+                        since=req.start_ms,
+                        limit=max(1, int(req.limit or 1)),
+                    )
+                else:
+                    values = [await exchange.fetch_funding_rate(symbol)]
+                rows = [
+                    make_unified_payload("funding_rate", dict(value))
+                    for value in values
+                    if isinstance(value, dict)
+                ]
+            elif descriptor.stream_type == StreamType.OPEN_INTEREST:
+                if (
+                    (req.history or req.start_ms is not None or req.end_ms is not None)
+                    and self.entry.supports("fetchOpenInterestHistory")
+                ):
+                    values = await exchange.fetch_open_interest_history(
+                        symbol,
+                        timeframe=descriptor.interval,
+                        since=req.start_ms,
+                        limit=max(1, int(req.limit or 1)),
+                    )
+                else:
+                    values = [await exchange.fetch_open_interest(symbol)]
+                rows = [
+                    make_unified_payload("open_interest", dict(value))
+                    for value in values
+                    if isinstance(value, dict)
+                ]
+            elif descriptor.stream_type == StreamType.LIQUIDATION:
+                values = await exchange.fetch_liquidations(
+                    symbol,
+                    since=req.start_ms,
+                    limit=max(1, int(req.limit or 1)),
+                )
+                rows = [
+                    make_unified_payload("liquidation", dict(value))
+                    for value in values
+                    if isinstance(value, dict)
+                ]
+            elif descriptor.stream_type == StreamType.PREMIUM_INDEX:
+                values = await exchange.fetch_premium_index_ohlcv(
+                    symbol,
+                    timeframe=descriptor.interval,
+                    since=req.start_ms,
+                    limit=max(1, int(req.limit or 1)),
+                )
+                rows = [
+                    make_unified_payload("premium_index", list(value[:6]))
+                    for value in values
+                    if isinstance(value, (list, tuple)) and len(value) >= 6
+                ]
             received = int(time.time() * 1000)
             return [
                 RawMessage(
@@ -553,12 +654,18 @@ def register_ccxt_plugins(registry: Any) -> int:
     return registered
 
 
-def resolve_ccxt_symbol(exchange: Any, descriptor: StreamDescriptor) -> str:
+def resolve_ccxt_symbol(
+    exchange: Any,
+    descriptor: StreamDescriptor,
+    *,
+    market_type: str | None = None,
+) -> str:
     requested = str(descriptor.symbol or "").strip()
+    selection = str(market_type or descriptor.market_type).strip().lower()
     candidates = [
         market
         for market in exchange.markets.values()
-        if market_matches_selection(market, descriptor.market_type)
+        if market_matches_selection(market, selection)
         and (
             str(market.get("symbol") or "") == requested
             or str(market.get("symbol") or "").upper() == requested.upper()
@@ -572,10 +679,44 @@ def resolve_ccxt_symbol(exchange: Any, descriptor: StreamDescriptor) -> str:
     }
     if len(by_symbol) != 1:
         raise ValueError(
-            f"unable to resolve one {descriptor.market_type} CCXT symbol for "
+            f"unable to resolve one {selection} CCXT symbol for "
             f"{descriptor.exchange}:{requested}",
         )
     return next(iter(by_symbol))
+
+
+def resolve_market_selection(
+    entry: CcxtCatalogEntry,
+    market_type: str,
+) -> str:
+    """Resolve CandleScope's legacy ``futures`` name to one CCXT family."""
+
+    requested = str(market_type or "spot").strip().lower()
+    if requested in entry.market_types:
+        return requested
+    if requested == "futures":
+        for candidate in ("swap.linear", "swap", "future.linear", "future"):
+            if candidate in entry.market_types:
+                return candidate
+    raise ValueError(
+        f"{entry.exchange_id} does not advertise CCXT market type {requested!r}",
+    )
+
+
+def _rest_method_for(
+    req: TransportRequest,
+    entry: CcxtCatalogEntry,
+) -> str | None:
+    stream_type = req.descriptor.stream_type
+    ranged = req.history or req.start_ms is not None or req.end_ms is not None
+    if stream_type == StreamType.FUNDING_RATE:
+        return "fetchFundingRateHistory" if ranged else "fetchFundingRate"
+    if stream_type == StreamType.OPEN_INTEREST:
+        if ranged and entry.supports("fetchOpenInterestHistory"):
+            return "fetchOpenInterestHistory"
+        return "fetchOpenInterest"
+    methods = _GENERIC_STREAM_METHODS.get(stream_type)
+    return methods[1] if methods is not None else None
 
 
 def _create_exchange(

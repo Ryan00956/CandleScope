@@ -21,6 +21,8 @@ from app.exchanges.ccxt_ext.catalog import (
     get_ccxt_catalog_entry,
 )
 from app.exchanges.ccxt_ext.generic import CcxtUnifiedPlugin, CcxtUnifiedProfile
+from app.exchanges.ccxt_ext.primary import OkxCombinedSummaryProfile
+from app.exchanges.ccxt_ext.primary import create_binance_ccxt_plugin
 from app.exchanges.ccxt_ext.runtime import CcxtRuntimePool, close_ccxt_exchange
 from app.exchanges.ccxt_ext.session import CcxtProviderSession
 from app.exchanges.ccxt_ext.unified import (
@@ -47,7 +49,7 @@ def _descriptor(
     )
 
 
-def test_pinned_catalog_registers_all_ids_without_replacing_strict_plugins() -> None:
+def test_pinned_catalog_registers_all_ids_with_ccxt_primary_venues() -> None:
     summary = ccxt_catalog_summary()
     assert summary == {
         "version": "4.5.60",
@@ -57,12 +59,24 @@ def test_pinned_catalog_registers_all_ids_without_replacing_strict_plugins() -> 
         "watch_trades": 75,
         "watch_order_book": 76,
         "watch_ticker": 67,
+        "watch_mark_price": 9,
+        "watch_funding_rate": 9,
+        "watch_liquidations": 10,
+        "fetch_funding_rate_history": 50,
+        "fetch_open_interest": 32,
+        "fetch_open_interest_history": 15,
     }
 
     registry = bootstrap_default_adapters()
     assert len(registry.list_plugins()) == summary["rest_exchange_ids"]
-    assert registry.get_plugin("binance").__class__.__name__ == "BinancePlugin"
-    assert registry.get_plugin("okx").__class__.__name__ == "OkxPlugin"
+    assert registry.get_plugin("binance").__class__.__name__ == "CcxtPrimaryPlugin"
+    assert registry.get_plugin("okx").__class__.__name__ == "CcxtPrimaryPlugin"
+    assert registry.get_plugin("binance").protocol().__class__.__name__ == (
+        "CcxtUnifiedProtocol"
+    )
+    assert "native_transport.retired" in (
+        registry.get_plugin("okx").capabilities().protocol_features
+    )
     assert isinstance(registry.get_plugin("bybit"), CcxtUnifiedPlugin)
 
 
@@ -105,6 +119,144 @@ def test_generic_provider_flag_controls_websocket_routing() -> None:
     )
     assert disabled.supports_ws(descriptor) is False
     assert disabled.create_provider_session(descriptor) is None
+
+
+def test_primary_venue_maps_futures_to_ccxt_linear_swap() -> None:
+    registry = bootstrap_default_adapters()
+    descriptor = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.MARK_PRICE,
+        exchange="binance",
+        market_type="futures",
+    )
+    plugin = registry.get_plugin("binance")
+
+    assert plugin.supports_provider_stream(descriptor) is True
+    assert plugin.supports_provider_stream(
+        StreamDescriptor(
+            "BTCUSDT",
+            StreamType.LIQUIDATION,
+            exchange="binance",
+            market_type="spot",
+        )
+    ) is False
+
+
+def test_unified_derivatives_summary_keeps_mark_index_and_funding() -> None:
+    descriptor = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.MARK_PRICE,
+        exchange="binance",
+        market_type="futures",
+    )
+    projector = CcxtUnifiedProjector(
+        exchange_id="binance",
+        market_type="futures",
+        descriptor=descriptor,
+    )
+    projected = projector.project(
+        {
+            "timestamp": 1_700_000_000_000,
+            "markPrice": 101.5,
+            "indexPrice": 101.0,
+            "info": {"r": "0.0001", "T": 1_700_028_800_000},
+        },
+        received_at_ms=1_700_000_000_001,
+    )
+    event = CcxtUnifiedNormalizer(descriptor).parse(
+        RawMessage(
+            payload=projected[0].payload,
+            source=DataSource.WEBSOCKET,
+            stream_type=StreamType.MARK_PRICE,
+            received_at_ms=1_700_000_000_001,
+        )
+    )
+
+    assert event is not None
+    assert event.data == {
+        "mark_price": 101.5,
+        "index_price": 101.0,
+        "funding_rate": 0.0001,
+        "next_funding_time_ms": 1_700_028_800_000,
+    }
+
+
+def test_okx_summary_profile_combines_three_ccxt_channels() -> None:
+    class Exchange:
+        markets = {
+            "BTC/USDT:USDT": {
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "swap": True,
+            },
+            "BTC/USDT": {
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+            },
+        }
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def watch_mark_price(self, symbol: str) -> dict[str, Any]:
+            assert symbol == "BTC/USDT:USDT"
+            return {"markPrice": 101, "timestamp": 1000, "info": {"markPx": "101"}}
+
+        async def watch_ticker(
+            self,
+            symbol: str,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            assert (symbol, params) == ("BTC/USDT", {"channel": "index-tickers"})
+            return {"indexPrice": 100, "timestamp": 1001, "info": {"idxPx": "100"}}
+
+        async def watch_funding_rate(self, symbol: str) -> dict[str, Any]:
+            assert symbol == "BTC/USDT:USDT"
+            return {
+                "fundingRate": 0.0001,
+                "fundingTimestamp": 1002,
+                "nextFundingTimestamp": 2000,
+                "info": {"fundingRate": "0.0001"},
+            }
+
+    async def run() -> None:
+        profile = OkxCombinedSummaryProfile(get_ccxt_catalog_entry("okx"))
+        exchange = Exchange()
+        descriptor = StreamDescriptor(
+                "BTC-USDT-SWAP",
+                StreamType.INDEX_PRICE,
+                exchange="okx",
+                market_type="futures",
+            )
+        assert profile.supports(descriptor) is True
+        result: dict[str, Any] = {}
+        for _attempt in range(3):
+            result = await profile.watch(
+                exchange,
+                descriptor,
+                "BTC/USDT:USDT",
+            )
+            if {"markPrice", "indexPrice", "fundingRate"}.issubset(result):
+                break
+        assert result["markPrice"] == 101
+        assert result["indexPrice"] == 100
+        assert result["fundingRate"] == 0.0001
+        assert result["nextFundingTimestamp"] == 2000
+        assert result["timestamp"] == 1001
+        concurrent = await asyncio.gather(
+            profile.watch(exchange, descriptor, "BTC/USDT:USDT"),
+            profile.watch(exchange, descriptor, "BTC/USDT:USDT"),
+        )
+        assert all(
+            {"markPrice", "indexPrice", "fundingRate"}.issubset(value)
+            for value in concurrent
+        )
+        await profile.close()
+
+    asyncio.run(run())
 
 
 def test_generic_catalog_refresh_is_lazy_but_explicit_selection_is_allowed() -> None:
@@ -501,6 +653,79 @@ def test_generic_rest_fetch_closes_exchange_and_returns_unified_rows(
     assert rows[0].source == DataSource.HTTP
     assert rows[0].payload["schema"] == "candlescope.ccxt.unified/1"
     assert fake.close_calls == 1
+
+
+def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets = {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "swap": True,
+                    "linear": True,
+                }
+            }
+            self.params: dict[str, Any] | None = None
+            self.closed = False
+
+        async def load_markets(self) -> None:
+            return None
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_klines(
+            self,
+            params: dict[str, Any],
+        ) -> list[list[Any]]:
+            self.params = params
+            return [[1000, "1", "2", "0.5", "1.5", "3", 1999, "4", 5, "1", "2", "0"]]
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    descriptor = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="binance",
+        market_type="futures",
+    )
+    messages = asyncio.run(
+        plugin.fetch_history_with_config(
+            TransportRequest(
+                descriptor,
+                limit=2000,
+                start_ms=1000,
+                end_ms=2000,
+            ),
+            IngestionConfig(proxy_mode="none"),
+        )
+    )
+
+    assert exchange.params == {
+        "symbol": "BTCUSDT",
+        "limit": 1500,
+        "startTime": 1000,
+        "endTime": 2000,
+        "interval": "1m",
+    }
+    assert messages[0].payload[7:11] == ["4", 5, "1", "2"]
+    event = plugin.normalizer(IngestionConfig(), descriptor).parse(messages[0])
+    assert event is not None
+    assert event.data["quote_volume"] == 4.0
+    assert event.data["trades"] == 5
+    assert exchange.closed is True
 
 
 def test_global_registry_contains_every_pinned_id() -> None:

@@ -1,4 +1,4 @@
-"""OKX linear swap profile for CCXT shadow qualification."""
+"""OKX linear swap raw profile for the primary CCXT provider."""
 
 from __future__ import annotations
 

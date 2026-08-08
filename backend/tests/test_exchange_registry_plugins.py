@@ -1,16 +1,13 @@
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
-from app.data_engine.ingestion.normalizers.binance import BinanceNormalizer
-from app.data_engine.ingestion.normalizers.okx import OkxNormalizer
-from app.exchanges.pagination import (
-    BinanceHistoricalPaginationPolicy,
-    OkxHistoricalPaginationPolicy,
+from app.exchanges.ccxt_ext.generic import (
+    CcxtHistoricalPaginationPolicy,
+    CcxtUnifiedProtocol,
 )
+from app.exchanges.ccxt_ext.primary import CcxtPrimaryNormalizer
 from app.exchanges.protocol import AdapterBackedProtocol
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
-from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
-from app.exchanges.plugins.okx.protocol import OkxExchangeProtocol
 
 
 def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
@@ -33,19 +30,19 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
     assert diagnostics["count"] >= 2
     statuses = {item["plugin_id"]: item for item in diagnostics["plugins"]}
     assert statuses["binance"]["capability_summary"] == {
-        "channel_declarations": 17,
+        "channel_declarations": 15,
         "market_channel_pairs": 19,
         "realtime_pairs": 19,
         "history_pairs": 6,
-        "websocket_pairs": 18,
+        "websocket_pairs": 0,
         "ordered_delta_pairs": 2,
     }
     assert statuses["okx"]["capability_summary"] == {
-        "channel_declarations": 3,
-        "market_channel_pairs": 4,
-        "realtime_pairs": 4,
-        "history_pairs": 2,
-        "websocket_pairs": 4,
+        "channel_declarations": 10,
+        "market_channel_pairs": 13,
+        "realtime_pairs": 13,
+        "history_pairs": 4,
+        "websocket_pairs": 0,
         "ordered_delta_pairs": 0,
     }
 
@@ -65,11 +62,11 @@ def test_builtin_plugins_create_exchange_normalizers() -> None:
 
     assert isinstance(
         registry.get_plugin("binance").normalizer(config, binance_descriptor),
-        BinanceNormalizer,
+        CcxtPrimaryNormalizer,
     )
     assert isinstance(
         registry.get_plugin("okx").normalizer(config, okx_descriptor),
-        OkxNormalizer,
+        CcxtPrimaryNormalizer,
     )
 
 
@@ -111,26 +108,30 @@ def test_builtin_plugins_own_symbol_and_rate_limit_policies() -> None:
     assert registry.get_plugin("okx").price_stream_type("spot") == StreamType.TICKER
 
 
-def test_builtin_plugins_use_concrete_protocols_and_pagination_policies() -> None:
+def test_primary_plugins_use_ccxt_protocol_and_pagination_policies() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
 
     binance = registry.get_plugin("binance")
     okx = registry.get_plugin("okx")
 
-    assert isinstance(binance.protocol(), BinanceExchangeProtocol)
-    assert isinstance(okx.protocol(), OkxExchangeProtocol)
+    assert isinstance(binance.protocol(), CcxtUnifiedProtocol)
+    assert isinstance(okx.protocol(), CcxtUnifiedProtocol)
     assert isinstance(
         binance.pagination_policy(BackfillConfig()),
-        BinanceHistoricalPaginationPolicy,
+        CcxtHistoricalPaginationPolicy,
     )
-    assert isinstance(okx.pagination_policy(BackfillConfig()), OkxHistoricalPaginationPolicy)
+    assert isinstance(
+        okx.pagination_policy(BackfillConfig()),
+        CcxtHistoricalPaginationPolicy,
+    )
 
     binance_capabilities = binance.capabilities().to_dict()
     okx_capabilities = okx.capabilities().to_dict()
     assert binance_capabilities["plugin_api_version"] == "1.0"
-    assert "ws.futures_route_split" in binance_capabilities["protocol_features"]
-    assert okx_capabilities["ws_connection_model"] == "shared_multiplex"
+    assert "provider.ccxt_primary" in binance_capabilities["protocol_features"]
+    assert "native_transport.retired" in okx_capabilities["protocol_features"]
+    assert okx_capabilities["ws_connection_model"] == "plugin_sidecar"
     assert okx_capabilities["limits"]["rest.kline.max_limit"] == 300
 
 

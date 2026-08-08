@@ -98,8 +98,12 @@ class _FakeProfile:
 
     def __init__(self, *, load_failures: int = 0) -> None:
         self.create_calls = 0
+        self.close_calls = 0
         self.load_failures = load_failures
         self.exchange: _FakeExchange | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
     def supports(self, descriptor: StreamDescriptor) -> bool:
         return descriptor.stream_type == StreamType.AGG_TRADE
@@ -315,8 +319,10 @@ def test_runtime_pool_shares_one_exchange_and_closes_at_last_release() -> None:
 
         await pool.release(first)
         assert profile.exchange.close_calls == 0
+        assert profile.close_calls == 0
         await pool.release(second)
         assert profile.exchange.close_calls == 1
+        assert profile.close_calls == 1
         assert pool.snapshot() == {"runtimes": {}}
 
     asyncio.run(run())
@@ -338,8 +344,10 @@ def test_runtime_pool_rebuilds_ccxt_caches_when_recycling_websockets() -> None:
         assert profile.exchange.load_calls == 1
         assert runtime.snapshot()["websocket_recycles"] == 1
         assert runtime.snapshot()["websocket_generation"] == 1
+        assert profile.close_calls == 1
         await pool.release(runtime)
         assert profile.exchange.close_calls == 1
+        assert profile.close_calls == 2
 
     asyncio.run(run())
 

@@ -198,8 +198,8 @@ class IngestionConfig:
     ws_stale_timeout: float = field(
         default_factory=lambda: _env_float("INGESTION_WS_STALE_TIMEOUT", 30.0),
     )
-    # Opt-in CCXT transport provider.  CandleScope remains responsible for
-    # raw-payload normalization, continuity, recovery, and book correctness.
+    # Deprecated qualification switch retained for old dual-feed tools.  The
+    # production registry no longer consults it; Binance/OKX are CCXT-owned.
     ccxt_stream_enabled: bool = field(
         default_factory=lambda: _env_bool("INGESTION_CCXT_STREAM_ENABLED", False),
     )

@@ -11,7 +11,15 @@ from ..binance_usdm import CandleScopeBinanceUSDM
 from ..models import CcxtRawMarketEvent
 
 _SUPPORTED_STREAMS = frozenset(
-    {StreamType.KLINE, StreamType.AGG_TRADE, StreamType.FULL_DEPTH}
+    {
+        StreamType.KLINE,
+        StreamType.AGG_TRADE,
+        StreamType.FULL_DEPTH,
+        StreamType.MARK_PRICE,
+        StreamType.INDEX_PRICE,
+        StreamType.FUNDING_RATE,
+        StreamType.LIQUIDATION,
+    }
 )
 
 
@@ -47,7 +55,7 @@ class BinanceUsdmCcxtProfile:
             values,
             raw_event_sink=raw_event_sink,
             lifecycle_sink=lifecycle_sink,
-            rate_limit_policy=BinancePlugin().rate_limit_policy(config),
+            rate_limit_policy=BinancePlugin._rate_limit_policy(config),
         )
 
     def resolve_symbol(
@@ -88,6 +96,14 @@ class BinanceUsdmCcxtProfile:
                 limit=100,
                 params={"rate": descriptor.update_interval_ms or 250},
             )
+        if descriptor.stream_type in {
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+            StreamType.FUNDING_RATE,
+        }:
+            return await exchange.watch_mark_price(ccxt_symbol)
+        if descriptor.stream_type == StreamType.LIQUIDATION:
+            return await exchange.watch_liquidations(ccxt_symbol)
         raise ValueError(f"unsupported CCXT stream: {descriptor.stream_type.value}")
 
     def matches(
@@ -101,6 +117,10 @@ class BinanceUsdmCcxtProfile:
             StreamType.KLINE: "kline",
             StreamType.AGG_TRADE: "aggTrade",
             StreamType.FULL_DEPTH: "depth",
+            StreamType.MARK_PRICE: "markPriceUpdate",
+            StreamType.INDEX_PRICE: "markPriceUpdate",
+            StreamType.FUNDING_RATE: "markPriceUpdate",
+            StreamType.LIQUIDATION: "forceOrder",
         }.get(descriptor.stream_type)
         if event.channel != expected:
             return False

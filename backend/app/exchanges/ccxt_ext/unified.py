@@ -70,6 +70,16 @@ class CcxtUnifiedProjector:
             payloads = self._project_order_book(result)
         elif stream_type == StreamType.TICKER:
             payloads = self._project_ticker(result)
+        elif stream_type == StreamType.MINI_TICKER:
+            payloads = self._project_ticker(result)
+        elif stream_type in {StreamType.MARK_PRICE, StreamType.INDEX_PRICE}:
+            payloads = self._project_derivatives_summary(result)
+        elif stream_type == StreamType.FUNDING_RATE:
+            payloads = self._project_single("funding_rate", result)
+        elif stream_type == StreamType.OPEN_INTEREST:
+            payloads = self._project_single("open_interest", result)
+        elif stream_type == StreamType.LIQUIDATION:
+            payloads = self._project_many("liquidation", result)
         else:
             raise ValueError(
                 f"Unsupported CCXT unified stream: {stream_type.value}",
@@ -225,6 +235,42 @@ class CcxtUnifiedProjector:
             }
         ]
 
+    @staticmethod
+    def _project_derivatives_summary(result: Any) -> list[dict[str, Any]]:
+        return CcxtUnifiedProjector._project_single(
+            "derivatives_summary",
+            result,
+        )
+
+    @staticmethod
+    def _project_single(kind: str, result: Any) -> list[dict[str, Any]]:
+        if not isinstance(result, dict):
+            return []
+        return [
+            {
+                "schema": CCXT_UNIFIED_MARKER,
+                "kind": kind,
+                "value": dict(result),
+            }
+        ]
+
+    @staticmethod
+    def _project_many(kind: str, result: Any) -> list[dict[str, Any]]:
+        if isinstance(result, dict):
+            values = [result]
+        elif isinstance(result, (list, tuple)):
+            values = [value for value in result if isinstance(value, dict)]
+        else:
+            return []
+        return [
+            {
+                "schema": CCXT_UNIFIED_MARKER,
+                "kind": kind,
+                "value": dict(value),
+            }
+            for value in values
+        ]
+
 
 class CcxtUnifiedNormalizer:
     """Convert CCXT unified envelopes into CandleScope ``MarketEvent`` values."""
@@ -243,8 +289,24 @@ class CcxtUnifiedNormalizer:
             return self._parse_trade(payload, msg)
         if kind == "order_book" and self._descriptor.stream_type == StreamType.DEPTH:
             return self._parse_order_book(payload, msg)
-        if kind == "ticker" and self._descriptor.stream_type == StreamType.TICKER:
+        if kind == "ticker" and self._descriptor.stream_type in {
+            StreamType.TICKER,
+            StreamType.MINI_TICKER,
+        }:
             return self._parse_ticker(payload, msg)
+        if kind == "derivatives_summary" and self._descriptor.stream_type in {
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+        }:
+            return self._parse_derivatives_summary(payload, msg)
+        if kind == "funding_rate" and self._descriptor.stream_type == StreamType.FUNDING_RATE:
+            return self._parse_funding_rate(payload, msg)
+        if kind == "open_interest" and self._descriptor.stream_type == StreamType.OPEN_INTEREST:
+            return self._parse_open_interest(payload, msg)
+        if kind == "liquidation" and self._descriptor.stream_type == StreamType.LIQUIDATION:
+            return self._parse_liquidation(payload, msg)
+        if kind == "premium_index" and self._descriptor.stream_type == StreamType.PREMIUM_INDEX:
+            return self._parse_index_kline(payload, msg)
         return None
 
     def _event(
@@ -425,10 +487,200 @@ class CcxtUnifiedNormalizer:
             "weighted_avg_price": _optional_float(ticker.get("vwap")) or 0.0,
         }
         return self._event(
-            event_type=StreamType.TICKER,
+            event_type=self._descriptor.stream_type,
             event_time_ms=timestamp,
             msg=msg,
             data=data,
+        )
+
+    def _parse_derivatives_summary(
+        self,
+        payload: dict[str, Any],
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        value = payload.get("value")
+        if not isinstance(value, dict):
+            return None
+        info = value.get("info") if isinstance(value.get("info"), dict) else {}
+        mark_price = _first_float(value, info, "markPrice", "mark_price", "markPx", "p")
+        index_price = _first_float(value, info, "indexPrice", "index_price", "idxPx", "i")
+        funding_rate = _first_float(value, info, "fundingRate", "funding_rate", "r")
+        if mark_price is None and index_price is None and funding_rate is None:
+            return None
+        timestamp = (
+            _first_int(value, info, "timestamp", "E", "ts")
+            or msg.received_at_ms
+        )
+        data: dict[str, Any] = {}
+        if mark_price is not None:
+            data["mark_price"] = mark_price
+        if index_price is not None:
+            data["index_price"] = index_price
+        if funding_rate is not None:
+            data["funding_rate"] = funding_rate
+        next_funding = _first_int(
+            value,
+            info,
+            "nextFundingTimestamp",
+            "nextFundingTime",
+            "nextFundingTimeMs",
+            "T",
+        )
+        if next_funding is not None:
+            data["next_funding_time_ms"] = next_funding
+        return self._event(
+            event_type=self._descriptor.stream_type,
+            event_time_ms=timestamp,
+            msg=msg,
+            data=data,
+        )
+
+    def _parse_funding_rate(
+        self,
+        payload: dict[str, Any],
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        value = payload.get("value")
+        if not isinstance(value, dict):
+            return None
+        info = value.get("info") if isinstance(value.get("info"), dict) else {}
+        funding_rate = _first_float(value, info, "fundingRate", "funding_rate")
+        if funding_rate is None:
+            return None
+        timestamp = (
+            _first_int(
+                value,
+                info,
+                "fundingTimestamp",
+                "fundingTime",
+                "timestamp",
+                "ts",
+            )
+            or msg.received_at_ms
+        )
+        data: dict[str, Any] = {"funding_rate": funding_rate}
+        next_funding = _first_int(
+            value,
+            info,
+            "nextFundingTimestamp",
+            "nextFundingTime",
+        )
+        if next_funding is not None:
+            data["next_funding_time_ms"] = next_funding
+        mark_price = _first_float(value, info, "markPrice", "markPx")
+        if mark_price is not None:
+            data["mark_price"] = mark_price
+        return self._event(
+            event_type=StreamType.FUNDING_RATE,
+            event_time_ms=timestamp,
+            msg=msg,
+            data=data,
+            sequence=timestamp,
+        )
+
+    def _parse_open_interest(
+        self,
+        payload: dict[str, Any],
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        value = payload.get("value")
+        if not isinstance(value, dict):
+            return None
+        info = value.get("info") if isinstance(value.get("info"), dict) else {}
+        amount = _first_float(
+            value,
+            info,
+            "openInterestAmount",
+            "openInterest",
+            "open_interest",
+            "oi",
+        )
+        if amount is None:
+            return None
+        timestamp = _first_int(value, info, "timestamp", "ts") or msg.received_at_ms
+        data: dict[str, Any] = {"open_interest": amount}
+        notional = _first_float(
+            value,
+            info,
+            "openInterestValue",
+            "open_interest_value",
+            "oiCcy",
+        )
+        if notional is not None:
+            data["open_interest_value"] = notional
+        return self._event(
+            event_type=StreamType.OPEN_INTEREST,
+            event_time_ms=timestamp,
+            msg=msg,
+            data=data,
+            sequence=timestamp,
+        )
+
+    def _parse_liquidation(
+        self,
+        payload: dict[str, Any],
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        value = payload.get("value")
+        if not isinstance(value, dict):
+            return None
+        info = value.get("info") if isinstance(value.get("info"), dict) else {}
+        timestamp = _first_int(value, info, "timestamp", "ts", "T") or msg.received_at_ms
+        price = _first_float(value, info, "price", "average", "bkPx", "ap", "p")
+        quantity = _first_float(
+            value,
+            info,
+            "contracts",
+            "amount",
+            "baseValue",
+            "sz",
+            "q",
+        )
+        if price is None or quantity is None:
+            return None
+        side = str(value.get("side") or info.get("side") or info.get("S") or "").lower()
+        data = {
+            "side": side,
+            "price": price,
+            "quantity": quantity,
+            "trade_time_ms": timestamp,
+            "source_quality": "ccxt_unified_public_liquidation",
+        }
+        return self._event(
+            event_type=StreamType.LIQUIDATION,
+            event_time_ms=timestamp,
+            msg=msg,
+            data=data,
+        )
+
+    def _parse_index_kline(
+        self,
+        payload: dict[str, Any],
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        row = payload.get("value")
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            return None
+        try:
+            open_time = int(row[0])
+            interval_ms = _timeframe_ms(self._descriptor.interval)
+            data = {
+                "interval": self._descriptor.interval or "",
+                "open_time_ms": open_time,
+                "close_time_ms": open_time + interval_ms - 1,
+                "premium_index_open": _finite_float(row[1]),
+                "premium_index_high": _finite_float(row[2]),
+                "premium_index_low": _finite_float(row[3]),
+                "premium_index_close": _finite_float(row[4]),
+            }
+        except (TypeError, ValueError):
+            return None
+        return self._event(
+            event_type=StreamType.PREMIUM_INDEX,
+            event_time_ms=open_time,
+            msg=msg,
+            data=data,
+            sequence=open_time,
         )
 
 
@@ -544,3 +796,25 @@ def _non_negative_int(value: Any) -> int | None:
 def _positive_int(value: Any) -> int | None:
     number = _non_negative_int(value)
     return number if number is not None and number > 0 else None
+
+
+def _first_float(*mappings_and_keys: Any) -> float | None:
+    mappings = [item for item in mappings_and_keys if isinstance(item, dict)]
+    keys = [item for item in mappings_and_keys if isinstance(item, str)]
+    for mapping in mappings:
+        for key in keys:
+            value = _optional_float(mapping.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _first_int(*mappings_and_keys: Any) -> int | None:
+    mappings = [item for item in mappings_and_keys if isinstance(item, dict)]
+    keys = [item for item in mappings_and_keys if isinstance(item, str)]
+    for mapping in mappings:
+        for key in keys:
+            value = _non_negative_int(mapping.get(key))
+            if value is not None:
+                return value
+    return None

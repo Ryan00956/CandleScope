@@ -607,10 +607,14 @@ def test_kline_gap_uses_fixed_interval_and_strict_open_time_sequence() -> None:
     asyncio.run(run())
 
 
-def test_recovery_is_noop_when_ccxt_transport_is_disabled() -> None:
+def test_recovery_is_noop_when_primary_ccxt_transport_is_disabled() -> None:
     async def run() -> None:
         transport = _FakeTransport([_agg_payload(11)])
-        layer = RecoveryLayer(IngestionConfig(), transport, _agg_descriptor())
+        layer = RecoveryLayer(
+            IngestionConfig(ccxt_unified_stream_enabled=False),
+            transport,
+            _agg_descriptor(),
+        )
         emitted: list[MarketEvent] = []
         gaps: list[GapMarker] = []
         layer.on_event(_append_async(emitted))

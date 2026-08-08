@@ -134,6 +134,7 @@ class CcxtRuntime:
         cleaner = getattr(self.exchange, "clean_ws_data", None)
         if not callable(closer) or not callable(cleaner):
             raise TypeError("CCXT exchange does not expose websocket cache cleanup")
+        await self._close_profile_state()
         await closer()
         cleaner()
         self._websocket_generation += 1
@@ -146,7 +147,18 @@ class CcxtRuntime:
             self._closed = True
             self._raw_subscribers.clear()
             self._lifecycle_subscribers.clear()
-            await close_ccxt_exchange(self.exchange)
+            try:
+                await self._close_profile_state()
+            finally:
+                await close_ccxt_exchange(self.exchange)
+
+    async def _close_profile_state(self) -> None:
+        close = getattr(self.profile, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     def snapshot(self) -> dict[str, Any]:
         return {

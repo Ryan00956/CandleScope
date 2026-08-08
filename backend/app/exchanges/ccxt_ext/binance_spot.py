@@ -1,4 +1,4 @@
-"""Raw-observable CCXT Pro Binance Spot class for shadow qualification."""
+"""Raw-observable pinned CCXT Pro Binance Spot client."""
 
 from __future__ import annotations
 
@@ -21,9 +21,8 @@ _HookedBinanceSpot = build_hooked_exchange_class(
 class CandleScopeBinanceSpot(_HookedBinanceSpot):  # type: ignore[misc, valid-type]
     """Pinned Binance Spot client that preserves complete decoded payloads.
 
-    This class is currently used by the qualification matrix only.  Production
-    provider admission remains separately disabled until Spot recovery and
-    full-order-book integration gates are complete.
+    Production strict K-line, aggregate-trade, and full-depth sessions use this
+    class; qualification tools exercise the same transport.
     """
 
     def open(self) -> None:

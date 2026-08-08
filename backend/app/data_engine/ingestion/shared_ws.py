@@ -6,7 +6,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from app.core import config as app_config
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
@@ -170,6 +170,7 @@ class SharedMultiplexHub:
         market_type: str,
         symbol: str,
         *,
+        protocol: Any | None = None,
         shard_index: int = 0,
         max_descriptors: int | None = None,
     ) -> None:
@@ -186,7 +187,7 @@ class SharedMultiplexHub:
 
         bootstrap_default_adapters()
         self._plugin = get_exchange_registry().get_plugin(exchange)
-        self._protocol = self._plugin.protocol()
+        self._protocol = protocol or self._plugin.protocol()
 
         self._subscribers: dict[int, _Subscriber] = {}
         self._reserved_descriptors: set[str] = set()

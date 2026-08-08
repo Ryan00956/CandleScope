@@ -42,6 +42,18 @@ _PUBLIC_METHODS = (
     "watchTrades",
     "watchOrderBook",
     "watchTicker",
+    "fetchMarkPrice",
+    "watchMarkPrice",
+    "fetchFundingRate",
+    "fetchFundingRateHistory",
+    "watchFundingRate",
+    "fetchOpenInterest",
+    "fetchOpenInterestHistory",
+    "fetchLiquidations",
+    "watchLiquidations",
+    "fetchMarkOHLCV",
+    "fetchIndexOHLCV",
+    "fetchPremiumIndexOHLCV",
 )
 _BASE_MARKET_TYPES = ("spot", "swap", "future", "option")
 _CONTRACT_MARKET_TYPES = frozenset({"swap", "future"})
@@ -74,6 +86,9 @@ class CcxtCatalogEntry:
                 "watchTrades",
                 "watchOrderBook",
                 "watchTicker",
+                "watchMarkPrice",
+                "watchFundingRate",
+                "watchLiquidations",
             )
         )
 
@@ -153,6 +168,24 @@ def ccxt_catalog_summary() -> dict[str, Any]:
             entry.supports("watchOrderBook") for entry in catalog
         ),
         "watch_ticker": sum(entry.supports("watchTicker") for entry in catalog),
+        "watch_mark_price": sum(
+            entry.supports("watchMarkPrice") for entry in catalog
+        ),
+        "watch_funding_rate": sum(
+            entry.supports("watchFundingRate") for entry in catalog
+        ),
+        "watch_liquidations": sum(
+            entry.supports("watchLiquidations") for entry in catalog
+        ),
+        "fetch_funding_rate_history": sum(
+            entry.supports("fetchFundingRateHistory") for entry in catalog
+        ),
+        "fetch_open_interest": sum(
+            entry.supports("fetchOpenInterest") for entry in catalog
+        ),
+        "fetch_open_interest_history": sum(
+            entry.supports("fetchOpenInterestHistory") for entry in catalog
+        ),
     }
 
 
@@ -335,6 +368,163 @@ def build_ccxt_capabilities(entry: CcxtCatalogEntry) -> ExchangeCapabilities:
             )
         )
 
+    contract_market_types = tuple(
+        market_type
+        for market_type in market_types
+        if market_selection_parts(market_type)[0] in _CONTRACT_MARKET_TYPES
+    )
+    fetch_mark = entry.supports("fetchMarkPrice")
+    watch_mark = entry.supports("watchMarkPrice") and entry.pro
+    if contract_market_types and (fetch_mark or watch_mark):
+        transports: list[TransportMode] = []
+        if watch_mark:
+            transports.append(TransportMode.PLUGIN_STREAM)
+        if fetch_mark:
+            transports.append(TransportMode.REST_POLL)
+        for channel, fields, limitations in (
+            (MarketChannel.MARK_PRICE, ("mark_price",), ()),
+            (
+                MarketChannel.INDEX_PRICE,
+                ("index_price",),
+                ("Index price availability is revalidated from each CCXT result",),
+            ),
+        ):
+            channels.append(
+                MarketChannelCapability(
+                    channel=channel,
+                    market_types=contract_market_types,
+                    realtime=True,
+                    realtime_transports=tuple(transports),
+                    delivery=DeliveryClass.LATEST,
+                    snapshot=True,
+                    available_fields=fields,
+                    connection_model=(
+                        "plugin_sidecar" if watch_mark else "polling_only"
+                    ),
+                    known_limitations=limitations,
+                )
+            )
+
+    fetch_funding = entry.supports("fetchFundingRate")
+    fetch_funding_history = entry.supports("fetchFundingRateHistory")
+    watch_funding = entry.supports("watchFundingRate") and entry.pro
+    funding_realtime = watch_funding or fetch_funding
+    if contract_market_types and (funding_realtime or fetch_funding_history):
+        transports: list[TransportMode] = []
+        if watch_funding:
+            transports.append(TransportMode.PLUGIN_STREAM)
+        if fetch_funding:
+            transports.append(TransportMode.REST_POLL)
+        channels.append(
+            MarketChannelCapability(
+                channel=MarketChannel.FUNDING_RATE,
+                market_types=contract_market_types,
+                realtime=funding_realtime,
+                history=fetch_funding_history,
+                realtime_transports=tuple(transports),
+                history_transports=(
+                    (TransportMode.REST_HISTORY,) if fetch_funding_history else ()
+                ),
+                delivery=DeliveryClass.LATEST,
+                snapshot=True,
+                available_fields=("funding_rate", "next_funding_time_ms"),
+                connection_model=(
+                    "plugin_sidecar"
+                    if watch_funding
+                    else "polling_only"
+                ),
+                known_limitations=(
+                    "Funding timestamps and future rates vary by exchange",
+                ),
+                history_policy=(
+                    HistoryAvailabilityPolicy(
+                        cadence=HistoryCadence.SCHEDULED,
+                        empty_page_semantics=(
+                            HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                        ),
+                        calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                        timezone="UTC",
+                        max_page_size=entry.history_limit,
+                    )
+                    if fetch_funding_history
+                    else None
+                ),
+            )
+        )
+
+    fetch_open_interest = entry.supports("fetchOpenInterest")
+    fetch_open_interest_history = entry.supports("fetchOpenInterestHistory")
+    if contract_market_types and (
+        fetch_open_interest or fetch_open_interest_history
+    ):
+        channels.append(
+            MarketChannelCapability(
+                channel=MarketChannel.OPEN_INTEREST,
+                market_types=contract_market_types,
+                realtime=fetch_open_interest,
+                history=fetch_open_interest_history,
+                realtime_transports=(
+                    (TransportMode.REST_POLL,) if fetch_open_interest else ()
+                ),
+                history_transports=(
+                    (TransportMode.REST_HISTORY,)
+                    if fetch_open_interest_history
+                    else ()
+                ),
+                delivery=DeliveryClass.LATEST,
+                snapshot=True,
+                available_fields=("open_interest", "open_interest_value"),
+                connection_model="polling_only",
+                known_limitations=(
+                    "Pinned CCXT exposes open interest through REST for this exchange",
+                ),
+                history_policy=(
+                    HistoryAvailabilityPolicy(
+                        cadence=HistoryCadence.REGULAR,
+                        empty_page_semantics=(
+                            HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                        ),
+                        calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                        timezone="UTC",
+                        max_page_size=entry.history_limit,
+                    )
+                    if fetch_open_interest_history
+                    else None
+                ),
+            )
+        )
+
+    fetch_liquidations = entry.supports("fetchLiquidations")
+    watch_liquidations = entry.supports("watchLiquidations") and entry.pro
+    if contract_market_types and (fetch_liquidations or watch_liquidations):
+        transports: list[TransportMode] = []
+        if watch_liquidations:
+            transports.append(TransportMode.PLUGIN_STREAM)
+        if fetch_liquidations:
+            transports.append(TransportMode.REST_POLL)
+        channels.append(
+            MarketChannelCapability(
+                channel=MarketChannel.LIQUIDATION,
+                market_types=contract_market_types,
+                realtime=True,
+                realtime_transports=tuple(transports),
+                delivery=DeliveryClass.APPEND,
+                sequence="none",
+                available_fields=(
+                    "side",
+                    "price",
+                    "quantity",
+                    "trade_time_ms",
+                ),
+                connection_model=(
+                    "plugin_sidecar" if watch_liquidations else "polling_only"
+                ),
+                known_limitations=(
+                    "Public liquidation feeds can be lossy and have no contiguous sequence",
+                ),
+            )
+        )
+
     return ExchangeCapabilities(
         exchange=entry.exchange_id,
         name=entry.name,
@@ -356,6 +546,7 @@ def build_ccxt_capabilities(entry: CcxtCatalogEntry) -> ExchangeCapabilities:
             f"ccxt.version.{SUPPORTED_CCXT_VERSION}",
             "capability.runtime_market_validation",
             "orderbook.ccxt_managed_snapshot",
+            "derivatives.ccxt_unified",
         ],
         limits={
             "ccxt.version": SUPPORTED_CCXT_VERSION,

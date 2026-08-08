@@ -1,4 +1,4 @@
-"""Raw-observable pinned CCXT Pro OKX client for shadow qualification."""
+"""Raw-observable pinned CCXT Pro OKX clients."""
 
 from __future__ import annotations
 
@@ -51,11 +51,11 @@ class _OwnedOkxSession:
 
 
 class CandleScopeOkx(_OwnedOkxSession, _HookedOkx):  # type: ignore[misc, valid-type]
-    """OKX Swap client used only by the profile qualification matrix."""
+    """OKX Swap client used by production raw profiles and qualification."""
 
 
 class CandleScopeOkxSpot(  # type: ignore[misc, valid-type]
     _OwnedOkxSession,
     _HookedOkxSpot,
 ):
-    """OKX Spot client used only by the profile qualification matrix."""
+    """OKX Spot client used by production raw profiles and qualification."""

@@ -554,7 +554,7 @@ class RecoveryLayer:
 
     def _is_enabled(self) -> bool:
         return (
-            bool(self._cfg.ccxt_stream_enabled)
+            bool(self._cfg.ccxt_unified_stream_enabled)
             and self._descriptor.exchange.strip().lower() == "binance"
             and self._descriptor.market_type.strip().lower() == "futures"
             and self._descriptor.stream_type in _SUPPORTED_STREAMS

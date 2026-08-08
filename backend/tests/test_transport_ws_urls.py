@@ -6,7 +6,7 @@ from app.data_engine.ingestion.transport import TransportLayer
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
 
-def test_okx_ticker_uses_public_ws_url() -> None:
+def test_okx_ticker_has_no_native_ws_url() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
     adapter = registry.get("okx")
@@ -19,15 +19,12 @@ def test_okx_ticker_uses_public_ws_url() -> None:
         market_type="spot",
     )
 
-    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == [
-        "wss://ws.okx.com:8443/ws/v5/public",
-    ]
-    assert registry.get_plugin("okx").protocol().ws_base_urls(descriptor) == [
-        "wss://ws.okx.com:8443/ws/v5/public",
-    ]
+    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == []
+    assert transport.create_provider_session(descriptor) is not None
+    assert registry.get_plugin("okx").protocol().ws_base_urls(descriptor) == []
 
 
-def test_okx_kline_keeps_business_ws_url() -> None:
+def test_okx_kline_has_no_native_ws_url() -> None:
     bootstrap_default_adapters()
     adapter = get_exchange_registry().get("okx")
     transport = TransportLayer(IngestionConfig())
@@ -40,12 +37,11 @@ def test_okx_kline_keeps_business_ws_url() -> None:
         market_type="spot",
     )
 
-    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == [
-        "wss://ws.okx.com:8443/ws/v5/business",
-    ]
+    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == []
+    assert transport.create_provider_session(descriptor) is not None
 
 
-def test_binance_futures_kline_uses_market_ws_route() -> None:
+def test_binance_futures_kline_has_no_native_ws_route() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
     adapter = registry.get("binance")
@@ -59,17 +55,12 @@ def test_binance_futures_kline_uses_market_ws_route() -> None:
         market_type="futures",
     )
 
-    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "futures") == [
-        "wss://fstream.binance.com/market/ws",
-        "wss://fstream.binance.me/market/ws",
-    ]
-    assert registry.get_plugin("binance").protocol().ws_base_urls(descriptor) == [
-        "wss://fstream.binance.com/market/ws",
-        "wss://fstream.binance.me/market/ws",
-    ]
+    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "futures") == []
+    assert transport.create_provider_session(descriptor) is not None
+    assert registry.get_plugin("binance").protocol().ws_base_urls(descriptor) == []
 
 
-def test_binance_spot_kline_keeps_spot_ws_route() -> None:
+def test_binance_spot_kline_has_no_native_ws_route() -> None:
     bootstrap_default_adapters()
     adapter = get_exchange_registry().get("binance")
     transport = TransportLayer(IngestionConfig())
@@ -82,8 +73,5 @@ def test_binance_spot_kline_keeps_spot_ws_route() -> None:
         market_type="spot",
     )
 
-    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == [
-        "wss://stream.binance.com:9443/ws",
-        "wss://data-stream.binance.vision/ws",
-        "wss://stream.binance.me:9443/ws",
-    ]
+    assert transport._get_ws_base_urls_for_descriptor(adapter, descriptor, "spot") == []
+    assert transport.create_provider_session(descriptor) is not None

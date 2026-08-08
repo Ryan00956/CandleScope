@@ -88,7 +88,7 @@ class CandleScopeBinanceUSDM(CcxtBinanceUSDM):
         if rate_limit_policy is None:
             from app.exchanges.plugins.binance.plugin import BinancePlugin
 
-            rate_limit_policy = BinancePlugin().rate_limit_policy()
+            rate_limit_policy = BinancePlugin._rate_limit_policy()
         self._candlescope_rate_limit_policy = rate_limit_policy
         self._candlescope_rest_observation: contextvars.ContextVar[
             _RestObservation | None
@@ -155,6 +155,16 @@ class CandleScopeBinanceUSDM(CcxtBinanceUSDM):
     def handle_order_book(self, client: Any, message: Any) -> Any:
         self._emit_raw("depth", message)
         return super().handle_order_book(client, message)
+
+    def handle_mark_prices(self, client: Any, message: Any) -> Any:
+        values = message if isinstance(message, list) else [message]
+        for value in values:
+            self._emit_raw("markPriceUpdate", value)
+        return super().handle_mark_prices(client, message)
+
+    def handle_liquidation(self, client: Any, message: Any) -> Any:
+        self._emit_raw("forceOrder", message)
+        return super().handle_liquidation(client, message)
 
     def on_connected(self, client: Any, message: Any = None) -> Any:
         self._emit_lifecycle("connected", client)

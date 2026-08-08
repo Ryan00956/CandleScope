@@ -922,12 +922,18 @@ class LiquidationService:
             and capability.delivery is DeliveryClass.APPEND
             and capability.sequence == "none"
             and capability.resync == "none"
-            and capability.supports_transport(TransportMode.WEBSOCKET)
+            and any(
+                capability.supports_transport(transport)
+                for transport in (
+                    TransportMode.WEBSOCKET,
+                    TransportMode.PLUGIN_STREAM,
+                )
+            )
         )
         if not supported:
             raise ValueError(
                 f"{identity[0]}:{identity[1]}:liquidation does not support "
-                "sampled append-only WebSocket capture",
+                "sampled append-only streaming capture",
             )
         return identity
 

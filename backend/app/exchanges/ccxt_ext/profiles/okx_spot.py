@@ -1,4 +1,4 @@
-"""OKX Spot profile for CCXT shadow qualification."""
+"""OKX Spot raw profile for the primary CCXT provider."""
 
 from __future__ import annotations
 

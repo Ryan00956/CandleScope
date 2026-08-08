@@ -1582,7 +1582,13 @@ class TradeFlowService:
             and capability.delivery is DeliveryClass.APPEND
             and capability.sequence == "monotonic_id"
             and capability.resync == "snapshot_replay"
-            and capability.supports_transport(TransportMode.WEBSOCKET)
+            and any(
+                capability.supports_transport(transport)
+                for transport in (
+                    TransportMode.WEBSOCKET,
+                    TransportMode.PLUGIN_STREAM,
+                )
+            )
             and capability.supports_transport(
                 TransportMode.REST_HISTORY,
                 history=True,

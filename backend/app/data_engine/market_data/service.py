@@ -2085,7 +2085,8 @@ class MarketDataService:
             request,
             config=getattr(self._factory, "config", None),
         )
-        if spec is None:
+        provider_fetch = getattr(plugin, "fetch_history_with_config", None)
+        if spec is None and not callable(provider_fetch):
             raise ValueError(f"No REST endpoint for {descriptor.key}")
         return await self._factory.fetch_market(
             descriptor,

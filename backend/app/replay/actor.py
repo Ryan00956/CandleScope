@@ -4155,11 +4155,15 @@ class ReplaySessionActor:
         ):
             return True
         position = state.get("position")
-        return isinstance(position, Mapping) and position.get("quantity") not in {
-            None,
-            "0",
-            0,
-        }
+        if not isinstance(position, Mapping):
+            return False
+        if position.get("position_mode") == "HEDGE":
+            return any(
+                isinstance(position.get(leg), Mapping)
+                and position[leg].get("quantity") not in {None, "0", 0}
+                for leg in ("long", "short")
+            )
+        return position.get("quantity") not in {None, "0", 0}
 
     def _compute_state_hash(
         self,

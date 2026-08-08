@@ -3,19 +3,59 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from ..errors import ReplayDomainError, ReplayErrorCode
 from .models import (
     Account,
     BrokerConfig,
+    OrderCapacityRequest,
     OrderRequest,
     OrderSide,
     Position,
+    PositionBook,
+    PositionMode,
+    PositionSide,
+    PositionState,
     ReplayOrder,
     canonical_decimal,
     decimal_to_string,
 )
+
+
+class OrderRiskContext(Protocol):
+    side: OrderSide
+    reduce_only: bool
+    limit_price: str | None
+    stop_price: str | None
+    leverage: str | None
+    position_side: PositionSide | None
+
+
+def position_for_order(
+    *,
+    config: BrokerConfig,
+    request: OrderRiskContext,
+    position: PositionState,
+) -> Position:
+    if config.position_mode is PositionMode.ONE_WAY:
+        if request.position_side is not None:
+            _order_rejected("position_side is only valid in HEDGE mode")
+        if not isinstance(position, Position):
+            raise TypeError("ONE_WAY broker requires a net position")
+        return position
+    if request.position_side is None:
+        _order_rejected("position_side is required in HEDGE mode")
+    if not isinstance(position, PositionBook):
+        raise TypeError("HEDGE broker requires a position book")
+    expected_side = (
+        request.position_side.closing_order_side
+        if request.reduce_only
+        else request.position_side.opening_order_side
+    )
+    if request.side is not expected_side:
+        _order_rejected("order side does not match the selected hedge leg")
+    return position.leg(request.position_side)
 
 
 def decimal_multiple(value: Decimal, step: Decimal) -> bool:
@@ -67,7 +107,7 @@ def fee_for_fill(
     return decimal_to_string(fee, field_name="fee")
 
 
-def order_reference_price(request: OrderRequest, mark_price: str) -> Decimal:
+def order_reference_price(request: OrderRiskContext, mark_price: str) -> Decimal:
     if request.limit_price is not None:
         return Decimal(request.limit_price)
     if request.stop_price is not None:
@@ -83,16 +123,35 @@ def order_reference_price_for_existing(order: ReplayOrder, mark_price: str) -> D
     return Decimal(mark_price)
 
 
+def effective_order_leverage(request: OrderRiskContext, config: BrokerConfig) -> Decimal:
+    """Resolve request leverage clamped to the session max leverage ceiling."""
+
+    maximum = Decimal(config.limits.max_leverage)
+    if request.leverage is None:
+        return maximum
+    leverage = Decimal(request.leverage)
+    if leverage < 1:
+        _order_rejected("leverage must be at least 1")
+    if leverage > maximum:
+        _risk_rejected("leverage exceeds session max_leverage")
+    return leverage
+
+
 def validate_order_risk(
     *,
     config: BrokerConfig,
     request: OrderRequest,
-    position: Position,
+    position: PositionState,
     account: Account,
     open_orders: Iterable[ReplayOrder],
 ) -> str:
     """Validate one request and return its conservative margin reservation."""
 
+    target_position = position_for_order(
+        config=config,
+        request=request,
+        position=position,
+    )
     quantity = Decimal(request.quantity)
     filters = config.instrument
     limits = config.limits
@@ -123,7 +182,7 @@ def validate_order_risk(
         _order_rejected("order notional is outside instrument bounds")
 
     if request.reduce_only:
-        position_quantity = Decimal(position.quantity)
+        position_quantity = Decimal(target_position.quantity)
         if position_quantity == 0:
             _order_rejected("reduce-only order requires an open position")
         expected_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
@@ -133,7 +192,7 @@ def validate_order_risk(
             _order_rejected("reduce-only quantity exceeds the position")
         return "0"
 
-    existing_exposure = abs(Decimal(position.quantity)) * Decimal(position.mark_price)
+    existing_exposure = Decimal(position.notional)
     for order in open_orders:
         if order.reduce_only or order.status.terminal:
             continue
@@ -144,17 +203,110 @@ def validate_order_risk(
     if projected_exposure > Decimal(limits.max_position_notional):
         _risk_rejected("order would exceed max_position_notional")
 
-    reservation = quote_round_up(notional / Decimal(limits.max_leverage), config)
+    leverage = effective_order_leverage(request, config)
+    reservation = quote_round_up(notional / leverage, config)
     if reservation > Decimal(account.available_equity):
         _risk_rejected("insufficient available equity for margin reservation")
     return decimal_to_string(reservation, field_name="reserved_margin")
+
+
+def build_order_capacity(
+    *,
+    config: BrokerConfig,
+    request: OrderCapacityRequest,
+    position: PositionState,
+    account: Account,
+    orders: Iterable[ReplayOrder],
+) -> dict[str, object]:
+    """Calculate order capacity without depending on a draft quantity."""
+
+    all_orders = tuple(orders)
+    open_orders = tuple(
+        order
+        for order in all_orders
+        if order.status.value in {"OPEN", "PARTIALLY_FILLED"}
+    )
+    if len(all_orders) >= config.limits.max_orders:
+        raise ReplayDomainError(
+            ReplayErrorCode.SCAN_LIMIT_EXCEEDED,
+            "broker order capacity exceeded",
+        )
+    if len(open_orders) >= config.limits.max_open_orders:
+        _risk_rejected("open order limit exceeded")
+
+    filters = config.instrument
+    for field_name, value in (
+        ("limit_price", request.limit_price),
+        ("stop_price", request.stop_price),
+    ):
+        if value is not None and not decimal_multiple(
+            Decimal(value),
+            Decimal(filters.price_tick),
+        ):
+            _order_rejected(f"{field_name} is not aligned to instrument tick")
+
+    target_position = position_for_order(
+        config=config,
+        request=request,
+        position=position,
+    )
+    reference = order_reference_price(request, position.mark_price)
+    leverage = effective_order_leverage(request, config)
+    if request.reduce_only:
+        position_quantity = Decimal(target_position.quantity)
+        if position_quantity == 0:
+            _order_rejected("reduce-only order requires an open position")
+        expected_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
+        if request.side is not expected_side:
+            _order_rejected("reduce-only side would increase the position")
+        maximum = abs(position_quantity)
+    else:
+        existing_exposure = Decimal(position.notional)
+        for order in open_orders:
+            if order.reduce_only:
+                continue
+            existing_exposure += Decimal(order.remaining_quantity) * (
+                order_reference_price_for_existing(order, position.mark_price)
+            )
+        notional_capacity = max(
+            Decimal(0),
+            Decimal(config.limits.max_position_notional) - existing_exposure,
+        )
+        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * leverage
+        maximum = min(
+            Decimal(filters.max_quantity),
+            Decimal(config.limits.max_order_quantity),
+            Decimal(filters.max_notional) / reference,
+            notional_capacity / reference,
+            margin_capacity / reference,
+        )
+    maximum = round_to_step(
+        max(Decimal(0), maximum),
+        Decimal(filters.quantity_step),
+        upward=False,
+    )
+    minimum_for_notional = round_to_step(
+        Decimal(filters.min_notional) / reference,
+        Decimal(filters.quantity_step),
+        upward=True,
+    )
+    if maximum < max(Decimal(filters.min_quantity), minimum_for_notional):
+        maximum = Decimal(0)
+    return {
+        "schema_version": "replay.order-capacity.v1",
+        "context": request.to_dict(),
+        "reference_price": decimal_to_string(reference, field_name="reference_price"),
+        "max_quantity": decimal_to_string(maximum, field_name="max_quantity"),
+        "quote_asset": account.quote_asset,
+        "max_leverage": config.limits.max_leverage,
+    }
 
 
 def build_order_preview(
     *,
     config: BrokerConfig,
     request: OrderRequest,
-    position: Position,
+    position: PositionState,
     account: Account,
     orders: Iterable[ReplayOrder],
 ) -> dict[str, object]:
@@ -176,6 +328,21 @@ def build_order_preview(
     if len(open_orders) >= config.limits.max_open_orders:
         _risk_rejected("open order limit exceeded")
 
+    capacity = build_order_capacity(
+        config=config,
+        request=OrderCapacityRequest(
+            side=request.side,
+            order_type=request.order_type,
+            reduce_only=request.reduce_only,
+            limit_price=request.limit_price,
+            stop_price=request.stop_price,
+            leverage=request.leverage,
+            position_side=request.position_side,
+        ),
+        position=position,
+        account=account,
+        orders=all_orders,
+    )
     reservation = validate_order_risk(
         config=config,
         request=request,
@@ -193,37 +360,6 @@ def build_order_preview(
     fee = fee_for_fill(notional=estimated_notional, maker=False, config=config)
     available_after = Decimal(account.available_equity) - Decimal(reservation)
 
-    if request.reduce_only:
-        maximum = abs(Decimal(position.quantity))
-    else:
-        existing_exposure = abs(Decimal(position.quantity)) * Decimal(
-            position.mark_price
-        )
-        for order in open_orders:
-            if order.reduce_only:
-                continue
-            existing_exposure += Decimal(order.remaining_quantity) * (
-                order_reference_price_for_existing(order, position.mark_price)
-            )
-        notional_capacity = max(
-            Decimal(0),
-            Decimal(config.limits.max_position_notional) - existing_exposure,
-        )
-        margin_capacity = max(Decimal(0), Decimal(account.available_equity)) * Decimal(
-            config.limits.max_leverage
-        )
-        maximum = min(
-            Decimal(config.instrument.max_quantity),
-            Decimal(config.limits.max_order_quantity),
-            Decimal(config.instrument.max_notional) / reference,
-            notional_capacity / reference,
-            margin_capacity / reference,
-        )
-    maximum = round_to_step(
-        max(Decimal(0), maximum),
-        Decimal(config.instrument.quantity_step),
-        upward=False,
-    )
     return {
         "schema_version": "replay.order-preview.v1",
         "order": request.to_dict(),
@@ -243,16 +379,18 @@ def build_order_preview(
             available_after,
             field_name="available_equity_after",
         ),
-        "max_quantity": decimal_to_string(
-            maximum,
-            field_name="max_quantity",
-        ),
+        "max_quantity": capacity["max_quantity"],
         "quote_asset": account.quote_asset,
         "max_leverage": config.limits.max_leverage,
     }
 
 
-def mark_position(position: Position, mark_price: str) -> Position:
+def mark_position(position: PositionState, mark_price: str) -> PositionState:
+    if isinstance(position, PositionBook):
+        long = mark_position(position.long, mark_price)
+        short = mark_position(position.short, mark_price)
+        assert isinstance(long, Position) and isinstance(short, Position)
+        return PositionBook(long=long, short=short)
     mark = Decimal(
         canonical_decimal(mark_price, field_name="mark_price", positive=True)
     )
@@ -281,7 +419,7 @@ def mark_position(position: Position, mark_price: str) -> Position:
 def build_account(
     *,
     config: BrokerConfig,
-    position: Position,
+    position: PositionState,
     realized_pnl: str,
     fees_paid: str,
     reserved_margin: str,
@@ -325,7 +463,7 @@ def build_account(
 def validate_trigger_position_notional(
     *,
     config: BrokerConfig,
-    position: Position,
+    position: PositionState,
 ) -> None:
     notional = Decimal(position.notional)
     if notional > Decimal(config.instrument.max_notional) or notional > Decimal(

@@ -34,6 +34,7 @@ from app.replay.training.models import (
     FundingMode,
     IntegrityMode,
     MarginMode,
+    PositionMode,
     ReplaySource,
     StartMode,
     TimeDisclosurePolicy,
@@ -273,6 +274,7 @@ class TrainingRunPreparationPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
     account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_history_ref: AccountHistoryRefPayload | None = None
@@ -308,6 +310,7 @@ class TrainingRunSetupPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
     account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
@@ -357,6 +360,8 @@ class ReplayOrderRequestPayload(_StrictModel):
     reduce_only: bool
     limit_price: str | None = Field(default=None, min_length=1, max_length=128)
     stop_price: str | None = Field(default=None, min_length=1, max_length=128)
+    leverage: str | None = Field(default=None, min_length=1, max_length=128)
+    position_side: Literal["LONG", "SHORT"] | None = None
 
 
 class ReplayTradePlanDraftPayload(_StrictModel):
@@ -375,6 +380,29 @@ class ReplayOrderPreviewPayload(_StrictModel):
     position_intent: Literal["NET", "OPEN"]
     order: ReplayOrderRequestPayload
     trade_plan: ReplayTradePlanDraftPayload | None = None
+
+
+class ReplayOrderCapacityContextPayload(_StrictModel):
+    side: Literal["BUY", "SELL"]
+    order_type: Literal[
+        "MARKET",
+        "LIMIT",
+        "STOP_MARKET",
+        "TAKE_PROFIT_MARKET",
+    ]
+    reduce_only: bool
+    limit_price: str | None = Field(default=None, min_length=1, max_length=128)
+    stop_price: str | None = Field(default=None, min_length=1, max_length=128)
+    leverage: str | None = Field(default=None, min_length=1, max_length=128)
+    position_side: Literal["LONG", "SHORT"] | None = None
+
+
+class ReplayOrderCapacityPayload(_StrictModel):
+    protocol: Literal["replay.v2"]
+    expected_revision: int = Field(ge=0, le=MAX_COUNTER)
+    expected_cursor: TrainingCursorPayload
+    position_intent: Literal["NET", "OPEN"]
+    context: ReplayOrderCapacityContextPayload
 
 
 class ReplayReviewPayload(_StrictModel):
@@ -1084,6 +1112,26 @@ async def preview_replay_v2_order(
             if payload.trade_plan is None
             else payload.trade_plan.model_dump(mode="json")
         ),
+    )
+
+
+@router.post(
+    "/runs/{run_id}/order-capacity",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def replay_v2_order_capacity(
+    request: Request,
+    run_id: str,
+    payload: ReplayOrderCapacityPayload,
+) -> dict[str, object]:
+    return await _training_service(request).order_capacity(
+        run_id,
+        expected_revision=payload.expected_revision,
+        expected_cursor=TrainingCursor.from_dict(
+            payload.expected_cursor.model_dump(mode="json")
+        ),
+        position_intent=payload.position_intent,
+        context=payload.context.model_dump(mode="json"),
     )
 
 

@@ -41,12 +41,14 @@ from .broker.models import (
     BrokerConfig,
     BrokerLimits,
     InstrumentFilters,
+    OrderCapacityRequest,
     OrderRequest,
     PAPER_LINEAR_EXECUTION_MODE,
-    Position,
+    PositionMode,
     ReplayOrder,
+    position_state_from_dict,
 )
-from .broker.risk import build_order_preview
+from .broker.risk import build_order_capacity, build_order_preview
 from .canonical import canonical_json_bytes, canonical_sha256
 from .checkpoints import CheckpointCodec, CheckpointError
 from .catalog import (
@@ -1204,7 +1206,7 @@ class ReplayService:
                 preview = build_order_preview(
                     config=handle.broker_config,
                     request=request,
-                    position=Position.from_dict(raw_position),
+                    position=position_state_from_dict(raw_position),
                     account=Account(**raw_account),  # type: ignore[arg-type]
                     orders=(ReplayOrder.from_dict(item) for item in raw_orders),
                 )
@@ -1224,6 +1226,60 @@ class ReplayService:
                 "cursor": snapshot["cursor"],
                 "execution_fidelity": self._execution_fidelity(handle.config),
                 "preview": preview,
+            }
+
+    async def order_capacity(
+        self,
+        session_id: str,
+        context: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Return quantity-independent capacity from an actor snapshot."""
+
+        async with self._lease_handle(session_id) as handle:
+            snapshot = await handle.actor.public_snapshot()
+            components = snapshot.get("components")
+            if not isinstance(components, Mapping):
+                raise ReplayDomainError(
+                    ReplayErrorCode.PERSISTENCE_DEGRADED,
+                    "replay broker projection is unavailable",
+                )
+            raw_orders = components.get("orders")
+            raw_position = components.get("position")
+            raw_account = components.get("account")
+            if (
+                not isinstance(raw_orders, list)
+                or not isinstance(raw_position, Mapping)
+                or not isinstance(raw_account, Mapping)
+            ):
+                raise ReplayDomainError(
+                    ReplayErrorCode.PERSISTENCE_DEGRADED,
+                    "replay broker projection is invalid",
+                )
+            try:
+                request = OrderCapacityRequest.from_mapping(context)
+                capacity = build_order_capacity(
+                    config=handle.broker_config,
+                    request=request,
+                    position=position_state_from_dict(raw_position),
+                    account=Account(**raw_account),  # type: ignore[arg-type]
+                    orders=(ReplayOrder.from_dict(item) for item in raw_orders),
+                )
+            except ReplayDomainError:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "order capacity violates the order contract",
+                ) from exc
+            return {
+                "protocol": REPLAY_PROTOCOL,
+                "session_id": handle.session_id,
+                "revision": snapshot["revision"],
+                "state": snapshot["state"],
+                "state_hash": snapshot["state_hash"],
+                "cursor": snapshot["cursor"],
+                "execution_fidelity": self._execution_fidelity(handle.config),
+                "capacity": capacity,
             }
 
     async def plan_source_chunk(
@@ -3648,6 +3704,7 @@ class ReplayService:
             taker_bps=config.fee_model.taker_bps,
             market_slippage_bps=config.slippage_model.market_bps,
             initial_mark_price=first.open,
+            position_mode=PositionMode(config.position_mode),
             instrument=InstrumentFilters(
                 price_tick=tick,
                 quantity_step="0.00000001",

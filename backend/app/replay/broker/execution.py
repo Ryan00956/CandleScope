@@ -18,8 +18,10 @@ from ..models import validate_counter, validate_identifier
 from ..sources.trade_reader import ReplayTrade
 from .ledger import LedgerBook, LedgerEntry
 from .models import (
+    AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
     AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION,
     AGG_TRADE_TAPE_MODEL_VERSION,
+    BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
     BAR_TOUCH_OR_TAPE_MODEL_VERSION,
     BROKER_MODEL_VERSION,
     PAPER_LINEAR_EXECUTION_MODE,
@@ -33,21 +35,28 @@ from .models import (
     LedgerAccount,
     LedgerKind,
     LiquidityRole,
+    OrderCapacityRequest,
     OrderRequest,
     OrderSide,
     OrderStatus,
     OrderType,
     Position,
+    PositionBook,
     PositionFillResult,
+    PositionMode,
+    PositionSide,
+    PositionState,
     ReplayFill,
     ReplayOrder,
     WarningCode,
     canonical_decimal,
     decimal_to_string,
     exact_keys,
+    position_state_from_dict,
 )
 from .risk import (
     adverse_market_price,
+    build_order_capacity,
     build_order_preview,
     build_account,
     decimal_multiple,
@@ -158,7 +167,7 @@ def _pack_final_state_bars(
 class _WorkingState:
     orders: dict[str, ReplayOrder]
     ledger: LedgerBook | None
-    position: Position
+    position: PositionState
     fills: list[ReplayFill]
     closed_trades: list[ClosedTrade]
     warnings: list[BrokerWarning]
@@ -287,12 +296,24 @@ class ConservativeBarBroker:
         }:
             raise ValueError("execution_mode is unsupported")
         self._execution_mode = execution_mode
+        if (
+            config.position_mode is PositionMode.HEDGE
+            and execution_mode != TOUCH_OR_TAPE_EXECUTION_MODE
+        ):
+            raise ValueError("HEDGE mode requires touch_or_tape_v2 execution")
         if execution_mode == TOUCH_OR_TAPE_EXECUTION_MODE:
-            self._model_version = (
-                AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION
-                if isinstance(bar_builder, TradeReplayBarBuilder)
-                else BAR_TOUCH_OR_TAPE_MODEL_VERSION
-            )
+            if config.position_mode is PositionMode.HEDGE:
+                self._model_version = (
+                    AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION
+                    if isinstance(bar_builder, TradeReplayBarBuilder)
+                    else BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION
+                )
+            else:
+                self._model_version = (
+                    AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION
+                    if isinstance(bar_builder, TradeReplayBarBuilder)
+                    else BAR_TOUCH_OR_TAPE_MODEL_VERSION
+                )
         else:
             self._model_version = (
                 AGG_TRADE_TAPE_MODEL_VERSION
@@ -339,7 +360,7 @@ class ConservativeBarBroker:
         return self._ledger.entries
 
     @property
-    def position(self) -> Position:
+    def position(self) -> PositionState:
         return self._position
 
     @property
@@ -437,6 +458,17 @@ class ConservativeBarBroker:
             orders=self.orders,
         )
 
+    def order_capacity(self, request: OrderCapacityRequest) -> Mapping[str, object]:
+        if not isinstance(request, OrderCapacityRequest):
+            raise TypeError("request must be OrderCapacityRequest")
+        return build_order_capacity(
+            config=self.config,
+            request=request,
+            position=self._position,
+            account=self._account,
+            orders=self.orders,
+        )
+
     def place_order(
         self,
         request: OrderRequest,
@@ -509,6 +541,7 @@ class ConservativeBarBroker:
             status_reason=None,
             status_history=(OrderStatus.NEW, OrderStatus.OPEN),
             model_version=self._model_version,
+            position_side=request.position_side,
         )
         orders = dict(self._orders)
         orders[order.order_id] = order
@@ -526,7 +559,7 @@ class ConservativeBarBroker:
                 event_time_ms=event_time_ms,
                 trigger=immediate,
             )
-            if filled and Decimal(working.position.quantity) == 0:
+            if filled:
                 self._cancel_orphan_reduce_orders(
                     working,
                     source_sequence=sequence,
@@ -598,10 +631,11 @@ class ConservativeBarBroker:
                 request.side is not existing.side
                 or request.order_type is not existing.order_type
                 or request.reduce_only is not existing.reduce_only
+                or request.position_side is not existing.position_side
             ):
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
-                    "replacement must preserve side, order_type, and reduce_only",
+                    "replacement must preserve side, order_type, reduce_only, and position_side",
                 )
             canceled = self.cancel_order(
                 order_id,
@@ -681,17 +715,27 @@ class ConservativeBarBroker:
         command_id: str,
         accepted_source_sequence: int | None = None,
         created_time_ms: int | None = None,
+        position_side: PositionSide | str | None = None,
     ) -> ReplayOrder:
-        if Decimal(self._position.quantity) == 0:
+        normalized_position_side = self._normalize_position_side(position_side)
+        target_position = self._position_for_side(
+            self._position,
+            normalized_position_side,
+        )
+        if Decimal(target_position.quantity) == 0:
             raise ReplayDomainError(
                 ReplayErrorCode.ORDER_REJECTED,
                 "close_position requires an open position",
             )
         close_quantity = quantity or decimal_to_string(
-            abs(Decimal(self._position.quantity)),
+            abs(Decimal(target_position.quantity)),
             field_name="close quantity",
         )
-        side = OrderSide.SELL if Decimal(self._position.quantity) > 0 else OrderSide.BUY
+        side = (
+            OrderSide.SELL
+            if Decimal(target_position.quantity) > 0
+            else OrderSide.BUY
+        )
         return self.place_order(
             OrderRequest(
                 client_order_id=f"close-{self._next_order:010d}",
@@ -699,6 +743,7 @@ class ConservativeBarBroker:
                 order_type=OrderType.MARKET,
                 quantity=close_quantity,
                 reduce_only=True,
+                position_side=normalized_position_side,
             ),
             command_id=command_id,
             accepted_source_sequence=accepted_source_sequence,
@@ -714,12 +759,19 @@ class ConservativeBarBroker:
         command_id: str,
         accepted_source_sequence: int | None = None,
         created_time_ms: int | None = None,
+        leverage: str | None = None,
+        position_side: PositionSide | str | None = None,
     ) -> tuple[ReplayOrder, ...]:
         """Execute an unambiguous market OPEN, CLOSE, or REVERSE action."""
 
         checkpoint = self.snapshot()
         try:
-            position_quantity = Decimal(self._position.quantity)
+            normalized_position_side = self._normalize_position_side(position_side)
+            target_position = self._position_for_side(
+                self._position,
+                normalized_position_side,
+            )
+            position_quantity = Decimal(target_position.quantity)
             if intent == "OPEN":
                 if side is None or quantity is None:
                     raise ReplayDomainError(
@@ -727,7 +779,7 @@ class ConservativeBarBroker:
                         "OPEN requires side and quantity",
                     )
                 normalized_side = OrderSide(side)
-                if position_quantity != 0 and (
+                if self.config.position_mode is PositionMode.ONE_WAY and position_quantity != 0 and (
                     position_quantity > 0
                 ) != (normalized_side is OrderSide.BUY):
                     raise ReplayDomainError(
@@ -741,6 +793,8 @@ class ConservativeBarBroker:
                         order_type=OrderType.MARKET,
                         quantity=quantity,
                         reduce_only=False,
+                        leverage=leverage,
+                        position_side=normalized_position_side,
                     ),
                     command_id=command_id,
                     accepted_source_sequence=accepted_source_sequence,
@@ -759,12 +813,18 @@ class ConservativeBarBroker:
                         command_id=command_id,
                         accepted_source_sequence=accepted_source_sequence,
                         created_time_ms=created_time_ms,
+                        position_side=normalized_position_side,
                     ),
                 )
             if intent != "REVERSE":
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
                     "position intent must be OPEN, CLOSE, or REVERSE",
+                )
+            if self.config.position_mode is PositionMode.HEDGE:
+                raise ReplayDomainError(
+                    ReplayErrorCode.UNSUPPORTED_EXECUTION_MODEL,
+                    "REVERSE is not defined in HEDGE mode; close and open explicit legs",
                 )
             if self._execution_mode != TOUCH_OR_TAPE_EXECUTION_MODE:
                 raise ReplayDomainError(
@@ -799,6 +859,7 @@ class ConservativeBarBroker:
                     order_type=OrderType.MARKET,
                     quantity=quantity,
                     reduce_only=False,
+                    leverage=leverage,
                 ),
                 command_id=command_id,
                 accepted_source_sequence=accepted_source_sequence,
@@ -818,18 +879,21 @@ class ConservativeBarBroker:
         command_id: str,
         accepted_source_sequence: int | None = None,
         created_time_ms: int | None = None,
+        position_side: PositionSide | str | None = None,
     ) -> tuple[ReplayOrder, ...]:
         """Atomically replace this workflow's stop-loss/take-profit orders."""
 
         checkpoint = self.snapshot()
         changed: list[ReplayOrder] = []
         try:
+            normalized_position_side = self._normalize_position_side(position_side)
             for existing in self.open_orders:
                 if (
                     existing.client_order_id.startswith("protection-")
                     and existing.reduce_only
                     and existing.order_type
                     in {OrderType.STOP_MARKET, OrderType.TAKE_PROFIT_MARKET}
+                    and existing.position_side is normalized_position_side
                 ):
                     changed.append(
                         self.cancel_order(
@@ -847,7 +911,11 @@ class ConservativeBarBroker:
                     )
                 return tuple(changed)
 
-            position_quantity = Decimal(self._position.quantity)
+            target_position = self._position_for_side(
+                self._position,
+                normalized_position_side,
+            )
+            position_quantity = Decimal(target_position.quantity)
             if position_quantity == 0:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
@@ -903,6 +971,7 @@ class ConservativeBarBroker:
                             quantity=normalized_quantity,
                             reduce_only=True,
                             stop_price=price,
+                            position_side=normalized_position_side,
                         ),
                         command_id=command_id,
                         accepted_source_sequence=accepted_source_sequence,
@@ -1038,7 +1107,7 @@ class ConservativeBarBroker:
             current_order = working.orders[order.order_id]
             if current_order.status.terminal:
                 continue
-            if Decimal(working.position.quantity) == 0 or not self._reduces_position(
+            if not self._reduces_position(
                 current_order,
                 working.position,
             ):
@@ -1074,7 +1143,7 @@ class ConservativeBarBroker:
                     "entry and adverse exit executed in the same ambiguous BAR",
                 )
                 entry_exit_warned = True
-            if Decimal(working.position.quantity) == 0:
+            if filled:
                 self._cancel_orphan_reduce_orders(
                     working,
                     source_sequence=source_sequence,
@@ -1133,9 +1202,9 @@ class ConservativeBarBroker:
                 OrderStatus.PARTIALLY_FILLED,
             }:
                 continue
-            if order.reduce_only and (
-                Decimal(working.position.quantity) == 0
-                or not self._reduces_position(order, working.position)
+            if order.reduce_only and not self._reduces_position(
+                order,
+                working.position,
             ):
                 self._terminal_order(
                     working,
@@ -1175,7 +1244,7 @@ class ConservativeBarBroker:
             )
             if filled and len(working.new_fills) == fill_count + 1:
                 available -= Decimal(working.new_fills[-1].quantity)
-            if Decimal(working.position.quantity) == 0:
+            if filled:
                 self._cancel_orphan_reduce_orders(
                     working,
                     source_sequence=source_sequence,
@@ -1255,7 +1324,12 @@ class ConservativeBarBroker:
                 bars.append(event)
             self._bar_builder.apply_bars_final_state(bars)
             final_mark = bars[-1].close
-        if self._position.quantity == "0":
+        position_is_flat = (
+            self._position.is_flat
+            if isinstance(self._position, PositionBook)
+            else self._position.quantity == "0"
+        )
+        if position_is_flat:
             if final_mark is None:
                 return {}
             self._position = mark_position(self._position, final_mark)
@@ -1316,7 +1390,6 @@ class ConservativeBarBroker:
         if not open_orders:
             return len(events)
         first_sequence = self._bar_builder.replay_events_applied + 1
-        position_quantity = Decimal(self._position.quantity)
         for offset, event in enumerate(events):
             source_sequence = first_sequence + offset
             for order in open_orders:
@@ -1324,9 +1397,9 @@ class ConservativeBarBroker:
                     continue
                 if trade_source:
                     assert isinstance(event, ReplayTrade)
-                    if order.reduce_only and (
-                        position_quantity == 0
-                        or not self._reduces_position(order, self._position)
+                    if order.reduce_only and not self._reduces_position(
+                        order,
+                        self._position,
                     ):
                         # Tape execution cancels an invalid reduce-only order
                         # as soon as it becomes eligible, even without a price
@@ -1419,6 +1492,7 @@ class ConservativeBarBroker:
                         if values["stop_price"] is None
                         else str(values["stop_price"])
                     ),
+                    position_side=existing.position_side,
                 )
                 orders = self.replace_order(
                     str(values["order_id"]),
@@ -1465,12 +1539,14 @@ class ConservativeBarBroker:
                 created_time_ms=virtual_time_ms,
             )
         elif normalized is CommandType.CLOSE_POSITION:
-            if set(values) != {"quantity"}:
+            close_values = dict(values)
+            position_side = close_values.pop("position_side", None)
+            if set(close_values) != {"quantity"}:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
                     "close_position payload is invalid",
                 )
-            quantity = values["quantity"]
+            quantity = close_values["quantity"]
             if quantity is not None and not isinstance(quantity, str):
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
@@ -1482,6 +1558,7 @@ class ConservativeBarBroker:
                     command_id=command_id,
                     accepted_source_sequence=source_sequence,
                     created_time_ms=virtual_time_ms,
+                    position_side=position_side,  # type: ignore[arg-type]
                 )
                 orders = (order,)
             except (TypeError, ValueError) as exc:
@@ -1490,23 +1567,37 @@ class ConservativeBarBroker:
                     "close_position quantity violates the order contract",
                 ) from exc
         elif normalized is CommandType.EXECUTE_POSITION_INTENT:
-            if set(values) != {"intent", "side", "quantity"}:
+            intent_values = dict(values)
+            leverage_value = intent_values.pop("leverage", None)
+            position_side = intent_values.pop("position_side", None)
+            if set(intent_values) != {"intent", "side", "quantity"}:
                 raise ReplayDomainError(
                     ReplayErrorCode.ORDER_REJECTED,
                     "execute_position_intent payload is invalid",
                 )
+            if leverage_value is not None and not isinstance(leverage_value, str):
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "execute_position_intent leverage must be a Decimal string or null",
+                )
             try:
                 orders = self.execute_position_intent(
-                    intent=str(values["intent"]),
-                    side=(None if values["side"] is None else str(values["side"])),
+                    intent=str(intent_values["intent"]),
+                    side=(
+                        None
+                        if intent_values["side"] is None
+                        else str(intent_values["side"])
+                    ),
                     quantity=(
                         None
-                        if values["quantity"] is None
-                        else str(values["quantity"])
+                        if intent_values["quantity"] is None
+                        else str(intent_values["quantity"])
                     ),
                     command_id=command_id,
                     accepted_source_sequence=source_sequence,
                     created_time_ms=virtual_time_ms,
+                    leverage=leverage_value,
+                    position_side=position_side,  # type: ignore[arg-type]
                 )
             except (TypeError, ValueError) as exc:
                 raise ReplayDomainError(
@@ -1514,7 +1605,9 @@ class ConservativeBarBroker:
                     "position intent violates the order contract",
                 ) from exc
         elif normalized is CommandType.SET_POSITION_PROTECTION:
-            if set(values) != {
+            protection_values = dict(values)
+            position_side = protection_values.pop("position_side", None)
+            if set(protection_values) != {
                 "quantity",
                 "stop_loss_price",
                 "take_profit_price",
@@ -1527,22 +1620,23 @@ class ConservativeBarBroker:
                 orders = self.set_position_protection(
                     quantity=(
                         None
-                        if values["quantity"] is None
-                        else str(values["quantity"])
+                        if protection_values["quantity"] is None
+                        else str(protection_values["quantity"])
                     ),
                     stop_loss_price=(
                         None
-                        if values["stop_loss_price"] is None
-                        else str(values["stop_loss_price"])
+                        if protection_values["stop_loss_price"] is None
+                        else str(protection_values["stop_loss_price"])
                     ),
                     take_profit_price=(
                         None
-                        if values["take_profit_price"] is None
-                        else str(values["take_profit_price"])
+                        if protection_values["take_profit_price"] is None
+                        else str(protection_values["take_profit_price"])
                     ),
                     command_id=command_id,
                     accepted_source_sequence=source_sequence,
                     created_time_ms=virtual_time_ms,
+                    position_side=position_side,  # type: ignore[arg-type]
                 )
             except (TypeError, ValueError) as exc:
                 raise ReplayDomainError(
@@ -1616,67 +1710,76 @@ class ConservativeBarBroker:
                     source_sequence=sequence,
                     event_time_ms=virtual_time_ms,
                 )
-        session_close_client_id: str | None = None
-        if (
-            position_disposition == "mark_close"
-            and Decimal(working.position.quantity) != 0
-        ):
-            quantity = decimal_to_string(
-                abs(Decimal(working.position.quantity)),
-                field_name="session close quantity",
+        session_close_client_ids: list[str] = []
+        if isinstance(working.position, PositionBook):
+            close_legs: tuple[tuple[PositionSide | None, Position], ...] = (
+                (PositionSide.LONG, working.position.long),
+                (PositionSide.SHORT, working.position.short),
             )
-            side = (
-                OrderSide.SELL
-                if Decimal(working.position.quantity) > 0
-                else OrderSide.BUY
-            )
-            order = ReplayOrder(
-                order_id=f"ord-{self._next_order:010d}",
-                client_order_id=f"session-close-{self._next_order:010d}",
-                side=side,
-                order_type=OrderType.MARKET,
-                quantity=quantity,
-                reduce_only=True,
-                limit_price=None,
-                stop_price=None,
-                status=OrderStatus.OPEN,
-                filled_quantity="0",
-                remaining_quantity=quantity,
-                average_fill_price=None,
-                accepted_source_sequence=sequence,
-                created_time_ms=virtual_time_ms,
-                ordinal=self._next_order,
-                reserved_margin="0",
-                status_reason=None,
-                status_history=(OrderStatus.NEW, OrderStatus.OPEN),
-                model_version=self._model_version,
-            )
-            working.orders[order.order_id] = order
-            working.changed_orders.append(order)
-            session_close_client_id = order.client_order_id
-            self._fill_working(
-                working,
-                order,
-                source_sequence=sequence,
-                event_time_ms=virtual_time_ms,
-                trigger=(
-                    working.position.mark_price,
-                    LiquidityRole.SYNTHETIC,
-                    FillReason.SESSION_END_MARK_CLOSE,
-                ),
-                synthetic=True,
-                historical_execution=False,
-                skip_trigger_risk=True,
-            )
+        else:
+            close_legs = ((None, working.position),)
+        if position_disposition == "mark_close":
+            for position_side, target_position in close_legs:
+                if Decimal(target_position.quantity) == 0:
+                    continue
+                quantity = decimal_to_string(
+                    abs(Decimal(target_position.quantity)),
+                    field_name="session close quantity",
+                )
+                side = (
+                    OrderSide.SELL
+                    if Decimal(target_position.quantity) > 0
+                    else OrderSide.BUY
+                )
+                ordinal = self._next_order + len(session_close_client_ids)
+                order = ReplayOrder(
+                    order_id=f"ord-{ordinal:010d}",
+                    client_order_id=f"session-close-{ordinal:010d}",
+                    side=side,
+                    order_type=OrderType.MARKET,
+                    quantity=quantity,
+                    reduce_only=True,
+                    limit_price=None,
+                    stop_price=None,
+                    status=OrderStatus.OPEN,
+                    filled_quantity="0",
+                    remaining_quantity=quantity,
+                    average_fill_price=None,
+                    accepted_source_sequence=sequence,
+                    created_time_ms=virtual_time_ms,
+                    ordinal=ordinal,
+                    reserved_margin="0",
+                    status_reason=None,
+                    status_history=(OrderStatus.NEW, OrderStatus.OPEN),
+                    model_version=self._model_version,
+                    position_side=position_side,
+                )
+                working.orders[order.order_id] = order
+                working.changed_orders.append(order)
+                session_close_client_ids.append(order.client_order_id)
+                self._fill_working(
+                    working,
+                    order,
+                    source_sequence=sequence,
+                    event_time_ms=virtual_time_ms,
+                    trigger=(
+                        target_position.mark_price,
+                        LiquidityRole.SYNTHETIC,
+                        FillReason.SESSION_END_MARK_CLOSE,
+                    ),
+                    synthetic=True,
+                    historical_execution=False,
+                    skip_trigger_risk=True,
+                )
         ledger = working.ledger or self._ledger
         account = self._account_from(ledger, working.position)
         self._assert_candidate_invariants(working, ledger, account)
         self._commit_working(working, account=account)
-        if session_close_client_id is not None:
+        if session_close_client_ids:
             client_ids = set(self._client_order_ids)
-            client_ids.add(session_close_client_id)
+            client_ids.update(session_close_client_ids)
             self._client_order_ids = client_ids
-            self._next_order += 1
+            self._next_order += len(session_close_client_ids)
         self._ended = True
         self._record_equity(account)
         return BrokerEventResult(
@@ -1738,7 +1841,11 @@ class ConservativeBarBroker:
         self._fills: list[ReplayFill] = []
         self._closed_trades: list[ClosedTrade] = []
         self._warnings: list[BrokerWarning] = []
-        self._position = Position.flat(mark_price=self.config.initial_mark_price)
+        self._position: PositionState = (
+            PositionBook.flat(mark_price=self.config.initial_mark_price)
+            if self.config.position_mode is PositionMode.HEDGE
+            else Position.flat(mark_price=self.config.initial_mark_price)
+        )
         self._account = self._account_from(self._ledger, self._position)
         self._next_order = 1
         self._next_fill = 1
@@ -1833,11 +1940,17 @@ class ConservativeBarBroker:
                     AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION: (
                         TOUCH_OR_TAPE_EXECUTION_MODE
                     ),
+                    AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION: (
+                        TOUCH_OR_TAPE_EXECUTION_MODE
+                    ),
                 }
                 if isinstance(self._bar_builder, TradeReplayBarBuilder)
                 else {
                     BROKER_MODEL_VERSION: PAPER_LINEAR_EXECUTION_MODE,
                     BAR_TOUCH_OR_TAPE_MODEL_VERSION: TOUCH_OR_TAPE_EXECUTION_MODE,
+                    BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION: (
+                        TOUCH_OR_TAPE_EXECUTION_MODE
+                    ),
                 }
             )
             restored_mode = compatible_models.get(checkpoint_model)
@@ -1989,7 +2102,7 @@ class ConservativeBarBroker:
                 if any(order_id not in orders for order_id in warning.order_ids):
                     raise ValueError("broker warning references a missing order")
 
-            position = Position.from_dict(payload["position"])  # type: ignore[arg-type]
+            position = position_state_from_dict(payload["position"])  # type: ignore[arg-type]
             ledger = LedgerBook(
                 initial_equity=self.config.initial_equity,
                 currency=self.config.quote_asset,
@@ -2155,9 +2268,13 @@ class ConservativeBarBroker:
     ) -> bool:
         price, liquidity, reason = trigger
         requested_quantity = Decimal(order.remaining_quantity)
+        target_position = self._position_for_side(
+            working.position,
+            order.position_side,
+        )
         if order.reduce_only:
             fill_quantity = min(
-                requested_quantity, abs(Decimal(working.position.quantity))
+                requested_quantity, abs(Decimal(target_position.quantity))
             )
         else:
             fill_quantity = requested_quantity
@@ -2177,17 +2294,22 @@ class ConservativeBarBroker:
             return False
         quantity = decimal_to_string(fill_quantity, field_name="fill quantity")
         position_result = apply_position_fill(
-            working.position,
+            target_position,
             order.side,
             quantity,
             price,
             price,
         )
+        candidate_position = self._replace_position_leg(
+            working.position,
+            order.position_side,
+            position_result.position,
+        )
         if not order.reduce_only and not skip_trigger_risk:
             try:
                 validate_trigger_position_notional(
                     config=self.config,
-                    position=position_result.position,
+                    position=candidate_position,
                 )
             except ReplayDomainError:
                 rejection_status = (
@@ -2233,6 +2355,7 @@ class ConservativeBarBroker:
             synthetic=synthetic,
             historical_execution=historical_execution,
             model_version=self._model_version,
+            position_side=order.position_side,
         )
         ledger = self._ledger_for_write(working)
         reserved_margin = Decimal(order.reserved_margin)
@@ -2348,10 +2471,11 @@ class ConservativeBarBroker:
                 exit_price=price,
                 realized_pnl=position_result.realized_pnl,
                 source_sequence=source_sequence,
+                position_side=order.position_side,
             )
             working.closed_trades.append(trade)
             working.next_trade += 1
-        working.position = position_result.position
+        working.position = candidate_position
         return True
 
     def _terminal_order(
@@ -2605,9 +2729,66 @@ class ConservativeBarBroker:
             OrderType.TAKE_PROFIT_MARKET: 3,
         }[order.order_type]
 
+    def _normalize_position_side(
+        self,
+        position_side: PositionSide | str | None,
+    ) -> PositionSide | None:
+        if self.config.position_mode is PositionMode.ONE_WAY:
+            if position_side is not None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "position_side is only valid in HEDGE mode",
+                )
+            return None
+        if position_side is None:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position_side is required in HEDGE mode",
+            )
+        try:
+            return PositionSide(position_side)
+        except ValueError as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "position_side must be LONG or SHORT",
+            ) from exc
+
     @staticmethod
-    def _reduces_position(order: ReplayOrder, position: Position) -> bool:
-        quantity = Decimal(position.quantity)
+    def _position_for_side(
+        position: PositionState,
+        position_side: PositionSide | None,
+    ) -> Position:
+        if isinstance(position, PositionBook):
+            if position_side is None:
+                raise ValueError("HEDGE position access requires position_side")
+            return position.leg(position_side)
+        if position_side is not None:
+            raise ValueError("ONE_WAY position access forbids position_side")
+        return position
+
+    @staticmethod
+    def _replace_position_leg(
+        position: PositionState,
+        position_side: PositionSide | None,
+        target: Position,
+    ) -> PositionState:
+        if isinstance(position, PositionBook):
+            if position_side is None:
+                raise ValueError("HEDGE position update requires position_side")
+            marked = mark_position(position, target.mark_price)
+            assert isinstance(marked, PositionBook)
+            return marked.with_leg(position_side, target)
+        if position_side is not None:
+            raise ValueError("ONE_WAY position update forbids position_side")
+        return target
+
+    def _reduces_position(
+        self,
+        order: ReplayOrder,
+        position: PositionState,
+    ) -> bool:
+        target = self._position_for_side(position, order.position_side)
+        quantity = Decimal(target.quantity)
         return (quantity > 0 and order.side is OrderSide.SELL) or (
             quantity < 0 and order.side is OrderSide.BUY
         )
@@ -2623,7 +2804,7 @@ class ConservativeBarBroker:
             if order.reduce_only and order.status in {
                 OrderStatus.OPEN,
                 OrderStatus.PARTIALLY_FILLED,
-            }:
+            } and not self._reduces_position(order, working.position):
                 self._terminal_order(
                     working,
                     order,
@@ -2662,7 +2843,7 @@ class ConservativeBarBroker:
             working.ledger = self._ledger.clone()
         return working.ledger
 
-    def _account_from(self, ledger: LedgerBook, position: Position) -> Account:
+    def _account_from(self, ledger: LedgerBook, position: PositionState) -> Account:
         realized = self._negate(ledger.account_total(LedgerAccount.REALIZED_PNL))
         fees = ledger.account_total(LedgerAccount.FEE_EXPENSE)
         reserved = ledger.account_total(LedgerAccount.RESERVED_MARGIN)
@@ -2714,11 +2895,27 @@ class ConservativeBarBroker:
             raise AssertionError("reserved margin does not match open orders")
         if Decimal(account.cash_balance) != expected_cash:
             raise AssertionError("cash balance does not reconcile")
-        if Decimal(working.position.quantity) == 0:
-            if working.position.entry_price is not None:
-                raise AssertionError("flat position retained an entry price")
-        elif working.position.entry_price is None:
-            raise AssertionError("open position lacks an entry price")
+        if self.config.position_mode is PositionMode.HEDGE:
+            if not isinstance(working.position, PositionBook):
+                raise AssertionError("HEDGE broker lost its position book")
+            if any(order.position_side is None for order in working.orders.values()):
+                raise AssertionError("HEDGE order lacks position_side")
+        else:
+            if not isinstance(working.position, Position):
+                raise AssertionError("ONE_WAY broker gained a position book")
+            if any(order.position_side is not None for order in working.orders.values()):
+                raise AssertionError("ONE_WAY order retained position_side")
+        legs = (
+            (working.position.long, working.position.short)
+            if isinstance(working.position, PositionBook)
+            else (working.position,)
+        )
+        for leg in legs:
+            if Decimal(leg.quantity) == 0:
+                if leg.entry_price is not None:
+                    raise AssertionError("flat position retained an entry price")
+            elif leg.entry_price is None:
+                raise AssertionError("open position lacks an entry price")
 
     def _assert_invariants(self) -> None:
         working = self._working_state()

@@ -7,6 +7,8 @@ import { intervalsSemanticallyEquivalent } from "../../utils/intervals.js";
 import type {
   ReplayAccountAuditResponse,
   ReplayOrderPreview,
+  ReplayOrderCapacity,
+  ReplayOrderCapacityContext,
   ReplayOrderRequest,
   ReplayTradePlanDraft,
   ReplayV2Command,
@@ -315,6 +317,11 @@ export interface ReplayViewerRuntime {
       tradePlan?: ReplayTradePlanDraft | null,
       signal?: AbortSignal,
     ): Promise<ReplayOrderPreview>;
+    orderCapacity(
+      context: ReplayOrderCapacityContext,
+      positionIntent: "NET" | "OPEN",
+      signal?: AbortSignal,
+    ): Promise<ReplayOrderCapacity>;
     auditAccount(): Promise<ReplayAccountAuditResponse>;
     resyncHistoricalBook(): Promise<void>;
     preparePeriodSummaries(): Promise<void>;
@@ -1015,6 +1022,33 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
     );
   }, [runtime.store]);
 
+  const orderCapacity = useCallback(async (
+    context: ReplayOrderCapacityContext,
+    positionIntent: "NET" | "OPEN",
+    signal?: AbortSignal,
+  ): Promise<ReplayOrderCapacity> => {
+    const viewer = viewerRef.current;
+    const store = runtime.store;
+    if (viewer === null || store.virtualTimeMs === null || store.sessionId === null) {
+      throw new Error("replay.v2 viewer is not capacity-ready");
+    }
+    return defaultReplayV2Api.orderCapacity(
+      viewer.run_id,
+      {
+        protocol: "replay.v2",
+        expected_revision: store.revision,
+        expected_cursor: {
+          virtual_time_ms: store.virtualTimeMs,
+          source_sequence: store.sourceSequence,
+          revision: store.revision,
+        },
+        position_intent: positionIntent,
+        context,
+      },
+      signal,
+    );
+  }, [runtime.store]);
+
   const resyncHistoricalBook = useCallback(async (): Promise<void> => {
     const runId = viewerRef.current?.run_id;
     if (runId === undefined) throw new Error("ViewerState is unavailable");
@@ -1097,6 +1131,7 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       addAndSelectTrack,
       submitTrade,
       previewOrder,
+      orderCapacity,
       auditAccount,
       resyncHistoricalBook,
       preparePeriodSummaries,

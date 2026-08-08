@@ -108,6 +108,7 @@ test("v2 training exports preserve integrity policy and hide actual history unti
     modelled_account: {
       schema_version: "replay.training.portfolio.v1",
       fidelity: "PAPER_LINEAR_V1_MULTI_TRACK_ADAPTER",
+      position_mode: "ONE_WAY",
       settlement_account_shared: true,
       initial_equity: "10000",
       equity: "10000",

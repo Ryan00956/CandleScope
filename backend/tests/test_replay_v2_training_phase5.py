@@ -31,6 +31,7 @@ from app.replay.training.models import (
     TrainingRunCreateRequest,
 )
 from app.replay.training.multitrack import StableMarketEvent, stable_market_event_order
+from app.replay.training.service import TrainingRunService
 from tests.fixtures.replay.fakes import FakeKlinesRepo, FixtureIdentity, make_bar
 from tests.fixtures.replay.service_fakes import (
     INTERVAL_MS,
@@ -49,6 +50,23 @@ from tests.fixtures.replay.trade_service_fakes import (
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_order_capacity_is_clamped_by_shared_run_equity() -> None:
+    maximum = TrainingRunService._shared_order_capacity_quantity(
+        adapter_max_quantity="10",
+        reference_price="100",
+        payload={"reduce_only": False, "leverage": "2"},
+        selected_track={"track_id": "track-1"},
+        portfolio={
+            "margin_mode": "CROSS",
+            "available_equity": "100",
+            "instrument_rules": [],
+        },
+        binding={"adapter_config": {"max_leverage": "5"}},
+    )
+
+    assert maximum == "2"
 
 
 def _multi_repository(*symbols: str):
@@ -411,6 +429,7 @@ async def test_authoritative_order_preview_is_cursor_bound_and_non_mutating(
             "reduce_only": False,
             "limit_price": None,
             "stop_price": None,
+            "leverage": "2",
         }
 
         preview = await service.training.preview_order(  # type: ignore[union-attr]
@@ -469,7 +488,12 @@ async def test_market_position_intent_and_atomic_protection_flow(
                 "intent-open",
                 ReplayV2CommandType.EXECUTE_POSITION_INTENT,
                 session,
-                {"intent": "OPEN", "side": "BUY", "quantity": "1"},
+                {
+                    "intent": "OPEN",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "leverage": "2",
+                },
             ),
         )
         assert opened["data"]["position"]["quantity"] == "1"
@@ -503,7 +527,12 @@ async def test_market_position_intent_and_atomic_protection_flow(
                 "intent-reverse",
                 ReplayV2CommandType.EXECUTE_POSITION_INTENT,
                 session,
-                {"intent": "REVERSE", "side": "SELL", "quantity": "2"},
+                {
+                    "intent": "REVERSE",
+                    "side": "SELL",
+                    "quantity": "2",
+                    "leverage": "2",
+                },
             ),
         )
         assert reversed_result["data"]["position"]["quantity"] == "-2"

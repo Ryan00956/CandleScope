@@ -411,6 +411,15 @@ async def test_account_gc_rechecks_pin_and_inventory_is_bounded_redacted(
         assert inventory["protocol"] == "replay.storage.inventory.v1"
         assert inventory["decision"]["state"] == "ENABLE"
         assert inventory["decision"]["default_flags_enabled"] is True
+        assert set(inventory["feature_flags"]) == {
+            "replay_enabled",
+            "agg_trade_enabled",
+            "segment_download_worker_enabled",
+            "segment_auto_gc_enabled",
+            "fast_forward_optimization_enabled",
+            "historical_book_enabled",
+            "account_history_enabled",
+        }
         assert inventory["bounds"] == {
             "max_items_per_category": 200,
             "max_observed_identities": 100,

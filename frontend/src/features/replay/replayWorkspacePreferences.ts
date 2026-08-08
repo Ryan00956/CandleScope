@@ -22,6 +22,8 @@ export type ReplayRailViewId = (typeof REPLAY_RAIL_VIEW_IDS)[keyof typeof REPLAY
 export interface ReplayWorkspacePreferences {
   readonly railWidth: number;
   readonly openViewIds: readonly ReplayRailViewId[];
+  /** Hide content panel without clearing openViewIds (full restore on expand). */
+  readonly panelCollapsed: boolean;
   readonly viewHeights: Readonly<Partial<Record<ReplayRailViewId, number>>>;
 }
 
@@ -34,6 +36,10 @@ export interface ReplayPreferenceStorage {
 export interface ReplayWorkspacePreferenceActions {
   setRailWidth(value: number): void;
   toggleView(viewId: ReplayRailViewId): void;
+  /** Close one view's content (does not only hide the panel). */
+  closeView(viewId: ReplayRailViewId): void;
+  setPanelCollapsed(collapsed: boolean): void;
+  togglePanelCollapsed(): void;
   setViewHeight(viewId: ReplayRailViewId, value: number): void;
 }
 
@@ -42,6 +48,7 @@ const LIVE_RAIL_COLLAPSED_KEY = "candlescope-sidebar-collapsed";
 const LIVE_DOCK_HEIGHT_KEY = "candlescope-order-book-height";
 const LIVE_DOCK_COLLAPSED_KEY = "candlescope-order-book-collapsed";
 const SCOPED_PREFIX = "candlescope-replay-workspace:";
+const REPLAY_WORKSPACE_SCHEMA_VERSION = 2;
 const REPLAY_RAIL_VIEW_ID_SET = new Set<ReplayRailViewId>(Object.values(REPLAY_RAIL_VIEW_IDS));
 const REPLAY_VIEW_HEIGHT_LIMITS: Readonly<Record<ReplayRailViewId, readonly [number, number]>> = {
   [REPLAY_RAIL_VIEW_IDS.watchlist]: [MARKET_RAIL_MIN_SIDEBAR_HEIGHT, MARKET_DOCK_MAX_HEIGHT],
@@ -137,6 +144,7 @@ function inherited(storage: ReplayPreferenceStorage | null): ReplayWorkspacePref
     return {
       railWidth: MARKET_RAIL_DEFAULT_WIDTH,
       openViewIds: [REPLAY_RAIL_VIEW_IDS.watchlist, REPLAY_RAIL_VIEW_IDS.capabilities],
+      panelCollapsed: false,
       viewHeights: defaultViewHeights(MARKET_DOCK_DEFAULT_HEIGHT),
     };
   }
@@ -148,6 +156,12 @@ function inherited(storage: ReplayPreferenceStorage | null): ReplayWorkspacePref
     MARKET_DOCK_MIN_HEIGHT,
     MARKET_DOCK_MAX_HEIGHT,
   );
+  // Legacy live "sidebar collapsed" maps to hide-only panelCollapsed so expand
+  // can restore the default open set instead of permanently clearing it.
+  const openViewIds: ReplayRailViewId[] = [
+    REPLAY_RAIL_VIEW_IDS.watchlist,
+    ...(dockCollapsed ? [] : [REPLAY_RAIL_VIEW_IDS.capabilities]),
+  ];
   return {
     railWidth: clamp(
       storage.getItem(LIVE_RAIL_WIDTH_KEY),
@@ -155,15 +169,19 @@ function inherited(storage: ReplayPreferenceStorage | null): ReplayWorkspacePref
       MARKET_RAIL_MIN_WIDTH,
       MARKET_RAIL_MAX_WIDTH,
     ),
-    openViewIds: [
-      ...(railCollapsed ? [] : [REPLAY_RAIL_VIEW_IDS.watchlist]),
-      ...(dockCollapsed ? [] : [REPLAY_RAIL_VIEW_IDS.capabilities]),
-    ],
+    openViewIds: railCollapsed && openViewIds.length === 0
+      ? [REPLAY_RAIL_VIEW_IDS.watchlist, REPLAY_RAIL_VIEW_IDS.capabilities]
+      : openViewIds,
+    panelCollapsed: railCollapsed,
     viewHeights: defaultViewHeights(dockHeight),
   };
 }
 
-function normalize(value: unknown, fallback: ReplayWorkspacePreferences): ReplayWorkspacePreferences {
+function normalize(
+  value: unknown,
+  fallback: ReplayWorkspacePreferences,
+  migrateLegacyEmpty = false,
+): ReplayWorkspacePreferences {
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
   const source = value as Record<string, unknown>;
   const legacyDockHeight = clamp(
@@ -174,11 +192,22 @@ function normalize(value: unknown, fallback: ReplayWorkspacePreferences): Replay
   );
   const legacyHeights = defaultViewHeights(legacyDockHeight);
   const hasModularOpenState = Array.isArray(source.openViewIds);
+  let openViewIds = hasModularOpenState
+    ? normalizeOpenViewIds(source.openViewIds, fallback.openViewIds)
+    : legacyOpenViewIds(source, fallback);
+  const migrateCollapsedEmpty = migrateLegacyEmpty
+    && hasModularOpenState
+    && openViewIds.length === 0;
+  if (migrateCollapsedEmpty) openViewIds = [...fallback.openViewIds];
+  const panelCollapsed = migrateCollapsedEmpty
+    ? openViewIds.length > 0
+    : openViewIds.length === 0
+      ? false
+      : bool(source.panelCollapsed, fallback.panelCollapsed);
   return {
     railWidth: clamp(source.railWidth, fallback.railWidth, MARKET_RAIL_MIN_WIDTH, MARKET_RAIL_MAX_WIDTH),
-    openViewIds: hasModularOpenState
-      ? normalizeOpenViewIds(source.openViewIds, fallback.openViewIds)
-      : legacyOpenViewIds(source, fallback),
+    openViewIds,
+    panelCollapsed,
     viewHeights: normalizeViewHeights(
       source.viewHeights,
       source.dockHeight === undefined ? fallback.viewHeights : legacyHeights,
@@ -194,7 +223,15 @@ export function loadReplayWorkspacePreferences(
   if (storage === null) return fallback;
   try {
     const raw = storage.getItem(scopedKey(sessionId));
-    return raw === null ? fallback : normalize(JSON.parse(raw), fallback);
+    if (raw === null) return fallback;
+    const parsed: unknown = JSON.parse(raw);
+    const currentSchema = parsed !== null
+      && typeof parsed === "object"
+      && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>).schemaVersion === REPLAY_WORKSPACE_SCHEMA_VERSION;
+    const normalized = normalize(parsed, fallback, !currentSchema);
+    if (!currentSchema) saveReplayWorkspacePreferences(sessionId, normalized, storage);
+    return normalized;
   } catch {
     return fallback;
   }
@@ -207,7 +244,10 @@ export function saveReplayWorkspacePreferences(
 ): void {
   if (storage === null) return;
   try {
-    storage.setItem(scopedKey(sessionId), JSON.stringify(normalize(preferences, inherited(storage))));
+    storage.setItem(scopedKey(sessionId), JSON.stringify({
+      ...normalize(preferences, inherited(storage)),
+      schemaVersion: REPLAY_WORKSPACE_SCHEMA_VERSION,
+    }));
   } catch {
     // A storage failure keeps the in-memory run layout valid.
   }
@@ -249,10 +289,52 @@ export function useReplayWorkspacePreferences(sessionId: string): {
   const actions = useMemo<ReplayWorkspacePreferenceActions>(() => ({
     setRailWidth: (value) => update({ railWidth: value }),
     toggleView: (viewId) => setPreferences((current) => {
+      // Hidden panel: activity click restores full selection (open missing view if needed).
+      if (current.panelCollapsed) {
+        const openViewIds = current.openViewIds.includes(viewId)
+          ? [...current.openViewIds]
+          : [...current.openViewIds, viewId];
+        const next = normalize({ ...current, openViewIds, panelCollapsed: false }, current);
+        saveReplayWorkspacePreferences(sessionId, next, storage);
+        return next;
+      }
       const openViewIds = current.openViewIds.includes(viewId)
         ? current.openViewIds.filter((id) => id !== viewId)
         : [...current.openViewIds, viewId];
-      const next = normalize({ ...current, openViewIds }, current);
+      const next = normalize({
+        ...current,
+        openViewIds,
+        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
+      }, current);
+      saveReplayWorkspacePreferences(sessionId, next, storage);
+      return next;
+    }),
+    closeView: (viewId) => setPreferences((current) => {
+      if (!current.openViewIds.includes(viewId)) return current;
+      const openViewIds = current.openViewIds.filter((id) => id !== viewId);
+      const next = normalize({
+        ...current,
+        openViewIds,
+        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
+      }, current);
+      saveReplayWorkspacePreferences(sessionId, next, storage);
+      return next;
+    }),
+    setPanelCollapsed: (collapsed) => setPreferences((current) => {
+      const panelCollapsed = collapsed && current.openViewIds.length > 0;
+      if (panelCollapsed === current.panelCollapsed) return current;
+      const next = normalize({ ...current, panelCollapsed }, current);
+      saveReplayWorkspacePreferences(sessionId, next, storage);
+      return next;
+    }),
+    togglePanelCollapsed: () => setPreferences((current) => {
+      if (current.openViewIds.length === 0) {
+        if (!current.panelCollapsed) return current;
+        const next = normalize({ ...current, panelCollapsed: false }, current);
+        saveReplayWorkspacePreferences(sessionId, next, storage);
+        return next;
+      }
+      const next = normalize({ ...current, panelCollapsed: !current.panelCollapsed }, current);
       saveReplayWorkspacePreferences(sessionId, next, storage);
       return next;
     }),

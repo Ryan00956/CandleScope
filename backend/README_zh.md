@@ -214,6 +214,7 @@ Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol sp
 - [app/indicator](app/indicator/)
 - [Runtime 插件 Host](app/plugin_runtime/README_zh.md)
 - [Pyne sidecar bridge](../packages/candlescope-plugin-pyne/README_zh.md)
+- [Pyne workbench v2](../packages/candlescope-plugin-pyne-workbench/README.md)
 
 内置指标包括 `MA`、`EMA`、`MACD`、`RSI`、`BOLL`、`ATR` 和 `VOL`。
 

@@ -14,6 +14,8 @@ BAR_BROKER_MODEL_VERSION = "BAR_CONSERVATIVE_V1"
 AGG_TRADE_TAPE_MODEL_VERSION = "AGG_TRADE_TAPE_V1"
 BAR_TOUCH_OR_TAPE_MODEL_VERSION = "BAR_TOUCH_OR_TAPE_V2"
 AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION = "AGG_TRADE_TOUCH_OR_TAPE_V2"
+BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "BAR_TOUCH_OR_TAPE_HEDGE_V3"
+AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION = "AGG_TRADE_TOUCH_OR_TAPE_HEDGE_V3"
 PAPER_LINEAR_EXECUTION_MODE = "paper_linear_v1"
 TOUCH_OR_TAPE_EXECUTION_MODE = "touch_or_tape_v2"
 SUPPORTED_BROKER_MODEL_VERSIONS = frozenset(
@@ -22,6 +24,8 @@ SUPPORTED_BROKER_MODEL_VERSIONS = frozenset(
         AGG_TRADE_TAPE_MODEL_VERSION,
         BAR_TOUCH_OR_TAPE_MODEL_VERSION,
         AGG_TRADE_TOUCH_OR_TAPE_MODEL_VERSION,
+        BAR_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
+        AGG_TRADE_TOUCH_OR_TAPE_HEDGE_MODEL_VERSION,
     }
 )
 # Backward-compatible public name for the original BAR model.
@@ -46,6 +50,24 @@ class OrderSide(_StringEnum):
     @property
     def opposite(self) -> "OrderSide":
         return OrderSide.SELL if self is OrderSide.BUY else OrderSide.BUY
+
+
+class PositionMode(_StringEnum):
+    ONE_WAY = "ONE_WAY"
+    HEDGE = "HEDGE"
+
+
+class PositionSide(_StringEnum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+    @property
+    def opening_order_side(self) -> OrderSide:
+        return OrderSide.BUY if self is PositionSide.LONG else OrderSide.SELL
+
+    @property
+    def closing_order_side(self) -> OrderSide:
+        return self.opening_order_side.opposite
 
 
 class OrderType(_StringEnum):
@@ -350,6 +372,7 @@ class BrokerConfig:
     initial_mark_price: str
     instrument: InstrumentFilters
     limits: BrokerLimits
+    position_mode: PositionMode = PositionMode.ONE_WAY
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -389,9 +412,14 @@ class BrokerConfig:
             raise TypeError("instrument must be InstrumentFilters")
         if not isinstance(self.limits, BrokerLimits):
             raise TypeError("limits must be BrokerLimits")
+        object.__setattr__(
+            self,
+            "position_mode",
+            coerce_enum(PositionMode, self.position_mode, "broker.position_mode"),
+        )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "initial_equity": self.initial_equity,
             "quote_asset": self.quote_asset,
             "maker_bps": self.maker_bps,
@@ -401,11 +429,17 @@ class BrokerConfig:
             "instrument": self.instrument.to_dict(),
             "limits": self.limits.to_dict(),
         }
+        # Keep legacy ONE_WAY config hashes and snapshots byte-for-byte stable.
+        if self.position_mode is PositionMode.HEDGE:
+            payload["position_mode"] = self.position_mode.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "BrokerConfig":
+        data = dict(payload)
+        position_mode = data.pop("position_mode", PositionMode.ONE_WAY.value)
         exact_keys(
-            payload,
+            data,
             {
                 "initial_equity",
                 "quote_asset",
@@ -417,19 +451,20 @@ class BrokerConfig:
                 "limits",
             },
         )
-        instrument = payload["instrument"]
-        limits = payload["limits"]
+        instrument = data["instrument"]
+        limits = data["limits"]
         if not isinstance(instrument, Mapping) or not isinstance(limits, Mapping):
             raise TypeError("broker instrument and limits must be objects")
         return cls(
-            initial_equity=payload["initial_equity"],  # type: ignore[arg-type]
-            quote_asset=payload["quote_asset"],  # type: ignore[arg-type]
-            maker_bps=payload["maker_bps"],  # type: ignore[arg-type]
-            taker_bps=payload["taker_bps"],  # type: ignore[arg-type]
-            market_slippage_bps=payload["market_slippage_bps"],  # type: ignore[arg-type]
-            initial_mark_price=payload["initial_mark_price"],  # type: ignore[arg-type]
+            initial_equity=data["initial_equity"],  # type: ignore[arg-type]
+            quote_asset=data["quote_asset"],  # type: ignore[arg-type]
+            maker_bps=data["maker_bps"],  # type: ignore[arg-type]
+            taker_bps=data["taker_bps"],  # type: ignore[arg-type]
+            market_slippage_bps=data["market_slippage_bps"],  # type: ignore[arg-type]
+            initial_mark_price=data["initial_mark_price"],  # type: ignore[arg-type]
             instrument=InstrumentFilters.from_dict(instrument),
             limits=BrokerLimits.from_dict(limits),
+            position_mode=position_mode,  # type: ignore[arg-type]
         )
 
 
@@ -442,6 +477,9 @@ class OrderRequest:
     reduce_only: bool
     limit_price: str | None = None
     stop_price: str | None = None
+    # Optional effective leverage for this order; None => broker max_leverage.
+    leverage: str | None = None
+    position_side: PositionSide | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -491,6 +529,21 @@ class OrderRequest:
                 positive=True,
             ),
         )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(
+                self.leverage,
+                field_name="leverage",
+                positive=True,
+            ),
+        )
+        if self.position_side is not None:
+            object.__setattr__(
+                self,
+                "position_side",
+                coerce_enum(PositionSide, self.position_side, "position_side"),
+            )
         if self.order_type is OrderType.MARKET:
             valid = self.limit_price is None and self.stop_price is None
         elif self.order_type is OrderType.LIMIT:
@@ -501,7 +554,7 @@ class OrderRequest:
             raise ValueError("order price fields do not match order_type")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "client_order_id": self.client_order_id,
             "side": self.side.value,
             "order_type": self.order_type.value,
@@ -510,11 +563,20 @@ class OrderRequest:
             "limit_price": self.limit_price,
             "stop_price": self.stop_price,
         }
+        # Keep legacy consumers exact-key compatible when optional fields are omitted.
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
+        if self.position_side is not None:
+            payload["position_side"] = self.position_side.value
+        return payload
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "OrderRequest":
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
+        position_side = data.pop("position_side", None)
         exact_keys(
-            payload,
+            data,
             {
                 "client_order_id",
                 "side",
@@ -525,7 +587,92 @@ class OrderRequest:
                 "stop_price",
             },
         )
-        return cls(**payload)  # type: ignore[arg-type]
+        return cls(  # type: ignore[arg-type]
+            **data,
+            leverage=leverage,
+            position_side=position_side,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OrderCapacityRequest:
+    """Quantity-independent order context used to calculate a safe maximum."""
+
+    side: OrderSide
+    order_type: OrderType
+    reduce_only: bool
+    limit_price: str | None = None
+    stop_price: str | None = None
+    leverage: str | None = None
+    position_side: PositionSide | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "side", coerce_enum(OrderSide, self.side, "side"))
+        object.__setattr__(
+            self,
+            "order_type",
+            coerce_enum(OrderType, self.order_type, "order_type"),
+        )
+        if not isinstance(self.reduce_only, bool):
+            raise TypeError("reduce_only must be a boolean")
+        object.__setattr__(
+            self,
+            "limit_price",
+            optional_decimal(self.limit_price, field_name="limit_price", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "stop_price",
+            optional_decimal(self.stop_price, field_name="stop_price", positive=True),
+        )
+        object.__setattr__(
+            self,
+            "leverage",
+            optional_decimal(self.leverage, field_name="leverage", positive=True),
+        )
+        if self.position_side is not None:
+            object.__setattr__(
+                self,
+                "position_side",
+                coerce_enum(PositionSide, self.position_side, "position_side"),
+            )
+        if self.order_type is OrderType.MARKET:
+            valid = self.limit_price is None and self.stop_price is None
+        elif self.order_type is OrderType.LIMIT:
+            valid = self.limit_price is not None and self.stop_price is None
+        else:
+            valid = self.limit_price is None and self.stop_price is not None
+        if not valid:
+            raise ValueError("order price fields do not match order_type")
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "side": self.side.value,
+            "order_type": self.order_type.value,
+            "reduce_only": self.reduce_only,
+            "limit_price": self.limit_price,
+            "stop_price": self.stop_price,
+        }
+        if self.leverage is not None:
+            payload["leverage"] = self.leverage
+        if self.position_side is not None:
+            payload["position_side"] = self.position_side.value
+        return payload
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "OrderCapacityRequest":
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
+        position_side = data.pop("position_side", None)
+        exact_keys(
+            data,
+            {"side", "order_type", "reduce_only", "limit_price", "stop_price"},
+        )
+        return cls(  # type: ignore[arg-type]
+            **data,
+            leverage=leverage,
+            position_side=position_side,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +696,7 @@ class ReplayOrder:
     status_reason: str | None
     status_history: tuple[OrderStatus, ...]
     model_version: str = BROKER_MODEL_VERSION
+    position_side: PositionSide | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -689,9 +837,15 @@ class ReplayOrder:
             raise TypeError("status_reason must be a string or null")
         if self.model_version not in SUPPORTED_BROKER_MODEL_VERSIONS:
             raise ValueError("order model_version is incompatible")
+        if self.position_side is not None:
+            object.__setattr__(
+                self,
+                "position_side",
+                coerce_enum(PositionSide, self.position_side, "position_side"),
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "order_id": self.order_id,
             "client_order_id": self.client_order_id,
             "side": self.side.value,
@@ -712,11 +866,16 @@ class ReplayOrder:
             "status_history": [value.value for value in self.status_history],
             "model_version": self.model_version,
         }
+        if self.position_side is not None:
+            payload["position_side"] = self.position_side.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ReplayOrder":
+        data = dict(payload)
+        position_side = data.pop("position_side", None)
         exact_keys(
-            payload,
+            data,
             {
                 "order_id",
                 "client_order_id",
@@ -739,13 +898,14 @@ class ReplayOrder:
                 "model_version",
             },
         )
-        if not isinstance(payload["status_history"], list):
+        if not isinstance(data["status_history"], list):
             raise TypeError("order status_history must be a list")
         return cls(
             **{
-                **payload,
-                "status_history": tuple(payload["status_history"]),
-            }
+                **data,
+                "status_history": tuple(data["status_history"]),
+            },
+            position_side=position_side,
         )  # type: ignore[arg-type]
 
 
@@ -766,6 +926,7 @@ class ReplayFill:
     synthetic: bool
     historical_execution: bool
     model_version: str = BROKER_MODEL_VERSION
+    position_side: PositionSide | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("fill_id", "order_id", "fee_asset"):
@@ -821,9 +982,15 @@ class ReplayFill:
             raise TypeError("fill execution flags must be booleans")
         if self.model_version not in SUPPORTED_BROKER_MODEL_VERSIONS:
             raise ValueError("fill model_version is incompatible")
+        if self.position_side is not None:
+            object.__setattr__(
+                self,
+                "position_side",
+                coerce_enum(PositionSide, self.position_side, "position_side"),
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "fill_id": self.fill_id,
             "order_id": self.order_id,
             "side": self.side.value,
@@ -840,11 +1007,16 @@ class ReplayFill:
             "historical_execution": self.historical_execution,
             "model_version": self.model_version,
         }
+        if self.position_side is not None:
+            payload["position_side"] = self.position_side.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ReplayFill":
+        data = dict(payload)
+        position_side = data.pop("position_side", None)
         exact_keys(
-            payload,
+            data,
             {
                 "fill_id",
                 "order_id",
@@ -863,7 +1035,7 @@ class ReplayFill:
                 "model_version",
             },
         )
-        return cls(**payload)  # type: ignore[arg-type]
+        return cls(**data, position_side=position_side)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -965,6 +1137,130 @@ class Position:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionBook:
+    """Two independent signed legs for hedge-mode execution."""
+
+    long: Position
+    short: Position
+    position_mode: PositionMode = PositionMode.HEDGE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.long, Position) or not isinstance(self.short, Position):
+            raise TypeError("hedge position legs must be Position instances")
+        object.__setattr__(
+            self,
+            "position_mode",
+            coerce_enum(PositionMode, self.position_mode, "position.position_mode"),
+        )
+        if self.position_mode is not PositionMode.HEDGE:
+            raise ValueError("PositionBook requires HEDGE position mode")
+        if Decimal(self.long.quantity) < 0:
+            raise ValueError("hedge LONG leg quantity cannot be negative")
+        if Decimal(self.short.quantity) > 0:
+            raise ValueError("hedge SHORT leg quantity cannot be positive")
+        if Decimal(self.long.mark_price) != Decimal(self.short.mark_price):
+            raise ValueError("hedge position legs must share one mark price")
+
+    @classmethod
+    def flat(cls, *, mark_price: str) -> "PositionBook":
+        return cls(
+            long=Position.flat(mark_price=mark_price),
+            short=Position.flat(mark_price=mark_price),
+        )
+
+    @property
+    def quantity(self) -> str:
+        return decimal_to_string(
+            Decimal(self.long.quantity) + Decimal(self.short.quantity),
+            field_name="position.net_quantity",
+        )
+
+    @property
+    def net_quantity(self) -> str:
+        return self.quantity
+
+    @property
+    def entry_price(self) -> str | None:
+        active = [
+            leg
+            for leg in (self.long, self.short)
+            if Decimal(leg.quantity) != 0
+        ]
+        return active[0].entry_price if len(active) == 1 else None
+
+    @property
+    def mark_price(self) -> str:
+        return self.long.mark_price
+
+    @property
+    def notional(self) -> str:
+        return decimal_to_string(
+            Decimal(self.long.notional) + Decimal(self.short.notional),
+            field_name="position.gross_notional",
+        )
+
+    @property
+    def gross_notional(self) -> str:
+        return self.notional
+
+    @property
+    def realized_pnl(self) -> str:
+        return decimal_to_string(
+            Decimal(self.long.realized_pnl) + Decimal(self.short.realized_pnl),
+            field_name="position.realized_pnl",
+        )
+
+    @property
+    def unrealized_pnl(self) -> str:
+        return decimal_to_string(
+            Decimal(self.long.unrealized_pnl) + Decimal(self.short.unrealized_pnl),
+            field_name="position.unrealized_pnl",
+        )
+
+    @property
+    def is_flat(self) -> bool:
+        return Decimal(self.long.quantity) == 0 and Decimal(self.short.quantity) == 0
+
+    def leg(self, position_side: PositionSide) -> Position:
+        side = coerce_enum(PositionSide, position_side, "position_side")
+        return self.long if side is PositionSide.LONG else self.short
+
+    def with_leg(self, position_side: PositionSide, position: Position) -> "PositionBook":
+        side = coerce_enum(PositionSide, position_side, "position_side")
+        return PositionBook(
+            long=position if side is PositionSide.LONG else self.long,
+            short=position if side is PositionSide.SHORT else self.short,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "position_mode": self.position_mode.value,
+            "long": self.long.to_dict(),
+            "short": self.short.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "PositionBook":
+        exact_keys(payload, {"position_mode", "long", "short"})
+        if payload["position_mode"] != PositionMode.HEDGE.value:
+            raise ValueError("position book payload must use HEDGE mode")
+        long = payload["long"]
+        short = payload["short"]
+        if not isinstance(long, Mapping) or not isinstance(short, Mapping):
+            raise TypeError("hedge position legs must be objects")
+        return cls(long=Position.from_dict(long), short=Position.from_dict(short))
+
+
+PositionState = Position | PositionBook
+
+
+def position_state_from_dict(payload: Mapping[str, object]) -> PositionState:
+    if payload.get("position_mode") == PositionMode.HEDGE.value:
+        return PositionBook.from_dict(payload)
+    return Position.from_dict(payload)
+
+
+@dataclass(frozen=True, slots=True)
 class Account:
     cash_balance: str
     equity: str
@@ -1045,6 +1341,7 @@ class ClosedTrade:
     exit_price: str
     realized_pnl: str
     source_sequence: int
+    position_side: PositionSide | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("trade_id", "order_id", "fill_id"):
@@ -1054,6 +1351,12 @@ class ClosedTrade:
                 validate_identifier(getattr(self, field_name), field_name=field_name),
             )
         object.__setattr__(self, "side", coerce_enum(OrderSide, self.side, "side"))
+        if self.position_side is not None:
+            object.__setattr__(
+                self,
+                "position_side",
+                coerce_enum(PositionSide, self.position_side, "position_side"),
+            )
         for field_name in ("quantity", "entry_price", "exit_price"):
             object.__setattr__(
                 self,
@@ -1088,7 +1391,7 @@ class ClosedTrade:
             raise ValueError("closed trade realized PnL does not reconcile")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "trade_id": self.trade_id,
             "order_id": self.order_id,
             "fill_id": self.fill_id,
@@ -1099,11 +1402,16 @@ class ClosedTrade:
             "realized_pnl": self.realized_pnl,
             "source_sequence": self.source_sequence,
         }
+        if self.position_side is not None:
+            payload["position_side"] = self.position_side.value
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ClosedTrade":
+        data = dict(payload)
+        position_side = data.pop("position_side", None)
         exact_keys(
-            payload,
+            data,
             {
                 "trade_id",
                 "order_id",
@@ -1116,7 +1424,7 @@ class ClosedTrade:
                 "source_sequence",
             },
         )
-        return cls(**payload)  # type: ignore[arg-type]
+        return cls(**data, position_side=position_side)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1198,7 +1506,7 @@ class BrokerEventResult:
     orders: tuple[ReplayOrder, ...]
     fills: tuple[ReplayFill, ...]
     warnings: tuple[BrokerWarning, ...]
-    position: Position
+    position: PositionState
     account: Account
 
     def to_dict(self) -> dict[str, object]:

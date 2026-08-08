@@ -116,6 +116,38 @@ test("order events cannot smuggle a source bar update", () => {
   assert.equal(parseReplayEvent(forged).type, "replay.order");
 });
 
+test("order events accept every command type emitted by the replay actor", () => {
+  const actorOrderCommandTypes = [
+    "place_order",
+    "replace_order",
+    "cancel_order",
+    "cancel_orders",
+    "close_position",
+    "execute_position_intent",
+    "set_position_protection",
+    "_training_adjust_capital",
+  ] as const;
+  const projection = structuredClone(replayDeltaEvent().data.projection);
+  Object.assign(projection, { bar_update: null });
+
+  for (const commandType of actorOrderCommandTypes) {
+    const parsed = parseReplayEvent({
+      ...replayDeltaEvent(),
+      type: "replay.order",
+      data: { command_type: commandType, projection },
+    });
+    assert.equal(parsed.type, "replay.order");
+    assert.ok("command_type" in parsed.data);
+    assert.equal(parsed.data.command_type, commandType);
+  }
+
+  assert.throws(() => parseReplayEvent({
+    ...replayDeltaEvent(),
+    type: "replay.order",
+    data: { command_type: "unknown_order_command", projection },
+  }), /unsupported value/);
+});
+
 test("session and atomic snapshot parsers bind protocol, session, counters, hashes, and epoch", () => {
   const response = parseReplaySessionResponse(replaySessionResponse());
   const event = parseReplayEvent(replaySnapshotEvent());

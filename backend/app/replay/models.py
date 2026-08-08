@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from types import MappingProxyType
@@ -234,6 +234,10 @@ class ReplaySessionConfig:
     slippage_model: SlippageModel
     max_leverage: str
     pause_on_controller_loss: bool
+    position_mode: str = field(
+        default="ONE_WAY",
+        metadata={"canonical_omit_value": "ONE_WAY"},
+    )
 
     def __post_init__(self) -> None:
         if self.protocol != REPLAY_PROTOCOL:
@@ -302,6 +306,8 @@ class ReplaySessionConfig:
             raise TypeError("blind_mode must be a boolean")
         if not isinstance(self.pause_on_controller_loss, bool):
             raise TypeError("pause_on_controller_loss must be a boolean")
+        if self.position_mode not in {"ONE_WAY", "HEDGE"}:
+            raise ValueError("position_mode must be ONE_WAY or HEDGE")
         object.__setattr__(
             self,
             "initial_equity",
@@ -327,6 +333,8 @@ class ReplaySessionConfig:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ReplaySessionConfig":
+        data = dict(payload)
+        position_mode = data.pop("position_mode", "ONE_WAY")
         expected = {
             "protocol",
             "source_kind",
@@ -350,33 +358,34 @@ class ReplaySessionConfig:
             "max_leverage",
             "pause_on_controller_loss",
         }
-        _expect_exact_keys(payload, expected)
+        _expect_exact_keys(data, expected)
         return cls(
-            protocol=payload["protocol"],  # type: ignore[arg-type]
-            source_kind=payload["source_kind"],  # type: ignore[arg-type]
-            exchange=payload["exchange"],  # type: ignore[arg-type]
-            market_type=payload["market_type"],  # type: ignore[arg-type]
-            symbol=payload["symbol"],  # type: ignore[arg-type]
-            base_interval=payload["base_interval"],  # type: ignore[arg-type]
-            display_interval=payload["display_interval"],  # type: ignore[arg-type]
-            start_policy=payload["start_policy"],  # type: ignore[arg-type]
-            requested_start_ms=payload["requested_start_ms"],  # type: ignore[arg-type]
-            warmup_bars=payload["warmup_bars"],  # type: ignore[arg-type]
-            horizon_ms=payload["horizon_ms"],  # type: ignore[arg-type]
-            random_seed=payload["random_seed"],  # type: ignore[arg-type]
-            quality_mode=payload["quality_mode"],  # type: ignore[arg-type]
-            blind_mode=payload["blind_mode"],  # type: ignore[arg-type]
-            initial_equity=payload["initial_equity"],  # type: ignore[arg-type]
-            quote_asset=payload["quote_asset"],  # type: ignore[arg-type]
-            execution_model=payload["execution_model"],  # type: ignore[arg-type]
-            fee_model=FeeModel.from_dict(payload["fee_model"]),
-            slippage_model=SlippageModel.from_dict(payload["slippage_model"]),
-            max_leverage=payload["max_leverage"],  # type: ignore[arg-type]
-            pause_on_controller_loss=payload["pause_on_controller_loss"],  # type: ignore[arg-type]
+            protocol=data["protocol"],  # type: ignore[arg-type]
+            source_kind=data["source_kind"],  # type: ignore[arg-type]
+            exchange=data["exchange"],  # type: ignore[arg-type]
+            market_type=data["market_type"],  # type: ignore[arg-type]
+            symbol=data["symbol"],  # type: ignore[arg-type]
+            base_interval=data["base_interval"],  # type: ignore[arg-type]
+            display_interval=data["display_interval"],  # type: ignore[arg-type]
+            start_policy=data["start_policy"],  # type: ignore[arg-type]
+            requested_start_ms=data["requested_start_ms"],  # type: ignore[arg-type]
+            warmup_bars=data["warmup_bars"],  # type: ignore[arg-type]
+            horizon_ms=data["horizon_ms"],  # type: ignore[arg-type]
+            random_seed=data["random_seed"],  # type: ignore[arg-type]
+            quality_mode=data["quality_mode"],  # type: ignore[arg-type]
+            blind_mode=data["blind_mode"],  # type: ignore[arg-type]
+            initial_equity=data["initial_equity"],  # type: ignore[arg-type]
+            quote_asset=data["quote_asset"],  # type: ignore[arg-type]
+            execution_model=data["execution_model"],  # type: ignore[arg-type]
+            fee_model=FeeModel.from_dict(data["fee_model"]),
+            slippage_model=SlippageModel.from_dict(data["slippage_model"]),
+            max_leverage=data["max_leverage"],  # type: ignore[arg-type]
+            pause_on_controller_loss=data["pause_on_controller_loss"],  # type: ignore[arg-type]
+            position_mode=position_mode,  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "protocol": self.protocol,
             "source_kind": self.source_kind.value,
             "exchange": self.exchange,
@@ -399,6 +408,9 @@ class ReplaySessionConfig:
             "max_leverage": self.max_leverage,
             "pause_on_controller_loss": self.pause_on_controller_loss,
         }
+        if self.position_mode == "HEDGE":
+            payload["position_mode"] = self.position_mode
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

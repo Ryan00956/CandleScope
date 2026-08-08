@@ -7,6 +7,7 @@ import type {
   ReplayV2IntegrityMode,
   ReplayV2FundingMode,
   ReplayV2MarginMode,
+  ReplayV2PositionMode,
   ReplayV2SourceKind,
   ReplayV2StartMode,
   ReplayV2TimeDisclosurePolicy,
@@ -48,6 +49,7 @@ export interface TrainingRunDraft {
   readonly takerFeeBps: string;
   readonly marketSlippageBps: string;
   readonly marginMode: ReplayV2MarginMode;
+  readonly positionMode: ReplayV2PositionMode;
   readonly fundingMode: ReplayV2FundingMode;
   readonly accountDataMode: ReplayV2AccountDataMode;
   readonly fixedFundingRate: string;
@@ -125,6 +127,7 @@ export function createTrainingRunDraft(
     takerFeeBps: "5",
     marketSlippageBps: "1",
     marginMode: "CROSS",
+    positionMode: "ONE_WAY",
     fundingMode: "OFF",
     accountDataMode: "APPROX_PROXY",
     fixedFundingRate: "0.0001",
@@ -364,6 +367,12 @@ export function evaluateTrainingRunDraft(
       errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
     }
   }
+  if (draft.positionMode === "HEDGE") {
+    if (draft.accountDataMode !== "APPROX_PROXY") errors.push("双向持仓目前仅支持近似模拟账户");
+    if (draft.marginMode !== "CROSS") errors.push("双向持仓目前仅支持全仓保证金");
+    if (draft.fundingMode !== "OFF") errors.push("双向持仓目前要求关闭资金费");
+    if (draft.bookMode !== "OFF") errors.push("双向持仓目前仅支持 Touch/Tape 撮合");
+  }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
     errors.push("规则变更白名单包含重复或未知项");
@@ -474,6 +483,12 @@ export function evaluateTrainingRunSetupDraft(
       errors.push("资金费结算间隔必须在 1 分钟至 30 天之间");
     }
   }
+  if (draft.positionMode === "HEDGE") {
+    if (draft.accountDataMode !== "APPROX_PROXY") errors.push("双向持仓目前仅支持近似模拟账户");
+    if (draft.marginMode !== "CROSS") errors.push("双向持仓目前仅支持全仓保证金");
+    if (draft.fundingMode !== "OFF") errors.push("双向持仓目前要求关闭资金费");
+    if (draft.bookMode !== "OFF") errors.push("双向持仓目前仅支持 Touch/Tape 撮合");
+  }
   if (new Set(draft.allowedMutations).size !== draft.allowedMutations.length
     || draft.allowedMutations.some((item) => !REPLAY_POLICY_MUTATIONS.includes(item))) {
     errors.push("规则变更白名单包含重复或未知项");
@@ -531,6 +546,7 @@ export function buildTrainingRunPreparationRequest(
     time_disclosure_policy: draft.timeDisclosurePolicy,
     book_mode: draft.bookMode,
     margin_mode: draft.marginMode,
+    position_mode: draft.positionMode,
     funding_mode: draft.fundingMode,
     account_data_mode: draft.accountDataMode,
     account_history_ref: draft.accountDataMode === "HISTORICAL_EXACT"
@@ -591,6 +607,7 @@ export function buildTrainingRunCreateRequest(
     time_disclosure_policy: draft.timeDisclosurePolicy,
     book_mode: draft.bookMode,
     margin_mode: draft.marginMode,
+    position_mode: draft.positionMode,
     funding_mode: draft.fundingMode,
     account_data_mode: draft.accountDataMode,
     fixed_funding_rate: draft.fundingMode === "SANDBOX_FIXED"

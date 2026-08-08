@@ -10,13 +10,19 @@ import {
 import type { StorageLike } from "../shared/browserStorage.js";
 import type { MarketRailViewDescriptor } from "./marketRailTypes.js";
 
-const LAYOUT_STORAGE_KEY = "candlescope-market-rail-layout-v1";
+const LAYOUT_STORAGE_KEY = "candlescope-market-rail-layout-v2";
+const LEGACY_LAYOUT_STORAGE_KEY = "candlescope-market-rail-layout-v1";
 const LEGACY_SIDEBAR_COLLAPSED_KEY = "candlescope-sidebar-collapsed";
 const LEGACY_ORDER_BOOK_COLLAPSED_KEY = "candlescope-order-book-collapsed";
 const LEGACY_TRADE_FLOW_PREFS_KEY = "candlescope-trade-flow-preferences-v1";
 
 export interface PersistedMarketRailLayout {
   readonly openViewIds: readonly string[];
+  /**
+   * Hides the content panel without clearing openViewIds.
+   * Distinct from closing individual views (which mutates openViewIds).
+   */
+  readonly panelCollapsed: boolean;
   readonly viewHeights: Readonly<Record<string, number>>;
 }
 
@@ -204,41 +210,93 @@ function migrateLegacyOpenViewIds(storage: StorageLike): string[] {
   }
 }
 
+function parseStoredLayout(
+  raw: string,
+  { migrateEmptyToCollapsed = false }: { migrateEmptyToCollapsed?: boolean } = {},
+): PersistedMarketRailLayout | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const storedOpenViewIds = Array.isArray(parsed.openViewIds)
+      ? normalizeOpenViewIds(parsed.openViewIds.filter((id): id is string => typeof id === "string"))
+      : [...DEFAULT_LIVE_OPEN_VIEW_IDS];
+    const migrateCollapsedEmpty = migrateEmptyToCollapsed && storedOpenViewIds.length === 0;
+    const openViewIds = migrateCollapsedEmpty
+      ? [...DEFAULT_LIVE_OPEN_VIEW_IDS]
+      : storedOpenViewIds;
+    return {
+      openViewIds,
+      panelCollapsed: openViewIds.length > 0
+        && (migrateCollapsedEmpty || parsed.panelCollapsed === true),
+      viewHeights: normalizeViewHeights(
+        isRecord(parsed.viewHeights)
+          ? parsed.viewHeights as Record<string, number>
+          : {},
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function loadMarketRailLayout(
   storage?: StorageLike | null,
 ): PersistedMarketRailLayout {
   if (!storage) {
     return {
       openViewIds: [...DEFAULT_LIVE_OPEN_VIEW_IDS],
+      panelCollapsed: false,
       viewHeights: {},
     };
   }
   try {
     const raw = storage.getItem(LAYOUT_STORAGE_KEY);
     if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (isRecord(parsed)) {
-        const openViewIds = Array.isArray(parsed.openViewIds)
-          ? normalizeOpenViewIds(parsed.openViewIds.filter((id): id is string => typeof id === "string"))
-          : [...DEFAULT_LIVE_OPEN_VIEW_IDS];
-        return {
-          openViewIds,
-          viewHeights: normalizeViewHeights(
-            isRecord(parsed.viewHeights)
-              ? parsed.viewHeights as Record<string, number>
-              : {},
-          ),
-        };
+      const current = parseStoredLayout(raw);
+      if (current) return current;
+    }
+
+    const legacyRaw = storage.getItem(LEGACY_LAYOUT_STORAGE_KEY);
+    if (legacyRaw) {
+      // v1 used an empty open set for whole-rail collapse. In v2 an empty set
+      // means the user explicitly closed every view, so migrate v1 once.
+      const migrated = parseStoredLayout(legacyRaw, { migrateEmptyToCollapsed: true });
+      if (migrated) {
+        saveMarketRailLayout(migrated, storage);
+        return migrated;
       }
     }
   } catch {
     // fall through to legacy migration
   }
 
-  return {
+  // Legacy "sidebar collapsed" hid the whole rail; migrate to panelCollapsed
+  // while restoring default open views so expand brings content back.
+  const legacyCollapsed = storage.getItem(LEGACY_SIDEBAR_COLLAPSED_KEY) === "true";
+  if (legacyCollapsed) {
+    const openViewIds = migrateLegacyOpenViewIds({
+      getItem(key: string) {
+        if (key === LEGACY_SIDEBAR_COLLAPSED_KEY) return "false";
+        return storage.getItem(key);
+      },
+      setItem: storage.setItem.bind(storage),
+    });
+    const migrated = {
+      openViewIds: openViewIds.length > 0 ? openViewIds : [...DEFAULT_LIVE_OPEN_VIEW_IDS],
+      panelCollapsed: true,
+      viewHeights: {},
+    };
+    saveMarketRailLayout(migrated, storage);
+    return migrated;
+  }
+
+  const migrated = {
     openViewIds: migrateLegacyOpenViewIds(storage),
+    panelCollapsed: false,
     viewHeights: {},
   };
+  saveMarketRailLayout(migrated, storage);
+  return migrated;
 }
 
 export function saveMarketRailLayout(
@@ -249,6 +307,7 @@ export function saveMarketRailLayout(
   try {
     storage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({
       openViewIds: layout.openViewIds,
+      panelCollapsed: layout.panelCollapsed === true,
       viewHeights: layout.viewHeights,
     }));
   } catch {

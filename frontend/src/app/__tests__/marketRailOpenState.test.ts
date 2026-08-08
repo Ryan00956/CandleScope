@@ -70,7 +70,7 @@ test("allocateRailViewHeights fills single open view", () => {
   assert.equal(heights.watchlist, 640);
 });
 
-test("loadMarketRailLayout migrates legacy collapsed rail to empty open set", () => {
+test("loadMarketRailLayout migrates legacy collapsed rail to hide-only panel state", () => {
   const storage = {
     data: {
       "candlescope-sidebar-collapsed": "true",
@@ -84,7 +84,65 @@ test("loadMarketRailLayout migrates legacy collapsed rail to empty open set", ()
     },
   };
   const layout = loadMarketRailLayout(storage);
+  // Expand must be able to restore content — do not permanently clear openViewIds.
+  assert.ok(layout.openViewIds.length > 0);
+  assert.equal(layout.panelCollapsed, true);
+  assert.ok(layout.openViewIds.includes("watchlist"));
+});
+
+test("loadMarketRailLayout migrates a v1 empty open set to restorable v2 collapse state", () => {
+  const storage = {
+    data: {
+      "candlescope-market-rail-layout-v1": JSON.stringify({
+        openViewIds: [],
+        viewHeights: { "order-book": 444 },
+      }),
+    } as Record<string, string>,
+    getItem(key: string) {
+      return this.data[key] ?? null;
+    },
+    setItem(key: string, value: string) {
+      this.data[key] = value;
+    },
+  };
+
+  const layout = loadMarketRailLayout(storage);
+
+  assert.deepEqual(layout.openViewIds, ["watchlist", "order-book"]);
+  assert.equal(layout.panelCollapsed, true);
+  assert.equal(layout.viewHeights["order-book"], 444);
+  assert.deepEqual(
+    JSON.parse(storage.data["candlescope-market-rail-layout-v2"] ?? "null"),
+    layout,
+  );
+});
+
+test("loadMarketRailLayout preserves an intentional empty open set in v2", () => {
+  const storage = {
+    data: {
+      "candlescope-market-rail-layout-v1": JSON.stringify({
+        openViewIds: ["watchlist", "order-book"],
+        panelCollapsed: true,
+        viewHeights: {},
+      }),
+      "candlescope-market-rail-layout-v2": JSON.stringify({
+        openViewIds: [],
+        panelCollapsed: false,
+        viewHeights: {},
+      }),
+    } as Record<string, string>,
+    getItem(key: string) {
+      return this.data[key] ?? null;
+    },
+    setItem(key: string, value: string) {
+      this.data[key] = value;
+    },
+  };
+
+  const layout = loadMarketRailLayout(storage);
+
   assert.deepEqual(layout.openViewIds, []);
+  assert.equal(layout.panelCollapsed, false);
 });
 
 test("loadMarketRailLayout migrates legacy expanded dockView tape", () => {

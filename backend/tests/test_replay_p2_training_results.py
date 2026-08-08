@@ -1,16 +1,105 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from app.replay.training.models import ReplayV2CommandType, TrainingCursor
+from app.replay.training.models import PositionMode, ReplayV2CommandType, TrainingCursor
 from tests.test_replay_v2_training_phase5 import _command, _request, _service
 
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_hedge_legs_are_projected_as_two_independent_trade_results(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "p2-hedge-training-results.db")
+    try:
+        request = replace(await _request(service), position_mode=PositionMode.HEDGE)
+        created = await service.training.create_run(request)  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+
+        for command_id, side, position_side in (
+            ("open-long", "BUY", "LONG"),
+            ("open-short", "SELL", "SHORT"),
+        ):
+            session = await service.get_session(session_id)
+            await service.training.command(  # type: ignore[union-attr]
+                run_id,
+                _command(
+                    run_id,
+                    command_id,
+                    ReplayV2CommandType.PLACE_ORDER,
+                    session,
+                    {
+                        "client_order_id": command_id,
+                        "side": side,
+                        "position_side": position_side,
+                        "order_type": "MARKET",
+                        "quantity": "1",
+                        "reduce_only": False,
+                        "limit_price": None,
+                        "stop_price": None,
+                        "leverage": "2",
+                    },
+                ),
+            )
+
+        session = await service.get_session(session_id)
+        await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "advance-hedge-entries",
+                ReplayV2CommandType.STEP_BASE,
+                session,
+                {"count": 2},
+            ),
+        )
+        session = await service.get_session(session_id)
+        position = session["snapshot"]["components"]["position"]
+        assert position["position_mode"] == "HEDGE"
+        assert Decimal(str(position["long"]["quantity"])) > 0
+        assert Decimal(str(position["short"]["quantity"])) < 0
+
+        for command_id, position_side in (
+            ("close-long", "LONG"),
+            ("close-short", "SHORT"),
+        ):
+            session = await service.get_session(session_id)
+            await service.training.command(  # type: ignore[union-attr]
+                run_id,
+                _command(
+                    run_id,
+                    command_id,
+                    ReplayV2CommandType.CLOSE_POSITION,
+                    session,
+                    {"quantity": None, "position_side": position_side},
+                ),
+            )
+
+        results = await service.training.training_results(run_id, limit=100)  # type: ignore[union-attr]
+        assert results["summary"]["trade_count"] == 2
+        assert {item["position_side"] for item in results["items"]} == {"BUY", "SELL"}
+        with sqlite3.connect(tmp_path / "p2-hedge-training-results.db") as connection:
+            projected_track_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT track_id FROM replay_training_trade_projection
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                )
+            }
+        assert projected_track_ids == {"track-1#LONG", "track-1#SHORT"}
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 async def test_trade_plan_is_sized_logged_and_projected_into_training_results(
@@ -42,6 +131,7 @@ async def test_trade_plan_is_sized_logged_and_projected_into_training_results(
             "reduce_only": False,
             "limit_price": None,
             "stop_price": None,
+            "leverage": "2",
         }
         preview = await service.training.preview_order(  # type: ignore[union-attr]
             run_id,

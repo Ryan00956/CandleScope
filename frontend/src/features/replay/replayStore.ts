@@ -15,7 +15,7 @@ import type {
   ReplayJournalEntry,
   ReplayOrder,
   ReplayParsedEvent,
-  ReplayPosition,
+  ReplayPositionState,
   ReplayProjection,
   ReplaySessionSnapshot,
   ReplaySessionConfig,
@@ -56,7 +56,7 @@ export interface ReplayStoreSnapshot {
   readonly fills: readonly ReplayFill[];
   readonly closedTrades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
-  readonly position: ReplayPosition | null;
+  readonly position: ReplayPositionState | null;
   readonly account: ReplayAccount | null;
   readonly journal: readonly ReplayJournalEntry[];
   readonly lastPrice: KlineBar | null;
@@ -128,7 +128,7 @@ export class ReplayStore {
   private fillsById = new Map<string, ReplayFill>();
   private closedTradesById = new Map<string, ReplayClosedTrade>();
   private warningsById = new Map<string, ReplayWarning>();
-  private position: ReplayPosition | null = null;
+  private position: ReplayPositionState | null = null;
   private account: ReplayAccount | null = null;
   private journal: ReplayJournalEntry[] = [];
   private error: ReplayStoreError | null = null;

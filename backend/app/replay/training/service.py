@@ -148,6 +148,60 @@ def _stored_mapping(value: object, *, field_name: str) -> Mapping[str, object]:
     return cast(Mapping[str, object], value)
 
 
+def _position_is_open(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("position_mode") == "HEDGE":
+        return any(
+            isinstance(value.get(leg), Mapping)
+            and value[leg].get("quantity") not in {None, "0", 0}
+            for leg in ("long", "short")
+        )
+    return value.get("quantity") not in {None, "0", 0}
+
+
+def _position_leg(
+    value: object,
+    *,
+    position_side: object = None,
+) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    if value.get("position_mode") != "HEDGE":
+        return cast(Mapping[str, object], value)
+    if position_side not in {"LONG", "SHORT"}:
+        return None
+    leg = value.get(str(position_side).lower())
+    return cast(Mapping[str, object], leg) if isinstance(leg, Mapping) else None
+
+
+def _position_mark(value: object, *, position_side: object = None) -> object:
+    leg = _position_leg(value, position_side=position_side)
+    if leg is not None and leg.get("mark_price") is not None:
+        return leg.get("mark_price")
+    if isinstance(value, Mapping) and value.get("position_mode") == "HEDGE":
+        for name in ("long", "short"):
+            candidate = value.get(name)
+            if isinstance(candidate, Mapping) and candidate.get("mark_price") is not None:
+                return candidate.get("mark_price")
+    return None
+
+
+def _position_gross_notional(value: object) -> Decimal:
+    if not isinstance(value, Mapping):
+        return Decimal(0)
+    if value.get("position_mode") != "HEDGE":
+        return Decimal(str(value.get("notional", "0")))
+    return sum(
+        (
+            Decimal(str(leg.get("notional", "0")))
+            for name in ("long", "short")
+            if isinstance((leg := value.get(name)), Mapping)
+        ),
+        Decimal(0),
+    )
+
+
 class TrainingRunService:
     """Own Hub metadata and delegate active single-track execution to replay.v1."""
 
@@ -883,7 +937,7 @@ class TrainingRunService:
                 snapshot=snapshot,
             )
             payload = dict(
-                self._exact_payload(
+                self._order_payload_with_optional_leverage(
                     order,
                     {
                         "client_order_id",
@@ -902,7 +956,15 @@ class TrainingRunService:
                     "order preview position intent is unsupported",
                     status_code=422,
                 )
-            if position_intent == "OPEN":
+            if binding.get("position_mode") == "HEDGE" and payload.get(
+                "position_side"
+            ) not in {"LONG", "SHORT"}:
+                raise TrainingRunError(
+                    "ORDER_REJECTED",
+                    "HEDGE order preview requires position_side",
+                    status_code=409,
+                )
+            if position_intent == "OPEN" and binding.get("position_mode") != "HEDGE":
                 if (
                     payload.get("order_type") != "MARKET"
                     or payload.get("reduce_only") is not False
@@ -1063,6 +1125,17 @@ class TrainingRunService:
                                 "actual": revised_actual,
                             },
                         )
+            preview = {
+                **dict(preview),
+                "max_quantity": self._shared_order_capacity_quantity(
+                    adapter_max_quantity=preview.get("max_quantity"),
+                    reference_price=preview.get("reference_price"),
+                    payload=payload,
+                    selected_track=selected,
+                    portfolio=projection.get("portfolio"),
+                    binding=binding,
+                ),
+            }
             response = {
                 **dict(preview),
                 "protocol": REPLAY_V2_PROTOCOL,
@@ -1083,6 +1156,212 @@ class TrainingRunService:
             if normalized_plan is not None:
                 response["trade_plan"] = normalized_plan
             return response
+
+    async def order_capacity(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        expected_cursor: TrainingCursor,
+        position_intent: str,
+        context: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Return a cursor-bound maximum without validating a draft quantity."""
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        if expected_revision != expected_cursor.revision:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "capacity revision must match expected cursor revision",
+                status_code=422,
+            )
+        actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
+        async with actor.serialized():
+            binding = await self.store.run_binding(normalized)
+            projection = await self.store.get_market_tracks(normalized)
+            tracks = projection.get("tracks")
+            if not isinstance(tracks, list):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market tracks projection is invalid",
+                    status_code=503,
+                )
+            selected_track_id = str(binding["selected_track_id"])
+            selected = next(
+                (
+                    track
+                    for track in tracks
+                    if isinstance(track, Mapping)
+                    and track.get("track_id") == selected_track_id
+                ),
+                None,
+            )
+            if (
+                selected is None
+                or selected.get("subscription_tier") != "FULL"
+                or selected.get("state") != "READY"
+            ):
+                raise TrainingRunError(
+                    "MARKET_TRACK_NOT_READY",
+                    "order capacity requires the selected market track to be READY and FULL",
+                    status_code=409,
+                )
+            session_id = str(binding["adapter_session_id"])
+            session = await self.replay_service.get_session(session_id)
+            snapshot = self._snapshot(session)
+            cursor = snapshot.get("cursor")
+            if not isinstance(cursor, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter cursor is invalid",
+                    status_code=503,
+                )
+            actual = {
+                "virtual_time_ms": cursor.get("virtual_time_ms"),
+                "source_sequence": cursor.get("source_sequence"),
+                "revision": snapshot.get("revision"),
+            }
+            if actual != expected_cursor.to_dict():
+                raise TrainingRunError(
+                    "REVISION_CONFLICT",
+                    "capacity cursor does not match the authoritative run cursor",
+                    status_code=409,
+                    details={"expected": expected_cursor.to_dict(), "actual": actual},
+                )
+            await self._guard_historical_book_current(
+                run_id=normalized,
+                binding=binding,
+                snapshot=snapshot,
+            )
+            payload = dict(
+                self._order_payload_with_optional_leverage(
+                    context,
+                    {
+                        "side",
+                        "order_type",
+                        "reduce_only",
+                        "limit_price",
+                        "stop_price",
+                    },
+                )
+            )
+            if position_intent not in {"NET", "OPEN"}:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "order capacity position intent is unsupported",
+                    status_code=422,
+                )
+            if binding.get("position_mode") == "HEDGE" and payload.get(
+                "position_side"
+            ) not in {"LONG", "SHORT"}:
+                raise TrainingRunError(
+                    "ORDER_REJECTED",
+                    "HEDGE order capacity requires position_side",
+                    status_code=409,
+                )
+            if position_intent == "OPEN" and binding.get("position_mode") != "HEDGE":
+                if (
+                    payload.get("order_type") != "MARKET"
+                    or payload.get("reduce_only") is not False
+                ):
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "OPEN capacity is only available for non-reduce-only market orders",
+                        status_code=422,
+                    )
+                position = selected.get("position")
+                if not isinstance(position, Mapping):
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "selected position projection is invalid",
+                        status_code=503,
+                    )
+                try:
+                    position_quantity = Decimal(str(position.get("quantity")))
+                except InvalidOperation as exc:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "selected position quantity is invalid",
+                        status_code=503,
+                    ) from exc
+                if position_quantity != 0 and (
+                    position_quantity > 0
+                ) != (payload.get("side") == "BUY"):
+                    raise TrainingRunError(
+                        "ORDER_REJECTED",
+                        "OPEN cannot reduce or reverse the current position",
+                        status_code=409,
+                    )
+            self._assert_exact_account_capacity_context(
+                payload=payload,
+                selected_track=selected,
+                portfolio=projection.get("portfolio"),
+            )
+            try:
+                adapter_capacity = await self.replay_service.order_capacity(
+                    session_id,
+                    payload,
+                )
+            except ReplayDomainError as exc:
+                raise TrainingRunError(
+                    exc.code.value,
+                    exc.message,
+                    status_code=exc.http_status,
+                    details=exc.details,
+                ) from exc
+            capacity_cursor = adapter_capacity.get("cursor")
+            if not isinstance(capacity_cursor, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter capacity cursor is invalid",
+                    status_code=503,
+                )
+            capacity_actual = {
+                "virtual_time_ms": capacity_cursor.get("virtual_time_ms"),
+                "source_sequence": capacity_cursor.get("source_sequence"),
+                "revision": adapter_capacity.get("revision"),
+            }
+            if capacity_actual != expected_cursor.to_dict():
+                raise TrainingRunError(
+                    "REVISION_CONFLICT",
+                    "market advanced while order capacity was calculated",
+                    status_code=409,
+                    details={
+                        "expected": expected_cursor.to_dict(),
+                        "actual": capacity_actual,
+                    },
+                )
+            raw_capacity = adapter_capacity.get("capacity")
+            if not isinstance(raw_capacity, Mapping):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "adapter order capacity is invalid",
+                    status_code=503,
+                )
+            maximum = self._shared_order_capacity_quantity(
+                adapter_max_quantity=raw_capacity.get("max_quantity"),
+                reference_price=raw_capacity.get("reference_price"),
+                payload=payload,
+                selected_track=selected,
+                portfolio=projection.get("portfolio"),
+                binding=binding,
+            )
+            return {
+                "protocol": REPLAY_V2_PROTOCOL,
+                "schema_version": "replay.order-capacity.v1",
+                "run_id": normalized,
+                "track_id": selected_track_id,
+                "position_intent": position_intent,
+                "revision": expected_revision,
+                "cursor": expected_cursor.to_dict(),
+                "state_hash": adapter_capacity["state_hash"],
+                "execution_fidelity": adapter_capacity["execution_fidelity"],
+                "context": dict(raw_capacity["context"]),
+                "reference_price": raw_capacity["reference_price"],
+                "max_quantity": maximum,
+                "quote_asset": raw_capacity["quote_asset"],
+                "max_leverage": raw_capacity["max_leverage"],
+            }
 
     async def get_fast_forward_plan(
         self,
@@ -4258,7 +4537,7 @@ class TrainingRunService:
             command.type is ReplayV2CommandType.PLACE_ORDER
             and "trade_plan" in command.payload
         ):
-            payload_with_plan = self._exact_payload(
+            payload_with_plan = self._order_payload_with_optional_leverage(
                 command.payload,
                 expected_fields[command.type] | {"trade_plan"},
             )
@@ -4275,6 +4554,18 @@ class TrainingRunService:
                 for key, value in payload_with_plan.items()
                 if key != "trade_plan"
             }
+        elif command.type in {
+            ReplayV2CommandType.PLACE_ORDER,
+            ReplayV2CommandType.EXECUTE_POSITION_INTENT,
+            ReplayV2CommandType.CLOSE_POSITION,
+            ReplayV2CommandType.SET_POSITION_PROTECTION,
+        }:
+            payload = dict(
+                self._order_payload_with_optional_leverage(
+                    command.payload,
+                    expected_fields[command.type],
+                )
+            )
         else:
             payload = dict(
                 self._exact_payload(command.payload, expected_fields[command.type])
@@ -4426,6 +4717,8 @@ class TrainingRunService:
                     "reduce_only": False,
                     "limit_price": None,
                     "stop_price": None,
+                    "leverage": payload.get("leverage"),
+                    "position_side": payload.get("position_side"),
                 }
                 self._assert_exact_account_order_filters(
                     payload=opening_payload,
@@ -4442,6 +4735,12 @@ class TrainingRunService:
                 )
         elif command.type is ReplayV2CommandType.SET_POSITION_PROTECTION:
             position = selected.get("position")
+            if (
+                isinstance(position, Mapping)
+                and position.get("position_mode") == "HEDGE"
+            ):
+                leg_name = str(payload.get("position_side", "")).lower()
+                position = position.get(leg_name)
             raw_quantity = payload.get("quantity")
             if raw_quantity is None and isinstance(position, Mapping):
                 try:
@@ -4537,8 +4836,9 @@ class TrainingRunService:
         if payload.get("order_type") == "LIMIT":
             return payload.get("limit_price")
         position = selected_track.get("position")
-        if isinstance(position, Mapping) and position.get("mark_price") is not None:
-            return position.get("mark_price")
+        mark = _position_mark(position, position_side=payload.get("position_side"))
+        if mark is not None:
+            return mark
         return selected_track.get("public_price")
 
     @staticmethod
@@ -4742,8 +5042,11 @@ class TrainingRunService:
                     "quantity_step": decimal_text(quantity_step, "quantity step"),
                 },
             )
-        position = selected_track.get("position")
-        if isinstance(position, Mapping):
+        position = _position_leg(
+            selected_track.get("position"),
+            position_side=payload.get("position_side"),
+        )
+        if position is not None:
             try:
                 position_quantity = Decimal(str(position.get("quantity", "0")))
             except InvalidOperation as exc:
@@ -4910,6 +5213,154 @@ class TrainingRunService:
                 details={"fallback_applied": False},
             ) from exc
 
+    @staticmethod
+    def _assert_exact_account_capacity_context(
+        *,
+        payload: Mapping[str, object],
+        selected_track: Mapping[str, object],
+        portfolio: object,
+    ) -> None:
+        """Validate quantity-independent historical price rules."""
+
+        if not isinstance(portfolio, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "run portfolio projection is invalid",
+                status_code=503,
+            )
+        history = portfolio.get("account_history")
+        if not isinstance(history, Mapping) or history.get("mode") != "HISTORICAL_EXACT":
+            return
+        if history.get("status") != "ACTIVE":
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_ARCHIVE_DEGRADED",
+                "exact account inputs are not active",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        rule = TrainingRunService._active_instrument_rule(
+            portfolio,
+            track_id=str(selected_track["track_id"]),
+        )
+        try:
+            tick = Decimal(str(rule["price_tick"]))
+            for field_name in ("limit_price", "stop_price"):
+                raw = payload.get(field_name)
+                if raw is None:
+                    continue
+                price = Decimal(str(raw))
+                if price <= 0 or price % tick != 0:
+                    raise TrainingRunError(
+                        "ACCOUNT_HISTORY_PRICE_FILTER",
+                        f"{field_name} violates the active historical price tick",
+                        status_code=422,
+                        details={"price_tick": str(tick)},
+                    )
+        except TrainingRunError:
+            raise
+        except (InvalidOperation, KeyError, TypeError) as exc:
+            raise TrainingRunError(
+                "ACCOUNT_HISTORY_RULE_INVALID",
+                "active historical capacity filters are invalid",
+                status_code=409,
+                details={"fallback_applied": False},
+            ) from exc
+
+    @staticmethod
+    def _shared_order_capacity_quantity(
+        *,
+        adapter_max_quantity: object,
+        reference_price: object,
+        payload: Mapping[str, object],
+        selected_track: Mapping[str, object],
+        portfolio: object,
+        binding: Mapping[str, object],
+    ) -> str:
+        """Clamp adapter capacity to shared-account and historical-rule limits."""
+
+        if not isinstance(portfolio, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "run portfolio projection is invalid",
+                status_code=503,
+            )
+        config = binding.get("adapter_config")
+        if not isinstance(config, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training adapter config is invalid",
+                status_code=503,
+            )
+        try:
+            maximum = Decimal(str(adapter_max_quantity))
+            price = Decimal(str(reference_price))
+            if payload.get("reduce_only") is True:
+                return decimal_to_string(maximum, field_name="max_quantity")
+            leverage = Decimal(str(payload.get("leverage") or config["max_leverage"]))
+            contract_size = Decimal(1)
+            quantity_step: Decimal | None = None
+            minimum_quantity = Decimal(0)
+            minimum_notional = Decimal(0)
+            rules = portfolio.get("instrument_rules")
+            active = next(
+                (
+                    item
+                    for item in rules
+                    if isinstance(rules, list)
+                    and isinstance(item, Mapping)
+                    and item.get("track_id") == selected_track.get("track_id")
+                    and isinstance(item.get("rule"), Mapping)
+                ),
+                None,
+            ) if isinstance(rules, list) else None
+            if isinstance(active, Mapping):
+                rule = cast(Mapping[str, object], active["rule"])
+                contract_size = Decimal(str(rule.get("contract_size", "1")))
+                leverage = min(leverage, Decimal(str(rule.get("max_leverage", leverage))))
+                quantity_step = Decimal(str(rule["quantity_step"]))
+                minimum_quantity = Decimal(str(rule["min_quantity"]))
+                minimum_notional = Decimal(str(rule["min_notional"]))
+                maximum = min(maximum, Decimal(str(rule["max_quantity"])))
+                position = selected_track.get("position")
+                if not isinstance(position, Mapping):
+                    raise TypeError("selected position projection is invalid")
+                remaining_notional = max(
+                    Decimal(0),
+                    Decimal(str(rule["max_notional"]))
+                    - _position_gross_notional(position),
+                )
+                maximum = min(maximum, remaining_notional / (price * contract_size))
+            if portfolio.get("margin_mode") == "ISOLATED":
+                allocations = portfolio.get("isolated_allocations")
+                account = selected_track.get("account")
+                if not isinstance(allocations, Mapping) or not isinstance(account, Mapping):
+                    raise TypeError("isolated account projection is invalid")
+                allocated = Decimal(str(allocations.get(str(selected_track["track_id"]), "0")))
+                available = allocated - Decimal(str(account.get("margin_used", "0"))) \
+                    - Decimal(str(account.get("reserved_margin", "0")))
+                if allocated <= 0:
+                    available = Decimal(0)
+            else:
+                available = Decimal(str(portfolio["available_equity"]))
+            shared_maximum = max(Decimal(0), available) * leverage / (price * contract_size)
+            maximum = min(maximum, shared_maximum)
+            if quantity_step is not None:
+                maximum = (
+                    maximum / quantity_step
+                ).to_integral_value(rounding=ROUND_FLOOR) * quantity_step
+            maximum = max(Decimal(0), maximum)
+            if maximum < minimum_quantity or maximum * price * contract_size < minimum_notional:
+                maximum = Decimal(0)
+            return decimal_to_string(maximum, field_name="max_quantity")
+        except TrainingRunError:
+            raise
+        except (InvalidOperation, KeyError, TypeError, ZeroDivisionError) as exc:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "order capacity cannot be valued against the shared settlement account",
+                status_code=422,
+            ) from exc
+
     async def _reconcile_liquidations(
         self,
         *,
@@ -4925,6 +5376,7 @@ class TrainingRunService:
         )
         completed = 0
         for event in pending_events:
+            liquidation_id = str(event["liquidation_id"])
             session_id = event.get("adapter_session_id")
             if not isinstance(session_id, str):
                 raise TrainingRunError(
@@ -4978,53 +5430,73 @@ class TrainingRunService:
                     if isinstance(components, Mapping)
                     else None
                 )
-                if not isinstance(position, Mapping) or position.get("quantity") in {
-                    None,
-                    "0",
-                }:
+                if not _position_is_open(position):
                     raise TrainingRunError(
                         "LIQUIDATION_EXECUTION_FAILED",
                         "simulated liquidation position disappeared before close",
                         status_code=409,
                     )
-                close = ReplayCommand(
-                    protocol=REPLAY_PROTOCOL,
-                    command_id=self._multi_command_id(
-                        command_id,
-                        str(event["track_id"]),
-                        "liquidation-close",
-                        _stored_counter(snapshot["revision"], field_name="revision"),
-                    ),
-                    client_instance_id=client_instance_id,
-                    expected_revision=_stored_counter(
-                        snapshot["revision"],
-                        field_name="revision",
-                    ),
-                    type=CommandType.CLOSE_POSITION,
-                    payload={"quantity": None},
-                )
-                closed = await self.replay_service.command(session_id, close)
-                data = _stored_mapping(
-                    closed.get("data"),
-                    field_name="liquidation close data",
-                )
-                orders = data.get("orders")
-                if (
-                    not isinstance(orders, list)
-                    or not orders
-                    or not isinstance(orders[0], Mapping)
-                    or not isinstance(orders[0].get("order_id"), str)
-                ):
-                    raise TrainingRunError(
-                        "LIQUIDATION_EXECUTION_FAILED",
-                        "simulated liquidation close order projection is missing",
-                        status_code=409,
+                close_sides: tuple[str | None, ...] = (None,)
+                if isinstance(position, Mapping) and position.get("position_mode") == "HEDGE":
+                    close_sides = tuple(
+                        side
+                        for side, leg in (
+                            ("LONG", position.get("long")),
+                            ("SHORT", position.get("short")),
+                        )
+                        if _position_is_open(leg)
                     )
+                close_order_ids: list[str] = []
+                for position_side in close_sides:
+                    session = await self.replay_service.get_session(session_id)
+                    close_snapshot = self._snapshot(session)
+                    revision = _stored_counter(
+                        close_snapshot["revision"],
+                        field_name="revision",
+                    )
+                    close = ReplayCommand(
+                        protocol=REPLAY_PROTOCOL,
+                        command_id=self._multi_command_id(
+                            command_id,
+                            str(event["track_id"]),
+                            f"liquidation-close-{position_side or 'NET'}",
+                            revision,
+                        ),
+                        client_instance_id=client_instance_id,
+                        expected_revision=revision,
+                        type=CommandType.CLOSE_POSITION,
+                        payload={
+                            "quantity": None,
+                            **(
+                                {}
+                                if position_side is None
+                                else {"position_side": position_side}
+                            ),
+                        },
+                    )
+                    closed = await self.replay_service.command(session_id, close)
+                    data = _stored_mapping(
+                        closed.get("data"),
+                        field_name="liquidation close data",
+                    )
+                    orders = data.get("orders")
+                    if (
+                        not isinstance(orders, list)
+                        or not orders
+                        or not isinstance(orders[0], Mapping)
+                        or not isinstance(orders[0].get("order_id"), str)
+                    ):
+                        raise TrainingRunError(
+                            "LIQUIDATION_EXECUTION_FAILED",
+                            "simulated liquidation close order projection is missing",
+                            status_code=409,
+                        )
+                    close_order_ids.append(str(orders[0]["order_id"]))
                 await self.store.complete_liquidation(
                     run_id=run_id,
-                    liquidation_id=str(event["liquidation_id"]),
+                    liquidation_id=liquidation_id,
                     canceled_order_ids=canceled,
-                    close_order_id=str(orders[0]["order_id"]),
+                    close_order_id=close_order_ids[0],
                 )
                 completed += 1
             except (ReplayDomainError, TrainingRunError) as exc:
@@ -5071,15 +5543,26 @@ class TrainingRunService:
         price_value = payload.get("limit_price") or payload.get("stop_price")
         if price_value is None:
             position = selected_track.get("position")
-            price_value = (
-                position.get("mark_price")
-                if isinstance(position, Mapping)
-                else selected_track.get("public_price")
+            price_value = _position_mark(
+                position,
+                position_side=payload.get("position_side"),
             )
+            if price_value is None:
+                price_value = selected_track.get("public_price")
         try:
             quantity = Decimal(str(payload["quantity"]))
             price = Decimal(str(price_value))
-            leverage = Decimal(str(config["max_leverage"]))
+            max_leverage = Decimal(str(config["max_leverage"]))
+            leverage = max_leverage
+            raw_leverage = payload.get("leverage")
+            if raw_leverage is not None:
+                leverage = Decimal(str(raw_leverage))
+                if leverage < 1 or leverage > max_leverage:
+                    raise TrainingRunError(
+                        "RISK_LIMIT_EXCEEDED",
+                        "order leverage must be between 1 and session max_leverage",
+                        status_code=409,
+                    )
             contract_size = Decimal(1)
             history = portfolio.get("account_history")
             if (
@@ -7546,11 +8029,7 @@ class TrainingRunService:
             ):
                 blocking.add("TRACK_DEGRADED")
             position = track.get("position")
-            if isinstance(position, Mapping) and position.get("quantity") not in {
-                None,
-                "0",
-                0,
-            }:
+            if _position_is_open(position):
                 dependencies.add("OPEN_POSITION")
             count = track.get("open_order_count")
             if isinstance(count, int) and not isinstance(count, bool) and count > 0:
@@ -7565,11 +8044,7 @@ class TrainingRunService:
             ):
                 dependencies.add("OPEN_ORDER")
             position = components.get("position")
-            if isinstance(position, Mapping) and position.get("quantity") not in {
-                None,
-                "0",
-                0,
-            }:
+            if _position_is_open(position):
                 dependencies.add("OPEN_POSITION")
         optimization_enabled = bool(
             self.replay_service.settings.replay_fast_forward_optimization_enabled
@@ -9146,6 +9621,50 @@ class TrainingRunService:
             )
         return payload
 
+    @classmethod
+    def _order_payload_with_optional_leverage(
+        cls,
+        payload: Mapping[str, object],
+        expected: set[str],
+    ) -> Mapping[str, object]:
+        """Exact payload contract with optional per-order leverage ≤ max."""
+
+        data = dict(payload)
+        leverage = data.pop("leverage", None)
+        position_side = data.pop("position_side", None)
+        validated = dict(cls._exact_payload(data, expected))
+        if position_side is not None:
+            if position_side not in {"LONG", "SHORT"}:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "position_side must be LONG or SHORT",
+                    status_code=422,
+                )
+            validated["position_side"] = position_side
+        if leverage is not None:
+            if not isinstance(leverage, str):
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "leverage must be a canonical Decimal string",
+                    status_code=422,
+                )
+            try:
+                normalized = normalize_decimal_string(leverage, field_name="leverage")
+            except (TypeError, ValueError) as exc:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "leverage is invalid",
+                    status_code=422,
+                ) from exc
+            if Decimal(normalized) < 1:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    "leverage must be at least 1",
+                    status_code=422,
+                )
+            validated["leverage"] = normalized
+        return validated
+
     @staticmethod
     def _selection_warmup_bars(request: TrainingRunCreateRequest) -> int:
         visible = request.visible_history_lookback
@@ -9216,6 +9735,7 @@ class TrainingRunService:
             ),
             max_leverage=request.max_leverage,
             pause_on_controller_loss=True,
+            position_mode=request.position_mode.value,
         )
 
     @staticmethod

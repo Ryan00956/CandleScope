@@ -41,13 +41,29 @@ export const REPLAY_COMMAND_TYPES = [
   "advance_by",
   "seek_to",
   "place_order",
+  "replace_order",
   "cancel_order",
+  "cancel_orders",
   "close_position",
+  "execute_position_intent",
+  "set_position_protection",
   "add_journal_note",
   "reveal_history",
   "end_session",
 ] as const;
 export type ReplayCommandType = (typeof REPLAY_COMMAND_TYPES)[number];
+
+export const REPLAY_ORDER_EVENT_COMMAND_TYPES = [
+  "place_order",
+  "replace_order",
+  "cancel_order",
+  "cancel_orders",
+  "close_position",
+  "execute_position_intent",
+  "set_position_protection",
+  "_training_adjust_capital",
+] as const;
+export type ReplayOrderEventCommandType = (typeof REPLAY_ORDER_EVENT_COMMAND_TYPES)[number];
 
 export const REPLAY_EVENT_TYPES = [
   "replay.delta",
@@ -119,6 +135,7 @@ export interface ReplaySlippageModel {
 
 export interface ReplaySessionConfig {
   readonly protocol: typeof REPLAY_PROTOCOL;
+  readonly position_mode: "ONE_WAY" | "HEDGE";
   readonly source_kind: ReplaySourceKind;
   readonly exchange: string;
   readonly market_type: string;
@@ -368,6 +385,7 @@ export interface ReplayOrder {
   readonly status_reason: string | null;
   readonly status_history: readonly string[];
   readonly model_version: string;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayFill {
@@ -386,6 +404,7 @@ export interface ReplayFill {
   readonly synthetic: boolean;
   readonly historical_execution: boolean;
   readonly model_version: string;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayClosedTrade {
@@ -398,6 +417,7 @@ export interface ReplayClosedTrade {
   readonly exit_price: ReplayDecimalString;
   readonly realized_pnl: ReplayDecimalString;
   readonly source_sequence: ReplaySequence;
+  readonly position_side?: "LONG" | "SHORT";
 }
 
 export interface ReplayWarning {
@@ -434,9 +454,17 @@ export interface ReplayProjection {
   readonly orders: readonly ReplayOrder[];
   readonly fills: readonly ReplayFill[];
   readonly warnings: readonly ReplayWarning[];
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
 }
+
+export interface ReplayHedgePositionBook {
+  readonly position_mode: "HEDGE";
+  readonly long: ReplayPosition;
+  readonly short: ReplayPosition;
+}
+
+export type ReplayPositionState = ReplayPosition | ReplayHedgePositionBook;
 
 export interface ReplayFinalStateSeriesPatch {
   readonly schema_version: "replay-series-tail-patch.v1";
@@ -454,7 +482,7 @@ export interface ReplayFinalStateProjection {
   readonly fills: readonly ReplayFill[];
   readonly closed_trades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
 }
 
@@ -558,7 +586,7 @@ export interface ReplayBrokerSnapshot {
   readonly closed_trades: readonly ReplayClosedTrade[];
   readonly warnings: readonly ReplayWarning[];
   readonly ledger: Readonly<Record<string, ReplayJson>>;
-  readonly position: ReplayPosition;
+  readonly position: ReplayPositionState;
   readonly account: ReplayAccount;
   readonly next_order: number;
   readonly next_fill: number;
@@ -662,7 +690,7 @@ export type ReplayParsedEvent = Omit<ReplayEventEnvelope, "data"> & {
     | ReplayFinalStateEventData
     | { readonly state: ReplaySessionState; readonly reason: string; readonly speed: ReplaySpeed; readonly controller_client_id: string | null }
     | { readonly source_sequence: ReplaySequence; readonly source_event: ReplaySourceEvent; readonly projection: ReplayProjection }
-    | { readonly command_type: ReplayCommandType; readonly projection: ReplayProjection }
+    | { readonly command_type: ReplayOrderEventCommandType; readonly projection: ReplayProjection }
     | ReplayJournalEntry
     | { readonly reset: true; readonly reason: string }
     | { readonly reason: string; readonly projection: ReplayProjection };

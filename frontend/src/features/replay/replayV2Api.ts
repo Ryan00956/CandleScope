@@ -40,6 +40,7 @@ import {
   parseReplayAccountAuditResponse,
   parseReplayAdvanceProgressResponse,
   parseReplayMarketTracksResponse,
+  parseReplayOrderCapacity,
   parseReplayOrderPreview,
   parseReplayTrainingResultsResponse,
   parseReplayV2CommandResult,
@@ -78,6 +79,8 @@ import type {
   ReplayAccountRecordType,
   ReplayAccountAuditResponse,
   ReplayMarketTracksResponse,
+  ReplayOrderCapacity,
+  ReplayOrderCapacityRequest,
   ReplayOrderPreview,
   ReplayOrderPreviewRequest,
   ReplayTrainingResultsResponse,
@@ -631,6 +634,22 @@ export class ReplayV2ApiClient {
     return this.request(
       `/runs/${safeSegment(runId, "run id")}/order-preview`,
       parseReplayOrderPreview,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        ...(signal ? { signal } : {}),
+      },
+    );
+  }
+
+  orderCapacity(
+    runId: string,
+    payload: ReplayOrderCapacityRequest,
+    signal?: AbortSignal,
+  ): Promise<ReplayOrderCapacity> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/order-capacity`,
+      parseReplayOrderCapacity,
       {
         method: "POST",
         body: JSON.stringify(payload),

@@ -5,6 +5,7 @@ import {
   REPLAY_EVENT_TYPES,
   REPLAY_EXECUTION_FIDELITIES,
   REPLAY_EXECUTION_MODELS,
+  REPLAY_ORDER_EVENT_COMMAND_TYPES,
   REPLAY_PROTOCOL,
   REPLAY_QUALITY_MODES,
   REPLAY_SESSION_STATES,
@@ -23,7 +24,6 @@ import type {
   ReplayCatalog,
   ReplayCatalogEntry,
   ReplayCommandResult,
-  ReplayCommandType,
   ReplayClosedTrade,
   ReplayCursor,
   ReplayDataFidelity,
@@ -39,8 +39,10 @@ import type {
   ReplayJournalEntry,
   ReplayJson,
   ReplayOrder,
+  ReplayOrderEventCommandType,
   ReplayParsedEvent,
   ReplayPosition,
+  ReplayPositionState,
   ReplayProjection,
   ReplaySequence,
   ReplaySessionConfig,
@@ -243,10 +245,14 @@ export function parseReplaySessionConfig(value: unknown, path = "$"): ReplaySess
     "random_seed", "quality_mode", "blind_mode", "initial_equity", "quote_asset",
     "execution_model", "fee_model", "slippage_model", "max_leverage",
     "pause_on_controller_loss",
+    ...(Object.hasOwn(source, "position_mode") ? ["position_mode"] : []),
   ], path);
   if (source.protocol !== REPLAY_PROTOCOL) fail(`${path}.protocol`, `expected ${REPLAY_PROTOCOL}`);
   return {
     protocol: REPLAY_PROTOCOL,
+    position_mode: Object.hasOwn(source, "position_mode")
+      ? enumeration(source.position_mode, ["ONE_WAY", "HEDGE"] as const, `${path}.position_mode`)
+      : "ONE_WAY",
     source_kind: enumeration(source.source_kind, REPLAY_SOURCE_KINDS, `${path}.source_kind`),
     exchange: identifier(source.exchange, `${path}.exchange`),
     market_type: identifier(source.market_type, `${path}.market_type`),
@@ -362,12 +368,13 @@ function parseSourceEvent(value: unknown, path: string): ReplaySourceEvent {
 
 function parseOrder(value: unknown, path: string): ReplayOrder {
   const source = record(value, path);
-  exact(source, [
+  const fields = [
     "order_id", "client_order_id", "side", "order_type", "quantity", "reduce_only",
     "limit_price", "stop_price", "status", "filled_quantity", "remaining_quantity",
     "average_fill_price", "accepted_source_sequence", "created_time_ms", "ordinal",
     "reserved_margin", "status_reason", "status_history", "model_version",
-  ], path);
+  ];
+  exact(source, Object.hasOwn(source, "position_side") ? [...fields, "position_side"] : fields, path);
   return {
     order_id: identifier(source.order_id, `${path}.order_id`),
     client_order_id: identifier(source.client_order_id, `${path}.client_order_id`),
@@ -388,16 +395,20 @@ function parseOrder(value: unknown, path: string): ReplayOrder {
     status_reason: nullableString(source.status_reason, `${path}.status_reason`),
     status_history: stringList(source.status_history, `${path}.status_history`),
     model_version: string(source.model_version, `${path}.model_version`),
+    ...(Object.hasOwn(source, "position_side")
+      ? { position_side: enumeration(source.position_side, ["LONG", "SHORT"] as const, `${path}.position_side`) }
+      : {}),
   };
 }
 
 function parseFill(value: unknown, path: string): ReplayFill {
   const source = record(value, path);
-  exact(source, [
+  const fields = [
     "fill_id", "order_id", "side", "quantity", "price", "notional", "fee", "fee_asset",
     "liquidity", "reason", "source_sequence", "event_time_ms", "synthetic",
     "historical_execution", "model_version",
-  ], path);
+  ];
+  exact(source, Object.hasOwn(source, "position_side") ? [...fields, "position_side"] : fields, path);
   return {
     fill_id: identifier(source.fill_id, `${path}.fill_id`),
     order_id: identifier(source.order_id, `${path}.order_id`),
@@ -414,15 +425,19 @@ function parseFill(value: unknown, path: string): ReplayFill {
     synthetic: bool(source.synthetic, `${path}.synthetic`),
     historical_execution: bool(source.historical_execution, `${path}.historical_execution`),
     model_version: string(source.model_version, `${path}.model_version`),
+    ...(Object.hasOwn(source, "position_side")
+      ? { position_side: enumeration(source.position_side, ["LONG", "SHORT"] as const, `${path}.position_side`) }
+      : {}),
   };
 }
 
 function parseClosedTrade(value: unknown, path: string): ReplayClosedTrade {
   const source = record(value, path);
-  exact(source, [
+  const fields = [
     "trade_id", "order_id", "fill_id", "side", "quantity", "entry_price",
     "exit_price", "realized_pnl", "source_sequence",
-  ], path);
+  ];
+  exact(source, Object.hasOwn(source, "position_side") ? [...fields, "position_side"] : fields, path);
   return {
     trade_id: identifier(source.trade_id, `${path}.trade_id`),
     order_id: identifier(source.order_id, `${path}.order_id`),
@@ -433,6 +448,9 @@ function parseClosedTrade(value: unknown, path: string): ReplayClosedTrade {
     exit_price: parseReplayDecimal(source.exit_price, `${path}.exit_price`),
     realized_pnl: parseReplayDecimal(source.realized_pnl, `${path}.realized_pnl`),
     source_sequence: integer(source.source_sequence, `${path}.source_sequence`),
+    ...(Object.hasOwn(source, "position_side")
+      ? { position_side: enumeration(source.position_side, ["LONG", "SHORT"] as const, `${path}.position_side`) }
+      : {}),
   };
 }
 
@@ -511,8 +529,19 @@ export function parseReplayProjection(value: unknown, path = "$"): ReplayProject
     orders: array(source.orders, `${path}.orders`, parseOrder),
     fills: array(source.fills, `${path}.fills`, parseFill),
     warnings: array(source.warnings, `${path}.warnings`, parseWarning),
-    position: parsePosition(source.position, `${path}.position`),
+    position: parsePositionState(source.position, `${path}.position`),
     account: parseAccount(source.account, `${path}.account`),
+  };
+}
+
+function parsePositionState(value: unknown, path: string): ReplayPositionState {
+  const source = record(value, path);
+  if (source.position_mode !== "HEDGE") return parsePosition(source, path);
+  exact(source, ["position_mode", "long", "short"], path);
+  return {
+    position_mode: "HEDGE",
+    long: parsePosition(source.long, `${path}.long`),
+    short: parsePosition(source.short, `${path}.short`),
   };
 }
 
@@ -681,7 +710,7 @@ function parseFinalStateProjection(value: unknown, path: string): ReplayFinalSta
     fills: array(source.fills, `${path}.fills`, parseFill),
     closed_trades: array(source.closed_trades, `${path}.closed_trades`, parseClosedTrade),
     warnings: array(source.warnings, `${path}.warnings`, parseWarning),
-    position: parsePosition(source.position, `${path}.position`),
+    position: parsePositionState(source.position, `${path}.position`),
     account: parseAccount(source.account, `${path}.account`),
   };
 }
@@ -853,7 +882,7 @@ function parseBrokerSnapshot(value: unknown, path: string): ReplayBrokerSnapshot
     closed_trades: array(source.closed_trades, `${path}.closed_trades`, parseClosedTrade),
     warnings: array(source.warnings, `${path}.warnings`, parseWarning),
     ledger: jsonRecord(source.ledger, `${path}.ledger`),
-    position: parsePosition(source.position, `${path}.position`),
+    position: parsePositionState(source.position, `${path}.position`),
     account: parseAccount(source.account, `${path}.account`),
     next_order: integer(source.next_order, `${path}.next_order`, 1),
     next_fill: integer(source.next_fill, `${path}.next_fill`, 1),
@@ -1505,7 +1534,11 @@ function parseEventData(type: string, value: unknown, path: string, virtualTime:
       }
       assertProjectionTime(projection, virtualTime, `${path}.projection`);
       return {
-        command_type: enumeration(source.command_type, REPLAY_COMMAND_TYPES, `${path}.command_type`) as ReplayCommandType,
+        command_type: enumeration(
+          source.command_type,
+          REPLAY_ORDER_EVENT_COMMAND_TYPES,
+          `${path}.command_type`,
+        ) as ReplayOrderEventCommandType,
         projection,
       };
     }

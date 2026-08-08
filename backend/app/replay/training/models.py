@@ -135,6 +135,11 @@ class MarginMode(_StringEnum):
     ISOLATED = "ISOLATED"
 
 
+class PositionMode(_StringEnum):
+    ONE_WAY = "ONE_WAY"
+    HEDGE = "HEDGE"
+
+
 class FundingMode(_StringEnum):
     OFF = "OFF"
     HISTORICAL_EXACT = "HISTORICAL_EXACT"
@@ -233,6 +238,7 @@ _ENUM_TYPES: tuple[tuple[str, type[_StringEnum]], ...] = (
     ("fast_forward_plan", FastForwardPlan),
     ("book_mode", BookMode),
     ("margin_mode", MarginMode),
+    ("position_mode", PositionMode),
     ("funding_mode", FundingMode),
     ("account_data_mode", AccountDataMode),
     ("execution_model", ExecutionModelV2),
@@ -1140,6 +1146,7 @@ class TrainingRunCreateRequest:
     margin_mode: MarginMode
     funding_mode: FundingMode
     allow_rule_changes: bool
+    position_mode: PositionMode = PositionMode.ONE_WAY
     account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_history_ref: "AccountHistoryRef | None" = None
     fixed_funding_rate: str | None = None
@@ -1169,6 +1176,7 @@ class TrainingRunCreateRequest:
             ("time_disclosure_policy", TimeDisclosurePolicy),
             ("book_mode", BookMode),
             ("margin_mode", MarginMode),
+            ("position_mode", PositionMode),
             ("funding_mode", FundingMode),
             ("account_data_mode", AccountDataMode),
         ):
@@ -1320,6 +1328,19 @@ class TrainingRunCreateRequest:
             raise ValueError(
                 "HISTORICAL_EXACT account data cannot use synthetic Sandbox funding"
             )
+        if self.position_mode is PositionMode.HEDGE:
+            if self.account_data_mode is not AccountDataMode.APPROX_PROXY:
+                raise ValueError(
+                    "HEDGE position mode currently requires APPROX_PROXY account data"
+                )
+            if self.margin_mode is not MarginMode.CROSS:
+                raise ValueError("HEDGE position mode currently requires CROSS margin")
+            if self.funding_mode is not FundingMode.OFF:
+                raise ValueError("HEDGE position mode currently requires funding OFF")
+            if self.book_mode is not BookMode.OFF:
+                raise ValueError(
+                    "HEDGE position mode currently requires touch-or-tape execution"
+                )
         if self.launch_context is not None:
             if not isinstance(self.launch_context, ReplayLaunchContext):
                 raise TypeError("launch_context must be a ReplayLaunchContext or null")
@@ -1383,6 +1404,7 @@ class TrainingRunCreateRequest:
             "account_data_mode",
             "account_history_ref",
             "launch_context",
+            "position_mode",
         }
         if missing:
             raise ValueError(f"missing field(s): {', '.join(sorted(missing))}")
@@ -1411,6 +1433,7 @@ class TrainingRunCreateRequest:
             else ReplayLaunchContext.from_dict(raw_launch_context)
         )
         normalized.setdefault("account_data_mode", AccountDataMode.APPROX_PROXY.value)
+        normalized.setdefault("position_mode", PositionMode.ONE_WAY.value)
         raw_account_history_ref = normalized.get("account_history_ref")
         normalized["account_history_ref"] = (
             None
@@ -1465,6 +1488,7 @@ class TrainingRunCreateRequest:
             "time_disclosure_policy": self.time_disclosure_policy.value,
             "book_mode": self.book_mode.value,
             "margin_mode": self.margin_mode.value,
+            "position_mode": self.position_mode.value,
             "funding_mode": self.funding_mode.value,
             "account_data_mode": self.account_data_mode.value,
             "account_history_ref": (
@@ -1580,6 +1604,7 @@ class TrainingRunSetupRequest:
         payload = dict(expect_mapping(value, field_name="training run setup"))
         payload.setdefault("random_range_start_ms", None)
         payload.setdefault("random_range_end_ms", None)
+        payload.setdefault("position_mode", PositionMode.ONE_WAY.value)
         required = {
             "protocol",
             "name",
@@ -1602,6 +1627,7 @@ class TrainingRunSetupRequest:
             "time_disclosure_policy",
             "book_mode",
             "margin_mode",
+            "position_mode",
             "funding_mode",
             "account_data_mode",
             "fixed_funding_rate",
@@ -1736,6 +1762,7 @@ __all__ = [
     "IntegrityMode",
     "MAX_V2_COUNTER",
     "MarginMode",
+    "PositionMode",
     "MarketTrackContract",
     "REPLAY_V2_ENUMS",
     "REPLAY_V2_PROTOCOL",

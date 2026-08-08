@@ -495,12 +495,30 @@ function LiveChartCell({
       typeof value?.time === "number" ? value.time : null,
     );
   }, [cell.id, linkCoordinator]);
-  const handleLinkedViewportRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
+  const pendingLinkedViewportRangeRef = useRef<ChartSurfaceVisibleRange | null>(null);
+  const linkedViewportFrameRef = useRef<number | null>(null);
+  const flushLinkedViewportRange = useCallback(() => {
+    linkedViewportFrameRef.current = null;
+    const range = pendingLinkedViewportRangeRef.current;
+    pendingLinkedViewportRangeRef.current = null;
+    if (!range) return;
     if (typeof range.rightmostTime === "number") {
       linkCoordinator.publishTimeAnchor(cell.id, range.rightmostTime);
     }
     if (range.time) linkCoordinator.publishDateRange(cell.id, range.time);
   }, [cell.id, linkCoordinator]);
+  const handleLinkedViewportRangeChange = useCallback((range: ChartSurfaceVisibleRange) => {
+    pendingLinkedViewportRangeRef.current = range;
+    if (linkedViewportFrameRef.current !== null) return;
+    linkedViewportFrameRef.current = requestAnimationFrame(flushLinkedViewportRange);
+  }, [flushLinkedViewportRange]);
+  useEffect(() => () => {
+    if (linkedViewportFrameRef.current !== null) {
+      cancelAnimationFrame(linkedViewportFrameRef.current);
+      linkedViewportFrameRef.current = null;
+    }
+    pendingLinkedViewportRangeRef.current = null;
+  }, [flushLinkedViewportRange]);
 
   const chartModel = useMemo(() => ({
     ...model.chartWorkspace.chart,

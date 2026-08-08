@@ -184,16 +184,27 @@ test("visible range snapshots include the fitted time and logical coverage", () 
 test("only user-driven viewport changes publish persistence and interactive coverage", () => {
   const range = { from: 0, to: 1_500 };
 
-  assert.equal(shouldPublishUserViewportRange({ range, userInteracted: true }), true);
+  assert.equal(shouldPublishUserViewportRange({
+    range,
+    userGestureActive: true,
+    userInteracted: true,
+  }), true);
   assert.equal(shouldPublishUserViewportRange({ range, userInteracted: false }), false);
+  assert.equal(shouldPublishUserViewportRange({
+    range,
+    userGestureActive: false,
+    userInteracted: true,
+  }), false);
   assert.equal(shouldPublishUserViewportRange({
     isProgrammatic: true,
     range,
+    userGestureActive: true,
     userInteracted: true,
   }), false);
   assert.equal(shouldPublishUserViewportRange({
     isSyncing: true,
     range,
+    userGestureActive: true,
     userInteracted: true,
   }), false);
 });

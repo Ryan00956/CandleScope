@@ -301,14 +301,22 @@ export function shouldPublishUserViewportRange({
   isProgrammatic = false,
   isSyncing = false,
   range = null,
+  userGestureActive = false,
   userInteracted = false,
 }: {
   isProgrammatic?: boolean;
   isSyncing?: boolean;
   range?: object | null;
+  userGestureActive?: boolean;
   userInteracted?: boolean;
 } = {}): boolean {
-  return Boolean(range && userInteracted && !isProgrammatic && !isSyncing);
+  return Boolean(
+    range
+    && userInteracted
+    && userGestureActive
+    && !isProgrammatic
+    && !isSyncing,
+  );
 }
 
 const CHART_PAN_MIN_HORIZONTAL_DISTANCE_PX = 4;

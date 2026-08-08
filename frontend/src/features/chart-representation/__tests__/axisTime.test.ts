@@ -166,6 +166,37 @@ test("source-time ranges map to every overlapping projected element", () => {
   assert.equal(mapSourceTimeRangeToDisplayLogicalRange(rows, { from: 200, to: 100 }), null);
 });
 
+test("source-time ranges include shared future-axis points without duplicating real bars", () => {
+  const rows: DisplayRow[] = [
+    { time: 100 },
+    { time: 200 },
+    { time: 300 },
+  ];
+  const futureAxisRows: DisplayRow[] = [
+    { time: 200 },
+    { time: 300 },
+    { time: 400 },
+    { time: 500 },
+  ];
+
+  assert.deepEqual(
+    mapSourceTimeRangeToDisplayLogicalRange(
+      rows,
+      { from: 200, to: 500 },
+      futureAxisRows,
+    ),
+    { from: 1, to: 4 },
+  );
+  assert.deepEqual(
+    mapSourceTimeRangeToDisplayLogicalRange(
+      rows,
+      { from: 400, to: 500 },
+      futureAxisRows,
+    ),
+    { from: 3, to: 4 },
+  );
+});
+
 test("viewport anchors preserve span and horizontal offset across projections", () => {
   const rows = [
     displayRow(0, 100, 0),

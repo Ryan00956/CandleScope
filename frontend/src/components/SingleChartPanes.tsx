@@ -1424,6 +1424,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const leftHistoryFlushFrameRef = useRef<number | null>(null);
   const historyWheelGestureActiveRef = useRef(false);
   const historyWheelGestureTimerRef = useRef<TimerHandle | null>(null);
+  const viewportLinkWheelGestureActiveRef = useRef(false);
+  const viewportLinkWheelGestureTimerRef = useRef<TimerHandle | null>(null);
   const rightWindowRestoreRef = useRef<{
     datasetKey: string;
     promise: Promise<boolean>;
@@ -2260,14 +2262,24 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     onDatasetViewportTransferSettledRef.current?.(transfer, outcome);
   }, []);
 
-  const markViewportRangeInteracted = useCallback(() => {
+  const markViewportRangeChanged = useCallback((userDriven: boolean) => {
     pendingSurfaceViewportRef.current = null;
     boundSurfaceViewportAnchorRef.current = null;
     settleDatasetViewportTransfer("interrupted");
-    userInteractedRef.current = true;
     followLatestDisabledRef.current = true;
-    viewportControllerRef.current?.markUserInteracting();
+    if (userDriven) {
+      userInteractedRef.current = true;
+      viewportControllerRef.current?.markUserInteracting();
+    }
   }, [settleDatasetViewportTransfer]);
+
+  const markViewportRangeInteracted = useCallback(() => {
+    markViewportRangeChanged(true);
+  }, [markViewportRangeChanged]);
+
+  const markLinkedViewportApplied = useCallback(() => {
+    markViewportRangeChanged(false);
+  }, [markViewportRangeChanged]);
 
   useEffect(() => {
     if (datasetViewportTransfer !== null
@@ -2580,14 +2592,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = previousSyncing;
     }
-    markViewportRangeInteracted();
+    markLinkedViewportApplied();
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = "linked-time-anchor";
     const visibleRange = captureVisibleRange();
     publishViewportRangeChange(visibleRange);
     scheduleVisibleRangeSave(visibleRange);
     return true;
-  }, [captureVisibleRange, markViewportRangeInteracted, publishViewportRangeChange, scheduleVisibleRangeSave]);
+  }, [captureVisibleRange, markLinkedViewportApplied, publishViewportRangeChange, scheduleVisibleRangeSave]);
 
   const setLinkedVisibleTimeRange = useCallback((
     range: ChartSurfaceLinkedTimeRange,
@@ -2597,6 +2609,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const logicalRange = mapSourceTimeRangeToDisplayLogicalRange(
       displayRowsRef.current,
       range,
+      futureTimeAxisDataRef.current,
     );
     if (!logicalRange) return false;
     const previousSyncing = isSyncingRef.current;
@@ -2611,14 +2624,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = previousSyncing;
     }
-    markViewportRangeInteracted();
+    markLinkedViewportApplied();
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = "linked-date-range";
     const visibleRange = captureVisibleRange();
     publishViewportRangeChange(visibleRange);
     scheduleVisibleRangeSave(visibleRange);
     return true;
-  }, [captureVisibleRange, markViewportRangeInteracted, publishViewportRangeChange, scheduleVisibleRangeSave]);
+  }, [captureVisibleRange, markLinkedViewportApplied, publishViewportRangeChange, scheduleVisibleRangeSave]);
 
   const linkedViewportIsReady = useCallback((): boolean => (
     hasRestoredRangeRef.current
@@ -2881,6 +2894,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         isProgrammatic: isRestoringViewportRef.current,
         isSyncing: isSyncingRef.current,
         range,
+        userGestureActive: isChartPointerActiveRef.current
+          || viewportLinkWheelGestureActiveRef.current,
         userInteracted: userInteractedRef.current,
       }) || !range) return;
       const visibleRange = captureVisibleRange();
@@ -3140,6 +3155,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const handleWheel = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
       if (event.deltaX !== 0 || event.deltaY !== 0) {
+        viewportLinkWheelGestureActiveRef.current = true;
+        if (viewportLinkWheelGestureTimerRef.current != null) {
+          clearTimeout(viewportLinkWheelGestureTimerRef.current);
+        }
+        viewportLinkWheelGestureTimerRef.current = setTimeout(() => {
+          viewportLinkWheelGestureTimerRef.current = null;
+          viewportLinkWheelGestureActiveRef.current = false;
+        }, HISTORY_WHEEL_GESTURE_IDLE_MS);
         markViewportRangeInteracted();
       }
       const containerRect = containerRef.current?.getBoundingClientRect?.() ?? null;
@@ -3192,9 +3215,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       isChartPointerActiveRef.current = false;
       chartPointerLogicalRangeChangedRef.current = false;
       historyWheelGestureActiveRef.current = false;
+      viewportLinkWheelGestureActiveRef.current = false;
       if (historyWheelGestureTimerRef.current != null) {
         clearTimeout(historyWheelGestureTimerRef.current);
         historyWheelGestureTimerRef.current = null;
+      }
+      if (viewportLinkWheelGestureTimerRef.current != null) {
+        clearTimeout(viewportLinkWheelGestureTimerRef.current);
+        viewportLinkWheelGestureTimerRef.current = null;
       }
       resetPointerGesture();
     };

@@ -6,6 +6,14 @@ import type {
   SourceTimeRange,
 } from "./chartRepresentationTypes.js";
 
+interface AxisRangeRow {
+  time?: unknown;
+  sourceTime?: unknown;
+  sourceFromTime?: unknown;
+  sourceToTime?: unknown;
+  customValues?: DisplayRow["customValues"];
+}
+
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -71,7 +79,7 @@ export function sourceTimeFromAxisTime(value: unknown): number | null {
  * Resolve the inclusive source-time lineage represented by a display row.
  */
 export function sourceTimeRangeFromDisplayRow(
-  row: DisplayRow | null | undefined,
+  row: AxisRangeRow | null | undefined,
 ): SourceTimeRange | null {
   if (!row || typeof row !== "object") return null;
   const lineage = row.customValues?.[PROJECTION_METADATA_KEY];
@@ -233,6 +241,7 @@ function findAnchorDisplayIndex(displayRows: readonly DisplayRow[], sourceTime: 
 export function mapSourceTimeRangeToDisplayLogicalRange(
   displayRows: readonly DisplayRow[] | null | undefined,
   sourceRange: SourceTimeRange | null | undefined,
+  axisCarrierRows: readonly AxisRangeRow[] | null | undefined = [],
 ): LogicalRange | null {
   const from = finiteNumber(sourceRange?.from);
   const to = finiteNumber(sourceRange?.to);
@@ -240,15 +249,67 @@ export function mapSourceTimeRangeToDisplayLogicalRange(
     return null;
   }
 
+  if (!axisCarrierRows || axisCarrierRows.length === 0) {
+    let first = -1;
+    let last = -1;
+    for (let index = 0; index < displayRows.length; index += 1) {
+      const row = displayRows[index];
+      if (!row) continue;
+      const lineage = sourceTimeRangeFromDisplayRow(row);
+      if (!lineage || lineage.to < from || lineage.from > to) continue;
+      if (first < 0) first = index;
+      last = index;
+    }
+    return first < 0 ? null : { from: first, to: last };
+  }
+
+  // Lightweight Charts builds one shared logical scale from every series.
+  // The render-only future-axis series therefore owns real logical points
+  // even though those rows must stay out of displayRows, indicators and
+  // drawings. Merge both sorted timelines here and de-duplicate the points
+  // already consumed by a newly arrived real bar. Otherwise a linked range
+  // that reaches into future whitespace is truncated at the last K-line and
+  // progressively zooms both charts on every drag update.
   let first = -1;
   let last = -1;
-  for (let index = 0; index < displayRows.length; index += 1) {
-    const row = displayRows[index];
+  let displayIndex = 0;
+  let carrierIndex = 0;
+  let logicalIndex = 0;
+  while (displayIndex < displayRows.length || carrierIndex < axisCarrierRows.length) {
+    const displayRow = displayRows[displayIndex] ?? null;
+    const carrierRow = axisCarrierRows[carrierIndex] ?? null;
+    let row: AxisRangeRow | null = null;
+
+    if (!displayRow) {
+      row = carrierRow;
+      carrierIndex += 1;
+    } else if (!carrierRow) {
+      row = displayRow;
+      displayIndex += 1;
+    } else {
+      const comparison = compareAxisTime(displayRow.time, carrierRow.time);
+      if (comparison < 0) {
+        row = displayRow;
+        displayIndex += 1;
+      } else if (comparison > 0) {
+        row = carrierRow;
+        carrierIndex += 1;
+      } else {
+        // Equal native time/order values are one shared time-scale point.
+        // Prefer the display row because it carries the richer lineage.
+        row = displayRow;
+        displayIndex += 1;
+        carrierIndex += 1;
+      }
+    }
+
     if (!row) continue;
     const lineage = sourceTimeRangeFromDisplayRow(row);
-    if (!lineage || lineage.to < from || lineage.from > to) continue;
-    if (first < 0) first = index;
-    last = index;
+    if (lineage && lineage.to >= from && lineage.from <= to) {
+      if (first < 0) first = logicalIndex;
+      last = logicalIndex;
+    }
+    logicalIndex += 1;
   }
   return first < 0 ? null : { from: first, to: last };
 }

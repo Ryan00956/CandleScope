@@ -12,7 +12,10 @@ import {
 } from "./export/drawingExportLifecycle.js";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
-import type { DrawingToolStateRuntime } from "./drawingToolState.js";
+import type {
+  DrawingToolSelectionRuntime,
+  DrawingToolStateRuntime,
+} from "./drawingToolState.js";
 import type {
   DrawingExportLease,
   DrawingExportPrepareOptions,
@@ -96,13 +99,15 @@ export function indicatorDrawingScopeKeys(
 export function useDrawingRuntime({
   chartSurfaceActions,
   drawingScopeBase,
+  drawingToolSelection,
   session,
 }: {
   chartSurfaceActions: ChartSurfaceActions | null | undefined;
   drawingScopeBase?: string | null;
+  drawingToolSelection?: DrawingToolSelectionRuntime | null;
   session: ChartSessionRuntime | null | undefined;
 }): DrawingRuntime {
-  const toolState = useDrawingToolState();
+  const toolState = useDrawingToolState(drawingToolSelection);
   const { view } = toolState;
   const {
     setDrawingsHidden,

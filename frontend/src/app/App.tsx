@@ -29,6 +29,7 @@ import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGc
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime.js";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime.js";
 import { useReplayEntryCapability } from "../features/replay/useReplayEntryCapability.js";
+import { useDrawingToolSelectionState } from "../features/drawings/drawingToolState.js";
 import { buildLiveReplayLaunchContext } from "../features/replay-launcher/replayLaunchContext.js";
 import AppProviders from "./AppProviders.js";
 import LiveChartCell from "./LiveChartCell.js";
@@ -101,6 +102,9 @@ function LiveWorkspaceApp() {
     longTaskKeys: new Set<string>(),
   });
   const settings = useChartSettingsRuntime();
+  // The toolbar is window-global, so every chart interaction controller must
+  // consume the same active tool instead of retaining a per-cell copy.
+  const drawingToolSelection = useDrawingToolSelectionState();
   const replayEntry = useReplayEntryCapability();
   const marketRailLayout = useMarketRailLayout();
   const pageExportRef = useRef<HTMLDivElement | null>(null);
@@ -620,6 +624,7 @@ function LiveWorkspaceApp() {
                       layoutEditingDisabled={!workspace.view.ready || workspace.view.layoutLocked}
                       pageExportRef={pageExportRef}
                       foregroundPreloadGate={foregroundPreloadGate}
+                      drawingToolSelection={drawingToolSelection}
                       globalSettings={settings}
                       watchlist={watchlist}
                       marketRail={marketRail}

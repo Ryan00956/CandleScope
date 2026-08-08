@@ -51,6 +51,7 @@ import { useMarketDataWorkspaceResources } from "../features/market-data/marketD
 import type { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime.js";
 import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime.js";
+import type { DrawingToolSelectionRuntime } from "../features/drawings/drawingToolState.js";
 import { useIndicatorRuntime } from "../features/indicators/useIndicatorRuntime.js";
 import type { ActiveIndicatorPersistence } from "../features/indicators/activeIndicatorStore.js";
 import { useExportRuntime } from "../features/export/useExportRuntime.js";
@@ -121,6 +122,7 @@ export interface LiveChartCellProps {
   layoutEditingDisabled?: boolean;
   pageExportRef: RefObject<HTMLDivElement | null>;
   foregroundPreloadGate: ForegroundPreloadGate;
+  drawingToolSelection: DrawingToolSelectionRuntime;
   globalSettings: ChartSettingsRuntime;
   watchlist: WatchlistRuntime;
   marketRail: ChartWorkspaceRailLayout;
@@ -160,6 +162,7 @@ function LiveChartCell({
   layoutEditingDisabled = false,
   pageExportRef,
   foregroundPreloadGate,
+  drawingToolSelection,
   globalSettings,
   watchlist,
   marketRail,
@@ -270,6 +273,7 @@ function LiveChartCell({
   const drawings = useDrawingRuntime({
     chartSurfaceActions: chartSurface.actions,
     drawingScopeBase,
+    drawingToolSelection,
     session: chartSession,
   });
 

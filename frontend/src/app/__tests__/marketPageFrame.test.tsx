@@ -149,3 +149,11 @@ test("right rail keeps undersized stacked views scrollable instead of shrinking 
   assert.match(styles, /\.market-rail-view-host \{[\s\S]*?flex: 0 0 auto;/);
   assert.match(styles, /\.replay-market-dock-body \{ flex: 1 1 0; min-height: 0; overflow: auto; \}/);
 });
+
+test("replay activity buttons do not leave frozen transition timelines retaining old rails", () => {
+  const styles = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+  assert.match(
+    styles,
+    /\.right-market-rail\[data-runtime-source="replay"\] \.market-activity-item \{[\s\S]*?transition: none;/,
+  );
+});

@@ -224,6 +224,12 @@ body {
   cursor: pointer;
   transition: color 0.12s ease, background 0.12s ease;
 }
+.right-market-rail[data-runtime-source="replay"] .market-activity-item {
+  /* Replay recovery can replace this rail while a background tab has frozen
+     its CSS timeline. A pending transition then retains the removed button and
+     its complete order-ticket subtree until that timeline advances. */
+  transition: none;
+}
 .market-activity-item:hover,
 .market-activity-item:focus-visible {
   color: var(--text-primary);

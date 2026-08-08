@@ -28,7 +28,6 @@ from app.exchanges.realtime import RealtimePolicy, RealtimeUpdateMode
 
 from .catalog import build_ccxt_capabilities, get_ccxt_catalog_entry
 from .generic import (
-    CcxtHistoricalPaginationPolicy,
     CcxtUnifiedAdapter,
     CcxtUnifiedPlugin,
     CcxtUnifiedProfile,
@@ -185,6 +184,7 @@ class _VenueContractBundle:
     normalizer_factory: Any
     symbol_normalizer_value: Any
     rate_limit_factory: Any
+    pagination_factory: Any
     realtime_policy_value: RealtimePolicy
     price_stream_type_value: StreamType
 
@@ -199,6 +199,9 @@ class _VenueContractBundle:
 
     def rate_limit_policy(self, config: Any = None) -> Any:
         return self.rate_limit_factory(config)
+
+    def pagination_policy(self, config: Any = None) -> Any:
+        return self.pagination_factory(config)
 
     def realtime_policy(self) -> RealtimePolicy:
         return self.realtime_policy_value
@@ -249,7 +252,7 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             ),
             symbol_normalizer=legacy.symbol_normalizer(),
             rate_limit_policy_factory=lambda config: legacy.rate_limit_policy(config),
-            pagination_policy_factory=lambda _config: CcxtHistoricalPaginationPolicy(),
+            pagination_policy_factory=lambda config: legacy.pagination_policy(config),
             realtime_policy=legacy.realtime_policy(),
             price_stream_type_factory=lambda market_type: legacy.price_stream_type(
                 market_type,
@@ -319,6 +322,35 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             descriptor=descriptor,
             profile=profile,
         )
+
+    def provider_rate_limit_endpoint(self, req: TransportRequest) -> str | None:
+        """Return quota metadata without exposing a native transport route."""
+
+        descriptor = req.descriptor
+        if self.venue == "okx":
+            if descriptor.stream_type == StreamType.KLINE:
+                return "/api/v5/market/history-candles"
+            return None
+        futures = descriptor.market_type.strip().lower() == "futures"
+        if descriptor.stream_type == StreamType.KLINE:
+            return "/fapi/v1/klines" if futures else "/api/v3/klines"
+        if descriptor.stream_type == StreamType.AGG_TRADE:
+            return "/fapi/v1/aggTrades" if futures else "/api/v3/aggTrades"
+        if descriptor.stream_type == StreamType.FULL_DEPTH:
+            return "/fapi/v1/depth" if futures else "/api/v3/depth"
+        if not futures:
+            return None
+        return {
+            StreamType.MARK_PRICE: "/fapi/v1/premiumIndex",
+            StreamType.INDEX_PRICE: "/fapi/v1/premiumIndex",
+            StreamType.PREMIUM_INDEX: "/fapi/v1/premiumIndexKlines",
+            StreamType.FUNDING_RATE: "/fapi/v1/fundingRate",
+            StreamType.OPEN_INTEREST: (
+                "/futures/data/openInterestHist"
+                if req.history or req.start_ms is not None or req.end_ms is not None
+                else "/fapi/v1/openInterest"
+            ),
+        }.get(descriptor.stream_type)
 
     async def fetch_history_with_config(
         self,
@@ -626,6 +658,7 @@ def _legacy_contract_plugin(venue: str) -> _VenueContractBundle:
             normalizer_factory=BinanceNormalizer,
             symbol_normalizer_value=BinanceSymbolNormalizer(),
             rate_limit_factory=BinancePlugin._rate_limit_policy,
+            pagination_factory=BinancePlugin._pagination_policy,
             realtime_policy_value=RealtimePolicy(),
             price_stream_type_value=StreamType.MINI_TICKER,
         )
@@ -639,6 +672,7 @@ def _legacy_contract_plugin(venue: str) -> _VenueContractBundle:
         normalizer_factory=OkxNormalizer,
         symbol_normalizer_value=DefaultSymbolNormalizer(),
         rate_limit_factory=OkxPlugin._rate_limit_policy,
+        pagination_factory=OkxPlugin._pagination_policy,
         realtime_policy_value=RealtimePolicy(
             update_mode=RealtimeUpdateMode.BASE_INTERVAL_FANOUT,
         ),

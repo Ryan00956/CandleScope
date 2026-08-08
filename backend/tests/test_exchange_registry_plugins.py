@@ -1,11 +1,12 @@
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
-from app.exchanges.ccxt_ext.generic import (
-    CcxtHistoricalPaginationPolicy,
-    CcxtUnifiedProtocol,
-)
+from app.exchanges.ccxt_ext.generic import CcxtUnifiedProtocol
 from app.exchanges.ccxt_ext.primary import CcxtPrimaryNormalizer
+from app.exchanges.pagination import (
+    BinanceHistoricalPaginationPolicy,
+    OkxHistoricalPaginationPolicy,
+)
 from app.exchanges.protocol import AdapterBackedProtocol
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
@@ -108,7 +109,7 @@ def test_builtin_plugins_own_symbol_and_rate_limit_policies() -> None:
     assert registry.get_plugin("okx").price_stream_type("spot") == StreamType.TICKER
 
 
-def test_primary_plugins_use_ccxt_protocol_and_pagination_policies() -> None:
+def test_primary_plugins_use_ccxt_protocol_and_venue_pagination_policies() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
 
@@ -117,13 +118,15 @@ def test_primary_plugins_use_ccxt_protocol_and_pagination_policies() -> None:
 
     assert isinstance(binance.protocol(), CcxtUnifiedProtocol)
     assert isinstance(okx.protocol(), CcxtUnifiedProtocol)
+    assert binance.history_archive_provider(BackfillConfig()) is None
+    assert okx.history_archive_provider(BackfillConfig()) is None
     assert isinstance(
         binance.pagination_policy(BackfillConfig()),
-        CcxtHistoricalPaginationPolicy,
+        BinanceHistoricalPaginationPolicy,
     )
     assert isinstance(
         okx.pagination_policy(BackfillConfig()),
-        CcxtHistoricalPaginationPolicy,
+        OkxHistoricalPaginationPolicy,
     )
 
     binance_capabilities = binance.capabilities().to_dict()

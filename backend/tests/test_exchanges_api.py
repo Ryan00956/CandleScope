@@ -77,6 +77,12 @@ def test_exchange_list_exposes_pinned_ccxt_catalog() -> None:
         "watch_trades": 75,
         "watch_order_book": 76,
         "watch_ticker": 67,
+        "watch_mark_price": 9,
+        "watch_funding_rate": 9,
+        "watch_liquidations": 10,
+        "fetch_funding_rate_history": 50,
+        "fetch_open_interest": 32,
+        "fetch_open_interest_history": 15,
     }
     by_id = {item["exchange"]: item for item in payload["exchanges"]}
     assert "provider.ccxt_unified" in by_id["bybit"]["protocol_features"]

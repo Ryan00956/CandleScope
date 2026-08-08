@@ -27,6 +27,7 @@ from app.exchanges.rate_limits import (
 )
 from app.exchanges.plugins.binance.plugin import BinancePlugin
 from app.exchanges.plugins.okx.plugin import OkxPlugin
+from app.exchanges.registry import bootstrap_default_adapters
 
 
 class _FakeResponse:
@@ -244,6 +245,22 @@ def _native_transport(config: IngestionConfig) -> TransportLayer:
     transport = TransportLayer(config)
     transport._registry = _NativeRegistry()  # type: ignore[assignment]
     return transport
+
+
+def test_primary_provider_exposes_quota_metadata_without_native_rest_route() -> None:
+    descriptor = StreamDescriptor(
+        symbol="BTCUSDT",
+        stream_type=StreamType.KLINE,
+        interval="1m",
+        exchange="binance",
+        market_type="spot",
+    )
+    request = TransportRequest(descriptor=descriptor, limit=1000)
+    plugin = bootstrap_default_adapters().get_plugin("binance")
+
+    assert plugin.protocol().rest_request(request) is None
+    admission = asyncio.run(TransportLayer(IngestionConfig()).http_admission(request))
+    assert admission.bucket_key == "binance:spot:request_weight:ip"
 
 
 def _provider_request(

@@ -190,6 +190,48 @@ async def test_capacity_snapshot_is_fail_closed_when_components_are_absent(
     assert snapshot["database"]["state"] == "missing"
 
 
+async def test_capacity_snapshot_counts_shared_ccxt_provider_websockets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(capacity, "KLINES_DB_PATH", tmp_path / "missing.sqlite")
+    ingress = _Snapshot({
+        "initialized": True,
+        "ingress": {
+            "shared_ws": {"physical_websockets": 0},
+            "ccxt_provider": {
+                "runtimes": {
+                    "okx|spot|descriptor-shard|0": {"physical_websockets": 1},
+                    "okx|spot|descriptor-shard|1": {"physical_websockets": 1},
+                },
+            },
+            "pipelines": {
+                "okx:BTC-USDT@kline_1m": {
+                    "feed_control": {
+                        "mode": "websocket",
+                        "session": {
+                            "layer": "L2_CcxtProvider",
+                            "health": "connected",
+                        },
+                    },
+                },
+            },
+        },
+    })
+    snapshot = await capacity.build_capacity_snapshot(
+        SimpleNamespace(
+            data_engine_runtime=SimpleNamespace(
+                backfill_coordinator=None,
+                ingestion_factory=ingress,
+            ),
+        ),
+    )
+
+    assert snapshot["exchange"]["physicalWebSockets"] == 2
+    assert snapshot["exchange"]["providerPhysicalWebSockets"] == 2
+    assert snapshot["exchange"]["dedicatedPhysicalWebSockets"] == 0
+
+
 async def test_capacity_snapshot_prefers_component_bounded_views(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

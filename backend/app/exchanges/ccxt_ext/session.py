@@ -243,7 +243,11 @@ class CcxtProviderSession:
             self._metrics.inc("runtime_rebuilds")
 
     async def _attach_runtime(self) -> None:
-        runtime = await self._pool.acquire(self._profile, self._cfg)
+        runtime = await self._pool.acquire(
+            self._profile,
+            self._cfg,
+            self._descriptor,
+        )
         try:
             ccxt_symbol = runtime.resolve_symbol(self._descriptor)
             token = runtime.subscribe(
@@ -258,7 +262,7 @@ class CcxtProviderSession:
                 else None
             )
         except BaseException:
-            await self._pool.release(runtime)
+            await self._pool.release(runtime, self._descriptor)
             raise
         self._runtime = runtime
         self._ccxt_symbol = ccxt_symbol
@@ -275,7 +279,7 @@ class CcxtProviderSession:
         if runtime is not None and token is not None:
             runtime.unsubscribe(token)
         if runtime is not None:
-            await self._pool.release(runtime)
+            await self._pool.release(runtime, self._descriptor)
 
     async def _delivery_loop(self) -> None:
         while self._running:

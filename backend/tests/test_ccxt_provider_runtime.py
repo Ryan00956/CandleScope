@@ -328,6 +328,47 @@ def test_runtime_pool_shares_one_exchange_and_closes_at_last_release() -> None:
     asyncio.run(run())
 
 
+def test_runtime_pool_bounds_okx_kline_descriptors_per_shard(monkeypatch) -> None:
+    async def run() -> None:
+        from app.core import config as app_config
+
+        monkeypatch.setattr(app_config, "KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD", 2)
+        pool = CcxtRuntimePool()
+        profile = _FakeProfile()
+        profile.exchange_id = "okx"
+        profile.market_type = "spot"
+        config = IngestionConfig()
+
+        def descriptor(symbol: str) -> StreamDescriptor:
+            return StreamDescriptor(
+                symbol,
+                StreamType.KLINE,
+                interval="1m",
+                exchange="okx",
+                market_type="spot",
+            )
+
+        btc = descriptor("BTC-USDT")
+        eth = descriptor("ETH-USDT")
+        sol = descriptor("SOL-USDT")
+        first = await pool.acquire(profile, config, btc)
+        same_shard = await pool.acquire(profile, config, eth)
+        second = await pool.acquire(profile, config, sol)
+
+        assert first is same_shard
+        assert second is not first
+        snapshot = pool.snapshot()["runtimes"]
+        assert sorted(value["descriptor_count"] for value in snapshot.values()) == [1, 2]
+        assert sorted(value["shard_index"] for value in snapshot.values()) == [0, 1]
+
+        await pool.release(first, btc)
+        await pool.release(same_shard, eth)
+        await pool.release(second, sol)
+        assert pool.snapshot() == {"runtimes": {}}
+
+    asyncio.run(run())
+
+
 def test_runtime_pool_rebuilds_ccxt_caches_when_recycling_websockets() -> None:
     async def run() -> None:
         pool = CcxtRuntimePool()

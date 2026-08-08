@@ -269,7 +269,7 @@ def _dedicated_upstream_websockets(ingress: dict[str, Any] | None) -> int:
         session = feed.get("session")
         if not isinstance(session, dict):
             continue
-        if session.get("layer") == "L2_SharedSession":
+        if session.get("layer") in {"L2_SharedSession", "L2_CcxtProvider"}:
             continue
         if session.get("health") == "connected":
             total += 1
@@ -402,6 +402,21 @@ async def build_capacity_snapshot(
         int(shared_ws.get("physical_websockets", 0))
         if isinstance(shared_ws, dict)
         else 0
+    )
+    ccxt_provider = (
+        ingress.get("ccxt_provider") if isinstance(ingress, dict) else None
+    )
+    ccxt_runtimes = (
+        ccxt_provider.get("runtimes")
+        if isinstance(ccxt_provider, dict)
+        else None
+    )
+    provider_physical = sum(
+        int(value.get("physical_websockets", 0))
+        for value in (
+            ccxt_runtimes.values() if isinstance(ccxt_runtimes, dict) else ()
+        )
+        if isinstance(value, dict)
     )
     dedicated_physical = _dedicated_upstream_websockets(ingress)
 
@@ -566,8 +581,11 @@ async def build_capacity_snapshot(
             "runtimeRouting": indicator_runtime,
         },
         "exchange": {
-            "physicalWebSockets": shared_physical + dedicated_physical,
+            "physicalWebSockets": (
+                shared_physical + provider_physical + dedicated_physical
+            ),
             "sharedPhysicalWebSockets": shared_physical,
+            "providerPhysicalWebSockets": provider_physical,
             "dedicatedPhysicalWebSockets": dedicated_physical,
             "ingestion": _ingestion_summary(ingestion_factory_snapshot),
             "pipelineDetailTotal": pipeline_total,

@@ -46,9 +46,26 @@ MINUTE_MS = 60_000
 @pytest.fixture(autouse=True)
 def _isolate_archive_routing_from_production_cold_start(monkeypatch) -> None:
     """Keep archive-routing tests focused on source selection, not shared budgets."""
+
+    class _ArchivePlugin:
+        @staticmethod
+        def history_archive_provider(_config=None):
+            return BinanceKlineArchiveProvider()
+
+    class _ArchiveRegistry:
+        @staticmethod
+        def get_plugin(exchange: str):
+            if exchange != "binance":
+                raise KeyError(exchange)
+            return _ArchivePlugin()
+
     monkeypatch.setattr(
         "app.data_engine.backfill.fetcher.get_shared_rate_limit_manager",
         lambda: RateLimitManager(),
+    )
+    monkeypatch.setattr(
+        "app.data_engine.backfill.source_router.get_exchange_registry",
+        lambda: _ArchiveRegistry(),
     )
 
 

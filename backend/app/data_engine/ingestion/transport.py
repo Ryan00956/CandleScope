@@ -590,20 +590,32 @@ class TransportLayer:
         plugin = self._registry.get_plugin(exchange)
         protocol = plugin.protocol()
         spec = protocol.rest_request(req, config=self._cfg)
+        params: dict[str, Any]
         if spec is None:
-            raise TransportError(
-                f"No REST endpoint for stream type: {desc.stream_type}"
+            provider_endpoint = getattr(
+                plugin,
+                "provider_rate_limit_endpoint",
+                None,
             )
+            endpoint = provider_endpoint(req) if callable(provider_endpoint) else None
+            if not endpoint:
+                raise TransportError(
+                    f"No REST endpoint for stream type: {desc.stream_type}"
+                )
+            params = {}
+        else:
+            endpoint = spec.path
+            params = dict(spec.params)
         quota_request = HistoricalRequest(
             exchange=exchange,
             market_type=market_type,
-            endpoint=spec.path,
+            endpoint=endpoint,
             symbol=desc.symbol,
             interval=desc.interval,
             start_ms=req.start_ms,
             end_ms=req.end_ms,
             limit=req.limit,
-            params=dict(spec.params),
+            params=params,
         )
         quota_rule = plugin.rate_limit_policy(self._cfg).rule_for(quota_request)
         return await self._rate_limits.inspect(quota_rule, quota_request)

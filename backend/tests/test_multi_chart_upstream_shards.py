@@ -6,8 +6,10 @@ import pytest
 
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
-from app.data_engine.ingestion.shared_ws import SharedWsHubRegistry
+from app.data_engine.ingestion.shared_ws import SharedMultiplexHub, SharedWsHubRegistry
 from app.data_engine.ingestion.transport import TransportError, TransportLayer
+from app.exchanges.ccxt_ext.session import CcxtProviderSession
+from app.exchanges.plugins.okx.protocol import OkxExchangeProtocol
 
 
 pytestmark = pytest.mark.anyio
@@ -27,53 +29,35 @@ async def _noop(*_args) -> None:
     return None
 
 
-async def test_okx_kline_descriptors_share_bounded_cross_symbol_shards() -> None:
+async def test_okx_kline_descriptors_defer_to_ccxt_provider_pool() -> None:
     ingestion = IngestionConfig()
+    transport = TransportLayer(ingestion)
     registry = SharedWsHubRegistry(
         ingestion,
-        TransportLayer(ingestion),
+        transport,
         max_descriptors_per_shard=2,
     )
     btc = _okx("BTC-USDT")
     eth = _okx("ETH-USDT")
     sol = _okx("SOL-USDT")
 
-    first = registry.get_hub(btc)
-    assert first is not None
-    first._ensure_runner = lambda: None
-    await first.subscribe(btc, _noop, _noop)
-
-    second_for_same_shard = registry.get_hub(eth)
-    assert second_for_same_shard is first
-    await first.subscribe(eth, _noop, _noop)
-
-    second = registry.get_hub(sol)
-    assert second is not None and second is not first
-    second._ensure_runner = lambda: None
-    await second.subscribe(sol, _noop, _noop)
-
-    snapshot = registry.snapshot()
-    assert snapshot["hub_count"] == 2
-    assert snapshot["descriptor_count"] == 3
-    assert snapshot["max_descriptors_per_shard"] == 2
-    assert [hub["shard_index"] for hub in snapshot["hubs"]] == [0, 1]
-    assert all(hub["scope"] == "KLINES" for hub in snapshot["hubs"])
-
-    # A failure/reconnect streak is local to one physical shard.
-    first._consecutive_failures = 3
-    assert first.snapshot()["consecutive_failures"] == 3
-    assert second.snapshot()["consecutive_failures"] == 0
+    assert [registry.get_hub(item) for item in (btc, eth, sol)] == [None, None, None]
+    sessions = [transport.create_provider_session(item) for item in (btc, eth, sol)]
+    assert all(isinstance(session, CcxtProviderSession) for session in sessions)
+    assert registry.snapshot()["hub_count"] == 0
 
 
 async def test_hub_itself_fails_closed_if_assignment_races_past_shard_cap() -> None:
     ingestion = IngestionConfig()
-    registry = SharedWsHubRegistry(
-        ingestion,
-        TransportLayer(ingestion),
-        max_descriptors_per_shard=1,
+    hub = SharedMultiplexHub(
+        config=ingestion,
+        transport=TransportLayer(ingestion),
+        exchange="okx",
+        market_type="spot",
+        symbol="KLINES",
+        protocol=OkxExchangeProtocol(),
+        max_descriptors=1,
     )
-    hub = registry.get_hub(_okx("BTC-USDT"))
-    assert hub is not None
     hub._ensure_runner = lambda: None
     await hub.subscribe(_okx("BTC-USDT"), _noop, _noop)
 
@@ -89,15 +73,10 @@ async def test_registry_reserves_slots_before_concurrent_sessions_subscribe() ->
         max_descriptors_per_shard=2,
     )
 
-    first = registry.get_hub(_okx("BTC-USDT"))
-    second = registry.get_hub(_okx("ETH-USDT"))
-    overflow = registry.get_hub(_okx("SOL-USDT"))
-
-    assert first is second
-    assert overflow is not None and overflow is not first
-    snapshot = registry.snapshot()
-    assert snapshot["descriptor_count"] == 3
-    assert [hub["reserved_descriptor_count"] for hub in snapshot["hubs"]] == [2, 1]
+    assert registry.get_hub(_okx("BTC-USDT")) is None
+    assert registry.get_hub(_okx("ETH-USDT")) is None
+    assert registry.get_hub(_okx("SOL-USDT")) is None
+    assert registry.snapshot()["descriptor_count"] == 0
 
 
 async def test_okx_hub_enforces_official_control_and_payload_budgets() -> None:
@@ -106,9 +85,14 @@ async def test_okx_hub_enforces_official_control_and_payload_budgets() -> None:
             return None
 
     ingestion = IngestionConfig()
-    registry = SharedWsHubRegistry(ingestion, TransportLayer(ingestion))
-    hub = registry.get_hub(_okx("BTC-USDT"))
-    assert hub is not None
+    hub = SharedMultiplexHub(
+        config=ingestion,
+        transport=TransportLayer(ingestion),
+        exchange="okx",
+        market_type="spot",
+        symbol="KLINES",
+        protocol=OkxExchangeProtocol(),
+    )
     hub._conn = _Connection()
 
     hub._control_messages.extend([time.monotonic()] * 480)

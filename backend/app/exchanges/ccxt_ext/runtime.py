@@ -7,11 +7,11 @@ import inspect
 import logging
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.data_engine.ingestion.config import IngestionConfig
-from app.data_engine.ingestion.models import StreamDescriptor
+from app.data_engine.ingestion.models import StreamDescriptor, StreamType
 
 from .models import CcxtLifecycleEvent, CcxtRawMarketEvent
 from .profile import CcxtExchangeProfile
@@ -161,6 +161,7 @@ class CcxtRuntime:
             await result
 
     def snapshot(self) -> dict[str, Any]:
+        clients = getattr(self.exchange, "clients", None)
         return {
             "exchange": self.profile.exchange_id,
             "market_type": self.profile.market_type,
@@ -171,6 +172,7 @@ class CcxtRuntime:
             "lifecycle_events": self._lifecycle_events,
             "websocket_recycles": self._websocket_recycles,
             "websocket_generation": self._websocket_generation,
+            "physical_websockets": len(clients) if isinstance(clients, dict) else 0,
         }
 
     def _on_raw_event(self, event: CcxtRawMarketEvent) -> None:
@@ -214,6 +216,8 @@ class _PoolEntry:
     runtime: CcxtRuntime
     start_task: asyncio.Task[None]
     references: int = 0
+    descriptor_references: dict[str, int] = field(default_factory=dict)
+    shard_index: int | None = None
 
 
 class CcxtRuntimePool:
@@ -227,9 +231,54 @@ class CcxtRuntimePool:
         self,
         profile: CcxtExchangeProfile,
         config: IngestionConfig,
+        descriptor: StreamDescriptor | None = None,
     ) -> CcxtRuntime:
-        key = profile.runtime_key(config)
+        base_key = profile.runtime_key(config)
+        descriptor_key = _sharded_descriptor_key(profile, descriptor)
         async with self._lock:
+            key = base_key
+            shard_index: int | None = None
+            if descriptor_key is not None:
+                capacity = _descriptor_shard_capacity()
+                candidates = sorted(
+                    (
+                        (entry_key, entry)
+                        for entry_key, entry in self._entries.items()
+                        if len(entry_key) == len(base_key) + 2
+                        and entry_key[: len(base_key)] == base_key
+                        and entry_key[-2] == "descriptor-shard"
+                    ),
+                    key=lambda item: int(item[0][-1]),
+                )
+                selected = next(
+                    (
+                        item
+                        for item in candidates
+                        if descriptor_key in item[1].descriptor_references
+                    ),
+                    None,
+                )
+                if selected is None:
+                    selected = next(
+                        (
+                            item
+                            for item in candidates
+                            if len(item[1].descriptor_references) < capacity
+                        ),
+                        None,
+                    )
+                if selected is not None:
+                    key, entry = selected
+                    shard_index = entry.shard_index
+                else:
+                    shard_index = (
+                        max(
+                            (int(item[0][-1]) for item in candidates),
+                            default=-1,
+                        )
+                        + 1
+                    )
+                    key = (*base_key, "descriptor-shard", str(shard_index))
             entry = self._entries.get(key)
             if entry is None:
                 runtime = CcxtRuntime(profile, config)
@@ -239,9 +288,14 @@ class CcxtRuntimePool:
                         runtime.start(),
                         name=f"ccxt_runtime_start_{profile.exchange_id}_{profile.market_type}",
                     ),
+                    shard_index=shard_index,
                 )
                 self._entries[key] = entry
             entry.references += 1
+            if descriptor_key is not None:
+                entry.descriptor_references[descriptor_key] = (
+                    entry.descriptor_references.get(descriptor_key, 0) + 1
+                )
         try:
             await asyncio.shield(entry.start_task)
         except asyncio.CancelledError:
@@ -250,6 +304,7 @@ class CcxtRuntimePool:
                 current = self._entries.get(key)
                 if current is entry:
                     entry.references -= 1
+                    _release_descriptor_reference(entry, descriptor_key)
                     if entry.references <= 0:
                         self._entries.pop(key, None)
                         should_close = True
@@ -268,14 +323,29 @@ class CcxtRuntimePool:
             raise
         return entry.runtime
 
-    async def release(self, runtime: CcxtRuntime) -> None:
-        key = runtime.profile.runtime_key(runtime.config)
+    async def release(
+        self,
+        runtime: CcxtRuntime,
+        descriptor: StreamDescriptor | None = None,
+    ) -> None:
         should_close = False
         async with self._lock:
-            entry = self._entries.get(key)
-            if entry is None or entry.runtime is not runtime:
+            located = next(
+                (
+                    (entry_key, entry)
+                    for entry_key, entry in self._entries.items()
+                    if entry.runtime is runtime
+                ),
+                None,
+            )
+            if located is None:
                 return
+            key, entry = located
             entry.references -= 1
+            _release_descriptor_reference(
+                entry,
+                _sharded_descriptor_key(runtime.profile, descriptor),
+            )
             if entry.references <= 0:
                 self._entries.pop(key, None)
                 should_close = True
@@ -288,6 +358,9 @@ class CcxtRuntimePool:
                 "|".join(key): {
                     **entry.runtime.snapshot(),
                     "references": entry.references,
+                    "descriptor_count": len(entry.descriptor_references),
+                    "descriptors": sorted(entry.descriptor_references),
+                    "shard_index": entry.shard_index,
                 }
                 for key, entry in self._entries.items()
             }
@@ -309,3 +382,35 @@ _SHARED_POOL = CcxtRuntimePool()
 
 def get_shared_ccxt_runtime_pool() -> CcxtRuntimePool:
     return _SHARED_POOL
+
+
+def _sharded_descriptor_key(
+    profile: CcxtExchangeProfile,
+    descriptor: StreamDescriptor | None,
+) -> str | None:
+    if (
+        descriptor is None
+        or profile.exchange_id != "okx"
+        or descriptor.stream_type != StreamType.KLINE
+    ):
+        return None
+    return descriptor.key
+
+
+def _descriptor_shard_capacity() -> int:
+    from app.core import config as app_config
+
+    return max(1, int(app_config.KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD))
+
+
+def _release_descriptor_reference(
+    entry: _PoolEntry,
+    descriptor_key: str | None,
+) -> None:
+    if descriptor_key is None:
+        return
+    remaining = entry.descriptor_references.get(descriptor_key, 0) - 1
+    if remaining <= 0:
+        entry.descriptor_references.pop(descriptor_key, None)
+    else:
+        entry.descriptor_references[descriptor_key] = remaining

@@ -240,6 +240,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 分类器与真实 capture 回归 `41 passed`；完整 frontend 架构、插件边界、双 typecheck、lint、`2966 passed` 和 production build 全部通过。修复提交 `f4c47cbd44d2a7a2197a6a99496cc8846e3c0fd7` 的真实 smoke 随后以 31 项 acceptance 全真通过，本轮 catalog epoch conflict 为 `0`，证明无错误时不会制造合成重试证据；完整构建 rollback 的 17 项 acceptance 也全真，旧 backend replay route 为 404，禁用重启与旧构建保持 replay.db 和 Phase 18 存储语义。
 - `f4c47cbd` 的 smoke/rollback 只验证修复和命令就绪；本节文档提交再次生成新 HEAD。最终来源、全量 checks、完整 benchmark、smoke、rollback、正式 4 小时 soak 和 manifest 必须全部绑定新 clean HEAD，性能环境仍须先恢复到可重复状态。
 
+### 3.22 命令 200 响应身份绑定与 100 周期复现闭环
+
+- `917c6de2827309ecd4d4d7b2eaeb537a50e288a9` 的正式 4 小时运行在 `training-action-cycle` 第 70 周期拒绝，错误为等待 training speed ack 超时，页面保持 `controlPending=set_speed`。失败 capture 中本次请求为 `control-746ef4d8-6fd4-427c-8d45-16e14720a726`、`set_speed(BASE_BAR, 10000)`；对应命令路由的 HTTP 200 body 却携带旧 `control-404ebcaf-8eeb-43ca-998e-9d1137e900f8`，全局时钟仍为 `PAUSED / rate=1 / USER_PAUSE`。这证明旧客户端把结构合法的 200 当作本次命令成功，却没有验证响应 `run_id/command_id` 是否绑定请求；它不证明错配由 Vite proxy、HTTP keep-alive 或浏览器缓存中的哪一层造成。
+- 对共享 keep-alive Vite proxy 另做隔离 echo 压测：共触发 3,997 个后端请求，其中约半数主动 abort，逐一校验 2,000 个完成响应，结果为 `mismatches=0 / errors=0`。真实诊断浏览器另以 CDP side monitor 连续观察 55 秒，当前命令 request/response ID 全部匹配，且响应不是 disk cache 或 service worker。没有可重复的代理错配证据，因此本阶段没有猜测性修改 proxy/agent，也没有通过关闭连接复用掩盖问题。
+- `fb42c8348744cba452ebbcc66ad944b17323afb7` 将客户端命令合同硬化为 fail closed：发送前要求 payload `run_id` 与 route 一致，收到成功响应后要求 response `run_id/command_id` 与请求精确一致；任一错配抛出 `REPLAY_V2_RESPONSE_IDENTITY_MISMATCH`。soak capture 不再只依赖通用 100 项 body tail，而是独立保留最多 2,000 条命令 request/response/body transition，并按 CDP requestId 关联；成功 2xx 的 route run、request run、response run 和 command ID 任一缺失或不一致都使 `replay_command_response_identity_exact=false`。
+- 定向 soak/API 回归 `51 passed`，双 typecheck、定向 ESLint 和 `git diff --check` 通过；完整 frontend 架构、插件边界、双 typecheck、lint、`2970 passed` 与 production build 全部通过。工作树原 `node_modules` 是指向主工作树的 junction，主工作树依赖已漂移到 Monaco `0.56.0`，与本分支 lock 的 `0.55.1` 不符；确认 junction target 后只删除本工作树 junction 并执行 `npm ci`，没有修改主工作树 target 或 lock，随后以独立依赖完成上述全量验证。
+- 同一 clean HEAD 的 `--allow-short` 高密度诊断完成 100/100 training action、100/100 下单/成交/重连、100/100 archive lifecycle 和 10,000 projection events，最后 archive lifecycle 在 `5,651,353 ms` 完成，越过旧 cycle 70 故障边界。32 项 acceptance 全真；712 个命令 request、712 个 response、712 个 response body 全部精确关联，identity violation 为 0；projection 为 `59,417.706 events/s`，primary/late heap 增长 `9,848,364 / 14,070,328 B`，盲审通过，报告 hash 为 `sha256:3be9640476b9b9b50b4e1e9426a615f9ac3df2bdb8e91a4aa5c2290f5651c179`。
+- 该运行使用 `--allow-short --duration-ms 10000 --projection-events 10000`，只关闭第 70 周期确定性复现和命令身份证据缺口，不是正式 4 小时发布证据。本文提交会再次产生新 HEAD；真实来源、全量 checks、formal benchmark、真实浏览器 smoke、rollback、正式 4 小时/100 周期/1,000,000 events soak 和 release manifest 仍须从新 clean HEAD 全部重跑，不能继承本节 artifact。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

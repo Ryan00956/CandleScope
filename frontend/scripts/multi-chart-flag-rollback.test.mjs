@@ -36,4 +36,3 @@ test("flag rollback fails closed when persisted v6 layout is truncated", () => {
   assert.equal(result.result, "fail");
   assert.equal(result.checks.v6DocumentPreserved.passed, false);
 });
-

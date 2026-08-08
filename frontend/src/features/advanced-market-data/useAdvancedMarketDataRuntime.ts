@@ -634,19 +634,6 @@ export function useAdvancedMarketDataRuntime({
   }, [enabled, historyContextKey, identityKey, invalidateHistoryRequests, liquidations]);
 
   useEffect(() => {
-    if (!activeMetricChannels.includes("open_interest")) return;
-    advancedMarketDataStore.setOpenInterestPeriod(
-      identity,
-      resolveOpenInterestPeriod(interval),
-    );
-  }, [activeMetricChannels, identity, interval]);
-
-  useEffect(() => {
-    if (!activeMetricChannels.includes("funding_rate")) return;
-    advancedMarketDataStore.setFundingPeriod(identity, interval);
-  }, [activeMetricChannels, identity, interval]);
-
-  useEffect(() => {
     const identityChanged = coverageIdentityRef.current !== identityKey;
     coverageIdentityRef.current = identityKey;
     invalidateHistoryRequests(identityChanged);

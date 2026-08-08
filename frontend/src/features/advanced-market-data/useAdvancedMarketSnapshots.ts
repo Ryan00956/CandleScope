@@ -9,6 +9,7 @@ import type {
   AdvancedMarketRuntimeView,
   AdvancedMarketSummarySnapshot,
 } from "./advancedMarketDataTypes.js";
+import { resolveOpenInterestPeriod } from "./metricPaneProjection.js";
 
 export function useAdvancedMarketSummary(
   view: AdvancedMarketRuntimeView,
@@ -31,6 +32,7 @@ export function useAdvancedMarketSummary(
 export function useAdvancedMarketMetrics(
   view: AdvancedMarketRuntimeView,
 ): AdvancedMarketMetricsSnapshot {
+  const openInterestPeriod = resolveOpenInterestPeriod(view.interval);
   const subscribe = useCallback(
     (listener: () => void) => view.stateMetricsEnabled
       ? advancedMarketDataStore.subscribeMetrics(view.identityKey, listener)
@@ -39,9 +41,13 @@ export function useAdvancedMarketMetrics(
   );
   const getSnapshot = useCallback(
     () => view.stateMetricsEnabled
-      ? advancedMarketDataStore.getMetricsSnapshot(view.identityKey)
+      ? advancedMarketDataStore.getMetricsSnapshotForPeriods(
+        view.identityKey,
+        view.interval,
+        openInterestPeriod,
+      )
       : EMPTY_ADVANCED_MARKET_METRICS,
-    [view.identityKey, view.stateMetricsEnabled],
+    [openInterestPeriod, view.identityKey, view.interval, view.stateMetricsEnabled],
   );
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_ADVANCED_MARKET_METRICS);
 }

@@ -219,16 +219,72 @@ test("funding derived history is isolated by chart period", () => {
     is_final: false,
   }, 300_000);
 
-  store.setFundingPeriod(IDENTITY, "1h");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [hourly], "1h");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
-
-  store.setFundingPeriod(IDENTITY, "5m");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [fiveMinute], "5m");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [fiveMinute]);
 
-  store.setFundingPeriod(IDENTITY, "1h");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "1h", "1h").fundingHistory,
+    [hourly],
+  );
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "5m", "5m").fundingHistory,
+    [fiveMinute],
+  );
+});
+
+test("same-identity charts read funding history from their own periods", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const quarterHour = [0, 900_000, 1_800_000].map((eventTime, index) => record(
+    "funding_rate",
+    {
+      funding_rate: 0.0001 + index * 0.00001,
+      sample_kind: "estimate",
+      provenance: "derived_history",
+      quality: "estimated",
+      is_final: false,
+    },
+    eventTime,
+  ));
+  const hourly = [0, 3_600_000].map((eventTime, index) => record(
+    "funding_rate",
+    {
+      funding_rate: 0.0002 + index * 0.00001,
+      sample_kind: "estimate",
+      provenance: "derived_history",
+      quality: "estimated",
+      is_final: false,
+    },
+    eventTime,
+  ));
+
+  store.mergeMetricHistory(IDENTITY, "funding_rate", quarterHour, "15m");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", hourly, "1h");
+
+  const quarterHourSnapshot = store.getMetricsSnapshotForPeriods(key, "15m", "15m");
+  const hourlySnapshot = store.getMetricsSnapshotForPeriods(key, "1h", "1h");
+  assert.deepEqual(quarterHourSnapshot.fundingHistory, quarterHour);
+  assert.deepEqual(hourlySnapshot.fundingHistory, hourly);
+  assert.strictEqual(
+    store.getMetricsSnapshotForPeriods(key, "15m", "15m"),
+    quarterHourSnapshot,
+  );
+
+  let notifications = 0;
+  store.subscribeMetrics(key, () => { notifications += 1; });
+  const nextQuarterHour = record("funding_rate", {
+    funding_rate: 0.00014,
+    sample_kind: "estimate",
+    provenance: "derived_history",
+    quality: "estimated",
+    is_final: false,
+  }, 2_700_000);
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [nextQuarterHour], "15m");
+  assert.equal(notifications, 1);
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "15m", "15m").fundingHistory,
+    [...quarterHour, nextQuarterHour],
+  );
 });
 
 test("funding period partition preserves month M distinct from minute m", () => {
@@ -246,14 +302,16 @@ test("funding period partition preserves month M distinct from minute m", () => 
     funding_rate: 0.0002,
   }, 2_592_000_000);
 
-  store.setFundingPeriod(IDENTITY, "1m");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [minute], "1m");
-  store.setFundingPeriod(IDENTITY, "1M");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [month], "1M");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [month]);
-
-  store.setFundingPeriod(IDENTITY, "1m");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [minute]);
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "1M", "1M").fundingHistory,
+    [month],
+  );
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "1m", "1m").fundingHistory,
+    [minute],
+  );
 });
 
 test("hybrid funding settlements follow their chart period without leaking bucket opens", () => {
@@ -280,22 +338,21 @@ test("hybrid funding settlements follow their chart period without leaking bucke
   const hourly = hybrid("1h", cycleTimeMs);
 
   store.mergeMetricHistory(IDENTITY, "funding_rate", [sparse]);
-  store.setFundingPeriod(IDENTITY, "1d");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [daily], "1d");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [daily]);
-
-  store.setFundingPeriod(IDENTITY, "1h");
   store.mergeMetricHistory(IDENTITY, "funding_rate", [hourly], "1h");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
-
-  store.setFundingPeriod(IDENTITY, "1d");
-  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [daily]);
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "1d", "1d").fundingHistory,
+    [daily],
+  );
+  assert.deepEqual(
+    store.getMetricsSnapshotForPeriods(key, "1h", "1h").fundingHistory,
+    [hourly],
+  );
 });
 
 test("funding realtime keeps bounded observations and resets at cycle boundary", () => {
   const store = new AdvancedMarketDataStore();
   const key = buildAdvancedMarketIdentityKey(IDENTITY);
-  store.setFundingPeriod(IDENTITY, "5m");
   const first = record("funding_rate", {
     funding_rate: 0.0001,
     observed_at_ms: 10_000,
@@ -371,7 +428,6 @@ test("funding realtime observations do not use epoch buckets for week or calenda
   for (const { period, observations } of cases) {
     const store = new AdvancedMarketDataStore();
     const key = buildAdvancedMarketIdentityKey(IDENTITY);
-    store.setFundingPeriod(IDENTITY, period);
     const records = observations.map((observedAtMs, index) => record("funding_rate", {
       funding_rate: 0.0001 + index * 0.00001,
       observed_at_ms: observedAtMs,
@@ -382,7 +438,10 @@ test("funding realtime observations do not use epoch buckets for week or calenda
       is_final: false,
     }, observedAtMs));
     store.applyRecords(IDENTITY, records);
-    assert.deepEqual(store.getMetricsSnapshot(key).fundingRealtimeHistory, records);
+    assert.deepEqual(
+      store.getMetricsSnapshotForPeriods(key, period, "5m").fundingRealtimeHistory,
+      records,
+    );
   }
 });
 
@@ -450,10 +509,10 @@ test("identity reset drops inactive cached histories", () => {
   assert.equal(store.getMetricsSnapshot(key).openInterestHistory.length, 0);
 });
 
-test("OI history is isolated by requested period while live OI stays a shared tail", () => {
+test("same-identity charts read OI history from their own periods while sharing the live tail", () => {
   const store = new AdvancedMarketDataStore();
   const key = buildAdvancedMarketIdentityKey(IDENTITY);
-  const fiveMinute = record("open_interest", {
+  const quarterHour = record("open_interest", {
     open_interest: 50_000,
     is_final: true,
     sample_kind: "final",
@@ -467,29 +526,25 @@ test("OI history is isolated by requested period while live OI stays a shared ta
 
   // The request descriptor is authoritative even when mock/history records
   // have an empty key.params object.
-  store.mergeMetricHistory(IDENTITY, "open_interest", [fiveMinute], "5m");
+  store.mergeMetricHistory(IDENTITY, "open_interest", [quarterHour], "15m");
   store.mergeMetricHistory(IDENTITY, "open_interest", [oneHour], "1h");
   store.applyRecords(IDENTITY, [websocketLive]);
 
-  let snapshot = store.getMetricsSnapshot(key);
-  assert.equal(snapshot.openInterestPeriod, "5m");
-  assert.deepEqual(snapshot.openInterestHistory.map((item) => item.data.open_interest), [
+  const quarterHourSnapshot = store.getMetricsSnapshotForPeriods(key, "15m", "15m");
+  const hourlySnapshot = store.getMetricsSnapshotForPeriods(key, "1h", "1h");
+  assert.equal(quarterHourSnapshot.openInterestPeriod, "15m");
+  assert.deepEqual(quarterHourSnapshot.openInterestHistory.map((item) => item.data.open_interest), [
     50_000,
     70_000,
   ]);
-  assert.equal(snapshot.openInterestHistory.at(-1)?.data.sample_kind, "provisional");
-
-  store.setOpenInterestPeriod(IDENTITY, "1h");
-  snapshot = store.getMetricsSnapshot(key);
-  assert.equal(snapshot.openInterestPeriod, "1h");
-  assert.deepEqual(snapshot.openInterestHistory.map((item) => item.data.open_interest), [
+  assert.equal(quarterHourSnapshot.openInterestHistory.at(-1)?.data.sample_kind, "provisional");
+  assert.equal(hourlySnapshot.openInterestPeriod, "1h");
+  assert.deepEqual(hourlySnapshot.openInterestHistory.map((item) => item.data.open_interest), [
     60_000,
     70_000,
   ]);
-
-  store.setOpenInterestPeriod(IDENTITY, "5m");
-  assert.deepEqual(
-    store.getMetricsSnapshot(key).openInterestHistory.map((item) => item.data.open_interest),
-    [50_000, 70_000],
+  assert.strictEqual(
+    store.getMetricsSnapshotForPeriods(key, "15m", "15m"),
+    quarterHourSnapshot,
   );
 });

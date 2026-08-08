@@ -71,19 +71,19 @@ python backend/scripts/soak_alerts_delivery.py `
 按 Git SHA 隔离的 release-evidence 目录：
 
 ```powershell
-$sha = (git rev-parse HEAD).Trim()
-$evidence = "H:\program\CandleScope-alerts-release-evidence\$sha\alerts"
-New-Item -ItemType Directory -Force -Path $evidence | Out-Null
-
-python backend/scripts/soak_alerts_delivery.py `
+python backend/scripts/run_alerts_delivery_soak.py `
+  --evidence-root H:\program\CandleScope-alerts-release-evidence `
   --duration-seconds 86400 `
   --restart-every 25 `
   --crash-every 100 `
-  --sample-every-seconds 30 `
-  --require-clean-head `
-  --state-dir "$evidence\state" `
-  --report "$evidence\alerts-delivery-soak-24h.json"
+  --sample-every-seconds 30
 ```
+
+正式门禁必须通过 `run_alerts_delivery_soak.py` 启动，不能在启动
+`soak_alerts_delivery.py` 后再用 `Get-Process` 附着监控。Windows 上附着得到的
+进程对象不会提供可靠的 `ExitCode`。启动器会保持原始子进程句柄，原子写入
+`launch-manifest.json` 与整数 `process-exit.json.exitCode`，并拒绝覆盖已有证据。
+若需在后台运行，应把该启动器本身作为后台进程启动，不要另建退出监控器。
 
 该脚本不会访问外网；它使用生产 Facade、SQLite Outbox、worker 生命周期、历史回执与退避调度，并注入可重试的确定性失败。
 每次 `--crash-every` 会轮换制造 `staged`、已 claim 的 `processing`、已排期的
@@ -91,5 +91,6 @@ python backend/scripts/soak_alerts_delivery.py `
 
 报告在运行中周期性原子更新，包含 Git SHA/脏工作树状态、累计投递/尝试/重试/
 死信计数、队列峰值、异常恢复次数、SQLite 文件大小以及进程 RSS 趋势。
-只有最终 `status=passed`、`passed=true` 和进程退出码 `0` 同时成立才算通过；
+只有最终 `status=passed`、`passed=true`、报告/manifest Git SHA 一致和
+`process-exit.json` 中整数退出码 `0` 同时成立才算通过；
 `status=running` 只表示门禁尚在执行。

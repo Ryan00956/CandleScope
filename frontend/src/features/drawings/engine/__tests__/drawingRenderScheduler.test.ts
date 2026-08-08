@@ -137,6 +137,40 @@ test("prefetched input and a lightweight freshness check avoid duplicate input c
   assert.equal(published, 1);
 });
 
+test("suspend cancels a pending frame without preventing later reactivation", () => {
+  const frames = new Map<number, () => void>();
+  const cancelled: number[] = [];
+  let nextHandle = 1;
+  let published = 0;
+  const scheduler = createDrawingRenderScheduler({
+    readInput: () => ({ stamp: stamp(1) }),
+    buildPlan: (input) => ({ stamp: input.stamp }),
+    publish: () => { published += 1; },
+    requestFrame: (callback) => {
+      const handle = nextHandle++;
+      frames.set(handle, callback);
+      return handle;
+    },
+    cancelFrame: (handle) => {
+      cancelled.push(handle as number);
+      frames.delete(handle as number);
+    },
+  });
+
+  assert.equal(scheduler.invalidate("old-surface"), true);
+  assert.equal(scheduler.scheduled, true);
+  scheduler.suspend();
+  assert.equal(scheduler.scheduled, false);
+  assert.deepEqual(cancelled, [1]);
+  assert.equal(frames.size, 0);
+
+  assert.equal(scheduler.invalidate("replacement-surface"), true);
+  assert.equal(scheduler.scheduled, true);
+  frames.get(2)?.();
+  assert.equal(published, 1);
+  assert.equal(scheduler.scheduled, false);
+});
+
 test("an invalidation raised during build discards the plan even when revisions are unchanged", () => {
   const frames: Array<() => void> = [];
   const discarded: string[] = [];

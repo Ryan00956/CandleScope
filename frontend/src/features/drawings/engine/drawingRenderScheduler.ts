@@ -45,6 +45,8 @@ export interface DrawingRenderScheduler<TInput extends DrawingRenderInput = Draw
   readonly scheduled: boolean;
   invalidate(reason?: string): boolean;
   flushNow(input?: TInput): boolean;
+  /** Cancel pending work while keeping the scheduler reusable after reactivation. */
+  suspend(): void;
   dispose(): void;
 }
 
@@ -102,6 +104,13 @@ export function createDrawingRenderScheduler<
   let invalidationGeneration = 0;
   let frameScheduleGeneration = 0;
   const reasons = new Set<string>();
+
+  const cancelPendingWork = (): void => {
+    reasons.clear();
+    frameScheduleGeneration += 1;
+    if (frameHandle !== null) cancelScheduledFrame(frameHandle);
+    frameHandle = null;
+  };
 
   const schedulePendingFrame = (): void => {
     const scheduleGeneration = ++frameScheduleGeneration;
@@ -188,15 +197,14 @@ export function createDrawingRenderScheduler<
       }
       return run(input);
     },
+    suspend() {
+      if (disposed) return;
+      cancelPendingWork();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
-      reasons.clear();
-      if (frameHandle !== null) {
-        cancelScheduledFrame(frameHandle);
-        frameScheduleGeneration += 1;
-        frameHandle = null;
-      }
+      cancelPendingWork();
     },
   };
   return Object.freeze(scheduler);

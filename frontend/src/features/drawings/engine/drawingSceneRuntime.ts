@@ -2006,6 +2006,11 @@ export function createDrawingSceneRuntime({
         "scope-invalidated",
         "drawing scene exact paint scope was suspended",
       );
+      // A suspended runtime is reusable, but no callback from its old surface
+      // may survive. Background/headless documents can throttle RAF forever;
+      // leaving one queued would retain the old adapter and chart even after
+      // every public binding below has been cleared.
+      scheduler.suspend();
       if (mode === "scene-canary") binding?.clearScene?.();
       if (binding) clearDrawingSceneProjectorCaches(binding.adapter);
       removeSubscriptions();

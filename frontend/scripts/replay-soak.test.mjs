@@ -32,6 +32,7 @@ import {
   selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
   withNetworkInspectorSuspended,
+  writeHeapSnapshot,
 } from "./replay-soak.mjs";
 
 test("public replay scripts cannot select or launch the retired v1 product", () => {
@@ -71,6 +72,7 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /HEDGE continuity pre-reload integrity idle/);
   assert.match(soak, /lifecycle pre-reload integrity idle/);
   assert.match(soak, /lifecycle replay API returned failures/);
+  assert.match(soak, /--heap-snapshot-out is available only with --allow-short/);
   assert.match(
     trainingShell,
     /"data-replay-integrity-operation": integrityRuntime\.operation \?\? ""/,
@@ -660,6 +662,47 @@ test("replay soak final product heap checkpoint leaves Network inspection disabl
     /heap probe failed/,
   );
   assert.deepEqual(calls, ["Network.disable"]);
+});
+
+test("replay soak diagnostic heap snapshot streams chunks and unregisters its handler", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-replay-heap-"));
+  const outputPath = path.join(directory, "primary.heapsnapshot");
+  const handlers = new Map();
+  const calls = [];
+  const cdp = {
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    off(name, handler) {
+      assert.equal(handlers.get(name), handler);
+      handlers.delete(name);
+    },
+    async send(name, payload = {}, timeoutMs = undefined) {
+      calls.push({ name, payload, timeoutMs });
+      if (name === "HeapProfiler.takeHeapSnapshot") {
+        handlers.get("HeapProfiler.addHeapSnapshotChunk")?.({ chunk: "{\"snapshot\":" });
+        handlers.get("HeapProfiler.addHeapSnapshotChunk")?.({ chunk: "true}" });
+      }
+      return {};
+    },
+  };
+
+  try {
+    const result = await writeHeapSnapshot(cdp, outputPath);
+    assert.equal(fs.readFileSync(outputPath, "utf8"), '{"snapshot":true}');
+    assert.deepEqual(result, { path: outputPath, chunks: 2, bytes: 17 });
+    assert.equal(handlers.size, 0);
+    assert.deepEqual(calls, [
+      { name: "HeapProfiler.collectGarbage", payload: {}, timeoutMs: undefined },
+      {
+        name: "HeapProfiler.takeHeapSnapshot",
+        payload: { reportProgress: false, captureNumericValue: true },
+        timeoutMs: 600_000,
+      },
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("replay soak product heap evidence uses clean lifecycle state nearest half duration", () => {

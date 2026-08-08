@@ -40,6 +40,7 @@ function parseArgs(argv) {
     cycles: RELEASE_CYCLES,
     diagnosticGapSteps: 0,
     durationMs: RELEASE_DURATION_MS,
+    heapSnapshotOut: "",
     headed: false,
     out: path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-browser-soak-20260722.json"),
     projectionEvents: RELEASE_PROJECTION_EVENTS,
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     else if (value === "--cycles") result.cycles = Number(argv[++index]);
     else if (value === "--diagnostic-gap-steps") result.diagnosticGapSteps = Number(argv[++index]);
     else if (value === "--duration-ms") result.durationMs = Number(argv[++index]);
+    else if (value === "--heap-snapshot-out") result.heapSnapshotOut = path.resolve(String(argv[++index] || ""));
     else if (value === "--out") result.out = path.resolve(String(argv[++index] || ""));
     else if (value === "--projection-events") result.projectionEvents = Number(argv[++index]);
     else if (value === "--real-klines-source") result.realKlinesSource = path.resolve(String(argv[++index] || ""));
@@ -85,6 +87,9 @@ function parseArgs(argv) {
   }
   if (!result.allowShort && result.diagnosticGapSteps > 0) {
     throw new Error("--diagnostic-gap-steps is available only with --allow-short");
+  }
+  if (!result.allowShort && result.heapSnapshotOut) {
+    throw new Error("--heap-snapshot-out is available only with --allow-short");
   }
   if (
     result.realKlinesSource
@@ -499,6 +504,13 @@ export class CdpConnection {
   on(method, handler) {
     if (!this.handlers.has(method)) this.handlers.set(method, new Set());
     this.handlers.get(method).add(handler);
+  }
+
+  off(method, handler) {
+    const handlers = this.handlers.get(method);
+    if (!handlers) return;
+    handlers.delete(handler);
+    if (handlers.size === 0) this.handlers.delete(method);
   }
 
   send(method, params = {}, timeoutMs = this.timeoutMs) {
@@ -2884,6 +2896,37 @@ function writeJson(outputPath, payload) {
   fs.writeFileSync(outputPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+export async function writeHeapSnapshot(cdp, outputPath) {
+  if (typeof outputPath !== "string" || outputPath.length === 0) {
+    throw new TypeError("heap snapshot output path is required");
+  }
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const descriptor = fs.openSync(outputPath, "w");
+  let bytes = 0;
+  let chunks = 0;
+  const onChunk = (event) => {
+    const chunk = typeof event?.chunk === "string" ? event.chunk : "";
+    if (chunk.length === 0) return;
+    fs.writeSync(descriptor, chunk);
+    bytes += Buffer.byteLength(chunk);
+    chunks += 1;
+  };
+  cdp.on("HeapProfiler.addHeapSnapshotChunk", onChunk);
+  try {
+    await cdp.send("HeapProfiler.collectGarbage");
+    await cdp.send(
+      "HeapProfiler.takeHeapSnapshot",
+      { reportProgress: false, captureNumericValue: true },
+      10 * 60_000,
+    );
+  } finally {
+    cdp.off?.("HeapProfiler.addHeapSnapshotChunk", onChunk);
+    fs.closeSync(descriptor);
+  }
+  assert(chunks > 0 && bytes > 0, "CDP heap snapshot emitted no data", { chunks, bytes });
+  return { path: outputPath, chunks, bytes };
+}
+
 export function browserSoakFailureEvidence({
   releaseEvidence,
   error,
@@ -3718,6 +3761,10 @@ async function main() {
       () => browserMetrics(replay.cdp),
       { resume: false },
     );
+    if (args.heapSnapshotOut) {
+      const snapshot = await writeHeapSnapshot(replay.cdp, args.heapSnapshotOut);
+      console.error(`replay heap snapshot complete: ${snapshot.bytes} bytes in ${snapshot.chunks} chunks`);
+    }
     await wait(100);
     await replayCapture.settle();
 

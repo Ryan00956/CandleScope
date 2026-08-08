@@ -215,6 +215,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 状态栏现公开只读 `data-replay-integrity-operation`；主页面连续性重载与每个临时 lifecycle 页面都先等待 50 ms 调度窗口过去，并要求完整性 operation 空闲、时间披露策略和结果标签已经由整批响应填充，再触发计划重载。临时 lifecycle capture 同时新增 replay API `>=400` 硬断言；主页面最终 500 门禁保持原样，没有添加状态码白名单、取消时间窗豁免或代理特判。
 - 增量验证为 soak harness `35 passed`、frontend 全量 `2957 passed`、双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 通过。修复提交后必须从 clean HEAD 重新运行真实浏览器短测和 40-cycle 压缩门禁；只有两级 API 失败断言、原 `64 MiB / 32 MiB` 产品堆阈值以及其余 acceptance 全部通过，才进入正式 4 小时证据链。
 
+### 3.19 Inspector 隔离后的剩余主页面留存
+
+- `390cb2973a8e2c277d8d65999a63b5b7ae200fdd` 的 clean-HEAD 高密度复验完成 40/40 训练动作、archive lifecycle、lifecycle reload、订单成交与适配器恢复/重连；40 个临时页的 replay API failure 均为 0，主页面也没有 4xx/5xx。30 项 acceptance 中 29 项为真，唯一失败为冻结 `32 MiB` 的 `primary_late_heap_bounded`，证明 3.18 的代理 500 已修复，但 release 仍保持拒绝。
+- Network inspector 暂停后的清洁主页面从 `7,923,872 B` 增至 `66,548,564 B`，primary/late 增长分别为 `58,624,692 / 62,484,984 B`；连续 inspector 的终态为 `66,282,740 B`，与清洁终态同量级。因此 3.17 的 `NetworkResourcesData` 只能解释 heap snapshot 中的一类伴随保留，不能作为全部 `Runtime.getHeapUsage` 增长的最终根因。`Performance.Nodes` 从 `1,393` 增至 `45,505`、listener 从 `449` 增至 `3,952`，而可见 DOM 终态只有 `736` elements，仍存在需要对象持有链确认的长生命周期页面留存。
+- 40 个 fresh lifecycle 页在 forced GC 后均稳定于约 `4–8 MiB`，没有随轮次增长；这排除了 archive 数据量或单次页面固有体积，但 fresh 页与经历 40 次恢复的主页面不是同一生命周期，不能拿较小 fresh heap 直接把主页面失败改判为通过。阈值、采样次数和 acceptance 均保持不变。
+- harness 新增仅限 `--allow-short` 的 `--heap-snapshot-out`：在最终 Network inspector 停用与 forced GC 后、Chrome 清理前流式写出主页面 `.heapsnapshot`；正式命令显式拒绝该参数。下一轮诊断将按 retained object/持有链定位真实产品或浏览器生命周期根因，修复后重新跑 40-cycle，而不是放宽 `32 MiB`。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

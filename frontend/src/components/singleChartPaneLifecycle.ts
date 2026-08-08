@@ -475,6 +475,64 @@ export function shouldAdvanceDrawingCoordinateGeneration({
   return axisMode === "derived-ordinal" && !canReuseProjection;
 }
 
+export interface ChartPaneAnimationFrameLifecycle {
+  readonly cancel: (handle: number | null) => void;
+  readonly dispose: () => void;
+  readonly isDisposed: () => boolean;
+  readonly schedule: (callback: FrameRequestCallback) => number | null;
+}
+
+/**
+ * Own every animation frame submitted by one chart-pane effect. ResizeObserver
+ * callbacks can already be queued when disconnect() runs, so a plain cleanup
+ * that only cancels the handles known at that instant is racy: the late
+ * callback can submit a new frame which retains the disposed chart. Marking
+ * this lifecycle disposed first makes those late submissions no-ops.
+ */
+export function createChartPaneAnimationFrameLifecycle({
+  cancelFrame,
+  requestFrame,
+}: {
+  cancelFrame: (handle: number) => void;
+  requestFrame: (callback: FrameRequestCallback) => number;
+}): ChartPaneAnimationFrameLifecycle {
+  let disposed = false;
+  const pending = new Set<number>();
+
+  const cancel = (handle: number | null): void => {
+    if (handle === null) return;
+    pending.delete(handle);
+    cancelFrame(handle);
+  };
+  const schedule = (callback: FrameRequestCallback): number | null => {
+    if (disposed) return null;
+    let handle = 0;
+    handle = requestFrame((time) => {
+      pending.delete(handle);
+      if (disposed) return;
+      callback(time);
+    });
+    if (disposed) {
+      cancelFrame(handle);
+      return null;
+    }
+    pending.add(handle);
+    return handle;
+  };
+
+  return {
+    cancel,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      for (const handle of pending) cancelFrame(handle);
+      pending.clear();
+    },
+    isDisposed: () => disposed,
+    schedule,
+  };
+}
+
 /**
  * Tear down a Lightweight Charts surface without leaving its auto-size
  * observer able to enqueue work against already-disposed canvas bindings.

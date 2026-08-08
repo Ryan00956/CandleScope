@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildVisibleRangeSnapshot,
+  createChartPaneAnimationFrameLifecycle,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership as hasCurrentDatasetOwnershipProduction,
   isConfirmedMainPaneHorizontalPan,
@@ -38,6 +39,36 @@ function shouldRestoreChartViewport(value: object): boolean {
     structuralMock<NonNullable<Parameters<typeof shouldRestoreChartViewportProduction>[0]>>(value),
   );
 }
+
+test("chart pane frame lifecycle rejects late observer work after disposal", () => {
+  let nextHandle = 1;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  const cancelled: number[] = [];
+  const lifecycle = createChartPaneAnimationFrameLifecycle({
+    cancelFrame: (handle) => {
+      cancelled.push(handle);
+      callbacks.delete(handle);
+    },
+    requestFrame: (callback) => {
+      const handle = nextHandle++;
+      callbacks.set(handle, callback);
+      return handle;
+    },
+  });
+  let executions = 0;
+  const first = lifecycle.schedule(() => { executions += 1; });
+  const lateObserverCallback = () => lifecycle.schedule(() => { executions += 10; });
+
+  assert.equal(first, 1);
+  lifecycle.dispose();
+  lateObserverCallback();
+
+  assert.equal(lifecycle.isDisposed(), true);
+  assert.deepEqual(cancelled, [1]);
+  assert.equal(callbacks.size, 0);
+  assert.equal(executions, 0);
+  assert.equal(lifecycle.schedule(() => { executions += 100; }), null);
+});
 
 test("chart disposal detaches drawings and disables auto-size before removal", () => {
   const calls: unknown[] = [];

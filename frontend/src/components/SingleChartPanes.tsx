@@ -131,6 +131,7 @@ import {
 import { createDrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex";
 import {
   buildVisibleRangeSnapshot,
+  createChartPaneAnimationFrameLifecycle,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership,
   isIndicatorReconcileReady,
@@ -2065,8 +2066,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const wrapper = wrapperRef.current;
     const chart = chartRef.current;
     if (!wrapper || !chart || activePaneIds.length === 0) return undefined;
+    const frameLifecycle = createChartPaneAnimationFrameLifecycle({
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+      requestFrame: (callback) => requestAnimationFrame(callback),
+    });
 
     const syncOverlays = () => {
+      if (frameLifecycle.isDisposed()) return;
       const heights = readPaneHeights(chart);
       if (heights.length !== activePaneIds.length) {
         panePointerLayoutRef.current = null;
@@ -2098,14 +2104,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     let followLatestResizeFrame: number | null = null;
     let observedWidth = wrapper.getBoundingClientRect().width;
     const syncSize = () => {
+      if (frameLifecycle.isDisposed()) return;
       syncOverlays();
       const nextWidth = wrapper.getBoundingClientRect().width;
       if (!Number.isFinite(nextWidth)
         || nextWidth <= 0
         || Math.abs(nextWidth - observedWidth) < 0.5) return;
       observedWidth = nextWidth;
-      if (followLatestResizeFrame !== null) cancelAnimationFrame(followLatestResizeFrame);
-      followLatestResizeFrame = requestAnimationFrame(() => {
+      frameLifecycle.cancel(followLatestResizeFrame);
+      followLatestResizeFrame = frameLifecycle.schedule(() => {
         followLatestResizeFrame = null;
         const displayRows = displayRowsRef.current;
         if (!followLatestRef.current
@@ -2126,7 +2133,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     };
     const trackPaneResize = () => {
       syncOverlays();
-      trackingFrame = requestAnimationFrame(trackPaneResize);
+      trackingFrame = frameLifecycle.schedule(trackPaneResize);
     };
     const startPaneResizeTracking = (event: PointerEvent) => {
       const target = event.target;
@@ -2139,16 +2146,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     };
     const stopPaneResizeTracking = () => {
       if (trackingFrame !== null) {
-        cancelAnimationFrame(trackingFrame);
+        frameLifecycle.cancel(trackingFrame);
         trackingFrame = null;
       }
       syncOverlays();
-      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
-      settleFrame = requestAnimationFrame(syncOverlays);
+      frameLifecycle.cancel(settleFrame);
+      settleFrame = frameLifecycle.schedule(syncOverlays);
     };
 
     syncOverlays();
-    const initialFrame = requestAnimationFrame(syncOverlays);
+    frameLifecycle.schedule(syncOverlays);
     const resizeObserver = typeof ResizeObserver === "function"
       ? new ResizeObserver(syncSize)
       : null;
@@ -2164,10 +2171,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     window.addEventListener("resize", syncSize);
     return () => {
       panePointerLayoutRef.current = null;
-      cancelAnimationFrame(initialFrame);
-      if (trackingFrame !== null) cancelAnimationFrame(trackingFrame);
-      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
-      if (followLatestResizeFrame !== null) cancelAnimationFrame(followLatestResizeFrame);
+      // Dispose before disconnecting observers/listeners. A callback which was
+      // already queued may still run, but it can no longer submit a frame that
+      // captures this chart surface.
+      frameLifecycle.dispose();
+      trackingFrame = null;
+      settleFrame = null;
+      followLatestResizeFrame = null;
       resizeObserver?.disconnect();
       wrapper.removeEventListener("pointerdown", startPaneResizeTracking, true);
       window.removeEventListener("pointerup", stopPaneResizeTracking);

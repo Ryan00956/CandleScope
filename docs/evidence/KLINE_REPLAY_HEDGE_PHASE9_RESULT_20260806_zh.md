@@ -222,6 +222,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 40 个 fresh lifecycle 页在 forced GC 后均稳定于约 `4–8 MiB`，没有随轮次增长；这排除了 archive 数据量或单次页面固有体积，但 fresh 页与经历 40 次恢复的主页面不是同一生命周期，不能拿较小 fresh heap 直接把主页面失败改判为通过。阈值、采样次数和 acceptance 均保持不变。
 - harness 新增仅限 `--allow-short` 的 `--heap-snapshot-out`：在最终 Network inspector 停用与 forced GC 后、Chrome 清理前流式写出主页面 `.heapsnapshot`；正式命令显式拒绝该参数。下一轮诊断将按 retained object/持有链定位真实产品或浏览器生命周期根因，修复后重新跑 40-cycle，而不是放宽 `32 MiB`。
 
+### 3.20 挂起绘图 RAF 与冻结回放栏 transition 根因修复
+
+- `722ae0866298c2e8855abbd578a24bee0333a036` 的 10-cycle 主页面 heap snapshot 显示旧图表和旧回放右栏不是不可解释的 V8 固定成本，而是可重复的 detached 子树。绕开 WeakMap 弱边后，最短强引用链为 `Global handles -> current Window -> HTMLDocument -> ScriptedAnimationController -> pending V8FrameRequestCallback -> drawing scheduler closure -> old chart adapter -> ChartApi -> ChartWidget`。`drawingSceneRuntime.suspend()` 原先会清空 binding、worker 和 plan，却没有取消 scheduler 已登记的 RAF；后台/无头 Chromium 的帧回调可能长期不执行，从而把每一轮已经卸载的图表完整保留。
+- scheduler 现在提供可复用的 `suspend()`：清空待处理 reason、推进 generation、取消已登记 frame handle 并解除引用，但不永久 dispose scheduler，后续 runtime 重新激活仍可正常调度。单测同时证明“挂起会取消旧 frame”和“挂起后可重新激活”。作为外围防线，图表 pane 的 ResizeObserver 生命周期也拒绝 cleanup 后的晚到 frame；没有修改渲染节拍、soak 采样或内存门槛。
+- 第二条强引用链为 `Global handles -> current Window -> HTMLDocument -> DocumentTimeline -> CSSTransition -> old active replay rail button -> detached replay rail -> replay-paper-trading`。回放页面的生命周期重载发生在后台/无头时间线中，旧右栏的短 transition 可能冻结并保留整棵子树。CSS 现在只对 `[data-runtime-source="replay"]` 下的 market activity item 禁用 transition；实时行情页面的 transition 保持不变，也没有增加运行时旗标、灰度或 fallback。
+- 三个同口径 5-cycle clean-HEAD heap snapshot 给出因果对照：`a4267196` 修复前 snapshot `40,241,164 B`，`ChartWidget=9`、detached chart pane `=8`、detached paper trading `=7`、全部 detached node `=2,725`；`1980869b` 取消绘图 RAF 后降至 `31,413,145 B / 2 / 1 / 7 / 2,253`；`f7cee596` 再清除回放栏 transition 后降至 `30,550,588 B / 2 / 1 / 0 / 150`。这两次下降分别对应两条持有链，而不是更换统计口径。
+- 增量验证中绘图 scheduler 定向测试 `57 passed`，完整 frontend 分别为 `2960 passed` 和 `2961 passed`；双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 通过。`f7cee596fafab7e9fca73af5910fa8703dedb891` 的 clean-HEAD 40-cycle 压缩复验随后运行 `1,822,766 ms`，完成 40/40 训练动作、archive lifecycle、lifecycle reload、订单成交与适配器恢复/重连，并以 `72,737.324 events/s` 完成 1,000,000 projection events；primary/late heap 增长为 `7,554,876 / 8,620,156 B`，盲审通过，30 项 acceptance 全部为真，报告 hash 为 `sha256:ed0c2bc6aeb8fa4554ac2419d01ff89e48b5cb2a4c2068ce16ffc4bddc6d6973`。
+- `64 MiB / 32 MiB` 堆门槛、40 次压缩生命周期、100 次正式生命周期、1,000,000 projection events 和其余发布条件均未放宽。该 PASS 只完成进入正式证据链前的高密度内存门禁；本节文档提交会产生新 HEAD，因此真实来源、全量 checks、formal benchmark、真实浏览器 smoke、rollback、正式 4 小时 soak 和 release manifest 仍须在新 clean HEAD 从头重跑，不能继承 `f7cee596` artifact。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

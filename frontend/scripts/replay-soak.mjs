@@ -1199,6 +1199,7 @@ async function hedgeBrowserAccountContinuityAudit({
 }
 
 function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
+  const requestByRequest = new Map();
   const responseByRequest = new Map();
   const boundaryGenerationByRequest = new Map();
   const bodyTasks = new Set();
@@ -1213,6 +1214,8 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     boundaryAudits,
     requestCount: 0,
     requests: [],
+    replayApiResponseBodies: [],
+    replayApiResponses: [],
     responseBodies: [],
     responseCount: 0,
     responses: [],
@@ -1243,25 +1246,46 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
       url: event.request?.url || "",
     };
     boundedPush(capture.requests, item);
+    requestByRequest.set(event.requestId, item);
     boundaryGenerationByRequest.set(event.requestId, boundaryGeneration);
     if (boundaryAudits && /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
       boundaryAudits.http.add({ kind: "request", ...item });
     }
   });
   cdp.on("Network.responseReceived", (event) => {
-    const item = { url: event.response?.url || "", status: event.response?.status || 0 };
+    const request = requestByRequest.get(event.requestId);
+    const item = {
+      requestId: event.requestId,
+      method: request?.method || "",
+      url: event.response?.url || request?.url || "",
+      status: event.response?.status || 0,
+    };
     capture.responseCount += 1;
     boundedPush(capture.responses, item);
     if (/\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
+      const pathname = new URL(item.url).pathname;
+      if (
+        item.status >= 400
+        || (
+          item.method === "POST"
+          && /\/api\/v1\/replay\/runs\/[^/]+\/markets$/.test(pathname)
+        )
+      ) {
+        boundedPush(capture.replayApiResponses, item, MAX_CAPTURE_RESPONSE_BODIES);
+      }
       responseByRequest.set(event.requestId, {
         boundaryGeneration: boundaryGenerationByRequest.get(event.requestId)
           ?? boundaryGeneration,
+        method: item.method,
+        requestId: event.requestId,
+        status: item.status,
         url: item.url,
       });
     }
   });
   cdp.on("Network.loadingFinished", (event) => {
     const response = responseByRequest.get(event.requestId);
+    requestByRequest.delete(event.requestId);
     boundaryGenerationByRequest.delete(event.requestId);
     if (!response) return;
     responseByRequest.delete(event.requestId);
@@ -1270,17 +1294,39 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
         const body = result.base64Encoded
           ? Buffer.from(result.body, "base64").toString("utf8")
           : result.body;
-        const item = { url: response.url, body };
+        const item = {
+          requestId: response.requestId,
+          method: response.method,
+          url: response.url,
+          status: response.status,
+          body,
+        };
         if (response.boundaryGeneration === boundaryGeneration) {
           boundaryAudits?.http.add({ kind: "response", ...item });
         }
         boundedPush(capture.responseBodies, item, MAX_CAPTURE_RESPONSE_BODIES);
+        if (
+          response.status >= 400
+          || (
+            response.method === "POST"
+            && /\/api\/v1\/replay\/runs\/[^/]+\/markets$/.test(
+              new URL(response.url).pathname,
+            )
+          )
+        ) {
+          boundedPush(
+            capture.replayApiResponseBodies,
+            item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+        }
       })
       .catch(() => undefined)
       .finally(() => bodyTasks.delete(task));
     bodyTasks.add(task);
   });
   cdp.on("Network.loadingFailed", (event) => {
+    requestByRequest.delete(event.requestId);
     responseByRequest.delete(event.requestId);
     boundaryGenerationByRequest.delete(event.requestId);
     boundedPush(capture.failedRequests, {
@@ -1327,6 +1373,101 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     }
   });
   return capture;
+}
+
+function parsedReplayApiResponseBody(item) {
+  if (typeof item?.body !== "string") return null;
+  try {
+    const parsed = JSON.parse(item.body);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate replay API failures against the initial-market optimistic
+ * concurrency contract. Archive preparation may advance the catalog epoch,
+ * but the UI is allowed exactly one classified refresh/retry and that retry
+ * must complete with the same POST path returning 201. Every other 4xx/5xx
+ * remains a release failure.
+ */
+export function replayApiConcurrencyContract(capture) {
+  const transitions = Array.isArray(capture?.replayApiResponses)
+    ? capture.replayApiResponses
+    : [];
+  const bodiesByRequest = new Map(
+    (Array.isArray(capture?.replayApiResponseBodies)
+      ? capture.replayApiResponseBodies
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const catalogEpochConflicts = [];
+  const unexpectedFailures = [];
+  const conflictCountByUrl = new Map();
+
+  for (let index = 0; index < transitions.length; index += 1) {
+    const response = transitions[index];
+    if (Number(response?.status) < 400) continue;
+    const bodyRecord = bodiesByRequest.get(response.requestId);
+    const body = parsedReplayApiResponseBody(bodyRecord);
+    const pathname = (() => {
+      try {
+        return new URL(response.url).pathname;
+      } catch {
+        return "";
+      }
+    })();
+    const isCatalogEpochConflict = (
+      response.status === 409
+      && response.method === "POST"
+      && /\/api\/v1\/replay\/runs\/[^/]+\/markets$/.test(pathname)
+      && body?.error?.code === "CATALOG_EPOCH_MISMATCH"
+    );
+    if (!isCatalogEpochConflict) {
+      unexpectedFailures.push({
+        ...response,
+        responseBody: body,
+        reason: "UNEXPECTED_REPLAY_API_FAILURE",
+      });
+      continue;
+    }
+
+    const previousCount = conflictCountByUrl.get(response.url) ?? 0;
+    conflictCountByUrl.set(response.url, previousCount + 1);
+    const retry = transitions.slice(index + 1).find((candidate) => (
+      candidate.method === "POST"
+      && candidate.url === response.url
+      && candidate.status === 201
+    ));
+    if (previousCount > 0 || retry === undefined) {
+      unexpectedFailures.push({
+        ...response,
+        responseBody: body,
+        reason: previousCount > 0
+          ? "CATALOG_EPOCH_RETRY_EXCEEDED"
+          : "CATALOG_EPOCH_RETRY_DID_NOT_SUCCEED",
+      });
+      continue;
+    }
+    catalogEpochConflicts.push({
+      requestId: response.requestId,
+      retryRequestId: retry.requestId,
+      method: response.method,
+      url: response.url,
+      status: response.status,
+      code: body.error.code,
+      retryStatus: retry.status,
+    });
+  }
+
+  return {
+    schemaVersion: "replay.api-concurrency-contract.v1",
+    passed: unexpectedFailures.length === 0,
+    catalogEpochConflictCount: catalogEpochConflicts.length,
+    catalogEpochConflicts,
+    unexpectedFailures,
+  };
 }
 
 function assert(condition, message, detail = undefined) {
@@ -3782,8 +3923,12 @@ async function main() {
     const replayNetwork = assertReplayNetwork(replayCapture, frontendOrigin);
     assert(replayCapture.exceptions.length === 0, "primary replay target raised runtime exceptions", replayCapture.exceptions);
     assert(replayCapture.consoleErrors.length === 0, "primary replay target logged console errors", replayCapture.consoleErrors);
-    const replayApiFailures = replayCapture.responses.filter((item) => /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url) && item.status >= 400);
-    assert(replayApiFailures.length === 0, "replay API returned failures during soak", replayApiFailures);
+    const replayApi = replayApiConcurrencyContract(replayCapture);
+    assert(
+      replayApi.passed,
+      "replay API returned unexpected or unbounded failures during soak",
+      replayApi,
+    );
     const backendLogCounts = backendTail.counts();
     assert(backendLogCounts.backfillFailures === 0, "live coexistence fixture triggered an offline backfill failure", backendLogCounts);
 
@@ -3893,6 +4038,7 @@ async function main() {
       blind_boundaries_clean: blindAuditPassed && boundaries
         .filter((item) => item.framing === "length-prefixed-json-lines.v1")
         .every((item) => item.itemsAfterFinish === 0),
+      replay_api_concurrency_bounded: replayApi.passed,
       replay_runtime_clean: replayCapture.exceptions.length === 0 && replayCapture.consoleErrors.length === 0,
       lifecycle_runtime_clean: cycles.every((cycle) => cycle.consoleErrors.length === 0),
       backend_runtime_clean: samples.every((sample) => sample.backendHealth?.passed === true)
@@ -3999,6 +4145,7 @@ async function main() {
       },
       samples,
       blindAudit: { passed: blindAuditPassed, boundaries },
+      replayApi,
       replayNetwork,
       acceptance: {
         passed: acceptancePassed,

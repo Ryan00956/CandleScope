@@ -20,6 +20,7 @@ import {
   primaryReplayFailureDiagnostics,
   readJson,
   replayBackendHealth,
+  replayApiConcurrencyContract,
   replaySpeedAction,
   replaySpeedRequestState,
   replayStepAction,
@@ -72,6 +73,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /HEDGE continuity pre-reload integrity idle/);
   assert.match(soak, /lifecycle pre-reload integrity idle/);
   assert.match(soak, /lifecycle replay API returned failures/);
+  assert.match(soak, /replay_api_concurrency_bounded/);
+  assert.match(soak, /CATALOG_EPOCH_RETRY_DID_NOT_SUCCEED/);
   assert.match(soak, /--heap-snapshot-out is available only with --allow-short/);
   assert.match(
     trainingShell,
@@ -619,6 +622,168 @@ test("replay soak blind capture attributes late response bodies to request start
   assert.equal(result.itemCount, 2);
   assert.deepEqual(result.forbiddenMatches, []);
   assert.equal(capture.responseBodies.length, 2);
+});
+
+test("replay target capture retains initial-market response identity and bodies", async () => {
+  const handlers = new Map();
+  const bodies = new Map([
+    ["conflict", JSON.stringify({ error: { code: "CATALOG_EPOCH_MISMATCH" } })],
+    ["retry", JSON.stringify({ initialized: true })],
+  ]);
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name, payload) {
+      assert.equal(name, "Network.getResponseBody");
+      return Promise.resolve({ base64Encoded: false, body: bodies.get(payload.requestId) });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp);
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/markets";
+  for (const [requestId, status] of [["conflict", 409], ["retry", 201]]) {
+    emit("Network.requestWillBeSent", {
+      requestId,
+      request: { method: "POST", url, postData: "{}" },
+    });
+    emit("Network.responseReceived", {
+      requestId,
+      response: { status, url },
+    });
+    emit("Network.loadingFinished", { requestId });
+  }
+  await capture.settle();
+
+  assert.deepEqual(
+    capture.replayApiResponses.map(({ requestId, method, status }) => ({ requestId, method, status })),
+    [
+      { requestId: "conflict", method: "POST", status: 409 },
+      { requestId: "retry", method: "POST", status: 201 },
+    ],
+  );
+  assert.equal(capture.replayApiResponseBodies.length, 2);
+  assert.equal(capture.replayApiResponseBodies[0].requestId, "conflict");
+  assert.equal(capture.replayApiResponseBodies[0].status, 409);
+});
+
+test("replay API contract accepts one classified catalog epoch conflict followed by 201", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/markets";
+  const result = replayApiConcurrencyContract({
+    replayApiResponses: [
+      { requestId: "conflict", method: "POST", url, status: 409 },
+      { requestId: "retry", method: "POST", url, status: 201 },
+    ],
+    replayApiResponseBodies: [
+      {
+        requestId: "conflict",
+        method: "POST",
+        url,
+        status: 409,
+        body: JSON.stringify({
+          protocol: "replay.v3",
+          error: {
+            code: "CATALOG_EPOCH_MISMATCH",
+            message: "catalog changed",
+            details: {},
+          },
+        }),
+      },
+    ],
+  });
+
+  assert.equal(result.passed, true);
+  assert.equal(result.catalogEpochConflictCount, 1);
+  assert.equal(result.catalogEpochConflicts[0].retryRequestId, "retry");
+  assert.deepEqual(result.unexpectedFailures, []);
+});
+
+test("replay API contract rejects unrelated replay conflicts", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/markets";
+  const result = replayApiConcurrencyContract({
+    replayApiResponses: [
+      { requestId: "busy", method: "POST", url, status: 409 },
+    ],
+    replayApiResponseBodies: [
+      {
+        requestId: "busy",
+        method: "POST",
+        url,
+        status: 409,
+        body: JSON.stringify({
+          protocol: "replay.v3",
+          error: {
+            code: "TRAINING_RUN_BUSY",
+            message: "run busy",
+            details: {},
+          },
+        }),
+      },
+    ],
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.catalogEpochConflictCount, 0);
+  assert.equal(result.unexpectedFailures[0].reason, "UNEXPECTED_REPLAY_API_FAILURE");
+  assert.equal(result.unexpectedFailures[0].responseBody.error.code, "TRAINING_RUN_BUSY");
+});
+
+test("replay API contract rejects catalog conflicts without a successful retry", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/markets";
+  const result = replayApiConcurrencyContract({
+    replayApiResponses: [
+      { requestId: "conflict", method: "POST", url, status: 409 },
+    ],
+    replayApiResponseBodies: [
+      {
+        requestId: "conflict",
+        method: "POST",
+        url,
+        status: 409,
+        body: JSON.stringify({
+          protocol: "replay.v3",
+          error: {
+            code: "CATALOG_EPOCH_MISMATCH",
+            message: "catalog changed",
+            details: {},
+          },
+        }),
+      },
+    ],
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(
+    result.unexpectedFailures[0].reason,
+    "CATALOG_EPOCH_RETRY_DID_NOT_SUCCEED",
+  );
+});
+
+test("replay API contract rejects a second catalog epoch conflict", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/markets";
+  const errorBody = JSON.stringify({
+    protocol: "replay.v3",
+    error: {
+      code: "CATALOG_EPOCH_MISMATCH",
+      message: "catalog changed",
+      details: {},
+    },
+  });
+  const result = replayApiConcurrencyContract({
+    replayApiResponses: [
+      { requestId: "conflict-1", method: "POST", url, status: 409 },
+      { requestId: "conflict-2", method: "POST", url, status: 409 },
+      { requestId: "retry", method: "POST", url, status: 201 },
+    ],
+    replayApiResponseBodies: [
+      { requestId: "conflict-1", method: "POST", url, status: 409, body: errorBody },
+      { requestId: "conflict-2", method: "POST", url, status: 409, body: errorBody },
+    ],
+  });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.catalogEpochConflictCount, 1);
+  assert.equal(result.unexpectedFailures[0].reason, "CATALOG_EPOCH_RETRY_EXCEEDED");
 });
 
 test("replay soak product heap checkpoints suspend and restore Network inspection", async () => {

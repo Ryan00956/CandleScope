@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any
 
+import aiohttp
 import ccxt
 import ccxt.async_support as ccxt_async
 import ccxt.pro as ccxtpro
@@ -53,6 +56,45 @@ _GENERIC_STREAM_METHODS = {
     StreamType.LIQUIDATION: ("watchLiquidations", "fetchLiquidations"),
     StreamType.PREMIUM_INDEX: (None, "fetchPremiumIndexOHLCV"),
 }
+
+
+class _OwnedThreadedResolverMixin:
+    """Give one-shot CCXT clients a reliable owned session on Windows."""
+
+    def open(self) -> None:
+        if sys.platform != "win32" or self.session is not None or not self.own_session:
+            super().open()
+            return
+
+        self.own_session = False
+        try:
+            super().open()
+        finally:
+            self.own_session = True
+        self.tcp_connector = aiohttp.TCPConnector(
+            ssl=self.ssl_context,
+            loop=self.asyncio_loop,
+            resolver=aiohttp.ThreadedResolver(loop=self.asyncio_loop),
+        )
+        self.session = aiohttp.ClientSession(
+            loop=self.asyncio_loop,
+            connector=self.tcp_connector,
+            trust_env=self.aiohttp_trust_env,
+        )
+
+    async def close(self, clean_instance_data: bool = True) -> None:
+        await super().close(clean_instance_data)
+
+
+@lru_cache(maxsize=None)
+def _owned_exchange_class(exchange_class: type, *, windows: bool) -> type:
+    if not windows:
+        return exchange_class
+    return type(
+        f"CandleScopeOwned{exchange_class.__name__}",
+        (_OwnedThreadedResolverMixin, exchange_class),
+        {"__module__": __name__},
+    )
 
 
 class CcxtUnifiedProtocol:
@@ -730,8 +772,20 @@ def _create_exchange(
     module = ccxtpro if websocket else ccxt_async
     if websocket and not entry.pro:
         raise ValueError(f"{entry.exchange_id} has no CCXT Pro implementation")
-    exchange_class = getattr(module, entry.exchange_id)
     base_type, subtype = market_selection_parts(market_type)
+    exchange_id = entry.exchange_id
+    if entry.exchange_id == "binance" and base_type in {"swap", "future"}:
+        # ``ccxt.binance`` loads spot, USD-M, and COIN-M market catalogs in one
+        # call even when defaultType points at a derivative family.  A transient
+        # spot exchangeInfo failure would therefore block an otherwise healthy
+        # USD-M history request and leave visible K-line, OI, or Funding gaps.
+        # Use the venue-specific CCXT subclasses so catalog bootstrap and every
+        # later implicit request stay on the selected derivative rail.
+        exchange_id = "binancecoinm" if subtype == "inverse" else "binanceusdm"
+    exchange_class = _owned_exchange_class(
+        getattr(module, exchange_id),
+        windows=sys.platform == "win32",
+    )
     options: dict[str, Any] = {"defaultType": base_type}
     if subtype is not None:
         options["defaultSubType"] = subtype

@@ -400,7 +400,11 @@ export function useMarketDataRuntime({
       gate.nativeIntervalValues,
     );
   }, []);
-  useEffect(() => {
+  // The stream and initial-history runtimes mount in layout effects. Configure
+  // their shared feed in the earlier layout-effect slot as well, so the
+  // multi-chart scheduler cannot subscribe before the API/stream adapters are
+  // attached after a fresh mount or cell remount.
+  useLayoutEffect(() => {
     seriesDataFeed.configure({
       api: workspaceResources?.klineApi || defaultKlineApi,
       chartWorkScheduler: workspaceResources?.workScheduler || null,

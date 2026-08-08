@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Any
 
+import aiohttp
 import pytest
 
 from app.api.v1.symbols import _catalog_refresh_requests
@@ -20,7 +22,11 @@ from app.exchanges.ccxt_ext.catalog import (
     ccxt_catalog_summary,
     get_ccxt_catalog_entry,
 )
-from app.exchanges.ccxt_ext.generic import CcxtUnifiedPlugin, CcxtUnifiedProfile
+from app.exchanges.ccxt_ext.generic import (
+    CcxtUnifiedPlugin,
+    CcxtUnifiedProfile,
+    _create_exchange,
+)
 from app.exchanges.ccxt_ext.primary import OkxCombinedSummaryProfile
 from app.exchanges.ccxt_ext.primary import create_binance_ccxt_plugin
 from app.exchanges.ccxt_ext.runtime import CcxtRuntimePool, close_ccxt_exchange
@@ -653,6 +659,52 @@ def test_generic_rest_fetch_closes_exchange_and_returns_unified_rows(
     assert rows[0].source == DataSource.HTTP
     assert rows[0].payload["schema"] == "candlescope.ccxt.unified/1"
     assert fake.close_calls == 1
+
+
+def test_binance_derivative_factory_does_not_bootstrap_spot_catalog() -> None:
+    entry = get_ccxt_catalog_entry("binance")
+    config = IngestionConfig(proxy_mode="none")
+
+    linear = _create_exchange(
+        entry,
+        config,
+        market_type="swap.linear",
+        websocket=False,
+    )
+    inverse = _create_exchange(
+        entry,
+        config,
+        market_type="swap.inverse",
+        websocket=False,
+    )
+
+    assert linear.id == "binanceusdm"
+    assert linear.options["fetchMarkets"]["types"] == ["linear"]
+    assert inverse.id == "binancecoinm"
+    assert inverse.options["fetchMarkets"]["types"] == ["inverse"]
+
+
+def test_generic_exchange_uses_threaded_dns_and_owns_cleanup_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(sys, "platform", "win32")
+        exchange = _create_exchange(
+            get_ccxt_catalog_entry("binance"),
+            IngestionConfig(proxy_mode="none"),
+            market_type="swap.linear",
+            websocket=False,
+        )
+
+        exchange.open()
+        assert isinstance(exchange.tcp_connector._resolver, aiohttp.ThreadedResolver)
+        assert exchange.session is not None
+        session = exchange.session
+        await close_ccxt_exchange(exchange)
+        assert session.closed is True
+        assert exchange.session is None
+
+    asyncio.run(run())
 
 
 def test_binance_primary_kline_rest_uses_ccxt_implicit_method(

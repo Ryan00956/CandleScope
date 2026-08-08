@@ -610,12 +610,24 @@ export class ReplayV2ApiClient {
     );
   }
 
-  commandRun(
+  async commandRun(
     runId: string,
     command: ReplayV2Command,
     signal?: AbortSignal,
   ): Promise<ReplayV2CommandResult> {
-    return this.request(
+    if (command.run_id !== runId) {
+      throw new ReplayV2ApiError(
+        "REPLAY_V2_PROTOCOL_ERROR",
+        "replay.v3 command run_id does not match the route",
+        {
+          details: {
+            command_run_id: command.run_id,
+            route_run_id: runId,
+          },
+        },
+      );
+    }
+    const result = await this.request(
       `/runs/${safeSegment(runId, "run id")}/commands`,
       parseReplayV2CommandResult,
       {
@@ -624,6 +636,24 @@ export class ReplayV2ApiClient {
         ...(signal ? { signal } : {}),
       },
     );
+    if (
+      result.run_id !== runId
+      || result.command_id !== command.command_id
+    ) {
+      throw new ReplayV2ApiError(
+        "REPLAY_V2_RESPONSE_IDENTITY_MISMATCH",
+        "replay.v3 command response identity does not match the request",
+        {
+          details: {
+            request_command_id: command.command_id,
+            request_run_id: runId,
+            response_command_id: result.command_id,
+            response_run_id: result.run_id,
+          },
+        },
+      );
+    }
+    return result;
   }
 
   previewOrder(

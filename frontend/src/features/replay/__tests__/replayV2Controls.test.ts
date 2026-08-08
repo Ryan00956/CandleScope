@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ReplayV2ApiClient } from "../replayV2Api.js";
+import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
 import {
   parseReplayOrderCapacity,
   parseReplayOrderPreview,
@@ -291,4 +291,79 @@ test("Phase 3 API uses run-scoped viewer, command, and progress routes", async (
     { url: "/api/v1/replay/runs/run-1/advances/step-display-1", method: "GET" },
   ]);
   assert.deepEqual(JSON.parse(requests[1]?.body ?? "null"), command);
+});
+
+test("command API fails closed when request and response identities diverge", async () => {
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "set-speed-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "set_speed",
+    payload: { basis: "BASE_BAR", rate: 120 },
+  };
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => new Response(JSON.stringify({
+      ...commandResult(),
+      command_id: "pause-before-set-speed",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  });
+
+  await assert.rejects(
+    client.commandRun("run-1", command),
+    (error: unknown) => {
+      assert.ok(error instanceof ReplayV2ApiError);
+      assert.equal(error.code, "REPLAY_V2_RESPONSE_IDENTITY_MISMATCH");
+      assert.deepEqual(error.details, {
+        request_command_id: "set-speed-1",
+        request_run_id: "run-1",
+        response_command_id: "pause-before-set-speed",
+        response_run_id: "run-1",
+      });
+      return true;
+    },
+  );
+});
+
+test("command API rejects a route and payload run mismatch before transport", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify(commandResult()), { status: 200 });
+    },
+  });
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-other",
+    command_id: "step-display-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "step_display",
+    payload: { count: 1, display_interval: "15m", viewer_revision: 2 },
+  };
+
+  await assert.rejects(
+    client.commandRun("run-1", command),
+    (error: unknown) => {
+      assert.ok(error instanceof ReplayV2ApiError);
+      assert.equal(error.code, "REPLAY_V2_PROTOCOL_ERROR");
+      return true;
+    },
+  );
+  assert.equal(requestCount, 0);
 });

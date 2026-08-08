@@ -21,6 +21,7 @@ import {
   readJson,
   replayBackendHealth,
   replayApiConcurrencyContract,
+  replayCommandResponseIdentityContract,
   replaySpeedAction,
   replaySpeedRequestState,
   replayStepAction,
@@ -665,6 +666,102 @@ test("replay target capture retains initial-market response identity and bodies"
   assert.equal(capture.replayApiResponseBodies.length, 2);
   assert.equal(capture.replayApiResponseBodies[0].requestId, "conflict");
   assert.equal(capture.replayApiResponseBodies[0].status, 409);
+});
+
+test("replay target capture retains command request and response identities", async () => {
+  const handlers = new Map();
+  const command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "set-speed-1",
+    type: "set_speed",
+  };
+  const result = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "set-speed-1",
+  };
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name, payload) {
+      assert.equal(name, "Network.getResponseBody");
+      assert.equal(payload.requestId, "command-1");
+      return Promise.resolve({
+        base64Encoded: false,
+        body: JSON.stringify(result),
+      });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp);
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/commands";
+  emit("Network.requestWillBeSent", {
+    requestId: "command-1",
+    request: { method: "POST", url, postData: JSON.stringify(command) },
+  });
+  emit("Network.responseReceived", {
+    requestId: "command-1",
+    response: { status: 200, url },
+  });
+  emit("Network.loadingFinished", { requestId: "command-1" });
+  await capture.settle();
+
+  assert.equal(capture.replayCommandRequests.length, 1);
+  assert.equal(capture.replayCommandResponses.length, 1);
+  assert.equal(capture.replayCommandResponseBodies.length, 1);
+  const identity = replayCommandResponseIdentityContract(capture);
+  assert.equal(identity.passed, true);
+  assert.deepEqual(identity.violations, []);
+  assert.equal(identity.records[0].requestCommandId, "set-speed-1");
+  assert.equal(identity.records[0].responseCommandId, "set-speed-1");
+});
+
+test("replay command response identity contract rejects a stale 200 body", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/run-1/commands";
+  const identity = replayCommandResponseIdentityContract({
+    replayCommandRequests: [{
+      requestId: "command-1",
+      method: "POST",
+      url,
+      postData: JSON.stringify({
+        protocol: "replay.v3",
+        run_id: "run-1",
+        command_id: "set-speed-1",
+        type: "set_speed",
+      }),
+    }],
+    replayCommandResponses: [{
+      requestId: "command-1",
+      method: "POST",
+      url,
+      status: 200,
+    }],
+    replayCommandResponseBodies: [{
+      requestId: "command-1",
+      method: "POST",
+      url,
+      status: 200,
+      body: JSON.stringify({
+        protocol: "replay.v3",
+        run_id: "run-1",
+        command_id: "pause-before-set-speed",
+      }),
+    }],
+  });
+
+  assert.equal(identity.passed, false);
+  assert.equal(identity.violations.length, 1);
+  assert.equal(
+    identity.violations[0].reason,
+    "COMMAND_RESPONSE_IDENTITY_MISMATCH",
+  );
+  assert.equal(identity.violations[0].requestCommandId, "set-speed-1");
+  assert.equal(
+    identity.violations[0].responseCommandId,
+    "pause-before-set-speed",
+  );
 });
 
 test("replay API contract accepts one classified catalog epoch conflict followed by 201", () => {

@@ -20,6 +20,7 @@ const RELEASE_PROJECTION_EVENTS = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_ITEMS = 10_000;
 const MAX_CAPTURE_RESPONSE_BODIES = 100;
+const MAX_CAPTURE_COMMAND_TRANSITIONS = 2_000;
 const MIB = 1024 * 1024;
 const DAY_MS = 86_400_000;
 const FORMAL_V2_BASE_INTERVAL_MS = 60_000;
@@ -1216,6 +1217,9 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     requests: [],
     replayApiResponseBodies: [],
     replayApiResponses: [],
+    replayCommandRequests: [],
+    replayCommandResponseBodies: [],
+    replayCommandResponses: [],
     responseBodies: [],
     responseCount: 0,
     responses: [],
@@ -1241,6 +1245,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   cdp.on("Network.requestWillBeSent", (event) => {
     capture.requestCount += 1;
     const item = {
+      requestId: event.requestId,
       method: event.request?.method || "",
       postData: event.request?.postData || "",
       url: event.request?.url || "",
@@ -1250,6 +1255,18 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     boundaryGenerationByRequest.set(event.requestId, boundaryGeneration);
     if (boundaryAudits && /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
       boundaryAudits.http.add({ kind: "request", ...item });
+    }
+    if (
+      item.method === "POST"
+      && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(
+        new URL(item.url).pathname,
+      )
+    ) {
+      boundedPush(
+        capture.replayCommandRequests,
+        item,
+        MAX_CAPTURE_COMMAND_TRANSITIONS,
+      );
     }
   });
   cdp.on("Network.responseReceived", (event) => {
@@ -1272,6 +1289,16 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
         )
       ) {
         boundedPush(capture.replayApiResponses, item, MAX_CAPTURE_RESPONSE_BODIES);
+      }
+      if (
+        item.method === "POST"
+        && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(pathname)
+      ) {
+        boundedPush(
+          capture.replayCommandResponses,
+          item,
+          MAX_CAPTURE_COMMAND_TRANSITIONS,
+        );
       }
       responseByRequest.set(event.requestId, {
         boundaryGeneration: boundaryGenerationByRequest.get(event.requestId)
@@ -1318,6 +1345,18 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
             capture.replayApiResponseBodies,
             item,
             MAX_CAPTURE_RESPONSE_BODIES,
+          );
+        }
+        if (
+          response.method === "POST"
+          && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(
+            new URL(response.url).pathname,
+          )
+        ) {
+          boundedPush(
+            capture.replayCommandResponseBodies,
+            item,
+            MAX_CAPTURE_COMMAND_TRANSITIONS,
           );
         }
       })
@@ -1467,6 +1506,86 @@ export function replayApiConcurrencyContract(capture) {
     catalogEpochConflictCount: catalogEpochConflicts.length,
     catalogEpochConflicts,
     unexpectedFailures,
+  };
+}
+
+/**
+ * Correlate every replay.v3 command request with its HTTP response body. A
+ * successful mutation is usable only when the route, request payload, and
+ * response identify the same Run and command_id. Keep the full bounded record
+ * in release evidence so a late soak failure cannot be diagnosed from URL and
+ * status alone.
+ */
+export function replayCommandResponseIdentityContract(capture) {
+  const requests = Array.isArray(capture?.replayCommandRequests)
+    ? capture.replayCommandRequests
+    : [];
+  const responsesByRequest = new Map(
+    (Array.isArray(capture?.replayCommandResponses)
+      ? capture.replayCommandResponses
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const bodiesByRequest = new Map(
+    (Array.isArray(capture?.replayCommandResponseBodies)
+      ? capture.replayCommandResponseBodies
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const records = [];
+  const violations = [];
+
+  for (const request of requests) {
+    const response = responsesByRequest.get(request.requestId);
+    const bodyRecord = bodiesByRequest.get(request.requestId);
+    const requestBody = parsedReplayApiResponseBody({ body: request.postData });
+    const responseBody = parsedReplayApiResponseBody(bodyRecord);
+    const routeRunId = (() => {
+      try {
+        const match = new URL(request.url).pathname.match(
+          /\/api\/v1\/replay\/runs\/([^/]+)\/commands$/,
+        );
+        return match === null ? null : decodeURIComponent(match[1]);
+      } catch {
+        return null;
+      }
+    })();
+    const status = Number(response?.status ?? 0);
+    const record = {
+      requestId: request.requestId,
+      status,
+      routeRunId,
+      requestRunId: requestBody?.run_id ?? null,
+      requestCommandId: requestBody?.command_id ?? null,
+      requestType: requestBody?.type ?? null,
+      responseRunId: responseBody?.run_id ?? null,
+      responseCommandId: responseBody?.command_id ?? null,
+    };
+    records.push(record);
+
+    let reason = null;
+    if (requestBody === null) reason = "COMMAND_REQUEST_BODY_INVALID";
+    else if (response === undefined) reason = "COMMAND_RESPONSE_MISSING";
+    else if (bodyRecord === undefined || responseBody === null) {
+      reason = "COMMAND_RESPONSE_BODY_INVALID";
+    } else if (status >= 200 && status < 300 && (
+      routeRunId === null
+      || requestBody.run_id !== routeRunId
+      || responseBody.run_id !== routeRunId
+      || responseBody.command_id !== requestBody.command_id
+    )) {
+      reason = "COMMAND_RESPONSE_IDENTITY_MISMATCH";
+    }
+    if (reason !== null) violations.push({ ...record, reason });
+  }
+
+  return {
+    passed: violations.length === 0,
+    requestCount: requests.length,
+    responseCount: responsesByRequest.size,
+    bodyCount: bodiesByRequest.size,
+    records,
+    violations,
   };
 }
 
@@ -3625,10 +3744,14 @@ async function main() {
           });
         } catch (error) {
           await replayCapture.settle();
+          const commandIdentity = replayCommandResponseIdentityContract(
+            replayCapture,
+          );
           phaseDiagnostics = {
             phase: "training-action-cycle",
             cycle: cycleIndex + 1,
             elapsedFromStartMs: Date.now() - startedAtMs,
+            commandIdentity,
             status: await replayStatus(replay.cdp).catch(() => null),
             page: await evaluate(replay.cdp, `({
               url: location.href,
@@ -3929,6 +4052,14 @@ async function main() {
       "replay API returned unexpected or unbounded failures during soak",
       replayApi,
     );
+    const replayCommandIdentity = replayCommandResponseIdentityContract(
+      replayCapture,
+    );
+    assert(
+      replayCommandIdentity.passed,
+      "replay command response identity changed during soak",
+      replayCommandIdentity,
+    );
     const backendLogCounts = backendTail.counts();
     assert(backendLogCounts.backfillFailures === 0, "live coexistence fixture triggered an offline backfill failure", backendLogCounts);
 
@@ -4039,6 +4170,7 @@ async function main() {
         .filter((item) => item.framing === "length-prefixed-json-lines.v1")
         .every((item) => item.itemsAfterFinish === 0),
       replay_api_concurrency_bounded: replayApi.passed,
+      replay_command_response_identity_exact: replayCommandIdentity.passed,
       replay_runtime_clean: replayCapture.exceptions.length === 0 && replayCapture.consoleErrors.length === 0,
       lifecycle_runtime_clean: cycles.every((cycle) => cycle.consoleErrors.length === 0),
       backend_runtime_clean: samples.every((sample) => sample.backendHealth?.passed === true)
@@ -4145,7 +4277,10 @@ async function main() {
       },
       samples,
       blindAudit: { passed: blindAuditPassed, boundaries },
-      replayApi,
+      replayApi: {
+        ...replayApi,
+        commandIdentity: replayCommandIdentity,
+      },
       replayNetwork,
       acceptance: {
         passed: acceptancePassed,

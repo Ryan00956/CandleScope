@@ -49,7 +49,8 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-manifest.v3"
+SCHEMA_VERSION = "replay.v2.release-manifest.v4"
+WALL_CLOCK_POLICY = "MEASURE_ONLY_NON_BLOCKING"
 MATRIX_PATH = REPOSITORY_ROOT / "docs" / "replay-v2-release-acceptance.json"
 
 
@@ -259,7 +260,7 @@ def main() -> int:
     )
     expected = {
         "checks": ("checks.json", "replay.v2.release-checks.v1"),
-        "benchmark": ("benchmark.json", "replay.v2.release-benchmark.v2"),
+        "benchmark": ("benchmark.json", "replay.v2.release-benchmark.v3"),
         "real_source": (
             "real-source-validation.json",
             "replay.v2.real-source-validation.v1",
@@ -306,6 +307,11 @@ def main() -> int:
         and checks["counts"].get("backend_pytest_passed", 0) > 0
         and checks["counts"].get("frontend_node_tests_passed", 0) > 0,
         "formal_benchmark": benchmark.get("profile") == "formal-release",
+        "benchmark_wall_clock_measure_only": (
+            benchmark.get("wall_clock_policy") == WALL_CLOCK_POLICY
+            and isinstance(benchmark_checks, Mapping)
+            and benchmark_checks.get("wall_clock_measure_only_policy") is True
+        ),
         "hedge_exchange_parity_benchmark": isinstance(benchmark_checks, Mapping)
         and benchmark_checks.get("hedge_exchange_parity_1_2_4_8") is True
         and benchmark_checks.get("hedge_exchange_parity_acceptance") is True,

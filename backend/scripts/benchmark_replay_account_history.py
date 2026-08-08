@@ -50,7 +50,7 @@ from tests.test_replay_v2_training_phase5 import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = "replay.phase16.account-history-capacity.v1"
+SCHEMA_VERSION = "replay.phase16.account-history-capacity.v2"
 REPLAY_START_MS = START_MS + 4 * INTERVAL_MS
 SYMBOLS = (
     "BTCUSDT",
@@ -62,10 +62,6 @@ SYMBOLS = (
     "DOGEUSDT",
     "AVAXUSDT",
 )
-# Frozen after the first uninstrumented positioned-track pilot (8-track p95
-# 315.332 ms and RSS delta 4.92 MiB). The ceilings retain Windows scheduling
-# headroom without treating multi-second steps or unbounded memory as healthy.
-MAX_STEP_P95_MS = 500.0
 MAX_RSS_DELTA_BYTES = 64 * 1024**2
 
 
@@ -488,8 +484,9 @@ async def run_benchmark(
             all(bool(value) for value in case["checks"].values())
             for case in cases
         ),
-        "all_p95_within_frozen_ceiling": all(
-            float(case["step_ms"]["p95"]) <= MAX_STEP_P95_MS
+        "all_step_timings_measured": all(
+            math.isfinite(float(case["step_ms"]["p95"]))
+            and float(case["step_ms"]["p95"]) >= 0
             for case in cases
         ),
         "all_rss_within_frozen_ceiling": all(
@@ -518,8 +515,8 @@ async def run_benchmark(
             "positions_per_track": 1,
             "iterations": iterations,
         },
-        "frozen_limits": {
-            "max_step_p95_ms": MAX_STEP_P95_MS,
+        "wall_clock_policy": "MEASURE_ONLY_NON_BLOCKING",
+        "resource_limits": {
             "max_rss_delta_bytes": MAX_RSS_DELTA_BYTES,
         },
         "cases": cases,

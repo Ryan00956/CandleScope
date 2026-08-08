@@ -209,10 +209,10 @@ def test_release_benchmark_emits_bound_git_and_dynamic_utc_metadata(
         benchmark_replay,
         "_load_thresholds",
         lambda _path: {
-            "bar_min_events_per_second": 1,
+            "bar_min_events_per_second": 1_000_000_000,
             "bar_max_peak_delta_bytes": 1,
             "bar_max_late_half_growth_bytes": 1,
-            "trade_min_events_per_second": 1,
+            "trade_min_events_per_second": 1_000_000_000,
             "trade_max_peak_delta_bytes": 1,
             "trade_max_late_half_growth_bytes": 1,
             "projection_max_fps": 30,
@@ -229,7 +229,22 @@ def test_release_benchmark_emits_bound_git_and_dynamic_utc_metadata(
     assert report["git_head"] == GIT_HEAD.lower()
     assert report["git_dirty"] is False
     assert report["environment"]["git_head"] == GIT_HEAD.lower()
+    assert report["wall_clock_policy"] == "MEASURE_ONLY_NON_BLOCKING"
     assert report["acceptance"]["passed"] is True
+    assert (
+        report["acceptance"]["wall_clock_policy"]
+        == "MEASURE_ONLY_NON_BLOCKING"
+    )
+    assert report["acceptance"]["performance_observations"] == {
+        "bar_events_per_second": 100.0,
+        "trade_events_per_second": 100.0,
+        "historical_references": {
+            "bar_events_per_second": 1_000_000_000.0,
+            "trade_events_per_second": 1_000_000_000.0,
+        },
+    }
+    assert report["acceptance"]["checks"]["bar_throughput_measured"] is True
+    assert report["acceptance"]["checks"]["trade_throughput_measured"] is True
 
 
 def test_determinism_parent_emits_bound_git_and_dynamic_utc_metadata(

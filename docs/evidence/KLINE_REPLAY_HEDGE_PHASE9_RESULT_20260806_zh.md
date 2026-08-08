@@ -249,6 +249,12 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 同一 clean HEAD 的 `--allow-short` 高密度诊断完成 100/100 training action、100/100 下单/成交/重连、100/100 archive lifecycle 和 10,000 projection events，最后 archive lifecycle 在 `5,651,353 ms` 完成，越过旧 cycle 70 故障边界。32 项 acceptance 全真；712 个命令 request、712 个 response、712 个 response body 全部精确关联，identity violation 为 0；projection 为 `59,417.706 events/s`，primary/late heap 增长 `9,848,364 / 14,070,328 B`，盲审通过，报告 hash 为 `sha256:3be9640476b9b9b50b4e1e9426a615f9ac3df2bdb8e91a4aa5c2290f5651c179`。
 - 该运行使用 `--allow-short --duration-ms 10000 --projection-events 10000`，只关闭第 70 周期确定性复现和命令身份证据缺口，不是正式 4 小时发布证据。本文提交会再次产生新 HEAD；真实来源、全量 checks、formal benchmark、真实浏览器 smoke、rollback、正式 4 小时/100 周期/1,000,000 events soak 和 release manifest 仍须从新 clean HEAD 全部重跑，不能继承本节 artifact。
 
+### 3.23 用户决策：墙钟性能改为必测量非阻断观测
+
+- `2d64c9a74ebf1831aa3135d0114d1aa6d36009d1` 的真实来源校验 6 项全真；正式 release checks 后端完成 `3250 passed`，唯一失败为 HEDGE Phase 9 单样本 benchmark：8 FULL normal `626.917 ms` 超过旧 `500 ms`，8 FULL liquidation `2221.873 ms` 超过旧 `2000 ms`，其余 1/2/4 轨、矩阵、账户/输入审计、SQLite 与 RSS 均通过。同期 5 秒采样显示 alerts 24h soak、sing-box 和两个 MuMu VM 合计持续占用约 3–4 个 CPU 核，因此旧墙钟门槛无法产生隔离、可重复的发布判定。
+- 用户于 2026-08-08 明确要求“跳过性能要求门槛”。该决策解释为删除所有 replay 正式 benchmark 的墙钟延迟/吞吐 PASS/FAIL 比较，而不是跳过 benchmark：BAR/AGG_TRADE throughput、segment GC/inventory、account-history step、HEDGE normal/liquidation 的真实数值仍必须由同 HEAD 正式 workload 生成并写入 artifact，policy 固定为 `MEASURE_ONLY_NON_BLOCKING`。
+- RSS/heap、late-half、queue/page、storage inventory、SQLite、审计、reference equivalence、1/2/4/8 矩阵、4 小时 soak 与 rollback 仍为硬门禁；没有新增环境变量、CLI opt-out、灰度、默认关闭或 fallback。历史 artifact 的 500/2,000/5,000 ms 与 5,000/600 events/s 只保留为历史测量参考，不再决定当前 release acceptance。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

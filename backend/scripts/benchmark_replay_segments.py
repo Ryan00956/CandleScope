@@ -131,8 +131,6 @@ async def run_benchmark(
     segment_count: int = 10_000,
     iterations: int = 20,
     byte_size: int = 4_096,
-    p95_budget_ms: float = 1_500.0,
-    inventory_p95_budget_ms: float = 1_500.0,
 ) -> dict[str, object]:
     if not 1 <= segment_count <= 10_000:
         raise ValueError("segment_count must be between 1 and 10000")
@@ -140,11 +138,6 @@ async def run_benchmark(
         raise ValueError("iterations must be positive")
     if byte_size < 1:
         raise ValueError("byte_size must be positive")
-    if p95_budget_ms <= 0:
-        raise ValueError("p95_budget_ms must be positive")
-    if inventory_p95_budget_ms <= 0:
-        raise ValueError("inventory_p95_budget_ms must be positive")
-
     with tempfile.TemporaryDirectory(prefix="replay-phase7-benchmark-") as directory:
         database = Path(directory) / "segments.db"
         trusted_file = Path(directory) / "trusted-source.blob"
@@ -270,26 +263,49 @@ async def run_benchmark(
                 "truncated": summary["truncated"],
                 "protocol": inventory["protocol"],
             }
-            gc_budget_pass = p95_ms <= p95_budget_ms
-            inventory_budget_pass = (
-                inventory_p95_ms <= inventory_p95_budget_ms
-            )
+            checks = {
+                "timings_measured": all(
+                    math.isfinite(value) and value >= 0
+                    for value in (
+                        p50_ms,
+                        p95_ms,
+                        max(durations_ms),
+                        inventory_p50_ms,
+                        inventory_p95_ms,
+                        max(inventory_durations_ms),
+                    )
+                ),
+                "exact_safe_candidate_set": (
+                    len(plan["candidates"]) == segment_count
+                    and not plan["protected"]
+                ),
+                "inventory_bounded": (
+                    summary["object_count"] == segment_count
+                    and len(items) == min(segment_count, MAX_CATEGORY_ITEMS)
+                    and summary["truncated"]
+                    is (segment_count > MAX_CATEGORY_ITEMS)
+                ),
+                "inventory_redacted": not _contains_forbidden_key(
+                    inventory,
+                    forbidden,
+                ),
+            }
             return {
-                "schema_version": "replay.phase7.segment-gc-benchmark.v1",
+                "schema_version": "replay.phase7.segment-gc-benchmark.v2",
                 "workload": "one-batched-registry-read-plus-deterministic-gc-plan",
+                "wall_clock_policy": "MEASURE_ONLY_NON_BLOCKING",
                 "iterations": iterations,
                 "segment_count": segment_count,
                 "p50_ms": round(p50_ms, 3),
                 "p95_ms": round(p95_ms, 3),
                 "max_ms": round(max(durations_ms), 3),
-                "p95_budget_ms": p95_budget_ms,
                 "inventory_p50_ms": round(inventory_p50_ms, 3),
                 "inventory_p95_ms": round(inventory_p95_ms, 3),
                 "inventory_max_ms": round(max(inventory_durations_ms), 3),
-                "inventory_p95_budget_ms": inventory_p95_budget_ms,
-                "gc_budget_pass": gc_budget_pass,
-                "inventory_budget_pass": inventory_budget_pass,
-                "budget_pass": gc_budget_pass and inventory_budget_pass,
+                "checks": checks,
+                "acceptance": {
+                    "passed": all(checks.values()),
+                },
                 "evidence": evidence,
                 "evidence_hash": canonical_sha256(evidence),
                 "inventory_evidence": inventory_evidence,
@@ -307,12 +323,6 @@ def main() -> None:
     parser.add_argument("--segments", type=int, default=10_000)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--byte-size", type=int, default=4_096)
-    parser.add_argument("--p95-budget-ms", type=float, default=1_500.0)
-    parser.add_argument(
-        "--inventory-p95-budget-ms",
-        type=float,
-        default=1_500.0,
-    )
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     report = asyncio.run(
@@ -320,8 +330,6 @@ def main() -> None:
             segment_count=args.segments,
             iterations=args.iterations,
             byte_size=args.byte_size,
-            p95_budget_ms=args.p95_budget_ms,
-            inventory_p95_budget_ms=args.inventory_p95_budget_ms,
         )
     )
     rendered = json.dumps(report, indent=2)
@@ -329,7 +337,7 @@ def main() -> None:
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(f"{rendered}\n", encoding="utf-8")
-    if not report["budget_pass"]:
+    if not report["acceptance"]["passed"]:
         raise SystemExit(1)
 
 

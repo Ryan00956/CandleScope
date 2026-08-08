@@ -692,7 +692,7 @@ git diff --check
 - data segment pin、GC dry-run、冷恢复和不可重建保护；
 - v1 legacy 只读、迁移和回滚。
 
-### 9.4 性能门槛冻结方式
+### 9.4 性能观测与资源门槛
 
 不在设计文档里拍脑袋写毫秒或轨道上限。每个相关 Phase 先运行真实 fixture baseline，再提交版本化 JSON：
 
@@ -703,7 +703,7 @@ docs/perf-baselines/replay-v2-fast-forward-*.json
 docs/perf-baselines/replay-v2-browser-soak-*.json
 ```
 
-基准必须记录机器、HEAD、dataset hash、参数、p50/p95/max、RSS/heap late-half、queue high-water、page/segment 次数和阈值来源。阈值只允许通过单独文档修订收紧或基于证据调整。
+基准必须记录机器、HEAD、dataset hash、参数、p50/p95/max、RSS/heap late-half、queue high-water、page/segment 次数和资源阈值来源。自 2026-08-08 的 HEDGE hard-cutover 决策起，墙钟延迟与吞吐为 `MEASURE_ONLY_NON_BLOCKING`：必须真实测量但不参与发布 PASS/FAIL；RSS/heap、队列、分页、存储、正确性和确定性继续作为硬门禁。不得增加 skip flag 或减少正式 workload。
 
 ### 9.5 发布证据目录
 
@@ -2123,7 +2123,7 @@ Commands run:
   backend full: python -m pytest -q
   backend static: python -m compileall -q app scripts；python -m ruff check <Phase 7 Python scope>
   backend baseline audits: python -m ruff check .；python -m mypy app，并在父提交临时 worktree 同机对照
-  benchmark: python scripts/benchmark_replay_segments.py --segments 10000 --iterations 20 --p95-budget-ms 1500 --json-out ../output/playwright/phase7-final-20260722/phase7-segment-benchmark.json
+  benchmark: python scripts/benchmark_replay_segments.py --segments 10000 --iterations 20 --json-out ../output/playwright/phase7-final-20260722/phase7-segment-benchmark.json
   frontend targeted: npm run test:replay
   frontend full: npm run check
   browser: Playwright CLI wrapper against isolated offline fixture :18108 and Vite :15208

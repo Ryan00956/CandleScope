@@ -61,6 +61,12 @@ def test_account_history_benchmark_releases_all_temporary_databases(
     )
 
     assert [case["track_count"] for case in report["cases"]] == [1, 2, 4, 8]
+    assert report["schema_version"] == "replay.phase16.account-history-capacity.v2"
+    assert report["wall_clock_policy"] == "MEASURE_ONLY_NON_BLOCKING"
+    assert report["acceptance"]["passed"] is True
+    assert report["checks"]["all_step_timings_measured"] is True
+    assert "all_p95_within_frozen_ceiling" not in report["checks"]
+    assert "max_step_p95_ms" not in report["resource_limits"]
     assert list(tmp_path.iterdir()) == []
 
 

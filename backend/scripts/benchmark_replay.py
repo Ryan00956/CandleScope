@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import platform
 import re
 import subprocess
@@ -21,7 +22,8 @@ from scripts.benchmark_replay_actor import run_benchmark as run_bar_benchmark  #
 from scripts.benchmark_replay_trade import run_actor_benchmark  # noqa: E402
 
 
-SCHEMA_VERSION = "replay-v1-benchmark-suite.v1"
+SCHEMA_VERSION = "replay-v1-benchmark-suite.v2"
+WALL_CLOCK_POLICY = "MEASURE_ONLY_NON_BLOCKING"
 DEFAULT_BASELINE = (
     BACKEND_ROOT.parent
     / "docs"
@@ -140,10 +142,14 @@ def _evaluate(
     assert isinstance(trade_projection, Mapping)
     assert isinstance(trade_bounds, Mapping)
 
+    bar_events_per_second = _required_number(bar_result, "events_per_second")
+    trade_events_per_second = _required_number(
+        trade_result,
+        "events_per_second",
+    )
     checks = {
-        "bar_min_events_per_second": (
-            _required_number(bar_result, "events_per_second")
-            >= _required_number(thresholds, "bar_min_events_per_second")
+        "bar_throughput_measured": (
+            math.isfinite(bar_events_per_second) and bar_events_per_second > 0
         ),
         "bar_max_peak_delta_bytes": (
             _required_number(bar_memory, "peak_delta_bytes")
@@ -163,9 +169,9 @@ def _evaluate(
         "bar_retained_structures_bounded": (
             bar_bounds.get("retained_structures_bounded") is True
         ),
-        "trade_min_events_per_second": (
-            _required_number(trade_result, "events_per_second")
-            >= _required_number(thresholds, "trade_min_events_per_second")
+        "trade_throughput_measured": (
+            math.isfinite(trade_events_per_second)
+            and trade_events_per_second > 0
         ),
         "trade_max_peak_delta_bytes": (
             _required_number(trade_memory, "peak_delta_bytes")
@@ -194,7 +200,32 @@ def _evaluate(
         ),
     }
     return {
-        "thresholds": dict(thresholds),
+        "wall_clock_policy": WALL_CLOCK_POLICY,
+        "performance_observations": {
+            "bar_events_per_second": bar_events_per_second,
+            "trade_events_per_second": trade_events_per_second,
+            "historical_references": {
+                "bar_events_per_second": _required_number(
+                    thresholds,
+                    "bar_min_events_per_second",
+                ),
+                "trade_events_per_second": _required_number(
+                    thresholds,
+                    "trade_min_events_per_second",
+                ),
+            },
+        },
+        "resource_thresholds": {
+            key: thresholds[key]
+            for key in (
+                "bar_max_peak_delta_bytes",
+                "bar_max_late_half_growth_bytes",
+                "trade_max_peak_delta_bytes",
+                "trade_max_late_half_growth_bytes",
+                "projection_max_fps",
+                "trade_max_page_rows",
+            )
+        },
         "checks": checks,
         "passed": all(checks.values()),
     }
@@ -223,6 +254,7 @@ async def run_suite(args: argparse.Namespace) -> dict[str, object]:
     )
     report: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
+        "wall_clock_policy": WALL_CLOCK_POLICY,
         "recorded_at": _utc_recorded_at(),
         "environment": {
             "python": sys.version.split()[0],

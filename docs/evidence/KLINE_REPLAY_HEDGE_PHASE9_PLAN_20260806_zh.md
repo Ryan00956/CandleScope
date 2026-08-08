@@ -58,8 +58,10 @@
 
 4. **Phase 9 benchmark 与 fault gates**
    - 新增 HEDGE 发布基准：1/2/4/8 FULL positioned tracks，分别运行 normal mark wave 与 liquidation wave。
-   - 普通 wave 冻结门槛：8 tracks p95 `<= 500 ms`。
-   - 强平 wave 单独报告 p50/p95/max；冻结门槛 p95 `<= 2000 ms`、max `<= 5000 ms`。
+   - 普通 wave 与强平 wave 单独报告 p50/p95/max；墙钟数值为必填观测，
+     不参与发布 PASS/FAIL。
+   - 不增加 skip flag，不减少 1/2/4/8 轨或正式样本；RSS、存储、队列、
+     审计和确定性仍按资源/正确性门禁判定。
    - 覆盖 archive 篡改、SQLite busy/WAL、进程恢复、审计链断裂和 rollback。
 
 5. **长稳与浏览器**
@@ -75,10 +77,11 @@
 ## 4. 不可放宽的停止条件
 
 - 任一新增 symbol 缺 exact public archive、simulation coverage 或 historical L2：停止该 Run，不能复用主轨输入。
-- 普通 wave 或 liquidation wave 超出冻结上限：报告并优化，不能修改阈值或减少场景。
+- 普通 wave 或 liquidation wave 数值必须原样报告；不得因较慢而删除样本，
+  也不得因较快而把窄样本宣称为生产容量保证。
 - 4 小时 soak 未达到真实时长/生命周期/事件数三项下限：不得用推算结果代替。
 - 审计、恢复、rollback 或 clean HEAD 绑定失败：不得生成 PASS release manifest。
 
 ## 5. 完成定义
 
-逐轨 HEDGE 输入语义正确，1/2/4/8 真实多标的双腿场景通过冻结性能门槛，4 小时 soak 与资源泄漏门禁通过，22 项最低验收矩阵与全量测试通过，并在 clean HEAD 上生成可独立验证的 release manifest 和 rollback 证据后，Phase 9 才可提交完成。
+逐轨 HEDGE 输入语义正确，1/2/4/8 真实多标的双腿场景完成墙钟测量并通过正确性/资源门禁，4 小时 soak 与资源泄漏门禁通过，22 项最低验收矩阵与全量测试通过，并在 clean HEAD 上生成可独立验证的 release manifest 和 rollback 证据后，Phase 9 才可提交完成。

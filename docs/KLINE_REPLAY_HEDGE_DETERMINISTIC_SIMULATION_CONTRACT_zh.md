@@ -156,13 +156,17 @@ simulation manifest 必须覆盖 Run 全区间：
 
 删除、重复、回退、时间倒序、hash 篡改、覆盖 gap 或 schema/version 不匹配均暂停整个 Run。
 
-## 9. 性能预算
+## 9. 性能观测与资源预算
 
-- 8 个 FULL positioned tracks 普通 wave：p95 不超过 500 ms；
-- 8 个 FULL positioned tracks 强平 wave：p95 不超过 2,000 ms、max 不超过 5,000 ms；
-- 进程 RSS 增量不超过 64 MiB。
+- 1/2/4/8 个 FULL positioned tracks 的普通 wave 与强平 wave 必须分别测量
+  p50/p95/max 并写入同 HEAD benchmark artifact；墙钟延迟与吞吐只作观测，
+  不设置发布通过阈值。
+- 不得通过跳过 benchmark、减少轨数/样本、伪造固定值或增加运行时 skip flag
+  来绕过测量。
+- 进程 RSS 增量不超过 64 MiB；内存、存储、队列和审计边界仍是硬门禁。
 
-Phase 9 可基于新证据收紧，但不得为过门禁放宽。
+本节自 2026-08-08 起取代此前 500/2,000/5,000 ms 墙钟冻结值；历史
+artifact 中的旧阈值只说明当时测量，不再参与当前 release acceptance。
 
 ## 10. Phase 0 黄金样本
 

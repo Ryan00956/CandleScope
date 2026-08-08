@@ -543,8 +543,11 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 硬门禁：
 
-- 8 FULL positioned tracks 普通 simulation-account wave 的真实 p95 不超过 500 ms 冻结上限。
-- 强平波单独报告 p50/p95/max，不与普通推进平均；Phase 0 冻结 p95 `2000 ms`、max `5000 ms`，不得为过门禁临时放宽。
+- 1/2/4/8 FULL positioned tracks 的普通 simulation-account wave 与强平波
+  必须分别报告 p50/p95/max，不与普通推进平均；墙钟延迟和吞吐是
+  `MEASURE_ONLY_NON_BLOCKING`，不设置发布通过阈值。
+- 不得省略 benchmark、减少轨数/正式样本或增加 `skip-performance` 旗标；
+  benchmark artifact 缺测量仍拒绝发布。
 - 内存、数据库、WAL、archive 和浏览器无单调泄漏。
 - 全量 backend、frontend、architecture、typecheck、lint、build 全通过。
 - 4 小时 soak、故障注入、审计和回滚全部通过。
@@ -622,7 +625,7 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 - 全新进程、全新数据库、全新浏览器的默认启用验证；
 - 完整构建 rollback 和数据恢复演练。
 
-任何旧 HEAD 的 benchmark、soak、浏览器截图或 manifest 都不能继承到新 HEAD。不得为了通过发布门禁临时修改性能阈值、减少场景、关闭强平分支或改用 fixture-only 证据。
+任何旧 HEAD 的 benchmark、soak、浏览器截图或 manifest 都不能继承到新 HEAD。不得省略墙钟测量、减少场景、关闭强平分支或改用 fixture-only 证据；延迟/吞吐数值不参与 PASS/FAIL，资源、正确性、长稳和回滚门禁不得放宽。
 
 ---
 

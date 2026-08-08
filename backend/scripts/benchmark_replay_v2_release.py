@@ -34,7 +34,8 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-benchmark.v2"
+SCHEMA_VERSION = "replay.v2.release-benchmark.v3"
+WALL_CLOCK_POLICY = "MEASURE_ONLY_NON_BLOCKING"
 
 
 def parse_args() -> argparse.Namespace:
@@ -169,18 +170,29 @@ def main() -> int:
     if not isinstance(cases, list):
         raise RuntimeError("multi-track benchmark did not emit cases")
     checks = {
+        "wall_clock_measure_only_policy": all(
+            payload.get("wall_clock_policy") == WALL_CLOCK_POLICY
+            for payload in (
+                core,
+                segments,
+                account_history,
+                hedge_exchange_parity,
+            )
+        ),
         "core_v1_acceptance": _accepted(core),
         "multitrack_1_2_4_8": [case.get("track_count") for case in cases if isinstance(case, Mapping)] == [1, 2, 4, 8],
         "multitrack_10000_iterations": all(
             isinstance(case, Mapping) and case.get("iterations") == 10_000
             for case in cases
         ),
-        "segment_10000_budget": segments.get("segment_count") == 10_000 and segments.get("budget_pass") is True,
+        "segment_10000_correctness": (
+            segments.get("segment_count") == 10_000
+            and _accepted(segments)
+        ),
         "storage_inventory_10000_bounded": (
             isinstance(segments.get("inventory_evidence"), Mapping)
             and segments["inventory_evidence"].get("item_count") == 200
             and segments["inventory_evidence"].get("truncated") is True
-            and segments.get("inventory_budget_pass") is True
         ),
         "fast_forward_runtime": _accepted(fast_forward),
         "fast_forward_reference_equivalence": isinstance(fast_forward.get("equivalence"), Mapping)
@@ -226,6 +238,7 @@ def main() -> int:
         "recorded_at": utc_now(),
         "release_evidence": evidence,
         "profile": "formal-release",
+        "wall_clock_policy": WALL_CLOCK_POLICY,
         "passed": True,
         "checks": checks,
         "components": artifacts,

@@ -207,6 +207,36 @@ def test_release_benchmarks_use_the_current_training_wire_protocol() -> None:
         assert 'protocol="replay.v2"' not in source
 
 
+def test_release_wall_clock_metrics_are_measure_only_without_skip_flag() -> None:
+    relative_paths = (
+        "backend/scripts/benchmark_replay.py",
+        "backend/scripts/benchmark_replay_segments.py",
+        "backend/scripts/benchmark_replay_account_history.py",
+        "backend/scripts/benchmark_replay_hedge_exchange_parity.py",
+        "backend/scripts/benchmark_replay_v2_release.py",
+        "backend/scripts/verify_replay_v2_release.py",
+    )
+    sources = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in relative_paths
+    }
+
+    assert all(
+        "MEASURE_ONLY_NON_BLOCKING" in source for source in sources.values()
+    )
+    combined = "\n".join(sources.values())
+    for forbidden in (
+        "--skip-performance",
+        "MAX_NORMAL_P95_MS",
+        "MAX_LIQUIDATION_P95_MS",
+        "MAX_LIQUIDATION_MAX_MS",
+        "MAX_STEP_P95_MS",
+        "p95_within_frozen_limit",
+        "all_p95_within_frozen_ceiling",
+    ):
+        assert forbidden not in combined
+
+
 def test_formal_fast_forward_refreshes_controller_lease_between_chunks() -> None:
     controller_ttl_seconds = 0.5
     result = asyncio.run(

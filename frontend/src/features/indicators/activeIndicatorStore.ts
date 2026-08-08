@@ -111,6 +111,29 @@ export function reconcilePersistedIndicatorDefinitions(
     : prepared;
 }
 
+export interface ActiveIndicatorUpdate {
+  durableChanged: boolean;
+  indicators: IndicatorDefinition[];
+}
+
+/**
+ * Apply one live-store update without confusing computed lines/errors with a
+ * durable workspace edit. Controlled chart cells still need to accept every
+ * runtime update locally; only definition changes are sent back to the
+ * workspace owner.
+ */
+export function applyActiveIndicatorUpdate(
+  current: IndicatorDefinition[],
+  action: SetStateAction<IndicatorDefinition[]>,
+): ActiveIndicatorUpdate {
+  const indicators = typeof action === "function" ? action(current) : action;
+  return {
+    durableChanged:
+      persistedIndicatorSignature(indicators) !== persistedIndicatorSignature(current),
+    indicators,
+  };
+}
+
 export interface UseActiveIndicatorStoreOptions {
   autoAddVolume?: boolean;
   normalizeIndicator?: (
@@ -170,6 +193,7 @@ export function useActiveIndicatorStore({
       return prepared === null ? [] : [prepared];
     })
   ));
+  const ownedIndicatorsRef = useRef(ownedIndicators);
   const volInitRef = useRef(false);
   const controlled = persistence?.controlled === true;
   const controlledIndicators = useMemo(() => (
@@ -180,21 +204,31 @@ export function useActiveIndicatorStore({
         })
       : []
   ), [controlled, normalizeIndicator, persistence]);
-  const activeIndicators = controlled ? controlledIndicators : ownedIndicators;
+  const activeIndicators = ownedIndicators;
   const setActiveIndicators = useCallback<Dispatch<SetStateAction<IndicatorDefinition[]>>>(
     (action) => {
-      if (!controlled) {
-        setOwnedIndicators(action);
-        return;
+      const update = applyActiveIndicatorUpdate(ownedIndicatorsRef.current, action);
+      if (update.indicators !== ownedIndicatorsRef.current) {
+        ownedIndicatorsRef.current = update.indicators;
+        setOwnedIndicators(update.indicators);
       }
-      const next = typeof action === "function" ? action(controlledIndicators) : action;
-      if (persistedIndicatorSignature(next) === persistedIndicatorSignature(controlledIndicators)) {
-        return;
+      if (controlled && update.durableChanged) {
+        persistence?.save(update.indicators.map(stripIndicatorRuntimeFields));
       }
-      persistence?.save(next.map(stripIndicatorRuntimeFields));
     },
-    [controlled, controlledIndicators, persistence],
+    [controlled, persistence],
   );
+
+  useEffect(() => {
+    if (!controlled) return;
+    const reconciled = reconcilePersistedIndicatorDefinitions(
+      ownedIndicatorsRef.current,
+      controlledIndicators,
+    );
+    if (reconciled === ownedIndicatorsRef.current) return;
+    ownedIndicatorsRef.current = reconciled;
+    setOwnedIndicators(reconciled);
+  }, [controlled, controlledIndicators]);
 
   useEffect(() => {
     if (!controlled) persistence?.save(ownedIndicators.map(stripIndicatorRuntimeFields));

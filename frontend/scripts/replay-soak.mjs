@@ -21,6 +21,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_ITEMS = 10_000;
 const MAX_CAPTURE_RESPONSE_BODIES = 100;
 const MAX_CAPTURE_COMMAND_TRANSITIONS = 2_000;
+const MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES = 1;
 const MIB = 1024 * 1024;
 const DAY_MS = 86_400_000;
 const FORMAL_V2_BASE_INTERVAL_MS = 60_000;
@@ -1256,12 +1257,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     if (boundaryAudits && /\/api\/v1\/replay(?:\/|\?|$)/.test(item.url)) {
       boundaryAudits.http.add({ kind: "request", ...item });
     }
-    if (
-      item.method === "POST"
-      && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(
-        new URL(item.url).pathname,
-      )
-    ) {
+    if (item.method === "POST" && replayCommandRoute(item.url) !== null) {
       boundedPush(
         capture.replayCommandRequests,
         item,
@@ -1290,10 +1286,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
       ) {
         boundedPush(capture.replayApiResponses, item, MAX_CAPTURE_RESPONSE_BODIES);
       }
-      if (
-        item.method === "POST"
-        && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(pathname)
-      ) {
+      if (item.method === "POST" && replayCommandRoute(item.url) !== null) {
         boundedPush(
           capture.replayCommandResponses,
           item,
@@ -1347,12 +1340,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
             MAX_CAPTURE_RESPONSE_BODIES,
           );
         }
-        if (
-          response.method === "POST"
-          && /\/api\/v1\/replay\/runs\/[^/]+\/commands$/.test(
-            new URL(response.url).pathname,
-          )
-        ) {
+        if (response.method === "POST" && replayCommandRoute(response.url) !== null) {
           boundedPush(
             capture.replayCommandResponseBodies,
             item,
@@ -1365,11 +1353,15 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     bodyTasks.add(task);
   });
   cdp.on("Network.loadingFailed", (event) => {
+    const request = requestByRequest.get(event.requestId);
     requestByRequest.delete(event.requestId);
     responseByRequest.delete(event.requestId);
     boundaryGenerationByRequest.delete(event.requestId);
     boundedPush(capture.failedRequests, {
       requestId: event.requestId || "",
+      method: request?.method || "",
+      postData: request?.postData || "",
+      url: request?.url || "",
       errorText: event.errorText || "",
       canceled: event.canceled === true,
       blockedReason: event.blockedReason || "",
@@ -1424,12 +1416,159 @@ function parsedReplayApiResponseBody(item) {
   }
 }
 
+function replayCommandRoute(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const session = pathname.match(
+      /^\/api\/v1\/replay\/runs\/session\/([^/]+)\/commands$/,
+    );
+    if (session !== null) {
+      return { kind: "session", id: decodeURIComponent(session[1]) };
+    }
+    const run = pathname.match(/^\/api\/v1\/replay\/runs\/([^/]+)\/commands$/);
+    if (run !== null) return { kind: "run", id: decodeURIComponent(run[1]) };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function replayCommandResponseMatches(route, requestBody, responseBody) {
+  if (route === null
+    || requestBody === null
+    || responseBody === null
+    || !["replay.v1", "replay.v3"].includes(requestBody.protocol)
+    || typeof requestBody.command_id !== "string"
+    || responseBody.command_id !== requestBody.command_id
+    || responseBody.protocol !== requestBody.protocol) return false;
+  if (route.kind === "run") {
+    return requestBody.protocol === "replay.v3"
+      && requestBody.run_id === route.id
+      && responseBody.run_id === route.id;
+  }
+  return requestBody.protocol === "replay.v1"
+    && Number.isSafeInteger(requestBody.expected_revision)
+    && responseBody.session_id === route.id
+    && responseBody.revision === requestBody.expected_revision + 1;
+}
+
+/**
+ * A command acknowledgement can be lost after the server has committed the
+ * mutation. The product runtime freezes later mutations, obtains a newer
+ * authoritative WebSocket snapshot, and then resubmits the byte-identical
+ * canonical envelope. Accept only one such infrastructure loss in a formal
+ * soak, only when the first response is bodyless/invalid or the network load
+ * failed, there is exactly one retry, and that retry returns a matching 2xx
+ * acknowledgement. Structured server errors are never recovery candidates.
+ */
+export function replayCommandTransportRecoveryContract(capture) {
+  const requests = Array.isArray(capture?.replayCommandRequests)
+    ? capture.replayCommandRequests
+    : [];
+  const responsesByRequest = new Map(
+    (Array.isArray(capture?.replayCommandResponses)
+      ? capture.replayCommandResponses
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const bodiesByRequest = new Map(
+    (Array.isArray(capture?.replayCommandResponseBodies)
+      ? capture.replayCommandResponseBodies
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const failuresByRequest = new Map(
+    (Array.isArray(capture?.failedRequests) ? capture.failedRequests : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const recoveries = [];
+  const violations = [];
+
+  for (let index = 0; index < requests.length; index += 1) {
+    const request = requests[index];
+    const response = responsesByRequest.get(request.requestId);
+    const responseBodyRecord = bodiesByRequest.get(request.requestId);
+    const responseBody = parsedReplayApiResponseBody(responseBodyRecord);
+    const networkFailure = failuresByRequest.get(request.requestId);
+    const status = Number(response?.status ?? 0);
+    const bodylessServerFailure = status >= 500
+      && status < 600
+      && responseBodyRecord !== undefined
+      && responseBody === null;
+    if (!bodylessServerFailure && (response !== undefined || networkFailure === undefined)) continue;
+
+    const route = replayCommandRoute(request.url);
+    const requestBody = parsedReplayApiResponseBody({ body: request.postData });
+    const retries = requests.slice(index + 1).filter((candidate) => (
+      candidate.method === "POST"
+      && candidate.url === request.url
+      && candidate.postData === request.postData
+    ));
+    const retry = retries[0];
+    const retryResponse = retry === undefined
+      ? undefined
+      : responsesByRequest.get(retry.requestId);
+    const retryBody = retry === undefined
+      ? null
+      : parsedReplayApiResponseBody(bodiesByRequest.get(retry.requestId));
+    const base = {
+      requestId: request.requestId,
+      method: request.method,
+      url: request.url,
+      status,
+      commandId: requestBody?.command_id ?? null,
+      failureKind: bodylessServerFailure ? "BODYLESS_HTTP_5XX" : "NETWORK_LOADING_FAILED",
+      errorText: networkFailure?.errorText ?? null,
+      retryRequestId: retry?.requestId ?? null,
+      retryStatus: Number(retryResponse?.status ?? 0),
+    };
+    let reason = null;
+    if (route === null || requestBody === null) {
+      reason = "COMMAND_TRANSPORT_RECOVERY_REQUEST_INVALID";
+    } else if (retries.length === 0) {
+      reason = "COMMAND_TRANSPORT_RECOVERY_MISSING";
+    } else if (retries.length > 1) {
+      reason = "COMMAND_TRANSPORT_RECOVERY_RETRY_EXCEEDED";
+    } else if (retryResponse === undefined
+      || Number(retryResponse.status) < 200
+      || Number(retryResponse.status) >= 300) {
+      reason = "COMMAND_TRANSPORT_RECOVERY_RETRY_FAILED";
+    } else if (!replayCommandResponseMatches(route, requestBody, retryBody)) {
+      reason = "COMMAND_TRANSPORT_RECOVERY_IDENTITY_MISMATCH";
+    }
+    if (reason !== null) {
+      violations.push({ ...base, reason });
+      continue;
+    }
+    recoveries.push(base);
+  }
+
+  if (recoveries.length > MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES) {
+    for (const recovery of recoveries.slice(MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES)) {
+      violations.push({
+        ...recovery,
+        reason: "COMMAND_TRANSPORT_RECOVERY_LIMIT_EXCEEDED",
+      });
+    }
+  }
+
+  return {
+    schemaVersion: "replay.command-transport-recovery.v1",
+    passed: violations.length === 0,
+    maximumRecoveries: MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES,
+    recoveryCount: recoveries.length,
+    recoveries,
+    violations,
+  };
+}
+
 /**
  * Validate replay API failures against the initial-market optimistic
- * concurrency contract. Archive preparation may advance the catalog epoch,
- * but the UI is allowed exactly one classified refresh/retry and that retry
- * must complete with the same POST path returning 201. Every other 4xx/5xx
- * remains a release failure.
+ * concurrency contract and the command acknowledgement-loss contract. Archive
+ * preparation may advance the catalog epoch, while a single bodyless command
+ * transport failure may reconcile through a byte-identical same-id retry.
+ * Every structured server failure and every unproved retry remains a release
+ * failure.
  */
 export function replayApiConcurrencyContract(capture) {
   const transitions = Array.isArray(capture?.replayApiResponses)
@@ -1444,10 +1583,15 @@ export function replayApiConcurrencyContract(capture) {
   const catalogEpochConflicts = [];
   const unexpectedFailures = [];
   const conflictCountByUrl = new Map();
+  const commandTransportRecovery = replayCommandTransportRecoveryContract(capture);
+  const recoveredRequestIds = new Set(
+    commandTransportRecovery.recoveries.map((item) => item.requestId),
+  );
 
   for (let index = 0; index < transitions.length; index += 1) {
     const response = transitions[index];
     if (Number(response?.status) < 400) continue;
+    if (recoveredRequestIds.has(response.requestId)) continue;
     const bodyRecord = bodiesByRequest.get(response.requestId);
     const body = parsedReplayApiResponseBody(bodyRecord);
     const pathname = (() => {
@@ -1500,21 +1644,34 @@ export function replayApiConcurrencyContract(capture) {
     });
   }
 
+  for (const violation of commandTransportRecovery.violations) {
+    if (unexpectedFailures.some((item) => item.requestId === violation.requestId)) continue;
+    unexpectedFailures.push({
+      requestId: violation.requestId,
+      method: violation.method,
+      url: violation.url,
+      status: violation.status,
+      responseBody: null,
+      reason: violation.reason,
+    });
+  }
+
   return {
-    schemaVersion: "replay.api-concurrency-contract.v1",
+    schemaVersion: "replay.api-concurrency-contract.v2",
     passed: unexpectedFailures.length === 0,
     catalogEpochConflictCount: catalogEpochConflicts.length,
     catalogEpochConflicts,
+    commandTransportRecovery,
     unexpectedFailures,
   };
 }
 
 /**
- * Correlate every replay.v3 command request with its HTTP response body. A
- * successful mutation is usable only when the route, request payload, and
- * response identify the same Run and command_id. Keep the full bounded record
- * in release evidence so a late soak failure cannot be diagnosed from URL and
- * status alone.
+ * Correlate every replay.v1 session and replay.v3 Run command request with its
+ * HTTP response body. A successful mutation is usable only when the route,
+ * request payload, and response identify the same session/Run and command_id.
+ * An initial bodyless infrastructure response is retained as a recovery record
+ * only after its exact canonical retry satisfies that same identity contract.
  */
 export function replayCommandResponseIdentityContract(capture) {
   const requests = Array.isArray(capture?.replayCommandRequests)
@@ -1534,56 +1691,74 @@ export function replayCommandResponseIdentityContract(capture) {
   );
   const records = [];
   const violations = [];
+  const transportRecovery = replayCommandTransportRecoveryContract(capture);
+  const recoveriesByRequest = new Map(
+    transportRecovery.recoveries.map((item) => [item.requestId, item]),
+  );
 
   for (const request of requests) {
     const response = responsesByRequest.get(request.requestId);
     const bodyRecord = bodiesByRequest.get(request.requestId);
     const requestBody = parsedReplayApiResponseBody({ body: request.postData });
     const responseBody = parsedReplayApiResponseBody(bodyRecord);
-    const routeRunId = (() => {
-      try {
-        const match = new URL(request.url).pathname.match(
-          /\/api\/v1\/replay\/runs\/([^/]+)\/commands$/,
-        );
-        return match === null ? null : decodeURIComponent(match[1]);
-      } catch {
-        return null;
-      }
-    })();
+    const route = replayCommandRoute(request.url);
+    const recovery = recoveriesByRequest.get(request.requestId);
     const status = Number(response?.status ?? 0);
     const record = {
       requestId: request.requestId,
       status,
-      routeRunId,
+      routeKind: route?.kind ?? null,
+      routeRunId: route?.kind === "run" ? route.id : null,
+      routeSessionId: route?.kind === "session" ? route.id : null,
       requestRunId: requestBody?.run_id ?? null,
       requestCommandId: requestBody?.command_id ?? null,
       requestType: requestBody?.type ?? null,
       responseRunId: responseBody?.run_id ?? null,
+      responseSessionId: responseBody?.session_id ?? null,
       responseCommandId: responseBody?.command_id ?? null,
+      recoveredByRequestId: recovery?.retryRequestId ?? null,
     };
     records.push(record);
 
     let reason = null;
     if (requestBody === null) reason = "COMMAND_REQUEST_BODY_INVALID";
+    else if (recovery !== undefined) reason = null;
     else if (response === undefined) reason = "COMMAND_RESPONSE_MISSING";
     else if (bodyRecord === undefined || responseBody === null) {
       reason = "COMMAND_RESPONSE_BODY_INVALID";
-    } else if (status >= 200 && status < 300 && (
-      routeRunId === null
-      || requestBody.run_id !== routeRunId
-      || responseBody.run_id !== routeRunId
-      || responseBody.command_id !== requestBody.command_id
-    )) {
+    } else if (status >= 200
+      && status < 300
+      && !replayCommandResponseMatches(route, requestBody, responseBody)) {
       reason = "COMMAND_RESPONSE_IDENTITY_MISMATCH";
     }
     if (reason !== null) violations.push({ ...record, reason });
   }
 
+  for (const violation of transportRecovery.violations) {
+    if (violations.some((item) => item.requestId === violation.requestId)) continue;
+    violations.push({
+      requestId: violation.requestId,
+      status: violation.status,
+      routeKind: replayCommandRoute(violation.url)?.kind ?? null,
+      routeRunId: null,
+      routeSessionId: null,
+      requestRunId: null,
+      requestCommandId: violation.commandId,
+      requestType: null,
+      responseRunId: null,
+      responseSessionId: null,
+      responseCommandId: null,
+      recoveredByRequestId: violation.retryRequestId,
+      reason: violation.reason,
+    });
+  }
+
   return {
-    passed: violations.length === 0,
+    passed: violations.length === 0 && transportRecovery.passed,
     requestCount: requests.length,
     responseCount: responsesByRequest.size,
     bodyCount: bodiesByRequest.size,
+    transportRecovery,
     records,
     violations,
   };
@@ -4047,19 +4222,29 @@ async function main() {
     assert(replayCapture.exceptions.length === 0, "primary replay target raised runtime exceptions", replayCapture.exceptions);
     assert(replayCapture.consoleErrors.length === 0, "primary replay target logged console errors", replayCapture.consoleErrors);
     const replayApi = replayApiConcurrencyContract(replayCapture);
+    const replayCommandIdentity = replayCommandResponseIdentityContract(
+      replayCapture,
+    );
+    phaseDiagnostics = {
+      phase: "post-run-replay-network-audit",
+      replayApi,
+      replayCommandIdentity,
+      recentReplayApiResponses: replayCapture.replayApiResponses.slice(-20),
+      recentReplayCommandRequests: replayCapture.replayCommandRequests.slice(-20),
+      recentReplayCommandResponses: replayCapture.replayCommandResponses.slice(-20),
+      recentFailedRequests: replayCapture.failedRequests.slice(-20),
+    };
     assert(
       replayApi.passed,
       "replay API returned unexpected or unbounded failures during soak",
       replayApi,
-    );
-    const replayCommandIdentity = replayCommandResponseIdentityContract(
-      replayCapture,
     );
     assert(
       replayCommandIdentity.passed,
       "replay command response identity changed during soak",
       replayCommandIdentity,
     );
+    phaseDiagnostics = null;
     const backendLogCounts = backendTail.counts();
     assert(backendLogCounts.backfillFailures === 0, "live coexistence fixture triggered an offline backfill failure", backendLogCounts);
 
@@ -4170,6 +4355,7 @@ async function main() {
         .filter((item) => item.framing === "length-prefixed-json-lines.v1")
         .every((item) => item.itemsAfterFinish === 0),
       replay_api_concurrency_bounded: replayApi.passed,
+      replay_command_transport_recovery_bounded: replayApi.commandTransportRecovery.passed,
       replay_command_response_identity_exact: replayCommandIdentity.passed,
       replay_runtime_clean: replayCapture.exceptions.length === 0 && replayCapture.consoleErrors.length === 0,
       lifecycle_runtime_clean: cycles.every((cycle) => cycle.consoleErrors.length === 0),

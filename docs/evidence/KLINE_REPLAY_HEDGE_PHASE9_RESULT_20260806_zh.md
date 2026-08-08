@@ -255,6 +255,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 用户于 2026-08-08 明确要求“跳过性能要求门槛”。该决策解释为删除所有 replay 正式 benchmark 的墙钟延迟/吞吐 PASS/FAIL 比较，而不是跳过 benchmark：BAR/AGG_TRADE throughput、segment GC/inventory、account-history step、HEDGE normal/liquidation 的真实数值仍必须由同 HEAD 正式 workload 生成并写入 artifact，policy 固定为 `MEASURE_ONLY_NON_BLOCKING`。
 - RSS/heap、late-half、queue/page、storage inventory、SQLite、审计、reference equivalence、1/2/4/8 矩阵、4 小时 soak 与 rollback 仍为硬门禁；没有新增环境变量、CLI opt-out、灰度、默认关闭或 fallback。历史 artifact 的 500/2,000/5,000 ms 与 5,000/600 events/s 只保留为历史测量参考，不再决定当前 release acceptance。
 
+### 3.24 正式 4 小时命令响应丢失与双协议恢复证据
+
+- `1cf1e66c75d1cf53d8e8b9b212e736747e87bfe8` 的正式真实来源、全量 checks、formal benchmark、真实浏览器 smoke 和 rollback 均通过。正式 soak 实际运行 `14,555.6 s`，完成 100/100 训练动作、archive lifecycle、lifecycle reload 与适配器恢复/重连，并以 `96,189.92 events/s` 完成 1,000,000 projection events；墙钟数值只记录，不参与 PASS/FAIL。
+- 该轮在所有周期完成后的网络审计阶段正确拒绝，没有生成 PASS artifact。唯一 replay API 失败为 `POST /api/v1/replay/runs/session/ee334a7d6e6746019c974bd751f9110f/commands -> 500`，响应体缺失。Vite 同一请求记录 `http proxy error` 与 `socket hang up`；backend 没有结构化 500、Traceback 或进程退出，并在此后继续约 14 分钟完成剩余周期。故现有证据只支持“代理到上游的命令确认响应丢失”，不支持把它伪装成业务成功或直接忽略。
+- 产品运行时原本已经采用 fail-closed 命令恢复：不确定响应会冻结后续 mutation，请求新的 WebSocket 原子快照，再以原始持久化 envelope 和同一 `command_id` 自动对账；后端按 canonical command ID 幂等返回已提交结果或只执行一次。缺口在 soak capture 只匹配 `replay.v3 /runs/{run_id}/commands`，没有捕获 `replay.v1 /runs/session/{session_id}/commands`，所以最终审计看得到无 body 的 500，却无法证明随后同命令对账成功。
+- soak 现同时捕获两种命令路由及 request/response/body/loading-failed 记录。`replay.command-transport-recovery.v1` 只接受：首次为已实际捕获但无可解析 body 的 5xx 或 Network loading failure；后续只有一次 byte-identical method/URL/body 重试；请求 `command_id` 不变；成功响应的 protocol、Run/session、`command_id` 和 v1 `expected_revision + 1` 与路由及请求完全一致。正式 4 小时内最多接受 1 个这样的完整恢复链；第二次传输丢失、第二次 retry、修改 revision/payload、缺 retry、非 2xx、身份错配或任何结构化 5xx 都硬失败。
+- `replay.api-concurrency-contract.v2` 将已证明的单次 exactly-once 恢复与 catalog epoch 冲突分别记录，不把它们降格为状态码白名单；`replayCommandResponseIdentityContract` 仍逐条保留首次失败和成功对账。最终网络审计在 assertion 前写入 `phaseDiagnostics`，以后即使拒绝也会保存恢复链、最近命令及 failed request，而不是只留下一个 requestId。
+- 定向 harness `48 passed`，覆盖 v1 实际捕获、无 body 500 成功对账、Network loading failure、修改 canonical envelope、结构化 persistence 503、超过一次恢复和 v3 stale-200 身份错配。该修复提交会生成新 HEAD；旧 `1cf1e66c` 的来源、checks、benchmark、smoke、rollback 和失败 soak 都只能作为根因证据，正式 Phase 9 必须在新 clean HEAD 从头重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

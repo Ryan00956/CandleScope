@@ -556,6 +556,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 完成记录（2026-08-06，以候选提交后的 clean-HEAD 外部 release manifest 为最终判定）：逐轨 HEDGE public archive binding/projection/applied receipt、真实 ADD_TRACK 多标的输入、全局屏障强平判定、22 项验收矩阵、HEDGE 浏览器 fixture/账户连续性和 release manifest v3 已实现。候选提交前 replay 后端 `916 passed`，前端综合门禁 `2936 passed`；8 FULL 双腿普通 wave p95 `357.662 ms`，强平 wave p95/max `1374.952 ms`，冻结阈值未调整。完整构建回滚工具已跟随两阶段 Run/market、`adapter_session_id`、`replay.v3` wire、可见但禁用的紧急停机入口和 cross-root 前回放基线隔离合同。长时诊断已修复 MarketTrack 权威刷新饥饿、CDP Network 观测保留、计划重载请求竞态、挂起绘图 RAF 和冻结 replay rail transition；`f7cee596` 的 40-cycle 压缩门禁在原 `64 MiB / 32 MiB` 堆阈值下全部通过。初始 market 的 catalog epoch 乐观并发现在按 requestId/body 严格证明最多一次 `409 CATALOG_EPOCH_MISMATCH -> 201`，其他 4xx/5xx 仍拒绝；`f4c47cbd` 的真实 smoke 31 项与 rollback 17 项 acceptance 全真。训练命令成功响应现在还必须精确匹配请求 `run_id/command_id`，soak 独立保留并关联全部命令 request/response/body；`fb42c834` 的压缩 100-cycle 复验完成 100/100 training/archive lifecycle、712/712 命令身份关联且 32 项 acceptance 全真，越过旧 cycle 70 错配故障边界。该结果只允许进入最终证据链，正式真实来源、全量 checks、benchmark、smoke、rollback、4 小时 soak 和 manifest 仍必须在本记录提交后的同一 clean HEAD 从头执行。详见 [`evidence/KLINE_REPLAY_HEDGE_PHASE9_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE9_RESULT_20260806_zh.md)。
 
+后续正式 4 小时轮在完成 100/100 周期后捕获到一次 `replay.v1` session command 的无响应体代理 500。产品已经按同一 canonical `command_id` 在新权威快照后 fail-closed 对账，验收捕获却只覆盖 `replay.v3` Run command，无法证明恢复链，因此该轮保持 FAIL。正式 soak 现同时捕获 v1/v3 命令，并新增硬合同：最多 1 次无结构化响应的传输丢失，必须由唯一一次 method/URL/body 字节完全相同的重试和匹配 protocol、Run/session、`command_id` 的 2xx 响应闭环；结构化 5xx、第二次丢失/重试、修改命令或身份不一致仍拒绝。修复后的新 clean HEAD 必须重跑本阶段全部正式证据。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

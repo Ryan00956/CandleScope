@@ -231,6 +231,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 增量验证中绘图 scheduler 定向测试 `57 passed`，完整 frontend 分别为 `2960 passed` 和 `2961 passed`；双 tsconfig typecheck、定向 ESLint 与 `git diff --check` 通过。`f7cee596fafab7e9fca73af5910fa8703dedb891` 的 clean-HEAD 40-cycle 压缩复验随后运行 `1,822,766 ms`，完成 40/40 训练动作、archive lifecycle、lifecycle reload、订单成交与适配器恢复/重连，并以 `72,737.324 events/s` 完成 1,000,000 projection events；primary/late heap 增长为 `7,554,876 / 8,620,156 B`，盲审通过，30 项 acceptance 全部为真，报告 hash 为 `sha256:ed0c2bc6aeb8fa4554ac2419d01ff89e48b5cb2a4c2068ce16ffc4bddc6d6973`。
 - `64 MiB / 32 MiB` 堆门槛、40 次压缩生命周期、100 次正式生命周期、1,000,000 projection events 和其余发布条件均未放宽。该 PASS 只完成进入正式证据链前的高密度内存门禁；本节文档提交会产生新 HEAD，因此真实来源、全量 checks、formal benchmark、真实浏览器 smoke、rollback、正式 4 小时 soak 和 release manifest 仍须在新 clean HEAD 从头重跑，不能继承 `f7cee596` artifact。
 
+### 3.21 非隔离性能失败与 catalog epoch 重试证据
+
+- `59378424f2ae8f707644c085d970cd7f56665b70` 的真实来源校验和全量 release checks 通过：官方 AGG_TRADE exact/nonempty/checksum 与真实 BAR 连续、只读、双标的 6 项全真；后端 `3251 passed`、前端 `2961 passed`。formal benchmark 随后在第一个 `core-v1` 组件 fail closed：BAR actor `3250.36 events/s` 低于冻结 `5000`，AGG_TRADE `741.27` 仍高于 `600`。同参数独立诊断没有挑选好结果，第二次 BAR 为 `2775.62`、AGG_TRADE 为 `619.86`，因此正式 `benchmark.json` 未生成。
+- 同机最近两个 clean-HEAD PASS 基线的 BAR/AGG_TRADE 分别为 `7721.97 / 868.29` 和 `6997.28 / 1030.22 events/s`；从后一 PASS 到 `59378424` 没有 backend 或性能 baseline 文件变化。失败时三个 3 秒 CPU 采样均显示独立 24 小时 alerts soak、两个 MuMu VM 和 sing-box 持续占用多个核心。发布门禁没有停止或修改这些不属于本任务的进程，也没有提高优先级、固定亲和性、降低样本或放宽 `5000 / 600`；该机器状态不能产生可信的正式性能 PASS。
+- 同一 HEAD 的真实浏览器 smoke 完成全部产品动作后发现一次 `/api/v1/replay/runs/<id>/markets` 409，并按“任何 replay API >=400”旧断言拒绝。旧失败 artifact 只保存 URL/status，未保存该响应 body，因此不能事后声称它一定是哪个 error code。代码合同同时明确：归档准备可能推进 catalog epoch，客户端只允许 `CATALOG_EPOCH_MISMATCH` 刷新并重试一次；无分类 409、重复冲突或未成功重试都必须失败。
+- harness 现按 CDP requestId 关联 method、URL、status 与 response body，并为初始 market POST 保存一个独立有界 transition 集。新 `replay.api-concurrency-contract.v1` 仅接受 `POST /runs/<id>/markets -> 409 CATALOG_EPOCH_MISMATCH -> 同 URL POST 201`，每个 URL 最多一次；body 缺失、`TRAINING_RUN_BUSY` 等其他 409、第二次 epoch 冲突、没有后续 201 以及任何其他 4xx/5xx 均继续 fail closed。acceptance 新增严格布尔 `replay_api_concurrency_bounded`，不是状态码白名单或网络失败豁免。
+- 分类器与真实 capture 回归 `41 passed`；完整 frontend 架构、插件边界、双 typecheck、lint、`2966 passed` 和 production build 全部通过。修复提交 `f4c47cbd44d2a7a2197a6a99496cc8846e3c0fd7` 的真实 smoke 随后以 31 项 acceptance 全真通过，本轮 catalog epoch conflict 为 `0`，证明无错误时不会制造合成重试证据；完整构建 rollback 的 17 项 acceptance 也全真，旧 backend replay route 为 404，禁用重启与旧构建保持 replay.db 和 Phase 18 存储语义。
+- `f4c47cbd` 的 smoke/rollback 只验证修复和命令就绪；本节文档提交再次生成新 HEAD。最终来源、全量 checks、完整 benchmark、smoke、rollback、正式 4 小时 soak 和 manifest 必须全部绑定新 clean HEAD，性能环境仍须先恢复到可重复状态。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

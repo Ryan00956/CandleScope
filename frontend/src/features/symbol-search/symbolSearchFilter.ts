@@ -101,6 +101,62 @@ export function buildMarketTabs({
   });
 }
 
+function marketTypeFamily(marketType: string): string {
+  const normalized = marketType.trim().toLowerCase();
+  if (normalized === "spot" || normalized.startsWith("spot.")) return "spot";
+  if (normalized === "option" || normalized.startsWith("option.")) return "option";
+  if (
+    normalized === "futures"
+    || normalized === "future"
+    || normalized === "swap"
+    || normalized === "perpetual"
+    || normalized.startsWith("future.")
+    || normalized.startsWith("swap.")
+    || normalized.startsWith("perpetual.")
+  ) return "derivatives";
+  return normalized;
+}
+
+function derivativePreference(marketType: string): number {
+  const normalized = marketType.trim().toLowerCase();
+  return [
+    "futures",
+    "swap.linear",
+    "swap",
+    "perpetual.linear",
+    "perpetual",
+    "future.linear",
+    "future",
+    "swap.inverse",
+    "future.inverse",
+  ].indexOf(normalized);
+}
+
+export function resolveExchangeMarketType(
+  currentMarketType: string,
+  marketTabs: readonly MarketTab[],
+): string {
+  const available = marketTabs.filter((tab) => tab.key !== "favorites");
+  const normalizedCurrent = currentMarketType.trim().toLowerCase();
+  const exact = available.find((tab) => tab.key.trim().toLowerCase() === normalizedCurrent);
+  if (exact) return exact.key;
+
+  const currentFamily = marketTypeFamily(normalizedCurrent);
+  const sameFamily = available.filter((tab) => marketTypeFamily(tab.key) === currentFamily);
+  if (sameFamily.length > 0) {
+    if (currentFamily === "derivatives") {
+      return [...sameFamily].sort((left, right) => {
+        const leftPreference = derivativePreference(left.key);
+        const rightPreference = derivativePreference(right.key);
+        return (leftPreference < 0 ? Number.MAX_SAFE_INTEGER : leftPreference)
+          - (rightPreference < 0 ? Number.MAX_SAFE_INTEGER : rightPreference);
+      })[0]?.key || sameFamily[0]!.key;
+    }
+    return sameFamily[0]!.key;
+  }
+  return available[0]?.key || "favorites";
+}
+
 export function filterSymbols({
   allSymbols,
   marketType,

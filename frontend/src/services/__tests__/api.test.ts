@@ -5,6 +5,7 @@ import {
   ApiError,
   buildCacheLimitsRequestBody,
   fetchExchangeCapabilities,
+  fetchExchangeInfo,
   fetchExchanges,
   fetchKlinesBefore,
   fetchKlinesHistory,
@@ -294,6 +295,25 @@ test("exchange endpoints validate the list and capabilities shapes", async (cont
     exchanges: [exchangeCapability({ channels: [{ channel: "kline" }] })],
   });
   await assert.rejects(() => fetchExchanges(), ApiPayloadError);
+});
+
+test("symbol catalog reads encode exact CCXT markets and forward cancellation", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const controller = new AbortController();
+  let capturedUrl = "";
+  let capturedSignal: AbortSignal | null | undefined;
+  globalThis.fetch = async (url, options) => {
+    capturedUrl = String(url);
+    capturedSignal = options?.signal;
+    return jsonResponse({ symbols: [] });
+  };
+
+  await fetchExchangeInfo("swap.linear", "bybit", { signal: controller.signal });
+
+  assert.match(capturedUrl, /market_type=swap\.linear/);
+  assert.match(capturedUrl, /exchange=bybit/);
+  assert.equal(capturedSignal, controller.signal);
 });
 
 test("subscription endpoints validate list and sync payloads", async (context) => {

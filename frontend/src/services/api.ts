@@ -377,11 +377,15 @@ export function getBatchKlineStreamUrl(): string {
 }
 
 // Exchange-info payloads remain unknown until their T10 symbol/settings owners migrate.
-export async function fetchExchangeInfo(marketType = "", exchange = ""): Promise<unknown> {
+export async function fetchExchangeInfo(
+  marketType = "",
+  exchange = "",
+  options: RequestSignalOptions = {},
+): Promise<unknown> {
   return request(buildUrl("/symbols/exchange-info", {
     market_type: marketType,
     exchange,
-  }));
+  }), requestSignalOptions(options.signal));
 }
 
 export async function fetchSupportedExchanges(): Promise<ExchangeListPayload> {

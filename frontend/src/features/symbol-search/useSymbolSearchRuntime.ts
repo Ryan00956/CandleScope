@@ -10,6 +10,7 @@ import {
   filterSymbols,
   getSymbolWatchlists,
   isSameSymbolEntry,
+  resolveExchangeMarketType,
 } from "./symbolSearchFilter";
 import type {
   Dispatch,
@@ -236,8 +237,16 @@ export function useSymbolSearchRuntime({
   }, []);
 
   const selectExchange = useCallback((exchange: string) => {
-    setExchangeFilter(new Set([exchange]));
-  }, []);
+    const nextExchangeFilter = new Set([exchange]);
+    const nextMarketTabs = buildMarketTabs({
+      allSymbols: catalog.allSymbols,
+      exchangeFilter: nextExchangeFilter,
+      ...(exchangeCatalog === undefined ? {} : { exchangeCatalog }),
+    });
+    const nextMarketType = resolveExchangeMarketType(marketType, nextMarketTabs);
+    setExchangeFilter(nextExchangeFilter);
+    setMarketType(nextMarketType);
+  }, [catalog.allSymbols, exchangeCatalog, marketType]);
 
   const openContextMenu = useCallback((event: ReactMouseEvent, symbol: string, symbolKey: string) => {
     event.preventDefault();

@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchExchangeInfo, refreshExchangeInfo } from "../../services/api";
 import { symbolKey } from "../../utils/symbolKey";
+import {
+  sharedSymbolCatalogClientCache,
+  type SymbolCatalogRequest,
+} from "./symbolCatalogClientCache";
 import type { SymbolSearchItem } from "./symbolSearchTypes.js";
 
 const SYMBOL_CATALOG_RETRY_BASE_MS = 1_000;
 const SYMBOL_CATALOG_RETRY_MAX_MS = 15_000;
 
-export function symbolCatalogRetryDelayMs(attempt: number): number {
-  return Math.min(
+export function symbolCatalogRetryDelayMs(
+  attempt: number,
+  retryAtMs: number | null = null,
+  nowMs = Date.now(),
+): number {
+  const exponentialDelay = Math.min(
     SYMBOL_CATALOG_RETRY_MAX_MS,
     SYMBOL_CATALOG_RETRY_BASE_MS * (2 ** Math.max(0, Math.min(4, attempt))),
   );
+  const serverDelay = retryAtMs == null ? 0 : Math.max(0, retryAtMs - nowMs);
+  return Math.max(exponentialDelay, serverDelay);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,6 +43,26 @@ export function symbolCatalogNeedsRetry(payload: unknown): boolean {
   return Object.values(payload.markets).some((value) => (
     isRecord(value) && (value.stale === true || value.refreshing === true)
   ));
+}
+
+export function symbolCatalogRetryAtMs(value: unknown): number | null {
+  if (typeof value === "string") {
+    try {
+      return symbolCatalogRetryAtMs(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  if (!isRecord(value)) return null;
+  const direct = Number(value.retry_at_ms);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const detail = symbolCatalogRetryAtMs(value.detail);
+  if (detail != null) return detail;
+  if (!isRecord(value.markets)) return null;
+  const marketRetryTimes = Object.values(value.markets)
+    .map((market) => symbolCatalogRetryAtMs(market))
+    .filter((retryAt): retryAt is number => retryAt != null);
+  return marketRetryTimes.length > 0 ? Math.max(...marketRetryTimes) : null;
 }
 
 export function enrichSymbols(symbols: unknown = []): SymbolSearchItem[] {
@@ -73,10 +103,6 @@ export function useSymbolCatalogRuntime({
   requestedExchanges?: ReadonlySet<string>;
   open: boolean;
 }): SymbolCatalogRuntime {
-  const [allSymbols, setAllSymbols] = useState<SymbolSearchItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [retryEpoch, setRetryEpoch] = useState(0);
   const exchangeRequestKey = Array.from(
     requestedExchanges?.size ? requestedExchanges : [currentExchange],
   )
@@ -85,57 +111,89 @@ export function useSymbolCatalogRuntime({
     .sort()
     .join(",");
   const marketRequestKey = requestedMarketType.trim().toLowerCase();
+  const initialRequests = exchangeRequestKey.split(",").filter(Boolean).map((exchange) => ({
+    exchange,
+    marketType: marketRequestKey,
+  }));
+  const [allSymbols, setAllSymbols] = useState<SymbolSearchItem[]>(() => (
+    sharedSymbolCatalogClientCache.readAll()
+  ));
+  const [loading, setLoading] = useState(() => (
+    open && sharedSymbolCatalogClientCache.shouldBlock(initialRequests)
+  ));
+  const [refreshing, setRefreshing] = useState(false);
+  const [retryEpoch, setRetryEpoch] = useState(0);
 
   useEffect(() => {
     if (!open) return undefined;
 
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeControllers: AbortController[] = [];
     let attempt = 0;
-    const requested = exchangeRequestKey.split(",").filter(Boolean);
+    const requests: SymbolCatalogRequest[] = exchangeRequestKey
+      .split(",")
+      .filter(Boolean)
+      .map((exchange) => ({ exchange, marketType: marketRequestKey }));
 
     const load = async () => {
       if (cancelled) return;
-      setLoading(true);
+      setLoading(sharedSymbolCatalogClientCache.shouldBlock(requests));
+      activeControllers = requests.map(() => new AbortController());
       try {
         const responses = await Promise.allSettled(
-          requested.map(async (exchange) => ({
-            exchange,
-            data: await fetchExchangeInfo(marketRequestKey, exchange),
+          requests.map(async (request, index) => ({
+            request,
+            data: await fetchExchangeInfo(request.marketType, request.exchange, {
+              signal: activeControllers[index]!.signal,
+            }),
           })),
         );
-        const successful = responses.flatMap((result) => (
-          result.status === "fulfilled" ? [result.value] : []
-        ));
-        const enriched = successful.flatMap(({ data }) => enrichSymbols(symbolList(data) || []));
         if (cancelled) return;
-        if (enriched.length > 0) {
-          const requestedSet = new Set(
-            requested.map((exchange) => `${exchange}:${marketRequestKey}`),
+
+        let retryNeeded = false;
+        const retryAtTimes: number[] = [];
+        for (let index = 0; index < responses.length; index += 1) {
+          const result = responses[index]!;
+          const request = requests[index]!;
+          const retryAtMs = symbolCatalogRetryAtMs(
+            result.status === "fulfilled" ? result.value.data : result.reason,
           );
-          setAllSymbols((previous) => [
-            ...previous.filter(
-              (item) => !requestedSet.has(`${item.exchange}:${item.marketType}`),
-            ),
-            ...enriched,
-          ]);
-          if (
-            successful.length === requested.length
-            && successful.every(({ data }) => !symbolCatalogNeedsRetry(data))
-          ) return;
+          if (retryAtMs != null) retryAtTimes.push(retryAtMs);
+          if (result.status === "rejected") {
+            sharedSymbolCatalogClientCache.rememberAttempt(request);
+            retryNeeded = true;
+            continue;
+          }
+          const enriched = enrichSymbols(symbolList(result.value.data) || []);
+          sharedSymbolCatalogClientCache.remember(request, enriched);
+          if (symbolCatalogNeedsRetry(result.value.data)) retryNeeded = true;
+        }
+        setAllSymbols(sharedSymbolCatalogClientCache.readAll());
+        if (!retryNeeded) return;
+        if (sharedSymbolCatalogClientCache.read(requests).length > 0) {
           console.warn("Exchange symbol catalog is partial or stale; retrying");
         } else {
           console.warn("Exchange symbol catalog returned no usable symbols; retrying");
         }
+        const retryAtMs = retryAtTimes.length > 0 ? Math.max(...retryAtTimes) : null;
+        const delay = symbolCatalogRetryDelayMs(attempt, retryAtMs);
+        attempt += 1;
+        retryTimer = setTimeout(() => { void load(); }, delay);
       } catch (error) {
-        if (!cancelled) console.warn("Failed to load exchange info; retrying:", error);
+        if (!cancelled) {
+          for (const request of requests) {
+            sharedSymbolCatalogClientCache.rememberAttempt(request);
+          }
+          setAllSymbols(sharedSymbolCatalogClientCache.readAll());
+          console.warn("Failed to load exchange info; retrying:", error);
+          const delay = symbolCatalogRetryDelayMs(attempt, symbolCatalogRetryAtMs(error));
+          attempt += 1;
+          retryTimer = setTimeout(() => { void load(); }, delay);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
-      if (cancelled) return;
-      const delay = symbolCatalogRetryDelayMs(attempt);
-      attempt += 1;
-      retryTimer = setTimeout(() => { void load(); }, delay);
     };
 
     void load();
@@ -143,6 +201,7 @@ export function useSymbolCatalogRuntime({
     return () => {
       cancelled = true;
       if (retryTimer != null) clearTimeout(retryTimer);
+      for (const controller of activeControllers) controller.abort();
     };
   }, [exchangeRequestKey, marketRequestKey, open, retryEpoch]);
 
@@ -155,13 +214,11 @@ export function useSymbolCatalogRuntime({
       const symbols = symbolList(data);
       if (symbols) {
         const enriched = enrichSymbols(symbols);
-        setAllSymbols((previous) => [
-          ...previous.filter((item) => !(
-            item.exchange === selectedExchange
-            && item.marketType === marketRequestKey
-          )),
-          ...enriched,
-        ]);
+        sharedSymbolCatalogClientCache.remember({
+          exchange: selectedExchange,
+          marketType: marketRequestKey,
+        }, enriched);
+        setAllSymbols(sharedSymbolCatalogClientCache.readAll());
         if (symbolCatalogNeedsRetry(data)) {
           setRetryEpoch((value) => value + 1);
         }

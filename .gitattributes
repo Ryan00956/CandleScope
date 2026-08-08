@@ -6,5 +6,36 @@ frontend/scripts/replay-rollback-drill.* text eol=lf
 
 # Plugin Platform Phase 0 freezes these fixtures by exact SHA-256.
 backend/app/official-plugin-releases.json text eol=lf
+backend/app/plugin_runtime_registry_v3/official-runtime-registry*.json text eol=lf
 backend/tests/fixtures/plugin_runtime/pyne_transport_v1.json text eol=lf
 packages/candlescope-plugin-sdk/tests/fixtures/hello_transcript_v1.json text eol=lf
+
+# Multi-runtime gates freeze SDK bundle bytes from the historical Windows
+# release layout. Preserve that reviewed layout in every worktree.
+packages/candlescope-plugin-sdk/src/** text eol=crlf
+packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/chart.py text eol=lf
+packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/render.py text eol=lf
+packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/schemas/manifest-v3.schema.json text eol=lf
+packages/candlescope-plugin-sdk/examples/platform-v2/hello-command.manifest.json text eol=crlf
+packages/candlescope-plugin-sdk/tests/fixtures/hello_command_transcript_v2.json text eol=crlf
+
+# Phase 3 freezes the native Rust reference sources byte-for-byte.
+examples/plugin-platform-native-rust/Cargo.lock text eol=lf
+examples/plugin-platform-native-rust/src/main.rs text eol=lf
+
+# Later multi-runtime gates also hash these reviewed evidence inputs directly.
+backend/tests/fixtures/plugin_platform_multi_runtime/phase6_python_sandbox_probe.py text eol=lf
+backend/tests/fixtures/plugin_platform_multi_runtime/Phase6JavaSandboxProbe.java text eol=lf
+docs/plugin-adapters/aho-corasick-assessment.json text eol=lf
+examples/plugins/aho-corasick-adapter/source-lock.json text eol=lf
+examples/plugins/aho-corasick-adapter/build-receipt.json text eol=lf
+examples/plugins/aho-corasick-adapter/.cargo/config.toml text eol=lf
+examples/plugins/aho-corasick-adapter/Cargo.lock text eol=lf
+examples/plugins/aho-corasick-adapter/Cargo.toml text eol=lf
+examples/plugins/aho-corasick-adapter/scripts/build_release.py text eol=lf
+examples/plugins/aho-corasick-adapter/src/** text eol=lf
+
+# Phase 8 freezes the Rust WASM SDK lockfile and source tree.
+packages/candlescope-plugin-sdk-rust-wasm/Cargo.lock text eol=lf
+packages/candlescope-plugin-sdk-rust-wasm/Cargo.toml text eol=lf
+packages/candlescope-plugin-sdk-rust-wasm/src/** text eol=lf

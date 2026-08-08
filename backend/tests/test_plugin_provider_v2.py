@@ -265,9 +265,12 @@ async def test_provider_kline_stream_is_observable_as_plugin_stream_and_emits_am
         )
         aggregator.add_target("BTCUSDT", "1m", exchange="mock", market_type="spot")
         aggregate_events = []
+        amended_ready = asyncio.Event()
 
         async def capture_aggregate(event) -> None:
             aggregate_events.append(event)
+            if event.event_type == BarEventType.AMENDED:
+                amended_ready.set()
 
         aggregator.publisher.on_bar_event(capture_aggregate)
         await aggregator.start()
@@ -283,6 +286,7 @@ async def test_provider_kline_stream_is_observable_as_plugin_stream_and_emits_am
 
         pipeline.delivery.on_market_event(capture)
         await asyncio.wait_for(ready.wait(), timeout=3.0)
+        await asyncio.wait_for(amended_ready.wait(), timeout=3.0)
         assert pipeline.feed_control.mode == FeedMode.PLUGIN_STREAM
         assert [event.data["finality"] for event in events[:3]] == [
             "final",

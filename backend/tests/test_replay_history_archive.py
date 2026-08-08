@@ -1184,7 +1184,7 @@ async def test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail(
         assert service.training is not None
         with pytest.raises(TrainingRunError) as early_rejected:
             await service.training.create_run(early_request)
-        assert early_rejected.value.code == "TRAINING_RUN_CREATE_FAILED"
+        assert early_rejected.value.code == "MARKET_UNSUPPORTED_AT_COMMITTED_START"
         assert early_rejected.value.details["reason"] == "NO_ELIGIBLE_WINDOW"
 
         reachable_floor_ms = START_MS + 13 * INTERVAL_MS

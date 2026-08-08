@@ -780,6 +780,73 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
     assert exchange.closed is True
 
 
+def test_binance_primary_full_depth_rest_preserves_snapshot_limit(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets = {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "swap": True,
+                    "linear": True,
+                }
+            }
+            self.params: dict[str, Any] | None = None
+            self.closed = False
+
+        async def load_markets(self) -> None:
+            return None
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_depth(
+            self,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            self.params = params
+            return {
+                "lastUpdateId": 123,
+                "E": 1000,
+                "T": 1000,
+                "bids": [["65000.0", "1.0"]],
+                "asks": [["65000.1", "2.0"]],
+            }
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    descriptor = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.FULL_DEPTH,
+        exchange="binance",
+        market_type="futures",
+        update_interval_ms=250,
+    )
+    messages = asyncio.run(
+        plugin.fetch_history_with_config(
+            TransportRequest(descriptor, limit=1000),
+            IngestionConfig(proxy_mode="none"),
+        )
+    )
+
+    assert exchange.params == {"symbol": "BTCUSDT", "limit": 1000}
+    assert messages[0].request_limit == 1000
+    event = plugin.normalizer(IngestionConfig(), descriptor).parse(messages[0])
+    assert event is not None
+    assert event.data["snapshot_limit"] == 1000
+    assert exchange.closed is True
+
+
 def test_global_registry_contains_every_pinned_id() -> None:
     registry = get_exchange_registry()
     bootstrap_default_adapters()

@@ -473,7 +473,12 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
                     else exchange.public_get_depth
                 )
                 values = [await method(params)]
-            return _raw_messages(descriptor, values, "ccxt+rest://binance")
+            return _raw_messages(
+                descriptor,
+                values,
+                "ccxt+rest://binance",
+                request_limit=params.get("limit"),
+            )
         finally:
             await close_ccxt_exchange(exchange)
 
@@ -762,6 +767,8 @@ def _raw_messages(
     descriptor: StreamDescriptor,
     values: Any,
     endpoint: str,
+    *,
+    request_limit: int | None = None,
 ) -> list[RawMessage]:
     rows = values if isinstance(values, list) else [values]
     received = int(time.time() * 1000)
@@ -773,6 +780,7 @@ def _raw_messages(
             received_at_ms=received,
             endpoint=endpoint,
             http_status=200,
+            request_limit=request_limit,
         )
         for value in rows
     ]

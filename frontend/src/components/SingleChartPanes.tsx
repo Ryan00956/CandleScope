@@ -138,6 +138,7 @@ import {
   isMainPanePlotPointerStart,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
+  restoreLinkedCrosshairAfterInternalRefresh,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
   resolveLeftHistoryDemand,
@@ -179,6 +180,7 @@ import {
   buildSurfaceViewportSnapshot,
   createProjector,
   findDisplayIndexForAxisAnchor,
+  findNumericDisplayIndexForTimeAnchor,
   getChartTypeDescriptor,
   isOrdinalAxisTime,
   isLastDisplayTargetForSourceTime,
@@ -334,6 +336,14 @@ type AdapterPriceScale = ReturnType<AdapterChart["priceScale"]>;
 type PriceScaleOptions = ReturnType<AdapterPriceScale["options"]>;
 type PriceScaleOptionsPatch = Parameters<AdapterPriceScale["applyOptions"]>[0];
 type ChartCrosshairParam = Parameters<Parameters<AdapterChart["subscribeCrosshairMove"]>[0]>[0];
+
+type LinkedCrosshairRenderState = {
+  axisKey: string | null;
+  axisTime: AxisTime | null;
+  chart: AdapterChart;
+  price: number | null;
+  sourceTime: number | null;
+};
 type VisibleLogicalRange = Parameters<
   Parameters<ReturnType<AdapterChart["timeScale"]>["subscribeVisibleLogicalRangeChange"]>[0]
 >[0];
@@ -1393,6 +1403,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const intervalRef = useRef(interval);
   const appliedAppearanceIntervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
+  const linkedCrosshairRenderStateRef = useRef<LinkedCrosshairRenderState | null>(null);
   const isRestoringViewportRef = useRef(false);
   const userInteractedRef = useRef(false);
   const followLatestDisabledRef = useRef(false);
@@ -2524,31 +2535,54 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const chart = chartRef.current;
     const series = mainSeriesRef.current;
     if (!chart || !series) return false;
+    const clearLinkedCrosshair = () => {
+      const previous = linkedCrosshairRenderStateRef.current;
+      if (previous?.chart !== chart || previous.axisKey !== null) {
+        chart.clearCrosshairPosition();
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+      }
+      linkedCrosshairRenderStateRef.current = {
+        axisKey: null,
+        axisTime: null,
+        chart,
+        price: null,
+        sourceTime: null,
+      };
+    };
     const previousSyncing = isSyncingRef.current;
     isSyncingRef.current = true;
     try {
       if (time === null || !Number.isFinite(time)) {
-        chart.clearCrosshairPosition();
-        paneCrosshairStore.publish(null);
-        publishMainLegendCrosshair(null);
+        clearLinkedCrosshair();
         return true;
       }
-      const displayIndex = findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
+      const numericTimeIndex = surfaceAxisModeRef.current === "time"
+        ? findNumericDisplayIndexForTimeAnchor(displayRowsRef.current, time)
+        : -1;
+      const displayIndex = numericTimeIndex >= 0
+        ? numericTimeIndex
+        : findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
       const displayRow = displayRowsRef.current[displayIndex] ?? null;
       if (!displayRow) {
-        chart.clearCrosshairPosition();
-        paneCrosshairStore.publish(null);
-        publishMainLegendCrosshair(null);
+        clearLinkedCrosshair();
         return false;
       }
       const sourceTime = resolveSourceTime(displayRow.time, displayRow);
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
       const price = Number(displayRow.close ?? displayRow.value ?? sourceRow?.close);
       if (!Number.isFinite(price)) {
-        chart.clearCrosshairPosition();
-        paneCrosshairStore.publish(null);
-        publishMainLegendCrosshair(null);
+        clearLinkedCrosshair();
         return false;
+      }
+      const displayAxisKey = axisTimeKey(displayRow.time);
+      const previous = linkedCrosshairRenderStateRef.current;
+      if (displayAxisKey !== null
+        && previous?.chart === chart
+        && previous.axisKey === displayAxisKey
+        && previous.price === price
+        && previous.sourceTime === sourceTime) {
+        return true;
       }
       chart.setCrosshairPosition(price, displayRow.time, series);
       paneCrosshairStore.publish(sourceTime);
@@ -2559,6 +2593,15 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         displayRow || sourceRow,
         { includeVolume, volumeRow: sourceRow },
       ));
+      linkedCrosshairRenderStateRef.current = displayAxisKey === null
+        ? null
+        : {
+            axisKey: displayAxisKey,
+            axisTime: displayRow.time,
+            chart,
+            price,
+            sourceTime,
+          };
       return true;
     } catch {
       return false;
@@ -2842,6 +2885,23 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     const handleCrosshairMove = (param: ChartCrosshairParam) => {
       if (isSyncingRef.current) return;
+      const linkedState = linkedCrosshairRenderStateRef.current;
+      if (linkedState?.chart === chart && param.sourceEvent === undefined) {
+        const previousSyncing = isSyncingRef.current;
+        isSyncingRef.current = true;
+        try {
+          restoreLinkedCrosshairAfterInternalRefresh(
+            chart,
+            mainSeriesRef.current,
+            linkedState,
+            param.sourceEvent,
+          );
+        } finally {
+          isSyncingRef.current = previousSyncing;
+        }
+        return;
+      }
+      linkedCrosshairRenderStateRef.current = null;
       if (param.time == null) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
@@ -2994,6 +3054,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
       paneCrosshairStore.clear();
+      if (linkedCrosshairRenderStateRef.current?.chart === chart) {
+        linkedCrosshairRenderStateRef.current = null;
+      }
       publishMainLegendCrosshair(null);
       reportCrosshairMove(null);
       const drawingBoundary = resolveDrawingSurfaceChartTypeBoundary(

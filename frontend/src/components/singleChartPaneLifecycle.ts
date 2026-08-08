@@ -7,6 +7,42 @@ import type { SeriesWindowStore } from "../features/market-data/window/seriesWin
 const EMPTY_DATA_TIME_SET: ReadonlySet<number> = new Set<number>();
 const EMPTY_OPTIONAL_CHART_COLLECTION: never[] = [];
 
+export interface LinkedCrosshairRefreshState<TChart, TAxisTime> {
+  axisTime: TAxisTime | null;
+  chart: TChart;
+  price: number | null;
+}
+
+interface LinkedCrosshairChartSurface<TAxisTime, TSeries> {
+  clearCrosshairPosition(): void;
+  setCrosshairPosition(price: number, horizontalPosition: TAxisTime, series: TSeries): void;
+}
+
+/**
+ * Lightweight Charts can emit a source-less crosshair event after a series
+ * refresh. When the crosshair is currently owned by a linked chart, restore
+ * its authoritative linked position and consume that synthetic refresh. A
+ * real mouse/touch event carries `sourceEvent` and is allowed to take over.
+ */
+export function restoreLinkedCrosshairAfterInternalRefresh<
+  TAxisTime,
+  TSeries,
+  TChart extends LinkedCrosshairChartSurface<TAxisTime, TSeries>,
+>(
+  chart: TChart,
+  series: TSeries | null | undefined,
+  state: LinkedCrosshairRefreshState<TChart, TAxisTime> | null | undefined,
+  sourceEvent: unknown,
+): boolean {
+  if (!state || state.chart !== chart || sourceEvent !== undefined) return false;
+  if (state.axisTime === null || state.price === null) {
+    chart.clearCrosshairPosition();
+  } else if (series) {
+    chart.setCrosshairPosition(state.price, state.axisTime, series);
+  }
+  return true;
+}
+
 /**
  * Optional pane inputs participate in several effect dependency graphs. Keep
  * their absent value referentially stable so an internal state update cannot

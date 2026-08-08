@@ -12,6 +12,7 @@ import {
   resolveDrawingSurfaceChartTypeBoundary,
   resolveLeftHistoryDemand,
   resolveIntervalTransitionReplayData,
+  restoreLinkedCrosshairAfterInternalRefresh,
   resolveDataTimeSet,
   resolveStableOptionalChartCollection,
   sameIndicatorSeriesData,
@@ -207,6 +208,51 @@ test("only user-driven viewport changes publish persistence and interactive cove
     userGestureActive: true,
     userInteracted: true,
   }), false);
+});
+
+test("linked crosshair ownership consumes source-less refreshes but yields to real input", () => {
+  const calls: unknown[] = [];
+  const chart = {
+    clearCrosshairPosition: () => calls.push(["clear"]),
+    setCrosshairPosition: (price: number, time: number, series: object) => {
+      calls.push(["set", price, time, series]);
+    },
+  };
+  const series = {};
+  const linkedState = {
+    axisTime: 10_000,
+    chart,
+    price: 65_000,
+  };
+
+  assert.equal(
+    restoreLinkedCrosshairAfterInternalRefresh(chart, series, linkedState, undefined),
+    true,
+  );
+  assert.deepEqual(calls, [["set", 65_000, 10_000, series]]);
+
+  calls.length = 0;
+  assert.equal(
+    restoreLinkedCrosshairAfterInternalRefresh(
+      chart,
+      series,
+      linkedState,
+      { type: "mousemove" },
+    ),
+    false,
+  );
+  assert.deepEqual(calls, []);
+
+  assert.equal(
+    restoreLinkedCrosshairAfterInternalRefresh(
+      chart,
+      series,
+      { ...linkedState, axisTime: null, price: null },
+      undefined,
+    ),
+    true,
+  );
+  assert.deepEqual(calls, [["clear"]]);
 });
 
 test("pointer release only deduplicates drawing invalidation after a logical-range change", () => {

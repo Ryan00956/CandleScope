@@ -230,6 +230,43 @@ export function findDisplayIndexForAxisAnchor(
   return predecessorIndex >= 0 ? predecessorIndex : firstAfterIndex;
 }
 
+/**
+ * Resolve a linked timestamp on the ordinary numeric time axis without
+ * scanning the complete retained window for every pointer event.
+ *
+ * Time-axis rows are strictly ordered and unique. A lower-period timestamp
+ * therefore maps to the containing coarse bar by selecting the last row at
+ * or before the requested time. Anchors outside the retained window clamp to
+ * its nearest edge, matching `findDisplayIndexForAxisAnchor`.
+ */
+export function findNumericDisplayIndexForTimeAnchor(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  axisTime: unknown,
+): number {
+  if (typeof axisTime !== "number"
+    || !Number.isFinite(axisTime)
+    || !displayRows
+    || displayRows.length === 0) {
+    return -1;
+  }
+
+  let low = 0;
+  let high = displayRows.length - 1;
+  let predecessor = -1;
+  while (low <= high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const rowTime = displayRows[middle]?.time;
+    if (typeof rowTime !== "number" || !Number.isFinite(rowTime)) return -1;
+    if (rowTime <= axisTime) {
+      predecessor = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return predecessor >= 0 ? predecessor : 0;
+}
+
 function findAnchorDisplayIndex(displayRows: readonly DisplayRow[], sourceTime: unknown): number {
   return findDisplayIndexForAxisAnchor(displayRows, sourceTime);
 }

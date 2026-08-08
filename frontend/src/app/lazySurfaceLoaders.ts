@@ -10,6 +10,12 @@ export function loadAlertsPanel(): Promise<typeof import("../components/alerts/A
   return import("../components/alerts/AlertsPanel");
 }
 
+export function loadWorkspacePanel(): Promise<
+  typeof import("../features/chart-workspace/WorkspacePanel")
+> {
+  return import("../features/chart-workspace/WorkspacePanel");
+}
+
 export function loadReplayLauncherDialog(): Promise<
   typeof import("../features/replay-launcher/ReplayLauncherDialog")
 > {

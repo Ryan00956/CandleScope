@@ -8,36 +8,18 @@ import {
   useRef,
   useState,
 } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { MarketDataWorkspaceProvider } from "../features/market-data/MarketDataWorkspaceProvider.js";
 import { useChartWorkspaceRuntime } from "../features/chart-workspace/useChartWorkspaceRuntime.js";
-import type {
-  ChartCellId,
-  ChartDrawingLayerSetId,
-  ChartLinkGroupId,
-  ChartLinkGroupSettings,
-  ChartLinkRole,
-  ChartWorkspaceLayout,
-  ChartWorkspaceTemplateId,
-} from "../features/chart-workspace/chartWorkspaceTypes.js";
-import {
-  CHART_DRAWING_LAYER_SET_IDS,
-  CHART_LINK_GROUP_IDS,
-} from "../features/chart-workspace/chartWorkspaceTypes.js";
+import type { ChartCellId } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import {
   ChartLinkCoordinator,
   type ChartLinkViewportIssue,
 } from "../features/chart-workspace/chartLinkCoordinator.js";
-import {
-  chartCellDrawingScopeBase,
-  summarizeChartDrawingLink,
-  type ChartDrawingLinkSummary,
-} from "../features/chart-workspace/chartWorkspaceDrawingLink.js";
+import { chartCellDrawingScopeBase } from "../features/chart-workspace/chartWorkspaceDrawingLink.js";
 import { chartWorkspaceCell } from "../features/chart-workspace/chartWorkspaceDocument.js";
 import WorkspaceLayoutTree from "../features/chart-workspace/WorkspaceLayoutTree.js";
-import { chartWorkspaceTemplateCellCount } from "../features/chart-workspace/chartWorkspaceLayout.js";
-import WorkspaceSwitcher from "../features/chart-workspace/WorkspaceSwitcher.js";
 import { CHART_WORKSPACE_FEATURE_FLAGS } from "../features/chart-workspace/chartWorkspaceCapacity.js";
 import { defaultWorkspaceBus } from "../features/chart-workspace/workspaceBus.js";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings.js";
@@ -57,7 +39,10 @@ import type {
 import MarketPageFrame from "./MarketPageFrame.js";
 import MarketWorkspaceFrame from "./MarketWorkspaceFrame.js";
 import { useMarketRailLayout } from "./useMarketRailLayout.js";
-import { loadReplayLauncherDialog } from "./lazySurfaceLoaders.js";
+import {
+  loadReplayLauncherDialog,
+  loadWorkspacePanel,
+} from "./lazySurfaceLoaders.js";
 import {
   desktopWindowManager,
   type DesktopBootstrap,
@@ -66,23 +51,7 @@ import "../index.css";
 import "../features/plugins/pluginTrustUx.css";
 
 const ReplayLauncherDialog = lazy(loadReplayLauncherDialog);
-
-const LAYOUT_OPTIONS: ReadonlyArray<{
-  id: ChartWorkspaceTemplateId;
-  label: string;
-  glyph: string;
-}> = [
-  { id: "single", label: "单图", glyph: "□" },
-  { id: "split-vertical", label: "左右双图", glyph: "▯▯" },
-  { id: "split-horizontal", label: "上下双图", glyph: "▭" },
-  { id: "main-confirmation", label: "主图与确认图", glyph: "◧" },
-  { id: "quad", label: "四图", glyph: "▦" },
-  { id: "grid-6", label: "六图（2×3）", glyph: "6" },
-  { id: "grid-8", label: "八图（2×4）", glyph: "8" },
-  { id: "grid-9", label: "九图（3×3）", glyph: "9" },
-  { id: "grid-12", label: "十二图（3×4）", glyph: "12" },
-  { id: "grid-16", label: "十六图（4×4）", glyph: "16" },
-];
+const WorkspacePanel = lazy(loadWorkspacePanel);
 
 const PHASE8_BUILTIN_INDICATORS: readonly IndicatorDefinition[] = Object.freeze([
   Object.freeze({
@@ -105,326 +74,12 @@ const PHASE8_BUILTIN_INDICATORS: readonly IndicatorDefinition[] = Object.freeze(
   }),
 ]);
 
-function WorkspaceLayoutControls({
-  layout,
-  disabled,
-  locked,
-  canUndo,
-  canRedo,
-  maxCellsPerWindow,
-  onChange,
-  onUndo,
-  onRedo,
-  onReset,
-  onLockChange,
-}: {
-  layout: ChartWorkspaceLayout;
-  disabled?: boolean;
-  locked: boolean;
-  canUndo: boolean;
-  canRedo: boolean;
-  maxCellsPerWindow: number;
-  onChange(layout: ChartWorkspaceTemplateId): void;
-  onUndo(): void;
-  onRedo(): void;
-  onReset(): void;
-  onLockChange(locked: boolean): void;
-}) {
-  return (
-    <div
-      className="workspace-layout-controls"
-      role="group"
-      aria-label="图表布局"
-      data-layout-locked={locked ? "true" : "false"}
-    >
-      {LAYOUT_OPTIONS.filter((option) => (
-        chartWorkspaceTemplateCellCount(option.id) <= maxCellsPerWindow
-      )).map((option) => (
-        <button
-          key={option.id}
-          type="button"
-          className={`workspace-layout-button${layout === option.id ? " active" : ""}`}
-          onClick={() => onChange(option.id)}
-          disabled={disabled || locked}
-          aria-pressed={layout === option.id}
-          aria-label={option.label}
-          title={option.label}
-        >
-          <span aria-hidden="true">{option.glyph}</span>
-        </button>
-      ))}
-      <span className="workspace-layout-action-separator" aria-hidden="true" />
-      <button
-        type="button"
-        className="workspace-layout-button workspace-layout-history-button"
-        onClick={onUndo}
-        disabled={disabled || locked || !canUndo}
-        aria-label="撤销上一次布局修改"
-        title="撤销上一次布局修改（Ctrl+Z）"
-      >
-        ↶
-      </button>
-      <button
-        type="button"
-        className="workspace-layout-button workspace-layout-history-button"
-        onClick={onRedo}
-        disabled={disabled || locked || !canRedo}
-        aria-label="重做上一次布局修改"
-        title="重做上一次布局修改（Ctrl+Shift+Z / Ctrl+Y）"
-      >
-        ↷
-      </button>
-      <button
-        type="button"
-        className="workspace-layout-button workspace-layout-reset-button"
-        onClick={onReset}
-        disabled={disabled || locked}
-        aria-label="只保留当前图表"
-        title="重置布局，只保留当前图表"
-      >
-        ⟲
-      </button>
-      <button
-        type="button"
-        className={`workspace-layout-button workspace-layout-lock-button${locked ? " active" : ""}`}
-        onClick={() => onLockChange(!locked)}
-        disabled={disabled}
-        aria-label={locked ? "解锁布局" : "锁定布局"}
-        aria-pressed={locked}
-        title={locked ? "布局已锁定；点击解锁" : "锁定布局，防止误拖、误关或误调整"}
-      >
-        {locked ? "🔒" : "🔓"}
-      </button>
-    </div>
-  );
-}
-
 function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable
     || target.tagName === "INPUT"
     || target.tagName === "TEXTAREA"
     || target.tagName === "SELECT";
-}
-
-function WorkspaceWindowControls({
-  bootstrap,
-  currentWindowId,
-  windowCount,
-  disabled,
-  error,
-  onCreate,
-  onClose,
-}: {
-  bootstrap: DesktopBootstrap;
-  currentWindowId: string;
-  windowCount: number;
-  disabled: boolean;
-  error: string | null;
-  onCreate(): void;
-  onClose(): void;
-}) {
-  const nativeEnabled = bootstrap.mode === "native" && bootstrap.multiWindowEnabled;
-  const status = bootstrap.mode === "web"
-    ? "Web 单窗口（原生多窗口不可用）"
-    : nativeEnabled
-      ? windowCount >= 4
-        ? "4/4 窗口 · 64/64 图 · 已达应用上限"
-        : `${windowCount}/4 窗口 · ${bootstrap.displayCount} 显示器`
-      : "原生多窗口未启用";
-  return (
-    <div
-      className="workspace-window-controls"
-      data-desktop-mode={bootstrap.mode}
-      data-multi-window-enabled={nativeEnabled ? "true" : "false"}
-      title={error || status}
-    >
-      <span className="workspace-window-status" role="status">{error || status}</span>
-      {nativeEnabled && (
-        <>
-          <button
-            type="button"
-            className="workspace-layout-button"
-            onClick={onCreate}
-            disabled={disabled || windowCount >= 4}
-            aria-label="新建原生图表窗口"
-            title={windowCount >= 4
-              ? "已达 4 窗口 / 64 图硬上限；请先关闭一个窗口"
-              : "复制当前布局到新的原生窗口"}
-          >
-            +屏
-          </button>
-          {currentWindowId !== "main-window" && (
-            <button
-              type="button"
-              className="workspace-layout-button"
-              onClick={onClose}
-              disabled={disabled}
-              aria-label="关闭当前原生图表窗口"
-              title="关闭当前窗口并保留其他窗口"
-            >
-              −屏
-            </button>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-const LINK_SETTING_OPTIONS: ReadonlyArray<{
-  key: keyof ChartLinkGroupSettings;
-  label: string;
-  title: string;
-}> = [
-  { key: "market", label: "品种", title: "同步交易所、市场类型和品种" },
-  { key: "interval", label: "周期", title: "同步图表周期" },
-  { key: "crosshair", label: "十字线", title: "按市场时间同步十字线" },
-  { key: "timeAnchor", label: "右端", title: "对齐可视窗口右端时间，并保留各图自己的缩放" },
-  { key: "dateRange", label: "范围", title: "同步完整可视日期范围与缩放" },
-  { key: "drawings", label: "绘图", title: "同市场、同图层集的图表共享绘图文档" },
-];
-
-const LINK_ROLE_OPTIONS: ReadonlyArray<{
-  id: ChartLinkRole;
-  label: string;
-  description: string;
-}> = [
-  { id: "bidirectional", label: "↔ 双向", description: "品种、周期与视图双向联动；启用绘图共享时可共同编辑" },
-  { id: "source", label: "→ 源图", description: "品种、周期与视图只发送；启用绘图共享时可共同编辑" },
-  { id: "destination", label: "← 目标图", description: "品种、周期与视图只接收；启用绘图共享时可共同编辑" },
-];
-
-function drawingLinkStatusText(summary: ChartDrawingLinkSummary): string {
-  if (summary.state === "linked") return `绘图已与 ${summary.linkedPeerCount} 个图表共享`;
-  if (summary.state === "waiting") return "绘图联动等待同组图表";
-  if (summary.state === "market-mismatch") return "绘图未共享：同组图表的市场身份不同";
-  if (summary.state === "layer-mismatch") return "绘图未共享：请选择相同图层集";
-  return summary.state === "disabled" ? "绘图联动未开启" : "独立绘图文档";
-}
-
-function WorkspaceLinkControls({
-  activeCellId,
-  group,
-  settings,
-  role,
-  drawingLayerSet,
-  drawingSummary,
-  viewportIssue,
-  disabled,
-  onGroupChange,
-  onRoleChange,
-  onDrawingLayerSetChange,
-  onSettingsChange,
-}: {
-  activeCellId: ChartCellId;
-  group: ChartLinkGroupId | null;
-  settings: ChartLinkGroupSettings | null;
-  role: ChartLinkRole;
-  drawingLayerSet: ChartDrawingLayerSetId;
-  drawingSummary: ChartDrawingLinkSummary;
-  viewportIssue: ChartLinkViewportIssue | null;
-  disabled?: boolean;
-  onGroupChange(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
-  onRoleChange(cellId: ChartCellId, role: ChartLinkRole): void;
-  onDrawingLayerSetChange(cellId: ChartCellId, layerSet: ChartDrawingLayerSetId): void;
-  onSettingsChange(group: ChartLinkGroupId, patch: Partial<ChartLinkGroupSettings>): void;
-}) {
-  return (
-    <div className="workspace-link-controls" data-link-group={group ?? "none"}>
-      <label className="workspace-link-group-select">
-        <span>联动</span>
-        <select
-          aria-label="活动图联动组"
-          disabled={disabled}
-          value={group ?? ""}
-          onChange={(event) => onGroupChange(
-            activeCellId,
-            (event.currentTarget.value || null) as ChartLinkGroupId | null,
-          )}
-        >
-          <option value="">独立</option>
-          {CHART_LINK_GROUP_IDS.map((candidate) => (
-            <option key={candidate} value={candidate}>组 {candidate}</option>
-          ))}
-        </select>
-      </label>
-      {group && settings && (
-        <details className="workspace-link-advanced">
-          <summary title="高级联动设置">
-            {role === "source" ? "源" : role === "destination" ? "目" : "↔"}
-            <span>高级</span>
-          </summary>
-          <div className="workspace-link-popover">
-            <strong>组 {group} 高级联动</strong>
-            <label className="workspace-link-field">
-              <span>本图角色</span>
-              <select
-                aria-label="活动图联动角色"
-                value={role}
-                disabled={disabled}
-                onChange={(event) => onRoleChange(
-                  activeCellId,
-                  event.currentTarget.value as ChartLinkRole,
-                )}
-              >
-                {LINK_ROLE_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <p className="workspace-link-help">
-              {LINK_ROLE_OPTIONS.find((option) => option.id === role)?.description}
-            </p>
-            <div className="workspace-link-setting-list" role="group" aria-label={`联动组 ${group} 同步项目`}>
-              {LINK_SETTING_OPTIONS.map((option) => (
-                <button
-                  key={option.key}
-                  type="button"
-                  className="workspace-link-setting"
-                  aria-pressed={settings[option.key]}
-                  title={option.title}
-                  disabled={disabled}
-                  onClick={() => onSettingsChange(group, {
-                    [option.key]: !settings[option.key],
-                  })}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            {settings.drawings && (
-              <label className="workspace-link-field">
-                <span>绘图图层集</span>
-                <select
-                  aria-label="活动图绘图图层集"
-                  value={drawingLayerSet}
-                  disabled={disabled}
-                  onChange={(event) => onDrawingLayerSetChange(
-                    activeCellId,
-                    event.currentTarget.value as ChartDrawingLayerSetId,
-                  )}
-                >
-                  {CHART_DRAWING_LAYER_SET_IDS.map((layerSet) => (
-                    <option key={layerSet} value={layerSet}>图层 {layerSet}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <p className="workspace-link-status" data-state={drawingSummary.state}>
-              {drawingLinkStatusText(drawingSummary)}
-            </p>
-            {viewportIssue?.group === group && (
-              <p className="workspace-link-status warning" role="status">
-                {viewportIssue.kind === "timeAnchor" ? "右端时间" : "日期范围"}
-                {`无法映射到 ${viewportIssue.failedCellIds.length} 个目标图，目标已保持原位`}
-              </p>
-            )}
-          </div>
-        </details>
-      )}
-    </div>
-  );
 }
 
 function LiveWorkspaceApp() {
@@ -732,6 +387,7 @@ function LiveWorkspaceApp() {
     value: ActiveChartEnvironment;
   } | null>(null);
   const [showReplayLauncher, setShowReplayLauncher] = useState(false);
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
   const currentActiveEnvironment = activeEnvironment?.workspaceId === workspace.view.activeWorkspaceId
     && activeEnvironment.workspaceRuntimeKey === workspace.view.runtimeKey
     ? activeEnvironment
@@ -795,6 +451,7 @@ function LiveWorkspaceApp() {
 
   const openReplayLauncher = useCallback(() => setShowReplayLauncher(true), []);
   const closeReplayLauncher = useCallback(() => setShowReplayLauncher(false), []);
+  const closeWorkspacePanel = useCallback(() => setWorkspacePanelOpen(false), []);
   const replayLaunchContext = useMemo(() => showReplayLauncher
     ? buildLiveReplayLaunchContext({
         exchange: activeSession.exchange,
@@ -884,89 +541,33 @@ function LiveWorkspaceApp() {
     topBarHost,
   ]);
   const workspaceControls = useMemo(() => (
-    <div className="workspace-top-controls">
-      <WorkspaceSwitcher
-        activeWorkspaceId={workspace.view.activeWorkspaceId}
-        activeWorkspaceName={workspace.view.activeWorkspaceName}
-        workspaces={workspace.view.workspaces}
-        ready={workspace.view.ready}
-        saveState={workspace.status.saveState}
-        persistenceMode={workspace.status.persistenceMode}
-        error={workspace.status.error}
-        maxCellsPerWindow={workspace.view.maxCellsPerWindow}
-        onSwitch={workspace.actions.switchWorkspace}
-        onCreate={workspace.actions.createWorkspace}
-        onDuplicate={workspace.actions.duplicateWorkspace}
-        onRename={workspace.actions.renameWorkspace}
-        onDelete={workspace.actions.deleteWorkspace}
-      />
-      <WorkspaceLayoutControls
-        layout={workspace.view.layout}
-        disabled={!workspace.view.ready}
-        locked={workspace.view.layoutLocked}
-        canUndo={workspace.view.canUndoLayout}
-        canRedo={workspace.view.canRedoLayout}
-        maxCellsPerWindow={workspace.view.maxCellsPerWindow}
-        onChange={workspace.actions.setLayout}
-        onUndo={workspace.actions.undoLayout}
-        onRedo={workspace.actions.redoLayout}
-        onReset={workspace.actions.resetLayout}
-        onLockChange={workspace.actions.setLayoutLocked}
-      />
-      <WorkspaceWindowControls
-        bootstrap={desktopBootstrap}
-        currentWindowId={workspace.view.window.id}
-        windowCount={Object.keys(workspace.view.document.windows).length}
-        disabled={!workspace.view.ready}
-        error={desktopError}
-        onCreate={workspace.actions.createWindow}
-        onClose={() => workspace.actions.closeWindow(workspace.view.window.id)}
-      />
-      <WorkspaceLinkControls
-        activeCellId={workspace.view.activeCellId}
-        group={workspace.view.activeCell.linkGroup}
-        settings={workspace.view.activeCell.linkGroup
-          ? workspace.view.document.linkGroups[workspace.view.activeCell.linkGroup]
-          : null}
-        role={workspace.view.activeCell.linkRole}
-        drawingLayerSet={workspace.view.activeCell.drawingLayerSet}
-        drawingSummary={summarizeChartDrawingLink(
-          workspace.view.document,
-          workspace.view.activeCellId,
-          workspace.view.visibleCellIds,
-        )}
-        viewportIssue={viewportLinkIssue}
-        disabled={!workspace.view.ready}
-        onGroupChange={workspace.actions.setCellLinkGroup}
-        onRoleChange={workspace.actions.setCellLinkRole}
-        onDrawingLayerSetChange={workspace.actions.setCellDrawingLayerSet}
-        onSettingsChange={workspace.actions.updateLinkGroupSettings}
-      />
-    </div>
+    <button
+      type="button"
+      className={`indicator-toggle-btn workspace-toggle-btn ${workspacePanelOpen ? "active" : ""}`}
+      data-save-state={workspace.status.saveState}
+      onPointerEnter={loadWorkspacePanel}
+      onMouseEnter={loadWorkspacePanel}
+      onFocus={loadWorkspacePanel}
+      onClick={() => setWorkspacePanelOpen((open) => !open)}
+      aria-label={`图表工作区：${workspace.view.activeWorkspaceName}，${workspace.view.layoutCellIds.length} 个图表`}
+      aria-expanded={workspacePanelOpen}
+      title={`图表工作区 · ${workspace.view.activeWorkspaceName} · ${workspace.view.layoutCellIds.length} 图`}
+    >
+      <span className="workspace-toggle-icon" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className="workspace-toggle-badge" aria-hidden="true">
+        {workspace.view.layoutCellIds.length}
+      </span>
+    </button>
   ), [
-    workspace.actions,
-    workspace.status.error,
-    workspace.status.persistenceMode,
     workspace.status.saveState,
-    desktopBootstrap,
-    desktopError,
-    workspace.view.activeCell.linkGroup,
-    workspace.view.activeCell.drawingLayerSet,
-    workspace.view.activeCell.linkRole,
-    workspace.view.activeCellId,
-    workspace.view.activeWorkspaceId,
     workspace.view.activeWorkspaceName,
-    workspace.view.layout,
-    workspace.view.canRedoLayout,
-    workspace.view.canUndoLayout,
-    workspace.view.layoutLocked,
-    workspace.view.maxCellsPerWindow,
-    workspace.view.document,
-    workspace.view.ready,
-    workspace.view.visibleCellIds,
-    workspace.view.workspaces,
-    workspace.view.window.id,
-    viewportLinkIssue,
+    workspace.view.layoutCellIds.length,
+    workspacePanelOpen,
   ]);
   const gridClassName = [
     "multi-chart-grid",
@@ -1049,6 +650,27 @@ function LiveWorkspaceApp() {
         featureSurfaces={<div className="workspace-portal-host" ref={setFeatureSurfacesHost} />}
         statusBar={<div className="workspace-portal-host" ref={setStatusBarHost} />}
       />
+      {featureSurfacesHost && workspacePanelOpen && createPortal(
+        <Suspense fallback={(
+          <div className="workspace-panel-overlay">
+            <aside className="workspace-panel workspace-panel-loading" aria-label="正在加载图表工作区" />
+          </div>
+        )}>
+          <WorkspacePanel
+            isOpen
+            onClose={closeWorkspacePanel}
+            runtime={workspace}
+            desktop={{
+              mode: desktopBootstrap.mode,
+              multiWindowEnabled: desktopBootstrap.multiWindowEnabled,
+              displayCount: desktopBootstrap.displayCount,
+              error: desktopError,
+            }}
+            viewportIssue={viewportLinkIssue}
+          />
+        </Suspense>,
+        featureSurfacesHost,
+      )}
       {showReplayLauncher && replayLaunchContext !== null && (
         <Suspense fallback={null}>
           <ReplayLauncherDialog

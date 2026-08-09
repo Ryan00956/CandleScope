@@ -566,6 +566,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 Windows lifecycle 修复后的专用真实 smoke 已通过并证明无新 Chrome/profile 残留；随后正式全量 backend checks 的唯一失败来自未改动的限流测试以 50ms `Retry-After` 同时充当“circuit 必须仍开启”的观察窗。宿主调度恰好发生在两个连续 inspect 之间，第一项仍为 `circuit_open`、第二项已进入恢复后的 `budget`；backend diff 为空且独立连续 30 次通过，判定为测试时钟竞争。该不等待恢复的跨 bucket 可见性测试现使用 5s 观察窗以隔离调度抖动，生产限流实现、默认 cooldown 和真实 Retry-After 行为均不变。新 clean HEAD 仍须重跑本阶段全部正式证据。
 
+该新 HEAD 的来源、checks、完整 measure-only benchmark、真实 smoke 与 rollback 随后全部通过；正式 4 小时 soak 在约 212 分钟、第 88 个训练周期捕获 `replay.v3 set_speed` POST 已发送但 120 秒内既无 response/body 也无 loading-failed，页面永久停在 `controlPending=set_speed`。这是命令 ACK/liveness 正确性失败，不属于墙钟性能豁免。Run API 现对六类快速时钟控制设置固定 ACK 截止，并且只在结果未知时用完全相同的 method/URL/body 与 canonical `command_id` 对账一次；结构化拒绝、身份错配、主动取消、第二次失败继续硬拒绝，长 advance/scan/end 不套用快速截止。没有灰度、默认关闭或 fallback；新 clean HEAD 仍须先做高密度复验，再从零重跑完整 Phase 9 正式证据链。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

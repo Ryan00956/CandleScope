@@ -395,8 +395,9 @@ test("read-only replay.v3 API does not retry invalid JSON from a successful resp
   assert.equal(requestCount, 1);
 });
 
-test("replay.v3 command POST never retries a bodyless 5xx", async () => {
+test("replay.v3 command POST retries one bodyless 5xx with the identical envelope", async () => {
   let requestCount = 0;
+  const requestBodies: string[] = [];
   const command: ReplayV2Command = {
     protocol: "replay.v3",
     run_id: "run-1",
@@ -412,22 +413,152 @@ test("replay.v3 command POST never retries a bodyless 5xx", async () => {
     payload: { count: 1, display_interval: "15m", viewer_revision: 2 },
   };
   const client = new ReplayV2ApiClient({
+    fetcher: async (_input, init) => {
+      requestCount += 1;
+      requestBodies.push(String(init?.body ?? ""));
+      if (requestCount === 1) return new Response("", { status: 500 });
+      return new Response(JSON.stringify(commandResult()), { status: 200 });
+    },
+  });
+
+  const result = await client.commandRun("run-1", command);
+
+  assert.equal(result.command_id, command.command_id);
+  assert.equal(requestCount, 2);
+  assert.deepEqual(requestBodies, [JSON.stringify(command), JSON.stringify(command)]);
+});
+
+test("replay.v3 command outcome recovery is capped at one retry", async () => {
+  let requestCount = 0;
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "step-display-loss-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "step_display",
+    payload: { count: 1, display_interval: "15m", viewer_revision: 2 },
+  };
+  const client = new ReplayV2ApiClient({
     fetcher: async () => {
       requestCount += 1;
-      return new Response("", { status: 500 });
+      throw new TypeError("socket reset");
     },
   });
 
   await assert.rejects(
     client.commandRun("run-1", command),
-    (error: unknown) => {
-      assert.ok(error instanceof ReplayV2ApiError);
-      assert.equal(error.code, "REPLAY_V2_PROTOCOL_ERROR");
-      assert.equal(error.status, 500);
-      return true;
-    },
+    (error: unknown) => error instanceof ReplayV2ApiError
+      && error.code === "REPLAY_V2_TRANSPORT_ERROR",
   );
-  assert.equal(requestCount, 1);
+  assert.equal(requestCount, 2);
+});
+
+test("fast replay.v3 clock control aborts a lost acknowledgement and retries the same command once", async () => {
+  let requestCount = 0;
+  const requestBodies: string[] = [];
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "set-speed-timeout-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "set_speed",
+    payload: { basis: "BASE_BAR", rate: 600 },
+  };
+  const client = new ReplayV2ApiClient({
+    commandAcknowledgementTimeoutMs: 5,
+    fetcher: async (_input, init) => {
+      requestCount += 1;
+      requestBodies.push(String(init?.body ?? ""));
+      if (requestCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("request canceled", "AbortError"));
+          }, { once: true });
+        });
+      }
+      return new Response(JSON.stringify({
+        ...commandResult(),
+        command_id: command.command_id,
+      }), { status: 200 });
+    },
+  });
+
+  const result = await client.commandRun("run-1", command);
+
+  assert.equal(result.command_id, command.command_id);
+  assert.equal(requestCount, 2);
+  assert.deepEqual(requestBodies, [JSON.stringify(command), JSON.stringify(command)]);
+});
+
+test("replay.v3 command does not retry a structured rejection or external abort", async () => {
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "set-speed-rejected-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "set_speed",
+    payload: { basis: "BASE_BAR", rate: 600 },
+  };
+  let structuredRequests = 0;
+  const structuredClient = new ReplayV2ApiClient({
+    commandAcknowledgementTimeoutMs: 50,
+    fetcher: async () => {
+      structuredRequests += 1;
+      return new Response(JSON.stringify({
+        protocol: "replay.v3",
+        error: {
+          code: "CONTROLLER_CONFLICT",
+          message: "controller belongs to another client",
+          details: {},
+        },
+      }), { status: 409 });
+    },
+  });
+  await assert.rejects(
+    structuredClient.commandRun("run-1", command),
+    (error: unknown) => error instanceof ReplayV2ApiError
+      && error.code === "CONTROLLER_CONFLICT",
+  );
+  assert.equal(structuredRequests, 1);
+
+  let abortedRequests = 0;
+  const abort = new AbortController();
+  const abortedClient = new ReplayV2ApiClient({
+    commandAcknowledgementTimeoutMs: 50,
+    fetcher: async (_input, init) => {
+      abortedRequests += 1;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("request canceled", "AbortError"));
+        }, { once: true });
+      });
+    },
+  });
+  const pending = abortedClient.commandRun("run-1", command, abort.signal);
+  abort.abort();
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof DOMException && error.name === "AbortError",
+  );
+  assert.equal(abortedRequests, 1);
 });
 
 test("command API fails closed when request and response identities diverge", async () => {
@@ -445,14 +576,18 @@ test("command API fails closed when request and response identities diverge", as
     type: "set_speed",
     payload: { basis: "BASE_BAR", rate: 120 },
   };
+  let requestCount = 0;
   const client = new ReplayV2ApiClient({
-    fetcher: async () => new Response(JSON.stringify({
-      ...commandResult(),
-      command_id: "pause-before-set-speed",
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify({
+        ...commandResult(),
+        command_id: "pause-before-set-speed",
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
   });
 
   await assert.rejects(
@@ -469,6 +604,7 @@ test("command API fails closed when request and response identities diverge", as
       return true;
     },
   );
+  assert.equal(requestCount, 1);
 });
 
 test("command API rejects a route and payload run mismatch before transport", async () => {

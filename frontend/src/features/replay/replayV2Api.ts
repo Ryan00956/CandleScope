@@ -98,6 +98,23 @@ import type {
 } from "./replayV2Types.js";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
+const BOUNDED_COMMAND_ACKNOWLEDGEMENT_TYPES = new Set<ReplayV2Command["type"]>([
+  "acquire_controller",
+  "takeover_controller",
+  "release_controller",
+  "play",
+  "pause",
+  "set_speed",
+]);
+
+export interface ReplayV2ApiClientOptions extends ReplayApiClientOptions {
+  /**
+   * Fast clock controls must not leave the trading surface permanently
+   * pending when an intermediary loses the HTTP acknowledgement after commit.
+   */
+  readonly commandAcknowledgementTimeoutMs?: number;
+}
 
 export interface TrainingRunListQuery {
   readonly limit?: number;
@@ -230,17 +247,29 @@ export class ReplayV2ApiClient {
   private readonly basePath: string;
   private readonly fetcher: typeof fetch;
   private readonly adapterApi: ReplayApiClient;
+  private readonly commandAcknowledgementTimeoutMs: number;
 
   constructor({
     basePath = "/api/v1/replay",
     fetcher = globalThis.fetch,
-  }: ReplayApiClientOptions = {}) {
+    commandAcknowledgementTimeoutMs = DEFAULT_COMMAND_ACKNOWLEDGEMENT_TIMEOUT_MS,
+  }: ReplayV2ApiClientOptions = {}) {
     if (typeof fetcher !== "function") {
       throw new ReplayV2ApiError("REPLAY_V2_TRANSPORT_ERROR", "Fetch API is unavailable");
+    }
+    if (
+      !Number.isSafeInteger(commandAcknowledgementTimeoutMs)
+      || commandAcknowledgementTimeoutMs < 1
+    ) {
+      throw new ReplayV2ApiError(
+        "REPLAY_V2_PROTOCOL_ERROR",
+        "command acknowledgement timeout must be a positive integer",
+      );
     }
     this.basePath = basePath.replace(/\/$/, "");
     this.fetcher = fetcher;
     this.adapterApi = new ReplayApiClient({ basePath: this.basePath, fetcher });
+    this.commandAcknowledgementTimeoutMs = commandAcknowledgementTimeoutMs;
   }
 
   capabilities(signal?: AbortSignal): Promise<ReplayCapabilities> {
@@ -627,15 +656,29 @@ export class ReplayV2ApiClient {
         },
       );
     }
-    const result = await this.request(
-      `/runs/${safeSegment(runId, "run id")}/commands`,
-      parseReplayV2CommandResult,
-      {
-        method: "POST",
-        body: JSON.stringify(command),
-        ...(signal ? { signal } : {}),
-      },
-    );
+    const path = `/runs/${safeSegment(runId, "run id")}/commands`;
+    const body = JSON.stringify(command);
+    let result: ReplayV2CommandResult | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        result = await this.commandAttempt(path, body, command.type, signal);
+        break;
+      } catch (error) {
+        if (
+          attempt !== 0
+          || signal?.aborted === true
+          || !this.commandOutcomeIsUnknown(error)
+        ) {
+          throw error;
+        }
+      }
+    }
+    if (result === null) {
+      throw new ReplayV2ApiError(
+        "REPLAY_V2_TRANSPORT_ERROR",
+        "replay.v3 command acknowledgement recovery exhausted",
+      );
+    }
     if (
       result.run_id !== runId
       || result.command_id !== command.command_id
@@ -654,6 +697,63 @@ export class ReplayV2ApiClient {
       );
     }
     return result;
+  }
+
+  private async commandAttempt(
+    path: string,
+    body: string,
+    type: ReplayV2Command["type"],
+    externalSignal?: AbortSignal,
+  ): Promise<ReplayV2CommandResult> {
+    if (!BOUNDED_COMMAND_ACKNOWLEDGEMENT_TYPES.has(type)) {
+      return this.request(path, parseReplayV2CommandResult, {
+        method: "POST",
+        body,
+        ...(externalSignal ? { signal: externalSignal } : {}),
+      });
+    }
+
+    const controller = new AbortController();
+    let acknowledgementTimedOut = false;
+    const relayExternalAbort = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted === true) relayExternalAbort();
+    else externalSignal?.addEventListener("abort", relayExternalAbort, { once: true });
+    const timer = globalThis.setTimeout(() => {
+      acknowledgementTimedOut = true;
+      controller.abort(new DOMException("command acknowledgement timed out", "TimeoutError"));
+    }, this.commandAcknowledgementTimeoutMs);
+
+    try {
+      return await this.request(path, parseReplayV2CommandResult, {
+        method: "POST",
+        body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (acknowledgementTimedOut) {
+        throw new ReplayV2ApiError(
+          "REPLAY_V2_TRANSPORT_ERROR",
+          "replay.v3 command acknowledgement timed out",
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", relayExternalAbort);
+    }
+  }
+
+  private commandOutcomeIsUnknown(error: unknown): boolean {
+    return error instanceof ReplayV2ApiError && (
+      error.code === "REPLAY_V2_TRANSPORT_ERROR"
+      || (
+        error.code === "REPLAY_V2_PROTOCOL_ERROR"
+        && error.status !== null
+        && error.status >= 500
+        && error.status < 600
+      )
+    );
   }
 
   previewOrder(

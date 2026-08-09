@@ -292,6 +292,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 正式 backend 全量 checks 的唯一失败为 `test_binance_418_opens_exchange_ip_circuit_across_buckets`：3252 个其余测试通过；第一次 futures inspect 得到 `circuit_open`，宿主在线程调度后第二次 spot inspect 已越过测试写死的 50ms `Retry-After`，得到 circuit 恢复后的 `budget`。`3da45a50..d7b502a2` 的 backend diff 为空，同一测试独立连续运行 30 次均通过，证明不是产品 circuit 语义回归，而是以调度抖动量级充当观察窗的测试脆弱性。
 - 该测试不等待恢复，只验证同一 418 在两个 Binance bucket 上立即可见；观察窗现从 50ms 改为 5s，并明确记录其目的仅是隔离宿主调度。生产 `RateLimitManager`、默认 cooldown、真实 `Retry-After` 解析与恢复语义均未修改；其他专门验证短 cooldown/恢复的测试仍保留原工作量。修复后的新 clean HEAD 仍须从正式来源、全量 checks 起重跑全部 Phase 9 证据。
 
+### 3.29 replay.v3 快速时钟命令 ACK 悬挂与同 ID 对账
+
+- `6727970112505ead0c035f6bdb0b32b336d691ee` 的正式来源、全量 checks、formal benchmark、真实 smoke 和 rollback 全部通过；benchmark 继续以 `MEASURE_ONLY_NON_BLOCKING` 记录 BAR `2796.73 events/s`、AGG_TRADE `757.37 events/s` 与 100 万事件 optimized/reference 等价结果，没有墙钟发布阈值。正式 4 小时 soak 在约 `12,723 s`、第 88 个训练动作硬失败，属于命令正确性而非已豁免性能。
+- 失败请求是 `set_speed(BASE_BAR, 600)`，request `command_id=control-7a900b68-fbb1-4f29-9368-f22b41d97e9a`。CDP 已捕获 POST 和完整 canonical body，但直到 120 秒动作截止仍没有 response、response body 或 loading-failed；页面保持 `PAUSED / rate=1 / controlPending=set_speed`，全部控件禁用。后端进程、WebSocket、SQLite 与 actor 均健康，当前 adapter queue 为 0、runtime/persistence failure 为 0；这只能证明 ACK 链悬挂，不能把命令猜测为成功或失败。
+- `replay.v1` 基础运行时已有未知结果后的同 ID 对账，`replay.v3` Run API 却只发送一次无内部截止的 POST，因此代理既不返回也不报错时会永久冻结交易界面。Run API 现在对 acquire/takeover/release/play/pause/set_speed 六类快速时钟控制设置固定 30 秒 ACK 截止；截止会终止该 HTTP 尝试，并且只有 transport error 或无结构化正文的 5xx 才允许一次 method/URL/body 字节完全相同、`command_id` 不变的重交。后端 canonical command journal 返回已提交结果或执行一次，成功响应仍必须精确匹配 Run/command 身份。
+- 结构化 4xx/5xx、成功但非法或身份错配的响应、调用方 Abort、第二次传输失败以及第二次 retry 均继续 fail closed。长 advance/scan/end 不套用快速 ACK 截止，避免把合法长任务误判为传输丢失；它们仍可在真实 transport error 后按同一 canonical command 最多对账一次。没有环境变量、灰度、默认关闭、fallback 或性能阈值改动。
+- 定向 API 回归覆盖 bodyless 5xx exact retry、悬挂 set_speed 的 timer abort、结构化 controller conflict、外部 Abort、身份错配以及第二次失败的有界拒绝；双 typecheck 与 lint 通过。修复形成新 clean HEAD 后先运行真实浏览器高密度周期，再从零重建 Phase 9 全部正式 artifacts；`67279701` 的 PASS 项和失败 soak 只保留为根因证据。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

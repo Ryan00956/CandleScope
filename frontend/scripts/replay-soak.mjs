@@ -21,7 +21,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_ITEMS = 10_000;
 const MAX_CAPTURE_RESPONSE_BODIES = 100;
 const MAX_CAPTURE_COMMAND_TRANSITIONS = 2_000;
-const MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES = 1;
+const MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES = 1;
 const MIB = 1024 * 1024;
 const DAY_MS = 86_400_000;
 const FORMAL_V2_BASE_INTERVAL_MS = 60_000;
@@ -1204,7 +1204,10 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   const requestByRequest = new Map();
   const responseByRequest = new Map();
   const boundaryGenerationByRequest = new Map();
+  const pendingReadOnlyRecoveryByUrl = new Map();
+  const readOnlyRecoveryRequestIds = new Set();
   const bodyTasks = new Set();
+  let requestSequence = 0;
   let boundaryGeneration = 0;
   const boundaryAudits = auditReplayBoundaries
     ? {
@@ -1221,6 +1224,9 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     replayCommandRequests: [],
     replayCommandResponseBodies: [],
     replayCommandResponses: [],
+    replayReadOnlyRequests: [],
+    replayReadOnlyResponseBodies: [],
+    replayReadOnlyResponses: [],
     responseBodies: [],
     responseCount: 0,
     responses: [],
@@ -1245,10 +1251,12 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   };
   cdp.on("Network.requestWillBeSent", (event) => {
     capture.requestCount += 1;
+    requestSequence += 1;
     const item = {
       requestId: event.requestId,
       method: event.request?.method || "",
       postData: event.request?.postData || "",
+      sequence: requestSequence,
       url: event.request?.url || "",
     };
     boundedPush(capture.requests, item);
@@ -1292,6 +1300,38 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
           item,
           MAX_CAPTURE_COMMAND_TRANSITIONS,
         );
+      }
+      if (item.method === "GET") {
+        const pendingRequestId = pendingReadOnlyRecoveryByUrl.get(item.url);
+        if (item.status >= 500) {
+          boundedPush(
+            capture.replayReadOnlyRequests,
+            request ?? item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+          boundedPush(
+            capture.replayReadOnlyResponses,
+            item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+          readOnlyRecoveryRequestIds.add(item.requestId);
+          if (pendingRequestId === undefined) {
+            pendingReadOnlyRecoveryByUrl.set(item.url, item.requestId);
+          }
+        } else if (pendingRequestId !== undefined) {
+          boundedPush(
+            capture.replayReadOnlyRequests,
+            request ?? item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+          boundedPush(
+            capture.replayReadOnlyResponses,
+            item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+          readOnlyRecoveryRequestIds.add(item.requestId);
+          pendingReadOnlyRecoveryByUrl.delete(item.url);
+        }
       }
       responseByRequest.set(event.requestId, {
         boundaryGeneration: boundaryGenerationByRequest.get(event.requestId)
@@ -1347,6 +1387,13 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
             MAX_CAPTURE_COMMAND_TRANSITIONS,
           );
         }
+        if (readOnlyRecoveryRequestIds.has(response.requestId)) {
+          boundedPush(
+            capture.replayReadOnlyResponseBodies,
+            item,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+        }
       })
       .catch(() => undefined)
       .finally(() => bodyTasks.delete(task));
@@ -1354,6 +1401,33 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   });
   cdp.on("Network.loadingFailed", (event) => {
     const request = requestByRequest.get(event.requestId);
+    const interruptedResponse = responseByRequest.get(event.requestId);
+    if (request?.method === "GET"
+      && /\/api\/v1\/replay(?:\/|\?|$)/.test(request.url)) {
+      if (!capture.replayReadOnlyRequests.some(
+        (item) => item.requestId === request.requestId,
+      )) {
+        boundedPush(
+          capture.replayReadOnlyRequests,
+          request,
+          MAX_CAPTURE_RESPONSE_BODIES,
+        );
+      }
+      if (interruptedResponse !== undefined
+        && !capture.replayReadOnlyResponses.some(
+          (item) => item.requestId === interruptedResponse.requestId,
+        )) {
+        boundedPush(
+          capture.replayReadOnlyResponses,
+          interruptedResponse,
+          MAX_CAPTURE_RESPONSE_BODIES,
+        );
+      }
+      readOnlyRecoveryRequestIds.add(event.requestId);
+      if (!pendingReadOnlyRecoveryByUrl.has(request.url)) {
+        pendingReadOnlyRecoveryByUrl.set(request.url, event.requestId);
+      }
+    }
     requestByRequest.delete(event.requestId);
     responseByRequest.delete(event.requestId);
     boundaryGenerationByRequest.delete(event.requestId);
@@ -1365,6 +1439,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
       errorText: event.errorText || "",
       canceled: event.canceled === true,
       blockedReason: event.blockedReason || "",
+      responseStatus: Number(interruptedResponse?.status ?? 0),
     });
   });
   cdp.on("Network.webSocketCreated", (event) => {
@@ -1543,8 +1618,8 @@ export function replayCommandTransportRecoveryContract(capture) {
     recoveries.push(base);
   }
 
-  if (recoveries.length > MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES) {
-    for (const recovery of recoveries.slice(MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES)) {
+  if (recoveries.length > MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES) {
+    for (const recovery of recoveries.slice(MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES)) {
       violations.push({
         ...recovery,
         reason: "COMMAND_TRANSPORT_RECOVERY_LIMIT_EXCEEDED",
@@ -1555,7 +1630,120 @@ export function replayCommandTransportRecoveryContract(capture) {
   return {
     schemaVersion: "replay.command-transport-recovery.v1",
     passed: violations.length === 0,
-    maximumRecoveries: MAX_RECOVERED_COMMAND_TRANSPORT_LOSSES,
+    maximumRecoveries: MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES,
+    recoveryCount: recoveries.length,
+    recoveries,
+    violations,
+  };
+}
+
+/**
+ * Replay state/catalog reads are idempotent. Accept one transient transport
+ * loss only when the product immediately issues the next same-URL GET and the
+ * retry has a captured, parseable 2xx JSON body. A structured server error is
+ * authoritative and therefore never enters this recovery path.
+ */
+export function replayReadOnlyTransportRecoveryContract(capture) {
+  const requests = Array.isArray(capture?.replayReadOnlyRequests)
+    ? capture.replayReadOnlyRequests
+    : [];
+  const responsesByRequest = new Map(
+    (Array.isArray(capture?.replayReadOnlyResponses)
+      ? capture.replayReadOnlyResponses
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const bodiesByRequest = new Map(
+    (Array.isArray(capture?.replayReadOnlyResponseBodies)
+      ? capture.replayReadOnlyResponseBodies
+      : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const failuresByRequest = new Map(
+    (Array.isArray(capture?.failedRequests) ? capture.failedRequests : [])
+      .map((item) => [item.requestId, item]),
+  );
+  const recoveries = [];
+  const violations = [];
+
+  for (let index = 0; index < requests.length; index += 1) {
+    const request = requests[index];
+    const response = responsesByRequest.get(request.requestId);
+    const responseBodyRecord = bodiesByRequest.get(request.requestId);
+    const responseBody = parsedReplayApiResponseBody(responseBodyRecord);
+    const networkFailure = failuresByRequest.get(request.requestId);
+    const status = Number(response?.status ?? 0);
+    const bodylessServerFailure = status >= 500
+      && status < 600
+      && responseBodyRecord !== undefined
+      && responseBody === null;
+    const interruptedRead = networkFailure !== undefined
+      && (response === undefined
+        || (status >= 200 && status < 300)
+        || (status >= 500 && status < 600));
+    if (!bodylessServerFailure && !interruptedRead) continue;
+
+    const retries = requests.slice(index + 1).filter((candidate) => (
+      candidate.method === "GET"
+      && candidate.url === request.url
+      && Number(candidate.sequence) > Number(request.sequence)
+    ));
+    const retry = retries[0];
+    const retryResponse = retry === undefined
+      ? undefined
+      : responsesByRequest.get(retry.requestId);
+    const retryBody = retry === undefined
+      ? null
+      : parsedReplayApiResponseBody(bodiesByRequest.get(retry.requestId));
+    const base = {
+      requestId: request.requestId,
+      method: request.method,
+      url: request.url,
+      status,
+      requestSequence: Number(request.sequence ?? 0),
+      failureKind: bodylessServerFailure ? "BODYLESS_HTTP_5XX" : "NETWORK_LOADING_FAILED",
+      errorText: networkFailure?.errorText ?? null,
+      retryRequestId: retry?.requestId ?? null,
+      retrySequence: Number(retry?.sequence ?? 0),
+      retryStatus: Number(retryResponse?.status ?? 0),
+    };
+    let reason = null;
+    if (request.method !== "GET"
+      || !/\/api\/v1\/replay(?:\/|\?|$)/.test(request.url)
+      || !Number.isSafeInteger(request.sequence)
+      || request.sequence < 1) {
+      reason = "READ_TRANSPORT_RECOVERY_REQUEST_INVALID";
+    } else if (retries.length === 0) {
+      reason = "READ_TRANSPORT_RECOVERY_MISSING";
+    } else if (retries.length > 1) {
+      reason = "READ_TRANSPORT_RECOVERY_RETRY_EXCEEDED";
+    } else if (retryResponse === undefined
+      || Number(retryResponse.status) < 200
+      || Number(retryResponse.status) >= 300) {
+      reason = "READ_TRANSPORT_RECOVERY_RETRY_FAILED";
+    } else if (retryBody === null) {
+      reason = "READ_TRANSPORT_RECOVERY_RESPONSE_INVALID";
+    }
+    if (reason !== null) {
+      violations.push({ ...base, reason });
+      continue;
+    }
+    recoveries.push(base);
+  }
+
+  if (recoveries.length > MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES) {
+    for (const recovery of recoveries.slice(MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES)) {
+      violations.push({
+        ...recovery,
+        reason: "READ_TRANSPORT_RECOVERY_LIMIT_EXCEEDED",
+      });
+    }
+  }
+
+  return {
+    schemaVersion: "replay.read-transport-recovery.v1",
+    passed: violations.length === 0,
+    maximumRecoveries: MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES,
     recoveryCount: recoveries.length,
     recoveries,
     violations,
@@ -1564,11 +1752,11 @@ export function replayCommandTransportRecoveryContract(capture) {
 
 /**
  * Validate replay API failures against the initial-market optimistic
- * concurrency contract and the command acknowledgement-loss contract. Archive
- * preparation may advance the catalog epoch, while a single bodyless command
- * transport failure may reconcile through a byte-identical same-id retry.
- * Every structured server failure and every unproved retry remains a release
- * failure.
+ * concurrency contract and the bounded transport-recovery contracts. Archive
+ * preparation may advance the catalog epoch, while one transport loss across
+ * command acknowledgements and idempotent state reads may be reconciled by its
+ * exact retry proof. Every structured server failure and every unproved retry
+ * remains a release failure.
  */
 export function replayApiConcurrencyContract(capture) {
   const transitions = Array.isArray(capture?.replayApiResponses)
@@ -1584,8 +1772,12 @@ export function replayApiConcurrencyContract(capture) {
   const unexpectedFailures = [];
   const conflictCountByUrl = new Map();
   const commandTransportRecovery = replayCommandTransportRecoveryContract(capture);
+  const readOnlyTransportRecovery = replayReadOnlyTransportRecoveryContract(capture);
   const recoveredRequestIds = new Set(
-    commandTransportRecovery.recoveries.map((item) => item.requestId),
+    [
+      ...commandTransportRecovery.recoveries,
+      ...readOnlyTransportRecovery.recoveries,
+    ].map((item) => item.requestId),
   );
 
   for (let index = 0; index < transitions.length; index += 1) {
@@ -1655,13 +1847,46 @@ export function replayApiConcurrencyContract(capture) {
       reason: violation.reason,
     });
   }
+  for (const violation of readOnlyTransportRecovery.violations) {
+    if (unexpectedFailures.some((item) => item.requestId === violation.requestId)) continue;
+    unexpectedFailures.push({
+      requestId: violation.requestId,
+      method: violation.method,
+      url: violation.url,
+      status: violation.status,
+      responseBody: null,
+      reason: violation.reason,
+    });
+  }
+  const allTransportRecoveries = [
+    ...commandTransportRecovery.recoveries.map((item) => ({ ...item, kind: "COMMAND" })),
+    ...readOnlyTransportRecovery.recoveries.map((item) => ({ ...item, kind: "READ_ONLY" })),
+  ];
+  if (allTransportRecoveries.length > MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES) {
+    for (const recovery of allTransportRecoveries.slice(MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES)) {
+      unexpectedFailures.push({
+        requestId: recovery.requestId,
+        method: recovery.method,
+        url: recovery.url,
+        status: recovery.status,
+        responseBody: null,
+        reason: "REPLAY_TRANSPORT_RECOVERY_LIMIT_EXCEEDED",
+      });
+    }
+  }
 
   return {
-    schemaVersion: "replay.api-concurrency-contract.v2",
+    schemaVersion: "replay.api-concurrency-contract.v3",
     passed: unexpectedFailures.length === 0,
     catalogEpochConflictCount: catalogEpochConflicts.length,
     catalogEpochConflicts,
     commandTransportRecovery,
+    readOnlyTransportRecovery,
+    transportRecovery: {
+      maximumRecoveries: MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES,
+      recoveryCount: allTransportRecoveries.length,
+      recoveries: allTransportRecoveries,
+    },
     unexpectedFailures,
   };
 }
@@ -4356,6 +4581,9 @@ async function main() {
         .every((item) => item.itemsAfterFinish === 0),
       replay_api_concurrency_bounded: replayApi.passed,
       replay_command_transport_recovery_bounded: replayApi.commandTransportRecovery.passed,
+      replay_read_transport_recovery_bounded: replayApi.readOnlyTransportRecovery.passed,
+      replay_transport_recovery_bounded: replayApi.transportRecovery.recoveryCount
+        <= replayApi.transportRecovery.maximumRecoveries,
       replay_command_response_identity_exact: replayCommandIdentity.passed,
       replay_runtime_clean: replayCapture.exceptions.length === 0 && replayCapture.consoleErrors.length === 0,
       lifecycle_runtime_clean: cycles.every((cycle) => cycle.consoleErrors.length === 0),

@@ -293,6 +293,127 @@ test("Phase 3 API uses run-scoped viewer, command, and progress routes", async (
   assert.deepEqual(JSON.parse(requests[1]?.body ?? "null"), command);
 });
 
+test("read-only replay.v3 API retries one transport failure", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      if (requestCount === 1) throw new TypeError("socket reset");
+      return new Response(JSON.stringify({
+        protocol: "replay.v3",
+        viewer_state: viewerState(),
+      }), { status: 200 });
+    },
+  });
+
+  const result = await client.viewerBySession("adapter-1");
+
+  assert.equal(result.viewer_state.run_id, "run-1");
+  assert.equal(requestCount, 2);
+});
+
+test("read-only replay.v3 API retries one bodyless proxy 5xx", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      if (requestCount === 1) return new Response("", { status: 500 });
+      return new Response(JSON.stringify({
+        protocol: "replay.v3",
+        viewer_state: viewerState(),
+      }), { status: 200 });
+    },
+  });
+
+  const result = await client.viewerBySession("adapter-1");
+
+  assert.equal(result.viewer_state.selected_track_id, "track-1");
+  assert.equal(requestCount, 2);
+});
+
+test("read-only replay.v3 API does not retry a structured server failure", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify({
+        protocol: "replay.v3",
+        error: {
+          code: "STORAGE_DEGRADED",
+          message: "track read failed",
+          details: { retryable: false },
+        },
+      }), { status: 503 });
+    },
+  });
+
+  await assert.rejects(
+    client.viewerBySession("adapter-1"),
+    (error: unknown) => {
+      assert.ok(error instanceof ReplayV2ApiError);
+      assert.equal(error.code, "STORAGE_DEGRADED");
+      assert.equal(error.status, 503);
+      return true;
+    },
+  );
+  assert.equal(requestCount, 1);
+});
+
+test("read-only replay.v3 API does not retry invalid JSON from a successful response", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response("", { status: 200 });
+    },
+  });
+
+  await assert.rejects(
+    client.viewerBySession("adapter-1"),
+    (error: unknown) => {
+      assert.ok(error instanceof ReplayV2ApiError);
+      assert.equal(error.code, "REPLAY_V2_PROTOCOL_ERROR");
+      return true;
+    },
+  );
+  assert.equal(requestCount, 1);
+});
+
+test("replay.v3 command POST never retries a bodyless 5xx", async () => {
+  let requestCount = 0;
+  const command: ReplayV2Command = {
+    protocol: "replay.v3",
+    run_id: "run-1",
+    command_id: "step-display-1",
+    client_instance_id: "browser-1",
+    expected_revision: 6,
+    expected_cursor: {
+      virtual_time_ms: 1_710_000_059_999,
+      source_sequence: 1,
+      revision: 6,
+    },
+    type: "step_display",
+    payload: { count: 1, display_interval: "15m", viewer_revision: 2 },
+  };
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response("", { status: 500 });
+    },
+  });
+
+  await assert.rejects(
+    client.commandRun("run-1", command),
+    (error: unknown) => {
+      assert.ok(error instanceof ReplayV2ApiError);
+      assert.equal(error.code, "REPLAY_V2_PROTOCOL_ERROR");
+      assert.equal(error.status, 500);
+      return true;
+    },
+  );
+  assert.equal(requestCount, 1);
+});
+
 test("command API fails closed when request and response identities diverge", async () => {
   const command: ReplayV2Command = {
     protocol: "replay.v3",

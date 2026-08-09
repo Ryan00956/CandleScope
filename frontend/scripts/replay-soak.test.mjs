@@ -23,6 +23,7 @@ import {
   replayApiConcurrencyContract,
   replayCommandResponseIdentityContract,
   replayCommandTransportRecoveryContract,
+  replayReadOnlyTransportRecoveryContract,
   replaySpeedAction,
   replaySpeedRequestState,
   replayStepAction,
@@ -780,6 +781,212 @@ test("replay v1 session command accepts one proved same-envelope transport recov
   assert.equal(identity.records[0].routeSessionId, "session-1");
   assert.equal(identity.records[0].recoveredByRequestId, "reconciled");
   assert.equal(identity.records[1].responseSessionId, "session-1");
+});
+
+test("replay read-only transport recovery accepts one bodyless 5xx followed by parseable 2xx", async () => {
+  const handlers = new Map();
+  const bodies = new Map([
+    ["lost", ""],
+    ["recovered", JSON.stringify({ protocol: "replay.v3", tracks: [] })],
+  ]);
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name, payload) {
+      assert.equal(name, "Network.getResponseBody");
+      return Promise.resolve({ base64Encoded: false, body: bodies.get(payload.requestId) });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp);
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  for (const [requestId, status] of [["lost", 500], ["recovered", 200]]) {
+    emit("Network.requestWillBeSent", {
+      requestId,
+      request: { method: "GET", url },
+    });
+    emit("Network.responseReceived", {
+      requestId,
+      response: { status, url },
+    });
+    emit("Network.loadingFinished", { requestId });
+  }
+  await capture.settle();
+
+  assert.equal(capture.replayReadOnlyRequests.length, 2);
+  assert.equal(capture.replayReadOnlyResponses.length, 2);
+  assert.equal(capture.replayReadOnlyResponseBodies.length, 2);
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.recoveryCount, 1);
+  assert.equal(recovery.recoveries[0].retryRequestId, "recovered");
+  const api = replayApiConcurrencyContract(capture);
+  assert.equal(api.passed, true);
+  assert.equal(api.schemaVersion, "replay.api-concurrency-contract.v3");
+  assert.equal(api.transportRecovery.recoveryCount, 1);
+});
+
+test("replay read-only transport recovery never accepts a structured 5xx", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const errorBody = JSON.stringify({
+    protocol: "replay.v3",
+    error: { code: "STORAGE_DEGRADED", message: "track read failed", details: {} },
+  });
+  const capture = {
+    replayApiResponses: [{ requestId: "failed", method: "GET", url, status: 503 }],
+    replayApiResponseBodies: [{ requestId: "failed", method: "GET", url, status: 503, body: errorBody }],
+    replayReadOnlyRequests: [{ requestId: "failed", method: "GET", url, sequence: 1 }],
+    replayReadOnlyResponses: [{ requestId: "failed", method: "GET", url, status: 503 }],
+    replayReadOnlyResponseBodies: [{ requestId: "failed", method: "GET", url, status: 503, body: errorBody }],
+  };
+
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.recoveryCount, 0);
+  const api = replayApiConcurrencyContract(capture);
+  assert.equal(api.passed, false);
+  assert.equal(api.unexpectedFailures[0].responseBody.error.code, "STORAGE_DEGRADED");
+});
+
+test("replay read-only transport recovery rejects a missing retry", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const capture = {
+    replayApiResponses: [{ requestId: "lost", method: "GET", url, status: 500 }],
+    replayApiResponseBodies: [{ requestId: "lost", method: "GET", url, status: 500, body: "" }],
+    replayReadOnlyRequests: [{ requestId: "lost", method: "GET", url, sequence: 1 }],
+    replayReadOnlyResponses: [{ requestId: "lost", method: "GET", url, status: 500 }],
+    replayReadOnlyResponseBodies: [{ requestId: "lost", method: "GET", url, status: 500, body: "" }],
+  };
+
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, false);
+  assert.equal(recovery.violations[0].reason, "READ_TRANSPORT_RECOVERY_MISSING");
+  assert.equal(replayApiConcurrencyContract(capture).passed, false);
+});
+
+test("replay read-only transport recovery rejects an interrupted 4xx response", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const capture = {
+    replayApiResponses: [{ requestId: "failed", method: "GET", url, status: 404 }],
+    replayReadOnlyRequests: [
+      { requestId: "failed", method: "GET", url, sequence: 1 },
+      { requestId: "later", method: "GET", url, sequence: 2 },
+    ],
+    replayReadOnlyResponses: [
+      { requestId: "failed", method: "GET", url, status: 404 },
+      { requestId: "later", method: "GET", url, status: 200 },
+    ],
+    replayReadOnlyResponseBodies: [
+      { requestId: "later", method: "GET", url, status: 200, body: "{}" },
+    ],
+    failedRequests: [{
+      requestId: "failed",
+      method: "GET",
+      url,
+      responseStatus: 404,
+      errorText: "net::ERR_CONNECTION_RESET",
+    }],
+  };
+
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.recoveryCount, 0);
+  const api = replayApiConcurrencyContract(capture);
+  assert.equal(api.passed, false);
+  assert.equal(api.unexpectedFailures[0].reason, "UNEXPECTED_REPLAY_API_FAILURE");
+});
+
+test("replay read-only transport recovery accepts an interrupted 2xx body", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const capture = {
+    replayReadOnlyRequests: [
+      { requestId: "interrupted", method: "GET", url, sequence: 1 },
+      { requestId: "retry", method: "GET", url, sequence: 2 },
+    ],
+    replayReadOnlyResponses: [
+      { requestId: "interrupted", method: "GET", url, status: 200 },
+      { requestId: "retry", method: "GET", url, status: 200 },
+    ],
+    replayReadOnlyResponseBodies: [
+      { requestId: "retry", method: "GET", url, status: 200, body: "{}" },
+    ],
+    failedRequests: [{
+      requestId: "interrupted",
+      method: "GET",
+      url,
+      responseStatus: 200,
+      errorText: "net::ERR_CONTENT_LENGTH_MISMATCH",
+    }],
+  };
+
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.recoveryCount, 1);
+  assert.equal(recovery.recoveries[0].failureKind, "NETWORK_LOADING_FAILED");
+  assert.equal(replayApiConcurrencyContract(capture).passed, true);
+});
+
+test("formal replay transport recovery permits only one combined command or read loss", () => {
+  const commandUrl = "http://127.0.0.1/api/v1/replay/runs/session/session-1/commands";
+  const readUrl = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const postData = JSON.stringify({
+    protocol: "replay.v1",
+    command_id: "command-loss-1",
+    expected_revision: 0,
+    type: "pause",
+    payload: {},
+  });
+  const commandResult = JSON.stringify({
+    protocol: "replay.v1",
+    session_id: "session-1",
+    command_id: "command-loss-1",
+    revision: 1,
+  });
+  const capture = {
+    replayApiResponses: [
+      { requestId: "command-lost", method: "POST", url: commandUrl, status: 500 },
+      { requestId: "read-lost", method: "GET", url: readUrl, status: 500 },
+    ],
+    replayApiResponseBodies: [
+      { requestId: "command-lost", method: "POST", url: commandUrl, status: 500, body: "" },
+      { requestId: "read-lost", method: "GET", url: readUrl, status: 500, body: "" },
+    ],
+    replayCommandRequests: [
+      { requestId: "command-lost", method: "POST", url: commandUrl, postData },
+      { requestId: "command-retry", method: "POST", url: commandUrl, postData },
+    ],
+    replayCommandResponses: [
+      { requestId: "command-lost", method: "POST", url: commandUrl, status: 500 },
+      { requestId: "command-retry", method: "POST", url: commandUrl, status: 200 },
+    ],
+    replayCommandResponseBodies: [
+      { requestId: "command-lost", method: "POST", url: commandUrl, status: 500, body: "" },
+      { requestId: "command-retry", method: "POST", url: commandUrl, status: 200, body: commandResult },
+    ],
+    replayReadOnlyRequests: [
+      { requestId: "read-lost", method: "GET", url: readUrl, sequence: 1 },
+      { requestId: "read-retry", method: "GET", url: readUrl, sequence: 2 },
+    ],
+    replayReadOnlyResponses: [
+      { requestId: "read-lost", method: "GET", url: readUrl, status: 500 },
+      { requestId: "read-retry", method: "GET", url: readUrl, status: 200 },
+    ],
+    replayReadOnlyResponseBodies: [
+      { requestId: "read-lost", method: "GET", url: readUrl, status: 500, body: "" },
+      { requestId: "read-retry", method: "GET", url: readUrl, status: 200, body: "{}" },
+    ],
+  };
+
+  assert.equal(replayCommandTransportRecoveryContract(capture).passed, true);
+  assert.equal(replayReadOnlyTransportRecoveryContract(capture).passed, true);
+  const api = replayApiConcurrencyContract(capture);
+  assert.equal(api.passed, false);
+  assert.equal(api.transportRecovery.recoveryCount, 2);
+  assert.equal(
+    api.unexpectedFailures.at(-1).reason,
+    "REPLAY_TRANSPORT_RECOVERY_LIMIT_EXCEEDED",
+  );
 });
 
 test("replay command transport recovery rejects a changed canonical envelope", () => {

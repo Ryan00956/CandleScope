@@ -264,6 +264,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - `replay.api-concurrency-contract.v2` 将已证明的单次 exactly-once 恢复与 catalog epoch 冲突分别记录，不把它们降格为状态码白名单；`replayCommandResponseIdentityContract` 仍逐条保留首次失败和成功对账。最终网络审计在 assertion 前写入 `phaseDiagnostics`，以后即使拒绝也会保存恢复链、最近命令及 failed request，而不是只留下一个 requestId。
 - 定向 harness `48 passed`，覆盖 v1 实际捕获、无 body 500 成功对账、Network loading failure、修改 canonical envelope、结构化 persistence 503、超过一次恢复和 v3 stale-200 身份错配。该修复提交会生成新 HEAD；旧 `1cf1e66c` 的来源、checks、benchmark、smoke、rollback 和失败 soak 都只能作为根因证据，正式 Phase 9 必须在新 clean HEAD 从头重跑。
 
+### 3.25 正式长稳只读状态断流与有界 GET 恢复
+
+- `1f1e06bfcb0c7186830376892fff2a4e8b716877` 的真实来源校验、全量 release checks、formal benchmark、真实浏览器 smoke 和 rollback 均通过：后端 `3253 passed`、前端 `2975 passed`；benchmark 在 `MEASURE_ONLY_NON_BLOCKING` 下保留了全部 core/fast-forward/1/2/4/8 HEDGE 墙钟测量，reference equivalence、账户/输入审计、SQLite、storage inventory 和 RSS 硬门禁全真；smoke 33 项及 rollback 17 项 acceptance 全真。
+- 同一 HEAD 的正式 4 小时 soak 没有被误报为 PASS：运行到约 `4,487.9 s`、第 30 个 training action cycle 时，页面等待重连后的命令就绪超时。失败 artifact 显示 session 已经重新连接并由本页持有 controller，服务端 state 为 `PAUSED`，source sequence/revision 持续有效；此前 250 个命令 request/response/body 全部身份一致、没有命令传输恢复或运行时异常。真正失败的是 `GET /api/v1/replay/runs/session/<session_id>/tracks -> 500`，正文不可解析；Vite 同 URL 记录 `http proxy error` 和 `read ECONNRESET`。客户端把一次只读状态断流直接转成 `replay.v3 response is not valid JSON`，清空 tracks/bars 并永久禁用命令控件。该证据证明 actor/controller 已恢复而幂等读取没有恢复，不是性能门槛，也不能由用户的墙钟豁免覆盖。
+- `ReplayV2ApiClient` 现在只对 GET 做最多一次内建重试：首次 fetch 传输失败、response body 读取中断，或无可解析 JSON 的 5xx 才允许重发；解析成功的结构化 4xx/5xx、成功 2xx 的非法 JSON、第二次失败以及所有 POST/DELETE/命令写入仍立即 fail closed。没有环境变量、灰度、默认关闭、退回旧 projection 或无限 retry。
+- soak 新增 `replay.read-transport-recovery.v1`：按 CDP requestId 保存失败 GET、HTTP status、loading-failed、response body、请求序号和唯一同 URL retry；只有无结构化正文的 5xx/网络断流加一个可解析 2xx 才能闭环。已见 4xx 后的正文中断仍拒绝。`replay.api-concurrency-contract.v3` 对命令与只读恢复合并计数，整场正式运行总计最多 1 次；新增 `replay_read_transport_recovery_bounded` 与综合 `replay_transport_recovery_bounded` acceptance，第二次恢复或任何无证明链仍硬失败。
+- 定向 harness `54 passed`，前端 API `13 passed`，覆盖实际 capture、bodyless 500、fetch/loading failure、2xx body 中断、结构化 503、非法成功 JSON、缺失 retry、已见 4xx 的中断、命令不自动重试和命令/读恢复合计超过一次。该修复提交将生成新 HEAD；`1f1e06bf` 的通过项和失败 soak 只保留为根因证据，正式 Phase 9 的来源、checks、benchmark、smoke、rollback、4 小时 soak 与 manifest 必须在新 clean HEAD 全部重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

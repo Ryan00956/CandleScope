@@ -908,54 +908,83 @@ export class ReplayV2ApiClient {
   }
 
   private async request<T>(path: string, parser: Parser<T>, options: RequestInit): Promise<T> {
-    let response: Response;
-    try {
-      const fetcher = this.fetcher;
-      response = await fetcher(`${this.basePath}${path}`, {
-        credentials: "same-origin",
-        headers: { "content-type": "application/json", ...options.headers },
-        ...options,
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") throw error;
-      throw new ReplayV2ApiError("REPLAY_V2_TRANSPORT_ERROR", "replay.v3 request failed", { cause: error });
-    }
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(await response.text()) as unknown;
-    } catch (error) {
-      throw new ReplayV2ApiError(
-        "REPLAY_V2_PROTOCOL_ERROR",
-        "replay.v3 response is not valid JSON",
-        { status: response.status, cause: error },
-      );
-    }
-    if (!response.ok) {
+    const method = (options.method ?? "GET").toUpperCase();
+    const retryableRead = method === "GET";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const mayRetry = retryableRead
+        && attempt === 0
+        && options.signal?.aborted !== true;
+      let response: Response;
       try {
-        const parsed = parseErrorEnvelope(payload);
-        throw new ReplayV2ApiError(parsed.code, parsed.message, {
-          status: response.status,
-          details: parsed.details,
+        const fetcher = this.fetcher;
+        response = await fetcher(`${this.basePath}${path}`, {
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", ...options.headers },
+          ...options,
         });
       } catch (error) {
-        if (error instanceof ReplayV2ApiError) throw error;
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        if (mayRetry) continue;
+        throw new ReplayV2ApiError(
+          "REPLAY_V2_TRANSPORT_ERROR",
+          "replay.v3 request failed",
+          { cause: error },
+        );
+      }
+
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        if (mayRetry) continue;
+        throw new ReplayV2ApiError(
+          "REPLAY_V2_TRANSPORT_ERROR",
+          "replay.v3 response body was interrupted",
+          { status: response.status, cause: error },
+        );
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text) as unknown;
+      } catch (error) {
+        if (mayRetry && response.status >= 500 && response.status < 600) continue;
         throw new ReplayV2ApiError(
           "REPLAY_V2_PROTOCOL_ERROR",
-          "replay.v3 error response violates the contract",
+          "replay.v3 response is not valid JSON",
+          { status: response.status, cause: error },
+        );
+      }
+      if (!response.ok) {
+        try {
+          const parsed = parseErrorEnvelope(payload);
+          throw new ReplayV2ApiError(parsed.code, parsed.message, {
+            status: response.status,
+            details: parsed.details,
+          });
+        } catch (error) {
+          if (error instanceof ReplayV2ApiError) throw error;
+          throw new ReplayV2ApiError(
+            "REPLAY_V2_PROTOCOL_ERROR",
+            "replay.v3 error response violates the contract",
+            { status: response.status, cause: error },
+          );
+        }
+      }
+      try {
+        return parser(payload);
+      } catch (error) {
+        throw new ReplayV2ApiError(
+          "REPLAY_V2_PROTOCOL_ERROR",
+          "replay.v3 response violates the contract",
           { status: response.status, cause: error },
         );
       }
     }
-    try {
-      return parser(payload);
-    } catch (error) {
-      throw new ReplayV2ApiError(
-        "REPLAY_V2_PROTOCOL_ERROR",
-        "replay.v3 response violates the contract",
-        { status: response.status, cause: error },
-      );
-    }
+    throw new ReplayV2ApiError(
+      "REPLAY_V2_TRANSPORT_ERROR",
+      "replay.v3 read retry exhausted",
+    );
   }
 }
 

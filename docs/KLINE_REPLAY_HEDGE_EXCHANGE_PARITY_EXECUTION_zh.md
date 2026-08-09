@@ -558,6 +558,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 后续正式 4 小时轮在完成 100/100 周期后捕获到一次 `replay.v1` session command 的无响应体代理 500。产品已经按同一 canonical `command_id` 在新权威快照后 fail-closed 对账，验收捕获却只覆盖 `replay.v3` Run command，无法证明恢复链，因此该轮保持 FAIL。正式 soak 现同时捕获 v1/v3 命令，并新增硬合同：最多 1 次无结构化响应的传输丢失，必须由唯一一次 method/URL/body 字节完全相同的重试和匹配 protocol、Run/session、`command_id` 的 2xx 响应闭环；结构化 5xx、第二次丢失/重试、修改命令或身份不一致仍拒绝。修复后的新 clean HEAD 必须重跑本阶段全部正式证据。
 
+再后一轮 clean-HEAD 正式 soak 在约 74.8 分钟、第 30 个训练周期捕获 `GET /runs/session/<id>/tracks` 的 Vite proxy `read ECONNRESET`/无效 500 body；session/controller/权威时钟和此前 250 个命令身份都健康，但客户端因一次幂等状态读取失败清空 tracks/bars 并永久禁用命令。该失败属于正确性与长稳硬门禁，不属于已豁免的墙钟性能阈值。产品现仅对 GET 的首次传输失败、body 中断或无结构化正文 5xx 自动重试一次；所有 mutation、结构化错误、成功但非法 JSON、第二次失败仍 fail closed。正式 soak 按 requestId/body/序号证明唯一同 URL GET 2xx 闭环，并将命令与读取恢复合并限制为整场最多一次；新 clean HEAD 仍必须重跑本阶段全部正式证据。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

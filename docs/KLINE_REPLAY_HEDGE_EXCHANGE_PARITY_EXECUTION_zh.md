@@ -562,6 +562,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 35-cycle 高密度复验随后完成全部周期并越过旧 cycle 30，但网络审计发现 capture 将 `canceled=true / net::ERR_ABORTED` 的页面生命周期主动取消误配为 GET retry，因此仍保持 FAIL。主动取消现在单独审计且不消耗恢复预算、不设置 pending；只有这两个字段同时精确匹配才分类为 abort，其他 canceled/网络错误仍受严格恢复合同约束。若主动取消中断已开始的真实 retry，原恢复链仍因缺少成功 2xx 而失败。修复后的新 clean HEAD 继续从高密度复验起重跑。
 
+再下一轮 clean-HEAD 高密度、来源、全检查与完整 benchmark 已通过，但正式 smoke 捕获 Windows Chrome launcher 以 `0` 退出并把真实 browser 交接到子进程的生命周期差异。旧 harness 将 launcher exit 误判为 browser 死亡，且 cleanup 因遗漏真实 browser 留下被锁 profile。harness 现仅对 Chrome 的显式 Windows 成功交接继续等待 browser readiness，随后持有 browser-level CDP 控制，收尾发送 `Browser.close`、执行 PID fallback，并以调试端点有界消失作为删除临时目录前的硬证明；非零 launcher exit、其他服务提前退出、端点仍存活均继续 fail closed。新 clean HEAD 仍须重跑本阶段全部正式证据。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

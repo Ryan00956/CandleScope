@@ -32,6 +32,7 @@ const FORMAL_V2_REAL_WINDOW_ROWS = (
   + FORMAL_V2_WARMUP_BARS
 );
 const SHUTDOWN_REQUEST_TIMEOUT_MS = 5_000;
+const BROWSER_SHUTDOWN_TIMEOUT_MS = 15_000;
 const HEDGE_BROWSER_SOURCE_PROFILE = "HEDGE_EXACT_ARCHIVE_QA";
 const REPLAY_TRAINING_PROTOCOL = "replay.v3";
 
@@ -323,11 +324,26 @@ export async function readJson(url, options = {}, fetchImpl = fetch) {
   });
 }
 
-async function waitForHttp(url, child, timeoutMs) {
+export function readinessProcessExitIsTerminal(
+  exitCode,
+  { allowSuccessfulExitHandoff = false } = {},
+) {
+  return exitCode !== null
+    && !(allowSuccessfulExitHandoff && exitCode === 0);
+}
+
+async function waitForHttp(
+  url,
+  child,
+  timeoutMs,
+  { allowSuccessfulExitHandoff = false } = {},
+) {
   const started = Date.now();
   let lastError = null;
   while (Date.now() - started < timeoutMs) {
-    if (child.exitCode !== null) throw new Error(`Process exited before ${url}: ${child.exitCode}`);
+    if (readinessProcessExitIsTerminal(child.exitCode, { allowSuccessfulExitHandoff })) {
+      throw new Error(`Process exited before ${url}: ${child.exitCode}`);
+    }
     try {
       const remainingMs = Math.max(1, timeoutMs - (Date.now() - started));
       const response = await withAbortTimeout({
@@ -542,6 +558,67 @@ export class CdpConnection {
     this.#terminate(new Error("CDP WebSocket closed by replay soak harness"));
     try { this.socket.close(); } catch { /* target may already be closed */ }
   }
+}
+
+async function connectBrowserControl(debugBase, timeoutMs) {
+  const version = await readJson(`${debugBase}/json/version`, { timeoutMs });
+  assert(
+    typeof version?.webSocketDebuggerUrl === "string"
+      && /^wss?:\/\//.test(version.webSocketDebuggerUrl),
+    "Chrome debugging endpoint did not expose a browser WebSocket",
+    version,
+  );
+  const connection = new CdpConnection(version.webSocketDebuggerUrl, { timeoutMs });
+  await connection.connect(timeoutMs);
+  return connection;
+}
+
+export async function requestBrowserClose(connection, timeoutMs = SHUTDOWN_REQUEST_TIMEOUT_MS) {
+  if (!connection) {
+    return { attempted: false, acknowledged: false, error: null };
+  }
+  let acknowledged = false;
+  let closeError = null;
+  try {
+    await connection.send("Browser.close", {}, timeoutMs);
+    acknowledged = true;
+  } catch (error) {
+    // Chrome may close the browser WebSocket before acknowledging Browser.close.
+    // Endpoint disappearance below remains the authoritative cleanup proof.
+    closeError = error instanceof Error ? error : new Error(String(error));
+  } finally {
+    connection.close();
+  }
+  return {
+    attempted: true,
+    acknowledged,
+    error: closeError?.message ?? null,
+  };
+}
+
+export async function waitForHttpUnavailable(
+  url,
+  timeoutMs,
+  { fetchImpl = fetch, waitImpl = wait } = {},
+) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("HTTP unavailability timeout must be a positive safe integer");
+  }
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const remainingMs = Math.max(1, timeoutMs - (Date.now() - started));
+    try {
+      await withAbortTimeout({
+        label: `HTTP shutdown ${url}`,
+        timeoutMs: Math.min(SHUTDOWN_REQUEST_TIMEOUT_MS, remainingMs),
+        operation: (signal) => fetchImpl(url, { signal }),
+      });
+    } catch {
+      return;
+    }
+    await waitImpl(Math.min(150, remainingMs));
+  }
+  throw new Error(`Timed out waiting for ${url} to become unavailable`);
 }
 
 async function createTarget(debugBase, url = "about:blank") {
@@ -3799,16 +3876,24 @@ async function main() {
   ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   const chromeTail = processTail(chrome);
   const connections = new Set();
+  const backendOrigin = `http://127.0.0.1:${backendPort}`;
+  const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
+  const debugBase = `http://127.0.0.1:${debugPort}`;
+  let browserControl = null;
   let result = null;
   let phaseDiagnostics = null;
+  let cleanupError = null;
   try {
-    const backendOrigin = `http://127.0.0.1:${backendPort}`;
-    const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
-    const debugBase = `http://127.0.0.1:${debugPort}`;
+    await waitForHttp(
+      `${debugBase}/json/version`,
+      chrome,
+      args.timeoutMs,
+      { allowSuccessfulExitHandoff: process.platform === "win32" },
+    );
+    browserControl = await connectBrowserControl(debugBase, args.timeoutMs);
     const diagnosticsUrl = `${backendOrigin}/__replay_smoke__/diagnostics`;
     await waitForHttp(`${backendOrigin}/__replay_smoke__/fixture`, backend, args.timeoutMs);
     await waitForHttp(`${frontendOrigin}/`, vite, args.timeoutMs);
-    await waitForHttp(`${debugBase}/json/version`, chrome, args.timeoutMs);
     const fixture = await readJson(`${backendOrigin}/__replay_smoke__/fixture`);
     const liveSymbol = fixture.live_window?.symbol;
     assert(
@@ -4775,15 +4860,59 @@ async function main() {
       viteTail: viteTail(),
       chromeTail: chromeTail(),
     });
+    fs.rmSync(args.out, { force: true });
     writeJson(`${args.out}.failed.json`, failure);
     throw error;
   } finally {
-    for (const connection of connections) connection.close();
-    await stopBackendGracefully(backend, `http://127.0.0.1:${backendPort}`);
-    await Promise.all([stopProcessTree(chrome), stopProcessTree(vite), stopProcessTree(backend)]);
-    await wait(300);
-    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    let browserClose = { attempted: false, acknowledged: false, error: null };
+    try {
+      for (const connection of connections) connection.close();
+      if (!browserControl) {
+        try {
+          browserControl = await connectBrowserControl(
+            debugBase,
+            SHUTDOWN_REQUEST_TIMEOUT_MS,
+          );
+        } catch {
+          // The browser may never have reached readiness; PID fallback and the
+          // endpoint-unavailable proof below still remain mandatory.
+        }
+      }
+      browserClose = await requestBrowserClose(browserControl);
+      await stopBackendGracefully(backend, backendOrigin);
+      await Promise.all([stopProcessTree(chrome), stopProcessTree(vite), stopProcessTree(backend)]);
+      await waitForHttpUnavailable(
+        `${debugBase}/json/version`,
+        BROWSER_SHUTDOWN_TIMEOUT_MS,
+      );
+      await wait(300);
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (error) {
+      fs.rmSync(args.out, { force: true });
+      const cleanupFailure = browserSoakFailureEvidence({
+        releaseEvidence,
+        error,
+        phaseDiagnostics: {
+          phase: "browser-process-cleanup",
+          browserClose,
+          preceding: phaseDiagnostics,
+        },
+        partialResult: result,
+        frontendRuntime: {
+          mode: frontendPlan.runtime,
+          explicitEnvironment: frontendPlan.environment,
+          buildExecution: frontendBuildExecution,
+          build: frontendBuild.evidence,
+        },
+        backendTail: backendTail(),
+        viteTail: viteTail(),
+        chromeTail: chromeTail(),
+      });
+      writeJson(`${args.out}.failed.json`, cleanupFailure);
+      cleanupError = error;
+    }
   }
+  if (cleanupError) throw cleanupError;
   return result;
 }
 

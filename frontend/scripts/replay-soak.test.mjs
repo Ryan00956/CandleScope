@@ -19,6 +19,7 @@ import {
   isExactHedgeTrainingBound,
   primaryReplayFailureDiagnostics,
   readJson,
+  readinessProcessExitIsTerminal,
   replayBackendHealth,
   replayApiConcurrencyContract,
   replayCommandResponseIdentityContract,
@@ -32,12 +33,66 @@ import {
   replaySoakFrontendProcessEnvironment,
   replayProductHeapEvidence,
   replayTrainingTargetSpeed,
+  requestBrowserClose,
   restoreCommandReadinessAfterReconnect,
   selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
+  waitForHttpUnavailable,
   withNetworkInspectorSuspended,
   writeHeapSnapshot,
 } from "./replay-soak.mjs";
+
+test("Chrome readiness permits only an explicit successful launcher handoff", () => {
+  assert.equal(readinessProcessExitIsTerminal(null), false);
+  assert.equal(readinessProcessExitIsTerminal(0), true);
+  assert.equal(
+    readinessProcessExitIsTerminal(0, { allowSuccessfulExitHandoff: true }),
+    false,
+  );
+  assert.equal(
+    readinessProcessExitIsTerminal(1, { allowSuccessfulExitHandoff: true }),
+    true,
+  );
+});
+
+test("browser cleanup tolerates WebSocket closure only with endpoint disappearance proof", async () => {
+  const commands = [];
+  let closed = 0;
+  const connection = {
+    async send(method, params, timeoutMs) {
+      commands.push({ method, params, timeoutMs });
+      throw new Error("CDP WebSocket closed");
+    },
+    close() {
+      closed += 1;
+    },
+  };
+
+  const close = await requestBrowserClose(connection, 25);
+  assert.deepEqual(commands, [{ method: "Browser.close", params: {}, timeoutMs: 25 }]);
+  assert.equal(closed, 1);
+  assert.deepEqual(close, {
+    attempted: true,
+    acknowledged: false,
+    error: "CDP WebSocket closed",
+  });
+  await waitForHttpUnavailable("http://127.0.0.1:1/json/version", 25, {
+    fetchImpl: async () => {
+      throw new Error("connection refused");
+    },
+    waitImpl: async () => undefined,
+  });
+});
+
+test("browser cleanup fails when the debugging endpoint remains alive", async () => {
+  await assert.rejects(
+    waitForHttpUnavailable("http://127.0.0.1:1/json/version", 10, {
+      fetchImpl: async () => ({ ok: true }),
+      waitImpl: () => new Promise((resolve) => setTimeout(resolve, 1)),
+    }),
+    /Timed out waiting for .* to become unavailable/,
+  );
+});
 
 test("public replay scripts cannot select or launch the retired v1 product", () => {
   const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -77,6 +132,8 @@ test("public replay scripts cannot select or launch the retired v1 product", () 
   assert.match(soak, /lifecycle pre-reload integrity idle/);
   assert.match(soak, /lifecycle replay API returned failures/);
   assert.match(soak, /replay_api_concurrency_bounded/);
+  assert.match(soak, /phase: "browser-process-cleanup"/);
+  assert.match(soak, /fs\.rmSync\(args\.out, \{ force: true \}\)/);
   assert.match(soak, /CATALOG_EPOCH_RETRY_DID_NOT_SUCCEED/);
   assert.match(soak, /--heap-snapshot-out is available only with --allow-short/);
   assert.match(

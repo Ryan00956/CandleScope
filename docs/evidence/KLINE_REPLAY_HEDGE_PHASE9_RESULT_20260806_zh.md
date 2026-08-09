@@ -279,6 +279,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - capture 现在仅把同时满足 `canceled=true` 且 `errorText=net::ERR_ABORTED` 的 replay GET 记入独立 `ignoredAborts` 审计，不设置 pending、不消耗一次传输恢复预算，也不与后续请求配对；任一其他 canceled/error 组合仍进入严格恢复合同。若主动取消发生在已开始的真实 retry 上，会终止 pending 并令原始恢复链因 retry 未成功而硬失败，不能借 abort 隐藏第二次错误。
 - 定向 harness 增至 `57 passed`，前端 API 增至 `14 passed`；新增真实 CDP capture 顺序、AbortError 不重试、`canceled=true + ERR_CONNECTION_RESET` 反例及真实 retry 被 abort 时仍硬失败的闭环。该修复会产生又一个新 HEAD；`5eba1e9b` 的 35-cycle 结果只作根因证据，修复后的高密度复验和 Phase 9 正式全链仍须重跑。
 
+### 3.27 正式 smoke 发现 Windows Chrome 启动器交接缺口
+
+- `3da45a5085c0223af06a32d36b88a27843d3f2f8` 的新 35-cycle 高密度复验已通过：35/35 training、35/35 archive lifecycle、293/293/293 命令身份一致、命令与 GET 恢复均为 0，5 个 `canceled=true / net::ERR_ABORTED` 仅审计，全部 acceptance 为真。来源验证、`3253` 个 backend tests、`2990` 个 frontend tests 和完整 benchmark 也通过；benchmark 明确为 `MEASURE_ONLY_NON_BLOCKING`，100 万事件优化/参考路径的 cursor、state、component、report hash 完全一致。
+- 随后的正式 smoke 在 Chrome readiness 阶段保持 FAIL。Windows 上 launcher PID 以 exit `0` 完成交接，但其真实 browser 子进程继续运行且稍后正常开放 `/json/version`；旧 harness 立即把 launcher exit 当作浏览器死亡，cleanup 又因只处理已退出 launcher PID 而遗漏真实 browser，最终由被占用的 `CrashpadMetrics-active.pma` 二次暴露资源泄漏。失败 artifact 与唯一临时 profile/PID 证据均已保留，残留浏览器已精确终止。
+- harness 现在只为 Chrome 的显式 Windows 路径允许 `launcher exit 0` 交接；非零退出以及 backend/vite 的任何提前退出仍 fail closed。Chrome readiness 后立即建立 browser-level CDP 控制连接，收尾发送 `Browser.close`，再执行原 PID fallback，并要求 `/json/version` 在有界时间内确实不可用后才删除临时目录。WebSocket 可能先于 `Browser.close` acknowledgement 断开，但只有端点消失证明才能接受；端点存活仍硬失败。
+- 该修复将产生新 HEAD。`3da45a50` 已通过的高密度、来源、checks、benchmark 只作根因和历史测量证据；新 HEAD 必须重新执行 Phase 9 正式全链，不能继承旧 HEAD 的 PASS。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

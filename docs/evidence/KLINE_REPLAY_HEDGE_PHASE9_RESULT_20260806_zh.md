@@ -286,6 +286,12 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - harness 现在只为 Chrome 的显式 Windows 路径允许 `launcher exit 0` 交接；非零退出以及 backend/vite 的任何提前退出仍 fail closed。Chrome readiness 后立即建立 browser-level CDP 控制连接，收尾发送 `Browser.close`，再执行原 PID fallback，并要求 `/json/version` 在有界时间内确实不可用后才删除临时目录。WebSocket 可能先于 `Browser.close` acknowledgement 断开，但只有端点消失证明才能接受；端点存活仍硬失败。
 - 该修复将产生新 HEAD。`3da45a50` 已通过的高密度、来源、checks、benchmark 只作根因和历史测量证据；新 HEAD 必须重新执行 Phase 9 正式全链，不能继承旧 HEAD 的 PASS。
 
+### 3.28 新 HEAD 全量 checks 捕获 50ms 测试时钟竞争
+
+- Windows lifecycle 修复的新 clean HEAD 已通过专用真实 browser smoke：1/1 training、1/1 archive lifecycle、21/21/21 命令身份一致、0 API/传输恢复异常；真实 browser 经 `Browser.close` 后无活进程，新临时 profile 自动删除。随后正式来源验证再次通过。
+- 正式 backend 全量 checks 的唯一失败为 `test_binance_418_opens_exchange_ip_circuit_across_buckets`：3252 个其余测试通过；第一次 futures inspect 得到 `circuit_open`，宿主在线程调度后第二次 spot inspect 已越过测试写死的 50ms `Retry-After`，得到 circuit 恢复后的 `budget`。`3da45a50..d7b502a2` 的 backend diff 为空，同一测试独立连续运行 30 次均通过，证明不是产品 circuit 语义回归，而是以调度抖动量级充当观察窗的测试脆弱性。
+- 该测试不等待恢复，只验证同一 418 在两个 Binance bucket 上立即可见；观察窗现从 50ms 改为 5s，并明确记录其目的仅是隔离宿主调度。生产 `RateLimitManager`、默认 cooldown、真实 `Retry-After` 解析与恢复语义均未修改；其他专门验证短 cooldown/恢复的测试仍保留原工作量。修复后的新 clean HEAD 仍须从正式来源、全量 checks 起重跑全部 Phase 9 证据。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

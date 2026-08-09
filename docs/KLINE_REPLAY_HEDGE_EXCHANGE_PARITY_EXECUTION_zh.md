@@ -564,6 +564,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 再下一轮 clean-HEAD 高密度、来源、全检查与完整 benchmark 已通过，但正式 smoke 捕获 Windows Chrome launcher 以 `0` 退出并把真实 browser 交接到子进程的生命周期差异。旧 harness 将 launcher exit 误判为 browser 死亡，且 cleanup 因遗漏真实 browser 留下被锁 profile。harness 现仅对 Chrome 的显式 Windows 成功交接继续等待 browser readiness，随后持有 browser-level CDP 控制，收尾发送 `Browser.close`、执行 PID fallback，并以调试端点有界消失作为删除临时目录前的硬证明；非零 launcher exit、其他服务提前退出、端点仍存活均继续 fail closed。新 clean HEAD 仍须重跑本阶段全部正式证据。
 
+Windows lifecycle 修复后的专用真实 smoke 已通过并证明无新 Chrome/profile 残留；随后正式全量 backend checks 的唯一失败来自未改动的限流测试以 50ms `Retry-After` 同时充当“circuit 必须仍开启”的观察窗。宿主调度恰好发生在两个连续 inspect 之间，第一项仍为 `circuit_open`、第二项已进入恢复后的 `budget`；backend diff 为空且独立连续 30 次通过，判定为测试时钟竞争。该不等待恢复的跨 bucket 可见性测试现使用 5s 观察窗以隔离调度抖动，生产限流实现、默认 cooldown 和真实 Retry-After 行为均不变。新 clean HEAD 仍须重跑本阶段全部正式证据。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

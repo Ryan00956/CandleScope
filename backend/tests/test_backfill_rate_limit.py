@@ -479,7 +479,10 @@ def test_binance_418_opens_exchange_ip_circuit_across_buckets() -> None:
             futures_rule,
             status_code=418,
             body_code="-1003",
-            headers={"Retry-After": "0.05"},
+            # This test does not wait for recovery. Keep the observation
+            # horizon well above host scheduler jitter so both immediate
+            # bucket inspections prove the same exchange-wide circuit.
+            headers={"Retry-After": "5"},
         )
         return (
             await manager.inspect(futures_rule, futures_request),

@@ -272,6 +272,13 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - soak 新增 `replay.read-transport-recovery.v1`：按 CDP requestId 保存失败 GET、HTTP status、loading-failed、response body、请求序号和唯一同 URL retry；只有无结构化正文的 5xx/网络断流加一个可解析 2xx 才能闭环。已见 4xx 后的正文中断仍拒绝。`replay.api-concurrency-contract.v3` 对命令与只读恢复合并计数，整场正式运行总计最多 1 次；新增 `replay_read_transport_recovery_bounded` 与综合 `replay_transport_recovery_bounded` acceptance，第二次恢复或任何无证明链仍硬失败。
 - 定向 harness `54 passed`，前端 API `13 passed`，覆盖实际 capture、bodyless 500、fetch/loading failure、2xx body 中断、结构化 503、非法成功 JSON、缺失 retry、已见 4xx 的中断、命令不自动重试和命令/读恢复合计超过一次。该修复提交将生成新 HEAD；`1f1e06bf` 的通过项和失败 soak 只保留为根因证据，正式 Phase 9 的来源、checks、benchmark、smoke、rollback、4 小时 soak 与 manifest 必须在新 clean HEAD 全部重跑。
 
+### 3.26 高密度复验发现主动取消分类缺口
+
+- `5eba1e9be6b23be86ebbc2866d44a262bae18a05` 的 35-cycle 真实浏览器高密度复验实际完成 35/35 lifecycle、10,000 projection events（`51,124.74 events/s`）并越过旧第 30 周期故障边界；293 个命令 request/response/body 身份全真。运行在最终网络审计保持 FAIL，没有生成 PASS artifact。
+- 唯一拒绝原因不是新的代理断流，而是 GET 恢复 capture 把 5 个生命周期主动取消误归为网络恢复：每条 CDP 记录均为 `canceled=true / net::ERR_ABORTED`，其中一条已收到 200 后正文因页面生命周期结束而取消；客户端 AbortError 分支不会自动 retry，后续同 URL 请求属于新生命周期，但旧 capture 设置 pending 并把它误配为 retry。该错误造成四条 `READ_TRANSPORT_RECOVERY_RETRY_EXCEEDED` 和一条虚假恢复，证明恢复分类器不能只看 `loadingFailed`。
+- capture 现在仅把同时满足 `canceled=true` 且 `errorText=net::ERR_ABORTED` 的 replay GET 记入独立 `ignoredAborts` 审计，不设置 pending、不消耗一次传输恢复预算，也不与后续请求配对；任一其他 canceled/error 组合仍进入严格恢复合同。若主动取消发生在已开始的真实 retry 上，会终止 pending 并令原始恢复链因 retry 未成功而硬失败，不能借 abort 隐藏第二次错误。
+- 定向 harness 增至 `57 passed`，前端 API 增至 `14 passed`；新增真实 CDP capture 顺序、AbortError 不重试、`canceled=true + ERR_CONNECTION_RESET` 反例及真实 retry 被 abort 时仍硬失败的闭环。该修复会产生又一个新 HEAD；`5eba1e9b` 的 35-cycle 结果只作根因证据，修复后的高密度复验和 Phase 9 正式全链仍须重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

@@ -312,6 +312,22 @@ test("read-only replay.v3 API retries one transport failure", async () => {
   assert.equal(requestCount, 2);
 });
 
+test("read-only replay.v3 API never retries an intentional abort", async () => {
+  let requestCount = 0;
+  const client = new ReplayV2ApiClient({
+    fetcher: async () => {
+      requestCount += 1;
+      throw new DOMException("request canceled", "AbortError");
+    },
+  });
+
+  await assert.rejects(
+    client.viewerBySession("adapter-1"),
+    (error: unknown) => error instanceof DOMException && error.name === "AbortError",
+  );
+  assert.equal(requestCount, 1);
+});
+
 test("read-only replay.v3 API retries one bodyless proxy 5xx", async () => {
   let requestCount = 0;
   const client = new ReplayV2ApiClient({

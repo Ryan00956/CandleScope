@@ -560,6 +560,8 @@ typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据�
 
 再后一轮 clean-HEAD 正式 soak 在约 74.8 分钟、第 30 个训练周期捕获 `GET /runs/session/<id>/tracks` 的 Vite proxy `read ECONNRESET`/无效 500 body；session/controller/权威时钟和此前 250 个命令身份都健康，但客户端因一次幂等状态读取失败清空 tracks/bars 并永久禁用命令。该失败属于正确性与长稳硬门禁，不属于已豁免的墙钟性能阈值。产品现仅对 GET 的首次传输失败、body 中断或无结构化正文 5xx 自动重试一次；所有 mutation、结构化错误、成功但非法 JSON、第二次失败仍 fail closed。正式 soak 按 requestId/body/序号证明唯一同 URL GET 2xx 闭环，并将命令与读取恢复合并限制为整场最多一次；新 clean HEAD 仍必须重跑本阶段全部正式证据。
 
+35-cycle 高密度复验随后完成全部周期并越过旧 cycle 30，但网络审计发现 capture 将 `canceled=true / net::ERR_ABORTED` 的页面生命周期主动取消误配为 GET retry，因此仍保持 FAIL。主动取消现在单独审计且不消耗恢复预算、不设置 pending；只有这两个字段同时精确匹配才分类为 abort，其他 canceled/网络错误仍受严格恢复合同约束。若主动取消中断已开始的真实 retry，原恢复链仍因缺少成功 2xx 而失败。修复后的新 clean HEAD 继续从高密度复验起重跑。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

@@ -1225,6 +1225,7 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
     replayCommandResponseBodies: [],
     replayCommandResponses: [],
     replayReadOnlyRequests: [],
+    replayReadOnlyAborts: [],
     replayReadOnlyResponseBodies: [],
     replayReadOnlyResponses: [],
     responseBodies: [],
@@ -1402,29 +1403,52 @@ function captureTarget(cdp, { auditReplayBoundaries = false } = {}) {
   cdp.on("Network.loadingFailed", (event) => {
     const request = requestByRequest.get(event.requestId);
     const interruptedResponse = responseByRequest.get(event.requestId);
-    if (request?.method === "GET"
-      && /\/api\/v1\/replay(?:\/|\?|$)/.test(request.url)) {
-      if (!capture.replayReadOnlyRequests.some(
-        (item) => item.requestId === request.requestId,
-      )) {
+    const isReplayRead = request?.method === "GET"
+      && /\/api\/v1\/replay(?:\/|\?|$)/.test(request.url);
+    const intentionalAbort = event.canceled === true
+      && event.errorText === "net::ERR_ABORTED";
+    if (isReplayRead) {
+      const pendingRequestId = pendingReadOnlyRecoveryByUrl.get(request.url);
+      if (intentionalAbort) {
         boundedPush(
-          capture.replayReadOnlyRequests,
-          request,
+          capture.replayReadOnlyAborts,
+          {
+            ...request,
+            canceled: true,
+            errorText: event.errorText,
+            responseStatus: Number(interruptedResponse?.status ?? 0),
+          },
           MAX_CAPTURE_RESPONSE_BODIES,
         );
       }
-      if (interruptedResponse !== undefined
-        && !capture.replayReadOnlyResponses.some(
-          (item) => item.requestId === interruptedResponse.requestId,
+      const interruptedTrackedRetry = intentionalAbort
+        && pendingRequestId !== undefined
+        && pendingRequestId !== request.requestId;
+      if (!intentionalAbort || interruptedTrackedRetry) {
+        if (!capture.replayReadOnlyRequests.some(
+          (item) => item.requestId === request.requestId,
         )) {
-        boundedPush(
-          capture.replayReadOnlyResponses,
-          interruptedResponse,
-          MAX_CAPTURE_RESPONSE_BODIES,
-        );
+          boundedPush(
+            capture.replayReadOnlyRequests,
+            request,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+        }
+        if (interruptedResponse !== undefined
+          && !capture.replayReadOnlyResponses.some(
+            (item) => item.requestId === interruptedResponse.requestId,
+          )) {
+          boundedPush(
+            capture.replayReadOnlyResponses,
+            interruptedResponse,
+            MAX_CAPTURE_RESPONSE_BODIES,
+          );
+        }
+        readOnlyRecoveryRequestIds.add(event.requestId);
       }
-      readOnlyRecoveryRequestIds.add(event.requestId);
-      if (!pendingReadOnlyRecoveryByUrl.has(request.url)) {
+      if (intentionalAbort && pendingRequestId !== undefined) {
+        pendingReadOnlyRecoveryByUrl.delete(request.url);
+      } else if (!intentionalAbort && pendingRequestId === undefined) {
         pendingReadOnlyRecoveryByUrl.set(request.url, event.requestId);
       }
     }
@@ -1663,6 +1687,10 @@ export function replayReadOnlyTransportRecoveryContract(capture) {
     (Array.isArray(capture?.failedRequests) ? capture.failedRequests : [])
       .map((item) => [item.requestId, item]),
   );
+  const ignoredAborts = (Array.isArray(capture?.replayReadOnlyAborts)
+    ? capture.replayReadOnlyAborts
+    : [])
+    .filter((item) => item?.canceled === true && item?.errorText === "net::ERR_ABORTED");
   const recoveries = [];
   const violations = [];
 
@@ -1672,6 +1700,9 @@ export function replayReadOnlyTransportRecoveryContract(capture) {
     const responseBodyRecord = bodiesByRequest.get(request.requestId);
     const responseBody = parsedReplayApiResponseBody(responseBodyRecord);
     const networkFailure = failuresByRequest.get(request.requestId);
+    const intentionalAbort = networkFailure?.canceled === true
+      && networkFailure?.errorText === "net::ERR_ABORTED";
+    if (intentionalAbort) continue;
     const status = Number(response?.status ?? 0);
     const bodylessServerFailure = status >= 500
       && status < 600
@@ -1744,6 +1775,8 @@ export function replayReadOnlyTransportRecoveryContract(capture) {
     schemaVersion: "replay.read-transport-recovery.v1",
     passed: violations.length === 0,
     maximumRecoveries: MAX_RECOVERED_REPLAY_TRANSPORT_LOSSES,
+    ignoredAbortCount: ignoredAborts.length,
+    ignoredAborts,
     recoveryCount: recoveries.length,
     recoveries,
     violations,

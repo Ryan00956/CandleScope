@@ -927,6 +927,128 @@ test("replay read-only transport recovery accepts an interrupted 2xx body", () =
   assert.equal(replayApiConcurrencyContract(capture).passed, true);
 });
 
+test("replay read-only transport recovery audits intentional aborts without consuming budget", async () => {
+  const handlers = new Map();
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name) {
+      assert.equal(name, "Network.getResponseBody");
+      return Promise.resolve({ base64Encoded: false, body: "{}" });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp);
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  emit("Network.requestWillBeSent", {
+    requestId: "aborted",
+    request: { method: "GET", url },
+  });
+  emit("Network.responseReceived", {
+    requestId: "aborted",
+    response: { status: 200, url },
+  });
+  emit("Network.loadingFailed", {
+    requestId: "aborted",
+    errorText: "net::ERR_ABORTED",
+    canceled: true,
+  });
+  emit("Network.requestWillBeSent", {
+    requestId: "later",
+    request: { method: "GET", url },
+  });
+  emit("Network.responseReceived", {
+    requestId: "later",
+    response: { status: 200, url },
+  });
+  emit("Network.loadingFinished", { requestId: "later" });
+  await capture.settle();
+
+  assert.equal(capture.replayReadOnlyAborts.length, 1);
+  assert.equal(capture.replayReadOnlyAborts[0].responseStatus, 200);
+  assert.deepEqual(capture.replayReadOnlyRequests, []);
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.ignoredAbortCount, 1);
+  assert.equal(recovery.recoveryCount, 0);
+  assert.equal(replayApiConcurrencyContract(capture).passed, true);
+});
+
+test("replay read-only transport recovery does not hide other canceled failures", () => {
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  const capture = {
+    replayReadOnlyRequests: [
+      { requestId: "lost", method: "GET", url, sequence: 1 },
+      { requestId: "retry", method: "GET", url, sequence: 2 },
+    ],
+    replayReadOnlyResponses: [
+      { requestId: "retry", method: "GET", url, status: 200 },
+    ],
+    replayReadOnlyResponseBodies: [
+      { requestId: "retry", method: "GET", url, status: 200, body: "{}" },
+    ],
+    failedRequests: [{
+      requestId: "lost",
+      method: "GET",
+      url,
+      canceled: true,
+      errorText: "net::ERR_CONNECTION_RESET",
+    }],
+  };
+
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, true);
+  assert.equal(recovery.ignoredAbortCount, 0);
+  assert.equal(recovery.recoveryCount, 1);
+  assert.equal(recovery.recoveries[0].errorText, "net::ERR_CONNECTION_RESET");
+});
+
+test("replay read-only transport recovery fails when its tracked retry is aborted", async () => {
+  const handlers = new Map();
+  const cdp = {
+    on(name, listener) {
+      handlers.set(name, listener);
+    },
+    send(name, payload) {
+      assert.equal(name, "Network.getResponseBody");
+      assert.equal(payload.requestId, "lost");
+      return Promise.resolve({ base64Encoded: false, body: "" });
+    },
+  };
+  const emit = (name, payload) => handlers.get(name)?.(payload);
+  const capture = captureTarget(cdp);
+  const url = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";
+  emit("Network.requestWillBeSent", {
+    requestId: "lost",
+    request: { method: "GET", url },
+  });
+  emit("Network.responseReceived", {
+    requestId: "lost",
+    response: { status: 500, url },
+  });
+  emit("Network.loadingFinished", { requestId: "lost" });
+  emit("Network.requestWillBeSent", {
+    requestId: "aborted-retry",
+    request: { method: "GET", url },
+  });
+  emit("Network.loadingFailed", {
+    requestId: "aborted-retry",
+    errorText: "net::ERR_ABORTED",
+    canceled: true,
+  });
+  await capture.settle();
+
+  assert.equal(capture.replayReadOnlyAborts.length, 1);
+  assert.equal(capture.replayReadOnlyRequests.length, 2);
+  const recovery = replayReadOnlyTransportRecoveryContract(capture);
+  assert.equal(recovery.passed, false);
+  assert.equal(recovery.recoveryCount, 0);
+  assert.equal(recovery.violations.length, 1);
+  assert.equal(recovery.violations[0].reason, "READ_TRANSPORT_RECOVERY_RETRY_FAILED");
+  assert.equal(replayApiConcurrencyContract(capture).passed, false);
+});
+
 test("formal replay transport recovery permits only one combined command or read loss", () => {
   const commandUrl = "http://127.0.0.1/api/v1/replay/runs/session/session-1/commands";
   const readUrl = "http://127.0.0.1/api/v1/replay/runs/session/session-1/tracks";

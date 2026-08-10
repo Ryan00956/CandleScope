@@ -317,6 +317,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 回归现精确断言 `violation is None` 和 `exitCode == STATUS_QUOTA_EXCEEDED`，比“任意非零且小于 8 秒”更严格地区分 OS CPU quota、probe 自行退出和 launcher wall-time violation。生产 `JOB_OBJECT_LIMIT_PROCESS_TIME`、CPU hard cap、AppContainer profile、1 秒 CPU time、10 秒 wall time、Job-only termination 与 status schema 均未修改，没有降低插件隔离安全性。
 - 该测试与记录会形成新 HEAD；`13c3f1c7` 的 70-cycle PASS、来源 PASS 和 checks FAIL 仅保留为根因证据。新 clean HEAD 必须重新完成 70-cycle 复验及 Phase 9 正式来源、全量 checks、benchmark、smoke、rollback、4 小时 soak 和 manifest，不能继承旧 artifact。
 
+### 3.32 Vite 上游连接池与 Uvicorn 空闲截止错配
+
+- `52ed928b92fd76d034104b3787f85f6367981e9e` 已重新完成 70/70 高密度周期、正式真实来源、全量 checks 和 7/7 measure-only benchmark。正式短 smoke 的训练、命令身份与 projection 均完成，但最终网络审计正确拒绝两个同秒发生的无正文 500：`POST /order-capacity` 为 `socket hang up`，`POST /public-times` 为 `read ECONNRESET`。后端没有结构化 500、Traceback、进程退出或健康异常；同一 HEAD、同一真实数据库的立即诊断复跑完整通过，因此不能把失败归为确定性的 HEDGE 业务异常，也不能覆盖原失败 artifact。
+- Vite 配置自 `83b5cb2c` 起为 `/api` 显式使用 `keepAlive=true` 的 Node Agent；Node 22 全局 Agent 同样默认 keep-alive。回放 fixture 使用 Uvicorn `0.34.0` 且未覆盖 `timeout_keep_alive=5`，代理不知道上游连接的权威空闲截止。在上游发送 FIN/RST 与代理分配空闲 socket 的竞态窗口，多个并发安全查询会分别得到 Vite 生成的无正文 500。
+- 使用相同 Vite preview、真实 FastAPI/Uvicorn，先确认上游已就绪，再把空闲截止收紧到 1 秒并在 `940–1060 ms` 边界发起 30 轮、每轮 8 个并发请求。旧 `keepAlive=true` 配置的 240 次请求稳定复现 25 个 500，其中 8 个 `socket hang up`、17 个 `ECONNRESET`；后端无错误。该实验只缩短复现窗口，没有修改产品错误预算。
+- 开发与 production-preview 代理现保留显式私有 Agent 和最多 32 条在途连接，但设为 `keepAlive=false`，使每个 API 请求使用新的上游连接；浏览器到 Vite 的连接策略不变。同一就绪检查、空闲截止和并发边界下再跑 240 次为 `240/240`、0 个代理错误。没有给 GET/POST 增加重试、没有接受第二次传输恢复、没有忽略 500，也没有修改后端、交易、强平或持久化语义。新增配置契约同时验证 dev/preview 都不使用 Node 全局 Agent、不启用上游池复用。
+- 该修复会形成新 HEAD；`52ed928b` 的高密度、来源、checks、benchmark PASS 以及 smoke FAIL/诊断 PASS 全部只作根因证据。新 clean HEAD 必须重新完成 70-cycle 复验和 Phase 9 全链，原严格网络恢复预算、资源与 4 小时长稳门禁均不放宽。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

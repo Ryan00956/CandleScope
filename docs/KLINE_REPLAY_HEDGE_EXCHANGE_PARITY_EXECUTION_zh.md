@@ -572,6 +572,8 @@ Windows lifecycle 修复后的专用真实 smoke 已通过并证明无新 Chrome
 
 该锁修复的 `13c3f1c73af416a89e902b2f0eef41ab6b6a359e` 已通过 70/70 高密度真实浏览器周期并越过旧第 62 轮；573 条命令 request/response/body 身份精确，双腿、账户连续性、恢复、资源和 35 项 acceptance 全真。随后正式全量 checks 的唯一失败来自无关的 Windows 插件沙箱测试：1 秒 CPU JobObject 配额已用 NTSTATUS `0xC0000044 (STATUS_QUOTA_EXCEEDED)` 终止子进程，`status=exited / violation=null`，但受宿主调度影响墙钟为 `8328 ms`，超过测试写死的 `8000 ms`。独立连续 5 次均通过，保留现场再次得到同一 NTSTATUS；本机 Windows SDK 也把 `0xC0000044` 定义为 `STATUS_QUOTA_EXCEEDED`。测试现删除任意墙钟性能判断，改为精确验证 `violation=null` 与该 NTSTATUS；生产 AppContainer、1 秒 CPU 配额、10 秒 wall-time 保护和只终止 sandbox Job 的行为均未修改。该测试/文档提交再次形成新 HEAD，70-cycle 与正式来源只能作诊断，仍须从新 clean HEAD 重跑 Phase 9 全链。
 
+`52ed928b92fd76d034104b3787f85f6367981e9e` 随后重新通过 70/70 高密度周期、真实来源、全量 checks 与 7/7 measure-only benchmark；正式 smoke 的产品生命周期完成，但网络审计捕获 `/order-capacity` 与 `/public-times` 两个并发 POST 被 Vite 以 `socket hang up / read ECONNRESET` 转为无正文 500。后端没有结构化错误且同 HEAD 立即复跑通过。受控实验先确认后端就绪，再把 Uvicorn 空闲截止缩至 1 秒：旧 `keepAlive=true` 配置的 240 次 Vite 边界请求中稳定复现 25 个同签名 500；dev/preview `/api` 代理改为显式 `keepAlive=false` 的私有 Agent后，同口径 `240/240` 全部成功。每次 API 请求现建立新上游连接；没有给查询 POST 加重试、没有放宽整场一次传输恢复预算、没有忽略 500。新 clean HEAD 仍须从 70-cycle 起重跑 Phase 9 全链。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

@@ -37,6 +37,7 @@ export function createReplayOrderAdvisoryScheduler({
   let handle: unknown | null = null;
   let pendingKey: string | null = null;
   let lastStartedKey: string | null = null;
+  let generation = 0;
   return {
     schedule(key, callback) {
       if (!key) throw new TypeError("replay order advisory key must be non-empty");
@@ -45,7 +46,10 @@ export function createReplayOrderAdvisoryScheduler({
       }
       if (handle !== null) timers.clearTimeout(handle);
       pendingKey = key;
+      generation += 1;
+      const scheduledGeneration = generation;
       handle = timers.setTimeout(() => {
+        if (scheduledGeneration !== generation) return;
         handle = null;
         pendingKey = null;
         lastStartedKey = key;
@@ -55,6 +59,7 @@ export function createReplayOrderAdvisoryScheduler({
     },
     cancel() {
       if (handle === null) return;
+      generation += 1;
       timers.clearTimeout(handle);
       handle = null;
       pendingKey = null;

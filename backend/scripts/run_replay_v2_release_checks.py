@@ -64,15 +64,8 @@ def main() -> int:
         if value
     )
 
-    backend, backend_stdout, _ = run_recorded_command(
-        name="backend-pytest",
-        command=[sys.executable, "-m", "pytest", "-q"],
-        cwd=BACKEND_ROOT,
-        log_directory=log_directory,
-        expected_head=head,
-        timeout_seconds=args.backend_timeout_seconds,
-        environment=environment,
-    )
+    # Run the cheaper frontend boundary first. A type/lint/build failure should
+    # not burn a complete backend suite before revealing itself.
     frontend, frontend_stdout, _ = run_recorded_command(
         name="frontend-check",
         command=npm_command(args.npm, "run", "check"),
@@ -80,6 +73,15 @@ def main() -> int:
         log_directory=log_directory,
         expected_head=head,
         timeout_seconds=args.frontend_timeout_seconds,
+        environment=environment,
+    )
+    backend, backend_stdout, _ = run_recorded_command(
+        name="backend-pytest",
+        command=[sys.executable, "-m", "pytest", "-q"],
+        cwd=BACKEND_ROOT,
+        log_directory=log_directory,
+        expected_head=head,
+        timeout_seconds=args.backend_timeout_seconds,
         environment=environment,
     )
 
@@ -99,7 +101,7 @@ def main() -> int:
             "backend_pytest_passed": int(backend_match.group(1)),
             "frontend_node_tests_passed": int(frontend_match.group(1)),
         },
-        "commands": [backend, frontend],
+        "commands": [frontend, backend],
     }
     write_json(output, report)
     assert_clean_head(head)

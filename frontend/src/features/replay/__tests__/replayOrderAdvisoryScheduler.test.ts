@@ -34,15 +34,15 @@ test("order advisory scheduling collapses high-rate cursor churn to the latest r
 });
 
 test("cancel prevents a stale advisory request from starting", () => {
-  let callback: (() => void) | null = null;
+  const callbacks = new Map<number, () => void>();
   const scheduler = createReplayOrderAdvisoryScheduler({
     timers: {
       setTimeout(next) {
-        callback = next;
+        callbacks.set(1, next);
         return 1;
       },
       clearTimeout() {
-        callback = null;
+        callbacks.delete(1);
       },
     },
   });
@@ -50,8 +50,9 @@ test("cancel prevents a stale advisory request from starting", () => {
   scheduler.schedule("revision-1", () => {
     started = true;
   });
+  const staleCallback = callbacks.get(1);
   scheduler.cancel();
-  callback?.();
+  staleCallback?.();
 
   assert.equal(started, false);
   assert.equal(scheduler.pending(), false);

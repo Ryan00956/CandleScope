@@ -570,6 +570,8 @@ Windows lifecycle 修复后的专用真实 smoke 已通过并证明无新 Chrome
 
 `b09ab3a6932d5dc0313fd53f89ab95d8ecea9d42` 的正式来源、全量 checks（后端 `3253 passed`、前端 `2996 passed`）、7/7 组件 measure-only benchmark、真实浏览器 smoke 和 rollback 全部通过；正式 4 小时 soak 在约 `8,964 s`、第 62 个训练周期因等待 `set_speed` ACK 超时硬失败。失败时页面与权威 Run 时钟均已是 `PAUSED`，但同一 canonical 命令的原请求和唯一对账请求都以 `net::ERR_ABORTED` 结束；后端队列、actor、持久化、恢复和 SQLite 仍健康。这不是墙钟性能门槛，而是有持仓播放批次长期持有 Run 串行锁造成的控制命令活性失败：PAUSE 可先设置停止信号和时钟状态，却仍要等当前批次释放锁才能返回；SET_SPEED 同样在锁外等待。HEDGE 的资金费/标记价依赖还会禁用终态优化，因此普通逐 BAR 参考路径也可能按累计时间在一个锁区间内推进最多 64 根，不能只修复原 32 根终态批次。播放调度现对 `OPEN_ORDER` / `OPEN_POSITION` 路径统一限制为每次 Run 锁只提交 1 个 BAR 屏障，覆盖优化和参考路径；空账户批处理保持不变，成交、标记、强平、保险基金和 ADL 仍按原全局屏障顺序执行。回归测试强制注入 64 根追赶量，在 LONG/SHORT 双腿同时持仓时证明只提交 1 根、游标只增 1、排队 PAUSE 在有界时间返回；Phase 9 HEDGE 与播放调度定向集 `18 passed`。没有开关、灰度、默认关闭、降级或性能阈值变更；本提交后必须先越过旧第 62 周期，再由新 clean HEAD 从零重建全部正式证据。
 
+该锁修复的 `13c3f1c73af416a89e902b2f0eef41ab6b6a359e` 已通过 70/70 高密度真实浏览器周期并越过旧第 62 轮；573 条命令 request/response/body 身份精确，双腿、账户连续性、恢复、资源和 35 项 acceptance 全真。随后正式全量 checks 的唯一失败来自无关的 Windows 插件沙箱测试：1 秒 CPU JobObject 配额已用 NTSTATUS `0xC0000044 (STATUS_QUOTA_EXCEEDED)` 终止子进程，`status=exited / violation=null`，但受宿主调度影响墙钟为 `8328 ms`，超过测试写死的 `8000 ms`。独立连续 5 次均通过，保留现场再次得到同一 NTSTATUS；本机 Windows SDK 也把 `0xC0000044` 定义为 `STATUS_QUOTA_EXCEEDED`。测试现删除任意墙钟性能判断，改为精确验证 `violation=null` 与该 NTSTATUS；生产 AppContainer、1 秒 CPU 配额、10 秒 wall-time 保护和只终止 sandbox Job 的行为均未修改。该测试/文档提交再次形成新 HEAD，70-cycle 与正式来源只能作诊断，仍须从新 clean HEAD 重跑 Phase 9 全链。
+
 ### Phase 10：整版 hard cutover
 
 工作内容：

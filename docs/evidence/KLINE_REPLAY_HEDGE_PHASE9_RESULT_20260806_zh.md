@@ -309,6 +309,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 新回归在真实 HEDGE deterministic-simulation Run 中同时建立 LONG/SHORT 两腿，强制 `discrete_playback_units=64`，并在首根适配器推进尚持锁时排队 PAUSE；结果只发生一次 adapter advance，`final_state_max_events=None` 的普通参考路径只消费 1 根，source sequence 精确 `+1`，PAUSE 在释放首根后 1 秒内返回。原空账户 64 根终态批处理和 TOUCH_OR_TAPE_V2 活跃仓位禁用优化测试继续通过；完整 Phase 9 HEDGE 与 Phase 13 播放调度定向集为 `18 passed`。
 - 本修复属于控制命令正确性/活性硬门禁，不恢复任何墙钟性能 PASS/FAIL。没有新增环境变量、灰度、默认关闭、fallback 或交易语义近似；该提交产生新 HEAD 后必须先做不少于 70 个周期的高密度真实浏览器复验越过旧第 62 周期，再从真实来源、全量 checks、7 组件 benchmark、smoke、rollback、正式 4 小时 soak 到 release manifest 全部重跑。
 
+### 3.31 Windows AppContainer CPU 配额测试的任意墙钟门槛
+
+- 锁修复候选 `13c3f1c73af416a89e902b2f0eef41ab6b6a359e` 的 70-cycle 高密度真实浏览器预检运行 `3,049,493 ms`，完成 70/70 training action、70/70 archive lifecycle、70/70 下单/成交/重连；最终仍同时持有 LONG/SHORT 两腿。573/573/573 条命令 request/response/body 身份精确，0 identity violation、0 命令/读取恢复，15 次生命周期主动 abort 正确隔离；35 项 acceptance 全真，报告 hash 为 `sha256:8049fb779f7cf219d10bde59d886c5cb8fa7d294e8ae4af92b9681d04a452593`。该轮已越过旧第 62 周期，证明 3.30 的控制活性修复闭环。
+- 同一 HEAD 的正式真实来源 validation 随后通过；正式 release checks 后端唯一失败为 `test_cpu_time_quota_terminates_only_the_sandbox_process`，其余 `3253 passed`。Windows JobObject 的 1 秒 per-process CPU 配额实际已终止恶意探针：launcher status 为 `status=exited`、`violation=null`、非零 exit；只是宿主墙钟 `8328 ms` 超过测试自 2026-07-22 起写死的 `8000 ms`。若由 10 秒 wall monitor 终止，status 必须为 `violated / violation=wall-time`，与现场不符。
+- 该测试独立连续运行 5 次全部通过，保留 basetemp 的另一次现场为 `elapsedMillis=3578`、`exitCode=3221225540 (0xC0000044)`、`status=exited`、`violation=null`。本机 Windows SDK `ntstatus.h` 明确定义 `0xC0000044` 为 `STATUS_QUOTA_EXCEEDED`。因此原 `< 8000 ms` 既不是配额身份，也会随宿主 CPU 调度漂移；它与用户已取消的墙钟性能发布门槛同类。
+- 回归现精确断言 `violation is None` 和 `exitCode == STATUS_QUOTA_EXCEEDED`，比“任意非零且小于 8 秒”更严格地区分 OS CPU quota、probe 自行退出和 launcher wall-time violation。生产 `JOB_OBJECT_LIMIT_PROCESS_TIME`、CPU hard cap、AppContainer profile、1 秒 CPU time、10 秒 wall time、Job-only termination 与 status schema 均未修改，没有降低插件隔离安全性。
+- 该测试与记录会形成新 HEAD；`13c3f1c7` 的 70-cycle PASS、来源 PASS 和 checks FAIL 仅保留为根因证据。新 clean HEAD 必须重新完成 70-cycle 复验及 Phase 9 正式来源、全量 checks、benchmark、smoke、rollback、4 小时 soak 和 manifest，不能继承旧 artifact。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

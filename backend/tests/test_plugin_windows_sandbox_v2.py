@@ -31,6 +31,7 @@ from app.plugin_security_v2.python_runtime import (
 
 FIXTURE_DIRECTORY = Path(__file__).parent / "fixtures" / "plugin_platform_v2"
 PROBE_SOURCE = FIXTURE_DIRECTORY / "windows_malicious_probe.c"
+STATUS_QUOTA_EXCEEDED = 0xC0000044
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows AppContainer only")
@@ -320,8 +321,8 @@ def test_cpu_time_quota_terminates_only_the_sandbox_process(
     assert completed.returncode != 0
     status = json.loads(prepared.status_path.read_text(encoding="utf-8"))
     assert status["status"] == "exited"
-    assert status["exitCode"] != 0
-    assert status["elapsedMillis"] < 8_000
+    assert status["violation"] is None
+    assert status["exitCode"] == STATUS_QUOTA_EXCEEDED
 
 
 @pytest.mark.anyio

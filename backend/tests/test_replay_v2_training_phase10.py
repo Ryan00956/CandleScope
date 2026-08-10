@@ -230,6 +230,8 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
     assert "--duration-ms 3600000 --cycles 100" in package["scripts"][
         "soak:replay:v2:stability"
     ]
+    assert "--cycles 10" in package["scripts"]["stress:replay:orders"]
+    assert "replay_order_advisory_requests_bounded" in soak
     assert "--observation-only --duration-ms 14400000" in package["scripts"][
         "soak:replay:v2:4h"
     ]

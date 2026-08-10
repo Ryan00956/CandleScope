@@ -2481,12 +2481,39 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
     "authoritative pre-order snapshot",
   );
   await click(cdp, `[data-replay-action="place-order"][data-side="${side}"]`);
-  const ordered = await waitForAuthoritativeReplayStatus(
-    cdp,
-    `(value) => value.orderCount > ${beforeOrder.orderCount}`,
-    timeoutMs,
-    "training market order ack",
+  const orderOutcome = await waitForValue(cdp, `(() => {
+    const statusElement = document.querySelector('#replay-status-bar, #status-bar[data-runtime-source="replay"]');
+    if (!(statusElement instanceof HTMLElement)) return null;
+    const status = {
+      connection: statusElement.dataset.replayConnection || statusElement.dataset.connectionStatus,
+      generation: Number(statusElement.dataset.replayGeneration || 0),
+      state: statusElement.dataset.replaySessionState,
+      sourceSequence: Number(statusElement.dataset.replaySourceSequence || 0),
+      revision: Number(statusElement.dataset.replayRevision || 0),
+      stateHash: statusElement.dataset.replayStateHash || "",
+      clockBasis: statusElement.dataset.replayClockBasis || "",
+      clockRate: Number(statusElement.dataset.replayClockRate || 0),
+      controlPending: statusElement.dataset.replayControlPending || "",
+      cursorMs: Number(statusElement.dataset.replayCursorMs || 0),
+      maxBarMs: Number(statusElement.dataset.replayMaxBarMs || 0),
+      orderCount: Number(statusElement.dataset.replayOrderCount || 0),
+      fillCount: Number(statusElement.dataset.replayFillCount || 0),
+      revealed: statusElement.dataset.replayRevealed,
+      bars: Number((statusElement.innerText.match(/([0-9]+) (?:display )?bars/) || [])[1] || 0),
+    };
+    if (status.orderCount > ${beforeOrder.orderCount}) return { kind: "ordered", status };
+    const feedback = document.querySelector('#replay-order-size-feedback[data-tone="error"]');
+    if (feedback instanceof HTMLElement && feedback.innerText.trim()) {
+      return { kind: "error", status, message: feedback.innerText.trim() };
+    }
+    return null;
+  })()`, timeoutMs, "training market order ack or validation error");
+  assert(
+    orderOutcome.kind === "ordered",
+    "training market order was rejected before command dispatch",
+    { beforeOrder, orderOutcome, side },
   );
+  const ordered = orderOutcome.status;
   const immediatelyFilled = await waitForAuthoritativeReplayStatus(
     cdp,
     `(value) => value.fillCount > ${beforeOrder.fillCount}`,
@@ -3401,6 +3428,36 @@ function assertReplayNetwork(capture, frontendOrigin) {
       buildReferences: 0,
     },
     passed: true,
+  };
+}
+
+export function replayOrderAdvisoryRequestContract(capture, cycles) {
+  if (!Number.isSafeInteger(cycles) || cycles < 1) {
+    throw new TypeError("replay order advisory contract cycles must be a positive safe integer");
+  }
+  const requests = Array.isArray(capture?.requests) ? capture.requests : [];
+  const counts = { capacity: 0, preview: 0 };
+  for (const request of requests) {
+    if (request?.method !== "POST" || typeof request?.url !== "string") continue;
+    let pathname;
+    try {
+      pathname = new URL(request.url).pathname;
+    } catch {
+      continue;
+    }
+    const match = pathname.match(/\/api\/v1\/replay\/runs\/[^/]+\/order-(capacity|preview)$/);
+    if (match?.[1] === "capacity") counts.capacity += 1;
+    if (match?.[1] === "preview") counts.preview += 1;
+  }
+  const requestCount = counts.capacity + counts.preview;
+  const maximumRequests = Math.max(40, cycles * 12 + 20);
+  return {
+    schemaVersion: "replay.order-advisory-request-contract.v1",
+    cycles,
+    requestCount,
+    maximumRequests,
+    counts,
+    passed: requestCount <= maximumRequests,
   };
 }
 
@@ -4582,12 +4639,17 @@ async function main() {
     assert(replayCapture.exceptions.length === 0, "primary replay target raised runtime exceptions", replayCapture.exceptions);
     assert(replayCapture.consoleErrors.length === 0, "primary replay target logged console errors", replayCapture.consoleErrors);
     const replayApi = replayApiConcurrencyContract(replayCapture);
+    const replayOrderAdvisories = replayOrderAdvisoryRequestContract(
+      replayCapture,
+      args.cycles,
+    );
     const replayCommandIdentity = replayCommandResponseIdentityContract(
       replayCapture,
     );
     phaseDiagnostics = {
       phase: "post-run-replay-network-audit",
       replayApi,
+      replayOrderAdvisories,
       replayCommandIdentity,
       recentReplayApiResponses: replayCapture.replayApiResponses.slice(-20),
       recentReplayCommandRequests: replayCapture.replayCommandRequests.slice(-20),
@@ -4598,6 +4660,11 @@ async function main() {
       replayApi.passed,
       "replay API returned unexpected or unbounded failures during soak",
       replayApi,
+    );
+    assert(
+      replayOrderAdvisories.passed,
+      "replay order advisory request amplification exceeded the lifecycle budget",
+      replayOrderAdvisories,
     );
     assert(
       replayCommandIdentity.passed,
@@ -4715,6 +4782,7 @@ async function main() {
         .filter((item) => item.framing === "length-prefixed-json-lines.v1")
         .every((item) => item.itemsAfterFinish === 0),
       replay_api_concurrency_bounded: replayApi.passed,
+      replay_order_advisory_requests_bounded: replayOrderAdvisories.passed,
       replay_command_transport_recovery_bounded: replayApi.commandTransportRecovery.passed,
       replay_read_transport_recovery_bounded: replayApi.readOnlyTransportRecovery.passed,
       replay_transport_recovery_bounded: replayApi.transportRecovery.recoveryCount
@@ -4789,6 +4857,7 @@ async function main() {
         maxSubscribers,
         requestCount: replayCapture.requestCount,
         responseCount: replayCapture.responseCount,
+        orderAdvisories: replayOrderAdvisories,
         webSocketCount: replayCapture.webSocketCount,
         webSocketFramesReceived: replayCapture.webSocketFramesReceived.length,
         exportSha256: sha256(exportedText),

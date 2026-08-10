@@ -13,6 +13,7 @@ import {
   replayOrderContextSide,
   replayOrderSizingAvailability,
 } from "../replayOrderSizing.js";
+import { createReplayOrderAdvisoryScheduler } from "../replayOrderAdvisoryScheduler.js";
 import type { ReplayClosedTrade } from "../replayTypes.js";
 import type {
   ReplayOrderPreview,
@@ -31,6 +32,7 @@ import type { ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 import ReplayLiquidationTimeline from "./ReplayLiquidationTimeline.js";
 
 const TERMINAL_ORDER_STATES = new Set(["FILLED", "CANCELED", "REJECTED", "EXPIRED"]);
+const REPLAY_ORDER_VALIDATION_TIMEOUT_MS = 15_000;
 const WORKBENCH_TABS = [
   ["positions", "持仓"],
   ["open-orders", "当前"],
@@ -393,6 +395,27 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     leverage: number;
   }> | null>(null);
   const [notice, setNotice] = useState<TradeNotice>(null);
+  const [tradeValidationSide, setTradeValidationSide] = useState<"BUY" | "SELL" | null>(null);
+  const tradeValidationControllerRef = useRef<AbortController | null>(null);
+  const tradeValidationMountedRef = useRef(true);
+  const capacityAdvisoryControllerRef = useRef<AbortController | null>(null);
+  const previewAdvisoryControllerRef = useRef<AbortController | null>(null);
+  const capacityScheduler = useMemo(createReplayOrderAdvisoryScheduler, []);
+  const previewScheduler = useMemo(createReplayOrderAdvisoryScheduler, []);
+  useEffect(() => {
+    tradeValidationMountedRef.current = true;
+    return () => {
+      tradeValidationMountedRef.current = false;
+      capacityScheduler.cancel();
+      previewScheduler.cancel();
+      capacityAdvisoryControllerRef.current?.abort();
+      previewAdvisoryControllerRef.current?.abort();
+      tradeValidationControllerRef.current?.abort();
+      capacityAdvisoryControllerRef.current = null;
+      previewAdvisoryControllerRef.current = null;
+      tradeValidationControllerRef.current = null;
+    };
+  }, [capacityScheduler, previewScheduler]);
   useTradeNoticeAutoDismiss(notice, setNotice);
   const store = runtime.store;
   const config = store.sessionConfig;
@@ -538,12 +561,15 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       viewer.viewerState === null
       || store.connectionState !== "connected"
       || store.virtualTimeMs === null
+      || tradeValidationSide !== null
       || (orderType !== "MARKET" && !price.trim())
     ) {
       return undefined;
     }
+    capacityAdvisoryControllerRef.current?.abort();
     const controller = new AbortController();
-    const timer = globalThis.setTimeout(() => {
+    capacityAdvisoryControllerRef.current = controller;
+    capacityScheduler.schedule(() => {
       const context: ReplayOrderCapacityContext = {
         side: previewSide,
         order_type: orderType,
@@ -589,13 +615,21 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           result: null,
           error: commandErrorMessage(error),
         });
+      }).finally(() => {
+        if (capacityAdvisoryControllerRef.current === controller) {
+          capacityAdvisoryControllerRef.current = null;
+        }
       });
-    }, 0);
+    });
     return () => {
-      globalThis.clearTimeout(timer);
+      capacityScheduler.cancel();
       controller.abort();
+      if (capacityAdvisoryControllerRef.current === controller) {
+        capacityAdvisoryControllerRef.current = null;
+      }
     };
   }, [
+    capacityScheduler,
     leverage,
     maxQuantityContextKey,
     maxQuantitySizingKey,
@@ -610,6 +644,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     sizingAvailableEquity,
     store.connectionState,
     store.virtualTimeMs,
+    tradeValidationSide,
     viewer.viewerState,
   ]);
   const currentCapacityState = capacityState?.key === maxQuantityContextKey
@@ -635,6 +670,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       viewer.viewerState === null
       || store.connectionState !== "connected"
       || store.virtualTimeMs === null
+      || tradeValidationSide !== null
       || !quantity.trim()
       || quantityExceedsCapacity
       || (orderType !== "MARKET" && !price.trim())
@@ -647,8 +683,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     ) {
       return undefined;
     }
+    previewAdvisoryControllerRef.current?.abort();
     const controller = new AbortController();
-    const timer = globalThis.setTimeout(() => {
+    previewAdvisoryControllerRef.current = controller;
+    previewScheduler.schedule(() => {
       const previewDraftOrder: ReplayOrderRequest = {
         client_order_id: clientOrderId,
         side: previewSide,
@@ -689,11 +727,18 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           result: null,
           error: commandErrorMessage(error),
         });
+      }).finally(() => {
+        if (previewAdvisoryControllerRef.current === controller) {
+          previewAdvisoryControllerRef.current = null;
+        }
       });
-    }, 180);
+    });
     return () => {
-      globalThis.clearTimeout(timer);
+      previewScheduler.cancel();
       controller.abort();
+      if (previewAdvisoryControllerRef.current === controller) {
+        previewAdvisoryControllerRef.current = null;
+      }
     };
   }, [
     clientOrderId,
@@ -704,6 +749,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     previewOrder,
     previewPositionIntent,
     price,
+    previewScheduler,
     previewKey,
     quantity,
     reduceOnly,
@@ -717,6 +763,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     targetPrice,
     tradePlanDraft,
     tradeReason,
+    tradeValidationSide,
     invalidationPrice,
     maxQuantityContextKey,
     maxQuantitySizingKey,
@@ -829,7 +876,11 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
 
   const placeOrderWithSide = async (nextSide: "BUY" | "SELL") => {
     const gate = ctaEnabled(nextSide);
-    if (!gate.enabled || !commandReady) return;
+    if (
+      !gate.enabled
+      || !commandReady
+      || tradeValidationControllerRef.current !== null
+    ) return;
     if (!quantity.trim() || (orderType !== "MARKET" && !price.trim())) {
       setNotice({ tone: "error", message: "请填写有效尺寸与价格后再提交" });
       return;
@@ -888,9 +939,27 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       price,
       leverage,
     ]);
+    capacityScheduler.cancel();
+    previewScheduler.cancel();
+    capacityAdvisoryControllerRef.current?.abort();
+    previewAdvisoryControllerRef.current?.abort();
+    capacityAdvisoryControllerRef.current = null;
+    previewAdvisoryControllerRef.current = null;
+    const validationController = new AbortController();
+    tradeValidationControllerRef.current = validationController;
+    setTradeValidationSide(nextSide);
+    const validationTimeout = globalThis.setTimeout(() => {
+      validationController.abort(
+        new DOMException("下单校验超时，请重试", "TimeoutError"),
+      );
+    }, REPLAY_ORDER_VALIDATION_TIMEOUT_MS);
     setNotice({ tone: "pending", message: "正在获取同侧可下上限…" });
     try {
-      const sideCapacity = await orderCapacity(sideContext, intent);
+      const sideCapacity = await orderCapacity(
+        sideContext,
+        intent,
+        validationController.signal,
+      );
       setCapacityState({
         key: sideContextKey,
         status: "ready",
@@ -920,7 +989,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
         return;
       }
       setNotice({ tone: "pending", message: "正在校验同侧预览…" });
-      const sidePreview = await previewOrder(order, intent, planForSide);
+      const sidePreview = await previewOrder(
+        order,
+        intent,
+        planForSide,
+        validationController.signal,
+      );
       if (sidePreview.order.side !== nextSide) {
         setNotice({ tone: "error", message: "预览方向与提交方向不一致，已取消提交" });
         return;
@@ -961,13 +1035,21 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       setPreviewState(null);
       setNotice({ tone: "success", message: "委托命令已受理，账户与交易记录已刷新" });
     } catch (error) {
-      setNotice({ tone: "error", message: commandErrorMessage(error) });
+      if (tradeValidationMountedRef.current) {
+        setNotice({ tone: "error", message: commandErrorMessage(error) });
+      }
+    } finally {
+      globalThis.clearTimeout(validationTimeout);
+      if (tradeValidationControllerRef.current === validationController) {
+        tradeValidationControllerRef.current = null;
+        if (tradeValidationMountedRef.current) setTradeValidationSide(null);
+      }
     }
   };
 
   const buyGate = ctaEnabled("BUY");
   const sellGate = ctaEnabled("SELL");
-  const submitting = viewer.viewerPending;
+  const submitting = viewer.viewerPending || tradeValidationSide !== null;
   const leverageOptions = useMemo(() => {
     const presets = [1, 2, 3, 5, 10, 20, 25, 50, 75, 100, 125].filter((value) => value <= maxLeverage);
     if (!presets.includes(Math.trunc(maxLeverage)) && maxLeverage >= 1) {
@@ -1203,7 +1285,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             title={buyGate.title || undefined}
             disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !buyGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
             onClick={() => void placeOrderWithSide("BUY")}
-          >{submitting && side === "BUY" ? "提交中…" : ctaLabel("BUY")}</button>
+          >{submitting && (side === "BUY" || tradeValidationSide === "BUY") ? "提交中…" : ctaLabel("BUY")}</button>
           <button
             type="button"
             className="replay-submit-order"
@@ -1212,7 +1294,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             title={sellGate.title || undefined}
             disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !sellGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
             onClick={() => void placeOrderWithSide("SELL")}
-          >{submitting && side === "SELL" ? "提交中…" : ctaLabel("SELL")}</button>
+          >{submitting && (side === "SELL" || tradeValidationSide === "SELL") ? "提交中…" : ctaLabel("SELL")}</button>
         </div>
 
         <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null ? "error" : "idle")}>

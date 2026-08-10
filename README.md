@@ -356,8 +356,11 @@ archive lifecycles, keyboard/focus/reduced-motion evidence, and a detached
 The blocking browser stability gate compresses 100 lifecycle cycles and
 1,000,000 projection events into at least 60 minutes. It formally requires
 `--real-klines-source` (or `REPLAY_REAL_KLINES_SOURCE`). The historical 4-hour
-command is retained only as an optional non-blocking observation. After a
-tooling-only commit, pass one or more
+command is retained only as an optional non-blocking observation. Before the
+formal run, `npm run stress:replay:orders` exercises 10 real browser lifecycle
+cycles and rejects order-capacity/preview request amplification in minutes;
+the same bounded-request contract remains active in the 60-minute gate. After
+a tooling-only commit, pass one or more
 `--reuse-evidence-dir <prior-head>/replay-v2` arguments to reuse benchmark,
 real-source, or rollback artifacts only when their declared runtime inputs have
 no Git diff. Checks, smoke, and stability evidence must still come from the

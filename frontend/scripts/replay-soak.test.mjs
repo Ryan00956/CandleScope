@@ -25,6 +25,7 @@ import {
   replayApiConcurrencyContract,
   replayCommandResponseIdentityContract,
   replayCommandTransportRecoveryContract,
+  replayOrderAdvisoryRequestContract,
   replayReadOnlyTransportRecoveryContract,
   replaySpeedAction,
   replaySpeedRequestState,
@@ -1717,6 +1718,35 @@ test("replay soak network gate isolates verified host injection without allowing
     requests: [{ url: "https://example.com/runtime.js" }],
     webSockets: [],
   }, frontendOrigin), /forbidden HTTP/);
+});
+
+test("replay soak bounds order advisory amplification by lifecycle count", () => {
+  const request = (kind) => ({
+    method: "POST",
+    url: `http://127.0.0.1:4173/api/v1/replay/runs/run-1/order-${kind}`,
+  });
+  const bounded = replayOrderAdvisoryRequestContract({
+    requests: [
+      ...Array.from({ length: 12 }, () => request("capacity")),
+      ...Array.from({ length: 8 }, () => request("preview")),
+      { method: "GET", url: "http://127.0.0.1:4173/api/v1/replay/runs/run-1" },
+    ],
+  }, 2);
+
+  assert.deepEqual(bounded.counts, { capacity: 12, preview: 8 });
+  assert.equal(bounded.requestCount, 20);
+  assert.equal(bounded.maximumRequests, 44);
+  assert.equal(bounded.passed, true);
+
+  const amplified = replayOrderAdvisoryRequestContract({
+    requests: Array.from({ length: 1_000 }, () => request("capacity")),
+  }, 10);
+  assert.equal(amplified.maximumRequests, 140);
+  assert.equal(amplified.passed, false);
+  assert.throws(
+    () => replayOrderAdvisoryRequestContract({ requests: [] }, 0),
+    /cycles must be a positive safe integer/,
+  );
 });
 
 test("replay soak reconnect accepts an already-ready controller", async () => {

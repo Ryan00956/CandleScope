@@ -325,6 +325,14 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 开发与 production-preview 代理现保留显式私有 Agent 和最多 32 条在途连接，但设为 `keepAlive=false`，使每个 API 请求使用新的上游连接；浏览器到 Vite 的连接策略不变。同一就绪检查、空闲截止和并发边界下再跑 240 次为 `240/240`、0 个代理错误。没有给 GET/POST 增加重试、没有接受第二次传输恢复、没有忽略 500，也没有修改后端、交易、强平或持久化语义。新增配置契约同时验证 dev/preview 都不使用 Node 全局 Agent、不启用上游池复用。
 - 该修复会形成新 HEAD；`52ed928b` 的高密度、来源、checks、benchmark PASS 以及 smoke FAIL/诊断 PASS 全部只作根因证据。新 clean HEAD 必须重新完成 70-cycle 复验和 Phase 9 全链，原严格网络恢复预算、资源与 4 小时长稳门禁均不放宽。
 
+### 3.33 60 分钟门禁捕获订单 advisory 请求放大
+
+- `3b6c2b4c29352a2692212449e20da65f6c36ab40` 首次执行新的 60 分钟阻塞式稳定性门禁，实际运行 `3,840.4 s`，完成 1,000,000 projection events 并越过 90 个训练/归档生命周期；第 94 个训练动作在下单前等待 120 秒后失败。Edge、页面、后端、actor、SQLite、WebSocket 和 controller 在失败前均存活且无 runtime/persistence/reaper/recovery 错误，757 条已完成命令 request/response/body 身份精确，因此本轮不是清理软件关闭浏览器，也不是旧 4 小时墙钟问题。
+- 失败动作的 SELL `POST /order-capacity` 已由 CDP 捕获完整 URL、游标和正文，但没有 response/body/loading-failed；随后 controller 仅因页面 120 秒未完成动作而过期。失败前页面约产生 24,000 个请求，尾部持续重复 capacity/preview/read 查询。根因是右栏 background capacity effect 以 revision/source-sequence/virtual-time 为 key，却用 0 ms timer 启动；高倍速游标每次发布都会发起 advisory POST。浏览器 abort 旧 fetch 不保证已进入 TrainingRunActor 的服务端计算立即停止，长期请求放大最终会让真正下单前的 exact capacity/preview 校验排队饥饿。
+- background capacity 与 preview 现在统一使用 180 ms trailing scheduler，游标持续变化时只保留最新回调；开始 exact 下单校验时会取消 scheduler、终止在途 advisory，并在校验期间禁止重新调度。exact capacity/preview 共用一个 15 秒 AbortSignal，重复提交被禁用，卸载时所有 timer/controller 都释放。soak 同时观察页面错误提示，校验失败后立即返回具体原因，不再固定等待 120 秒。
+- 新增 `replay.order-advisory-request-contract.v1`，按生命周期给 capacity/preview POST 设置宽松但有限的总预算 `max(40, cycles * 12 + 20)`；历史请求风暴会在 smoke/高压/正式运行的最终网络审计中直接失败。`npm run stress:replay:orders` 用 10 次真实浏览器训练和 archive lifecycle 在分钟级验证该入口，正式 60 分钟门禁继续执行相同合同。纯 scheduler 回归证明 1,000 次游标 churn 只启动最后 1 次请求，合同回归证明 1,000 次 advisory 在 10-cycle 预算下被拒绝。
+- 提交前验证为 scheduler `2 passed`、soak harness `63 passed`、replay 前端 `351 passed`、Phase 10 发布合同 `12 passed`，architecture、双 TypeScript、定向 ESLint、Node syntax 与 `git diff --check` 全部通过。该修复形成新 HEAD 后先执行 10-cycle 分钟级高压回归；通过后只重跑当前 HEAD 必需的 checks、smoke、rollback 和一次 60 分钟门禁，benchmark/真实来源仅按祖先与阶段 pathspec 零 diff 审计复用，旧 4 小时观察不重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

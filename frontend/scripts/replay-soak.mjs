@@ -3437,6 +3437,7 @@ export function replayOrderAdvisoryRequestContract(capture, cycles) {
   }
   const requests = Array.isArray(capture?.requests) ? capture.requests : [];
   const counts = { capacity: 0, preview: 0 };
+  const semanticRequests = new Set();
   for (const request of requests) {
     if (request?.method !== "POST" || typeof request?.url !== "string") continue;
     let pathname;
@@ -3448,6 +3449,7 @@ export function replayOrderAdvisoryRequestContract(capture, cycles) {
     const match = pathname.match(/\/api\/v1\/replay\/runs\/[^/]+\/order-(capacity|preview)$/);
     if (match?.[1] === "capacity") counts.capacity += 1;
     if (match?.[1] === "preview") counts.preview += 1;
+    if (match) semanticRequests.add(`${request.url}\n${request.postData ?? ""}`);
   }
   const requestCount = counts.capacity + counts.preview;
   const maximumRequests = Math.max(40, cycles * 12 + 20);
@@ -3455,6 +3457,8 @@ export function replayOrderAdvisoryRequestContract(capture, cycles) {
     schemaVersion: "replay.order-advisory-request-contract.v1",
     cycles,
     requestCount,
+    semanticRequestCount: semanticRequests.size,
+    duplicateRequestCount: requestCount - semanticRequests.size,
     maximumRequests,
     counts,
     passed: requestCount <= maximumRequests,

@@ -1735,6 +1735,8 @@ test("replay soak bounds order advisory amplification by lifecycle count", () =>
 
   assert.deepEqual(bounded.counts, { capacity: 12, preview: 8 });
   assert.equal(bounded.requestCount, 20);
+  assert.equal(bounded.semanticRequestCount, 2);
+  assert.equal(bounded.duplicateRequestCount, 18);
   assert.equal(bounded.maximumRequests, 44);
   assert.equal(bounded.passed, true);
 
@@ -1742,6 +1744,8 @@ test("replay soak bounds order advisory amplification by lifecycle count", () =>
     requests: Array.from({ length: 1_000 }, () => request("capacity")),
   }, 10);
   assert.equal(amplified.maximumRequests, 140);
+  assert.equal(amplified.semanticRequestCount, 1);
+  assert.equal(amplified.duplicateRequestCount, 999);
   assert.equal(amplified.passed, false);
   assert.throws(
     () => replayOrderAdvisoryRequestContract({ requests: [] }, 0),

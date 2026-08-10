@@ -23,7 +23,7 @@ test("order advisory scheduling collapses high-rate cursor churn to the latest r
   const started: number[] = [];
 
   for (let revision = 1; revision <= 1_000; revision += 1) {
-    scheduler.schedule(() => started.push(revision));
+    scheduler.schedule(`revision-${revision}`, () => started.push(revision));
   }
 
   assert.equal(callbacks.size, 1);
@@ -47,7 +47,7 @@ test("cancel prevents a stale advisory request from starting", () => {
     },
   });
   let started = false;
-  scheduler.schedule(() => {
+  scheduler.schedule("revision-1", () => {
     started = true;
   });
   scheduler.cancel();
@@ -55,4 +55,32 @@ test("cancel prevents a stale advisory request from starting", () => {
 
   assert.equal(started, false);
   assert.equal(scheduler.pending(), false);
+});
+
+test("a settled advisory key is deduplicated until an aborted request is forgotten", () => {
+  const callbacks = new Map<number, () => void>();
+  let nextHandle = 0;
+  const scheduler = createReplayOrderAdvisoryScheduler({
+    timers: {
+      setTimeout(callback) {
+        nextHandle += 1;
+        callbacks.set(nextHandle, callback);
+        return nextHandle;
+      },
+      clearTimeout(handle) {
+        callbacks.delete(Number(handle));
+      },
+    },
+  });
+  let starts = 0;
+  assert.equal(scheduler.schedule("same-cursor", () => { starts += 1; }), true);
+  callbacks.get(1)?.();
+  assert.equal(starts, 1);
+  assert.equal(scheduler.schedule("same-cursor", () => { starts += 1; }), false);
+  assert.equal(callbacks.size, 1);
+
+  scheduler.forget("same-cursor");
+  assert.equal(scheduler.schedule("same-cursor", () => { starts += 1; }), true);
+  callbacks.get(2)?.();
+  assert.equal(starts, 2);
 });

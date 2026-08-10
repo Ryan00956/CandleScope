@@ -418,6 +418,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   }, [capacityScheduler, previewScheduler]);
   useTradeNoticeAutoDismiss(notice, setNotice);
   const store = runtime.store;
+  const viewerReady = viewer.viewerState !== null;
   const config = store.sessionConfig;
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
   const commandReady = ownsController
@@ -558,8 +559,9 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   ]);
   useEffect(() => {
     if (
-      viewer.viewerState === null
+      !viewerReady
       || store.connectionState !== "connected"
+      || store.state !== "PAUSED"
       || store.virtualTimeMs === null
       || tradeValidationSide !== null
       || (orderType !== "MARKET" && !price.trim())
@@ -569,7 +571,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     capacityAdvisoryControllerRef.current?.abort();
     const controller = new AbortController();
     capacityAdvisoryControllerRef.current = controller;
-    capacityScheduler.schedule(() => {
+    let settled = false;
+    capacityScheduler.schedule(maxQuantityContextKey, () => {
       const context: ReplayOrderCapacityContext = {
         side: previewSide,
         order_type: orderType,
@@ -616,6 +619,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           error: commandErrorMessage(error),
         });
       }).finally(() => {
+        settled = true;
         if (capacityAdvisoryControllerRef.current === controller) {
           capacityAdvisoryControllerRef.current = null;
         }
@@ -627,6 +631,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       if (capacityAdvisoryControllerRef.current === controller) {
         capacityAdvisoryControllerRef.current = null;
       }
+      if (!settled) capacityScheduler.forget(maxQuantityContextKey);
     };
   }, [
     capacityScheduler,
@@ -643,9 +648,10 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     reduceOnly,
     sizingAvailableEquity,
     store.connectionState,
+    store.state,
     store.virtualTimeMs,
     tradeValidationSide,
-    viewer.viewerState,
+    viewerReady,
   ]);
   const currentCapacityState = capacityState?.key === maxQuantityContextKey
     ? capacityState
@@ -657,6 +663,9 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const capacityError = currentCapacityState?.status === "error"
     ? currentCapacityState.error
     : null;
+  const capacityReadyKey = currentCapacityState?.status === "ready"
+    ? currentCapacityState.key
+    : null;
   const estimatedMaxQuantity = capacity?.max_quantity
     ?? (maxQuantitySnapshot?.key === maxQuantityContextKey
       ? maxQuantitySnapshot.value
@@ -667,10 +676,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const quantityExceedsCapacity = sizingAvailability.quantityExceedsCapacity;
   useEffect(() => {
     if (
-      viewer.viewerState === null
+      !viewerReady
       || store.connectionState !== "connected"
+      || store.state !== "PAUSED"
       || store.virtualTimeMs === null
       || tradeValidationSide !== null
+      || capacityReadyKey !== maxQuantityContextKey
       || !quantity.trim()
       || quantityExceedsCapacity
       || (orderType !== "MARKET" && !price.trim())
@@ -686,7 +697,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     previewAdvisoryControllerRef.current?.abort();
     const controller = new AbortController();
     previewAdvisoryControllerRef.current = controller;
-    previewScheduler.schedule(() => {
+    let settled = false;
+    previewScheduler.schedule(previewKey, () => {
       const previewDraftOrder: ReplayOrderRequest = {
         client_order_id: clientOrderId,
         side: previewSide,
@@ -728,6 +740,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           error: commandErrorMessage(error),
         });
       }).finally(() => {
+        settled = true;
         if (previewAdvisoryControllerRef.current === controller) {
           previewAdvisoryControllerRef.current = null;
         }
@@ -739,9 +752,11 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       if (previewAdvisoryControllerRef.current === controller) {
         previewAdvisoryControllerRef.current = null;
       }
+      if (!settled) previewScheduler.forget(previewKey);
     };
   }, [
     clientOrderId,
+    capacityReadyKey,
     leverage,
     orderType,
     positionMode,
@@ -759,6 +774,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     store.connectionState,
     store.revision,
     store.sourceSequence,
+    store.state,
     store.virtualTimeMs,
     targetPrice,
     tradePlanDraft,
@@ -769,7 +785,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     maxQuantitySizingKey,
     quantityExceedsCapacity,
     sizingAvailableEquity,
-    viewer.viewerState,
+    viewerReady,
   ]);
   const currentPreviewState = previewState?.key === previewKey ? previewState : null;
   const preview = currentPreviewState?.status === "ready"

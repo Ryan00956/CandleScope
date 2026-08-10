@@ -8,7 +8,7 @@
 
 Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutable archive：每个 FULL track 独立绑定规则、费率、mark/index、funding 和历史 L2；保险基金与 ADL 只使用 Phase 0 冻结的版本化确定性模拟 manifest，且明确标记为模拟，禁止运行时随机、无限余额或 proxy fallback。
 
-本文件随候选实现提交。根据 release 工具的 clean-HEAD 约束，正式 benchmark、浏览器 smoke、4 小时 soak、回滚和 release manifest 必须在该提交之后写到仓库外的 `<evidence-root>/<git-head>/`；只要候选 HEAD 后续发生代码或文档修改，全部正式证据作废并在新 HEAD 重跑。
+本文件随候选实现提交。2026-08-10 的 owner 决策将阻塞式浏览器门禁改为不少于 60 分钟、100 次 lifecycle、1,000,000 projection events 的高密度稳定性运行；4 小时仅保留为非阻塞观察。checks、smoke 和稳定性证据仍必须绑定当前 clean HEAD；benchmark、真实来源和 rollback 只有在旧证据 HEAD 是当前 HEAD 的祖先、且 verifier 声明的阶段运行时输入零 diff 时才允许复用，复用来源和 diff 必须写入最终 manifest。
 
 ## 2. 已实现内容
 
@@ -333,8 +333,8 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 2. formal benchmark（含 1/2/4/8 HEDGE）；
 3. 真实 BAR 与官方 AGG_TRADE source validation；
 4. 真实浏览器短 smoke；
-5. 不少于 4 小时、100 次 archive lifecycle、1,000,000 projection events 的正式 soak；
+5. 不少于 60 分钟、100 次 archive lifecycle、1,000,000 projection events 的高密度正式稳定性运行；
 6. 完整构建 rollback drill；
 7. 22 项 HEDGE matrix、默认启用静态审计和最终 release manifest。
 
-只有外部 `release-manifest.json` 为 PASS 且工作树仍为同一 clean HEAD，Phase 9 才算完成。任何失败先修复并形成新候选提交，再从第 1 项重跑；不继承旧证据。本文件不回填会改变 HEAD 的易变运行数值；最终测试计数、来源摘要、性能分布、4 小时遥测和回滚 acceptance map 以该 HEAD 外部 manifest 及其绑定 artifacts 为唯一权威记录。
+只有外部 `release-manifest.json` 为 PASS 且工作树仍为同一 clean HEAD，Phase 9 才算完成。失败后只重跑受影响阶段：checks、smoke 和稳定性证据不跨 HEAD；benchmark、真实来源和 rollback 仅可通过 verifier 的祖先关系与阶段输入 pathspec 零 diff 审计后复用。4 小时观察不参与 PASS/FAIL，也不能被写成已通过的发布门禁。最终测试计数、来源摘要、性能分布、稳定性遥测、复用审计和回滚 acceptance map 以外部 manifest 及其绑定 artifacts 为唯一权威记录。

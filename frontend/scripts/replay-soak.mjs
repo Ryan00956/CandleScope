@@ -14,7 +14,8 @@ const scriptDirectory = path.dirname(scriptPath);
 const frontendRoot = path.resolve(scriptDirectory, "..");
 const repositoryRoot = path.resolve(frontendRoot, "..");
 const backendRoot = path.join(repositoryRoot, "backend");
-const RELEASE_DURATION_MS = 4 * 60 * 60 * 1_000;
+const RELEASE_STABILITY_DURATION_MS = 60 * 60 * 1_000;
+const NON_BLOCKING_OBSERVATION_DURATION_MS = 4 * 60 * 60 * 1_000;
 const RELEASE_CYCLES = 100;
 const RELEASE_PROJECTION_EVENTS = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -36,16 +37,17 @@ const BROWSER_SHUTDOWN_TIMEOUT_MS = 15_000;
 const HEDGE_BROWSER_SOURCE_PROFILE = "HEDGE_EXACT_ARCHIVE_QA";
 const REPLAY_TRAINING_PROTOCOL = "replay.v3";
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const result = {
     allowShort: false,
+    observationOnly: false,
     chromePath: process.env.CHROME_PATH || "",
     cycles: RELEASE_CYCLES,
     diagnosticGapSteps: 0,
-    durationMs: RELEASE_DURATION_MS,
+    durationMs: RELEASE_STABILITY_DURATION_MS,
     heapSnapshotOut: "",
     headed: false,
-    out: path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-browser-soak-20260722.json"),
+    out: path.join(repositoryRoot, "docs", "perf-baselines", "replay-v2-browser-stability-60m.json"),
     projectionEvents: RELEASE_PROJECTION_EVENTS,
     realKlinesSource: process.env.REPLAY_REAL_KLINES_SOURCE
       ? path.resolve(process.env.REPLAY_REAL_KLINES_SOURCE)
@@ -56,6 +58,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === "--allow-short") result.allowShort = true;
+    else if (value === "--observation-only") result.observationOnly = true;
     else if (value === "--headed") result.headed = true;
     else if (value === "--chrome-path") result.chromePath = String(argv[++index] || "");
     else if (value === "--cycles") result.cycles = Number(argv[++index]);
@@ -81,12 +84,24 @@ function parseArgs(argv) {
       throw new Error(`${name} must be an integer >= ${minimum}`);
     }
   }
-  if (!result.allowShort && (
-    result.durationMs < RELEASE_DURATION_MS
+  if (result.allowShort && result.observationOnly) {
+    throw new Error("--allow-short and --observation-only are mutually exclusive");
+  }
+  if (result.observationOnly && (
+    result.durationMs < NON_BLOCKING_OBSERVATION_DURATION_MS
     || result.cycles < RELEASE_CYCLES
     || result.projectionEvents < RELEASE_PROJECTION_EVENTS
   )) {
-    throw new Error("Release soak requires >=4h, >=100 lifecycle cycles, and >=1,000,000 browser projection events; use --allow-short only for harness validation");
+    throw new Error(
+      "Non-blocking observation requires >=4h, >=100 lifecycle cycles, and >=1,000,000 browser projection events",
+    );
+  }
+  if (!result.allowShort && !result.observationOnly && (
+    result.durationMs < RELEASE_STABILITY_DURATION_MS
+    || result.cycles < RELEASE_CYCLES
+    || result.projectionEvents < RELEASE_PROJECTION_EVENTS
+  )) {
+    throw new Error("Release stability gate requires >=60m, >=100 lifecycle cycles, and >=1,000,000 browser projection events; use --allow-short only for harness validation");
   }
   if (!result.allowShort && result.diagnosticGapSteps > 0) {
     throw new Error("--diagnostic-gap-steps is available only with --allow-short");
@@ -669,11 +684,12 @@ async function evaluate(cdp, expression, { userGesture = false } = {}) {
   return result.result?.value;
 }
 
-async function waitForValue(cdp, expression, timeoutMs, label) {
+export async function waitForValue(cdp, expression, timeoutMs, label) {
   const started = Date.now();
   let value;
   let lastError = null;
   while (Date.now() - started < timeoutMs) {
+    if (cdp?.terminalError instanceof Error) throw cdp.terminalError;
     try {
       value = await evaluate(cdp, expression);
       if (value) return value;
@@ -681,6 +697,7 @@ async function waitForValue(cdp, expression, timeoutMs, label) {
     } catch (error) {
       // Navigation replaces the execution context. Preserve the final error so
       // a genuinely dead target is distinguishable from a not-yet-ready DOM.
+      if (cdp?.terminalError instanceof Error) throw cdp.terminalError;
       lastError = error?.message || String(error);
     }
     await wait(100);
@@ -3899,7 +3916,7 @@ async function main() {
     assert(
       typeof liveSymbol === "string"
         && Object.values(fixture.live_window?.rows_by_interval || {}).every((rows) => Number(rows) >= 2_000)
-        && Number(fixture.live_window?.future_horizon_ms) >= RELEASE_DURATION_MS,
+        && Number(fixture.live_window?.future_horizon_ms) >= args.durationMs,
       "browser soak fixture did not enable its isolated gap-free live window",
       fixture,
     );
@@ -4715,7 +4732,11 @@ async function main() {
       schema_version: "replay-v2-browser-soak.v1",
       recorded_at: releaseEvidence.recorded_at,
       release_evidence: releaseEvidence.evidence,
-      mode: args.allowShort ? "harness-validation" : "release-4h",
+      mode: args.allowShort
+        ? "harness-validation"
+        : args.observationOnly
+          ? "observation-4h-non-blocking"
+          : "release-stability-60m",
       passed: acceptancePassed,
       config: {
         durationMs: args.durationMs,

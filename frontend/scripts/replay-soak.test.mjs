@@ -18,6 +18,7 @@ import {
   inspectReplaySoakFrontendBuild,
   isExactHedgeTrainingBound,
   primaryReplayFailureDiagnostics,
+  parseArgs,
   readJson,
   readinessProcessExitIsTerminal,
   replayBackendHealth,
@@ -38,9 +39,60 @@ import {
   selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
   waitForHttpUnavailable,
+  waitForValue,
   withNetworkInspectorSuspended,
   writeHeapSnapshot,
 } from "./replay-soak.mjs";
+
+test("release stability and non-blocking observation modes keep distinct minimums", () => {
+  const realSource = ["--real-klines-source", fileURLToPath(import.meta.url)];
+  const stability = parseArgs(realSource);
+  assert.equal(stability.durationMs, 3_600_000);
+  assert.equal(stability.cycles, 100);
+  assert.equal(stability.projectionEvents, 1_000_000);
+  assert.equal(stability.observationOnly, false);
+
+  const observation = parseArgs([
+    ...realSource,
+    "--observation-only",
+    "--duration-ms",
+    "14400000",
+  ]);
+  assert.equal(observation.observationOnly, true);
+
+  assert.throws(
+    () => parseArgs([
+      ...realSource,
+      "--observation-only",
+      "--duration-ms",
+      "14400000",
+      "--cycles",
+      "99",
+    ]),
+    /Non-blocking observation requires >=4h, >=100 lifecycle cycles/,
+  );
+  assert.throws(
+    () => parseArgs(["--allow-short", "--observation-only"]),
+    /mutually exclusive/,
+  );
+});
+
+test("waitForValue fails immediately after the CDP control channel is terminal", async () => {
+  let sends = 0;
+  const cdp = {
+    terminalError: new Error("CDP WebSocket closed (code=1006)"),
+    async send() {
+      sends += 1;
+      return {};
+    },
+  };
+
+  await assert.rejects(
+    waitForValue(cdp, "true", 120_000, "terminal CDP probe"),
+    /CDP WebSocket closed \(code=1006\)/,
+  );
+  assert.equal(sends, 0);
+});
 
 test("Chrome readiness permits only an explicit successful launcher handoff", () => {
   assert.equal(readinessProcessExitIsTerminal(null), false);

@@ -129,6 +129,48 @@ def test_bound_json_rejects_wrong_head_schema_dirty_or_failed(tmp_path: Path) ->
             )
 
 
+def test_release_stage_reuse_accepts_only_ancestor_evidence_with_unchanged_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_head = "a" * 40
+    new_head = "b" * 40
+    monkeypatch.setattr(release_verifier, "_is_ancestor", lambda *_args: True)
+
+    def unchanged(*args: str, **_kwargs: object) -> str:
+        if "--" in args:
+            return ""
+        return "docs/evidence/release-policy.md\n"
+
+    monkeypatch.setattr(release_verifier, "run_git", unchanged)
+    binding = release_verifier._reuse_binding("benchmark", old_head, new_head)
+    assert binding["kind"] == "VERIFIED_ANCESTOR_REUSE"
+    assert binding["captured_head"] == old_head
+    assert binding["current_head"] == new_head
+    assert binding["changed_files"] == ["docs/evidence/release-policy.md"]
+
+    monkeypatch.setattr(
+        release_verifier,
+        "run_git",
+        lambda *args, **_kwargs: (
+            "backend/app/replay/service.py\n" if "--" in args else ""
+        ),
+    )
+    with pytest.raises(ValueError, match="inputs changed"):
+        release_verifier._reuse_binding("benchmark", old_head, new_head)
+
+
+def test_release_stage_reuse_rejects_non_ancestors_and_non_reusable_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_head = "a" * 40
+    new_head = "b" * 40
+    monkeypatch.setattr(release_verifier, "_is_ancestor", lambda *_args: False)
+    with pytest.raises(ValueError, match="is not an ancestor"):
+        release_verifier._reuse_binding("real_source", old_head, new_head)
+    with pytest.raises(ValueError, match="must be rerun"):
+        release_verifier._reuse_binding("v2_soak", old_head, new_head)
+
+
 def test_phase10_revert_drill_resolves_the_phase_first_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,7 +202,8 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         "v2AccessibilityAudit",
         "v2_keyboard_accessible",
         "v2_reduced_motion_effective",
-        "release-4h",
+        "release-stability-60m",
+        "observation-4h-non-blocking",
         "--real-klines-source",
         "real_bar_source_evidence",
         "hedge_exact_training_bound",
@@ -184,9 +227,13 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         assert needle in rollback
     assert "--live-window" in smoke
     assert "--disable-gap-maintenance" in smoke
-    assert (
-        "--duration-ms 14400000 --cycles 100" in package["scripts"]["soak:replay:v2:4h"]
-    )
+    assert "--duration-ms 3600000 --cycles 100" in package["scripts"][
+        "soak:replay:v2:stability"
+    ]
+    assert "--observation-only --duration-ms 14400000" in package["scripts"][
+        "soak:replay:v2:4h"
+    ]
+    assert "VERIFIED_ANCESTOR_REUSE" in verifier
     assert "--product-v2" not in soak
     assert "--product-v2" not in rollback
     assert "--product-v2" not in package["scripts"]["drill:replay:v2:rollback"]

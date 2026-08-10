@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 try:
     from scripts.verify_replay_hedge_acceptance import (
@@ -49,16 +50,183 @@ except ModuleNotFoundError:
     )
 
 
-SCHEMA_VERSION = "replay.v2.release-manifest.v4"
+SCHEMA_VERSION = "replay.v2.release-manifest.v5"
 WALL_CLOCK_POLICY = "MEASURE_ONLY_NON_BLOCKING"
 MATRIX_PATH = REPOSITORY_ROOT / "docs" / "replay-v2-release-acceptance.json"
+RELEASE_STABILITY_DURATION_MS = 3_600_000
+REUSABLE_STAGE_PATHS: Mapping[str, tuple[str, ...]] = {
+    "benchmark": (
+        "backend/app",
+        ":(glob)backend/scripts/benchmark_replay*.py",
+        "backend/scripts/replay_v2_release_common.py",
+        "backend/requirements.txt",
+        "backend/requirements-parquet.txt",
+        "docs/perf-baselines/replay-v1-backend-20260718.json",
+        "packages/candlescope-plugin-sdk",
+    ),
+    "real_source": (
+        "backend/app",
+        "backend/scripts/validate_replay_v2_real_sources.py",
+        "backend/scripts/replay_v2_release_common.py",
+        "backend/requirements.txt",
+        "backend/requirements-parquet.txt",
+        "packages/candlescope-plugin-sdk",
+    ),
+    "rollback": (
+        "backend/app",
+        "backend/scripts/replay_smoke_fixture.py",
+        "frontend/src",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "frontend/vite.config.js",
+        "frontend/scripts/replay-harness-port.mjs",
+        "frontend/scripts/replay-release-evidence.mjs",
+        "frontend/scripts/replay-soak.mjs",
+        "frontend/scripts/replay-v2-rollback-drill.mjs",
+        "packages/candlescope-plugin-sdk",
+    ),
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument(
+        "--reuse-evidence-dir",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Prior clean-HEAD evidence directory. Only explicitly reusable stages "
+            "whose declared runtime inputs are unchanged may be imported."
+        ),
+    )
     parser.add_argument("--out", type=Path)
     return parser.parse_args()
+
+
+def _is_ancestor(ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    detail = (completed.stderr or completed.stdout).strip()
+    raise RuntimeError(f"git merge-base --is-ancestor failed: {detail}")
+
+
+def _reuse_binding(stage: str, captured_head: str, current_head: str) -> dict[str, object]:
+    pathspecs = REUSABLE_STAGE_PATHS.get(stage)
+    if pathspecs is None:
+        raise ValueError(f"release stage {stage} must be rerun on the current HEAD")
+    if captured_head == current_head:
+        return {
+            "kind": "CURRENT_HEAD",
+            "captured_head": captured_head,
+            "current_head": current_head,
+            "changed_files": [],
+        }
+    if not _is_ancestor(captured_head, current_head):
+        raise ValueError(
+            f"release stage {stage} evidence HEAD {captured_head} is not an ancestor "
+            f"of {current_head}"
+        )
+    invalidating = run_git(
+        "diff",
+        "--name-only",
+        "--diff-filter=ACDMRTUXB",
+        f"{captured_head}..{current_head}",
+        "--",
+        *pathspecs,
+    ).splitlines()
+    if invalidating:
+        raise ValueError(
+            f"release stage {stage} inputs changed since {captured_head}: {invalidating}"
+        )
+    changed_files = run_git(
+        "diff",
+        "--name-only",
+        "--diff-filter=ACDMRTUXB",
+        f"{captured_head}..{current_head}",
+    ).splitlines()
+    return {
+        "kind": "VERIFIED_ANCESTOR_REUSE",
+        "captured_head": captured_head,
+        "current_head": current_head,
+        "invalidation_pathspecs": list(pathspecs),
+        "changed_files": changed_files,
+    }
+
+
+def _load_release_artifact(
+    *,
+    stage: str,
+    filename: str,
+    schema: str,
+    current_directory: Path,
+    reuse_directories: Sequence[Path],
+    current_head: str,
+) -> tuple[Mapping[str, object], dict[str, object]]:
+    current_path = current_directory / filename
+    if current_path.is_file():
+        payload, bound_artifact = load_bound_json(
+            current_path,
+            expected_head=current_head,
+            expected_schema=schema,
+        )
+        bound_artifact["binding"] = {
+            "kind": "CURRENT_HEAD",
+            "captured_head": current_head,
+            "current_head": current_head,
+            "changed_files": [],
+        }
+        return payload, bound_artifact
+    if stage not in REUSABLE_STAGE_PATHS:
+        raise FileNotFoundError(
+            f"release stage {stage} requires current-HEAD artifact {current_path}"
+        )
+    failures: list[str] = []
+    for directory in reuse_directories:
+        candidate = directory.expanduser().resolve() / filename
+        if not candidate.is_file():
+            failures.append(f"{candidate}: missing")
+            continue
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+            release_evidence = raw.get("release_evidence") if isinstance(raw, Mapping) else None
+            captured_head = (
+                str(release_evidence.get("git_head", "")).lower()
+                if isinstance(release_evidence, Mapping)
+                else ""
+            )
+            if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", captured_head) is None:
+                raise ValueError(f"{candidate} has no full captured Git HEAD")
+            require_external_head_path(candidate, captured_head)
+            payload, bound_artifact = load_bound_json(
+                candidate,
+                expected_head=captured_head,
+                expected_schema=schema,
+            )
+            bound_artifact["binding"] = _reuse_binding(
+                stage,
+                captured_head,
+                current_head,
+            )
+            return payload, bound_artifact
+        except (RuntimeError, ValueError) as error:
+            failures.append(f"{candidate}: {error}")
+    raise ValueError(
+        f"no reusable artifact satisfied release stage {stage}: " + "; ".join(failures)
+    )
 
 
 def _validate_matrix() -> tuple[Mapping[str, object], list[dict[str, object]]]:
@@ -255,6 +423,7 @@ def main() -> int:
     evidence = capture_clean_head()
     head = str(evidence["git_head"])
     evidence_directory = require_external_head_path(args.evidence_dir, head)
+    reuse_directories = [directory.expanduser().resolve() for directory in args.reuse_evidence_dir]
     output = require_external_head_path(
         args.out or (evidence_directory / "release-manifest.json"), head
     )
@@ -272,10 +441,13 @@ def main() -> int:
     payloads: dict[str, Mapping[str, object]] = {}
     artifacts: dict[str, dict[str, object]] = {}
     for name, (filename, schema) in expected.items():
-        payload, bound_artifact = load_bound_json(
-            evidence_directory / filename,
-            expected_head=head,
-            expected_schema=schema,
+        payload, bound_artifact = _load_release_artifact(
+            stage=name,
+            filename=filename,
+            schema=schema,
+            current_directory=evidence_directory,
+            reuse_directories=reuse_directories,
+            current_head=head,
         )
         payloads[name] = payload
         artifacts[name] = bound_artifact
@@ -330,10 +502,10 @@ def main() -> int:
         "v2_smoke_harness": v2_smoke.get("mode") == "harness-validation"
         and isinstance(smoke_config, Mapping)
         and smoke_config.get("product") == "replay.v2",
-        "v2_soak_4h": v2_soak.get("mode") == "release-4h"
+        "v2_stability_60m": v2_soak.get("mode") == "release-stability-60m"
         and isinstance(soak_config, Mapping)
         and soak_config.get("product") == "replay.v2"
-        and soak_config.get("durationMs", 0) >= 14_400_000
+        and soak_config.get("durationMs", 0) >= RELEASE_STABILITY_DURATION_MS
         and soak_config.get("cycles", 0) >= 100
         and soak_config.get("projectionEvents", 0) >= 1_000_000,
         "v2_soak_real_bar_evidence": isinstance(soak_config, Mapping)
@@ -407,6 +579,11 @@ def main() -> int:
         "production_observation": (
             "PINNED_DATA_GAPS_FAIL_CLOSED_WITHOUT_DISABLING_THE_PRODUCT"
         ),
+        "stability_policy": {
+            "blocking_gate": "DENSE_60M_100_LIFECYCLES_1000000_PROJECTION_EVENTS",
+            "four_hour_observation": "NON_BLOCKING_OPTIONAL",
+            "ancestor_evidence_reuse": "DECLARED_STAGE_INPUTS_MUST_BE_UNCHANGED",
+        },
         "support_decision": real_source_support,
     }
     write_json(output, report)

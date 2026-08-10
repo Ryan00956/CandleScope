@@ -331,7 +331,7 @@ Set-Location ..\frontend
   --out "$ReplayEvidenceRoot\replay-v2-smoke.json"
 node scripts\replay-soak.mjs `
   --real-klines-source ..\backend\data\replay-dev\source-candlescope.db `
-  --duration-ms 14400000 --cycles 100 --projection-events 1000000 `
+  --duration-ms 3600000 --cycles 100 --projection-events 1000000 `
   --sample-ms 60000 --timeout-ms 120000 `
   --out "$ReplayEvidenceRoot\replay-v2-soak.json"
 node scripts\replay-v2-rollback-drill.mjs `
@@ -351,11 +351,19 @@ the next gate fail the clean-tree check. The final verifier also checks all 40
 product-contract scenarios, exact repository defaults, artifact hashes, real
 BAR and official aggTrade source provenance, bounded storage inventory, 100
 archive lifecycles, keyboard/focus/reduced-motion evidence, and a detached
-`git revert --no-commit` drill. The 4-hour soak is a real release gate, not a
-short harness mode, and formally requires `--real-klines-source` (or
-`REPLAY_REAL_KLINES_SOURCE`). Passing these local gates leaves production on
-HOLD and does not replace the required BOOK/account capture, capacity/alerting
-observation window, or explicit enablement decision.
+`git revert --no-commit` drill.
+
+The blocking browser stability gate compresses 100 lifecycle cycles and
+1,000,000 projection events into at least 60 minutes. It formally requires
+`--real-klines-source` (or `REPLAY_REAL_KLINES_SOURCE`). The historical 4-hour
+command is retained only as an optional non-blocking observation. After a
+tooling-only commit, pass one or more
+`--reuse-evidence-dir <prior-head>/replay-v2` arguments to reuse benchmark,
+real-source, or rollback artifacts only when their declared runtime inputs have
+no Git diff. Checks, smoke, and stability evidence must still come from the
+current HEAD. Passing these local gates leaves production on HOLD and does not
+replace the required BOOK/account capture, capacity/alerting observation
+window, or explicit enablement decision.
 
 ## Architecture
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import replace
@@ -54,12 +55,14 @@ async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
         assert service.training is not None
         created = await service.training.create_run(request)
         run_id = str(created["run"]["run_id"])
-        public_portfolio = (
-            await service.training.get_market_tracks(run_id)
-        )["portfolio"]
+        public_portfolio = (await service.training.get_market_tracks(run_id))[
+            "portfolio"
+        ]
         public_view = public_portfolio["hedge_inputs"]
 
-        def read_private(connection: sqlite3.Connection) -> tuple[dict[str, object], sqlite3.Row]:
+        def read_private(
+            connection: sqlite3.Connection,
+        ) -> tuple[dict[str, object], sqlite3.Row]:
             private_view = service.training.store._hedge_input_projection(
                 connection,
                 run_id=run_id,
@@ -79,9 +82,10 @@ async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
             assert private_view is not None and dataset is not None
             return private_view, dataset
 
-        private_view, dataset = await service.training.store.base_store.run_extension_read(
-            read_private
-        )
+        (
+            private_view,
+            dataset,
+        ) = await service.training.store.base_store.run_extension_read(read_private)
         assert private_view["schema_version"] == "replay.hedge-input-view.v1"
         assert public_view["schema_version"] == "replay.hedge-input-view.v2"
         assert public_view["time_domain"] == expected_time_domain
@@ -132,7 +136,10 @@ async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
         encoded_audit = json.dumps(account_audit, separators=(",", ":"))
         assert '"as_of_actual_time_ms"' not in encoded_audit
         assert '"as_of_virtual_time_ms"' not in encoded_audit
-        assert '"snapshot":{"schema_version":"replay.hedge-input-audit.v1"' not in encoded_audit
+        assert (
+            '"snapshot":{"schema_version":"replay.hedge-input-audit.v1"'
+            not in encoded_audit
+        )
         if expected_time_domain == "PUBLIC":
             encoded = json.dumps(public_view, separators=(",", ":"))
             assert str(private_view["bound_range_start_ms"]) not in encoded
@@ -154,16 +161,15 @@ async def test_public_hedge_input_view_uses_one_disclosed_time_domain(
                 command_type=ReplayV2CommandType.REVEAL_TIME,
                 payload={"reason": "verify irreversible public HEDGE time view"},
             )
-            revealed_view = (
-                await service.training.get_market_tracks(run_id)
-            )["portfolio"]["hedge_inputs"]
+            revealed_view = (await service.training.get_market_tracks(run_id))[
+                "portfolio"
+            ]["hedge_inputs"]
             assert revealed_view["time_domain"] == "ACTUAL"
             assert revealed_view["bound_range_start_ms"] == int(
                 private_view["bound_range_start_ms"]
             )
             assert all(
-                item["time_domain"] == "ACTUAL"
-                for item in revealed_view["projections"]
+                item["time_domain"] == "ACTUAL" for item in revealed_view["projections"]
             )
     finally:
         await service.shutdown(step_timeout=1.0)
@@ -245,8 +251,7 @@ async def test_same_symbol_hedge_legs_add_protect_partial_close_and_flatten(
             for item in portfolio["positions"]
         } == {"LONG": "0.55", "SHORT": "-0.55"}
         assert all(
-            len(item["protection"]["orders"]) == 2
-            for item in portfolio["positions"]
+            len(item["protection"]["orders"]) == 2 for item in portfolio["positions"]
         )
         for position_side in ("LONG", "SHORT"):
             await _send(
@@ -261,6 +266,158 @@ async def test_same_symbol_hedge_legs_add_protect_partial_close_and_flatten(
         assert final["positions"] == []
         assert final["status"] == "ACTIVE"
     finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _risk_service(tmp_path / "phase9-interactive-playback-liveness.db")
+    pause_task: asyncio.Task[dict[str, object]] | None = None
+    release_first_bar = asyncio.Event()
+    try:
+        base = replace(
+            _sandbox_request(await _request(service), initial_equity="10000"),
+            market_type="futures",
+        )
+        request = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix="phase9-interactive-playback-liveness",
+            mark_prices=["100"] * 13,
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase9-interactive-playback-liveness-acquire",
+        )
+        for side, position_side in (("BUY", "LONG"), ("SELL", "SHORT")):
+            await _send(
+                service,
+                run_id=run_id,
+                session_id=session_id,
+                command_id=(
+                    f"phase9-interactive-playback-liveness-{position_side.lower()}"
+                ),
+                command_type=ReplayV2CommandType.PLACE_ORDER,
+                payload={
+                    "client_order_id": (
+                        f"phase9-interactive-playback-liveness-{position_side.lower()}"
+                    ),
+                    "side": side,
+                    "position_side": position_side,
+                    "order_type": "MARKET",
+                    "quantity": "0.5",
+                    "leverage": "3",
+                    "reduce_only": False,
+                    "limit_price": None,
+                    "stop_price": None,
+                },
+            )
+
+        binding = await service.training.store.run_binding(run_id)
+        projection = await service.training.get_market_tracks(run_id)
+        tracks = tuple(
+            track
+            for track in projection["tracks"]
+            if track["subscription_tier"] == "FULL"
+        )
+        before_play = await service.get_session(session_id)
+        before_sequence = int(before_play["snapshot"]["cursor"]["source_sequence"])
+        assert (
+            service.training._ordered_playback_interactive_batch_limit(
+                binding=binding,
+                tracks=tracks,
+                snapshot=before_play["snapshot"],
+                target_virtual_time_ms=(
+                    int(before_play["snapshot"]["cursor"]["virtual_time_ms"]) + 60_000
+                ),
+            )
+            == 1
+        )
+
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-interactive-playback-liveness-profile",
+            command_type=ReplayV2CommandType.SET_SPEED,
+            payload={"basis": "BASE_BAR", "rate": 10_000},
+        )
+
+        original_advance = service.training._advance_adapter_to
+        first_bar_advanced = asyncio.Event()
+        advance_kwargs: list[dict[str, object]] = []
+
+        async def controlled_advance(**kwargs):
+            advance_kwargs.append(dict(kwargs))
+            result = await original_advance(**kwargs)
+            first_bar_advanced.set()
+            await release_first_bar.wait()
+            return result
+
+        monkeypatch.setattr(
+            service.training,
+            "_advance_adapter_to",
+            controlled_advance,
+        )
+        monkeypatch.setattr(
+            "app.replay.training.service.discrete_playback_units",
+            lambda _elapsed_seconds, *, rate: 64,
+        )
+
+        playing = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase9-interactive-playback-liveness-play",
+            command_type=ReplayV2CommandType.PLAY,
+            payload={"basis": "BASE_BAR", "rate": 10_000},
+        )
+        assert playing["state"] == "PLAYING"
+        await asyncio.wait_for(first_bar_advanced.wait(), timeout=1.0)
+
+        pause_task = asyncio.create_task(
+            _send(
+                service,
+                run_id=run_id,
+                session_id=session_id,
+                command_id="phase9-interactive-playback-liveness-pause",
+                command_type=ReplayV2CommandType.PAUSE,
+                payload={},
+            )
+        )
+        actor = service.training._run_actors[run_id]
+        for _attempt in range(100):
+            if actor._playback_stop.is_set():
+                break
+            await asyncio.sleep(0)
+        assert actor._playback_stop.is_set()
+        release_first_bar.set()
+
+        paused = await asyncio.wait_for(pause_task, timeout=1.0)
+        pause_task = None
+        assert paused["state"] == "PAUSED"
+        assert len(advance_kwargs) == 1
+        assert advance_kwargs[0]["final_state_max_events"] is None
+        assert advance_kwargs[0]["require_empty_account"] is False
+        after_pause = await service.get_session(session_id)
+        assert (
+            int(after_pause["snapshot"]["cursor"]["source_sequence"])
+            == before_sequence + 1
+        )
+    finally:
+        release_first_bar.set()
+        if pause_task is not None:
+            pause_task.cancel()
+            await asyncio.gather(pause_task, return_exceptions=True)
         await service.shutdown(step_timeout=1.0)
 
 
@@ -480,8 +637,7 @@ async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
         assert tracks["ETHUSDT"]["track_id"] == secondary_track_id
         positions = projection["portfolio"]["positions"]
         assert {
-            (str(item["symbol"]), str(item["position_side"]))
-            for item in positions
+            (str(item["symbol"]), str(item["position_side"])) for item in positions
         } == {
             ("BTCUSDT", "LONG"),
             ("BTCUSDT", "SHORT"),
@@ -537,9 +693,7 @@ async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
         failed = await service.training.hedge_inputs.audit_run(run_id)
         assert failed["status"] == "FAIL"
         assert any(
-            str(item["field"]).startswith(
-                f"track_projection.{secondary_track_id}"
-            )
+            str(item["field"]).startswith(f"track_projection.{secondary_track_id}")
             for item in failed["differences"]
         )
     finally:
@@ -585,8 +739,7 @@ async def test_real_multitrack_cross_breach_creates_one_account_case(
         execution_orders = [
             order
             for step in case["steps"]
-            if step["step_type"]
-            in {"PARTIAL_LIQUIDATION", "FULL_LIQUIDATION"}
+            if step["step_type"] in {"PARTIAL_LIQUIDATION", "FULL_LIQUIDATION"}
             for order in step["orders"]
         ]
         assert execution_orders
@@ -747,13 +900,9 @@ async def test_isolated_liquidation_closes_only_the_breached_hedge_leg(
             survivor_side
         ]
         case = portfolio["liquidations"][0]
-        assert {
-            leg["position_side"] for leg in case["legs"]
-        } == {victim_side}
+        assert {leg["position_side"] for leg in case["legs"]} == {victim_side}
         assert case["state"] == "COMPLETED"
-        assert portfolio["isolated_allocations"] == {
-            f"track-1:{survivor_side}": "70"
-        }
+        assert portfolio["isolated_allocations"] == {f"track-1:{survivor_side}": "70"}
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -841,8 +990,6 @@ async def test_cross_liquidation_cancels_opening_order_and_recovers_before_close
             "RISK_RECHECK",
             "COMPLETE",
         ]
-        assert [order["state"] for order in case["steps"][0]["orders"]] == [
-            "CANCELED"
-        ]
+        assert [order["state"] for order in case["steps"][0]["orders"]] == ["CANCELED"]
     finally:
         await service.shutdown(step_timeout=1.0)

@@ -122,6 +122,7 @@ if TYPE_CHECKING:
 ADVANCE_PROGRESS_RETENTION_SECONDS = 2.0
 FINAL_STATE_PROJECTION_DELIVERY = "FINAL_STATE"
 FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS = 10_000
+ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS = 1
 ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
 ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
 _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
@@ -796,9 +797,7 @@ class TrainingRunService:
             **account_audit,
             "status": combined_status,
             "account_audit_status": account_status,
-            "hedge_input_audit": self._public_hedge_input_audit(
-                hedge_input_audit
-            ),
+            "hedge_input_audit": self._public_hedge_input_audit(hedge_input_audit),
         }
 
     @staticmethod
@@ -819,9 +818,7 @@ class TrainingRunService:
             "difference_hashes": [
                 canonical_sha256(difference) for difference in differences
             ],
-            "snapshot_hash": (
-                None if snapshot is None else canonical_sha256(snapshot)
-            ),
+            "snapshot_hash": (None if snapshot is None else canonical_sha256(snapshot)),
         }
 
     async def list_data_segments(
@@ -7136,40 +7133,53 @@ class TrainingRunService:
                             timeout = 0.0
                     else:
                         final_state_batch_units = 0
-                        if (
-                            source_kind == "BAR"
-                            and rate >= ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE
-                        ):
+                        interactive_batch_limit = 0
+                        if source_kind == "BAR":
                             base_interval_ms = fixed_interval_ms(
                                 str(binding["base_interval"]),
                                 field_name="base_interval",
                             )
                             if current_time <= MAX_TIMESTAMP_MS - base_interval_ms:
-                                final_state_profile = (
-                                    self._ordered_final_state_batch_profile(
+                                next_base_time = current_time + base_interval_ms
+                                interactive_batch_limit = (
+                                    self._ordered_playback_interactive_batch_limit(
                                         binding=binding,
                                         tracks=tracks,
                                         snapshot=selected_snapshot,
-                                        target_virtual_time_ms=(
-                                            current_time + base_interval_ms
-                                        ),
-                                        enabled=True,
+                                        target_virtual_time_ms=next_base_time,
                                     )
                                 )
-                                if final_state_profile is not None:
-                                    final_state_batch_units = min(
-                                        final_state_profile[0],
-                                        (
-                                            rate
-                                            + ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ
-                                            - 1
+                                if rate >= ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE:
+                                    final_state_profile = (
+                                        self._ordered_final_state_batch_profile(
+                                            binding=binding,
+                                            tracks=tracks,
+                                            snapshot=selected_snapshot,
+                                            target_virtual_time_ms=next_base_time,
+                                            enabled=True,
                                         )
-                                        // ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ,
                                     )
+                                    if final_state_profile is not None:
+                                        final_state_batch_units = min(
+                                            final_state_profile[0],
+                                            (
+                                                rate
+                                                + ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ
+                                                - 1
+                                            )
+                                            // ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ,
+                                        )
                         units = discrete_playback_units(
                             elapsed_seconds,
                             rate=rate,
                         )
+                        if interactive_batch_limit > 0:
+                            # The Run actor lock is also the PAUSE/SET_SPEED
+                            # acknowledgement boundary.  Once orders or positions
+                            # exist, yield that fair lock after every committed BAR
+                            # so account growth cannot turn one playback batch into
+                            # an unbounded control-command stall.
+                            units = min(units, interactive_batch_limit)
                         if units < final_state_batch_units:
                             if raw_elapsed_seconds >= 0:
                                 # Keep one bounded projection batch computed
@@ -8023,11 +8033,36 @@ class TrainingRunService:
             return None
         require_empty_account = not dependencies
         limit = min(
-            MAX_PLAYBACK_BATCH_UNITS if require_empty_account else 32,
+            (
+                MAX_PLAYBACK_BATCH_UNITS
+                if require_empty_account
+                else ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS
+            ),
             self.replay_service.settings.event_buffer_size,
             FINAL_STATE_EMPTY_ACCOUNT_CHUNK_EVENTS,
         )
         return max(1, limit), require_empty_account
+
+    def _ordered_playback_interactive_batch_limit(
+        self,
+        *,
+        binding: Mapping[str, object],
+        tracks: tuple[Mapping[str, object], ...],
+        snapshot: Mapping[str, object],
+        target_virtual_time_ms: int,
+    ) -> int:
+        """Bound a playing account to one durable market barrier per Run lock."""
+
+        decision = self._plan_fast_forward(
+            binding=binding,
+            snapshot=snapshot,
+            tracks=tracks,
+            target_virtual_time_ms=target_virtual_time_ms,
+        )
+        dependencies = set(decision.context.path_dependencies)
+        if dependencies.intersection({"OPEN_ORDER", "OPEN_POSITION"}):
+            return ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS
+        return 0
 
     @staticmethod
     def _actual_event_time_ms(

@@ -300,6 +300,15 @@ Phase 9 的实现候选已经完成。公开交易所输入仍是 exact immutabl
 - 结构化 4xx/5xx、成功但非法或身份错配的响应、调用方 Abort、第二次传输失败以及第二次 retry 均继续 fail closed。长 advance/scan/end 不套用快速 ACK 截止，避免把合法长任务误判为传输丢失；它们仍可在真实 transport error 后按同一 canonical command 最多对账一次。没有环境变量、灰度、默认关闭、fallback 或性能阈值改动。
 - 定向 API 回归覆盖 bodyless 5xx exact retry、悬挂 set_speed 的 timer abort、结构化 controller conflict、外部 Abort、身份错配以及第二次失败的有界拒绝；双 typecheck 与 lint 通过。修复形成新 clean HEAD 后先运行真实浏览器高密度周期，再从零重建 Phase 9 全部正式 artifacts；`67279701` 的 PASS 项和失败 soak 只保留为根因证据。
 
+### 3.30 有持仓播放批次长期占用 Run 锁与控制活性修复
+
+- `b09ab3a6932d5dc0313fd53f89ab95d8ecea9d42` 已从零完成正式来源、全量 checks、formal benchmark、真实 smoke 和 rollback。来源包含 BTC/ETH 各 4,000 根连续真实 BAR 以及 Binance 官方 BTCUSDT futures `2020-01-01` 的 71,359 条 aggTrades；后端 `3253 passed`、前端 `2996 passed`。7/7 benchmark 组件和 14 项硬检查全真，性能 policy 保持 `MEASURE_ONLY_NON_BLOCKING`；smoke 33 项及 rollback 17 项 acceptance 全真。
+- 同一 HEAD 的正式 4 小时 soak 在 `elapsed=8,964,348 ms`、第 62 个 training action cycle fail closed，错误为等待 training speed ACK 超时。失败时页面 source sequence `3301`、revision `3425`，权威 global clock 已是 `PAUSED / BASE_BAR / rate=1`，两条 HEDGE 腿仍同时存在，`controlPending` 已清空；最后一个 `set_speed(BASE_BAR, 120)` canonical 命令的首次请求和唯一同 ID 对账请求都以 `status=0 / net::ERR_ABORTED` 结束。后端 queue 为 0，runtime、persistence、reaper、recovery 与 SQLite transaction failure 均为 0，已接受 adapter 命令的最大 ACK 仅 `672 ms`。失败 artifact 保存为仓库外 `replay-v2-soak.json.failed.json`，未生成 PASS manifest。
+- 根因是 `_run_ordered_playback` 在 `TrainingRunActor.serialized()` 内完成整个 `_advance_full_tracks_to` 目标。PAUSE 会先调用 `signal_ordered_stop()`，因此页面和权威 clock 可先变为 PAUSED，但 HTTP command 仍要排队等待同一 Run 锁；SET_SPEED 也必须先取得该锁。旧调度按 wall-time 累积最多 64 个离散单位，并可能在一次锁区间内逐 BAR 结算全部单位。原终态批次另允许有普通 position 时最多 32 根，但 HEDGE pinned mark/funding 等依赖会禁用该优化而走普通参考路径，所以只把 32 改小不能关闭真实失败入口。
+- 播放调度现对每轮权威 track/snapshot 复用 fast-forward path dependency 判定；只要出现 `OPEN_ORDER` 或 `OPEN_POSITION`，无论终态优化是否可用、是否还有 funding/mark/book 依赖，单次锁区间的播放目标都限制为 1 个 BAR。每根完成持久化 global checkpoint 后退出 Run 锁，Python fair lock 允许已排队 PAUSE/SET_SPEED 获得确认；停止信号仍只在完整提交屏障检查，不会产生半根成交、半次强平或跳过保险/ADL。空账户仍使用原 64/大块终态路径，手动长任务合同未修改。
+- 新回归在真实 HEDGE deterministic-simulation Run 中同时建立 LONG/SHORT 两腿，强制 `discrete_playback_units=64`，并在首根适配器推进尚持锁时排队 PAUSE；结果只发生一次 adapter advance，`final_state_max_events=None` 的普通参考路径只消费 1 根，source sequence 精确 `+1`，PAUSE 在释放首根后 1 秒内返回。原空账户 64 根终态批处理和 TOUCH_OR_TAPE_V2 活跃仓位禁用优化测试继续通过；完整 Phase 9 HEDGE 与 Phase 13 播放调度定向集为 `18 passed`。
+- 本修复属于控制命令正确性/活性硬门禁，不恢复任何墙钟性能 PASS/FAIL。没有新增环境变量、灰度、默认关闭、fallback 或交易语义近似；该提交产生新 HEAD 后必须先做不少于 70 个周期的高密度真实浏览器复验越过旧第 62 周期，再从真实来源、全量 checks、7 组件 benchmark、smoke、rollback、正式 4 小时 soak 到 release manifest 全部重跑。
+
 ## 4. clean-HEAD 正式判定
 
 候选提交后依次执行并绑定同一 HEAD：

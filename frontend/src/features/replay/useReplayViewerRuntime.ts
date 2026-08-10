@@ -887,7 +887,12 @@ export function useReplayViewerRuntime(runtime: ReplayRuntime): ReplayViewerRunt
       }
       return result;
     } catch (cause) {
-      await failClosedAndRefreshMarketTracks(command.run_id);
+      // The command acknowledgement has its own bounded deadline.  Do not
+      // extend that deadline by awaiting a tracks refresh which is serialized
+      // behind the same server Run lock.  The helper clears local projections
+      // synchronously before its first await, then restores them only from an
+      // authoritative response when the server becomes available again.
+      void failClosedAndRefreshMarketTracks(command.run_id);
       setError(cause instanceof Error ? cause.message : "回放控制失败");
       throw cause;
     } finally {

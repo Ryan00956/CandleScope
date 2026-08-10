@@ -7326,6 +7326,7 @@ class TrainingRunService:
                             target_virtual_time_ms=target,
                             stop_event=stop,
                             allow_final_state_batch=True,
+                            audit_account_at_barrier=False,
                         )
                         if consumed_wall_seconds > 0:
                             last_advance_wall += consumed_wall_seconds
@@ -7529,6 +7530,7 @@ class TrainingRunService:
         job: dict[str, object] | None = None,
         stop_event: asyncio.Event | None = None,
         allow_final_state_batch: bool = False,
+        audit_account_at_barrier: bool = True,
     ) -> tuple[StableMarketEvent, ...]:
         hedge_mode = str(binding.get("position_mode")) == "HEDGE"
         if not hedge_mode:
@@ -7569,7 +7571,8 @@ class TrainingRunService:
         async def cancel_at_committed_barrier() -> tuple[StableMarketEvent, ...]:
             if job is not None:
                 job["status"] = "CANCELLED"
-            await self.audit_account(command.run_id)
+            if audit_account_at_barrier:
+                await self.audit_account(command.run_id)
             return tuple(all_events)
 
         for _wave_index in range(10_000):
@@ -7728,7 +7731,8 @@ class TrainingRunService:
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
-                await self.audit_account(command.run_id)
+                if audit_account_at_barrier:
+                    await self.audit_account(command.run_id)
                 return tuple(all_events)
             candidate_times = [*next_times, target_virtual_time_ms]
             if next_account_virtual is not None:

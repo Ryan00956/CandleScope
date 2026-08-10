@@ -298,29 +298,47 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
             selected_session_id=session_id,
             command_id="phase9-interactive-playback-liveness-acquire",
         )
-        for side, position_side in (("BUY", "LONG"), ("SELL", "SHORT")):
-            await _send(
-                service,
-                run_id=run_id,
-                session_id=session_id,
-                command_id=(
-                    f"phase9-interactive-playback-liveness-{position_side.lower()}"
-                ),
-                command_type=ReplayV2CommandType.PLACE_ORDER,
-                payload={
-                    "client_order_id": (
-                        f"phase9-interactive-playback-liveness-{position_side.lower()}"
-                    ),
-                    "side": side,
-                    "position_side": position_side,
-                    "order_type": "MARKET",
-                    "quantity": "0.5",
-                    "leverage": "3",
-                    "reduce_only": False,
-                    "limit_price": None,
-                    "stop_price": None,
-                },
-            )
+        # Match the order/fill cardinality from the release-soak failure while
+        # compressing away its wall-clock waits and browser lifecycle work.
+        for ordinal in range(37):
+            for side, position_side in (("BUY", "LONG"), ("SELL", "SHORT")):
+                suffix = f"{position_side.lower()}-{ordinal}"
+                await _send(
+                    service,
+                    run_id=run_id,
+                    session_id=session_id,
+                    command_id=f"phase9-interactive-playback-liveness-{suffix}",
+                    command_type=ReplayV2CommandType.PLACE_ORDER,
+                    payload={
+                        "client_order_id": (
+                            f"phase9-interactive-playback-liveness-{suffix}"
+                        ),
+                        "side": side,
+                        "position_side": position_side,
+                        "order_type": "MARKET",
+                        "quantity": "0.05",
+                        "leverage": "3",
+                        "reduce_only": False,
+                        "limit_price": None,
+                        "stop_price": None,
+                    },
+                )
+
+        def accumulated_counts(connection: sqlite3.Connection) -> tuple[int, int]:
+            orders = connection.execute(
+                "SELECT COUNT(*) FROM replay_training_contract_order WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            fills = connection.execute(
+                "SELECT COUNT(*) FROM replay_training_contract_fill WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            assert orders is not None and fills is not None
+            return int(orders[0]), int(fills[0])
+
+        assert await service.training.store.base_store.run_extension_read(
+            accumulated_counts
+        ) == (74, 74)
 
         binding = await service.training.store.run_binding(run_id)
         projection = await service.training.get_market_tracks(run_id)
@@ -356,6 +374,12 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
         first_bar_advanced = asyncio.Event()
         advance_kwargs: list[dict[str, object]] = []
 
+        async def forbidden_account_audit(_run_id: str) -> dict[str, object]:
+            raise AssertionError(
+                "ordered playback must not run the exhaustive account auditor "
+                "while holding the pause acknowledgement lock"
+            )
+
         async def controlled_advance(**kwargs):
             advance_kwargs.append(dict(kwargs))
             result = await original_advance(**kwargs)
@@ -367,6 +391,11 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
             service.training,
             "_advance_adapter_to",
             controlled_advance,
+        )
+        monkeypatch.setattr(
+            service.training,
+            "audit_account",
+            forbidden_account_audit,
         )
         monkeypatch.setattr(
             "app.replay.training.service.discrete_playback_units",

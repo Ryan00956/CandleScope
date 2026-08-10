@@ -1,4 +1,4 @@
-export const REPLAY_ORDER_ADVISORY_DEBOUNCE_MS = 180;
+export const REPLAY_ORDER_ADVISORY_DEBOUNCE_MS = 500;
 
 export interface ReplayOrderAdvisoryTimers {
   setTimeout(callback: () => void, delayMs: number): unknown;

@@ -19,7 +19,7 @@ test("order advisory scheduling collapses high-rate cursor churn to the latest r
       callbacks.delete(Number(handle));
     },
   };
-  const scheduler = createReplayOrderAdvisoryScheduler({ delayMs: 180, timers });
+  const scheduler = createReplayOrderAdvisoryScheduler({ delayMs: 500, timers });
   const started: number[] = [];
 
   for (let revision = 1; revision <= 1_000; revision += 1) {

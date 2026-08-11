@@ -1251,17 +1251,18 @@ async function hedgeBrowserAccountContinuityAudit({
   await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
   const afterRefresh = await readServerAccountProof(backendOrigin, runId);
 
-  const disconnectRequest = readJson(
-    `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
-    { method: "POST" },
+  await runObservedReplayDisconnect(
+    () => waitForReplayStatus(
+      cdp,
+      '(value) => value.connection === "reconnecting" || value.connection === "resyncing"',
+      timeoutMs,
+      "HEDGE continuity disconnect feedback",
+    ),
+    () => readJson(
+      `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
+      { method: "POST" },
+    ),
   );
-  await waitForReplayStatus(
-    cdp,
-    '(value) => value.connection === "reconnecting" || value.connection === "resyncing"',
-    timeoutMs,
-    "HEDGE continuity disconnect feedback",
-  );
-  await disconnectRequest;
   await waitForAuthoritativeReplayStatus(
     cdp,
     '(value) => value.connection === "connected" && value.state === "PAUSED"',
@@ -2199,6 +2200,18 @@ async function waitForReplayStatus(cdp, predicateSource, timeoutMs, label) {
   })()`, timeoutMs, label);
 }
 
+export async function runObservedReplayDisconnect(waitForFeedback, disconnect) {
+  if (typeof waitForFeedback !== "function" || typeof disconnect !== "function") {
+    throw new TypeError("observed replay disconnect requires wait and trigger functions");
+  }
+  // Queue the first CDP observation before the fixture starts its deliberately
+  // short disconnect window, otherwise a busy browser can miss the transition.
+  const feedbackPromise = waitForFeedback();
+  const disconnectPromise = disconnect();
+  const [feedback, response] = await Promise.all([feedbackPromise, disconnectPromise]);
+  return { feedback, response };
+}
+
 function isAuthoritativeReplayStatus(value) {
   return value !== null
     && typeof value === "object"
@@ -2589,17 +2602,18 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   const normalSpeed = normalSpeedRequest.acknowledged;
   await waitForCommandReady(cdp, timeoutMs);
 
-  const disconnectRequest = readJson(
-    `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
-    { method: "POST" },
+  await runObservedReplayDisconnect(
+    () => waitForReplayStatus(
+      cdp,
+      `(value) => value.connection === "reconnecting" || value.connection === "resyncing"`,
+      timeoutMs,
+      "training replay disconnect feedback",
+    ),
+    () => readJson(
+      `${backendOrigin}/__replay_smoke__/disconnect-replay/${encodeURIComponent(sessionId)}`,
+      { method: "POST" },
+    ),
   );
-  await waitForReplayStatus(
-    cdp,
-    `(value) => value.connection === "reconnecting" || value.connection === "resyncing"`,
-    timeoutMs,
-    "training replay disconnect feedback",
-  );
-  await disconnectRequest;
   const reconnected = await waitForAuthoritativeReplayStatus(
     cdp,
     `(value) => value.connection === "connected" && value.sourceSequence >= ${normalSpeed.sourceSequence}`,

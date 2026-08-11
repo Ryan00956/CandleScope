@@ -37,6 +37,7 @@ import {
   replayTrainingTargetSpeed,
   requestBrowserClose,
   restoreCommandReadinessAfterReconnect,
+  runObservedReplayDisconnect,
   selectFormalV2HedgeTrainingPlan,
   selectFormalV2RealTrainingPlan,
   waitForHttpUnavailable,
@@ -44,6 +45,32 @@ import {
   withNetworkInspectorSuspended,
   writeHeapSnapshot,
 } from "./replay-soak.mjs";
+
+test("observed replay disconnect starts feedback polling before the trigger", async () => {
+  const order = [];
+  let releaseFeedback;
+  const feedbackPending = new Promise((resolve) => {
+    releaseFeedback = resolve;
+  });
+
+  const resultPending = runObservedReplayDisconnect(
+    () => {
+      order.push("feedback");
+      return feedbackPending;
+    },
+    async () => {
+      order.push("disconnect");
+      return { disconnected_subscribers: 1 };
+    },
+  );
+
+  assert.deepEqual(order, ["feedback", "disconnect"]);
+  releaseFeedback({ connection: "reconnecting" });
+  assert.deepEqual(await resultPending, {
+    feedback: { connection: "reconnecting" },
+    response: { disconnected_subscribers: 1 },
+  });
+});
 
 test("release stability and non-blocking observation modes keep distinct minimums", () => {
   const realSource = ["--real-klines-source", fileURLToPath(import.meta.url)];

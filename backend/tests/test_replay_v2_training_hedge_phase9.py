@@ -450,8 +450,10 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
         await service.shutdown(step_timeout=1.0)
 
 
+@pytest.mark.parametrize("setup_start_mode", ("MANUAL", "RANDOM"))
 async def test_segment_plan_resolves_cross_verified_default_hedge_refs(
     tmp_path: Path,
+    setup_start_mode: str,
 ) -> None:
     service = await _risk_service(tmp_path / "phase9-plan.db")
     try:
@@ -483,10 +485,26 @@ async def test_segment_plan_resolves_cross_verified_default_hedge_refs(
         assert hedge_plan["simulation_manifest_ref"] == (
             pinned.simulation_manifest_ref.to_dict()
         )
+        setup_payload = TrainingRunSetupRequest.from_market_request(planning).to_dict()
+        if setup_start_mode == "RANDOM":
+            setup_payload.update(
+                {
+                    "start_mode": "RANDOM",
+                    "requested_start_ms": None,
+                    "random_range_start_ms": planning.requested_start_ms,
+                    "random_range_end_ms": planning.requested_start_ms,
+                }
+            )
         shell = await service.training.create_empty_run(
-            TrainingRunSetupRequest.from_market_request(planning)
+            TrainingRunSetupRequest.from_dict(setup_payload)
         )
         run_id = str(shell["run"]["run_id"])
+        commitment = await service.training.store.get_time_commitment(run_id)
+        assert commitment["start_mode"] == setup_start_mode
+        assert commitment["committed_start_ms"] == planning.requested_start_ms
+        if setup_start_mode == "RANDOM":
+            assert commitment["seed_source"] == "SERVER"
+            assert commitment["random_seed"] is not None
         selection_payload = {
             "catalog_epoch": planning.catalog_epoch,
             "exchange": planning.exchange,
@@ -517,6 +535,21 @@ async def test_segment_plan_resolves_cross_verified_default_hedge_refs(
             str(created["run"]["run_id"])
         )
         assert projection["portfolio"]["position_mode"] == "HEDGE"
+        if setup_start_mode == "RANDOM":
+            with sqlite3.connect(tmp_path / "phase9-plan.db") as connection:
+                persisted = connection.execute(
+                    """
+                    SELECT start_mode, seed_source, random_seed, actual_start_ms
+                    FROM replay_training_start_selection
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+            assert persisted is not None
+            assert persisted[0] == "RANDOM"
+            assert persisted[1] == "SERVER"
+            assert persisted[2] == commitment["random_seed"]
+            assert persisted[3] == commitment["committed_start_ms"]
     finally:
         await service.shutdown(step_timeout=1.0)
 

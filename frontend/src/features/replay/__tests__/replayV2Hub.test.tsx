@@ -765,6 +765,21 @@ test("HEDGE create mode is the default and accepts the exchange-parity policy ma
   assert.equal(evaluation.canSubmit, true);
   assert.equal(buildTrainingRunCreateRequest(hedge, evaluation).position_mode, "HEDGE");
 
+  const randomHedge = {
+    ...hedge,
+    startMode: "RANDOM" as const,
+    requestedStartMs: null,
+    randomRangeStartMs: hedge.requestedStartMs,
+    randomRangeEndMs: hedge.requestedStartMs,
+    timeDisclosurePolicy: "HIDE_ALL" as const,
+  };
+  const randomEvaluation = evaluateTrainingRunSetupDraft(randomHedge, capabilities);
+  assert.equal(randomEvaluation.canSubmit, true);
+  const randomPayload = buildTrainingRunCreateRequest(randomHedge, randomEvaluation);
+  assert.equal(randomPayload.start_mode, "RANDOM");
+  assert.equal(randomPayload.requested_start_ms, null);
+  assert.equal(randomPayload.position_mode, "HEDGE");
+
   for (const supported of [
     { ...hedge, marginMode: "ISOLATED" as const },
   ]) {

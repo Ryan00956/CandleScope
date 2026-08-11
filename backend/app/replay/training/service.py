@@ -2514,6 +2514,21 @@ class TrainingRunService:
             selection,
             max_dataset_rows=self.replay_service.settings.max_bar_dataset_rows,
         )
+        # Empty Run creation commits T0 before a market is selected.  RANDOM
+        # remains the durable/user-facing start mode, while input binding needs
+        # the exact committed instant just like a manual request.  Keep this
+        # projection local so seed ownership and blind-training eligibility are
+        # not rewritten as MANUAL in persisted Run evidence.
+        input_binding_request = (
+            replace(
+                request,
+                start_mode=StartMode.MANUAL,
+                requested_start_ms=history_policy.actual_replay_start_ms,
+                random_seed=None,
+            )
+            if _existing_shell_run_id is not None
+            else request
+        )
         base_interval_ms = compatible_step_interval_ms(
             base_interval=request.base_interval,
             step_interval=request.display_interval,
@@ -2538,7 +2553,7 @@ class TrainingRunService:
             )
         account_history_binding = None
         if request.account_data_mode is AccountDataMode.HISTORICAL_EXACT:
-            if request.start_mode is not StartMode.MANUAL:
+            if input_binding_request.start_mode is not StartMode.MANUAL:
                 raise TrainingRunError(
                     "ACCOUNT_HISTORY_MANUAL_START_REQUIRED",
                     "historical exact account data requires a manual start",
@@ -2546,7 +2561,7 @@ class TrainingRunService:
                     details={"fallback_applied": False},
                 )
             account_history_binding = await self.account_history.prepare_binding(
-                request=request,
+                request=input_binding_request,
                 bound_range_start_ms=history_policy.actual_replay_start_ms,
                 bound_range_end_ms=(
                     history_policy.actual_replay_start_ms + request.forward_cache_ms
@@ -2557,8 +2572,8 @@ class TrainingRunService:
         historical_book_binding = None
         if request.book_mode is BookMode.BOOK_ASSISTED_REQUIRED:
             if (
-                request.start_mode is not StartMode.MANUAL
-                or request.requested_start_ms is None
+                input_binding_request.start_mode is not StartMode.MANUAL
+                or input_binding_request.requested_start_ms is None
             ):
                 raise TrainingRunError(
                     "HISTORICAL_BOOK_MANUAL_START_REQUIRED",
@@ -2570,18 +2585,18 @@ class TrainingRunService:
                 exchange=request.exchange,
                 market_type=request.market_type,
                 symbol=request.symbol,
-                range_start_ms=request.requested_start_ms,
+                range_start_ms=input_binding_request.requested_start_ms,
                 range_end_ms=(
-                    request.requested_start_ms
+                    input_binding_request.requested_start_ms
                     + request.forward_cache_ms
                     + base_interval_ms
                 ),
-                actual_time_ms=request.requested_start_ms,
-                virtual_time_ms=request.requested_start_ms,
+                actual_time_ms=input_binding_request.requested_start_ms,
+                virtual_time_ms=input_binding_request.requested_start_ms,
             )
         hedge_input_binding: PreparedHedgeInputBinding | None = None
         if request.position_mode.value == "HEDGE":
-            if request.start_mode is not StartMode.MANUAL:
+            if input_binding_request.start_mode is not StartMode.MANUAL:
                 raise TrainingRunError(
                     "HEDGE_INPUT_MANUAL_START_REQUIRED",
                     "pinned HEDGE inputs require an exact manual start",
@@ -2596,7 +2611,7 @@ class TrainingRunService:
                     details={"fallback_applied": False},
                 )
             hedge_input_binding = await self.hedge_inputs.prepare_binding(
-                request=request,
+                request=input_binding_request,
                 bound_range_start_ms=history_policy.actual_replay_start_ms,
                 bound_range_end_ms=(
                     history_policy.actual_replay_start_ms

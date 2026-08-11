@@ -273,9 +273,6 @@ export function evaluateTrainingRunDraft(
     errors.push("随机开始不能携带真实开始时间");
   }
   if (draft.bookMode === "BOOK_ASSISTED_REQUIRED") {
-    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
-      errors.push("历史盘口必须使用明确的手动开始时间");
-    }
     if (segmentPlan?.historical_book.capability_state !== "AVAILABLE_EXACT") {
       errors.push("历史盘口尚未取得连续、可 pin 的 exact L2 能力证明");
     }
@@ -349,9 +346,6 @@ export function evaluateTrainingRunDraft(
   let hedgePublicHistoryRef: ReplayHedgePublicHistoryRef | null = null;
   let simulationManifestRef: ReplayHedgeSimulationManifestRef | null = null;
   if (draft.accountDataMode === "HISTORICAL_EXACT") {
-    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
-      errors.push("精确账户历史必须使用明确的手动开始时间");
-    }
     if (draft.fundingMode === "SANDBOX_FIXED") {
       errors.push("精确账户历史不能混用 Sandbox 合成资金费");
     }
@@ -390,9 +384,6 @@ export function evaluateTrainingRunDraft(
   if (draft.positionMode === "HEDGE") {
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
       errors.push("双向持仓必须使用版本化确定性模拟账户");
-    }
-    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
-      errors.push("双向持仓必须使用明确的手动开始时间以 pin 全部历史输入");
     }
     if (draft.exchange !== "binance" || draft.marketType !== "futures") {
       errors.push("双向持仓当前要求 Binance USD-M futures 历史输入");
@@ -462,10 +453,6 @@ export function evaluateTrainingRunSetupDraft(
       errors.push("随机区间起止时间必须使用同一分钟网格");
     }
   }
-  if (draft.bookMode === "BOOK_ASSISTED_REQUIRED"
-    && (draft.startMode !== "MANUAL" || draft.requestedStartMs === null)) {
-    errors.push("历史盘口必须使用明确的手动开始时间");
-  }
   if (draft.indicatorWarmupBars < 1
     || draft.indicatorWarmupBars > capabilities.limits.max_warmup_bars) {
     errors.push("指标预热 BAR 数超出服务端限制");
@@ -504,9 +491,6 @@ export function evaluateTrainingRunSetupDraft(
     if (!NON_NEGATIVE_DECIMAL.test(value)) errors.push(`${label}必须是非负规范十进制字符串`);
   }
   if (draft.accountDataMode === "HISTORICAL_EXACT") {
-    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
-      errors.push("精确账户历史必须使用明确的手动开始时间");
-    }
     if (draft.fundingMode === "SANDBOX_FIXED") {
       errors.push("精确账户历史不能混用 Sandbox 合成资金费");
     }
@@ -531,9 +515,6 @@ export function evaluateTrainingRunSetupDraft(
   if (draft.positionMode === "HEDGE") {
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
       errors.push("双向持仓必须使用版本化确定性模拟账户");
-    }
-    if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
-      errors.push("双向持仓必须使用明确的手动开始时间以 pin 全部历史输入");
     }
     if (draft.fundingMode !== "HISTORICAL_EXACT") {
       errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");

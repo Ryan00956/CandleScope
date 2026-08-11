@@ -1251,10 +1251,10 @@ async function hedgeBrowserAccountContinuityAudit({
   await restoreCommandReadinessAfterReconnect(cdp, timeoutMs);
   const afterRefresh = await readServerAccountProof(backendOrigin, runId);
 
+  await armReplayConnectionFeedback(cdp);
   await runObservedReplayDisconnect(
-    () => waitForReplayStatus(
+    () => waitForArmedReplayConnectionFeedback(
       cdp,
-      '(value) => value.connection === "reconnecting" || value.connection === "resyncing"',
       timeoutMs,
       "HEDGE continuity disconnect feedback",
     ),
@@ -2200,6 +2200,46 @@ async function waitForReplayStatus(cdp, predicateSource, timeoutMs, label) {
   })()`, timeoutMs, label);
 }
 
+export async function armReplayConnectionFeedback(cdp) {
+  return evaluate(cdp, `(() => {
+    const observationKey = "__CANDLESCOPE_REPLAY_DISCONNECT_OBSERVATION__";
+    const observerKey = "__CANDLESCOPE_REPLAY_DISCONNECT_OBSERVER__";
+    const previous = globalThis[observerKey];
+    if (previous && typeof previous.disconnect === "function") previous.disconnect();
+    const observation = { connection: null, generation: 0, observedAtMs: null };
+    const inspect = () => {
+      const status = document.querySelector('#replay-status-bar, #status-bar[data-runtime-source="replay"]');
+      if (!(status instanceof HTMLElement)) return;
+      const connection = status.dataset.replayConnection || status.dataset.connectionStatus || "";
+      if (connection !== "reconnecting" && connection !== "resyncing") return;
+      observation.connection = connection;
+      observation.generation = Number(status.dataset.replayGeneration || 0);
+      observation.observedAtMs = performance.now();
+      observer.disconnect();
+    };
+    const observer = new MutationObserver(inspect);
+    globalThis[observationKey] = observation;
+    globalThis[observerKey] = observer;
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-replay-connection", "data-connection-status"],
+      childList: true,
+      subtree: true,
+    });
+    inspect();
+    return true;
+  })()`);
+}
+
+async function waitForArmedReplayConnectionFeedback(cdp, timeoutMs, label) {
+  return waitForValue(cdp, `(() => {
+    const observation = globalThis.__CANDLESCOPE_REPLAY_DISCONNECT_OBSERVATION__;
+    return observation?.connection === "reconnecting" || observation?.connection === "resyncing"
+      ? { ...observation }
+      : null;
+  })()`, timeoutMs, label);
+}
+
 export async function runObservedReplayDisconnect(waitForFeedback, disconnect) {
   if (typeof waitForFeedback !== "function" || typeof disconnect !== "function") {
     throw new TypeError("observed replay disconnect requires wait and trigger functions");
@@ -2602,10 +2642,10 @@ async function trainingActionCycle({ cdp, backendOrigin, sessionId, diagnosticGa
   const normalSpeed = normalSpeedRequest.acknowledged;
   await waitForCommandReady(cdp, timeoutMs);
 
+  await armReplayConnectionFeedback(cdp);
   await runObservedReplayDisconnect(
-    () => waitForReplayStatus(
+    () => waitForArmedReplayConnectionFeedback(
       cdp,
-      `(value) => value.connection === "reconnecting" || value.connection === "resyncing"`,
       timeoutMs,
       "training replay disconnect feedback",
     ),

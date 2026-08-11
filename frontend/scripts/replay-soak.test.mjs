@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  armReplayConnectionFeedback,
   auditBoundary,
   assertReplayNetwork,
   browserSoakFailureEvidence,
@@ -45,6 +46,23 @@ import {
   withNetworkInspectorSuspended,
   writeHeapSnapshot,
 } from "./replay-soak.mjs";
+
+test("replay disconnect feedback arms a persistent DOM transition observer", async () => {
+  const commands = [];
+  const cdp = {
+    async send(method, params) {
+      commands.push({ method, params });
+      return { result: { value: true } };
+    },
+  };
+
+  assert.equal(await armReplayConnectionFeedback(cdp), true);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0]?.method, "Runtime.evaluate");
+  assert.match(commands[0]?.params.expression ?? "", /MutationObserver/);
+  assert.match(commands[0]?.params.expression ?? "", /data-replay-connection/);
+  assert.match(commands[0]?.params.expression ?? "", /observedAtMs/);
+});
 
 test("observed replay disconnect starts feedback polling before the trigger", async () => {
   const order = [];

@@ -20,6 +20,7 @@ REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 SDK_SOURCE_ROOT = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk" / "src"
 DEFAULT_LOCK_PATH = PACKAGE_ROOT / "release" / "release-lock.json"
+CANDIDATE_LOCK_PATH = PACKAGE_ROOT / "release" / "release-lock.candidate.json"
 EXPECTED_WHEEL_ORDER = (
     "candlescope-plugin-pyne",
     "candlescope-plugin-sdk",
@@ -85,12 +86,13 @@ def load_release_lock(path: Path = DEFAULT_LOCK_PATH) -> dict[str, Any]:
         raise ReleaseLockError("release lock sections are invalid")
     assert isinstance(plugin, dict)
     assert isinstance(wheels, dict)
-    if plugin != {
-        "id": "candlescope.pyne",
-        "package": "candlescope-plugin-pyne",
-        "version": "0.2.0",
-    }:
-        raise ReleaseLockError("release lock plugin identity is not the Phase 6 contract")
+    if plugin.get("id") != "candlescope.pyne" or plugin.get("package") != (
+        "candlescope-plugin-pyne"
+    ):
+        raise ReleaseLockError("release lock plugin identity is invalid")
+    plugin_version = plugin.get("version")
+    if not isinstance(plugin_version, str) or not plugin_version.strip():
+        raise ReleaseLockError("release lock plugin version is invalid")
     if tuple(wheels) != EXPECTED_WHEEL_ORDER:
         raise ReleaseLockError(
             "release lock wheels must be ordered as bridge, SDK, Pyne Runtime, NumPy"
@@ -98,6 +100,8 @@ def load_release_lock(path: Path = DEFAULT_LOCK_PATH) -> dict[str, Any]:
     for package, expected in wheels.items():
         if not isinstance(expected, dict) or not isinstance(expected.get("version"), str):
             raise ReleaseLockError(f"release lock wheel {package!r} is invalid")
+    if wheels["candlescope-plugin-pyne"]["version"] != plugin_version:
+        raise ReleaseLockError("release lock plugin and bridge wheel versions differ")
     pyne_sha256 = wheels["pyne-runtime"].get("sha256")
     if not isinstance(pyne_sha256, str) or _SHA256.fullmatch(pyne_sha256) is None:
         raise ReleaseLockError("release lock Pyne wheel requires a SHA-256")
@@ -229,6 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Repeat exactly four times: bridge, SDK, Pyne Runtime, and NumPy wheels.",
     )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--lock",
+        type=Path,
+        default=DEFAULT_LOCK_PATH,
+        help="Release lock to validate; defaults to the published 0.2 lock.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -236,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         bundle = build_locked_bundle(
             args.wheel,
             args.output,
+            lock_path=args.lock,
             force=args.force,
         )
     except (PluginBundleError, ReleaseLockError) as exc:

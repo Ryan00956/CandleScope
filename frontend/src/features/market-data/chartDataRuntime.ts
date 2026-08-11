@@ -201,6 +201,18 @@ export function klineRowsEqual(
   return true;
 }
 
+export function shouldAdoptSharedSeriesSnapshot({
+  currentRows,
+  ownsActiveSeries,
+  sharedRows,
+}: {
+  currentRows: readonly KlineBar[];
+  ownsActiveSeries: boolean;
+  sharedRows: readonly KlineBar[];
+}): boolean {
+  return ownsActiveSeries && sharedRows.length > 0 && currentRows !== sharedRows;
+}
+
 function resolveTailGapNow(options: GapDetectionOptions): EpochSeconds | null {
   if (!options?.includeTailGap) return null;
   const explicitSeconds = toEpochSeconds(options.nowSecs);

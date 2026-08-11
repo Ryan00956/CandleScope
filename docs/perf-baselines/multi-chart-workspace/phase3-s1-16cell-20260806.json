@@ -1,0 +1,1800 @@
+{
+  "schemaVersion": "candlescope.multi-chart.capacity/1",
+  "generatedAt": "2026-08-06T10:04:17.952Z",
+  "git": {
+    "commit": "879e58bf1d1cca6634fd21caf970db59a3d3df53",
+    "dirty": true,
+    "statusLines": 36
+  },
+  "hardware": {
+    "profileSha256": "sha256:88973308182b77405db1eca6499d8e13f7979d58ad904a2b337e72b9ff345376",
+    "profilePath": "H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\hardware-profile-phase3-20260806.json"
+  },
+  "scenario": {
+    "id": "S1",
+    "windows": 1,
+    "cells": 16,
+    "expectedSeries": [
+      "BTCUSDT@1m"
+    ],
+    "expectedSymbols": [
+      "BTCUSDT"
+    ],
+    "durationMs": 10000
+  },
+  "data": {
+    "databaseState": "warm",
+    "datasetSha256": "sha256:88e219f2d2c92f230ca76b0e306206c061033d4a29ad5898a6b1992ecb7f99a2",
+    "database": {
+      "path": "H:\\program\\CandleScope-multi-chart-workspace\\backend\\data\\candlescope.db",
+      "exists": true,
+      "state": "warm",
+      "sizeBytes": 3928064,
+      "rowCount": 14966,
+      "seriesCount": 20,
+      "earliestOpenTimeMs": 1656374400000,
+      "latestOpenTimeMs": 1786010580000,
+      "sha256": "sha256:88e219f2d2c92f230ca76b0e306206c061033d4a29ad5898a6b1992ecb7f99a2",
+      "hashConsistency": "live_sqlite_file_set",
+      "files": [
+        {
+          "name": "candlescope.db",
+          "sizeBytes": 3928064,
+          "sha256": "sha256:8f4a3544a4bc4aaee4aa1b21c2f78dd5d0dce6d7a95da47ff1e3bb36f2400aa8"
+        },
+        {
+          "name": "candlescope.db-wal",
+          "sizeBytes": 4124152,
+          "sha256": "sha256:7b57c34a98c91130d4e3cf3b68591e889af514892ec80cc4e472a62f1432f9ed"
+        },
+        {
+          "name": "candlescope.db-shm",
+          "sizeBytes": 32768,
+          "sha256": "sha256:2eab52674e400cb7ab7b6773c12aa89bbb228797869838088b2ef0b7ff194878"
+        }
+      ]
+    }
+  },
+  "frontend": {
+    "readiness": {
+      "ready": true,
+      "readyMs": 3494,
+      "documentReady": "complete",
+      "documentVisibility": "visible",
+      "visibleCells": 16,
+      "cellIds": [
+        "cell-1",
+        "cell-2",
+        "cell-3",
+        "cell-4",
+        "cell-5",
+        "cell-6",
+        "cell-7",
+        "cell-8",
+        "cell-9",
+        "cell-10",
+        "cell-11",
+        "cell-12",
+        "cell-13",
+        "cell-14",
+        "cell-15",
+        "cell-16"
+      ],
+      "marketDataReady": [
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true",
+        "true"
+      ],
+      "canvasQuietMs": 618.7999999970198,
+      "statuses": [
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live",
+        "multi-chart-cell-status live"
+      ],
+      "canvasCount": 208,
+      "errorText": [],
+      "navigationToReadyMs": 3511
+    },
+    "heap": {
+      "beforeBytes": 147378928,
+      "afterBytes": 110066380,
+      "deltaBytes": -37312548,
+      "deltaPct": -25.317
+    },
+    "longTasks": {
+      "count": 0,
+      "perMinute": 0,
+      "durationsMs": []
+    },
+    "inputResponse": {
+      "samples": 225,
+      "p95Ms": 104,
+      "rawMs": [
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        64,
+        64,
+        64,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        64,
+        64,
+        64,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        64,
+        64,
+        64,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        64,
+        64,
+        64,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        64,
+        64,
+        64,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        56,
+        56,
+        56,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        64,
+        64,
+        64,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        104,
+        64,
+        64,
+        64,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        64,
+        64,
+        64,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        56,
+        56,
+        56
+      ]
+    },
+    "reactCommits": {
+      "supported": false,
+      "reason": "React profiler is not enabled in the production build"
+    },
+    "canvasRemounts": 0,
+    "canvasAddsAfterReady": 0,
+    "backgroundSuppression": {
+      "hidden": true,
+      "allMinimized": true,
+      "formingDelta": 0,
+      "previewDelta": 0,
+      "pendingFrames": 0
+    },
+    "klineWebSockets": 2,
+    "indicatorWebSockets": 1,
+    "webSockets": {
+      "all": [
+        {
+          "event": "created",
+          "atMs": 1786010636829,
+          "requestId": "42928.14",
+          "url": "ws://gc.kis.v2.scr.kaspersky-labs.com/7D8B79A2-8974-4D7B-A76A-F4F29624C06B8FeTk0yAKNIfGsnUw5z5gJxv6-0Okzt8KDBvT_8DSqGdZyNGZFiWCpEjasEV1jvMVggL-c66-Fu-2QAMTTGX7g/websocket?url=http%3A%2F%2F127.0.0.1%3A15285%2F&nocache=1786010636825"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637191,
+          "requestId": "42928.41",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637199,
+          "requestId": "42928.73",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/prices"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637392,
+          "requestId": "42928.130",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/klines_multi?symbol=BTCUSDT&exchange=binance&market_type=spot"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637537,
+          "requestId": "42928.135",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637640,
+          "requestId": "42928.214",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/klines_multi?symbol=BTCUSDT&exchange=binance&market_type=spot"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010638591,
+          "requestId": "42928.241",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/indicators"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640499,
+          "requestId": "42928.264",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640655,
+          "requestId": "42928.266",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640826,
+          "requestId": "42928.268",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640995,
+          "requestId": "42928.270",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641154,
+          "requestId": "42928.272",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641320,
+          "requestId": "42928.274",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641491,
+          "requestId": "42928.276",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641662,
+          "requestId": "42928.278",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641820,
+          "requestId": "42928.280",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641958,
+          "requestId": "42928.282",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642144,
+          "requestId": "42928.284",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642311,
+          "requestId": "42928.285",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642481,
+          "requestId": "42928.286",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642636,
+          "requestId": "42928.287",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642791,
+          "requestId": "42928.288",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        }
+      ],
+      "kline": [
+        {
+          "event": "created",
+          "atMs": 1786010637392,
+          "requestId": "42928.130",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/klines_multi?symbol=BTCUSDT&exchange=binance&market_type=spot"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637640,
+          "requestId": "42928.214",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/klines_multi?symbol=BTCUSDT&exchange=binance&market_type=spot"
+        }
+      ],
+      "indicator": [
+        {
+          "event": "created",
+          "atMs": 1786010638591,
+          "requestId": "42928.241",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/indicators"
+        }
+      ],
+      "other": [
+        {
+          "event": "created",
+          "atMs": 1786010636829,
+          "requestId": "42928.14",
+          "url": "ws://gc.kis.v2.scr.kaspersky-labs.com/7D8B79A2-8974-4D7B-A76A-F4F29624C06B8FeTk0yAKNIfGsnUw5z5gJxv6-0Okzt8KDBvT_8DSqGdZyNGZFiWCpEjasEV1jvMVggL-c66-Fu-2QAMTTGX7g/websocket?url=http%3A%2F%2F127.0.0.1%3A15285%2F&nocache=1786010636825"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637191,
+          "requestId": "42928.41",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637199,
+          "requestId": "42928.73",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/prices"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010637537,
+          "requestId": "42928.135",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640499,
+          "requestId": "42928.264",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640655,
+          "requestId": "42928.266",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640826,
+          "requestId": "42928.268",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010640995,
+          "requestId": "42928.270",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641154,
+          "requestId": "42928.272",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641320,
+          "requestId": "42928.274",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641491,
+          "requestId": "42928.276",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641662,
+          "requestId": "42928.278",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641820,
+          "requestId": "42928.280",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010641958,
+          "requestId": "42928.282",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642144,
+          "requestId": "42928.284",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642311,
+          "requestId": "42928.285",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642481,
+          "requestId": "42928.286",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642636,
+          "requestId": "42928.287",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        },
+        {
+          "event": "created",
+          "atMs": 1786010642791,
+          "requestId": "42928.288",
+          "url": "ws://127.0.0.1:18081/api/v1/stream/order-book"
+        }
+      ]
+    },
+    "perf": {
+      "namespace": "__CANDLESCOPE_PERF__",
+      "createdAtMs": 132,
+      "timings": {
+        "appBootToRootRequestedMs": 0,
+        "latestRequestMs": 117,
+        "latestCommitMs": 117,
+        "historyRequestMs": 504,
+        "historyCommitMs": 504,
+        "firstBarsMs": 982,
+        "chartReadyMs": 982,
+        "wsOpenMs": 470,
+        "wsLiveReadyMs": 496,
+        "firstRealtimeTickMs": 3074,
+        "indicatorComputeMs": null,
+        "indicatorHostedOpenMs": 1723,
+        "indicatorHostedSnapshotMs": null,
+        "settingsOpenMs": null,
+        "symbolSearchOpenMs": null,
+        "watchlistReadyMs": 433,
+        "drawingToolbarReadyMs": 433
+      },
+      "marks": {
+        "app.boot.start": {
+          "atMs": 134,
+          "sinceStoreMs": 2,
+          "detail": null
+        },
+        "app.root.render.requested": {
+          "atMs": 134,
+          "sinceStoreMs": 2,
+          "detail": null
+        },
+        "chart.initialLoad.start": {
+          "atMs": 1324,
+          "sinceStoreMs": 1192,
+          "detail": {
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m"
+          }
+        },
+        "chart.initialLoad.history.request": {
+          "atMs": 1324,
+          "sinceStoreMs": 1192,
+          "detail": {
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "countBack": 500
+          }
+        },
+        "chart.initialLoad.history.commit": {
+          "atMs": 1828,
+          "sinceStoreMs": 1696,
+          "detail": {
+            "source": "cache",
+            "bars": 500
+          }
+        },
+        "chart.firstBars": {
+          "atMs": 1116,
+          "sinceStoreMs": 984,
+          "detail": {
+            "source": "initial-latest",
+            "status": "provisional",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "bars": 5
+          }
+        },
+        "chart.ready": {
+          "atMs": 1116,
+          "sinceStoreMs": 984,
+          "detail": {
+            "source": "initial-latest",
+            "status": "provisional",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "bars": 5
+          }
+        },
+        "chart.activeHistoryHydration.complete": {
+          "atMs": 3464,
+          "sinceStoreMs": 3332,
+          "detail": {
+            "bars": 1500,
+            "countBack": 1500,
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m"
+          }
+        },
+        "ws.kline.open": {
+          "atMs": 604,
+          "sinceStoreMs": 472,
+          "detail": {
+            "symbol": "BTCUSDT",
+            "marketType": "spot",
+            "exchange": "binance"
+          }
+        },
+        "ws.kline.live": {
+          "atMs": 630,
+          "sinceStoreMs": 498,
+          "detail": {
+            "symbol": "BTCUSDT",
+            "marketType": "spot",
+            "exchange": "binance",
+            "interval": "1m",
+            "source": "subscription-ack"
+          }
+        },
+        "ws.kline.firstTick": {
+          "atMs": 3208,
+          "sinceStoreMs": 3076,
+          "detail": {
+            "symbol": "BTCUSDT",
+            "marketType": "spot",
+            "exchange": "binance",
+            "interval": "1m"
+          }
+        },
+        "indicator.ws.open": {
+          "atMs": 1857,
+          "sinceStoreMs": 1724,
+          "detail": {
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "marketType": "spot",
+            "exchange": "binance",
+            "wsGeneration": 1
+          }
+        }
+      },
+      "eventCount": 240,
+      "eventsByName": {
+        "chart.candleSeries.update": 74,
+        "chart.data.tick": 5,
+        "chart.indicatorSeries.update": 80,
+        "drawing.perf.summary": 1,
+        "indicator.compute.skip": 80
+      }
+    },
+    "windowBroker": {
+      "enabled": true,
+      "indicator": {
+        "logicalClients": 16,
+        "maxSubscriptions": 50,
+        "physicalShards": 1,
+        "shards": [
+          {
+            "index": 0,
+            "subscriptions": 16
+          }
+        ],
+        "subscriptions": 16
+      },
+      "klineHttp": {
+        "completedPhysical": 23,
+        "joinedLogical": 68,
+        "logicalInflight": 0,
+        "physicalInflight": 0,
+        "requests": [],
+        "totalLogical": 91,
+        "totalPhysical": 23
+      },
+      "klineStream": {
+        "entries": [
+          {
+            "activeIntervals": [
+              "1m"
+            ],
+            "intervalUnion": [
+              "1m"
+            ],
+            "key": "binance|spot|BTCUSDT",
+            "logicalSubscribers": 16,
+            "open": true,
+            "series": {
+              "exchange": "binance",
+              "marketType": "spot",
+              "symbol": "BTCUSDT"
+            }
+          }
+        ],
+        "intervalUnionSize": 1,
+        "logicalSubscribers": 16,
+        "physicalStreams": 1
+      },
+      "scheduler": {
+        "activeAsync": 0,
+        "cells": [
+          {
+            "cellId": "cell-1",
+            "committed": {
+              "initial-history": 4,
+              "load-more": 2,
+              "indicator-range": 7,
+              "kline-forming": 7,
+              "indicator-preview": 6,
+              "authoritative-final": 1
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652135,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 9,
+            "maxQueueWaitMs": 70,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-2",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 4,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 557,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-3",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 232,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-4",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 232,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-5",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 262,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-6",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 266,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-7",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 393,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-8",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 454,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-9",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 456,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-10",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 544,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-11",
+            "committed": {
+              "initial-history": 3,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 545,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-12",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 614,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-13",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 4,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652181,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 26,
+            "maxQueueWaitMs": 821,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-14",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 16,
+            "maxQueueWaitMs": 704,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-15",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 1,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 15,
+            "maxQueueWaitMs": 953,
+            "pending": {},
+            "replaced": 0,
+            "tier": "visible-secondary"
+          },
+          {
+            "cellId": "cell-16",
+            "committed": {
+              "initial-history": 2,
+              "load-more": 2,
+              "indicator-range": 2,
+              "kline-forming": 7,
+              "authoritative-final": 1,
+              "indicator-preview": 6
+            },
+            "dropped": 0,
+            "lastCommitAt": 1786010652200,
+            "lastLane": "indicator-preview",
+            "lastQueueWaitMs": 15,
+            "maxQueueWaitMs": 739,
+            "pending": {},
+            "replaced": 0,
+            "tier": "focused"
+          }
+        ],
+        "disposed": false,
+        "pendingAsync": 0,
+        "pendingFrames": 0,
+        "windowVisible": true
+      },
+      "seriesStores": 1
+    },
+    "errors": {
+      "console": [],
+      "exceptions": [],
+      "network": []
+    }
+  },
+  "backend": {
+    "activeSeries": 1,
+    "streamLeases": 1,
+    "eventLoopLag": {
+      "samples": 1095,
+      "avg_ms": 10.01,
+      "p95_ms": 16,
+      "p99_ms": 32,
+      "max_ms": 235,
+      "last_ms": 16,
+      "interval_seconds": 1,
+      "running": true
+    },
+    "privateBytes": {
+      "supported": false,
+      "reason": "process private-bytes sampler is introduced at the long-soak gate"
+    },
+    "backfill": {
+      "activeRequests": 0,
+      "pendingRequests": 0,
+      "runningChunks": 0,
+      "readyChunks": 0
+    },
+    "indicatorExecutor": {
+      "name": "indicator",
+      "max_workers": 2,
+      "submitted": 83,
+      "started": 83,
+      "completed": 83,
+      "failed": 0,
+      "active": 0,
+      "pending": 0,
+      "avg_queue_wait_ms": 3.76,
+      "max_queue_wait_ms": 33.46,
+      "avg_run_ms": 9.83,
+      "max_run_ms": 104.06
+    },
+    "before": {
+      "schemaVersion": "candlescope.backend.capacity/1",
+      "generatedAtMs": 1786010636089,
+      "readOnly": true,
+      "ok": true,
+      "errors": [],
+      "database": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\backend\\data\\candlescope.db",
+        "exists": true,
+        "state": "warm",
+        "sizeBytes": 2498560,
+        "rowCount": 14963,
+        "seriesCount": 20,
+        "earliestOpenTimeMs": 1656374400000,
+        "latestOpenTimeMs": 1786010400000,
+        "sha256": null,
+        "hashConsistency": "not_requested",
+        "files": []
+      },
+      "dataManager": {
+        "activeSeries": 0,
+        "streamLeases": 0,
+        "logicalSubscribers": 3,
+        "cacheSeries": 18,
+        "cacheBars": 10486,
+        "directSubscriptionsBySeries": {},
+        "streams": []
+      },
+      "backfill": {
+        "activeRequests": 0,
+        "pendingRequests": 0,
+        "runningChunks": 0,
+        "readyChunks": 0
+      },
+      "executors": {
+        "indicator": {
+          "name": "indicator",
+          "max_workers": 2,
+          "submitted": 75,
+          "started": 75,
+          "completed": 75,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 3.77,
+          "max_queue_wait_ms": 33.46,
+          "avg_run_ms": 9.59,
+          "max_run_ms": 104.06
+        },
+        "pyne_wait": {
+          "name": "pyne_wait",
+          "max_workers": 2,
+          "submitted": 0,
+          "started": 0,
+          "completed": 0,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 0,
+          "max_queue_wait_ms": 0,
+          "avg_run_ms": 0,
+          "max_run_ms": 0
+        },
+        "storage": {
+          "name": "storage",
+          "max_workers": 4,
+          "submitted": 1392,
+          "started": 1392,
+          "completed": 1392,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 1.25,
+          "max_queue_wait_ms": 89.27,
+          "avg_run_ms": 15.41,
+          "max_run_ms": 338.72
+        }
+      },
+      "indicators": {
+        "activeInstances": 0,
+        "streamSubscriptions": 0,
+        "rangeCache": {
+          "entries": 0,
+          "maxEntries": 128,
+          "series": 16,
+          "inFlight": 0,
+          "hits": 74,
+          "misses": 77,
+          "computes": 77,
+          "singleflightJoins": 0
+        },
+        "runtimeRouting": {
+          "started": true,
+          "source": "built-in-default",
+          "counts": {
+            "legacy": 0,
+            "shadow": 0,
+            "sidecar": 0,
+            "shadowMatched": 0,
+            "shadowMismatched": 0,
+            "shadowSkipped": 0,
+            "sidecarErrors": 0
+          },
+          "pendingShadow": 0
+        }
+      },
+      "exchange": {
+        "physicalWebSockets": 3,
+        "sharedPhysicalWebSockets": 0,
+        "dedicatedPhysicalWebSockets": 3,
+        "sharedWs": {
+          "hub_count": 0,
+          "active_hubs": 0,
+          "physical_websockets": 0,
+          "subscriber_count": 0,
+          "descriptor_count": 0,
+          "hubs": []
+        },
+        "pipelineCount": 3,
+        "pipelineKeys": [
+          "BTCUSDT@miniTicker",
+          "futures:BTCUSDT@miniTicker",
+          "futures:ETHUSDT@miniTicker"
+        ],
+        "transport": {
+          "activeHttpEndpoint": "https://api.binance.com",
+          "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+          "metrics": {
+            "layer": "L1_Transport",
+            "counters": {
+              "ws_connect_attempts": 66,
+              "ws_connect_ok": 22
+            },
+            "gauges": {
+              "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+            },
+            "timestamps": {
+              "ws_last_connect_at": 1786010452805,
+              "ws_last_success_at": 1786010453180
+            }
+          },
+          "rateLimits": {
+            "binance:futures:request_weight:ip": {
+              "rule": "binance_futures_exchange_info",
+              "algorithm": "header_weight",
+              "capacity": 1920,
+              "tokens": 1919,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "binance:spot:request_weight:ip": {
+              "rule": "binance_spot_exchange_info",
+              "algorithm": "header_weight",
+              "capacity": 960,
+              "tokens": 940,
+              "maxConcurrency": 2,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "okx:public-instruments:futures:ip": {
+              "rule": "okx_futures_public_instruments",
+              "algorithm": "token_bucket",
+              "capacity": 16,
+              "tokens": 15,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "okx:public-instruments:spot:ip": {
+              "rule": "okx_spot_public_instruments",
+              "algorithm": "token_bucket",
+              "capacity": 16,
+              "tokens": 15,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            }
+          }
+        }
+      },
+      "runtime": {
+        "eventLoopLag": {
+          "samples": 1076,
+          "avg_ms": 10.01,
+          "p95_ms": 16,
+          "p99_ms": 16,
+          "max_ms": 235,
+          "last_ms": 16,
+          "interval_seconds": 1,
+          "running": true
+        }
+      }
+    },
+    "after": {
+      "schemaVersion": "candlescope.backend.capacity/1",
+      "generatedAtMs": 1786010654234,
+      "readOnly": true,
+      "ok": true,
+      "errors": [],
+      "database": {
+        "path": "H:\\program\\CandleScope-multi-chart-workspace\\backend\\data\\candlescope.db",
+        "exists": true,
+        "state": "warm",
+        "sizeBytes": 3928064,
+        "rowCount": 14966,
+        "seriesCount": 20,
+        "earliestOpenTimeMs": 1656374400000,
+        "latestOpenTimeMs": 1786010580000,
+        "sha256": "sha256:88e219f2d2c92f230ca76b0e306206c061033d4a29ad5898a6b1992ecb7f99a2",
+        "hashConsistency": "live_sqlite_file_set",
+        "files": [
+          {
+            "name": "candlescope.db",
+            "sizeBytes": 3928064,
+            "sha256": "sha256:8f4a3544a4bc4aaee4aa1b21c2f78dd5d0dce6d7a95da47ff1e3bb36f2400aa8"
+          },
+          {
+            "name": "candlescope.db-wal",
+            "sizeBytes": 4124152,
+            "sha256": "sha256:7b57c34a98c91130d4e3cf3b68591e889af514892ec80cc4e472a62f1432f9ed"
+          },
+          {
+            "name": "candlescope.db-shm",
+            "sizeBytes": 32768,
+            "sha256": "sha256:2eab52674e400cb7ab7b6773c12aa89bbb228797869838088b2ef0b7ff194878"
+          }
+        ]
+      },
+      "dataManager": {
+        "activeSeries": 1,
+        "streamLeases": 1,
+        "logicalSubscribers": 5,
+        "cacheSeries": 18,
+        "cacheBars": 10489,
+        "directSubscriptionsBySeries": {
+          "BTCUSDT@1m": 1
+        },
+        "streams": [
+          {
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "market_type": "spot",
+            "topic": "BTCUSDT@1m",
+            "status": "active",
+            "subscriber_count": 0,
+            "bars_received": 9,
+            "last_bar_at_ms": 1786010653993,
+            "started_at_ms": 1786010637653,
+            "error": null
+          }
+        ]
+      },
+      "backfill": {
+        "activeRequests": 0,
+        "pendingRequests": 0,
+        "runningChunks": 0,
+        "readyChunks": 0
+      },
+      "executors": {
+        "indicator": {
+          "name": "indicator",
+          "max_workers": 2,
+          "submitted": 83,
+          "started": 83,
+          "completed": 83,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 3.76,
+          "max_queue_wait_ms": 33.46,
+          "avg_run_ms": 9.83,
+          "max_run_ms": 104.06
+        },
+        "pyne_wait": {
+          "name": "pyne_wait",
+          "max_workers": 2,
+          "submitted": 0,
+          "started": 0,
+          "completed": 0,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 0,
+          "max_queue_wait_ms": 0,
+          "avg_run_ms": 0,
+          "max_run_ms": 0
+        },
+        "storage": {
+          "name": "storage",
+          "max_workers": 4,
+          "submitted": 1715,
+          "started": 1715,
+          "completed": 1715,
+          "failed": 0,
+          "active": 0,
+          "pending": 0,
+          "avg_queue_wait_ms": 1.2,
+          "max_queue_wait_ms": 89.27,
+          "avg_run_ms": 14.31,
+          "max_run_ms": 338.72
+        }
+      },
+      "indicators": {
+        "activeInstances": 1,
+        "streamSubscriptions": 1,
+        "rangeCache": {
+          "entries": 3,
+          "maxEntries": 128,
+          "series": 16,
+          "inFlight": 0,
+          "hits": 92,
+          "misses": 85,
+          "computes": 85,
+          "singleflightJoins": 0
+        },
+        "runtimeRouting": {
+          "started": true,
+          "source": "built-in-default",
+          "counts": {
+            "legacy": 0,
+            "shadow": 0,
+            "sidecar": 0,
+            "shadowMatched": 0,
+            "shadowMismatched": 0,
+            "shadowSkipped": 0,
+            "sidecarErrors": 0
+          },
+          "pendingShadow": 0
+        }
+      },
+      "exchange": {
+        "physicalWebSockets": 5,
+        "sharedPhysicalWebSockets": 0,
+        "dedicatedPhysicalWebSockets": 5,
+        "sharedWs": {
+          "hub_count": 0,
+          "active_hubs": 0,
+          "physical_websockets": 0,
+          "subscriber_count": 0,
+          "descriptor_count": 0,
+          "hubs": []
+        },
+        "pipelineCount": 5,
+        "pipelineKeys": [
+          "BTCUSDT@depth20@1000ms",
+          "BTCUSDT@kline_1m",
+          "BTCUSDT@miniTicker",
+          "futures:BTCUSDT@miniTicker",
+          "futures:ETHUSDT@miniTicker"
+        ],
+        "transport": {
+          "activeHttpEndpoint": "https://api.binance.com",
+          "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+          "metrics": {
+            "layer": "L1_Transport",
+            "counters": {
+              "ws_connect_attempts": 74,
+              "ws_connect_ok": 25
+            },
+            "gauges": {
+              "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+            },
+            "timestamps": {
+              "ws_last_connect_at": 1786010642839,
+              "ws_last_success_at": 1786010643208
+            }
+          },
+          "rateLimits": {
+            "binance:futures:request_weight:ip": {
+              "rule": "binance_futures_exchange_info",
+              "algorithm": "header_weight",
+              "capacity": 1920,
+              "tokens": 1919,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "binance:spot:request_weight:ip": {
+              "rule": "binance_spot_exchange_info",
+              "algorithm": "header_weight",
+              "capacity": 960,
+              "tokens": 947,
+              "maxConcurrency": 2,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "okx:public-instruments:futures:ip": {
+              "rule": "okx_futures_public_instruments",
+              "algorithm": "token_bucket",
+              "capacity": 16,
+              "tokens": 15,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            },
+            "okx:public-instruments:spot:ip": {
+              "rule": "okx_spot_public_instruments",
+              "algorithm": "token_bucket",
+              "capacity": 16,
+              "tokens": 15,
+              "maxConcurrency": 1,
+              "cooldownRemainingSeconds": 0,
+              "deferredRequests": 0
+            }
+          }
+        }
+      },
+      "runtime": {
+        "eventLoopLag": {
+          "samples": 1095,
+          "avg_ms": 10.01,
+          "p95_ms": 16,
+          "p99_ms": 32,
+          "max_ms": 235,
+          "last_ms": 16,
+          "interval_seconds": 1,
+          "running": true
+        }
+      }
+    },
+    "scenarioMapping": {
+      "bySeries": {
+        "BTCUSDT@1m": {
+          "before": 0,
+          "after": 1,
+          "delta": 1
+        }
+      },
+      "observedSeries": 1,
+      "leases": 1,
+      "duplicateSeries": [],
+      "expectedSeries": 1
+    }
+  },
+  "upstream": {
+    "physicalWebSockets": 5,
+    "physicalWebSocketDelta": 2,
+    "httpRequests": null,
+    "httpRequestsSupported": false,
+    "exchange": {
+      "physicalWebSockets": 5,
+      "sharedPhysicalWebSockets": 0,
+      "dedicatedPhysicalWebSockets": 5,
+      "sharedWs": {
+        "hub_count": 0,
+        "active_hubs": 0,
+        "physical_websockets": 0,
+        "subscriber_count": 0,
+        "descriptor_count": 0,
+        "hubs": []
+      },
+      "pipelineCount": 5,
+      "pipelineKeys": [
+        "BTCUSDT@depth20@1000ms",
+        "BTCUSDT@kline_1m",
+        "BTCUSDT@miniTicker",
+        "futures:BTCUSDT@miniTicker",
+        "futures:ETHUSDT@miniTicker"
+      ],
+      "transport": {
+        "activeHttpEndpoint": "https://api.binance.com",
+        "activeWsEndpoint": "wss://stream.binance.com:9443/ws",
+        "metrics": {
+          "layer": "L1_Transport",
+          "counters": {
+            "ws_connect_attempts": 74,
+            "ws_connect_ok": 25
+          },
+          "gauges": {
+            "ws_active_endpoint": "wss://stream.binance.com:9443/ws"
+          },
+          "timestamps": {
+            "ws_last_connect_at": 1786010642839,
+            "ws_last_success_at": 1786010643208
+          }
+        },
+        "rateLimits": {
+          "binance:futures:request_weight:ip": {
+            "rule": "binance_futures_exchange_info",
+            "algorithm": "header_weight",
+            "capacity": 1920,
+            "tokens": 1919,
+            "maxConcurrency": 1,
+            "cooldownRemainingSeconds": 0,
+            "deferredRequests": 0
+          },
+          "binance:spot:request_weight:ip": {
+            "rule": "binance_spot_exchange_info",
+            "algorithm": "header_weight",
+            "capacity": 960,
+            "tokens": 947,
+            "maxConcurrency": 2,
+            "cooldownRemainingSeconds": 0,
+            "deferredRequests": 0
+          },
+          "okx:public-instruments:futures:ip": {
+            "rule": "okx_futures_public_instruments",
+            "algorithm": "token_bucket",
+            "capacity": 16,
+            "tokens": 15,
+            "maxConcurrency": 1,
+            "cooldownRemainingSeconds": 0,
+            "deferredRequests": 0
+          },
+          "okx:public-instruments:spot:ip": {
+            "rule": "okx_spot_public_instruments",
+            "algorithm": "token_bucket",
+            "capacity": 16,
+            "tokens": 15,
+            "maxConcurrency": 1,
+            "cooldownRemainingSeconds": 0,
+            "deferredRequests": 0
+          }
+        }
+      }
+    }
+  },
+  "artifacts": {
+    "screenshot": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-capacity\\phase3-s1-16\\s1-16cell.png",
+    "trace": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-capacity\\phase3-s1-16\\s1-16cell.trace.json",
+    "backendSnapshot": "H:\\program\\CandleScope-multi-chart-workspace\\output\\playwright\\multi-chart-capacity\\phase3-s1-16\\s1-16cell.backend.json"
+  },
+  "gates": {
+    "visibleCells": {
+      "actual": 16,
+      "expected": 16,
+      "passed": true
+    },
+    "allCellsReady": {
+      "actual": true,
+      "expected": true,
+      "passed": true
+    },
+    "documentVisible": {
+      "actual": "visible",
+      "expected": "visible",
+      "passed": true
+    },
+    "consoleErrors": {
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    },
+    "runtimeExceptions": {
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    },
+    "networkFailures": {
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    },
+    "backendSnapshot": {
+      "actual": "candlescope.backend.capacity/1",
+      "expected": "candlescope.backend.capacity/1",
+      "passed": true
+    },
+    "expectedBackendSeries": {
+      "actual": 1,
+      "expected": 1,
+      "passed": true
+    },
+    "duplicateBackendLease": {
+      "actual": [],
+      "expected": [],
+      "passed": true
+    },
+    "canvasRemounts": {
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    },
+    "backgroundSuppression": {
+      "actual": {
+        "hidden": true,
+        "allMinimized": true,
+        "formingDelta": 0,
+        "previewDelta": 0,
+        "pendingFrames": 0
+      },
+      "expected": {
+        "hidden": true,
+        "allMinimized": true,
+        "formingDelta": 0,
+        "previewDelta": 0,
+        "pendingFrames": 0
+      },
+      "passed": true
+    }
+  },
+  "result": "pass"
+}

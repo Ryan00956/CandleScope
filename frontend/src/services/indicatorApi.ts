@@ -12,6 +12,7 @@
  *   POST /indicators/compute          → compute indicator (engine or script)
  */
 import { API_BASE, httpBaseToWsBase } from "./apiConfig.js";
+import { sharedControlRead } from "./sharedControlRead.js";
 import {
   isIndicatorRecord,
   parseCustomIndicatorList,
@@ -89,10 +90,12 @@ export async function fetchPresets(): Promise<IndicatorPreset[]> {
 
 /** Fetch a single preset with full script */
 export async function fetchPreset(presetId: string): Promise<IndicatorPreset> {
-  const payload = await request(
-    `${API_BASE}/indicators/presets/${encodeURIComponent(presetId)}`,
-  );
-  return parseIndicatorPreset(payload);
+  return sharedControlRead(`control:indicator-preset:${presetId}`, 5_000, async () => {
+    const payload = await request(
+      `${API_BASE}/indicators/presets/${encodeURIComponent(presetId)}`,
+    );
+    return parseIndicatorPreset(payload);
+  });
 }
 
 /** Fetch raw indicator specs from registry (advanced) */
@@ -417,6 +420,32 @@ export async function fetchPyneSecurityPolicy(): Promise<PyneSecurityPolicy> {
 /** WebSocket URL for backend-managed builtin indicator updates */
 export function getIndicatorStreamUrl(): string {
   return `${httpBaseToWsBase(API_BASE)}/stream/indicators`;
+}
+
+export interface IndicatorWebSocketLimits {
+  maxSubscriptions: number;
+}
+
+/** Read the server-owned per-socket limit used by the window indicator broker. */
+export async function fetchIndicatorWebSocketLimits(
+  signal?: AbortSignal,
+): Promise<IndicatorWebSocketLimits> {
+  const payload = await request(
+    `${API_BASE}/indicators/diagnostics`,
+    indicatorSignalOptions(signal),
+  );
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Indicator diagnostics must be an object");
+  }
+  const websocket = (payload as Record<string, unknown>).websocket;
+  if (!websocket || typeof websocket !== "object" || Array.isArray(websocket)) {
+    throw new TypeError("Indicator diagnostics.websocket must be an object");
+  }
+  const maxSubscriptions = (websocket as Record<string, unknown>).maxSubscriptions;
+  if (!Number.isSafeInteger(maxSubscriptions) || Number(maxSubscriptions) < 1) {
+    throw new TypeError("Indicator diagnostics.websocket.maxSubscriptions must be a positive integer");
+  }
+  return { maxSubscriptions: Number(maxSubscriptions) };
 }
 
 /** Delete a custom indicator */

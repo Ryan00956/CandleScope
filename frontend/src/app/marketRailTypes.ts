@@ -23,14 +23,19 @@ export interface MarketRailViewDescriptor {
 
 export interface MarketRailLayoutState {
   readonly openViewIds: readonly string[];
+  /** When true, content panel is hidden but openViewIds stay selected for full restore. */
+  readonly panelCollapsed: boolean;
   readonly viewHeights: Readonly<Record<string, number>>;
 }
 
 export interface MarketRailLayoutActions {
   setOpenViewIds(ids: readonly string[]): void;
+  /** Activity-bar click: toggle a view, or expand the panel if it was only hidden. */
   toggleView(viewId: string): void;
   openView(viewId: string): void;
   closeView(viewId: string): void;
+  setPanelCollapsed(collapsed: boolean): void;
+  togglePanelCollapsed(): void;
   setViewHeight(viewId: string, height: number): void;
   isOpen(viewId: string): boolean;
 }

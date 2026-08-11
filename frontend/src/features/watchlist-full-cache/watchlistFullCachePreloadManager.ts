@@ -137,6 +137,7 @@ export function createWatchlistFullCachePreloadManager(
   const active = new Map<string, ActivePreload>();
   const attemptedKeys = new Set<string>();
   let disposed = false;
+  const gateOwner = (key: string) => `watchlist-full-cache:${key}`;
 
   function pump(): void {
     if (disposed) return;
@@ -144,10 +145,13 @@ export function createWatchlistFullCachePreloadManager(
       const key = queuedKeys.shift();
       if (!key || active.has(key) || attemptedKeys.has(key)) continue;
       const job = desired.get(key);
-      if (!job || shouldSkipSettledFullCachePreload(job, limit)) continue;
+      if (!job || shouldSkipSettledFullCachePreload(job, limit)) {
+        foregroundPreloadGate?.cancelQueued(gateOwner(key));
+        continue;
+      }
 
       const lease = foregroundPreloadGate?.tryAcquirePreload(
-        `watchlist-full-cache:${key}`,
+        gateOwner(key),
       );
       if (foregroundPreloadGate && !lease) {
         queuedKeys.unshift(key);
@@ -223,6 +227,9 @@ export function createWatchlistFullCachePreloadManager(
         }
       }
 
+      for (const key of desired.keys()) {
+        if (!nextDesired.has(key)) foregroundPreloadGate?.cancelQueued(gateOwner(key));
+      }
       desired = nextDesired;
       for (const key of attemptedKeys) {
         if (!desired.has(key)) attemptedKeys.delete(key);
@@ -250,6 +257,8 @@ export function createWatchlistFullCachePreloadManager(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      for (const key of desired.keys()) foregroundPreloadGate?.cancelQueued(gateOwner(key));
+      for (const key of queuedKeys) foregroundPreloadGate?.cancelQueued(gateOwner(key));
       desired.clear();
       queuedKeys = [];
       attemptedKeys.clear();

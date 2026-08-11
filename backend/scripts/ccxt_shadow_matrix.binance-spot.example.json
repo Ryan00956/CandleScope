@@ -1,0 +1,19 @@
+{
+  "profile": "binance_spot",
+  "targets": [
+    {
+      "symbol": "BTCUSDT",
+      "ccxt_symbol": "BTC/USDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    },
+    {
+      "symbol": "ETHUSDT",
+      "ccxt_symbol": "ETH/USDT",
+      "interval": "1m",
+      "depth_update_interval_ms": 100
+    }
+  ],
+  "duration_seconds": 65,
+  "startup_timeout_seconds": 45
+}

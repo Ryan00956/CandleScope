@@ -47,6 +47,7 @@ import type { IntervalString } from "../../utils/intervals.js";
 import type { ExchangeId, MarketType, SymbolCode } from "../../utils/symbolKey.js";
 import type { MarketDataRuntimeContract } from "./marketDataRuntimeContract.js";
 import { getClientInstanceId } from "../../services/api.js";
+import { useMarketDataWorkspaceResources } from "./marketDataWorkspaceContext.js";
 
 let chartDemandScopeSequence = 0;
 const chartDemandScopeRuntimeId = [
@@ -54,15 +55,47 @@ const chartDemandScopeRuntimeId = [
   Math.random().toString(36).slice(2, 10),
 ].join("-");
 
+function demandScopeDigest(value: string): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
 export function formatChartDemandScope(
   clientInstanceId: string,
   runtimeId: string,
   sequence: number,
+  owner?: Readonly<{
+    workspaceId?: string | undefined;
+    windowId?: string | undefined;
+    cellId?: string | undefined;
+  }>,
 ): string {
-  return `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
+  const base = `chart:${clientInstanceId}:${runtimeId}:${sequence}`;
+  if (!owner?.workspaceId && !owner?.windowId && !owner?.cellId) return base;
+  const expanded = [
+    base,
+    "workspace", owner.workspaceId || "_",
+    "window", owner.windowId || "_",
+    "cell", owner.cellId || "_",
+  ].join(":");
+  if (expanded.length <= 128) return expanded;
+  const ownerIdentity = [owner.workspaceId || "_", owner.windowId || "_", owner.cellId || "_"].join("\u0000");
+  return `${base}:owner:${demandScopeDigest(ownerIdentity)}`;
 }
 
-function createChartDemandScope(): string {
+function createChartDemandScope(
+  owner?: Readonly<{
+    workspaceId?: string | undefined;
+    windowId?: string | undefined;
+    cellId?: string | undefined;
+  }>,
+): string {
   chartDemandScopeSequence += 1;
   // Fast Refresh can reload this module while the API transport module keeps
   // its client id. A per-module nonce prevents sequence 1 from reusing a
@@ -71,6 +104,7 @@ function createChartDemandScope(): string {
     getClientInstanceId(),
     chartDemandScopeRuntimeId,
     chartDemandScopeSequence,
+    owner,
   );
 }
 
@@ -138,6 +172,12 @@ export interface UseMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
   realtimePriceRef: MutableRefObject<number | null>;
   foregroundPreloadGate?: ForegroundPreloadGate;
+  backgroundPrefetchEnabled?: boolean;
+  intervalPrefetchEnabled?: boolean;
+  schedulerCellId?: string;
+  workspaceId?: string;
+  windowId?: string;
+  initialViewportCountBackCap?: number;
 }
 
 export type MarketDataRuntime = MarketDataRuntimeContract;
@@ -146,7 +186,14 @@ export function useMarketDataRuntime({
   session,
   realtimePriceRef,
   foregroundPreloadGate,
+  backgroundPrefetchEnabled = true,
+  intervalPrefetchEnabled = backgroundPrefetchEnabled,
+  schedulerCellId,
+  workspaceId,
+  windowId,
+  initialViewportCountBackCap,
 }: UseMarketDataRuntimeOptions): MarketDataRuntime {
+  const workspaceResources = useMarketDataWorkspaceResources();
   const {
     symbol,
     exchange,
@@ -181,6 +228,13 @@ export function useMarketDataRuntime({
   }
   const backgroundPrefetchPriority = foregroundPreloadGate
     || defaultForegroundPreloadGateRef.current;
+  const inactivePrefetchGateRef = useRef<ChartBackgroundPrefetchPriorityGate | null>(null);
+  if (inactivePrefetchGateRef.current == null) {
+    inactivePrefetchGateRef.current = new ChartBackgroundPrefetchPriorityGate();
+  }
+  const chartBackgroundPrefetchPriority = backgroundPrefetchEnabled
+    ? backgroundPrefetchPriority
+    : inactivePrefetchGateRef.current;
   const publishIndicatorWindowRange = useCallback((meta: IndicatorWindowMeta) => {
     requestIndicatorRangeForWindowMeta((start, end, reason) => {
       if (!reason) return false;
@@ -214,6 +268,7 @@ export function useMarketDataRuntime({
     symbol,
     interval,
     onIndicatorWindowMeta: publishIndicatorWindowRange,
+    ...(workspaceResources ? { windowRegistry: workspaceResources.windowRegistry } : {}),
   });
 
   const [loading, setLoading] = useState(true);
@@ -252,7 +307,11 @@ export function useMarketDataRuntime({
   } | null>(null);
   if (requestDemandRef.current == null) {
     requestDemandRef.current = {
-      scope: createChartDemandScope(),
+      scope: createChartDemandScope({
+        workspaceId,
+        windowId,
+        cellId: schedulerCellId,
+      }),
       generation: 0,
       sessionKey: null,
       ready: false,
@@ -341,9 +400,15 @@ export function useMarketDataRuntime({
       gate.nativeIntervalValues,
     );
   }, []);
-  useEffect(() => {
+  // The stream and initial-history runtimes mount in layout effects. Configure
+  // their shared feed in the earlier layout-effect slot as well, so the
+  // multi-chart scheduler cannot subscribe before the API/stream adapters are
+  // attached after a fresh mount or cell remount.
+  useLayoutEffect(() => {
     seriesDataFeed.configure({
-      api: defaultKlineApi,
+      api: workspaceResources?.klineApi || defaultKlineApi,
+      chartWorkScheduler: workspaceResources?.workScheduler || null,
+      chartWorkSchedulerCellId: schedulerCellId || null,
       foregroundPreloadGate: backgroundPrefetchPriority,
       canRequestSeries: canRequestChartSeries,
       getActiveSeries: () => ({
@@ -356,6 +421,9 @@ export function useMarketDataRuntime({
       commitMergedChartData,
       commitPatchedChartData,
       patchCacheTick,
+      ...(workspaceResources
+        ? { streamFactory: workspaceResources.streamCoordinator.subscribe }
+        : {}),
     });
   }, [
     backgroundPrefetchPriority,
@@ -369,6 +437,8 @@ export function useMarketDataRuntime({
     patchCacheTick,
     seriesDataFeed,
     symbol,
+    workspaceResources,
+    schedulerCellId,
   ]);
 
   const resolveInitialRows = useCallback(
@@ -419,6 +489,7 @@ export function useMarketDataRuntime({
     exchange,
     marketType,
     nativeIntervalValues,
+    ...(initialViewportCountBackCap === undefined ? {} : { initialViewportCountBackCap }),
     getFromCache,
     resolveInitialRows,
     seriesDataFeed,
@@ -444,12 +515,21 @@ export function useMarketDataRuntime({
     interval,
     nativeIntervalValues,
   );
-  const activeHistoryViewportCountBack = planInitialViewportCountBack(
+  const plannedActiveHistoryViewportCountBack = planInitialViewportCountBack(
     interval,
     nativeIntervalValues,
   );
+  const activeHistoryViewportCountBack = initialViewportCountBackCap == null
+    ? plannedActiveHistoryViewportCountBack
+    : Math.min(
+        plannedActiveHistoryViewportCountBack,
+        Math.max(1, Math.floor(initialViewportCountBackCap)),
+      );
   useActiveChartHistoryHydration({
-    enabled: activeChartReady
+    // Deepen the active interval after first paint even in a dense workspace;
+    // this is active-chart hydration, not speculative cross-interval warming.
+    enabled: backgroundPrefetchEnabled
+      && activeChartReady
       && marketDataReady
       && !loading
       && !initialHistoryPending,
@@ -461,7 +541,7 @@ export function useMarketDataRuntime({
     historyRepairPending: chartDataMeta.historyRepairPending === true,
     validatedCountBack: chartDataMeta.historyValidatedCountBack ?? null,
     seriesDataFeed,
-    priorityGate: backgroundPrefetchPriority,
+    priorityGate: chartBackgroundPrefetchPriority,
     commitMergedChartData,
   });
 
@@ -648,6 +728,8 @@ export function useMarketDataRuntime({
     updateRealtimePrice,
     handleBackfillCompleted,
     setWsStatus,
+    ...(schedulerCellId ? { schedulerCellId } : {}),
+    workScheduler: workspaceResources?.workScheduler || null,
   });
 
   const foregroundIndicatorRequestCount = indicatorRangeRequests.length;
@@ -734,9 +816,14 @@ export function useMarketDataRuntime({
     seriesDataFeed,
     priorityGate: backgroundPrefetchPriority,
     isForegroundBusy: isForegroundBusyForPrefetch,
+    schedulerOwner: `chart-background-prefetch:${schedulerCellId || sessionKey}`,
     // Background interval warming must yield while the active chart is still
     // loading history, extending left, or waiting for indicator coverage.
-    enabled: activeChartReady
+    // Cross-interval warming is optional and disabled by the dense-workspace
+    // policy. Keeping this separate prevents four active cells from walking
+    // the complete interval catalog while 64 charts are converging.
+    enabled: intervalPrefetchEnabled
+      && activeChartReady
       && marketDataReady
       && !loading
       && !loadingMoreLeft

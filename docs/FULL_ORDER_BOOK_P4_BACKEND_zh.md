@@ -45,7 +45,7 @@ Binance USDⓈ-M REST `/fapi/v1/depth` 单侧最多返回 1000 个价位，而�
 }
 ```
 
-本地引擎默认允许每侧最多 5000 个动态价位；HTTP/WS 单次输出最多投影前 1000 行。`output_limit` 只影响聚合后的输出，不改变后端重建覆盖范围，也不会新建额外的交易所连接。价格聚合发生在完整本地投影上，因此粗粒度不会退化为“把已经裁剪的 100 行再合并”。
+本地引擎默认保留每侧最优的 5000 个已知动态价位；HTTP/WS 单次输出最多投影前 1000 行。交易所 REST 种子本身不是穷尽深度，因此事件会显式携带 `exchange_full_depth_exhaustive=false` 和本地保留窗口/裁剪计数。超过本地窗口的更差价位不会伪装成完整交易所深度；如果保留窗口下降到 REST 种子的可信档数以下，引擎仍会 fail-closed 并重新同步。`output_limit` 只影响输出投影，不会新建额外的交易所连接。
 
 ## 3. Binance 同步协议
 
@@ -248,7 +248,7 @@ live book 使用：
 |---|---:|---|
 | `FULL_ORDER_BOOK_MAX_STREAMS` | `16` | 同时活跃的 Full Depth 物理流上限 |
 | `FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE` | `4096` | 每条物理流严格 delta queue 上限 |
-| `FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE` | `5000` | 本地每侧价位硬上限，必须至少 1000 |
+| `FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE` | `5000` | 本地每侧最优已知价位保留窗口，必须至少 1000；可信种子深度耗尽时 fail-closed |
 | `FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA` | `10000` | 单个 delta 的价位更新硬上限 |
 | `FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES` | `200000` | bootstrap 缓冲价位更新总上限 |
 | `FULL_ORDER_BOOK_DEFAULT_MAX_PENDING` | `16` | 下游消费者等待的不同 stream key 上限 |

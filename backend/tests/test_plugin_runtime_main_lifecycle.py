@@ -151,6 +151,12 @@ def _patch_startup_dependencies(
     monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
     monkeypatch.setattr(main_module, "init_trade_flow_storage", lambda _path: None)
     monkeypatch.setattr(main_module, "init_liquidation_storage", lambda _path: None)
+
+    async def _init_replay_runtime() -> None:
+        main_module.app.state.replay_runtime = None
+        main_module.app.state.replay_service = None
+
+    monkeypatch.setattr(main_module, "_init_replay_runtime", _init_replay_runtime)
     monkeypatch.setattr(
         first_party_bootstrap_module,
         "ensure_first_party_plugins_from_environment",

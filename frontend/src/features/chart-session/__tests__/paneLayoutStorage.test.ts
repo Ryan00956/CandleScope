@@ -45,3 +45,18 @@ test("pane order storage keeps bounded unique pane ids", () => {
     assert.deepEqual(JSON.parse(mustBeDefined(storage.getItem(PANE_ORDER_KEY))), ["vol", "macd"]);
   });
 });
+
+test("pane order storage isolates chart cells and falls back to the legacy order", () => {
+  withLocalStorage({
+    [PANE_ORDER_KEY]: JSON.stringify(["main", "vol"]),
+  }, (storage) => {
+    assert.deepEqual(loadPaneOrder("cell-2"), ["main", "vol"]);
+    savePaneOrder(["main", "rsi"], "cell-2");
+    assert.deepEqual(loadPaneOrder("cell-2"), ["main", "rsi"]);
+    assert.deepEqual(loadPaneOrder("cell-1"), ["main", "vol"]);
+    assert.deepEqual(
+      JSON.parse(mustBeDefined(storage.getItem(`${PANE_ORDER_KEY}:cell-2`))),
+      ["main", "rsi"],
+    );
+  });
+});

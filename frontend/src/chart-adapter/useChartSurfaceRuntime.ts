@@ -16,8 +16,19 @@ export interface ChartSurfaceVisibleRange {
   time?: { from: number; to: number };
 }
 
+export interface ChartSurfaceLinkedTimeRange {
+  from: number;
+  to: number;
+}
+
 export interface ChartSurfaceHandle {
   getVisibleRange(): ChartSurfaceVisibleRange | null;
+  setLinkedCrosshairTime(time: number | null): boolean;
+  setLinkedVisibleTimeAnchor(time: number): boolean;
+  setLinkedVisibleTimeRange(range: ChartSurfaceLinkedTimeRange): boolean;
+  subscribeLinkedViewportReady(listener: (generation: number) => void): () => void;
+  subscribeDrawingRevision(listener: (scopeKey: string, revision: number) => void): () => void;
+  setLinkedDrawingRevision(scopeKey: string, revision: number): boolean;
   captureViewportTransfer(): SurfaceViewportSnapshot | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
@@ -31,6 +42,30 @@ export function useChartSurfaceRuntime() {
 
   const getVisibleRange = useCallback(() => (
     callChartSurface(ref, "getVisibleRange", null)
+  ), []);
+
+  const setLinkedCrosshairTime = useCallback((time: number | null) => (
+    callChartSurface(ref, "setLinkedCrosshairTime", false, time)
+  ), []);
+
+  const setLinkedVisibleTimeAnchor = useCallback((time: number) => (
+    callChartSurface(ref, "setLinkedVisibleTimeAnchor", false, time)
+  ), []);
+
+  const setLinkedVisibleTimeRange = useCallback((range: ChartSurfaceLinkedTimeRange) => (
+    callChartSurface(ref, "setLinkedVisibleTimeRange", false, range)
+  ), []);
+
+  const subscribeLinkedViewportReady = useCallback((listener: (generation: number) => void) => (
+    callChartSurface(ref, "subscribeLinkedViewportReady", () => {}, listener)
+  ), []);
+
+  const subscribeDrawingRevision = useCallback((listener: (scopeKey: string, revision: number) => void) => (
+    callChartSurface(ref, "subscribeDrawingRevision", () => {}, listener)
+  ), []);
+
+  const setLinkedDrawingRevision = useCallback((scopeKey: string, revision: number) => (
+    callChartSurface(ref, "setLinkedDrawingRevision", false, scopeKey, revision)
   ), []);
 
   const captureViewportTransfer = useCallback(() => (
@@ -64,6 +99,12 @@ export function useChartSurfaceRuntime() {
 
   const actions = useMemo(() => ({
     getVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
+    setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -75,6 +116,12 @@ export function useChartSurfaceRuntime() {
     clearAllDrawings,
     getExportSnapshot,
     getVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
+    setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     prepareExport,
     setDrawingsHidden,
     updateSelectedDrawingStyle,

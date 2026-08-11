@@ -775,6 +775,10 @@ def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -
     async def init_data_manager() -> None:
         events.append("data-manager")
 
+    async def init_replay_runtime() -> None:
+        main_module.app.state.replay_runtime = None
+        main_module.app.state.replay_service = None
+
     def schedule_catalog():
         events.append("catalog")
         return None
@@ -784,6 +788,7 @@ def test_startup_initializes_data_manager_before_catalog_schedule(monkeypatch) -
     monkeypatch.setattr(main_module, "init_market_metrics_storage", lambda: None)
     monkeypatch.setattr(main_module, "init_trade_flow_storage", lambda *args: None)
     monkeypatch.setattr(main_module, "init_liquidation_storage", lambda *args: None)
+    monkeypatch.setattr(main_module, "_init_replay_runtime", init_replay_runtime)
     monkeypatch.setattr(main_module, "_init_data_manager", init_data_manager)
     monkeypatch.setattr(main_module, "_schedule_symbol_catalog_refresh", schedule_catalog)
 

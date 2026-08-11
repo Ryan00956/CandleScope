@@ -142,4 +142,4 @@ def test_normalize_layer_dispatches_by_exchange() -> None:
     assert event.exchange == "okx"
     assert event.stream_key == "okx:BTC-USDT@kline_1m"
     assert event.data["volume"] == 9
-    assert layer.snapshot()["normalizer"] == "OkxNormalizer"
+    assert layer.snapshot()["normalizer"] == "CcxtPrimaryNormalizer"

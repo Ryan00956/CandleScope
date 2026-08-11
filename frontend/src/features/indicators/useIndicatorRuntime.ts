@@ -5,7 +5,10 @@ import type { MarketDataRuntime } from "../market-data/useMarketDataRuntime.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { IndicatorRangeEvent } from "../market-data/klineContracts.js";
+import { useMarketDataWorkspaceResources } from "../market-data/marketDataWorkspaceContext.js";
+import type { IndicatorStreamIdentity } from "./sharedIndicatorStreamCoordinator.js";
 import { useActiveIndicatorStore } from "./activeIndicatorStore.js";
+import type { ActiveIndicatorPersistence } from "./activeIndicatorStore.js";
 import { resolveRealtimeHistogramColor } from "./indicatorRealtimeColor.js";
 import {
   applyRealtimeIndicatorValuesToLines,
@@ -145,6 +148,7 @@ import type {
 export { buildIndicatorRangeLifecycleKey } from "./indicatorRangeLifecycle.js";
 
 interface UseIndicatorRuntimeOptions {
+  autoAddVolume?: boolean;
   session?: ChartSessionRuntime;
   marketData?: MarketDataRuntime;
   candleDownColor?: string;
@@ -166,6 +170,9 @@ interface UseIndicatorRuntimeOptions {
   savedVisibleRange?: unknown;
   symbol?: string;
   onIndicatorRemoved?: (indicatorId: string) => void;
+  indicatorPersistence?: ActiveIndicatorPersistence | null;
+  streamIdentity?: IndicatorStreamIdentity | null;
+  workSchedulerCellId?: string;
 }
 
 interface ResolvedIndicatorRuntimeInputs {
@@ -556,6 +563,9 @@ function isContinuousChartRange(chartData: KlineBar[], intervalSeconds: number |
 export function useIndicatorRuntime(
   options: UseIndicatorRuntimeOptions = {},
 ): IndicatorRuntime {
+  const marketWorkspaceResources = useMarketDataWorkspaceResources();
+  const workScheduler = marketWorkspaceResources?.workScheduler || null;
+  const workSchedulerCellId = options.workSchedulerCellId;
   const {
     candleDownColor,
     candleUpColor,
@@ -592,7 +602,15 @@ export function useIndicatorRuntime(
     toggleVisibility,
     updateIndicatorParams,
     updateIndicatorScript,
-  } = useActiveIndicatorStore({ onRequireCompute: requireIndicatorCompute });
+  } = useActiveIndicatorStore({
+    ...(options.autoAddVolume === undefined
+      ? {}
+      : { autoAddVolume: options.autoAddVolume }),
+    onRequireCompute: requireIndicatorCompute,
+    ...(options.indicatorPersistence === undefined
+      ? {}
+      : { persistence: options.indicatorPersistence }),
+  });
 
   const [outputState, outputDispatch] = useReducer(
     indicatorOutputReducer,
@@ -1253,6 +1271,9 @@ export function useIndicatorRuntime(
             === update.indicatorConfigSignature);
       },
       onFlush: flushRealtimeIndicatorValues,
+      ...(workScheduler && workSchedulerCellId
+        ? { scheduler: workScheduler.frameScheduler(workSchedulerCellId) }
+        : {}),
     });
     realtimeIndicatorBatcherRef.current = batcher;
     provisionalIndicatorPreviewsRef.current.clear();
@@ -1271,6 +1292,8 @@ export function useIndicatorRuntime(
     resolveRealtimeIndicatorConfigSignature,
     sessionKey,
     symbol,
+    workScheduler,
+    workSchedulerCellId,
   ]);
 
   const applyWsValues = useCallback((
@@ -1550,7 +1573,10 @@ export function useIndicatorRuntime(
         if (message.securityMode !== undefined) {
           rangeRequest.securityMode = message.securityMode;
         }
-        const payload = await indicatorRangeBatcher.schedule(rangeRequest);
+        const requestRange = () => indicatorRangeBatcher.schedule(rangeRequest);
+        const payload = await (workScheduler && workSchedulerCellId
+          ? workScheduler.run(workSchedulerCellId, "indicator-range", requestRange)
+          : requestRange());
         if (payload?.ok !== false || payload.code === "INDICATOR_RANGE_EMPTY") return payload;
         if (payload.code === "INDICATOR_RANGE_NOT_READY") {
           const waitRevision = normalizeIndicatorRevision(payload) || revision;
@@ -1659,6 +1685,8 @@ export function useIndicatorRuntime(
     runtimeContextRef,
     scheduleIndicatorCorrectionFlush,
     setIndicatorError,
+    workScheduler,
+    workSchedulerCellId,
   ]);
 
   const executeDirectIndicatorRangeIntent = useCallback((
@@ -2317,6 +2345,8 @@ export function useIndicatorRuntime(
     setIndicatorError,
     subscriptionUpdatesReady: hostedSubscriptionUpdatesReady,
     symbol,
+    streamCoordinator: marketWorkspaceResources?.indicatorStreamCoordinator || null,
+    streamIdentity: options.streamIdentity || null,
   });
 
   useEffect(() => {

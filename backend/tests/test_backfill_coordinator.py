@@ -774,6 +774,85 @@ def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
     asyncio.run(_run())
 
 
+def test_backfill_scheduler_rotates_equal_priority_work_across_chart_cells() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+        cell_a = asyncio.create_task(coord.request_and_wait(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=180_000,
+            exchange="binance",
+            market_type="spot",
+            reason="visible_range_gap",
+            request_id="cell-a",
+            metadata={
+                "app_id": "candlescope",
+                "workspace_id": "workspace-a",
+                "window_id": "window-a",
+                "cell_id": "cell-a",
+            },
+        )))
+        await engine.first_started.wait()
+
+        cell_b = asyncio.create_task(coord.request_and_wait(RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            exchange="binance",
+            market_type="spot",
+            reason="visible_range_gap",
+            request_id="cell-b",
+            metadata={
+                "app_id": "candlescope",
+                "workspace_id": "workspace-a",
+                "window_id": "window-a",
+                "cell_id": "cell-b",
+            },
+        )))
+
+        active = coord.snapshot()["active"][0]
+        assert active["fairness_owner"] == (
+            "candlescope/workspace-a/window-a/cell-a"
+        )
+        engine.release_first.set()
+        await _wait_until(lambda: len(engine.calls) >= 2)
+
+        assert [call["symbol"] for call in engine.calls[:2]] == [
+            "BTCUSDT",
+            "ETHUSDT",
+        ]
+        await asyncio.gather(cell_a, cell_b)
+        assert coord.snapshot()["fairness_rotations"] >= 1
+
+    asyncio.run(_run())
+
+
 def test_backfill_scheduler_runs_initial_history_from_newest_chunk() -> None:
     async def _run() -> None:
         class _Engine:

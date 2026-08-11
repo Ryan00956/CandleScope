@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://candlescope.local/schemas/multi-chart-capacity-v1.json",
+  "title": "CandleScope multi-chart capacity evidence v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "git",
+    "hardware",
+    "scenario",
+    "data",
+    "frontend",
+    "backend",
+    "upstream",
+    "gates",
+    "result"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "candlescope.multi-chart.capacity/1" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "git": {
+      "type": "object",
+      "required": ["commit", "dirty"],
+      "properties": {
+        "commit": { "type": "string", "minLength": 1 },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "required": ["profileSha256"],
+      "properties": {
+        "profileSha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "windows", "cells"],
+      "properties": {
+        "id": { "enum": ["S1", "S2", "S3", "S4", "S5", "C1", "W1", "W2", "W3", "F1", "F2", "F3"] },
+        "windows": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "cells": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "result": { "enum": ["pass", "fail", "unsupported"] },
+    "gates": { "type": "object" }
+  }
+}

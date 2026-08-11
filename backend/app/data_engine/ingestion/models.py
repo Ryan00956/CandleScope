@@ -224,7 +224,7 @@ class MarketEvent:
         - Kline (closed): open_time
         - Kline (not closed): None (never dedup live updates)
         - AggTrade: agg_trade_id
-        - Trade: trade_id
+        - Trade: explicit provider sequence only
         - Others: None (no dedup)
         """
         if self.event_type == StreamType.KLINE:
@@ -256,7 +256,10 @@ class MarketEvent:
         if self.event_type == StreamType.AGG_TRADE:
             return self.data.get("agg_trade_id")
         if self.event_type == StreamType.TRADE:
-            return self.data.get("trade_id")
+            # Unified providers may expose numeric-looking exchange IDs that
+            # are unique but not contiguous.  Only an explicit sequence is a
+            # safe input to CandleScope's +1 trade-gap detector.
+            return self.sequence if isinstance(self.sequence, int) else None
         return None
 
 

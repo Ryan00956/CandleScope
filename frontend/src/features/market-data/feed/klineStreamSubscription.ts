@@ -60,7 +60,7 @@ interface StreamCallbacks {
   onParseError: NonNullable<KlineStreamOptions["onParseError"]>;
 }
 
-type ParsedStreamMessage =
+export type ParsedStreamMessage =
   | { kind: "status"; message: KlineStreamStatusMessage }
   | { kind: "control"; message: KlineStreamControlMessage }
   | { kind: "backfill"; message: KlineStreamBackfillMessage }

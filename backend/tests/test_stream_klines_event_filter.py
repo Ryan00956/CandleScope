@@ -92,13 +92,14 @@ def test_multi_kline_outbox_keeps_forming_index_after_final_enqueue_timeout() ->
         key = ("binance", "spot", "BTCUSDT", "1m")
 
         assert await outbox.put({"seq": 1}, key=key, replaceable=True)
-        assert not await outbox.put(
+        assert await outbox.put(
             {"seq": 2, "closed": True},
             key=key,
             timeout=0.01,
         )
-        assert await outbox.put({"seq": 3}, key=key, replaceable=True)
+        assert not await outbox.put({"seq": 3}, key=key, replaceable=True)
         assert outbox._queue.qsize() == 1
-        assert await outbox.get() == {"seq": 3}
+        assert await outbox.get() == {"seq": 1}
+        assert await outbox.get() == {"seq": 2, "closed": True}
 
     asyncio.run(_run())

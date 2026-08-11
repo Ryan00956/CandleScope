@@ -504,6 +504,7 @@ def test_shared_ws_adds_and_removes_stream_without_reconnecting() -> None:
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         hub._ensure_runner = lambda: None
 
@@ -542,6 +543,7 @@ def test_cancelled_dynamic_subscribe_rolls_back_local_and_remote_state() -> None
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         hub._ensure_runner = lambda: None
 
@@ -581,6 +583,7 @@ def test_last_unsubscribe_serializes_new_subscribe_before_runner_cleanup() -> No
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         runner_starts = 0
 
@@ -628,6 +631,7 @@ def test_cancelled_handle_unsubscribe_keeps_cleanup_alive_and_retryable() -> Non
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         hub._ensure_runner = lambda: None
 
@@ -671,6 +675,7 @@ def test_shared_ws_control_send_timeout_closes_degraded_connection() -> None:
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         hub._ensure_runner = lambda: None
 
@@ -705,6 +710,7 @@ def test_shared_ws_rejects_binance_code_msg_control_error() -> None:
             "binance",
             "futures",
             "derivatives_summary",
+            protocol=BinanceExchangeProtocol(),
         )
         hub._ensure_runner = lambda: None
 
@@ -720,7 +726,7 @@ def test_shared_ws_rejects_binance_code_msg_control_error() -> None:
     asyncio.run(_scenario())
 
 
-def test_shared_ws_registry_groups_derivatives_summary_across_symbols() -> None:
+def test_shared_ws_registry_defers_derivatives_summary_to_ccxt_provider() -> None:
     config = IngestionConfig()
     transport = TransportLayer(config)
     registry = SharedWsHubRegistry(config, transport)
@@ -729,8 +735,9 @@ def test_shared_ws_registry_groups_derivatives_summary_across_symbols() -> None:
     index_hub = registry.get_hub(_descriptor(StreamType.INDEX_PRICE, "ETHUSDT"))
     funding_hub = registry.get_hub(_descriptor(StreamType.FUNDING_RATE, "SOLUSDT"))
 
-    assert mark_hub is not None
-    assert mark_hub is index_hub is funding_hub
+    assert mark_hub is None
+    assert index_hub is None
+    assert funding_hub is None
     assert registry.get_hub(_descriptor(StreamType.OPEN_INTEREST)) is None
 
 

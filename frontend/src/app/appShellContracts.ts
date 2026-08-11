@@ -65,7 +65,7 @@ export interface AlertsShellRuntime {
 }
 
 export interface AppShellRuntimeInputs {
-  session: ChartSessionRuntime;
+  session: Pick<ChartSessionRuntime, "view" | "actions" | "status">;
   marketData: MarketDataRuntimeContract;
   advancedMarketData: AdvancedMarketRuntime;
   drawings: DrawingRuntime;

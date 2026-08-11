@@ -6,6 +6,8 @@ import time
 from types import SimpleNamespace
 
 from fastapi import FastAPI
+from fastapi import HTTPException
+from fastapi.responses import ORJSONResponse
 from fastapi.testclient import TestClient
 
 import app.api.v1.klines as klines_api
@@ -1955,6 +1957,98 @@ def test_history_query_triggers_data_manager_backfill_request_when_empty() -> No
     assert start_ms < end_ms
 
 
+def test_history_batch_uses_bounded_quads_and_preserves_per_item_failures(monkeypatch) -> None:
+    active = 0
+    max_active = 0
+    order: list[str] = []
+
+    async def _fake_history(**kwargs):
+        nonlocal active, max_active
+        symbol = kwargs["symbol"]
+        active += 1
+        max_active = max(max_active, active)
+        order.append(symbol)
+        await asyncio.sleep(0)
+        active -= 1
+        if symbol == "BAD":
+            raise HTTPException(status_code=400, detail="bad item")
+        return ORJSONResponse({"symbol": symbol, "data": []})
+
+    monkeypatch.setattr(klines_api, "get_klines_history", _fake_history)
+    response = _client(DataManager()).post(
+        "/api/v1/klines/history/batch",
+        json={
+            "requests": [
+                {"request_id": "first", "symbol": "BTCUSDT", "max_wait_ms": 0},
+                {"request_id": "bad", "symbol": "BAD", "max_wait_ms": 0},
+                {"request_id": "third", "symbol": "ETHUSDT", "max_wait_ms": 0},
+                {"request_id": "fourth", "symbol": "SOLUSDT", "max_wait_ms": 0},
+                {"request_id": "fifth", "symbol": "BNBUSDT", "max_wait_ms": 0},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert order == ["BTCUSDT", "BAD", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+    assert max_active == 4
+    assert response.json() == {
+        "results": [
+            {
+                "request_id": "first",
+                "ok": True,
+                "status": 200,
+                "payload": {"symbol": "BTCUSDT", "data": []},
+            },
+            {
+                "request_id": "bad",
+                "ok": False,
+                "status": 400,
+                "detail": "bad item",
+            },
+            {
+                "request_id": "third",
+                "ok": True,
+                "status": 200,
+                "payload": {"symbol": "ETHUSDT", "data": []},
+            },
+            {
+                "request_id": "fourth",
+                "ok": True,
+                "status": 200,
+                "payload": {"symbol": "SOLUSDT", "data": []},
+            },
+            {
+                "request_id": "fifth",
+                "ok": True,
+                "status": 200,
+                "payload": {"symbol": "BNBUSDT", "data": []},
+            },
+        ],
+    }
+
+
+def test_history_batch_rejects_duplicate_ids_and_more_than_sixteen_items() -> None:
+    client = _client(DataManager())
+    duplicate = client.post(
+        "/api/v1/klines/history/batch",
+        json={"requests": [
+            {"request_id": "same", "max_wait_ms": 0},
+            {"request_id": "same", "max_wait_ms": 0},
+        ]},
+    )
+    oversized = client.post(
+        "/api/v1/klines/history/batch",
+        json={"requests": [
+            {"request_id": f"item-{index}", "max_wait_ms": 0}
+            for index in range(17)
+        ]},
+    )
+
+    assert duplicate.status_code == 422
+    assert duplicate.json()["detail"] == "duplicate history batch request_id: same"
+    assert oversized.status_code == 422
+
+
 def test_history_count_back_overrides_days_window() -> None:
     calls: list[tuple[str, str, int, int, str, str]] = []
     dm = DataManager()
@@ -1972,7 +2066,7 @@ def test_history_count_back_overrides_days_window() -> None:
             "interval": "1h",
             "days": 45_000,
             "count_back": 10,
-            "max_wait_ms": 0,
+            "max_wait_ms": 1,
             "exchange": "binance",
             "market_type": "spot",
         },
@@ -2052,7 +2146,7 @@ def test_history_count_back_monthly_steps_calendar_buckets_without_calendar(
         "limit": 3,
         "exchange": "binance",
         "market_type": "spot",
-        "auto_backfill": None,
+        "auto_backfill": False,
         "backfill_reason": "initial_history",
         "backfill_requester": "klines_history",
     }]

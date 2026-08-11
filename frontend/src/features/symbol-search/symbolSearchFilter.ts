@@ -7,11 +7,17 @@ import type {
 
 export const QUOTE_CHIPS = ["USDT", "BTC", "ETH", "BNB", "FDUSD", "ALL"] as const;
 
-export const MARKET_TABS = [
+export interface MarketTab {
+  key: string;
+  label: string;
+  icon: string;
+}
+
+export const MARKET_TABS: MarketTab[] = [
   { key: "favorites", label: "★ 收藏", icon: "⭐" },
   { key: "spot", label: "现货", icon: "💱" },
   { key: "futures", label: "合约", icon: "📄" },
-] as const;
+];
 
 export const ROW_HEIGHT = 42;
 export const VISIBLE_ROWS = 14;
@@ -31,8 +37,11 @@ export function buildExchangeChips({
   allSymbols: SymbolSearchItem[];
   currentExchange?: string | null;
   exchangeCatalog?: ExchangeCatalog | null;
-}): Array<{ key: string; label: string }> {
+}): Array<{ key: string; label: string; disabled: boolean }> {
   const exchanges = new Set<string>([currentExchange || "binance"]);
+  for (const exchange of Object.keys(exchangeCatalog || {})) {
+    exchanges.add(exchange);
+  }
   for (const item of allSymbols) {
     if (item.exchange) exchanges.add(item.exchange);
   }
@@ -42,6 +51,8 @@ export function buildExchangeChips({
     .map((key) => ({
       key,
       label: formatExchangeLabel(key, exchangeCatalog),
+      disabled: Array.isArray(exchangeCatalog?.[key]?.markets)
+        && exchangeCatalog[key].markets?.length === 0,
     }));
 }
 
@@ -53,12 +64,16 @@ export function buildMarketTabs({
   allSymbols: SymbolSearchItem[];
   exchangeCatalog?: ExchangeCatalog | null;
   exchangeFilter: Set<string>;
-}): Array<(typeof MARKET_TABS)[number]> {
+}): MarketTab[] {
   const available = new Set<string>(["favorites"]);
+  const labels = new Map<string, string>();
   for (const selectedExchange of exchangeFilter) {
     const markets = exchangeCatalog?.[selectedExchange]?.markets || [];
     for (const market of markets) {
-      if (market.market_type) available.add(market.market_type);
+      if (market.market_type) {
+        available.add(market.market_type);
+        if (market.label) labels.set(market.market_type, market.label);
+      }
     }
   }
   if (available.size === 1) {
@@ -68,7 +83,78 @@ export function buildMarketTabs({
       }
     }
   }
-  return MARKET_TABS.filter((tab) => available.has(tab.key));
+  const known = new Map(MARKET_TABS.map((tab) => [tab.key, tab]));
+  const order = ["favorites", "spot", "futures"];
+  const marketTypes = [...available].sort((left, right) => {
+    const leftIndex = order.indexOf(left);
+    const rightIndex = order.indexOf(right);
+    if (leftIndex >= 0 || rightIndex >= 0) {
+      return (leftIndex < 0 ? order.length : leftIndex)
+        - (rightIndex < 0 ? order.length : rightIndex);
+    }
+    return left.localeCompare(right);
+  });
+  return marketTypes.map((key) => known.get(key) || {
+    key,
+    label: labels.get(key) || key,
+    icon: key.startsWith("spot") ? "💱" : key.startsWith("option") ? "◈" : "📄",
+  });
+}
+
+function marketTypeFamily(marketType: string): string {
+  const normalized = marketType.trim().toLowerCase();
+  if (normalized === "spot" || normalized.startsWith("spot.")) return "spot";
+  if (normalized === "option" || normalized.startsWith("option.")) return "option";
+  if (
+    normalized === "futures"
+    || normalized === "future"
+    || normalized === "swap"
+    || normalized === "perpetual"
+    || normalized.startsWith("future.")
+    || normalized.startsWith("swap.")
+    || normalized.startsWith("perpetual.")
+  ) return "derivatives";
+  return normalized;
+}
+
+function derivativePreference(marketType: string): number {
+  const normalized = marketType.trim().toLowerCase();
+  return [
+    "futures",
+    "swap.linear",
+    "swap",
+    "perpetual.linear",
+    "perpetual",
+    "future.linear",
+    "future",
+    "swap.inverse",
+    "future.inverse",
+  ].indexOf(normalized);
+}
+
+export function resolveExchangeMarketType(
+  currentMarketType: string,
+  marketTabs: readonly MarketTab[],
+): string {
+  const available = marketTabs.filter((tab) => tab.key !== "favorites");
+  const normalizedCurrent = currentMarketType.trim().toLowerCase();
+  const exact = available.find((tab) => tab.key.trim().toLowerCase() === normalizedCurrent);
+  if (exact) return exact.key;
+
+  const currentFamily = marketTypeFamily(normalizedCurrent);
+  const sameFamily = available.filter((tab) => marketTypeFamily(tab.key) === currentFamily);
+  if (sameFamily.length > 0) {
+    if (currentFamily === "derivatives") {
+      return [...sameFamily].sort((left, right) => {
+        const leftPreference = derivativePreference(left.key);
+        const rightPreference = derivativePreference(right.key);
+        return (leftPreference < 0 ? Number.MAX_SAFE_INTEGER : leftPreference)
+          - (rightPreference < 0 ? Number.MAX_SAFE_INTEGER : rightPreference);
+      })[0]?.key || sameFamily[0]!.key;
+    }
+    return sameFamily[0]!.key;
+  }
+  return available[0]?.key || "favorites";
 }
 
 export function filterSymbols({

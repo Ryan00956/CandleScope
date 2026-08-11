@@ -128,6 +128,9 @@ test("active-chart hydration bypasses dwell and preempts an ordinary speculative
   assert.equal(gate.isCurrent(hydration), true);
   assert.equal(gate.tryAcquirePreload("chart-background-prefetch"), null);
   assert.equal(gate.tryAcquireHydration("duplicate-hydration"), null);
+  assert.deepEqual(gate.snapshot().queuedHydrationOwners, ["duplicate-hydration"]);
+  gate.cancelQueued("duplicate-hydration");
+  gate.cancelQueued("chart-background-prefetch");
 
   clock.advance(100);
   const hydrationGeneration = hydration.generation;
@@ -144,6 +147,27 @@ test("active-chart hydration bypasses dwell and preempts an ordinary speculative
   assert.equal(gate.tryAcquirePreload("watchlist-resume"), null);
   clock.advance(1);
   assert.ok(gate.tryAcquirePreload("watchlist-resume"));
+  gate.dispose();
+});
+
+test("same-lane speculative owners advance in FIFO order and cancelled owners cannot starve followers", () => {
+  const gate = new ForegroundPreloadGate({ quietDwellMs: 0 });
+  const first = gate.tryAcquireHydration("cell-1");
+  assert.ok(first);
+  assert.equal(gate.tryAcquireHydration("cell-2"), null);
+  assert.equal(gate.tryAcquireHydration("cell-3"), null);
+  assert.deepEqual(gate.snapshot().queuedHydrationOwners, ["cell-2", "cell-3"]);
+
+  gate.release(first);
+  assert.equal(gate.tryAcquireHydration("cell-3"), null, "a later poller cannot jump the queue");
+  const second = gate.tryAcquireHydration("cell-2");
+  assert.ok(second);
+  gate.release(second);
+  gate.cancelQueued("cell-3");
+
+  const preload = gate.tryAcquirePreload("watchlist");
+  assert.ok(preload);
+  gate.release(preload);
   gate.dispose();
 });
 

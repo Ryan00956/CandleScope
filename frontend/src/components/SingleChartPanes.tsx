@@ -139,6 +139,7 @@ import {
   isMainPanePlotPointerStart,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
+  restoreLinkedCrosshairAfterInternalRefresh,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
   resolveLeftHistoryDemand,
@@ -179,9 +180,12 @@ import {
   buildDisplaySourceTimeIndex,
   buildSurfaceViewportSnapshot,
   createProjector,
+  findDisplayIndexForAxisAnchor,
+  findNumericDisplayIndexForTimeAnchor,
   getChartTypeDescriptor,
   isOrdinalAxisTime,
   isLastDisplayTargetForSourceTime,
+  mapSourceTimeRangeToDisplayLogicalRange,
   planSurfaceViewportRestore,
   preserveBoundSurfaceViewportSourceAnchor,
   ProjectionStore,
@@ -208,7 +212,11 @@ import type {
   MainSeriesHandle,
   NormalizedIndicatorSeriesEntry,
 } from "../chart-adapter/chartAdapterTypes.js";
-import type { ChartSurfaceHandle, ChartSurfaceVisibleRange } from "../chart-adapter/useChartSurfaceRuntime.js";
+import type {
+  ChartSurfaceHandle,
+  ChartSurfaceLinkedTimeRange,
+  ChartSurfaceVisibleRange,
+} from "../chart-adapter/useChartSurfaceRuntime.js";
 import type { ViewportController } from "../chart-adapter/viewportController.js";
 import type {
   AxisTime,
@@ -248,9 +256,11 @@ import type { MainChartType } from "../shared/mainChartTypes.js";
 import type { IntervalString } from "../utils/intervals.js";
 
 export interface SingleChartPanesProps {
+  suspended?: boolean;
   seriesStore?: SeriesWindowStore | null;
   symbol: string;
   drawingKeyBase?: string;
+  paneLayoutScope?: string | null;
   interval: IntervalString;
   loading?: boolean;
   onCrosshairMove?: ((value: MainSeriesCrosshairValue | null) => void) | null;
@@ -290,6 +300,7 @@ export interface SingleChartPanesProps {
   latestBarPosition?: number;
   dataMeta?: ChartDataCommitMeta | null;
   onViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
+  onUserViewportRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
   onVisibleRangeChange?: ((range: ChartSurfaceVisibleRange) => void) | null;
   drawingTool?: DrawingToolId | null;
   onDrawingToolChange?: ((tool: DrawingToolId | null) => void) | null;
@@ -326,6 +337,14 @@ type AdapterPriceScale = ReturnType<AdapterChart["priceScale"]>;
 type PriceScaleOptions = ReturnType<AdapterPriceScale["options"]>;
 type PriceScaleOptionsPatch = Parameters<AdapterPriceScale["applyOptions"]>[0];
 type ChartCrosshairParam = Parameters<Parameters<AdapterChart["subscribeCrosshairMove"]>[0]>[0];
+
+type LinkedCrosshairRenderState = {
+  axisKey: string | null;
+  axisTime: AxisTime | null;
+  chart: AdapterChart;
+  price: number | null;
+  sourceTime: number | null;
+};
 type VisibleLogicalRange = Parameters<
   Parameters<ReturnType<AdapterChart["timeScale"]>["subscribeVisibleLogicalRangeChange"]>[0]
 >[0];
@@ -1214,9 +1233,11 @@ function buildPaneDescriptors({
 }
 
 const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(function SingleChartPanes({
+  suspended = false,
   seriesStore = null,
   symbol,
   drawingKeyBase = "",
+  paneLayoutScope = null,
   interval,
   loading = false,
   onCrosshairMove,
@@ -1253,6 +1274,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   latestBarPosition = 0.5,
   dataMeta = null,
   onViewportRangeChange = null,
+  onUserViewportRangeChange = null,
   onVisibleRangeChange = null,
   drawingTool = null,
   onDrawingToolChange,
@@ -1382,6 +1404,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const intervalRef = useRef(interval);
   const appliedAppearanceIntervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
+  const linkedCrosshairRenderStateRef = useRef<LinkedCrosshairRenderState | null>(null);
   const isRestoringViewportRef = useRef(false);
   const userInteractedRef = useRef(false);
   const followLatestDisabledRef = useRef(false);
@@ -1413,6 +1436,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const leftHistoryFlushFrameRef = useRef<number | null>(null);
   const historyWheelGestureActiveRef = useRef(false);
   const historyWheelGestureTimerRef = useRef<TimerHandle | null>(null);
+  const viewportLinkWheelGestureActiveRef = useRef(false);
+  const viewportLinkWheelGestureTimerRef = useRef<TimerHandle | null>(null);
   const rightWindowRestoreRef = useRef<{
     datasetKey: string;
     promise: Promise<boolean>;
@@ -1422,9 +1447,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const surfaceConfigKeyRef = useRef<string | null>(null);
   const drawingProjectionConfigRef = useRef<string | null>(null);
   const onViewportRangeChangeRef = useRef(onViewportRangeChange);
+  const onUserViewportRangeChangeRef = useRef(onUserViewportRangeChange);
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef<DrawingEngineApi | null>(null);
   const drawingApisByPaneRef = useRef<Map<string, DrawingEngineApi>>(new Map());
+  const drawingPublicationUnsubscribesByPaneRef = useRef<Map<string, () => void>>(new Map());
+  const drawingRevisionListenersRef = useRef<Set<(scopeKey: string, revision: number) => void>>(new Set());
+  const linkedDrawingRevisionsRef = useRef<Record<string, number>>({});
+  const [linkedDrawingRevisions, setLinkedDrawingRevisions] = useState<Record<string, number>>({});
   const drawingApiMountKeysByPaneRef = useRef<Map<string, string>>(new Map());
   const drawingAdaptersByPaneRef = useRef<Map<
     string,
@@ -1433,6 +1463,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const selectedDrawingPaneIdRef = useRef<string | null>(null);
   const selectedDrawingsByPaneRef = useRef<Map<string, SelectedDrawingMeta>>(new Map());
   const drawingsHiddenRef = useRef(false);
+  const linkedViewportReadyListenersRef = useRef<Set<(generation: number) => void>>(new Set());
+  const linkedViewportReadyGenerationRef = useRef(0);
+  const linkedViewportReadyStateRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
   const paneCrosshairStoreLifecycle = useMemo(
     () => createPaneCrosshairStoreLifecycle(),
@@ -1625,7 +1658,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   >(() => new Set());
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuState | null>(null);
   const [paneOrder, setPaneOrder] = useState<string[]>(() => {
-    const stored = loadPaneOrder();
+    const stored = loadPaneOrder(paneLayoutScope);
     return stored.includes("main") ? stored : ["main", ...stored];
   });
   const [collapsedPaneIds, setCollapsedPaneIds] = useState<string[]>([]);
@@ -1939,6 +1972,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (adapter !== chartAdapter) adapter.notifyDrawingFrameInvalidation();
     }
   }, [chartAdapter]);
+  const reportCrosshairMove = useEffectEvent((value: MainSeriesCrosshairValue | null) => {
+    onCrosshairMove?.(value);
+  });
 
   useEffect(() => {
     if (drawingFontMetricRevision <= 0) return;
@@ -1951,10 +1987,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   );
 
   useEffect(() => {
-    onCrosshairMove?.(null);
+    reportCrosshairMove(null);
     paneCrosshairStore.clear();
     publishMainLegendCrosshair(null);
-  }, [datasetKey, interval, onCrosshairMove, paneCrosshairStore, publishMainLegendCrosshair, symbol]);
+  }, [datasetKey, interval, paneCrosshairStore, publishMainLegendCrosshair, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(indicatorReconcileReady ? seriesStore : null);
   const derivedAuxiliaryIndex = useMemo(() => {
@@ -1967,8 +2003,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     return buildDisplaySourceTimeIndex(auxiliaryDisplayState.rows);
   }, [auxiliaryDisplayState, datasetKey, surfaceConfigKey, usesDerivedAxis]);
   useEffect(() => {
-    savePaneOrder(paneOrder);
-  }, [paneOrder]);
+    savePaneOrder(paneOrder, paneLayoutScope);
+  }, [paneLayoutScope, paneOrder]);
   const activePaneIds = useMemo(
     () => reconcilePaneOrder(paneOrder, ["main", ...subPanes.map((pane) => pane.id)]),
     [paneOrder, subPanes],
@@ -2058,8 +2094,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }
   }, [activePaneIds.length, activePaneIdsKey, desiredMainPaneIndex, notifyDrawingFrameInvalidation, seriesReady]);
   const paneHeightStorageKey = useMemo(
-    () => `${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
-    [activeSubPanes],
+    () => `${paneLayoutScope ? `${paneLayoutScope}:` : ""}${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
+    [activeSubPanes, paneLayoutScope],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
   useLayoutEffect(() => {
@@ -2229,6 +2265,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => { onNeedMoreRightRef.current = onNeedMoreRight; }, [onNeedMoreRight]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
   useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
+  useEffect(() => {
+    onUserViewportRangeChangeRef.current = onUserViewportRangeChange;
+  }, [onUserViewportRangeChange]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
 
   const settleDatasetViewportTransfer = useCallback((
@@ -2244,14 +2283,24 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     onDatasetViewportTransferSettledRef.current?.(transfer, outcome);
   }, []);
 
-  const markViewportRangeInteracted = useCallback(() => {
+  const markViewportRangeChanged = useCallback((userDriven: boolean) => {
     pendingSurfaceViewportRef.current = null;
     boundSurfaceViewportAnchorRef.current = null;
     settleDatasetViewportTransfer("interrupted");
-    userInteractedRef.current = true;
     followLatestDisabledRef.current = true;
-    viewportControllerRef.current?.markUserInteracting();
+    if (userDriven) {
+      userInteractedRef.current = true;
+      viewportControllerRef.current?.markUserInteracting();
+    }
   }, [settleDatasetViewportTransfer]);
+
+  const markViewportRangeInteracted = useCallback(() => {
+    markViewportRangeChanged(true);
+  }, [markViewportRangeChanged]);
+
+  const markLinkedViewportApplied = useCallback(() => {
+    markViewportRangeChanged(false);
+  }, [markViewportRangeChanged]);
 
   useEffect(() => {
     if (datasetViewportTransfer !== null
@@ -2492,6 +2541,179 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
   }, [captureVisibleRange]);
 
+  const setLinkedCrosshairTime = useCallback((time: number | null): boolean => {
+    const chart = chartRef.current;
+    const series = mainSeriesRef.current;
+    if (!chart || !series) return false;
+    const clearLinkedCrosshair = () => {
+      const previous = linkedCrosshairRenderStateRef.current;
+      if (previous?.chart !== chart || previous.axisKey !== null) {
+        chart.clearCrosshairPosition();
+        paneCrosshairStore.publish(null);
+        publishMainLegendCrosshair(null);
+      }
+      linkedCrosshairRenderStateRef.current = {
+        axisKey: null,
+        axisTime: null,
+        chart,
+        price: null,
+        sourceTime: null,
+      };
+    };
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (time === null || !Number.isFinite(time)) {
+        clearLinkedCrosshair();
+        return true;
+      }
+      const numericTimeIndex = surfaceAxisModeRef.current === "time"
+        ? findNumericDisplayIndexForTimeAnchor(displayRowsRef.current, time)
+        : -1;
+      const displayIndex = numericTimeIndex >= 0
+        ? numericTimeIndex
+        : findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
+      const displayRow = displayRowsRef.current[displayIndex] ?? null;
+      if (!displayRow) {
+        clearLinkedCrosshair();
+        return false;
+      }
+      const sourceTime = resolveSourceTime(displayRow.time, displayRow);
+      const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
+      const price = Number(displayRow.close ?? displayRow.value ?? sourceRow?.close);
+      if (!Number.isFinite(price)) {
+        clearLinkedCrosshair();
+        return false;
+      }
+      const displayAxisKey = axisTimeKey(displayRow.time);
+      const previous = linkedCrosshairRenderStateRef.current;
+      if (displayAxisKey !== null
+        && previous?.chart === chart
+        && previous.axisKey === displayAxisKey
+        && previous.price === price
+        && previous.sourceTime === sourceTime) {
+        return true;
+      }
+      chart.setCrosshairPosition(price, displayRow.time, series);
+      paneCrosshairStore.publish(sourceTime);
+      const includeVolume = !isOrdinalAxisTime(displayRow.time)
+        || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
+      publishMainLegendCrosshair(buildMainSeriesCrosshairValue(
+        sourceTime,
+        displayRow || sourceRow,
+        { includeVolume, volumeRow: sourceRow },
+      ));
+      linkedCrosshairRenderStateRef.current = displayAxisKey === null
+        ? null
+        : {
+            axisKey: displayAxisKey,
+            axisTime: displayRow.time,
+            chart,
+            price,
+            sourceTime,
+          };
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+  }, [paneCrosshairStore, publishMainLegendCrosshair]);
+
+  const setLinkedVisibleTimeAnchor = useCallback((time: number): boolean => {
+    if (!Number.isFinite(time)) return false;
+    const currentRange = captureVisibleRange();
+    const logical = currentRange?.logical;
+    if (!logical) return false;
+    const span = logical.to - logical.from;
+    const targetIndex = findDisplayIndexForAxisAnchor(displayRowsRef.current, time);
+    if (!Number.isFinite(span) || span <= 0 || targetIndex < 0) return false;
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (!viewportControllerRef.current?.restoreProjectionRange({
+        from: targetIndex - span,
+        to: targetIndex,
+      }, {
+        ...(currentRange?.barSpacing === undefined
+          ? {}
+          : { barSpacing: currentRange.barSpacing }),
+        immediate: true,
+      })) return false;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+    markLinkedViewportApplied();
+    hasRestoredRangeRef.current = true;
+    lastViewportRestoreSourceRef.current = "linked-time-anchor";
+    const visibleRange = captureVisibleRange();
+    publishViewportRangeChange(visibleRange);
+    scheduleVisibleRangeSave(visibleRange);
+    return true;
+  }, [captureVisibleRange, markLinkedViewportApplied, publishViewportRangeChange, scheduleVisibleRangeSave]);
+
+  const setLinkedVisibleTimeRange = useCallback((
+    range: ChartSurfaceLinkedTimeRange,
+  ): boolean => {
+    const chart = chartRef.current;
+    if (!chart) return false;
+    const logicalRange = mapSourceTimeRangeToDisplayLogicalRange(
+      displayRowsRef.current,
+      range,
+      futureTimeAxisDataRef.current,
+    );
+    if (!logicalRange) return false;
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      if (!viewportControllerRef.current?.restoreProjectionRange(
+        logicalRange,
+        { immediate: true },
+      )) return false;
+    } catch {
+      return false;
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+    markLinkedViewportApplied();
+    hasRestoredRangeRef.current = true;
+    lastViewportRestoreSourceRef.current = "linked-date-range";
+    const visibleRange = captureVisibleRange();
+    publishViewportRangeChange(visibleRange);
+    scheduleVisibleRangeSave(visibleRange);
+    return true;
+  }, [captureVisibleRange, markLinkedViewportApplied, publishViewportRangeChange, scheduleVisibleRangeSave]);
+
+  const linkedViewportIsReady = useCallback((): boolean => (
+    hasRestoredRangeRef.current
+    && pendingSurfaceViewportRef.current === null
+    && displayRowsRef.current.length > 0
+    && captureVisibleRange()?.logical !== undefined
+  ), [captureVisibleRange]);
+
+  const subscribeLinkedViewportReady = useCallback((listener: (generation: number) => void) => {
+    linkedViewportReadyListenersRef.current.add(listener);
+    if (linkedViewportReadyStateRef.current) {
+      listener(linkedViewportReadyGenerationRef.current);
+    }
+    return () => { linkedViewportReadyListenersRef.current.delete(listener); };
+  }, []);
+
+  const notifyLinkedViewportReady = useCallback(() => {
+    if (!linkedViewportIsReady()) {
+      linkedViewportReadyStateRef.current = false;
+      return;
+    }
+    if (!linkedViewportReadyStateRef.current) {
+      linkedViewportReadyStateRef.current = true;
+      linkedViewportReadyGenerationRef.current += 1;
+    }
+    const generation = linkedViewportReadyGenerationRef.current;
+    for (const listener of [...linkedViewportReadyListenersRef.current]) listener(generation);
+  }, [linkedViewportIsReady]);
+
   const updateMainSeriesReference = useCallback((
     series: MainSeriesHandle | null,
     rows: ChartSeriesInputRow[],
@@ -2511,6 +2733,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
+    linkedViewportReadyStateRef.current = false;
     const drawingApisForSurface = drawingApisByPaneRef.current;
     const surfaceViewportCache = surfaceViewportCacheRef.current;
     const initialSubPaneCount = activeSubPaneCountRef.current;
@@ -2672,10 +2895,27 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     const handleCrosshairMove = (param: ChartCrosshairParam) => {
       if (isSyncingRef.current) return;
+      const linkedState = linkedCrosshairRenderStateRef.current;
+      if (linkedState?.chart === chart && param.sourceEvent === undefined) {
+        const previousSyncing = isSyncingRef.current;
+        isSyncingRef.current = true;
+        try {
+          restoreLinkedCrosshairAfterInternalRefresh(
+            chart,
+            mainSeriesRef.current,
+            linkedState,
+            param.sourceEvent,
+          );
+        } finally {
+          isSyncingRef.current = previousSyncing;
+        }
+        return;
+      }
+      linkedCrosshairRenderStateRef.current = null;
       if (param.time == null) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       const axisTime = typeof param.time === "number" || isOrdinalAxisTime(param.time)
@@ -2684,7 +2924,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (axisTime == null) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
@@ -2694,7 +2934,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (shouldUseLatestChartPaneLegend(sourceTime, displayRow, sourceRow)) {
         paneCrosshairStore.publish(null);
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       paneCrosshairStore.publish(sourceTime);
@@ -2707,11 +2947,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       );
       if (!crosshairValue) {
         publishMainLegendCrosshair(null);
-        onCrosshairMove?.(null);
+        reportCrosshairMove(null);
         return;
       }
       publishMainLegendCrosshair(crosshairValue);
-      onCrosshairMove?.(crosshairValue);
+      reportCrosshairMove(crosshairValue);
     };
 
     const handleVisibleLogicalRangeChange = (range: VisibleLogicalRange) => {
@@ -2724,10 +2964,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         isProgrammatic: isRestoringViewportRef.current,
         isSyncing: isSyncingRef.current,
         range,
+        userGestureActive: isChartPointerActiveRef.current
+          || viewportLinkWheelGestureActiveRef.current,
         userInteracted: userInteractedRef.current,
       }) || !range) return;
       const visibleRange = captureVisibleRange();
       publishViewportRangeChange(visibleRange);
+      if (visibleRange) onUserViewportRangeChangeRef.current?.(visibleRange);
       scheduleVisibleRangeSave(visibleRange);
       if (!isChartPointerActiveRef.current && historyWheelGestureActiveRef.current) {
         evaluateHistoryEdgeGesture(range, { retireIfIdle: false });
@@ -2738,6 +2981,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
     return () => {
+      linkedViewportReadyStateRef.current = false;
       const owner = activeSurfaceOwnerRef.current?.chart === chart
         ? activeSurfaceOwnerRef.current
         : {
@@ -2820,8 +3064,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
       paneCrosshairStore.clear();
+      if (linkedCrosshairRenderStateRef.current?.chart === chart) {
+        linkedCrosshairRenderStateRef.current = null;
+      }
       publishMainLegendCrosshair(null);
-      onCrosshairMove?.(null);
+      reportCrosshairMove(null);
       const drawingBoundary = resolveDrawingSurfaceChartTypeBoundary(
         initialChartType,
         requestedChartTypeRef.current,
@@ -2852,7 +3099,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
       }
     };
-  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, onCrosshairMove, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, evaluateHistoryEdgeGesture, markViewportRangeInteracted, paneCrosshairStore, publishDrawingProjectionStore, publishMainLegendCrosshair, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -2981,6 +3228,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     const handleWheel = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".pane-control-bar")) return;
       if (event.deltaX !== 0 || event.deltaY !== 0) {
+        viewportLinkWheelGestureActiveRef.current = true;
+        if (viewportLinkWheelGestureTimerRef.current != null) {
+          clearTimeout(viewportLinkWheelGestureTimerRef.current);
+        }
+        viewportLinkWheelGestureTimerRef.current = setTimeout(() => {
+          viewportLinkWheelGestureTimerRef.current = null;
+          viewportLinkWheelGestureActiveRef.current = false;
+        }, HISTORY_WHEEL_GESTURE_IDLE_MS);
         markViewportRangeInteracted();
       }
       const containerRect = containerRef.current?.getBoundingClientRect?.() ?? null;
@@ -3033,9 +3288,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       isChartPointerActiveRef.current = false;
       chartPointerLogicalRangeChangedRef.current = false;
       historyWheelGestureActiveRef.current = false;
+      viewportLinkWheelGestureActiveRef.current = false;
       if (historyWheelGestureTimerRef.current != null) {
         clearTimeout(historyWheelGestureTimerRef.current);
         historyWheelGestureTimerRef.current = null;
+      }
+      if (viewportLinkWheelGestureTimerRef.current != null) {
+        clearTimeout(viewportLinkWheelGestureTimerRef.current);
+        viewportLinkWheelGestureTimerRef.current = null;
       }
       resetPointerGesture();
     };
@@ -3503,6 +3763,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   useEffect(() => {
     const chart = chartRef.current;
     const activeOwner = activeSurfaceOwnerRef.current;
+    linkedViewportReadyStateRef.current = false;
     const outgoingDatasetKey = activeOwner?.chart === chart
       ? activeOwner.datasetKey
       : null;
@@ -3845,6 +4106,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     } finally {
       isSyncingRef.current = false;
     }
+    notifyLinkedViewportReady();
 
     const unsubscribe = store.subscribe((delta, currentStore) => {
       if (projectionGenerationRef.current !== generation
@@ -4028,9 +4290,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       } finally {
         isSyncingRef.current = false;
       }
+      notifyLinkedViewportReady();
     });
     return () => { unsubscribe(); };
-  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, followLatestViewport, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, settleDatasetViewportTransfer, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, followLatestViewport, mainSeriesRenderContext, materializeRuntimePaneLayout, notifyLinkedViewportReady, projectionSettings, publishDrawingProjectionStore, scheduleLeftHistoryDemandFlush, seriesReady, seriesStore, settleDatasetViewportTransfer, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -4042,12 +4305,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       hasRows: rows.length > 0,
       lastRestoreSource: lastViewportRestoreSourceRef.current,
       userInteracted: userInteractedRef.current,
-    })) return;
+    })) {
+      notifyLinkedViewportReady();
+      return;
+    }
 
     if (followLatestViewport(displayRowsRef.current)) {
       hasRestoredRangeRef.current = true;
       lastViewportRestoreSourceRef.current = "follow-latest";
       publishViewportRangeChange();
+      notifyLinkedViewportReady();
       return;
     }
 
@@ -4072,7 +4339,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = dataMeta?.source || null;
     if (restored) publishViewportRangeChange();
-  }, [captureVisibleRange, dataMeta, datasetKey, followLatestViewport, publishViewportRangeChange, savedVisibleRange, seriesStore]);
+    notifyLinkedViewportReady();
+  }, [captureVisibleRange, dataMeta, datasetKey, followLatestViewport, notifyLinkedViewportReady, publishViewportRangeChange, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -4790,6 +5058,21 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     drawingPaneSurfaces,
     supportsDrawingFeatures,
   ]);
+  const subscribeDrawingRevision = useCallback((
+    listener: (scopeKey: string, revision: number) => void,
+  ) => {
+    drawingRevisionListenersRef.current.add(listener);
+    return () => { drawingRevisionListenersRef.current.delete(listener); };
+  }, []);
+  const setLinkedDrawingRevision = useCallback((scopeKey: string, revision: number) => {
+    if (!scopeKey || !Number.isSafeInteger(revision) || revision < 0) return false;
+    const current = linkedDrawingRevisionsRef.current[scopeKey] ?? -1;
+    if (revision <= current) return true;
+    const next = { ...linkedDrawingRevisionsRef.current, [scopeKey]: revision };
+    linkedDrawingRevisionsRef.current = next;
+    setLinkedDrawingRevisions(next);
+    return true;
+  }, []);
   const handleDrawingApiChange = useCallback((
     paneId: string,
     paneDrawingKey: string,
@@ -4798,6 +5081,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     previousApi: DrawingEngineApi | null,
   ) => {
     if (api) {
+      drawingPublicationUnsubscribesByPaneRef.current.get(paneId)?.();
+      drawingPublicationUnsubscribesByPaneRef.current.set(paneId, api.subscribePublication((stamp) => {
+        if (stamp.documentRevision <= (linkedDrawingRevisionsRef.current[stamp.scopeKey] ?? -1)) return;
+        for (const listener of [...drawingRevisionListenersRef.current]) {
+          listener(stamp.scopeKey, stamp.documentRevision);
+        }
+      }));
       drawingApisByPaneRef.current.set(paneId, api);
       // The host consumes `initialHidden` when it mounts, while later user
       // changes flow through the chart-surface API. Replaying visibility here
@@ -4828,6 +5118,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       currentKey: drawingApiMountKeysByPaneRef.current.get(paneId) ?? null,
     });
     if (ownsRegistration) {
+      drawingPublicationUnsubscribesByPaneRef.current.get(paneId)?.();
+      drawingPublicationUnsubscribesByPaneRef.current.delete(paneId);
       drawingApisByPaneRef.current.delete(paneId);
       drawingApiMountKeysByPaneRef.current.delete(paneId);
     }
@@ -4868,6 +5160,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useImperativeHandle(ref, () => ({
     getVisibleRange: captureVisibleRange,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
+    setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     captureViewportTransfer,
     clearAllDrawings,
     setDrawingsHidden,
@@ -4934,6 +5232,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     prepareDrawingExport,
     resetAutoScale,
     seriesReady,
+    setLinkedCrosshairTime,
+    setLinkedVisibleTimeAnchor,
+    setLinkedVisibleTimeRange,
+    subscribeLinkedViewportReady,
+    subscribeDrawingRevision,
+    setLinkedDrawingRevision,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
   ]);
@@ -4941,6 +5245,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   return (
     <div
       className="chart-area multi-pane-chart"
+      data-rendering-suspended={suspended ? "true" : "false"}
       ref={wrapperRef}
       onPointerMove={handleChartPanePointerMove}
       onPointerLeave={handleChartPanePointerLeave}
@@ -5087,7 +5392,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         .filter((surface) => drawingPaneMountKeys.has(surface.drawingKey))
         .map((surface) => (
           <NativePaneDrawingHost
-            key={surface.drawingKey}
+            key={`${surface.drawingKey}:${linkedDrawingRevisions[surface.drawingKey] ?? 0}`}
             component={DrawingEngineHost}
             {...(surface.paneId === "main" ? { chartAdapter } : {})}
             paneId={surface.paneId}

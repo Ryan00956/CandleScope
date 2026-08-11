@@ -25,6 +25,9 @@ from app.exchanges.rate_limits import (
     RateLimitReservation,
     RateLimitRule,
 )
+from app.exchanges.plugins.binance.plugin import BinancePlugin
+from app.exchanges.plugins.okx.plugin import OkxPlugin
+from app.exchanges.registry import bootstrap_default_adapters
 
 
 class _FakeResponse:
@@ -228,6 +231,36 @@ class _ProviderRegistry:
     def get_plugin(self, exchange: str) -> _ProviderPlugin:
         assert exchange == "mock"
         return self._plugin
+
+
+class _NativeRegistry:
+    def __init__(self) -> None:
+        self._plugins = {"binance": BinancePlugin(), "okx": OkxPlugin()}
+
+    def get_plugin(self, exchange: str) -> Any:
+        return self._plugins[exchange]
+
+
+def _native_transport(config: IngestionConfig) -> TransportLayer:
+    transport = TransportLayer(config)
+    transport._registry = _NativeRegistry()  # type: ignore[assignment]
+    return transport
+
+
+def test_primary_provider_exposes_quota_metadata_without_native_rest_route() -> None:
+    descriptor = StreamDescriptor(
+        symbol="BTCUSDT",
+        stream_type=StreamType.KLINE,
+        interval="1m",
+        exchange="binance",
+        market_type="spot",
+    )
+    request = TransportRequest(descriptor=descriptor, limit=1000)
+    plugin = bootstrap_default_adapters().get_plugin("binance")
+
+    assert plugin.protocol().rest_request(request) is None
+    admission = asyncio.run(TransportLayer(IngestionConfig()).http_admission(request))
+    assert admission.bucket_key == "binance:spot:request_weight:ip"
 
 
 def _provider_request(
@@ -488,7 +521,7 @@ def test_cancelled_provider_fetch_completes_owned_probe_as_unknown() -> None:
 
 def test_http_fetch_preserves_okx_rate_limit_metadata() -> None:
     async def run() -> TransportError:
-        transport = TransportLayer(IngestionConfig())
+        transport = _native_transport(IngestionConfig())
         transport._http_session = _FakeSession()  # type: ignore[assignment]
         req = TransportRequest(
             descriptor=StreamDescriptor(
@@ -519,7 +552,7 @@ def test_http_fetch_accounts_for_each_physical_endpoint_attempt() -> None:
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         transport._http_session = _SequenceSession(
             [  # type: ignore[assignment]
                 _FakeResponse({"msg": "temporary"}, status=500),
@@ -569,7 +602,7 @@ def test_http_fetch_accounts_owned_response_on_exact_reservation(
         _CountingRateLimits,
         bool,
     ]:
-        transport = TransportLayer(
+        transport = _native_transport(
             IngestionConfig(
                 http_base_urls_futures=[
                     "https://one.example",
@@ -684,7 +717,7 @@ def test_http_setup_without_endpoints_settles_exact_reservation() -> None:
         list[dict[str, object]],
         bool,
     ]:
-        transport = TransportLayer(IngestionConfig(http_base_urls_futures=[]))
+        transport = _native_transport(IngestionConfig(http_base_urls_futures=[]))
         transport._http_session = _SequenceSession([])  # type: ignore[assignment]
         manager = _TrackingRateLimitManager()
         quota_request = HistoricalRequest(
@@ -740,7 +773,7 @@ def test_http_setup_cancellation_settles_exact_reservation(
         list[dict[str, object]],
         bool,
     ]:
-        transport = TransportLayer(IngestionConfig())
+        transport = _native_transport(IngestionConfig())
 
         async def cancel_setup() -> None:
             raise asyncio.CancelledError
@@ -793,7 +826,7 @@ def test_http_setup_cancellation_settles_exact_reservation(
 
 def test_http_429_defers_from_exact_reservation_manager() -> None:
     async def run() -> tuple[RateLimitDeferred, dict[str, object], _CountingRateLimits]:
-        transport = TransportLayer(
+        transport = _native_transport(
             IngestionConfig(
                 http_base_urls_futures=["https://one.example"],
             )
@@ -853,7 +886,7 @@ def test_http_200_parse_failure_accounts_headers_before_normal_failover() -> Non
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession(
             [
                 _MalformedJsonResponse(
@@ -905,7 +938,7 @@ def test_http_fetch_does_not_fail_over_binance_invalid_parameter() -> None:
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession([_BinanceInvalidParameterResponse()])
         transport._http_session = session  # type: ignore[assignment]
         request = TransportRequest(
@@ -942,7 +975,7 @@ def test_http_fetch_does_not_fail_over_shared_rate_limit_response(
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession(
             [
                 _BinanceRateLimitResponse(status=status_code),
@@ -975,7 +1008,7 @@ def test_http_fetch_returns_typed_deferral_after_physical_418() -> None:
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession([_BinanceRateLimitResponse(status=418)])
         transport._http_session = session  # type: ignore[assignment]
         request = TransportRequest(
@@ -1008,7 +1041,7 @@ def test_rate_limit_body_read_failure_preserves_typed_deferral_without_failover(
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example", "https://two.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession(
             [
                 _BinanceRateLimitBodyReadFailureResponse(status=status_code),
@@ -1043,7 +1076,7 @@ def test_request_queued_behind_physical_418_rechecks_before_sending() -> None:
         config = IngestionConfig(
             http_base_urls_futures=["https://one.example"],
         )
-        transport = TransportLayer(config)
+        transport = _native_transport(config)
         session = _SequenceSession(
             [
                 _GatedBinanceRateLimitResponse(entered, release),

@@ -30,6 +30,7 @@ from app.plugin_runtime_registry_v3 import (
     load_runtime_registry_roots_bytes,
     verify_runtime_registry_bytes,
 )
+from app.plugin_runtime_registry_v3 import service as registry_service
 from scripts import candlescope_runtime_registry
 from tests.plugin_platform_multi_runtime_testkit import build_v3_runtime_bundle
 from tests.plugin_platform_runtime_registry_testkit import (
@@ -61,6 +62,64 @@ def _make_service(
         fixture.payloads if payloads is None else payloads
     )
     return fixture.service(root, fetcher=fetcher), fetcher
+
+
+def test_quarantine_move_retries_a_transient_permission_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "quarantine" / "target"
+    source.mkdir()
+    target.parent.mkdir()
+    real_replace = registry_service.os.replace
+    attempts = 0
+    sleeps: list[float] = []
+
+    def flaky_replace(current: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("transient file lock")
+        real_replace(current, destination)
+
+    monkeypatch.setattr(registry_service.os, "replace", flaky_replace)
+    monkeypatch.setattr(registry_service.time, "sleep", sleeps.append)
+
+    registry_service._replace_quarantined_path(source, target)
+
+    assert attempts == 3
+    assert sleeps == [0.05, 0.1]
+    assert target.is_dir()
+    assert not source.exists()
+
+
+def test_quarantine_move_fails_closed_after_the_bounded_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "quarantine" / "target"
+    source.mkdir()
+    target.parent.mkdir()
+    attempts = 0
+    sleeps: list[float] = []
+
+    def locked_replace(_current: Path, _destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("permanent file lock")
+
+    monkeypatch.setattr(registry_service.os, "replace", locked_replace)
+    monkeypatch.setattr(registry_service.time, "sleep", sleeps.append)
+
+    with pytest.raises(PermissionError, match="permanent file lock"):
+        registry_service._replace_quarantined_path(source, target)
+
+    assert attempts == registry_service.QUARANTINE_REPLACE_ATTEMPTS
+    assert sleeps == pytest.approx([0.05, 0.1, 0.15, 0.2])
+    assert source.is_dir()
+    assert not target.exists()
 
 
 def _activation_record(

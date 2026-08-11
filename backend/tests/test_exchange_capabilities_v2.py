@@ -60,7 +60,10 @@ def test_every_declared_builtin_channel_has_exactly_one_contract_fixture() -> No
             assert case.normalizer_samples
             expectation = expected[contract_case_channel_key(case)]
             expected_sources = set()
-            if TransportMode.WEBSOCKET in expectation.realtime_transports:
+            if any(
+                mode in expectation.realtime_transports
+                for mode in (TransportMode.WEBSOCKET, TransportMode.PLUGIN_STREAM)
+            ):
                 expected_sources.add(DataSource.WEBSOCKET)
             if any(
                 mode in expectation.realtime_transports
@@ -161,16 +164,19 @@ def test_market_specific_capabilities_do_not_advertise_synthetic_ticker_fields()
         "futures",
     )
     assert binance_futures is not None
-    assert set(binance_futures.unavailable_fields) == {
-        "prev_close_price",
+    assert set(binance_futures.available_fields) == {
+        "last_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "quote_volume",
         "bid_price",
-        "bid_qty",
         "ask_price",
-        "ask_qty",
     }
-    assert set(binance_futures.available_fields).isdisjoint(
-        binance_futures.unavailable_fields
-    )
+    assert binance_futures.unavailable_fields == ()
+    assert "prev_close_price" not in binance_futures.available_fields
+    assert "bid_qty" not in binance_futures.available_fields
 
     okx_futures = registry.get_plugin("okx").capabilities().channel_capability(
         MarketChannel.TICKER,
@@ -194,20 +200,27 @@ def test_builtin_depth_is_replaceable_snapshot_not_ordered_delta() -> None:
         assert depth.delivery is DeliveryClass.SNAPSHOT
         assert depth.snapshot is True
         assert depth.delta is False
-        assert depth.sequence == "monotonic_id"
+        assert depth.sequence == "none"
         assert depth.resync == "replace_snapshot"
         assert depth.params == {"depth_levels": [5, 10, 20]}
+        assert "Local snapshot revisions are not exchange sequence numbers" in (
+            depth.known_limitations
+        )
 
     okx = registry.get_plugin("okx").capabilities()
-    assert okx.channel_capability(MarketChannel.DEPTH, "spot") is None
-    assert okx.channel_capability(MarketChannel.DEPTH, "futures") is None
+    for market_type in ("spot", "futures"):
+        depth = okx.channel_capability(MarketChannel.DEPTH, market_type)
+        assert depth is not None
+        assert depth.delivery is DeliveryClass.SNAPSHOT
+        assert depth.sequence == "none"
+        assert depth.resync == "replace_snapshot"
 
 
 @pytest.mark.parametrize(
     ("market_type", "expected_limit"),
     [("spot", 5000), ("futures", 1000)],
 )
-def test_binance_depth_request_respects_market_specific_limit(
+def test_binance_native_depth_rest_protocol_is_retired(
     market_type: str,
     expected_limit: int,
 ) -> None:
@@ -224,12 +237,12 @@ def test_binance_depth_request_respects_market_specific_limit(
         TransportRequest(descriptor, limit=5000)
     )
 
-    assert request is not None
-    assert request.params["limit"] == expected_limit
+    del expected_limit
+    assert request is None
 
 
 @pytest.mark.parametrize("market_type", ["spot", "futures"])
-def test_binance_recent_trade_request_omits_unsupported_time_range(
+def test_binance_native_recent_trade_rest_protocol_is_retired(
     market_type: str,
 ) -> None:
     bootstrap_default_adapters()
@@ -249,11 +262,10 @@ def test_binance_recent_trade_request_omits_unsupported_time_range(
         )
     )
 
-    assert request is not None
-    assert request.params == {"symbol": "BTCUSDT", "limit": 1000}
+    assert request is None
 
 
-def test_binance_recent_trade_fixture_does_not_invent_websocket_order_ids() -> None:
+def test_binance_ccxt_trade_fixture_does_not_invent_venue_order_ids() -> None:
     trade_cases = [
         case
         for case in builtin_exchange_contract_cases()["binance"]
@@ -262,9 +274,14 @@ def test_binance_recent_trade_fixture_does_not_invent_websocket_order_ids() -> N
 
     assert len(trade_cases) == 2
     for case in trade_cases:
-        row = case.sample_http_payload[0]
-        assert "buyerOrderId" not in row
-        assert "sellerOrderId" not in row
+        sample = next(
+            item
+            for item in case.normalizer_samples
+            if item.source is DataSource.HTTP
+        )
+        assert sample.payload["kind"] == "trade"
+        assert "buyerOrderId" not in sample.payload["value"]
+        assert "sellerOrderId" not in sample.payload["value"]
 
 
 def test_contract_rejects_schema_v2_without_channel_declarations() -> None:

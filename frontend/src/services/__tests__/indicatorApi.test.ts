@@ -9,6 +9,7 @@ let computeIndicatorBatch: typeof IndicatorApiModule.computeIndicatorBatch;
 let computeIndicatorRange: typeof IndicatorApiModule.computeIndicatorRange;
 let computeIndicatorRangeBatch: typeof IndicatorApiModule.computeIndicatorRangeBatch;
 let fetchScriptRuntimes: typeof IndicatorApiModule.fetchScriptRuntimes;
+let fetchIndicatorWebSocketLimits: typeof IndicatorApiModule.fetchIndicatorWebSocketLimits;
 
 test.before(async () => {
   server = await createServer({
@@ -24,12 +25,30 @@ test.before(async () => {
     computeIndicatorBatch,
     computeIndicatorRange,
     computeIndicatorRangeBatch,
+    fetchIndicatorWebSocketLimits,
     fetchScriptRuntimes,
   } = module);
 });
 
 test.after(async () => {
   await server?.close();
+});
+
+test("indicator WebSocket limits are parsed from diagnostics and fail closed", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    websocket: { maxSubscriptions: 50 },
+  }), { headers: { "Content-Type": "application/json" } });
+  assert.deepEqual(await fetchIndicatorWebSocketLimits(), { maxSubscriptions: 50 });
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    websocket: { maxSubscriptions: 0 },
+  }), { headers: { "Content-Type": "application/json" } });
+  await assert.rejects(
+    fetchIndicatorWebSocketLimits(),
+    /maxSubscriptions must be a positive integer/,
+  );
 });
 
 test("range preserves a typed HTTP 202 payload and forwards AbortSignal", async (context) => {

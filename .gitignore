@@ -247,6 +247,9 @@ frontend/*.tsbuildinfo
 **/output/playwright/
 docs/perf-baselines/*
 !docs/perf-baselines/replay-v2-account-history-20260726.json
+!docs/perf-baselines/multi-chart-workspace/
+docs/perf-baselines/multi-chart-workspace/*
+!docs/perf-baselines/multi-chart-workspace/*.json
 !docs/perf-baselines/drawing-engine-v2/
 docs/perf-baselines/drawing-engine-v2/*
 !docs/perf-baselines/drawing-engine-v2/README.md

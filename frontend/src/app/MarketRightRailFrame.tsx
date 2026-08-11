@@ -31,7 +31,10 @@ export interface MarketRightRailFrameProps {
   readonly source?: "live" | "replay";
   readonly views: readonly MarketRailViewDescriptor[];
   readonly openViewIds: readonly string[];
+  /** Hide content panel without clearing openViewIds (full restore on expand). */
+  readonly panelCollapsed?: boolean;
   readonly onToggleView: (viewId: string) => void;
+  readonly onTogglePanelCollapsed?: () => void;
   readonly renderView: (viewId: string, height: number) => ReactNode;
   readonly layout: MarketRightRailLayout;
   readonly viewHeights?: Readonly<Record<string, number>>;
@@ -46,11 +49,38 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /** VS Code-style right rail: activity bar + optional stacked multi-view panel. */
+function PanelCollapseIcon({ collapsed }: { collapsed: boolean }) {
+  // Chevron: point outward (right) when collapsed to show expand; inward when open to hide.
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      {collapsed ? (
+        <path
+          d="M6.5 3.5 11 8l-4.5 4.5"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : (
+        <path
+          d="M9.5 3.5 5 8l4.5 4.5"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+    </svg>
+  );
+}
+
 export default function MarketRightRailFrame({
   source = "live",
   views,
   openViewIds,
+  panelCollapsed = false,
   onToggleView,
+  onTogglePanelCollapsed,
   renderView,
   layout,
   viewHeights = {},
@@ -80,7 +110,10 @@ export default function MarketRightRailFrame({
     () => orderedOpenViews(views, openViewIds),
     [openViewIds, views],
   );
-  const panelOpen = openViews.length > 0;
+  // hasOpenViews = content selected; panelOpen = content actually shown.
+  // panelCollapsed hides the panel without clearing openViewIds (full restore).
+  const hasOpenViews = openViews.length > 0;
+  const panelOpen = hasOpenViews && !panelCollapsed;
   const width = transientWidth ?? layout.width;
   const effectiveHeights = transientHeights ?? viewHeights;
 
@@ -250,6 +283,9 @@ export default function MarketRightRailFrame({
     [views],
   );
 
+  const canTogglePanel = hasOpenViews || panelCollapsed;
+  const collapseLabel = panelCollapsed ? "显示侧栏" : "隐藏侧栏";
+
   return (
     <aside
       ref={railRef}
@@ -259,21 +295,26 @@ export default function MarketRightRailFrame({
       data-runtime-source={source}
       data-market-shell-owner="right-rail"
       data-panel-open={panelOpen ? "true" : "false"}
+      data-panel-collapsed={panelCollapsed ? "true" : "false"}
     >
-      {panelOpen && (
+      {/* Keep open views mounted while collapsed so expand fully restores local UI state. */}
+      {hasOpenViews && (
         <>
-          <div
-            className={`wl-resize-handle ${widthResizing ? "active" : ""}`}
-            onPointerDown={startWidthResize}
-            role="separator"
-            aria-label="调整右侧栏宽度"
-            aria-orientation="vertical"
-          />
+          {panelOpen && (
+            <div
+              className={`wl-resize-handle ${widthResizing ? "active" : ""}`}
+              onPointerDown={startWidthResize}
+              role="separator"
+              aria-label="调整右侧栏宽度"
+              aria-orientation="vertical"
+            />
+          )}
           <div
             ref={panelRef}
             className="market-rail-panel"
-            style={{ width }}
+            style={{ width, display: panelOpen ? undefined : "none" }}
             data-market-shell-owner="right-rail-panel"
+            aria-hidden={panelOpen ? undefined : true}
           >
             {openViews.map((view, index) => {
               const height = allocatedHeights[view.id] ?? 0;
@@ -339,6 +380,22 @@ export default function MarketRightRailFrame({
             </button>
           );
         })}
+        {onTogglePanelCollapsed && (
+          <button
+            type="button"
+            className={`market-activity-item market-activity-collapse ${panelCollapsed ? "active" : ""}`}
+            title={collapseLabel}
+            aria-label={collapseLabel}
+            aria-pressed={panelCollapsed}
+            data-rail-action="toggle-panel"
+            disabled={!canTogglePanel}
+            onClick={onTogglePanelCollapsed}
+          >
+            <span className="market-activity-icon" aria-hidden="true">
+              <PanelCollapseIcon collapsed={panelCollapsed} />
+            </span>
+          </button>
+        )}
       </nav>
     </aside>
   );

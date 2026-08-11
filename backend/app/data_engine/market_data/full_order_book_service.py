@@ -156,6 +156,7 @@ class FullOrderBookService:
         engine: _FullOrderBookEngine | None = None,
         hub: MarketEventHub | None = None,
         max_streams: int = 16,
+        max_levels_per_side: int = 5_000,
         upstream_queue_size: int = 4096,
         snapshot_limit: int = 1000,
         snapshot_timeout_seconds: float = 5.0,
@@ -166,6 +167,10 @@ class FullOrderBookService:
     ) -> None:
         self._factory = ingestion_factory
         self._max_streams = _positive_int(max_streams, "max_streams")
+        self._max_levels_per_side = _positive_int(
+            max_levels_per_side,
+            "max_levels_per_side",
+        )
         self._upstream_queue_size = _positive_int(
             upstream_queue_size,
             "upstream_queue_size",
@@ -173,6 +178,10 @@ class FullOrderBookService:
         self._snapshot_limit = _positive_int(snapshot_limit, "snapshot_limit")
         if self._snapshot_limit != 1000:
             raise ValueError("Full Order Book snapshot_limit must be 1000")
+        if self._max_levels_per_side < self._snapshot_limit:
+            raise ValueError(
+                "max_levels_per_side must hold the configured REST snapshot",
+            )
         self._snapshot_timeout_seconds = _positive_float(
             snapshot_timeout_seconds,
             "snapshot_timeout_seconds",
@@ -204,6 +213,7 @@ class FullOrderBookService:
 
             engine = FullOrderBookEngine(
                 max_streams=self._max_streams,
+                max_levels_per_side=self._max_levels_per_side,
                 max_buffered_deltas_per_stream=self._upstream_queue_size,
             )
         self.engine = engine

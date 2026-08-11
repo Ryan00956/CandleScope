@@ -35,6 +35,26 @@ const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
 export const INITIAL_HISTORY_COUNT_BACK = 1_500;
 export const INITIAL_VIEWPORT_COUNT_BACK = 500;
+// A 4x4 Cell is only about 300 CSS px wide at the release viewport. 128 bars
+// preserves enough context for the shipped MA/RSI/SMA fixtures, then the
+// focused Cell uses the existing serialized hydration lane to reach 1,500.
+// At the 1,920 px release viewport a 4x4 plot is about 320 CSS pixels wide.
+// Sixty-four bars cover it at roughly 5 px/bar; the active cell still hydrates
+// to the normal 1,500-bar history after first paint.
+export const DENSE_WORKSPACE_VIEWPORT_COUNT_BACK = 64;
+export const DENSE_WORKSPACE_CELL_THRESHOLD = 8;
+
+export function shouldEnableWorkspaceIntervalPrefetch(cellCount: number): boolean {
+  return Math.max(0, Math.floor(Number(cellCount) || 0)) < DENSE_WORKSPACE_CELL_THRESHOLD;
+}
+/**
+ * The first viewport request is a non-blocking storage probe. A populated
+ * page can paint immediately without occupying one of the browser's limited
+ * HTTP/1.1 connection slots while a tail repair runs. Empty/pending results
+ * enter the existing bounded retry path below, where the long-poll budget is
+ * useful for cold backfill.
+ */
+export const INITIAL_VIEWPORT_PROBE_WAIT_MS = 0;
 export const INITIAL_VIEWPORT_MAX_WAIT_MS = 1_500;
 export const INITIAL_HISTORY_SOURCE_ROW_BUDGET = 20_000;
 export const WARM_CACHE_REVALIDATE_TTL_MS = 60_000;
@@ -160,6 +180,7 @@ export interface UseChartInitialLoadOptions {
   exchange: ExchangeId;
   marketType: MarketType;
   nativeIntervalValues: readonly IntervalString[];
+  initialViewportCountBackCap?: number;
   getFromCache(symbol: SymbolCode, interval: IntervalString): KlineBar[];
   resolveInitialRows?: ResolveInitialRows | null;
   seriesDataFeed: SeriesDataFeed;
@@ -210,6 +231,15 @@ export function planInitialViewportCountBack(
     INITIAL_VIEWPORT_COUNT_BACK,
     planInitialHistoryCountBack(interval, nativeIntervalValues),
   );
+}
+
+export function initialViewportCountBackCapForCellCount(
+  visibleCellCount: number,
+): number | undefined {
+  return Number.isFinite(visibleCellCount)
+    && Math.floor(visibleCellCount) >= DENSE_WORKSPACE_CELL_THRESHOLD
+    ? DENSE_WORKSPACE_VIEWPORT_COUNT_BACK
+    : undefined;
 }
 
 /**
@@ -271,6 +301,7 @@ export function useChartInitialLoad({
   exchange,
   marketType,
   nativeIntervalValues,
+  initialViewportCountBackCap,
   getFromCache,
   resolveInitialRows,
   seriesDataFeed,
@@ -370,7 +401,13 @@ export function useChartInitialLoad({
 
     const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
     const initialHistoryCountBack = planInitialHistoryCountBack(intv, nativeIntervalValues);
-    const initialViewportCountBack = planInitialViewportCountBack(intv, nativeIntervalValues);
+    const plannedViewportCountBack = planInitialViewportCountBack(intv, nativeIntervalValues);
+    const initialViewportCountBack = initialViewportCountBackCap == null
+      ? plannedViewportCountBack
+      : Math.min(
+          plannedViewportCountBack,
+          Math.max(1, Math.floor(initialViewportCountBackCap)),
+        );
     const initialEpoch = seriesDataFeed.beginEpoch(series);
     controller.signal.addEventListener("abort", () => {
       seriesDataFeed.cancelSeriesRepairs(series);
@@ -708,8 +745,27 @@ export function useChartInitialLoad({
       countBack: initialViewportCountBack,
     });
 
-    const initialRequests: Promise<unknown>[] = [];
-    if (shouldRequestInitialLatest(intv, nativeIntervalValues)) {
+    try {
+      const result = await seriesDataFeed.getBars(series, {
+        countBack: initialViewportCountBack,
+        maxWaitMs: INITIAL_VIEWPORT_PROBE_WAIT_MS,
+        intent: "viewport",
+        source: "initial-history",
+        signal: controller.signal,
+      });
+      markPerf("chart.initialLoad.history.response", {
+        source: result?.source || "unknown",
+        bars: result?.data?.length || 0,
+      });
+      commitHistoryResult(result);
+    } catch {
+      if (!controller.signal.aborted) startInitialHistoryRetry();
+    }
+
+    // A warm storage page is already a better initial seed than /latest and
+    // avoids doubling the per-Cell bootstrap traffic. Cold/empty probes retain
+    // the latest fast path before the bounded history retry takes ownership.
+    if (!shownInitialData && shouldRequestInitialLatest(intv, nativeIntervalValues)) {
       markPerf("chart.initialLoad.latest.request", {
         exchange: ex,
         marketType: mt,
@@ -717,47 +773,29 @@ export function useChartInitialLoad({
         interval: intv,
         limit: 5,
       });
-      initialRequests.push(seriesDataFeed.getLatest(series, {
+      await seriesDataFeed.getLatest(series, {
         limit: 5,
         source: "initial-latest",
         signal: controller.signal,
         commit: "patch-active",
-      })
-        .then((result) => {
-          markPerf("chart.initialLoad.latest.response", {
-            source: result?.source || "unknown",
-            bars: result?.data?.length || 0,
-          });
-          commitQuickResult(result);
-        })
-        .catch(() => null));
+      }).then((result) => {
+        markPerf("chart.initialLoad.latest.response", {
+          source: result?.source || "unknown",
+          bars: result?.data?.length || 0,
+        });
+        commitQuickResult(result);
+      }).catch(() => null);
     } else {
       markPerf("chart.initialLoad.latest.skipped", {
         exchange: ex,
         marketType: mt,
         symbol: sym,
         interval: intv,
-        reason: "derived-interval-history-owns-tail",
+        reason: shownInitialData
+          ? "viewport-history-already-renderable"
+          : "derived-interval-history-owns-tail",
       });
     }
-    initialRequests.push(seriesDataFeed.getBars(series, {
-        countBack: initialViewportCountBack,
-        maxWaitMs: INITIAL_VIEWPORT_MAX_WAIT_MS,
-        intent: "viewport",
-        source: "initial-history",
-        signal: controller.signal,
-      })
-        .then((result) => {
-          markPerf("chart.initialLoad.history.response", {
-            source: result?.source || "unknown",
-            bars: result?.data?.length || 0,
-          });
-          commitHistoryResult(result);
-        })
-        .catch(() => {
-          if (!controller.signal.aborted) startInitialHistoryRetry();
-        }));
-    await Promise.all(initialRequests);
 
     if (shownInitialData) {
       setLoading(false);
@@ -773,6 +811,7 @@ export function useChartInitialLoad({
     markChartDataTransition,
     marketType,
     nativeIntervalValues,
+    initialViewportCountBackCap,
     pendingInitialHistoryRef,
     replaceChartData,
     resolveInitialRows,

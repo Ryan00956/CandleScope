@@ -1,0 +1,88 @@
+{
+  "$schema": "candlescope.multi-chart.phase/1",
+  "phase": 1,
+  "status": "pass",
+  "capturedAt": "2026-08-06T16:17:30+08:00",
+  "baseCommit": "9aa218f2",
+  "scope": {
+    "frontendFilesChanged": true,
+    "backendFilesChanged": false,
+    "defaultVisibleCellLimit": 4,
+    "hardLimits": {
+      "cellsPerWindow": 16,
+      "windowsPerWorkspace": 4,
+      "cellsPerApp": 64,
+      "layoutNodes": 31,
+      "layoutDepth": 16
+    },
+    "flags": {
+      "MULTI_CHART_16_ENABLED": false,
+      "MULTI_WINDOW_ENABLED": false,
+      "MULTI_CHART_64_ENABLED": false
+    }
+  },
+  "tests": {
+    "workspaceTargeted": {
+      "command": "npx tsx --test \"src/features/chart-workspace/**/*.test.{ts,tsx}\"",
+      "passed": 72,
+      "failed": 0
+    },
+    "frontendFullGate": {
+      "command": "npm run check",
+      "architecture": "pass",
+      "plugins": "pass",
+      "typecheck": "pass",
+      "lint": "pass",
+      "testsPassed": 3002,
+      "testsFailed": 0,
+      "productionBuild": "pass"
+    }
+  },
+  "migration": {
+    "browser": "Chrome headed via @playwright/cli",
+    "url": "http://127.0.0.1:15285/",
+    "seedRoute": "http://127.0.0.1:15285/replay.html",
+    "legacySlot": {
+      "database": "candlescope-chart-workspaces",
+      "store": "workspaces",
+      "recordCount": 1,
+      "documentSchemaVersion": 5,
+      "beforeSha256": "25cf5c8406ddf8c35d00459e496ccb86868607578516b6a07a9823028c408d90",
+      "afterSha256": "25cf5c8406ddf8c35d00459e496ccb86868607578516b6a07a9823028c408d90",
+      "byteIdentical": true
+    },
+    "v6Slot": {
+      "database": "candlescope-chart-workspaces-v6",
+      "store": "workspaces-v6",
+      "recordCount": 1,
+      "documentSchemaVersion": 6,
+      "activeWindowId": "main-window",
+      "windowCount": 1,
+      "cellCount": 4,
+      "migratedActiveCellId": "cell-3",
+      "preservedIndicator": "phase1-indicator",
+      "preservedDrawingLayerSet": "3"
+    },
+    "revisionStability": {
+      "settledSampleA": 4,
+      "settledSampleB": 4,
+      "sampleIntervalSeconds": 8,
+      "unexpectedRevisionGrowth": 0
+    }
+  },
+  "browserAcceptance": {
+    "visibleCells": 4,
+    "layout": "quad",
+    "splitRightDisabledAtLimit": true,
+    "splitDownDisabledAtLimit": true,
+    "consoleErrors": 0,
+    "runtimeAlerts": 0,
+    "screenshot": "output/playwright/multi-chart-capacity/phase1-v6-migration-quad.png"
+  },
+  "rollback": {
+    "flagsDefaultOff": true,
+    "legacyV5SlotPreserved": true,
+    "v6SlotDeleteRequired": false,
+    "procedure": "Revert the Phase 1 commit and keep both v5 and v6 stores. The old build continues reading the unchanged v5 store."
+  }
+}

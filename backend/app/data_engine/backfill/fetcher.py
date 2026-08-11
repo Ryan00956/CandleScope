@@ -1069,9 +1069,25 @@ class HistoricalFetcher:
                     market_type=task.market_type,
                 )
             )
-            endpoint = protocol.rest_path(
-                descriptor.stream_type, descriptor.market_type
+            endpoint = None
+            provider_endpoint = getattr(
+                plugin,
+                "provider_rate_limit_endpoint",
+                None,
             )
+            if callable(provider_endpoint):
+                endpoint = provider_endpoint(
+                    request
+                    or TransportRequest(
+                        descriptor=descriptor,
+                        limit=self._cfg.fetch_batch_size,
+                    )
+                )
+            if not endpoint:
+                endpoint = protocol.rest_path(
+                    descriptor.stream_type,
+                    descriptor.market_type,
+                )
         except Exception:
             endpoint = None
         return endpoint or "kline"

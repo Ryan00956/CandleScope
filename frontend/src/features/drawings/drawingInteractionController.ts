@@ -1379,6 +1379,10 @@ export interface DrawingInteractionRuntime {
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
   selectedPrimId: string | null;
   selectedDrawingMeta: SelectedDrawingMeta | null;
+  subscribeVisibleScenePublication(
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    options?: Readonly<{ replayLastPublication?: boolean }>,
+  ): () => void;
   editingTextId: string | null;
   editingTextValue: string;
   editingTextPos: ScreenPoint | null;
@@ -5301,6 +5305,7 @@ export function useDrawing({
     // Selected-text bag (for the floating format toolbar)
     selectedTextSnapshot,
     selectedTextBox,
+    subscribeVisibleScenePublication,
     updateSelectedText,
     updateSelectedDrawingStyle,
     deleteSelected,

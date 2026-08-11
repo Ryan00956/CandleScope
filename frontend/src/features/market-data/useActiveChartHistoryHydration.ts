@@ -286,6 +286,7 @@ export function useActiveChartHistoryHydration({
       controller.abort();
       if (timer != null) clearTimeout(timer);
       unsubscribe();
+      priorityGate.cancelQueued(`active-history-hydration:${sessionKey}`);
     };
   }, [
     commitMergedChartData,

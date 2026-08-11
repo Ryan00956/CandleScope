@@ -1,12 +1,13 @@
 """
 Real-time Ingestion — Market Data Ingress Pipeline.
 
-Six-layer architecture:
+Layered architecture:
   L1 Transport   → raw WS / HTTP I/O
   L2 Session     → WS lifecycle, reconnect, health
   L3 FeedControl → WS ↔ HTTP failover
   L4 Normalize   → raw JSON → MarketEvent
-  L5 Continuity  → dedup, gap detection, backfill
+  L5 Continuity  → dedup, gap detection
+  L5.5 Recovery  → bounded authoritative REST gap repair
   L6 Delivery    → fan-out to subscribers (callbacks / async iterators)
 
 Usage::
@@ -53,6 +54,7 @@ from .session_types import HealthCallback, SessionLike
 from .feed_control import FeedControlLayer
 from .normalize import NormalizeLayer
 from .continuity import ContinuityLayer
+from .recovery import RecoveryLayer
 from .delivery import DeliveryLayer, DeliveryQueueSubscriber
 from .shared_ws import SharedWsHubRegistry, SharedWsSessionAdapter
 
@@ -78,6 +80,7 @@ __all__ = [
     "FeedControlLayer",
     "NormalizeLayer",
     "ContinuityLayer",
+    "RecoveryLayer",
     "DeliveryLayer",
     "DeliveryQueueSubscriber",
     # Orchestrator
@@ -116,19 +119,23 @@ class StreamPipeline:
             descriptor,
             calendar_resolver=calendar_resolver,
         )
+        self.recovery = RecoveryLayer(config, transport, descriptor)
         self.delivery = DeliveryLayer(config, descriptor)
 
-        # Wire: L3 → L4 → L5 → L6
+        # Wire: L3 → L4 → L5 → L5.5 → L6
         self.feed_control.on_data(self.normalize.ingest)
         self.normalize.on_event(self.continuity.ingest)
-        self.continuity.on_event(self.delivery.deliver_event)
-        self.continuity.on_gap(self.delivery.deliver_gap)
+        self.continuity.on_event(self.recovery.ingest_event)
+        self.continuity.on_gap(self.recovery.ingest_gap)
+        self.recovery.on_event(self.delivery.deliver_event)
+        self.recovery.on_gap(self.delivery.deliver_gap)
 
     async def start(self) -> None:
         await self.feed_control.start()
 
     async def stop(self) -> None:
         await self.feed_control.stop()
+        await self.recovery.stop()
         await self.delivery.close_all_subscribers()
 
     def on_health_change(self, callback: HealthCallback) -> None:
@@ -142,6 +149,7 @@ class StreamPipeline:
             "feed_control": self.feed_control.snapshot(),
             "normalize": self.normalize.snapshot(),
             "continuity": self.continuity.snapshot(),
+            "recovery": self.recovery.snapshot(),
             "delivery": self.delivery.snapshot(),
         }
 
@@ -309,10 +317,53 @@ class MarketDataIngress:
     # ── Observability ────────────────────────────────────────
 
     def snapshot(self) -> dict:
+        from app.exchanges.ccxt_ext.runtime import get_shared_ccxt_runtime_pool
+
         return {
             "started": self._started,
             "transport": self._transport.snapshot(),
+            "shared_ws": self._shared_ws.snapshot(),
+            "ccxt_provider": get_shared_ccxt_runtime_pool().snapshot(),
             "pipelines": {
                 key: p.snapshot() for key, p in self._pipelines.items()
+            },
+        }
+
+    def capacity_snapshot(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict:
+        """Build a paged capacity view without materializing every pipeline."""
+        from app.exchanges.ccxt_ext.runtime import get_shared_ccxt_runtime_pool
+
+        safe_offset = max(0, int(offset))
+        safe_limit = min(100, max(0, int(limit)))
+        ordered = sorted(self._pipelines.items(), key=lambda item: item[0])
+        dedicated_connected = 0
+        for _key, pipeline in ordered:
+            feed = pipeline.feed_control.snapshot()
+            session = feed.get("session") if isinstance(feed, dict) else None
+            if (
+                isinstance(feed, dict)
+                and feed.get("mode") == "websocket"
+                and isinstance(session, dict)
+                and session.get("layer")
+                not in {"L2_SharedSession", "L2_CcxtProvider"}
+                and session.get("health") == "connected"
+            ):
+                dedicated_connected += 1
+        return {
+            "started": self._started,
+            "transport": self._transport.snapshot(),
+            "shared_ws": self._shared_ws.snapshot(),
+            "ccxt_provider": get_shared_ccxt_runtime_pool().snapshot(),
+            "pipeline_detail_prepared": True,
+            "pipeline_detail_total": len(ordered),
+            "dedicated_physical_websockets": dedicated_connected,
+            "pipelines": {
+                key: pipeline.snapshot()
+                for key, pipeline in ordered[safe_offset:safe_offset + safe_limit]
             },
         }

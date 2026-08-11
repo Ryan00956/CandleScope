@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { CURSOR_TOOL_IDS, DEFAULT_CURSOR_TOOL } from "./drawingModel.js";
 import type { DrawingToolId, FibonacciLevel, PassiveCursorToolId } from "./drawingTypes.js";
@@ -73,9 +73,36 @@ export interface DrawingToolStateRuntime {
   };
 }
 
-export function useDrawingToolState(): DrawingToolStateRuntime {
-  const [drawingTool, setDrawingToolState] = useState<DrawingToolId>(DEFAULT_CURSOR_TOOL);
-  const lastCursorToolRef = useRef<PassiveCursorToolId>(DEFAULT_CURSOR_TOOL);
+export interface DrawingToolSelectionRuntime {
+  drawingTool: DrawingToolId;
+  setDrawingTool(tool: DrawingToolId | null): void;
+}
+
+export function useDrawingToolSelectionState(
+  initialTool: DrawingToolId = DEFAULT_CURSOR_TOOL,
+): DrawingToolSelectionRuntime {
+  const [drawingTool, setDrawingToolState] = useState<DrawingToolId>(initialTool);
+  const lastCursorToolRef = useRef<PassiveCursorToolId>(
+    CURSOR_TOOL_IDS.has(initialTool as PassiveCursorToolId)
+      ? initialTool as PassiveCursorToolId
+      : DEFAULT_CURSOR_TOOL,
+  );
+  const setDrawingTool = useCallback((nextTool: DrawingToolId | null) => {
+    const normalizedTool = nextTool || lastCursorToolRef.current || DEFAULT_CURSOR_TOOL;
+    if (CURSOR_TOOL_IDS.has(normalizedTool as PassiveCursorToolId)) {
+      lastCursorToolRef.current = normalizedTool as PassiveCursorToolId;
+    }
+    setDrawingToolState(normalizedTool);
+  }, []);
+
+  return useMemo(() => ({ drawingTool, setDrawingTool }), [drawingTool, setDrawingTool]);
+}
+
+export function useDrawingToolState(
+  sharedSelection?: DrawingToolSelectionRuntime | null,
+): DrawingToolStateRuntime {
+  const localSelection = useDrawingToolSelectionState();
+  const drawingToolSelection = sharedSelection ?? localSelection;
   const [penColor, setPenColor] = useState("#f59e0b");
   const [penSize, setPenSize] = useState(2);
   const [textFontSize, setTextFontSize] = useState(14);
@@ -93,14 +120,6 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
     false,
   ));
   const [selectedDrawing, setSelectedDrawing] = useState<SelectedDrawingMeta | null>(null);
-
-  const setDrawingTool = useCallback((nextTool: DrawingToolId | null) => {
-    const normalizedTool = nextTool || lastCursorToolRef.current || DEFAULT_CURSOR_TOOL;
-    if (CURSOR_TOOL_IDS.has(normalizedTool as PassiveCursorToolId)) {
-      lastCursorToolRef.current = normalizedTool as PassiveCursorToolId;
-    }
-    setDrawingToolState(normalizedTool);
-  }, []);
 
   const handleFibLevelsChange = useCallback((levels: FibonacciLevel[] | null) => {
     setFibLevels(levels);
@@ -136,7 +155,7 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
 
   return {
     view: {
-      drawingTool,
+      drawingTool: drawingToolSelection.drawingTool,
       penColor,
       penSize,
       textFontSize,
@@ -151,7 +170,7 @@ export function useDrawingToolState(): DrawingToolStateRuntime {
       selectedDrawing,
     },
     actions: {
-      setDrawingTool,
+      setDrawingTool: drawingToolSelection.setDrawingTool,
       setPenColor,
       setPenSize,
       setTextFontSize,

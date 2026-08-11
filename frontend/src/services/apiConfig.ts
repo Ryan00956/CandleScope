@@ -8,7 +8,9 @@ function normalizeApiBase(value: unknown): HttpApiBase {
   return base.endsWith("/") ? base.slice(0, -1) : base;
 }
 
-export const API_BASE = normalizeApiBase(import.meta.env?.VITE_API_BASE);
+export const API_BASE = normalizeApiBase(
+  globalThis.window?.candlescopeDesktop?.apiBase || import.meta.env?.VITE_API_BASE,
+);
 
 export function httpBaseToWsBase(httpBase: HttpApiBase): WebSocketApiBase {
   if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;

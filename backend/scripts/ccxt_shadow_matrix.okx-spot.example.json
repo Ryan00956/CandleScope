@@ -1,0 +1,17 @@
+{
+  "profile": "okx_spot",
+  "targets": [
+    {
+      "symbol": "BTC-USDT",
+      "ccxt_symbol": "BTC/USDT",
+      "interval": "1m"
+    },
+    {
+      "symbol": "ETH-USDT",
+      "ccxt_symbol": "ETH/USDT",
+      "interval": "1m"
+    }
+  ],
+  "duration_seconds": 65,
+  "startup_timeout_seconds": 45
+}

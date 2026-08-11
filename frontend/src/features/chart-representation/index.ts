@@ -45,6 +45,7 @@ export {
   compareAxisTime,
   findDisplayIndexForAxisAnchor,
   findLastDisplayIndexForSourceTime,
+  findNumericDisplayIndexForTimeAnchor,
   isOrdinalAxisTime,
   mapSourceTimeRangeToDisplayLogicalRange,
   mapSourceViewportAnchorToDisplayLogicalRange,

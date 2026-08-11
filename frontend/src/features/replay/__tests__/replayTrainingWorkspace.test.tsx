@@ -519,13 +519,16 @@ test("workspace preferences inherit live layout once and then persist only insid
   storage.setItem("candlescope-order-book-height", "430");
   const initial = loadReplayWorkspacePreferences("adapter-1", storage);
   assert.equal(initial.railWidth, 410);
-  assert.deepEqual(initial.openViewIds, ["replay-capabilities"]);
+  // Legacy collapsed rail → hide panel while keeping open views restorable.
+  assert.deepEqual(initial.openViewIds, ["replay-watchlist", "replay-capabilities"]);
+  assert.equal(initial.panelCollapsed, true);
   assert.equal(initial.viewHeights["replay-paper"], 430);
 
   saveReplayWorkspacePreferences("adapter-1", {
     ...initial,
     railWidth: 360,
     openViewIds: ["replay-watchlist", "replay-paper", "replay-capabilities"],
+    panelCollapsed: false,
     viewHeights: {
       ...initial.viewHeights,
       "replay-paper": 300,
@@ -539,6 +542,7 @@ test("workspace preferences inherit live layout once and then persist only insid
   const restored = loadReplayWorkspacePreferences("adapter-1", storage);
   assert.equal(restored.railWidth, 360);
   assert.deepEqual(restored.openViewIds, ["replay-watchlist", "replay-paper", "replay-capabilities"]);
+  assert.equal(restored.panelCollapsed, false);
   assert.equal(restored.viewHeights["replay-paper"], 300);
   assert.equal(restored.viewHeights["replay-capabilities"], 240);
 });
@@ -561,6 +565,44 @@ test("workspace preferences migrate the pre-module replay rail without coupling 
   assert.equal(migrated.viewHeights["replay-capabilities"], 280);
 });
 
+test("workspace preferences migrate a legacy modular empty rail to restorable collapse state", () => {
+  const storage = new MemoryStorage();
+  storage.setItem("candlescope-replay-workspace:legacy-empty", JSON.stringify({
+    railWidth: 380,
+    openViewIds: [],
+    viewHeights: { "replay-capabilities": 300 },
+  }));
+
+  const migrated = loadReplayWorkspacePreferences("legacy-empty", storage);
+
+  assert.deepEqual(migrated.openViewIds, ["replay-watchlist", "replay-capabilities"]);
+  assert.equal(migrated.panelCollapsed, true);
+  assert.equal(migrated.viewHeights["replay-capabilities"], 300);
+  assert.match(
+    storage.getItem("candlescope-replay-workspace:legacy-empty") ?? "",
+    /"schemaVersion":2/,
+  );
+});
+
+test("workspace preferences preserve an intentional empty rail in schema v2", () => {
+  const storage = new MemoryStorage();
+  saveReplayWorkspacePreferences("current-empty", {
+    railWidth: 360,
+    openViewIds: [],
+    panelCollapsed: false,
+    viewHeights: {},
+  }, storage);
+
+  const restored = loadReplayWorkspacePreferences("current-empty", storage);
+
+  assert.deepEqual(restored.openViewIds, []);
+  assert.equal(restored.panelCollapsed, false);
+  assert.match(
+    storage.getItem("candlescope-replay-workspace:current-empty") ?? "",
+    /"schemaVersion":2/,
+  );
+});
+
 test("replay modular rail panels fill their host instead of overflowing stored heights", () => {
   const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");
   const styles = source("src/index.css");
@@ -568,6 +610,8 @@ test("replay modular rail panels fill their host instead of overflowing stored h
   assert.doesNotMatch(marketRail, /style=\{\{ height \}\}/);
   assert.match(marketRail, /viewHeights=\{preferences\.viewHeights\}/);
   assert.match(marketRail, /openViewIds=\{preferences\.openViewIds\}/);
+  assert.match(marketRail, /panelCollapsed=\{preferences\.panelCollapsed\}/);
+  assert.match(marketRail, /onTogglePanelCollapsed=\{actions\.togglePanelCollapsed\}/);
   assert.match(styles, /\.replay-market-dock\[data-active-dock="paper"\] \.replay-market-dock-body \{\s*overflow: auto;/);
 });
 

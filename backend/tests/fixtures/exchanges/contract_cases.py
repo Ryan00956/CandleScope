@@ -510,6 +510,126 @@ _OKX_CHANNEL_EXPECTATIONS = {
             "For derivatives, normalized volume is contract count rather than base-asset volume",
         ),
     ),
+    **{
+        (market_type, MarketChannel.TRADE): ChannelCapabilityExpectation(
+            delivery=DeliveryClass.APPEND,
+            snapshot=False,
+            delta=False,
+            history=False,
+            sequence="none",
+            resync="none",
+            connection_model="plugin_sidecar",
+            available_fields=frozenset({
+                "trade_id",
+                "price",
+                "quantity",
+                "trade_time_ms",
+                "side",
+                "is_buyer_maker",
+            }),
+            known_limitations=(
+                "Trade identifiers are exchange-owned and are not assumed contiguous",
+            ),
+            realtime_transports=(
+                TransportMode.PLUGIN_STREAM,
+                TransportMode.REST_POLL,
+            ),
+        )
+        for market_type in ("spot", "futures")
+    },
+    **{
+        (market_type, MarketChannel.DEPTH): ChannelCapabilityExpectation(
+            delivery=DeliveryClass.SNAPSHOT,
+            snapshot=True,
+            delta=False,
+            history=False,
+            sequence="none",
+            resync="replace_snapshot",
+            connection_model="plugin_sidecar",
+            available_fields=frozenset({
+                "depth_levels",
+                "update_interval_ms",
+                "last_update_id",
+                "bids",
+                "asks",
+            }),
+            params=(("depth_levels", (5, 10, 20)),),
+            known_limitations=(
+                "CCXT manages the incremental book and CandleScope receives bounded snapshots",
+                "Local snapshot revisions are not exchange sequence numbers",
+            ),
+            realtime_transports=(
+                TransportMode.PLUGIN_STREAM,
+                TransportMode.REST_SNAPSHOT,
+            ),
+        )
+        for market_type in ("spot", "futures")
+    },
+    ("futures", MarketChannel.MARK_PRICE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="plugin_sidecar",
+        available_fields=frozenset({"mark_price"}),
+        realtime_transports=(TransportMode.PLUGIN_STREAM, TransportMode.REST_POLL),
+    ),
+    ("futures", MarketChannel.INDEX_PRICE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="plugin_sidecar",
+        available_fields=frozenset({"index_price"}),
+        known_limitations=(
+            "Index price availability is revalidated from each CCXT result",
+        ),
+        realtime_transports=(TransportMode.PLUGIN_STREAM, TransportMode.REST_POLL),
+    ),
+    ("futures", MarketChannel.FUNDING_RATE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=True,
+        sequence="none",
+        resync="none",
+        connection_model="plugin_sidecar",
+        available_fields=frozenset({"funding_rate", "next_funding_time_ms"}),
+        known_limitations=("Funding timestamps and future rates vary by exchange",),
+        realtime_transports=(TransportMode.PLUGIN_STREAM, TransportMode.REST_POLL),
+    ),
+    ("futures", MarketChannel.OPEN_INTEREST): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=True,
+        sequence="none",
+        resync="none",
+        connection_model="polling_only",
+        available_fields=frozenset({"open_interest", "open_interest_value"}),
+        known_limitations=(
+            "Pinned CCXT exposes open interest through REST for this exchange",
+        ),
+        realtime_transports=(TransportMode.REST_POLL,),
+    ),
+    ("futures", MarketChannel.LIQUIDATION): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.APPEND,
+        snapshot=False,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="plugin_sidecar",
+        available_fields=frozenset({"side", "price", "quantity", "trade_time_ms"}),
+        known_limitations=(
+            "Public liquidation feeds can be lossy and have no contiguous sequence",
+        ),
+        realtime_transports=(TransportMode.PLUGIN_STREAM,),
+    ),
 }
 
 _STREAM_TYPE_TO_CHANNEL = {
@@ -532,9 +652,99 @@ def builtin_exchange_channel_expectations(
 ) -> dict[str, dict[tuple[str, MarketChannel], ChannelCapabilityExpectation]]:
     """Return the authoritative v2 market/channel matrix for built-ins."""
 
+    def ccxt_primary(
+        values: dict[tuple[str, MarketChannel], ChannelCapabilityExpectation],
+    ) -> dict[tuple[str, MarketChannel], ChannelCapabilityExpectation]:
+        return {
+            identity: replace(
+                expectation,
+                realtime_transports=tuple(
+                    TransportMode.PLUGIN_STREAM
+                    if transport == TransportMode.WEBSOCKET
+                    else transport
+                    for transport in expectation.realtime_transports
+                ),
+                connection_model=(
+                    "plugin_sidecar"
+                    if expectation.connection_model != "polling_only"
+                    else "polling_only"
+                ),
+            )
+            for identity, expectation in values.items()
+        }
+
+    binance = dict(_BINANCE_CHANNEL_EXPECTATIONS)
+    for market_type in ("spot", "futures"):
+        binance[(market_type, MarketChannel.TRADE)] = ChannelCapabilityExpectation(
+            delivery=DeliveryClass.APPEND,
+            snapshot=False,
+            delta=False,
+            history=False,
+            sequence="none",
+            resync="none",
+            connection_model="plugin_sidecar",
+            available_fields=frozenset({
+                "trade_id",
+                "price",
+                "quantity",
+                "trade_time_ms",
+                "side",
+                "is_buyer_maker",
+            }),
+            known_limitations=(
+                "Trade identifiers are exchange-owned and are not assumed contiguous",
+            ),
+            realtime_transports=(TransportMode.PLUGIN_STREAM, TransportMode.REST_POLL),
+        )
+        binance[(market_type, MarketChannel.TICKER)] = ChannelCapabilityExpectation(
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            delta=False,
+            history=False,
+            sequence="none",
+            resync="none",
+            connection_model="plugin_sidecar",
+            available_fields=frozenset({
+                "last_price",
+                "open_price",
+                "high_price",
+                "low_price",
+                "volume",
+                "quote_volume",
+                "bid_price",
+                "ask_price",
+            }),
+            realtime_transports=(TransportMode.PLUGIN_STREAM, TransportMode.REST_POLL),
+        )
+        binance[(market_type, MarketChannel.DEPTH)] = ChannelCapabilityExpectation(
+            delivery=DeliveryClass.SNAPSHOT,
+            snapshot=True,
+            delta=False,
+            history=False,
+            sequence="none",
+            resync="replace_snapshot",
+            connection_model="plugin_sidecar",
+            available_fields=frozenset({
+                "depth_levels",
+                "update_interval_ms",
+                "last_update_id",
+                "bids",
+                "asks",
+            }),
+            params=(("depth_levels", (5, 10, 20)),),
+            known_limitations=(
+                "CCXT manages the incremental book and CandleScope receives bounded snapshots",
+                "Local snapshot revisions are not exchange sequence numbers",
+            ),
+            realtime_transports=(
+                TransportMode.PLUGIN_STREAM,
+                TransportMode.REST_SNAPSHOT,
+            ),
+        )
+
     return {
-        "binance": dict(_BINANCE_CHANNEL_EXPECTATIONS),
-        "okx": dict(_OKX_CHANNEL_EXPECTATIONS),
+        "binance": ccxt_primary(binance),
+        "okx": ccxt_primary(_OKX_CHANNEL_EXPECTATIONS),
     }
 
 
@@ -548,6 +758,11 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
             for stream_type in (
                 StreamType.KLINE,
                 StreamType.AGG_TRADE,
+            )
+        ] + [
+            _ccxt_unified_case("binance", market_type, stream_type)
+            for market_type in ("spot", "futures")
+            for stream_type in (
                 StreamType.TRADE,
                 StreamType.TICKER,
                 StreamType.MINI_TICKER,
@@ -570,6 +785,19 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
             _okx_case(market_type, stream_type)
             for market_type in ("spot", "futures")
             for stream_type in (StreamType.KLINE, StreamType.TICKER)
+        ] + [
+            _ccxt_unified_case("okx", market_type, stream_type)
+            for market_type in ("spot", "futures")
+            for stream_type in (StreamType.TRADE, StreamType.DEPTH)
+        ] + [
+            _ccxt_unified_case("okx", "futures", stream_type)
+            for stream_type in (
+                StreamType.MARK_PRICE,
+                StreamType.INDEX_PRICE,
+                StreamType.FUNDING_RATE,
+                StreamType.OPEN_INTEREST,
+                StreamType.LIQUIDATION,
+            )
         ],
     }
 
@@ -653,6 +881,120 @@ def _okx_case(market_type: str, stream_type: StreamType) -> ExchangeContractCase
         sample_http_payload=http_payload,
         expected_http_rows=1,
         normalizer_samples=samples,
+    )
+
+
+def _ccxt_unified_case(
+    exchange: str,
+    market_type: str,
+    stream_type: StreamType,
+) -> ExchangeContractCase:
+    descriptor = _descriptor(
+        exchange,
+        _symbol(exchange, market_type),
+        stream_type,
+        market_type,
+    )
+    timestamp = 1_700_000_000_000
+    kind: str
+    value: dict[str, Any]
+    required: set[str]
+    if stream_type == StreamType.TRADE:
+        kind = "trade"
+        value = {
+            "id": "42",
+            "timestamp": timestamp,
+            "price": 100,
+            "amount": 2,
+            "side": "buy",
+        }
+        required = {"trade_id", "price", "quantity", "trade_time_ms"}
+    elif stream_type in {StreamType.TICKER, StreamType.MINI_TICKER}:
+        kind = "ticker"
+        value = {
+            "timestamp": timestamp,
+            "last": 100,
+            "close": 100,
+            "open": 95,
+            "high": 105,
+            "low": 90,
+            "baseVolume": 10,
+            "quoteVolume": 1000,
+            "bid": 99,
+            "ask": 101,
+        }
+        required = (
+            {"close_price", "open_price", "high_price", "low_price", "volume", "quote_volume"}
+            if stream_type == StreamType.MINI_TICKER
+            else {"last_price", "open_price", "high_price", "low_price", "volume"}
+        )
+    elif stream_type == StreamType.DEPTH:
+        kind = "order_book"
+        value = {
+            "timestamp": timestamp,
+            "nonce": 7,
+            "bids": [[99, 1]],
+            "asks": [[101, 2]],
+        }
+        required = {"last_update_id", "bids", "asks", "source_quality"}
+    elif stream_type in {StreamType.MARK_PRICE, StreamType.INDEX_PRICE}:
+        kind = "derivatives_summary"
+        value = {
+            "timestamp": timestamp,
+            "markPrice": 100,
+            "indexPrice": 99.5,
+            "fundingRate": 0.0001,
+        }
+        required = {
+            "mark_price" if stream_type == StreamType.MARK_PRICE else "index_price"
+        }
+    elif stream_type == StreamType.FUNDING_RATE:
+        kind = "funding_rate"
+        value = {"fundingTimestamp": timestamp, "fundingRate": 0.0001}
+        required = {"funding_rate"}
+    elif stream_type == StreamType.OPEN_INTEREST:
+        kind = "open_interest"
+        value = {
+            "timestamp": timestamp,
+            "openInterestAmount": 123,
+            "openInterestValue": 12_300,
+        }
+        required = {"open_interest"}
+    else:
+        kind = "liquidation"
+        value = {
+            "timestamp": timestamp,
+            "side": "sell",
+            "price": 100,
+            "contracts": 2,
+        }
+        required = {"side", "price", "quantity", "trade_time_ms"}
+    payload: dict[str, Any] = {
+        "schema": "candlescope.ccxt.unified/1",
+        "kind": kind,
+        "value": value,
+    }
+    if stream_type == StreamType.DEPTH:
+        payload["local_revision"] = 1
+    sources: list[DataSource] = []
+    if stream_type != StreamType.OPEN_INTEREST:
+        sources.append(DataSource.WEBSOCKET)
+    if stream_type != StreamType.LIQUIDATION:
+        sources.append(DataSource.HTTP)
+    if stream_type in {StreamType.FUNDING_RATE, StreamType.OPEN_INTEREST}:
+        sources.append(DataSource.HTTP_BACKFILL)
+    return ExchangeContractCase(
+        descriptor=descriptor,
+        request=_request(descriptor),
+        normalizer_samples=[
+            NormalizerContractSample(
+                payload=payload,
+                source=source,
+                required_data_fields=set(required),
+                expected_event_type=stream_type,
+            )
+            for source in sources
+        ],
     )
 
 

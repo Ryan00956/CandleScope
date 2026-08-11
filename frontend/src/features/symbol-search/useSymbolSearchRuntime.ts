@@ -10,6 +10,7 @@ import {
   filterSymbols,
   getSymbolWatchlists,
   isSameSymbolEntry,
+  resolveExchangeMarketType,
 } from "./symbolSearchFilter";
 import type {
   Dispatch,
@@ -58,7 +59,7 @@ export interface SymbolSearchRuntime {
     quoteFilter: string;
     favorites: string[];
     favoriteSet: Set<string>;
-    exchangeChips: Array<{ key: string; label: string }>;
+    exchangeChips: Array<{ key: string; label: string; disabled: boolean }>;
     marketTabs: ReturnType<typeof buildMarketTabs>;
     filteredSymbols: SymbolSearchItem[];
     highlightIndex: number;
@@ -78,6 +79,7 @@ export interface SymbolSearchRuntime {
     setMarketType: Dispatch<SetStateAction<string>>;
     setQuoteFilter: Dispatch<SetStateAction<string>>;
     setHighlightIndex: Dispatch<SetStateAction<number>>;
+    selectExchange(exchange: string): void;
     toggleExchange(exchange: string): void;
     toggleFavorite(symbolKey: string, event?: { stopPropagation(): void } | null): void;
     selectSymbol(entry: SymbolSearchItem): void;
@@ -126,7 +128,12 @@ export function useSymbolSearchRuntime({
   const listRef = useRef<HTMLDivElement | null>(null);
   const modalRef = useRef<HTMLDivElement | null>(null);
 
-  const catalog = useSymbolCatalogRuntime({ currentExchange: currentExchangeKey, open });
+  const catalog = useSymbolCatalogRuntime({
+    currentExchange: currentExchangeKey,
+    requestedMarketType: marketType === "favorites" ? currentMarketTypeKey : marketType,
+    requestedExchanges: exchangeFilter,
+    open,
+  });
   const favoritesStore = useSymbolFavoritesStore();
 
   useEffect(() => {
@@ -228,6 +235,18 @@ export function useSymbolSearchRuntime({
       return next;
     });
   }, []);
+
+  const selectExchange = useCallback((exchange: string) => {
+    const nextExchangeFilter = new Set([exchange]);
+    const nextMarketTabs = buildMarketTabs({
+      allSymbols: catalog.allSymbols,
+      exchangeFilter: nextExchangeFilter,
+      ...(exchangeCatalog === undefined ? {} : { exchangeCatalog }),
+    });
+    const nextMarketType = resolveExchangeMarketType(marketType, nextMarketTabs);
+    setExchangeFilter(nextExchangeFilter);
+    setMarketType(nextMarketType);
+  }, [catalog.allSymbols, exchangeCatalog, marketType]);
 
   const openContextMenu = useCallback((event: ReactMouseEvent, symbol: string, symbolKey: string) => {
     event.preventDefault();
@@ -349,6 +368,7 @@ export function useSymbolSearchRuntime({
     setMarketType,
     setQuoteFilter,
     setHighlightIndex,
+    selectExchange,
     toggleExchange,
     toggleFavorite,
     selectSymbol,
@@ -367,6 +387,7 @@ export function useSymbolSearchRuntime({
     handleScroll,
     openContextMenu,
     selectSymbol,
+    selectExchange,
     toggleExchange,
     toggleFavorite,
     watchlists,

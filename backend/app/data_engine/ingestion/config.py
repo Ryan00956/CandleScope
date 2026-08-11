@@ -35,6 +35,13 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_str(key: str, default: str) -> str:
     return os.getenv(key, default)
 
@@ -190,6 +197,64 @@ class IngestionConfig:
     # Max time (seconds) without receiving any message before declaring stale
     ws_stale_timeout: float = field(
         default_factory=lambda: _env_float("INGESTION_WS_STALE_TIMEOUT", 30.0),
+    )
+    # Deprecated qualification switch retained for old dual-feed tools.  The
+    # production registry no longer consults it; Binance/OKX are CCXT-owned.
+    ccxt_stream_enabled: bool = field(
+        default_factory=lambda: _env_bool("INGESTION_CCXT_STREAM_ENABLED", False),
+    )
+    # Generic CCXT Pro adapters consume CCXT's unified watch_* results.  This
+    # is the default path for exchanges without a stricter raw profile.
+    ccxt_unified_stream_enabled: bool = field(
+        default_factory=lambda: _env_bool(
+            "INGESTION_CCXT_UNIFIED_STREAM_ENABLED",
+            True,
+        ),
+    )
+    # Raw hooks run synchronously in CCXT's websocket reader.  Overflow is a
+    # hard health failure rather than a silent data drop.
+    ccxt_raw_queue_size: int = field(
+        default_factory=lambda: _env_int("INGESTION_CCXT_RAW_QUEUE_SIZE", 4096),
+    )
+    ccxt_recovery_timeout_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "INGESTION_CCXT_RECOVERY_TIMEOUT_SECONDS",
+            10.0,
+        ),
+    )
+    # Per-attempt REST deadline.  Transient failures keep the gap pending and
+    # retry within the separate total deadline below.
+    ccxt_recovery_retry_initial_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "INGESTION_CCXT_RECOVERY_RETRY_INITIAL_SECONDS",
+            1.0,
+        ),
+    )
+    ccxt_recovery_retry_max_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "INGESTION_CCXT_RECOVERY_RETRY_MAX_SECONDS",
+            30.0,
+        ),
+    )
+    ccxt_recovery_retry_deadline_seconds: float = field(
+        default_factory=lambda: _env_float(
+            "INGESTION_CCXT_RECOVERY_RETRY_DEADLINE_SECONDS",
+            900.0,
+        ),
+    )
+    # Live events stay fail-closed behind the unresolved boundary.  This cap
+    # prevents an extended exchange outage from growing memory without bound.
+    ccxt_recovery_buffer_max_events: int = field(
+        default_factory=lambda: _env_int(
+            "INGESTION_CCXT_RECOVERY_BUFFER_MAX_EVENTS",
+            50_000,
+        ),
+    )
+    ccxt_recovery_max_events: int = field(
+        default_factory=lambda: _env_int(
+            "INGESTION_CCXT_RECOVERY_MAX_EVENTS",
+            10_000,
+        ),
     )
 
     # ── L3: Feed Control ───────────────────────────────────────

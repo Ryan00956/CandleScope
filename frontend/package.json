@@ -1,17 +1,72 @@
 {
   "name": "frontend",
+  "description": "CandleScope native multi-chart desktop shell and web frontend",
+  "author": "CandleScope Contributors",
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "desktop/main.mjs",
+  "build": {
+    "appId": "io.candlescope.desktop",
+    "productName": "CandleScope",
+    "asar": true,
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "app/**/*",
+          "requirements.txt"
+        ]
+      },
+      {
+        "from": "../packages/candlescope-plugin-sdk/src",
+        "to": "packages/candlescope-plugin-sdk/src",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ]
+    }
+  },
+  "overrides": {
+    "dompurify": "3.4.13"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "capacity:multi-chart": "node scripts/multi-chart-capacity.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "tsx --test \"scripts/*.test.mjs\" \"src/**/*.test.{ts,tsx}\"",
     "test:replay": "tsx --test \"src/features/replay/**/*.test.{ts,tsx}\" \"src/app/__tests__/marketPageFrame.test.tsx\"",
     "check:plugins": "node scripts/check-plugin-platform.mjs",
-    "check": "npm run check:architecture && npm run check:plugins && npm run typecheck && npm run lint && npm test && npm run build",
+    "check": "npm run check:architecture && npm run check:plugins && npm run typecheck && npm run lint && npm test && npm run test:desktop && npm run build",
+    "desktop:dev": "electron desktop/main.mjs",
+    "desktop:package:dir": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase6-package.ps1",
+    "desktop:spike": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase6-spike.ps1",
+    "desktop:release:phase6": "node scripts/desktop-phase6-release.mjs --create ../output/playwright/multi-chart-phase6/desktop-spike.json --restore ../output/playwright/multi-chart-phase6/desktop-restore.json --packaged ../output/playwright/multi-chart-phase6/desktop-packaged.json --out ../docs/perf-baselines/multi-chart-workspace/phase6-desktop-shell-20260807.json",
+    "desktop:spike:phase7": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase7-spike.ps1",
+    "desktop:release:phase7": "node scripts/desktop-phase7-release.mjs --w1 ../output/playwright/multi-chart-phase7/desktop-phase7-w1.json --w2 ../output/playwright/multi-chart-phase7/desktop-phase7-w2.json --out ../docs/perf-baselines/multi-chart-workspace/phase7-workspace-bus-20260807.json",
+    "desktop:spike:phase8": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase8-spike.ps1",
+    "desktop:rollback:phase8": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase8-rollback.ps1",
+    "desktop:package:phase8": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase8-package.ps1",
+    "desktop:validate:phase8": "node scripts/phase8-full-validation.mjs --out ../docs/perf-baselines/multi-chart-workspace/phase8-full-validation-20260807.json",
+    "desktop:release:phase8": "node scripts/phase8-release.mjs --phase7 ../docs/perf-baselines/multi-chart-workspace/phase7-workspace-bus-20260807.json --w3 ../output/playwright/multi-chart-phase8/desktop-phase8-w3.json --soak ../output/playwright/multi-chart-phase8/desktop-phase8-soak.json --f1 ../output/playwright/multi-chart-phase8/desktop-phase8-f1.json --f2 ../output/playwright/multi-chart-phase8/desktop-phase8-f2.json --f3 ../output/playwright/multi-chart-phase8/desktop-phase8-f3.json --rollback ../docs/perf-baselines/multi-chart-workspace/phase8-flag-rollback-20260807.json --package ../docs/perf-baselines/multi-chart-workspace/phase8-package-fresh-process-20260807.json --validation ../docs/perf-baselines/multi-chart-workspace/phase8-full-validation-20260807.json --out ../docs/perf-baselines/multi-chart-workspace/phase8-release-20260807.json",
+    "desktop:soak:phase8:4h": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/desktop-phase8-spike.ps1 -Mode SOAK -DurationMs 14400000 -SampleMs 60000",
+    "test:desktop": "node --test \"desktop/*.test.mjs\"",
     "perf:baseline": "node scripts/perf-baseline.mjs",
     "perf:drawing": "node scripts/drawing-performance.mjs",
     "monitor:indicators": "node scripts/indicator-stack-monitor.mjs",
@@ -55,6 +110,8 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "electron": "43.3.0",
+    "electron-builder": "26.15.3",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",

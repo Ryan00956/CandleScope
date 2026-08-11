@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
 from typing import Any
 
@@ -174,7 +175,19 @@ class TransportLayer:
         """Initialize shared resources (HTTP session)."""
         if self._http_session is None or self._http_session.closed:
             timeout = aiohttp.ClientTimeout(total=self._cfg.http_timeout)
-            self._http_session = aiohttp.ClientSession(timeout=timeout)
+            connector = None
+            if sys.platform == "win32":
+                # aiohttp prefers aiodns when it is installed.  On the
+                # CandleScope Windows host that resolver cannot reach the OS
+                # DNS configuration, while getaddrinfo succeeds.  Keep the
+                # workaround local to this owned session.
+                connector = aiohttp.TCPConnector(
+                    resolver=aiohttp.ThreadedResolver(),
+                )
+            self._http_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
             logger.info("HTTP session created (timeout=%ss)", self._cfg.http_timeout)
 
     async def stop(self) -> None:
@@ -216,7 +229,15 @@ class TransportLayer:
             if quota_reservation is not None:
                 quota_reservation.record_response(response_unknown=True)
             raise
+        configured_provider_fetch = getattr(
+            plugin,
+            "fetch_history_with_config",
+            None,
+        )
         provider_fetch = getattr(plugin, "fetch_history", None)
+        if callable(configured_provider_fetch):
+            async def provider_fetch(request: TransportRequest) -> list[RawMessage]:
+                return await configured_provider_fetch(request, self._cfg)
         if callable(provider_fetch):
             try:
                 self._metrics.inc("plugin_requests_sent")
@@ -569,20 +590,32 @@ class TransportLayer:
         plugin = self._registry.get_plugin(exchange)
         protocol = plugin.protocol()
         spec = protocol.rest_request(req, config=self._cfg)
+        params: dict[str, Any]
         if spec is None:
-            raise TransportError(
-                f"No REST endpoint for stream type: {desc.stream_type}"
+            provider_endpoint = getattr(
+                plugin,
+                "provider_rate_limit_endpoint",
+                None,
             )
+            endpoint = provider_endpoint(req) if callable(provider_endpoint) else None
+            if not endpoint:
+                raise TransportError(
+                    f"No REST endpoint for stream type: {desc.stream_type}"
+                )
+            params = {}
+        else:
+            endpoint = spec.path
+            params = dict(spec.params)
         quota_request = HistoricalRequest(
             exchange=exchange,
             market_type=market_type,
-            endpoint=spec.path,
+            endpoint=endpoint,
             symbol=desc.symbol,
             interval=desc.interval,
             start_ms=req.start_ms,
             end_ms=req.end_ms,
             limit=req.limit,
-            params=dict(spec.params),
+            params=params,
         )
         quota_rule = plugin.rate_limit_policy(self._cfg).rule_for(quota_request)
         return await self._rate_limits.inspect(quota_rule, quota_request)
@@ -752,7 +785,12 @@ class TransportLayer:
         plugin = self._registry.get_plugin(exchange)
         supports_provider_stream = getattr(plugin, "supports_provider_stream", None)
         if callable(supports_provider_stream) and supports_provider_stream(descriptor):
-            return True
+            provider_enabled = getattr(plugin, "provider_stream_enabled", None)
+            if not callable(provider_enabled) or provider_enabled(
+                self._cfg,
+                descriptor,
+            ):
+                return True
         protocol_support = getattr(plugin.protocol(), "supports_ws", None)
         if callable(protocol_support) and not protocol_support(descriptor):
             return False

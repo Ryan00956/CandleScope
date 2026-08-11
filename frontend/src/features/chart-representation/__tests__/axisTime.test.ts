@@ -6,6 +6,7 @@ import {
   compareAxisTime,
   findDisplayIndexForAxisAnchor,
   findLastDisplayIndexForSourceTime,
+  findNumericDisplayIndexForTimeAnchor,
   isOrdinalAxisTime,
   mapSourceTimeRangeToDisplayLogicalRange,
   mapSourceViewportAnchorToDisplayLogicalRange,
@@ -146,6 +147,37 @@ test("display anchor lookup falls to the first retained row after a left trim", 
   assert.equal(findDisplayIndexForAxisAnchor(rows, { order: 2 }), -1);
 });
 
+test("numeric linked crosshair lookup selects the containing coarse bar in logarithmic time", () => {
+  const rows: DisplayRow[] = [
+    { time: 100 },
+    { time: 200 },
+    { time: 300 },
+    { time: 400 },
+  ];
+
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 50), 0);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 100), 0);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 175), 0);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 250), 1);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 400), 3);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, 500), 3);
+  assert.equal(findNumericDisplayIndexForTimeAnchor(rows, Number.NaN), -1);
+  assert.equal(findNumericDisplayIndexForTimeAnchor([], 100), -1);
+
+  let indexedReads = 0;
+  const largeRows = new Proxy<DisplayRow[]>(
+    Array.from({ length: 65_536 }, (_, index) => ({ time: index * 60 })),
+    {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property)) indexedReads += 1;
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    },
+  );
+  assert.equal(findNumericDisplayIndexForTimeAnchor(largeRows, 2_000_000), 33_333);
+  assert.ok(indexedReads <= 17, `expected logarithmic row reads, received ${indexedReads}`);
+});
+
 test("source-time ranges map to every overlapping projected element", () => {
   const rows = [
     displayRow(0, 100, 0),
@@ -164,6 +196,37 @@ test("source-time ranges map to every overlapping projected element", () => {
   );
   assert.equal(mapSourceTimeRangeToDisplayLogicalRange(rows, { from: 400, to: 500 }), null);
   assert.equal(mapSourceTimeRangeToDisplayLogicalRange(rows, { from: 200, to: 100 }), null);
+});
+
+test("source-time ranges include shared future-axis points without duplicating real bars", () => {
+  const rows: DisplayRow[] = [
+    { time: 100 },
+    { time: 200 },
+    { time: 300 },
+  ];
+  const futureAxisRows: DisplayRow[] = [
+    { time: 200 },
+    { time: 300 },
+    { time: 400 },
+    { time: 500 },
+  ];
+
+  assert.deepEqual(
+    mapSourceTimeRangeToDisplayLogicalRange(
+      rows,
+      { from: 200, to: 500 },
+      futureAxisRows,
+    ),
+    { from: 1, to: 4 },
+  );
+  assert.deepEqual(
+    mapSourceTimeRangeToDisplayLogicalRange(
+      rows,
+      { from: 400, to: 500 },
+      futureAxisRows,
+    ),
+    { from: 3, to: 4 },
+  );
 });
 
 test("viewport anchors preserve span and horizontal offset across projections", () => {

@@ -1,7 +1,7 @@
 # K 线回放 HEDGE Phase 3 完成证据
 
-日期：2026-08-06  
-基线：`42ca5560`  
+日期：2026-08-06
+基线：`42ca5560`
 阶段：Phase 3 — pinned public archive 与 materialized simulation manifest
 
 ## 1. 结论

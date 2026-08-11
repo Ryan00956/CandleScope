@@ -26,7 +26,7 @@ from .pagination import (
     OkxHistoricalPaginationPolicy,
     ReverseTimePaginationPolicy,
 )
-from .plugin import ExchangePlugin, SymbolNormalizer
+from .plugin import ExchangePlugin, ProviderStreamPlugin, SymbolNormalizer
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
 from .rate_limits import (
     HistoricalRequest,
@@ -66,6 +66,7 @@ __all__ = [
     "ExchangePlugin",
     "ExchangePluginLoadStatus",
     "ExchangePluginRegistrationError",
+    "ProviderStreamPlugin",
     "ExchangeProtocol",
     "HistoricalPaginationPolicy",
     "BinanceHistoricalPaginationPolicy",

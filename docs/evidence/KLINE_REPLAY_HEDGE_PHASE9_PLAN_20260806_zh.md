@@ -1,7 +1,7 @@
 # K 线回放交易所级双向持仓 Phase 9 执行计划
 
-日期：2026-08-06  
-分支：`codex/replay-hedge-exchange-parity`  
+日期：2026-08-06
+分支：`codex/replay-hedge-exchange-parity`
 基线：`056d9a2d feat(replay): harden hedge liquidation recovery`
 
 ## 1. 阶段目标

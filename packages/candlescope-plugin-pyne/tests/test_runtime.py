@@ -68,7 +68,7 @@ def test_descriptor_is_public_versioned_and_reports_the_engine_boundary() -> Non
 
     assert descriptor.id == RUNTIME_ID == "candlescope.pyne"
     assert descriptor.package == "candlescope-plugin-pyne"
-    assert descriptor.version == PLUGIN_VERSION == "0.2.0"
+    assert descriptor.version == PLUGIN_VERSION == "0.3.0.dev0"
     assert [language.id for language in descriptor.languages] == ["pyne"]
     assert descriptor.meta["expectedEngineVersion"] == EXPECTED_PYNE_VERSION
     assert descriptor.meta["executorBoundary"] == "sidecar-inline"
@@ -94,7 +94,7 @@ def test_descriptor_rejects_an_unpinned_installed_engine_version(
 ) -> None:
     monkeypatch.setattr(runtime_module.pyne_runtime, "__version__", "9.9.9")
 
-    with pytest.raises(RuntimeError, match="requires pyne-runtime 0.2.0rc1"):
+    with pytest.raises(RuntimeError, match="requires pyne-runtime 0.3.0rc2"):
         PyneRuntimePlugin().describe()
 
 

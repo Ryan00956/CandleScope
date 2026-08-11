@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
+from app.core import config as app_config
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.data_engine.market_data import (
     MarketChannel,
@@ -24,6 +26,8 @@ logger = logging.getLogger("ingestion.shared_ws")
 
 SharedDataCallback = Callable[[RawMessage], Awaitable[None]]
 SharedHealthCallback = Callable[[SessionHealth, str], Awaitable[None]]
+_OKX_CONTROL_MESSAGES_PER_HOUR = 480
+_OKX_CONTROL_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 @dataclass(slots=True)
@@ -165,24 +169,35 @@ class SharedMultiplexHub:
         exchange: str,
         market_type: str,
         symbol: str,
+        *,
+        protocol: Any | None = None,
+        shard_index: int = 0,
+        max_descriptors: int | None = None,
     ) -> None:
         self._cfg = config
         self._transport = transport
         self._exchange = exchange
         self._market_type = market_type
         self._symbol = symbol.upper()
+        self._shard_index = max(0, int(shard_index))
+        self._max_descriptors = max(1, int(
+            app_config.KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD
+            if max_descriptors is None else max_descriptors
+        ))
 
         bootstrap_default_adapters()
         self._plugin = get_exchange_registry().get_plugin(exchange)
-        self._protocol = self._plugin.protocol()
+        self._protocol = protocol or self._plugin.protocol()
 
         self._subscribers: dict[int, _Subscriber] = {}
+        self._reserved_descriptors: set[str] = set()
         self._next_token = 1
         self._runner_task: asyncio.Task | None = None
         self._subscription_changed = asyncio.Event()
         self._lifecycle_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._last_control_send = 0.0
+        self._control_messages: deque[float] = deque()
         self._conn = None
         self._ctx = None
         self._health = SessionHealth.DISCONNECTED
@@ -205,10 +220,21 @@ class SharedMultiplexHub:
     ) -> SharedWsSubscriptionHandle:
         async with self._lifecycle_lock:
             stream_identity = self._subscription_identity(descriptor)
+            reserved_here = stream_identity in self._reserved_descriptors
+            self._reserved_descriptors.discard(stream_identity)
             already_requested = any(
                 self._subscription_identity(item.descriptor) == stream_identity
                 for item in self._subscribers.values()
             )
+            if (
+                not already_requested
+                and not reserved_here
+                and self.descriptor_count >= self._max_descriptors
+            ):
+                raise TransportError(
+                    "shared WS descriptor shard capacity reached "
+                    f"(max={self._max_descriptors})"
+                )
             token = self._next_token
             self._next_token += 1
             self._subscribers[token] = _Subscriber(
@@ -369,16 +395,32 @@ class SharedMultiplexHub:
         async with self._send_lock:
             if self._conn is None:
                 raise TransportError("shared WS connection not ready")
+            encoded = json.dumps(payload)
+            if (
+                self._exchange.lower() == "okx"
+                and len(encoded.encode("utf-8")) > _OKX_CONTROL_PAYLOAD_MAX_BYTES
+            ):
+                raise TransportError("OKX shared WS control payload exceeds 64 KiB")
+            now = time.monotonic()
+            while self._control_messages and now - self._control_messages[0] >= 3600:
+                self._control_messages.popleft()
+            if (
+                self._exchange.lower() == "okx"
+                and len(self._control_messages) >= _OKX_CONTROL_MESSAGES_PER_HOUR
+            ):
+                raise TransportError("OKX shared WS 480/hour control budget exhausted")
             elapsed = time.monotonic() - self._last_control_send
             if elapsed < 0.11:
                 await asyncio.sleep(0.11 - elapsed)
             try:
                 await asyncio.wait_for(
-                    self._conn.send(json.dumps(payload)),
+                    self._conn.send(encoded),
                     timeout=max(0.1, float(self._cfg.ws_control_timeout)),
                 )
             except asyncio.TimeoutError as exc:
                 raise TransportError("shared WS control send timed out") from exc
+            if self._exchange.lower() == "okx":
+                self._control_messages.append(time.monotonic())
             self._last_control_send = time.monotonic()
 
     async def _read_loop(self) -> None:
@@ -477,12 +519,80 @@ class SharedMultiplexHub:
             return spec.stream_name
         return json.dumps(spec.subscribe_payload or {}, sort_keys=True, separators=(",", ":"))
 
+    @property
+    def descriptor_count(self) -> int:
+        return len(self._reserved_descriptors | {
+            self._subscription_identity(subscriber.descriptor)
+            for subscriber in self._subscribers.values()
+        })
+
+    def owns_descriptor(self, descriptor: StreamDescriptor) -> bool:
+        identity = self._subscription_identity(descriptor)
+        return identity in self._reserved_descriptors or any(
+            self._subscription_identity(subscriber.descriptor) == identity
+            for subscriber in self._subscribers.values()
+        )
+
+    def can_accept(self, descriptor: StreamDescriptor) -> bool:
+        return self.owns_descriptor(descriptor) or self.descriptor_count < self._max_descriptors
+
+    def reserve_descriptor(self, descriptor: StreamDescriptor) -> None:
+        identity = self._subscription_identity(descriptor)
+        if identity in self._reserved_descriptors or self.owns_descriptor(descriptor):
+            return
+        if self.descriptor_count >= self._max_descriptors:
+            raise TransportError(
+                "shared WS descriptor shard reservation capacity reached "
+                f"(max={self._max_descriptors})"
+            )
+        self._reserved_descriptors.add(identity)
+
+    def snapshot(self) -> dict[str, object]:
+        """Return connection and logical fan-out state without mutating the hub."""
+
+        descriptor_ids = self._reserved_descriptors | {
+            self._subscription_identity(subscriber.descriptor)
+            for subscriber in self._subscribers.values()
+        }
+        return {
+            "exchange": self._exchange,
+            "market_type": self._market_type,
+            "scope": self._symbol,
+            "shard_index": self._shard_index,
+            "max_descriptors": self._max_descriptors,
+            "health": self._health.value,
+            "physical_websocket": int(self._conn is not None),
+            "runner_active": self._runner_task is not None
+            and not self._runner_task.done(),
+            "subscriber_count": len(self._subscribers),
+            "descriptor_count": len(descriptor_ids),
+            "reserved_descriptor_count": len(self._reserved_descriptors),
+            "descriptors": sorted(descriptor_ids),
+            "consecutive_failures": self._consecutive_failures,
+            "control_messages_last_hour": len(self._control_messages),
+            "control_budget_per_hour": (
+                _OKX_CONTROL_MESSAGES_PER_HOUR
+                if self._exchange.lower() == "okx"
+                else None
+            ),
+        }
+
 
 class SharedWsHubRegistry:
-    def __init__(self, config: IngestionConfig, transport: TransportLayer) -> None:
+    def __init__(
+        self,
+        config: IngestionConfig,
+        transport: TransportLayer,
+        *,
+        max_descriptors_per_shard: int | None = None,
+    ) -> None:
         self._cfg = config
         self._transport = transport
-        self._hubs: dict[tuple[str, str, str], SharedMultiplexHub] = {}
+        self._max_descriptors_per_shard = max(1, int(
+            app_config.KLINE_UPSTREAM_MAX_DESCRIPTORS_PER_SHARD
+            if max_descriptors_per_shard is None else max_descriptors_per_shard
+        ))
+        self._hubs: dict[tuple[str, str, str, int], SharedMultiplexHub] = {}
 
     def get_hub(self, descriptor: StreamDescriptor) -> SharedMultiplexHub | None:
         bootstrap_default_adapters()
@@ -516,20 +626,43 @@ class SharedWsHubRegistry:
         }:
             scope = "derivatives_summary"
         elif descriptor.stream_type == StreamType.KLINE:
-            scope = descriptor.symbol.upper()
+            # OKX documents one Business WS connection carrying multiple
+            # candle channel arguments.  Keep legacy/other exchanges scoped
+            # per symbol until the same product contract is proven there.
+            scope = (
+                "klines"
+                if capability_v2 and descriptor.exchange.lower() == "okx"
+                else descriptor.symbol.upper()
+            )
         else:
             return None
-        key = (descriptor.exchange, descriptor.market_type, scope)
-        hub = self._hubs.get(key)
-        if hub is None:
-            hub = SharedMultiplexHub(
-                config=self._cfg,
-                transport=self._transport,
-                exchange=descriptor.exchange,
-                market_type=descriptor.market_type,
-                symbol=scope,
-            )
-            self._hubs[key] = hub
+        base_key = (descriptor.exchange, descriptor.market_type, scope)
+        candidates = [
+            (key, hub)
+            for key, hub in sorted(self._hubs.items())
+            if key[:3] == base_key
+        ]
+        for _key, hub in candidates:
+            if hub.owns_descriptor(descriptor):
+                hub.reserve_descriptor(descriptor)
+                return hub
+        for _key, hub in candidates:
+            if hub.can_accept(descriptor):
+                hub.reserve_descriptor(descriptor)
+                return hub
+        shard_index = candidates[-1][0][3] + 1 if candidates else 0
+        key = (*base_key, shard_index)
+        hub = SharedMultiplexHub(
+            config=self._cfg,
+            transport=self._transport,
+            exchange=descriptor.exchange,
+            market_type=descriptor.market_type,
+            symbol=scope,
+            shard_index=shard_index,
+            max_descriptors=self._max_descriptors_per_shard,
+        )
+        hub.reserve_descriptor(descriptor)
+        self._hubs[key] = hub
         return hub
 
     def create_session(self, descriptor: StreamDescriptor) -> SessionLike | None:
@@ -537,6 +670,23 @@ class SharedWsHubRegistry:
         if hub is None:
             return None
         return SharedWsSessionAdapter(hub, descriptor)
+
+    def snapshot(self) -> dict[str, object]:
+        hubs = [
+            hub.snapshot()
+            for _key, hub in sorted(self._hubs.items())
+        ]
+        return {
+            "hub_count": len(hubs),
+            "active_hubs": sum(1 for hub in hubs if hub["runner_active"]),
+            "physical_websockets": sum(
+                int(hub["physical_websocket"]) for hub in hubs
+            ),
+            "subscriber_count": sum(int(hub["subscriber_count"]) for hub in hubs),
+            "descriptor_count": sum(int(hub["descriptor_count"]) for hub in hubs),
+            "max_descriptors_per_shard": self._max_descriptors_per_shard,
+            "hubs": hubs,
+        }
 
 
 # Backward-compatible alias for tests and older imports.

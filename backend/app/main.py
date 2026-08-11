@@ -73,6 +73,7 @@ from app.core.config import (
 )
 from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
+from app.data_engine.data_manager.capacity import build_capacity_snapshot
 from app.plugin_core_v2 import create_core_plugin_router
 from app.data_engine.storage import (
     init_klines_storage,
@@ -606,3 +607,21 @@ async def debug_snapshot() -> dict:
         return snapshot
     except Exception as exc:
         return {"error": str(exc)}
+
+
+@app.get("/debug/capacity", tags=["system"])
+async def capacity_snapshot(
+    include_database_hash: bool = False,
+    detail_offset: int = 0,
+    detail_limit: int = 20,
+    event_loop_after_sequence: int | None = None,
+) -> dict:
+    """Return a read-only, multi-chart-oriented capacity snapshot."""
+
+    return await build_capacity_snapshot(
+        app.state,
+        include_database_hash=include_database_hash,
+        detail_offset=detail_offset,
+        detail_limit=detail_limit,
+        event_loop_after_sequence=event_loop_after_sequence,
+    )

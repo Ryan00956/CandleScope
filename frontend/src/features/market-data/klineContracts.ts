@@ -1,5 +1,6 @@
 import type { IntervalString } from "../../utils/intervals.js";
 import type { ForegroundPreloadGate } from "./foregroundPreloadGate.js";
+import type { ChartWorkScheduler } from "./chartWorkScheduler.js";
 import type {
   EpochMilliseconds,
   EpochSeconds,
@@ -124,6 +125,19 @@ export interface KlineHistoryRequestOptions extends KlineRequestOptions {
   intent?: KlineHistoryIntent;
 }
 
+export interface KlineHistoryBatchRequest {
+  symbol: string;
+  interval: IntervalString;
+  days: number | null | undefined;
+  marketType: string;
+  exchange: string;
+  options: Omit<KlineHistoryRequestOptions, "signal">;
+}
+
+export type KlineHistoryBatchOutcome =
+  | { ok: true; result: KlineFetchResult }
+  | { ok: false; error: Error };
+
 export interface KlineBeforeRequestOptions extends KlineRequestOptions {
   /** Backend long-poll budget. Validation probes use zero to stay non-blocking. */
   maxWaitMs?: number;
@@ -144,6 +158,11 @@ export interface KlineApi {
     exchange: string,
     options: KlineHistoryRequestOptions,
   ): Promise<KlineFetchResult>;
+  /** Optional bounded transport used to serialize a multi-Cell history burst. */
+  fetchKlinesHistoryBatch?(
+    requests: readonly KlineHistoryBatchRequest[],
+    options: Pick<KlineRequestOptions, "signal">,
+  ): Promise<KlineHistoryBatchOutcome[]>;
   fetchKlinesBefore(
     symbol: string,
     interval: IntervalString,
@@ -214,8 +233,15 @@ export type PatchCacheTick = (
   meta: FeedCacheMeta,
 ) => void;
 
+export type KlineStreamFactory = (
+  series: Pick<MarketSeries, "exchange" | "marketType" | "symbol">,
+  options?: KlineStreamOptions,
+) => KlineStreamController;
+
 export interface SeriesDataFeedConfig {
   api?: KlineApi | null;
+  chartWorkScheduler?: ChartWorkScheduler | null;
+  chartWorkSchedulerCellId?: string | null;
   foregroundPreloadGate?: ForegroundPreloadGate | null;
   canRequestSeries?: (series: Partial<MarketSeries>) => boolean;
   getActiveSeries?: () => MarketSeries | null;
@@ -224,6 +250,7 @@ export interface SeriesDataFeedConfig {
   commitMergedChartData?: CommitChartData;
   commitPatchedChartData?: CommitChartData;
   patchCacheTick?: PatchCacheTick;
+  streamFactory?: KlineStreamFactory | null;
 }
 
 export interface AppliedKlineResult extends KlineFetchResult {

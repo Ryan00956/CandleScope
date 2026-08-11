@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { fetchPreset } from "../../services/indicatorApi.js";
 import type { IndicatorDefinition, IndicatorParams } from "./indicatorTypes.js";
@@ -12,6 +12,7 @@ export interface IndicatorStorageLike {
 }
 
 export interface ActiveIndicatorPersistence {
+  controlled?: boolean;
   load(): IndicatorDefinition[];
   save(list: IndicatorDefinition[]): void;
 }
@@ -84,6 +85,55 @@ export function stripIndicatorRuntimeFields(indicator: IndicatorDefinition): Ind
   return rest;
 }
 
+function persistedIndicatorSignature(indicators: readonly IndicatorDefinition[]): string {
+  return JSON.stringify(indicators.map(stripIndicatorRuntimeFields));
+}
+
+/**
+ * Reconcile a durable owner (workspace v6, local storage, etc.) with the live
+ * indicator store. Runtime-only fields are retained when the durable
+ * definitions are semantically unchanged; a genuine external edit replaces
+ * the live definitions so restored and peer-window state cannot drift.
+ */
+export function reconcilePersistedIndicatorDefinitions(
+  current: IndicatorDefinition[],
+  persisted: readonly IndicatorDefinition[],
+  normalizeIndicator?: (
+    indicator: IndicatorDefinition,
+  ) => IndicatorDefinition | null,
+): IndicatorDefinition[] {
+  const prepared = persisted.flatMap((indicator) => {
+    const normalized = normalizeIndicator ? normalizeIndicator(indicator) : indicator;
+    return normalized === null ? [] : [normalized];
+  });
+  return persistedIndicatorSignature(current) === persistedIndicatorSignature(prepared)
+    ? current
+    : prepared;
+}
+
+export interface ActiveIndicatorUpdate {
+  durableChanged: boolean;
+  indicators: IndicatorDefinition[];
+}
+
+/**
+ * Apply one live-store update without confusing computed lines/errors with a
+ * durable workspace edit. Controlled chart cells still need to accept every
+ * runtime update locally; only definition changes are sent back to the
+ * workspace owner.
+ */
+export function applyActiveIndicatorUpdate(
+  current: IndicatorDefinition[],
+  action: SetStateAction<IndicatorDefinition[]>,
+): ActiveIndicatorUpdate {
+  const indicators = typeof action === "function" ? action(current) : action;
+  return {
+    durableChanged:
+      persistedIndicatorSignature(indicators) !== persistedIndicatorSignature(current),
+    indicators,
+  };
+}
+
 export interface UseActiveIndicatorStoreOptions {
   autoAddVolume?: boolean;
   normalizeIndicator?: (
@@ -137,17 +187,52 @@ export function useActiveIndicatorStore({
   const prepareIndicator = useCallback((indicator: IndicatorDefinition) => (
     normalizeIndicator ? normalizeIndicator(indicator) : indicator
   ), [normalizeIndicator]);
-  const [activeIndicators, setActiveIndicators] = useState<IndicatorDefinition[]>(() => (
+  const [ownedIndicators, setOwnedIndicators] = useState<IndicatorDefinition[]>(() => (
     (persistence?.load() ?? []).flatMap((indicator) => {
       const prepared = normalizeIndicator ? normalizeIndicator(indicator) : indicator;
       return prepared === null ? [] : [prepared];
     })
   ));
+  const ownedIndicatorsRef = useRef(ownedIndicators);
   const volInitRef = useRef(false);
+  const controlled = persistence?.controlled === true;
+  const controlledIndicators = useMemo(() => (
+    controlled
+      ? (persistence?.load() ?? []).flatMap((indicator) => {
+          const prepared = normalizeIndicator ? normalizeIndicator(indicator) : indicator;
+          return prepared === null ? [] : [prepared];
+        })
+      : []
+  ), [controlled, normalizeIndicator, persistence]);
+  const activeIndicators = ownedIndicators;
+  const setActiveIndicators = useCallback<Dispatch<SetStateAction<IndicatorDefinition[]>>>(
+    (action) => {
+      const update = applyActiveIndicatorUpdate(ownedIndicatorsRef.current, action);
+      if (update.indicators !== ownedIndicatorsRef.current) {
+        ownedIndicatorsRef.current = update.indicators;
+        setOwnedIndicators(update.indicators);
+      }
+      if (controlled && update.durableChanged) {
+        persistence?.save(update.indicators.map(stripIndicatorRuntimeFields));
+      }
+    },
+    [controlled, persistence],
+  );
 
   useEffect(() => {
-    persistence?.save(activeIndicators.map(stripIndicatorRuntimeFields));
-  }, [activeIndicators, persistence]);
+    if (!controlled) return;
+    const reconciled = reconcilePersistedIndicatorDefinitions(
+      ownedIndicatorsRef.current,
+      controlledIndicators,
+    );
+    if (reconciled === ownedIndicatorsRef.current) return;
+    ownedIndicatorsRef.current = reconciled;
+    setOwnedIndicators(reconciled);
+  }, [controlled, controlledIndicators]);
+
+  useEffect(() => {
+    if (!controlled) persistence?.save(ownedIndicators.map(stripIndicatorRuntimeFields));
+  }, [controlled, ownedIndicators, persistence]);
 
   useEffect(() => {
     if (!autoAddVolume) return;
@@ -190,6 +275,7 @@ export function useActiveIndicatorStore({
     autoAddVolume,
     onRequireCompute,
     prepareIndicator,
+    setActiveIndicators,
   ]);
 
   const addIndicator = useCallback((indicator: IndicatorDefinition) => {
@@ -200,11 +286,11 @@ export function useActiveIndicatorStore({
       return [...prev, { ...prepared, visible: true, lines: [] }];
     });
     onRequireCompute?.();
-  }, [onRequireCompute, prepareIndicator]);
+  }, [onRequireCompute, prepareIndicator, setActiveIndicators]);
 
   const removeIndicator = useCallback((indicatorId: string) => {
     setActiveIndicators((prev) => prev.filter((indicator) => indicator.id !== indicatorId));
-  }, []);
+  }, [setActiveIndicators]);
 
   const toggleVisibility = useCallback((indicatorId: string) => {
     setActiveIndicators((prev) =>
@@ -214,7 +300,7 @@ export function useActiveIndicatorStore({
           : indicator
       )
     );
-  }, []);
+  }, [setActiveIndicators]);
 
   const updateIndicatorParams = useCallback((indicatorId: string, newParams: IndicatorParams) => {
     setActiveIndicators((prev) =>
@@ -225,7 +311,7 @@ export function useActiveIndicatorStore({
       )
     );
     onRequireCompute?.();
-  }, [onRequireCompute]);
+  }, [onRequireCompute, setActiveIndicators]);
 
   const updateIndicatorScript = useCallback((
     indicatorId: string,
@@ -244,7 +330,7 @@ export function useActiveIndicatorStore({
       );
     }));
     onRequireCompute?.();
-  }, [normalizeIndicator, onRequireCompute]);
+  }, [normalizeIndicator, onRequireCompute, setActiveIndicators]);
 
   return {
     activeIndicators,

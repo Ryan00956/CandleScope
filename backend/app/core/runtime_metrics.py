@@ -2,18 +2,41 @@
 from __future__ import annotations
 
 import asyncio
+from array import array
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
 
+_HISTOGRAM_MAX_MS = 1_000
+
+
 @dataclass(slots=True)
 class _RollingLatency:
+    history_limit: int = 120
+    output_limit: int = 120
     samples: int = 0
     total_ms: float = 0.0
     max_ms: float = 0.0
     last_ms: float = 0.0
-    recent_ms: list[float] = field(default_factory=list)
+    _values: array = field(init=False, repr=False)
+    _histogram: array = field(init=False, repr=False)
+    _stored: int = field(init=False, default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        self.history_limit = max(1, int(self.history_limit))
+        self.output_limit = max(1, int(self.output_limit))
+        # A one-hour 10 ms event-loop window contains roughly 360,000
+        # samples. Python ``(sequence, float)`` tuples cost tens of megabytes
+        # and copying that deque for every capacity snapshot caused apparent
+        # process-memory growth during the release soak. Sequence numbers are
+        # monotonic, so retain only packed doubles in a fixed-size ring and
+        # derive their sequence from the slot position.
+        self._values = array("d", [0.0]) * self.history_limit
+        # Cumulative one-millisecond buckets let a release harness subtract a
+        # baseline and calculate a true multi-hour percentile without retaining
+        # every raw sample.  The last bucket is the >1000 ms overflow bucket.
+        self._histogram = array("Q", [0]) * (_HISTOGRAM_MAX_MS + 2)
 
     def add(self, value_ms: float) -> None:
         value = max(0.0, float(value_ms))
@@ -21,29 +44,73 @@ class _RollingLatency:
         self.total_ms += value
         self.max_ms = max(self.max_ms, value)
         self.last_ms = value
-        self.recent_ms.append(value)
-        if len(self.recent_ms) > 120:
-            self.recent_ms.pop(0)
+        self._values[(self.samples - 1) % self.history_limit] = value
+        self._stored = min(self.history_limit, self._stored + 1)
+        bucket = min(_HISTOGRAM_MAX_MS + 1, int(value) + (value % 1 > 0))
+        self._histogram[bucket] += 1
 
-    def snapshot(self) -> dict[str, Any]:
-        sorted_recent = sorted(self.recent_ms)
+    def _sample(self, sequence: int) -> tuple[int, float]:
+        return sequence, self._values[(sequence - 1) % self.history_limit]
+
+    def _samples_from(self, first_sequence: int) -> list[tuple[int, float]]:
+        oldest_sequence = self.samples - self._stored + 1
+        start = max(oldest_sequence, int(first_sequence))
+        if self._stored == 0 or start > self.samples:
+            return []
+        return [self._sample(sequence) for sequence in range(start, self.samples + 1)]
+
+    def snapshot(self, *, after_sequence: int | None = None) -> dict[str, Any]:
+        oldest_sequence = self.samples - self._stored + 1
+        if after_sequence is None:
+            # Ordinary health/capacity polling needs a recent percentile and
+            # the bounded output tail, not a copy of the entire one-hour ring.
+            selected = self._samples_from(self.samples - self.output_limit + 1)
+        else:
+            selected = self._samples_from(max(0, int(after_sequence)) + 1)
+        sorted_recent = sorted(value for _, value in selected)
         avg = self.total_ms / self.samples if self.samples else 0.0
-        return {
+        payload = {
             "samples": self.samples,
             "avg_ms": round(avg, 2),
             "p95_ms": _percentile(sorted_recent, 95),
             "p99_ms": _percentile(sorted_recent, 99),
             "max_ms": round(self.max_ms, 2),
             "last_ms": round(self.last_ms, 2),
+            # Bounded raw samples let release harnesses calculate a percentile
+            # for their own observation window instead of inheriting a spike
+            # from a previous scenario in this sidecar process.
+            "sample_sequence": self.samples,
+            "recent_samples": [
+                {"sequence": sequence, "value_ms": round(value, 2)}
+                for sequence, value in selected[-self.output_limit:]
+            ],
+            "histogram": {
+                "bucket_width_ms": 1,
+                "max_ms": _HISTOGRAM_MAX_MS,
+                "counts": list(self._histogram),
+            },
         }
+        if after_sequence is not None:
+            normalized_after = max(0, int(after_sequence))
+            payload.update({
+                "window_after_sequence": normalized_after,
+                "window_complete": normalized_after >= oldest_sequence - 1,
+                "window_sample_count": len(selected),
+                "window_p95_ms": _percentile(sorted_recent, 95),
+                "window_p99_ms": _percentile(sorted_recent, 99),
+            })
+        return payload
 
 
 class EventLoopLagMonitor:
     """Samples event-loop scheduling lag with a lightweight background task."""
 
     def __init__(self, *, interval_seconds: float = 1.0) -> None:
-        self._interval = max(0.05, float(interval_seconds))
-        self._latency = _RollingLatency()
+        self._interval = max(0.01, float(interval_seconds))
+        # 10 ms release sampling for one hour needs 360,000 points. Retain a
+        # bounded margin so a caller can request an exact sequence window while
+        # ordinary snapshots still emit only the newest 120 raw samples.
+        self._latency = _RollingLatency(history_limit=400_000)
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -75,8 +142,8 @@ class EventLoopLagMonitor:
             if next_tick < now:
                 next_tick = now + self._interval
 
-    def snapshot(self) -> dict[str, Any]:
-        payload = self._latency.snapshot()
+    def snapshot(self, *, after_sequence: int | None = None) -> dict[str, Any]:
+        payload = self._latency.snapshot(after_sequence=after_sequence)
         payload["interval_seconds"] = self._interval
         payload["running"] = self._task is not None and not self._task.done()
         return payload

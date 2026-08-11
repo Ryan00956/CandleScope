@@ -1,6 +1,7 @@
 import {
   fetchKlinesBefore as fetchTransportKlinesBefore,
   fetchKlinesHistory as fetchTransportKlinesHistory,
+  fetchKlinesHistoryBatch as fetchTransportKlinesHistoryBatch,
   fetchKlinesRange as fetchTransportKlinesRange,
   fetchLatestKlines as fetchTransportLatestKlines,
   getMultiStreamUrl,
@@ -14,6 +15,8 @@ import type {
   KlineBeforeRequestOptions,
   KlineFetchResult,
   KlineHistoryRequestOptions,
+  KlineHistoryBatchOutcome,
+  KlineHistoryBatchRequest,
   KlineRangeRequestOptions,
   KlineRequestOptions,
 } from "../klineContracts.js";
@@ -176,6 +179,16 @@ async function fetchKlinesHistory(
   ));
 }
 
+async function fetchKlinesHistoryBatch(
+  requests: readonly KlineHistoryBatchRequest[],
+  options: { signal?: AbortSignal },
+): Promise<KlineHistoryBatchOutcome[]> {
+  const outcomes = await fetchTransportKlinesHistoryBatch(requests, options);
+  return outcomes.map((outcome) => outcome.ok
+    ? { ok: true, result: toMarketDataResult(outcome.result) }
+    : outcome);
+}
+
 async function fetchKlinesBefore(
   symbol: string,
   interval: IntervalString,
@@ -238,6 +251,7 @@ async function fetchLatestKlines(
 
 export const defaultKlineApi = {
   fetchKlinesHistory,
+  fetchKlinesHistoryBatch,
   fetchKlinesBefore,
   fetchKlinesRange,
   fetchLatestKlines,

@@ -11,6 +11,7 @@ export interface SymbolSearchItem extends Record<string, unknown> {
 
 export interface ExchangeMarketDescriptor {
   market_type?: string;
+  label?: string;
 }
 
 export interface ExchangeCatalogEntry {

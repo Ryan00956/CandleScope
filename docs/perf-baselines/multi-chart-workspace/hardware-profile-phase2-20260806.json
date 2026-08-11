@@ -1,0 +1,101 @@
+{
+  "schemaVersion": "candlescope.multi-chart.hardware/1",
+  "generatedAt": "2026-08-06T09:01:36.619Z",
+  "profileSha256": "sha256:88973308182b77405db1eca6499d8e13f7979d58ad904a2b337e72b9ff345376",
+  "host": {
+    "hostname": "DESKTOP-K6P66JD",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "architecture": "x64",
+    "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "logicalCores": 32,
+    "totalMemoryBytes": 34081607680,
+    "graphics": [
+      {
+        "Name": "Parsec Virtual Display Adapter",
+        "DriverVersion": "0.45.0.0",
+        "CurrentHorizontalResolution": null,
+        "CurrentVerticalResolution": null,
+        "CurrentRefreshRate": null
+      },
+      {
+        "Name": "OrayIddDriver Device",
+        "DriverVersion": "17.50.19.949",
+        "CurrentHorizontalResolution": 2560,
+        "CurrentVerticalResolution": 1600,
+        "CurrentRefreshRate": 240
+      },
+      {
+        "Name": "NVIDIA GeForce RTX 4080 Laptop GPU",
+        "DriverVersion": "32.0.16.1062",
+        "CurrentHorizontalResolution": 2560,
+        "CurrentVerticalResolution": 1600,
+        "CurrentRefreshRate": 240
+      }
+    ],
+    "monitorTopology": {
+      "monitorCount": 1,
+      "monitors": [
+        {
+          "deviceName": "\\\\.\\DISPLAY1",
+          "primary": true,
+          "x": 0,
+          "y": 0,
+          "width": 1707,
+          "height": 1067,
+          "bitsPerPixel": 32
+        }
+      ]
+    }
+  },
+  "software": {
+    "node": "v22.14.0",
+    "python": "Python 3.12.7",
+    "browser": {
+      "product": "Chrome/151.0.7922.71",
+      "protocolVersion": "1.3",
+      "executable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    }
+  },
+  "display": {
+    "width": 1707,
+    "height": 1067,
+    "availWidth": 1707,
+    "availHeight": 1019,
+    "devicePixelRatio": 1.5,
+    "colorDepth": 24
+  },
+  "webgl": {
+    "vendor": "Google Inc. (NVIDIA)",
+    "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4080 Laptop GPU (0x000027A0) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "database": {
+    "path": "H:\\program\\CandleScope-multi-chart-workspace\\backend\\data\\candlescope.db",
+    "exists": true,
+    "state": "warm",
+    "sizeBytes": 2404352,
+    "rowCount": 9108,
+    "seriesCount": 8,
+    "earliestOpenTimeMs": 1656374400000,
+    "latestOpenTimeMs": 1786006800000,
+    "sha256": "sha256:34397b37f48b48aab739d43155a56850e8f38d0908cb9b5d438d1822e21b7d77",
+    "hashConsistency": "live_sqlite_file_set",
+    "files": [
+      {
+        "name": "candlescope.db",
+        "sizeBytes": 2404352,
+        "sha256": "sha256:70d9901ff79541de30f3a00df26e837e0ef1d535f27c33b0df87b493795385ec"
+      },
+      {
+        "name": "candlescope.db-wal",
+        "sizeBytes": 226632,
+        "sha256": "sha256:20956c92ee28f65122d7d879cb9b77c3395e2d2807f6b8a6d42a3ed2e0c57ab3"
+      },
+      {
+        "name": "candlescope.db-shm",
+        "sizeBytes": 32768,
+        "sha256": "sha256:a2faeeab8a5257e9389ef361317aee925a98d4ca10a2a4dc390a9f553434c2ad"
+      }
+    ]
+  }
+}

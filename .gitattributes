@@ -6,6 +6,7 @@ frontend/scripts/replay-rollback-drill.* text eol=lf
 
 # Plugin Platform Phase 0 freezes these fixtures by exact SHA-256.
 backend/app/official-plugin-releases.json text eol=lf
+backend/app/plugin_runtime_registry_v3/official-runtime-registry*.json text eol=lf
 backend/tests/fixtures/plugin_runtime/pyne_transport_v1.json text eol=lf
 packages/candlescope-plugin-sdk/tests/fixtures/hello_transcript_v1.json text eol=lf
 
@@ -30,19 +31,21 @@ examples/plugin-platform-native-rust/Cargo.toml text eol=lf
 examples/plugin-platform-native-rust/LICENSE text eol=lf
 examples/plugin-platform-native-rust/*.md text eol=lf
 examples/plugin-platform-native-rust/**/*.rs text eol=lf
-# The Phase 1 SDK wheel froze the historical Windows checkout bytes. Most SDK
-# sources were CRLF, while these three newly introduced files were LF.
-packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/**/*.css text eol=crlf
-packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/**/*.html text eol=crlf
-packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/**/*.js text eol=crlf
-packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/**/*.json text eol=crlf
-packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/**/*.py text eol=crlf
+
+# Multi-runtime gates freeze SDK bundle bytes from the historical Windows
+# release layout. Preserve that reviewed layout in every worktree, while the
+# explicitly listed Phase 1 additions retain their reviewed LF bytes.
+packages/candlescope-plugin-sdk/src/** text eol=crlf
 packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/chart.py text eol=lf
 packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/render.py text eol=lf
 packages/candlescope-plugin-sdk/src/candlescope_plugin_sdk/platform_v2/schemas/manifest-v3.schema.json text eol=lf
+packages/candlescope-plugin-sdk/examples/platform-v2/hello-command.manifest.json text eol=crlf
+packages/candlescope-plugin-sdk/tests/fixtures/hello_command_transcript_v2.json text eol=crlf
 packages/candlescope-plugin-sdk/tests/fixtures/platform_v3/*.json text eol=lf
+
+# Phase 8 freezes the Rust WASM SDK lockfile and source tree.
 packages/candlescope-plugin-sdk-rust-wasm/Cargo.lock text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/Cargo.toml text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/LICENSE text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/*.md text eol=lf
-packages/candlescope-plugin-sdk-rust-wasm/**/*.rs text eol=lf
+packages/candlescope-plugin-sdk-rust-wasm/src/** text eol=lf

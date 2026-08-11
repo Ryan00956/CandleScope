@@ -55,14 +55,32 @@ function unavailableIntervalMessage(
 
 export function useChartSession({
   chartSurfaceActions,
+  initialSession: configuredInitialSession = null,
+  controlledSession = null,
+  onSessionChange = null,
+  visibleRangeScope = null,
 }: UseChartSessionOptions = {}): ChartSessionRuntime {
-  const [initialSession] = useState(loadInitialChartSession);
+  const [initialSession] = useState(() => {
+    const fallback = loadInitialChartSession();
+    const configuredInterval = canonicalizeIntervalValue(configuredInitialSession?.interval);
+    return {
+      exchange: configuredInitialSession?.exchange || fallback.exchange,
+      marketType: configuredInitialSession?.marketType || fallback.marketType,
+      symbol: configuredInitialSession?.symbol || fallback.symbol,
+      interval: configuredInterval || fallback.interval,
+    };
+  });
   const [symbol, setSymbol] = useState(initialSession.symbol);
   const [exchange, setExchange] = useState(initialSession.exchange);
   const [marketType, setMarketType] = useState(initialSession.marketType);
   const [interval, setInterval] = useState(initialSession.interval);
   const [lastTransition, setLastTransition] = useState<ChartSessionTransition | null>(null);
   const transitionIdRef = useRef(0);
+  const controlledInterval = canonicalizeIntervalValue(controlledSession?.interval);
+  const controlledSessionKey = controlledSession && controlledInterval
+    ? buildChartSessionKey({ ...controlledSession, interval: controlledInterval })
+    : null;
+  const lastControlledSessionKeyRef = useRef(controlledSessionKey);
 
   const { exchangeCatalog, exchangeCatalogStatus } = useExchangeCatalog();
   const {
@@ -152,14 +170,24 @@ export function useChartSession({
     [exchange, interval, marketType, symbol],
   );
   const savedVisibleRange = useMemo(
-    () => getVisibleRangeForInterval(symbol, interval, marketType, exchange),
-    [exchange, interval, marketType, symbol],
+    () => getVisibleRangeForInterval(
+      symbol,
+      interval,
+      marketType,
+      exchange,
+      visibleRangeScope,
+    ),
+    [exchange, interval, marketType, symbol, visibleRangeScope],
   );
   const sessionKey = useMemo(
     () => buildChartSessionKey({ exchange, marketType, symbol, interval }),
     [exchange, interval, marketType, symbol],
   );
   const visibleRangeDataMetaRef = useRef<unknown>(null);
+
+  useEffect(() => {
+    onSessionChange?.({ exchange, marketType, symbol, interval });
+  }, [exchange, interval, marketType, onSessionChange, symbol]);
 
   const publishTransition = useCallback((
     type: ChartSessionTransitionType,
@@ -181,6 +209,42 @@ export function useChartSession({
     }));
   }, [exchange, interval, marketType, symbol]);
 
+  useEffect(() => {
+    if (!controlledSession || !controlledInterval || !controlledSessionKey) return;
+    // A local toolbar action renders before its onSessionChange echo reaches
+    // the workspace document. Only react to a genuinely new external key, or
+    // the stale controlled value would immediately undo the user's action.
+    if (lastControlledSessionKeyRef.current === controlledSessionKey) return;
+    lastControlledSessionKeyRef.current = controlledSessionKey;
+    const nextSession = { ...controlledSession, interval: controlledInterval };
+    if (nextSession.exchange === exchange
+      && nextSession.marketType === marketType
+      && nextSession.symbol === symbol
+      && intervalsSemanticallyEquivalent(nextSession.interval, interval)) return;
+    const identityChanged = nextSession.exchange !== exchange
+      || nextSession.marketType !== marketType
+      || nextSession.symbol !== symbol;
+    publishTransition(
+      identityChanged
+        ? CHART_SESSION_TRANSITION_TYPES.SYMBOL_CHANGE
+        : CHART_SESSION_TRANSITION_TYPES.INTERVAL_CHANGE,
+      nextSession,
+    );
+    setExchange(nextSession.exchange);
+    setMarketType(nextSession.marketType);
+    setSymbol(nextSession.symbol);
+    setInterval(nextSession.interval);
+  }, [
+    controlledSession,
+    controlledInterval,
+    controlledSessionKey,
+    exchange,
+    interval,
+    marketType,
+    publishTransition,
+    symbol,
+  ]);
+
   const setDatasetVersionCompat = useCallback((): void => {}, []);
 
   const refreshDataset = useCallback((): void => {}, []);
@@ -197,8 +261,9 @@ export function useChartSession({
       marketType,
       exchange,
       dataMeta,
+      visibleRangeScope,
     );
-  }, [chartSurfaceActions, exchange, interval, marketType, symbol]);
+  }, [chartSurfaceActions, exchange, interval, marketType, symbol, visibleRangeScope]);
 
   const handleVisibleRangeChange = useCallback((range: unknown, dataMeta: unknown = null): void => {
     if (dataMeta) {
@@ -211,8 +276,9 @@ export function useChartSession({
       marketType,
       exchange,
       dataMeta ?? visibleRangeDataMetaRef.current,
+      visibleRangeScope,
     );
-  }, [exchange, interval, marketType, symbol]);
+  }, [exchange, interval, marketType, symbol, visibleRangeScope]);
 
   const updateVisibleRangeDataMeta = useCallback((dataMeta: unknown): void => {
     visibleRangeDataMetaRef.current = dataMeta ?? null;

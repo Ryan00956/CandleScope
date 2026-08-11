@@ -2,9 +2,21 @@ import type { KlineBar, MarketSeries, SeriesKey } from "../marketDataTypes.js";
 import { asSeriesKey } from "../marketDataTypes.js";
 import { SeriesWindowStore } from "./seriesWindowStore.js";
 import { canonicalizeIntervalValue } from "../../../utils/intervals.js";
+import { WINDOW_DELTA_TYPES } from "../klineContracts.js";
+
+const SHARED_SNAPSHOT_DELTA_TYPES: ReadonlySet<string> = new Set([
+  WINDOW_DELTA_TYPES.REPLACE,
+  WINDOW_DELTA_TYPES.APPEND,
+  WINDOW_DELTA_TYPES.PREPEND,
+  WINDOW_DELTA_TYPES.MID_MERGE,
+]);
 
 interface SeriesWindowRegistryOptions {
   maxBars?: number;
+  sharedSnapshot?: {
+    read(key: string): KlineBar[];
+    publish(key: string, rows: readonly KlineBar[]): void;
+  } | null;
 }
 interface StoreOptions {
   intervalSeconds?: number | null;
@@ -52,11 +64,14 @@ export function createDetachedSeriesWindowStore(
 
 export class SeriesWindowRegistry {
   maxBars: number | undefined;
+  private readonly sharedSnapshot: SeriesWindowRegistryOptions["sharedSnapshot"];
+  private readonly sharedCounts = { hydrations: 0, hydratedBars: 0, publishes: 0, publishErrors: 0 };
   private _stores: Map<string, SeriesWindowStore>;
   private _meta: Map<string, Record<string, unknown>>;
 
-  constructor({ maxBars }: SeriesWindowRegistryOptions = {}) {
+  constructor({ maxBars, sharedSnapshot = null }: SeriesWindowRegistryOptions = {}) {
     this.maxBars = maxBars;
+    this.sharedSnapshot = sharedSnapshot;
     this._stores = new Map();
     this._meta = new Map();
   }
@@ -83,6 +98,23 @@ export class SeriesWindowRegistry {
         ...(this.maxBars === undefined ? {} : { maxBars: this.maxBars }),
         seriesKey: key,
         intervalSeconds: options.intervalSeconds ?? null,
+      });
+      const sharedRows = this.sharedSnapshot?.read(key) || [];
+      if (sharedRows.length > 0) {
+        store.replace(sharedRows, { source: "desktop-shared-snapshot" });
+        this.sharedCounts.hydrations += 1;
+        this.sharedCounts.hydratedBars += sharedRows.length;
+      }
+      store.subscribe((delta, current) => {
+        if (!this.sharedSnapshot
+          || !delta.changed
+          || !SHARED_SNAPSHOT_DELTA_TYPES.has(delta.type)) return;
+        try {
+          this.sharedSnapshot.publish(key, current.snapshot().slice(-256));
+          this.sharedCounts.publishes += 1;
+        } catch {
+          this.sharedCounts.publishErrors += 1;
+        }
       });
       this._stores.set(key, store);
     }
@@ -120,6 +152,10 @@ export class SeriesWindowRegistry {
       store,
       meta: this.meta(key),
     }));
+  }
+
+  sharedSnapshotDiagnostics(): typeof this.sharedCounts {
+    return { ...this.sharedCounts };
   }
 
   evict(key: string): ({ key: string } & ReturnType<SeriesWindowStore["describe"]>) | null {

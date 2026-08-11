@@ -34,8 +34,8 @@ from candlescope_plugin_sdk import (
 RUNTIME_ID = "candlescope.pyne"
 PLUGIN_NAME = "Pyne Runtime"
 PLUGIN_PACKAGE = "candlescope-plugin-pyne"
-PLUGIN_VERSION = "0.2.0"
-EXPECTED_PYNE_VERSION = "0.2.0rc1"
+PLUGIN_VERSION = "0.3.0.dev0"
+EXPECTED_PYNE_VERSION = "0.3.0rc2"
 UNKNOWN_SOURCE_VERSION = "0.0.0+unknown"
 
 _SECURITY_MODE_KEYS = ("securityMode", "security_mode")

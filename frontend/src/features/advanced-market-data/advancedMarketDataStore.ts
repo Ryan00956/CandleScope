@@ -69,16 +69,12 @@ interface IdentityStoreState {
   fundingLegacySettlementHistory: MarketStateRecord[];
   fundingHybridSettlementHistoryByPeriod: Map<string, MarketStateRecord[]>;
   fundingDerivedHistoryByPeriod: Map<string, MarketStateRecord[]>;
-  activeFundingPeriod: string | null;
-  fundingDisplayHistory: MarketStateRecord[];
   fundingRealtimeHistory: MarketStateRecord[];
   fundingPreview: MarketStateRecord | null;
   openInterestHistoryByPeriod: Map<string, MarketStateRecord[]>;
   openInterestLive: MarketStateRecord | null;
-  openInterestDisplayHistory: MarketStateRecord[];
-  activeOpenInterestPeriod: string;
   summarySnapshot: AdvancedMarketSummarySnapshot;
-  metricsSnapshot: AdvancedMarketMetricsSnapshot;
+  metricsSnapshotsByContext: Map<string, AdvancedMarketMetricsSnapshot>;
   summaryListeners: Set<() => void>;
   metricsListeners: Set<() => void>;
   connectionStatus: AdvancedMarketConnectionStatus;
@@ -263,32 +259,32 @@ function mergeFundingSettlements(
     .slice(-MAX_METRIC_RECORDS);
 }
 
-function refreshFundingDisplayHistory(state: IdentityStoreState): boolean {
-  const hybridSettlements = state.activeFundingPeriod
-    ? state.fundingHybridSettlementHistoryByPeriod.get(state.activeFundingPeriod) ?? []
+function fundingDisplayHistoryForPeriod(
+  state: IdentityStoreState,
+  period: string | null,
+): MarketStateRecord[] {
+  const hybridSettlements = period
+    ? state.fundingHybridSettlementHistoryByPeriod.get(period) ?? []
     : [];
-  const derived = state.activeFundingPeriod
-    ? state.fundingDerivedHistoryByPeriod.get(state.activeFundingPeriod) ?? []
+  const derived = period
+    ? state.fundingDerivedHistoryByPeriod.get(period) ?? []
     : [];
-  const next = mergeRecords(
+  return mergeRecords(
     mergeFundingSettlements(state.fundingLegacySettlementHistory, hybridSettlements),
     derived,
   );
-  if (sameRecordSequence(state.fundingDisplayHistory, next)) return false;
-  state.fundingDisplayHistory = next;
-  return true;
 }
 
-function refreshOpenInterestDisplayHistory(state: IdentityStoreState): boolean {
+function openInterestDisplayHistoryForPeriod(
+  state: IdentityStoreState,
+  period: string,
+): MarketStateRecord[] {
   const periodHistory = state.openInterestHistoryByPeriod.get(
-    state.activeOpenInterestPeriod,
+    period,
   ) ?? [];
-  const next = state.openInterestLive
+  return state.openInterestLive
     ? mergeRecords(periodHistory, [state.openInterestLive])
     : periodHistory;
-  if (sameRecordSequence(state.openInterestDisplayHistory, next)) return false;
-  state.openInterestDisplayHistory = next;
-  return true;
 }
 
 function sameSummary(
@@ -323,16 +319,12 @@ function createState(): IdentityStoreState {
     fundingLegacySettlementHistory: [],
     fundingHybridSettlementHistoryByPeriod: new Map(),
     fundingDerivedHistoryByPeriod: new Map(),
-    activeFundingPeriod: null,
-    fundingDisplayHistory: [],
     fundingRealtimeHistory: [],
     fundingPreview: null,
     openInterestHistoryByPeriod: new Map(),
     openInterestLive: null,
-    openInterestDisplayHistory: [],
-    activeOpenInterestPeriod: DEFAULT_OPEN_INTEREST_PERIOD,
     summarySnapshot: EMPTY_ADVANCED_MARKET_SUMMARY,
-    metricsSnapshot: EMPTY_ADVANCED_MARKET_METRICS,
+    metricsSnapshotsByContext: new Map(),
     summaryListeners: new Set(),
     metricsListeners: new Set(),
     connectionStatus: "disabled",
@@ -388,7 +380,43 @@ export class AdvancedMarketDataStore {
   }
 
   getMetricsSnapshot(identityKey: string): AdvancedMarketMetricsSnapshot {
-    return this.states.get(identityKey)?.metricsSnapshot ?? EMPTY_ADVANCED_MARKET_METRICS;
+    return this.getMetricsSnapshotForPeriods(
+      identityKey,
+      null,
+      DEFAULT_OPEN_INTEREST_PERIOD,
+    );
+  }
+
+  getMetricsSnapshotForPeriods(
+    identityKey: string,
+    fundingPeriod: string | null,
+    openInterestPeriod: string,
+  ): AdvancedMarketMetricsSnapshot {
+    const state = this.states.get(identityKey);
+    if (!state) return EMPTY_ADVANCED_MARKET_METRICS;
+    const normalizedFundingPeriod = normalizeFundingPeriod(fundingPeriod);
+    const normalizedOpenInterestPeriod = normalizePeriod(openInterestPeriod)
+      ?? DEFAULT_OPEN_INTEREST_PERIOD;
+    const contextKey = [
+      normalizedFundingPeriod ?? "none",
+      normalizedOpenInterestPeriod,
+    ].join(":");
+    const cached = state.metricsSnapshotsByContext.get(contextKey);
+    if (cached) return cached;
+    const snapshot: AdvancedMarketMetricsSnapshot = {
+      fundingHistory: fundingDisplayHistoryForPeriod(state, normalizedFundingPeriod),
+      fundingRealtimeHistory: state.fundingRealtimeHistory,
+      fundingPreview: state.fundingPreview,
+      openInterestHistory: openInterestDisplayHistoryForPeriod(
+        state,
+        normalizedOpenInterestPeriod,
+      ),
+      openInterestPeriod: normalizedOpenInterestPeriod,
+      connectionStatus: state.connectionStatus,
+      revision: state.metricsRevision,
+    };
+    state.metricsSnapshotsByContext.set(contextKey, snapshot);
+    return snapshot;
   }
 
   setConnectionStatus(
@@ -402,29 +430,6 @@ export class AdvancedMarketDataStore {
     this.publishMetrics(state);
   }
 
-  setOpenInterestPeriod(identity: AdvancedMarketIdentity, period: string): void {
-    const normalized = normalizePeriod(period);
-    if (!normalized) return;
-    const state = this.state(identity);
-    if (state.activeOpenInterestPeriod === normalized) return;
-    state.activeOpenInterestPeriod = normalized;
-    refreshOpenInterestDisplayHistory(state);
-    this.publishMetrics(state);
-  }
-
-  setFundingPeriod(identity: AdvancedMarketIdentity, period: string): void {
-    const normalized = normalizeFundingPeriod(period);
-    if (!normalized) return;
-    const state = this.state(identity);
-    if (state.activeFundingPeriod === normalized) return;
-    state.activeFundingPeriod = normalized;
-    // A period switch hands closed bars back to hybrid history. Keep only the
-    // latest exchange observation for the newly forming K.
-    state.fundingRealtimeHistory = state.fundingPreview ? [state.fundingPreview] : [];
-    refreshFundingDisplayHistory(state);
-    this.publishMetrics(state);
-  }
-
   applyRecords(
     identity: AdvancedMarketIdentity,
     records: readonly MarketStateRecord[],
@@ -432,8 +437,6 @@ export class AdvancedMarketDataStore {
     const state = this.state(identity);
     let summaryChanged = false;
     let metricsChanged = false;
-    let fundingDisplayDirty = false;
-    let openInterestDisplayDirty = false;
     for (const record of records) {
       if (!recordMatchesIdentity(identity, record)) continue;
       const previous = state.latestByChannel.get(record.channel);
@@ -456,7 +459,7 @@ export class AdvancedMarketDataStore {
               const next = mergeRecords(current, [record]);
               if (next !== current) {
                 state.fundingHybridSettlementHistoryByPeriod.set(hybridPeriod, next);
-                if (hybridPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+                metricsChanged = true;
               }
             } else {
               const next = mergeRecords(
@@ -465,7 +468,7 @@ export class AdvancedMarketDataStore {
               );
               if (next !== state.fundingLegacySettlementHistory) {
                 state.fundingLegacySettlementHistory = next;
-                fundingDisplayDirty = true;
+                metricsChanged = true;
               }
             }
           } else {
@@ -475,7 +478,7 @@ export class AdvancedMarketDataStore {
               const next = mergeRecords(current, [record]);
               if (next !== current) {
                 state.fundingDerivedHistoryByPeriod.set(period, next);
-                if (period === state.activeFundingPeriod) fundingDisplayDirty = true;
+                metricsChanged = true;
               }
             }
           }
@@ -501,12 +504,10 @@ export class AdvancedMarketDataStore {
         const next = asOpenInterestLiveProvisional(record);
         if (!sameMarketRecord(state.openInterestLive, next)) {
           state.openInterestLive = next;
-          openInterestDisplayDirty = true;
+          metricsChanged = true;
         }
       }
     }
-    if (fundingDisplayDirty && refreshFundingDisplayHistory(state)) metricsChanged = true;
-    if (openInterestDisplayDirty && refreshOpenInterestDisplayHistory(state)) metricsChanged = true;
     if (summaryChanged) this.publishSummary(state);
     if (metricsChanged) this.publishMetrics(state);
   }
@@ -538,21 +539,20 @@ export class AdvancedMarketDataStore {
       ));
       const hybridSettlementSet = new Set(hybridSettlements);
       const legacySettlements = settlements.filter((record) => !hybridSettlementSet.has(record));
-      let fundingDisplayDirty = false;
       const legacyHistory = mergeRecords(
         state.fundingLegacySettlementHistory,
         legacySettlements,
       );
       if (legacyHistory !== state.fundingLegacySettlementHistory) {
         state.fundingLegacySettlementHistory = legacyHistory;
-        fundingDisplayDirty = true;
+        metricsChanged = true;
       }
       if (fundingPeriod && hybridSettlements.length > 0) {
         const current = state.fundingHybridSettlementHistoryByPeriod.get(fundingPeriod) ?? [];
         const next = mergeRecords(current, hybridSettlements);
         if (next !== current) {
           state.fundingHybridSettlementHistoryByPeriod.set(fundingPeriod, next);
-          if (fundingPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+          metricsChanged = true;
         }
       }
       if (fundingPeriod && derived.length > 0) {
@@ -560,10 +560,9 @@ export class AdvancedMarketDataStore {
         const next = mergeRecords(current, derived);
         if (next !== current) {
           state.fundingDerivedHistoryByPeriod.set(fundingPeriod, next);
-          if (fundingPeriod === state.activeFundingPeriod) fundingDisplayDirty = true;
+          metricsChanged = true;
         }
       }
-      if (fundingDisplayDirty && refreshFundingDisplayHistory(state)) metricsChanged = true;
       for (const preview of previews.sort(compareChannelProgress)) {
         if (state.fundingPreview
           && compareChannelProgress(preview, state.fundingPreview) < 0) continue;
@@ -592,15 +591,13 @@ export class AdvancedMarketDataStore {
         grouped.set(resolvedPeriod, group);
       }
       if (grouped.size === 0) return;
-      let activeHistoryChanged = false;
       for (const [resolvedPeriod, incoming] of grouped) {
         const current = state.openInterestHistoryByPeriod.get(resolvedPeriod) ?? [];
         const next = mergeRecords(current, incoming);
         if (next === current) continue;
         state.openInterestHistoryByPeriod.set(resolvedPeriod, next);
-        if (resolvedPeriod === state.activeOpenInterestPeriod) activeHistoryChanged = true;
+        metricsChanged = true;
       }
-      if (activeHistoryChanged && refreshOpenInterestDisplayHistory(state)) metricsChanged = true;
     }
     if (metricsChanged) this.publishMetrics(state);
   }
@@ -665,25 +662,8 @@ export class AdvancedMarketDataStore {
   }
 
   private publishMetrics(state: IdentityStoreState): void {
-    const previous = state.metricsSnapshot;
-    if (previous.fundingHistory === state.fundingDisplayHistory
-      && previous.fundingRealtimeHistory === state.fundingRealtimeHistory
-      && previous.fundingPreview === state.fundingPreview
-      && previous.openInterestHistory === state.openInterestDisplayHistory
-      && previous.openInterestPeriod === state.activeOpenInterestPeriod
-      && previous.connectionStatus === state.connectionStatus) {
-      return;
-    }
     state.metricsRevision += 1;
-    state.metricsSnapshot = {
-      fundingHistory: state.fundingDisplayHistory,
-      fundingRealtimeHistory: state.fundingRealtimeHistory,
-      fundingPreview: state.fundingPreview,
-      openInterestHistory: state.openInterestDisplayHistory,
-      openInterestPeriod: state.activeOpenInterestPeriod,
-      connectionStatus: state.connectionStatus,
-      revision: state.metricsRevision,
-    };
+    state.metricsSnapshotsByContext.clear();
     this.queueMetricsNotification(state);
   }
 

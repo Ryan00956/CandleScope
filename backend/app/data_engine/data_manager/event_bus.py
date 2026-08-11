@@ -625,6 +625,15 @@ class DataEventBus:
 
     def snapshot(self) -> dict:
         """JSON-serializable diagnostic snapshot."""
+        with self._protection_lock:
+            direct_subscriptions_by_key = {
+                str(key): len(self._callback_ids_by_key.get(key, ()))
+                + len(self._queue_ids_by_key.get(key, ()))
+                for key in sorted(
+                    set(self._callback_ids_by_key) | set(self._queue_ids_by_key),
+                    key=str,
+                )
+            }
         return {
             "callback_subscriptions": len(self._subscriptions),
             "queue_subscriptions": len(self._queue_subs),
@@ -655,6 +664,7 @@ class DataEventBus:
             "subscribed_keys": [
                 str(k) for k in self.get_all_subscribed_keys()
             ],
+            "direct_subscriptions_by_key": direct_subscriptions_by_key,
         }
 
     # ── Internal ─────────────────────────────────────────────

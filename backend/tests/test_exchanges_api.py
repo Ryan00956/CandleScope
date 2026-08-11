@@ -61,3 +61,28 @@ def test_exchange_diagnostics_reports_loaded_plugins() -> None:
     assert binance_rules["binance_spot_klines"]["algorithm"] == "header_weight"
     assert binance_rules["binance_futures_klines"]["endpoint"] == "/fapi/v1/klines"
     assert okx_rules["okx_history_candles"]["bucket_key"] == "okx:history-candles:ip"
+
+
+def test_exchange_list_exposes_pinned_ccxt_catalog() -> None:
+    response = _client().get("/api/v1/exchanges/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 105
+    assert payload["ccxt"] == {
+        "version": "4.5.60",
+        "rest_exchange_ids": 105,
+        "pro_exchange_ids": 77,
+        "watch_ohlcv": 59,
+        "watch_trades": 75,
+        "watch_order_book": 76,
+        "watch_ticker": 67,
+        "watch_mark_price": 9,
+        "watch_funding_rate": 9,
+        "watch_liquidations": 10,
+        "fetch_funding_rate_history": 50,
+        "fetch_open_interest": 32,
+        "fetch_open_interest_history": 15,
+    }
+    by_id = {item["exchange"]: item for item in payload["exchanges"]}
+    assert "provider.ccxt_unified" in by_id["bybit"]["protocol_features"]

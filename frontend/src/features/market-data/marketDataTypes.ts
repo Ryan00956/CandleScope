@@ -124,7 +124,7 @@ export interface UseChartBackgroundPrefetchOptions
   nativeIntervals: readonly IntervalString[];
   hasCache: HasMarketCache;
   seriesDataFeed: SeriesDataFeed;
-  enabled?: boolean;
+  enabled: boolean;
 }
 
 export interface UseSessionTransitionResetOptions {

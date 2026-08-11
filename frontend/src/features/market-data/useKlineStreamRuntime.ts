@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks.js";
 import {
@@ -18,6 +18,7 @@ import type {
 import type { KlineBar } from "./marketDataTypes.js";
 import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
 import { planTargetBarRequest } from "./intervalRequestBudget.js";
+import type { ChartWorkScheduler } from "./chartWorkScheduler.js";
 
 const WS_RECONNECT_BASE_DELAY = 2_000;
 const WS_RECONNECT_MAX_DELAY = 60_000;
@@ -174,6 +175,8 @@ export interface UseKlineStreamRuntimeOptions {
   updateRealtimePrice(closePrice: number): void;
   handleBackfillCompleted(message: BackfillCompletedMessage): boolean;
   setWsStatus: Dispatch<SetStateAction<KlineWebSocketStatus>>;
+  schedulerCellId?: string;
+  workScheduler?: ChartWorkScheduler | null;
 }
 
 export function useKlineStreamRuntime({
@@ -193,6 +196,8 @@ export function useKlineStreamRuntime({
   updateRealtimePrice,
   handleBackfillCompleted,
   setWsStatus,
+  schedulerCellId,
+  workScheduler,
 }: UseKlineStreamRuntimeOptions): void {
   const subscriptionRef = useRef<KlineStreamController | null>(null);
   const trackedIntervalsRef = useRef(trackedIntervals);
@@ -204,7 +209,7 @@ export function useKlineStreamRuntime({
     trackedIntervalsRef.current = trackedIntervals;
   }, [trackedIntervals]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!enabled) {
       setWsStatus("idle");
       return undefined;
@@ -457,18 +462,41 @@ export function useKlineStreamRuntime({
                 [tick],
               );
 
-              if (intervalsSemanticallyEquivalent(msgInterval, currentIntv)) {
-                stopPolling();
-                setWsStatus("live");
-                // The active interval shares one window store with the cache;
-                // commitPatchedChartData applies the tick and keeps React
-                // meta (barCount, coverage) in sync. Applying it twice via
-                // patchCacheTick first would turn the commit into a NOOP.
-                markPerfOnce("ws.kline.firstTick", { symbol, marketType, exchange, interval: currentIntv });
-                commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
-                updateLastPrice(tick, currentIntv);
+              const currentIntervalTick = intervalsSemanticallyEquivalent(msgInterval, currentIntv);
+              const commitTick = () => {
+                if (!active) return;
+                if (currentIntervalTick) {
+                  stopPolling();
+                  setWsStatus("live");
+                  // The active interval shares one window store with the cache;
+                  // commitPatchedChartData applies the tick and keeps React
+                  // meta (barCount, coverage) in sync. Applying it twice via
+                  // patchCacheTick first would turn the commit into a NOOP.
+                  markPerfOnce("ws.kline.firstTick", { symbol, marketType, exchange, interval: currentIntv });
+                  commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
+                  updateLastPrice(tick, currentIntv);
+                } else {
+                  patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
+                }
+              };
+              const schedulerKey = `${exchange}|${marketType}|${symbol}|${msgInterval}`;
+              if (!workScheduler || !schedulerCellId) {
+                commitTick();
+              } else if (tick.is_closed === true) {
+                // Closed rows and later amendments are authoritative and may
+                // also supersede a forming callback queued earlier this frame.
+                workScheduler.commitAuthoritative(
+                  schedulerCellId,
+                  commitTick,
+                  { lane: "kline-forming", key: schedulerKey },
+                );
               } else {
-                patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
+                workScheduler.enqueueFrame(
+                  schedulerCellId,
+                  "kline-forming",
+                  schedulerKey,
+                  commitTick,
+                );
               }
             },
             onParseError: (parseErr) => {
@@ -578,6 +606,8 @@ export function useKlineStreamRuntime({
     updateLastPrice,
     updateRealtimePrice,
     webSocketEnabled,
+    schedulerCellId,
+    workScheduler,
   ]);
 
   useEffect(() => {

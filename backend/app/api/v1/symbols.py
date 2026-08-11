@@ -449,6 +449,8 @@ def _catalog_refresh_requests(
     normalized_market_type = market_type.strip().lower()
     requests: list[tuple[str, str, Any]] = []
     for adapter in adapters:
+        if not exchange and getattr(adapter, "eager_catalog_refresh", True) is False:
+            continue
         seen_market_types: set[str] = set()
         for market in adapter.capabilities().markets:
             candidate = market.market_type.strip().lower()
@@ -962,13 +964,20 @@ async def get_exchange_info(
 
 
 @router.post("/exchange-info/refresh")
-async def refresh_exchange_info(exchange: str = Query("", description="Optional exchange id")) -> dict:
+async def refresh_exchange_info(
+    exchange: str = Query("", description="Optional exchange id"),
+    market_type: str = Query("", description="Optional exact market type"),
+) -> dict:
     """Manually re-fetch exchange metadata via the registry."""
-    counts = await refresh_exchange_metadata(exchange, force=True)
+    counts = await refresh_exchange_metadata(
+        exchange,
+        market_type=market_type,
+        force=True,
+    )
     payload = {
         "counts": counts,
         "cached_at": _cache_loaded_at,
-        **_catalog_status_payload(exchange=exchange),
+        **_catalog_status_payload(exchange=exchange, market_type=market_type),
     }
     if not any(count > 0 for count in counts.values()):
         raise HTTPException(

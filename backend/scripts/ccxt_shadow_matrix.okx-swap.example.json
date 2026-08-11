@@ -1,0 +1,27 @@
+{
+  "profile": "okx_swap",
+  "targets": [
+    {
+      "symbol": "BTC-USDT-SWAP",
+      "ccxt_symbol": "BTC/USDT:USDT",
+      "interval": "1m"
+    },
+    {
+      "symbol": "ETH-USDT-SWAP",
+      "ccxt_symbol": "ETH/USDT:USDT",
+      "interval": "1m"
+    },
+    {
+      "symbol": "SOL-USDT-SWAP",
+      "ccxt_symbol": "SOL/USDT:USDT",
+      "interval": "1m"
+    },
+    {
+      "symbol": "DOGE-USDT-SWAP",
+      "ccxt_symbol": "DOGE/USDT:USDT",
+      "interval": "1m"
+    }
+  ],
+  "duration_seconds": 65,
+  "startup_timeout_seconds": 45
+}

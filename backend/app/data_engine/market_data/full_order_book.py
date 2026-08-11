@@ -330,6 +330,9 @@ class _BookRevision:
         asks: Mapping[float, FullOrderBookLevel],
         bid_prices: Sequence[float],
         ask_prices: Sequence[float],
+        *,
+        bid_update_prices: Sequence[float] | None = None,
+        ask_update_prices: Sequence[float] | None = None,
     ) -> _BookRevision:
         parent: _BookRevision | None = self
         if self._bids_cache is not None and self._asks_cache is not None:
@@ -365,10 +368,20 @@ class _BookRevision:
         return _BookRevision(
             parent=parent,
             bid_updates=tuple(
-                (update.price, bids.get(update.price)) for update in delta.bids
+                (price, bids.get(price))
+                for price in (
+                    bid_update_prices
+                    if bid_update_prices is not None
+                    else tuple(update.price for update in delta.bids)
+                )
             ),
             ask_updates=tuple(
-                (update.price, asks.get(update.price)) for update in delta.asks
+                (price, asks.get(price))
+                for price in (
+                    ask_update_prices
+                    if ask_update_prices is not None
+                    else tuple(update.price for update in delta.asks)
+                )
             ),
             top_bids=tuple(
                 bids[price]
@@ -678,6 +691,9 @@ class FullOrderBookSnapshot:
     received_at_ms: int
     source: DataSource
     revision: int
+    local_level_capacity: int
+    local_bid_levels_trimmed: int = 0
+    local_ask_levels_trimmed: int = 0
     _materialization_token: object | None = field(
         default=None,
         repr=False,
@@ -793,6 +809,33 @@ class FullOrderBookSnapshot:
             "revision",
             _required_int(self.revision, label="revision", minimum=1),
         )
+        object.__setattr__(
+            self,
+            "local_level_capacity",
+            _required_int(
+                self.local_level_capacity,
+                label="local level capacity",
+                minimum=self.snapshot_limit,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "local_bid_levels_trimmed",
+            _required_int(
+                self.local_bid_levels_trimmed,
+                label="local bid levels trimmed",
+                minimum=0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "local_ask_levels_trimmed",
+            _required_int(
+                self.local_ask_levels_trimmed,
+                label="local ask levels trimmed",
+                minimum=0,
+            ),
+        )
 
     @property
     def stream_identity(self) -> FullOrderBookIdentity:
@@ -862,6 +905,10 @@ class FullOrderBookSnapshot:
             "source": self.source.value,
             "local_sequence_continuity": True,
             "exchange_full_depth_exhaustive": False,
+            "local_level_retention_bounded": True,
+            "local_level_capacity": self.local_level_capacity,
+            "local_bid_levels_trimmed": self.local_bid_levels_trimmed,
+            "local_ask_levels_trimmed": self.local_ask_levels_trimmed,
             "_canonical_level_order": True,
         }
 
@@ -915,6 +962,12 @@ class _StreamState:
     revision: int = 0
     failure: FullOrderBookFailure | None = None
     failure_detail: str | None = None
+    trusted_bid_depth: int = 0
+    trusted_ask_depth: int = 0
+    trimmed_bid_boundary: float | None = None
+    trimmed_ask_boundary: float | None = None
+    bid_levels_trimmed: int = 0
+    ask_levels_trimmed: int = 0
 
 
 def _normalize_identity(identity: FullOrderBookIdentity) -> FullOrderBookIdentity:
@@ -969,6 +1022,10 @@ class FullOrderBookEngine:
             "crossed_books": 0,
             "empty_books": 0,
             "capacity_failures": 0,
+            "retention_exhaustions": 0,
+            "bid_levels_trimmed": 0,
+            "ask_levels_trimmed": 0,
+            "updates_outside_retained_window": 0,
             "buffered_old_discarded": 0,
         }
 
@@ -1142,6 +1199,12 @@ class FullOrderBookEngine:
         state.last_update_id = last_id
         state.last_delta_signature = last_signature
         state.snapshot_limit = seed.snapshot_limit
+        state.trusted_bid_depth = len(seed.bids)
+        state.trusted_ask_depth = len(seed.asks)
+        state.trimmed_bid_boundary = None
+        state.trimmed_ask_boundary = None
+        state.bid_levels_trimmed = 0
+        state.ask_levels_trimmed = 0
         state.event_time_ms = last_event_time
         state.received_at_ms = last_received
         state.source = last_source
@@ -1196,6 +1259,12 @@ class FullOrderBookEngine:
                     "ask_levels": len(state.asks),
                     "buffered_deltas": len(state.buffered),
                     "buffered_level_updates": state.buffered_updates,
+                    "trusted_bid_depth": state.trusted_bid_depth,
+                    "trusted_ask_depth": state.trusted_ask_depth,
+                    "trimmed_bid_boundary": state.trimmed_bid_boundary,
+                    "trimmed_ask_boundary": state.trimmed_ask_boundary,
+                    "bid_levels_trimmed": state.bid_levels_trimmed,
+                    "ask_levels_trimmed": state.ask_levels_trimmed,
                     "revision": state.revision,
                     "failure": state.failure.value if state.failure is not None else None,
                     "failure_detail": state.failure_detail,
@@ -1237,12 +1306,9 @@ class FullOrderBookEngine:
             return self._stale_result(state)
         if not self._bridges_snapshot(delta, state.last_update_id):
             return self._fail(state, FullOrderBookFailure.GAP, "delta does not bridge REST snapshot")
-        failure = self._mutate_book(
-            state.bids,
-            state.asks,
+        failure, bid_update_prices, ask_update_prices = self._mutate_live_book(
+            state,
             delta,
-            bid_prices=state.bid_prices,
-            ask_prices=state.ask_prices,
         )
         if failure is not None:
             return self._fail(state, failure[0], failure[1])
@@ -1260,6 +1326,8 @@ class FullOrderBookEngine:
             state.asks,
             state.bid_prices,
             state.ask_prices,
+            bid_update_prices=bid_update_prices,
+            ask_update_prices=ask_update_prices,
         )
         self._metrics["deltas_applied"] += 1
         return self._result(
@@ -1268,6 +1336,98 @@ class FullOrderBookEngine:
             FullOrderBookAction.APPLIED,
             snapshot=self._project(identity, state, depth=None),
         )
+
+    def _mutate_live_book(
+        self,
+        state: _StreamState,
+        delta: DepthDelta,
+    ) -> tuple[
+        tuple[FullOrderBookFailure, str] | None,
+        tuple[float, ...],
+        tuple[float, ...],
+    ]:
+        """Apply one delta while retaining a bounded, explicitly known window.
+
+        Binance REST snapshots are finite, so the exchange book is already
+        non-exhaustive outside the seed.  We retain the best known levels and
+        ignore later updates strictly beyond a trimmed boundary.  If the
+        trusted seed-depth window itself is exhausted, the engine still fails
+        closed and requests a fresh snapshot.
+        """
+
+        bid_updates = tuple(
+            update
+            for update in delta.bids
+            if update.price in state.bids
+            or state.trimmed_bid_boundary is None
+            or update.price > state.trimmed_bid_boundary
+        )
+        ask_updates = tuple(
+            update
+            for update in delta.asks
+            if update.price in state.asks
+            or state.trimmed_ask_boundary is None
+            or update.price < state.trimmed_ask_boundary
+        )
+        ignored = len(delta.bids) + len(delta.asks) - len(bid_updates) - len(ask_updates)
+        self._metrics["updates_outside_retained_window"] += ignored
+        bid_touched = {update.price for update in bid_updates}
+        ask_touched = {update.price for update in ask_updates}
+        self._mutate_side(state.bids, state.bid_prices, bid_updates)
+        self._mutate_side(state.asks, state.ask_prices, ask_updates)
+
+        while len(state.bids) > self._max_levels_per_side:
+            price = state.bid_prices.pop(0)
+            state.bids.pop(price)
+            state.trimmed_bid_boundary = max(
+                price,
+                state.trimmed_bid_boundary
+                if state.trimmed_bid_boundary is not None
+                else price,
+            )
+            state.bid_levels_trimmed += 1
+            self._metrics["bid_levels_trimmed"] += 1
+            bid_touched.add(price)
+        while len(state.asks) > self._max_levels_per_side:
+            price = state.ask_prices.pop()
+            state.asks.pop(price)
+            state.trimmed_ask_boundary = min(
+                price,
+                state.trimmed_ask_boundary
+                if state.trimmed_ask_boundary is not None
+                else price,
+            )
+            state.ask_levels_trimmed += 1
+            self._metrics["ask_levels_trimmed"] += 1
+            ask_touched.add(price)
+
+        touched = tuple(sorted(bid_touched)), tuple(sorted(ask_touched))
+        if not state.bids or not state.asks:
+            return (
+                (FullOrderBookFailure.EMPTY_BOOK, "local book lost one complete side"),
+                *touched,
+            )
+        if state.bid_prices[-1] >= state.ask_prices[0]:
+            return (
+                (
+                    FullOrderBookFailure.CROSSED_BOOK,
+                    "local book became crossed or locked",
+                ),
+                *touched,
+            )
+        if (
+            len(state.bids) < state.trusted_bid_depth
+            or len(state.asks) < state.trusted_ask_depth
+        ):
+            self._metrics["retention_exhaustions"] += 1
+            return (
+                (
+                    FullOrderBookFailure.CAPACITY,
+                    "trusted local depth fell below the REST seed coverage",
+                ),
+                *touched,
+            )
+        return None, *touched
 
     def _apply_live(
         self,
@@ -1285,12 +1445,9 @@ class FullOrderBookEngine:
         link_error = self._link_error(state.last_update_id, delta)
         if link_error is not None:
             return self._fail(state, FullOrderBookFailure.GAP, link_error)
-        failure = self._mutate_book(
-            state.bids,
-            state.asks,
+        failure, bid_update_prices, ask_update_prices = self._mutate_live_book(
+            state,
             delta,
-            bid_prices=state.bid_prices,
-            ask_prices=state.ask_prices,
         )
         if failure is not None:
             return self._fail(state, failure[0], failure[1])
@@ -1307,6 +1464,8 @@ class FullOrderBookEngine:
             state.asks,
             state.bid_prices,
             state.ask_prices,
+            bid_update_prices=bid_update_prices,
+            ask_update_prices=ask_update_prices,
         )
         self._metrics["deltas_applied"] += 1
         return self._result(
@@ -1414,6 +1573,9 @@ class FullOrderBookEngine:
             received_at_ms=state.received_at_ms,
             source=state.source,
             revision=state.revision,
+            local_level_capacity=self._max_levels_per_side,
+            local_bid_levels_trimmed=state.bid_levels_trimmed,
+            local_ask_levels_trimmed=state.ask_levels_trimmed,
             _materialization_token=_TRUSTED_LAZY_SNAPSHOT,
         )
 
@@ -1478,6 +1640,12 @@ class FullOrderBookEngine:
         state.revision = 0
         state.failure = failure
         state.failure_detail = detail
+        state.trusted_bid_depth = 0
+        state.trusted_ask_depth = 0
+        state.trimmed_bid_boundary = None
+        state.trimmed_ask_boundary = None
+        state.bid_levels_trimmed = 0
+        state.ask_levels_trimmed = 0
         return self._result(state, False, FullOrderBookAction.RESYNC_REQUIRED, reason=detail, failure=failure)
 
     def _active_state(
@@ -1523,6 +1691,12 @@ class FullOrderBookEngine:
         state.revision = 0
         state.failure = None
         state.failure_detail = None
+        state.trusted_bid_depth = 0
+        state.trusted_ask_depth = 0
+        state.trimmed_bid_boundary = None
+        state.trimmed_ask_boundary = None
+        state.bid_levels_trimmed = 0
+        state.ask_levels_trimmed = 0
 
     def _reserve_capacity(self, identity: FullOrderBookIdentity) -> None:
         if identity in self._streams or len(self._streams) < self._max_streams:

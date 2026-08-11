@@ -7,6 +7,7 @@ import {
   SeriesWindowRegistry,
 } from "../window/windowRegistry.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
+import { toEpochSeconds } from "../marketDataTypes.js";
 
 test("buildSeriesWindowKey normalizes exchange and market type", () => {
   assert.equal(
@@ -143,4 +144,37 @@ test("a detached display store clears the target frame without mutating warm reg
   assert.equal(btcStore.snapshot(), snapshot);
   assert.equal(btcStore.version, version);
   assert.equal(btcStore.axisRevision, axisRevision);
+});
+
+test("desktop shared snapshots hydrate a new registry before gap repair and republish authoritative ranges", () => {
+  const key = buildSeriesWindowKey({ symbol: "BTCUSDT", interval: "1m" });
+  const published: Array<{ key: string; rows: readonly unknown[] }> = [];
+  const row = (time: number) => ({
+    time: mustBeDefined(toEpochSeconds(time)),
+    open: 1,
+    high: 2,
+    low: 0,
+    close: 1,
+    volume: 3,
+  });
+  const registry = new SeriesWindowRegistry({
+    sharedSnapshot: {
+      read: (requested) => requested === key ? [row(60), row(120)] : [],
+      publish: (publishedKey, rows) => published.push({ key: publishedKey, rows }),
+    },
+  });
+
+  const store = registry.getOrCreate(key);
+  assert.deepEqual(store.snapshot().map((value) => value.time), [60, 120]);
+  assert.deepEqual(registry.sharedSnapshotDiagnostics(), {
+    hydrations: 1,
+    hydratedBars: 2,
+    publishes: 0,
+    publishErrors: 0,
+  });
+
+  store.applyRange([row(180)], { source: "gap-repair" });
+  assert.equal(published.length, 1);
+  assert.equal(published[0]?.key, key);
+  assert.deepEqual(published[0]?.rows.map((value) => (value as { time: number }).time), [60, 120, 180]);
 });

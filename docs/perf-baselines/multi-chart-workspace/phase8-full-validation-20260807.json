@@ -1,0 +1,206 @@
+{
+  "schemaVersion": "candlescope.multi-chart.phase8-full-validation/1",
+  "generatedAt": "2026-08-07T16:05:15.044Z",
+  "scope": "frontend-backend-architecture-plugin-desktop-build",
+  "steps": [
+    {
+      "id": "architecture",
+      "command": [
+        "npm",
+        "run",
+        "check:architecture"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:49:46.195Z",
+      "durationMs": 607,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "plugins",
+      "command": [
+        "npm",
+        "run",
+        "check:plugins"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:49:46.802Z",
+      "durationMs": 410,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:49:47.213Z",
+      "durationMs": 29317,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "lint",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:50:16.530Z",
+      "durationMs": 89474,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "frontend-tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:51:46.001Z",
+      "durationMs": 18990,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "desktop-tests",
+      "command": [
+        "npm",
+        "run",
+        "test:desktop"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:52:04.991Z",
+      "durationMs": 2646,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "frontend-build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace\\frontend",
+      "startedAt": "2026-08-07T15:52:07.637Z",
+      "durationMs": 4166,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null
+    },
+    {
+      "id": "backend-tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "backend/tests",
+        "-q",
+        "--junitxml=H:\\program\\CandleScope-multi-chart-workspace\\docs\\perf-baselines\\multi-chart-workspace\\phase8-backend-full-junit-20260807.xml"
+      ],
+      "cwd": "H:\\program\\CandleScope-multi-chart-workspace",
+      "startedAt": "2026-08-07T15:52:11.802Z",
+      "durationMs": 783212,
+      "exitCode": 1,
+      "signal": null,
+      "spawnError": null,
+      "acceptedBaseline": true,
+      "baselineComparison": {
+        "accepted": true,
+        "summary": {
+          "tests": 3160,
+          "failures": 31,
+          "errors": 8,
+          "skipped": 0
+        },
+        "actualNodeIds": [
+          "backend/tests/test_plugin_marketplace_phase10_service.py::test_runtime_registry_binding_requires_active_ancestry_and_exact_artifact",
+          "backend/tests/test_plugin_platform_multi_runtime_phase1.py::test_phase1_contract_rebuilds_exact_v2_and_v3_generations",
+          "backend/tests/test_plugin_platform_multi_runtime_phase1.py::test_phase1_gate_executes_v2_and_keeps_v3_inspect_only",
+          "backend/tests/test_plugin_platform_multi_runtime_phase2_gate.py::test_phase2_cli_prints_and_atomically_writes_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase2_gate.py::test_phase2_contract_drift_fails_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase2_gate.py::test_phase2_contract_freezes_provider_seam_and_python_equivalence",
+          "backend/tests/test_plugin_platform_multi_runtime_phase2_gate.py::test_phase2_gate_runs_v2_dual_path_v3_python_and_budgets",
+          "backend/tests/test_plugin_platform_multi_runtime_phase3_gate.py::test_phase3_cli_prints_and_atomically_writes_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase3_gate.py::test_phase3_contract_drift_fails_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase3_gate.py::test_phase3_contract_freezes_native_artifact_job_and_rollout_policy",
+          "backend/tests/test_plugin_platform_multi_runtime_phase3_gate.py::test_phase3_gate_runs_native_transcript_faults_sandbox_rollback_and_budgets",
+          "backend/tests/test_plugin_platform_multi_runtime_phase4.py::test_official_registry_is_signed_and_pins_complete_temurin_supply_chain",
+          "backend/tests/test_plugin_platform_multi_runtime_phase4_gate.py::test_phase4_cli_prints_and_atomically_writes_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase4_gate.py::test_phase4_contract_drift_fails_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase4_gate.py::test_phase4_contract_freezes_registry_supply_receipt_and_rollout_policy",
+          "backend/tests/test_plugin_platform_multi_runtime_phase4_gate.py::test_phase4_deterministic_gate_exercises_cache_failures_revision_and_references",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5.py::test_official_registry_bootstraps_the_continuous_history_and_can_rollback",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5.py::test_official_registry_revision_2_pins_temurin_25_and_retains_revision_1",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5_gate.py::test_phase5_cli_prints_and_atomically_writes_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5_gate.py::test_phase5_contract_drift_fails_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5_gate.py::test_phase5_contract_freezes_provider_sdk_registry_adapter_and_rollback",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5_gate.py::test_phase5_gate_binds_recorded_evidence_to_the_frozen_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase5_gate.py::test_phase5_recorded_real_jre_gate_covers_release_lifecycle_and_faults",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6.py::test_phase6_registry_migrates_java_to_appcontainer_compatible_jre",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6_gate.py::test_phase6_cli_prints_and_atomically_writes_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6_gate.py::test_phase6_contract_drift_fails_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6_gate.py::test_phase6_contract_freezes_trust_grants_sandbox_and_jre_migration",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6_gate.py::test_phase6_gate_binds_real_evidence_to_frozen_contract",
+          "backend/tests/test_plugin_platform_multi_runtime_phase6_gate.py::test_phase6_recorded_windows_gate_covers_every_executable_kind",
+          "backend/tests/test_plugin_platform_multi_runtime_phase7_gate.py::test_phase7_frozen_contract_matches_implementation",
+          "backend/tests/test_plugin_platform_multi_runtime_phase7_gate.py::test_phase7_recorded_real_gate_is_current_and_passed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase7_gate.py::test_phase7_release_gate_summary_is_fail_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase8_gate.py::test_phase8_frozen_contract_matches_implementation",
+          "backend/tests/test_plugin_platform_multi_runtime_phase8_gate.py::test_phase8_recorded_real_gate_is_current_and_passed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase8_gate.py::test_phase8_release_gate_summary_is_fail_closed",
+          "backend/tests/test_plugin_platform_multi_runtime_phase9.py::test_phase9_contract_fixture_matches_implemented_release",
+          "backend/tests/test_plugin_platform_multi_runtime_phase9_gate.py::test_phase9_install_check_and_rollback_gate",
+          "backend/tests/test_plugin_platform_multi_runtime_phase9_gate.py::test_phase9_real_second_project_gate",
+          "backend/tests/test_replay_history_archive.py::test_bar_selection_starts_after_unverified_gap_and_ends_at_real_tail"
+        ],
+        "unexpectedNodeIds": [],
+        "resolvedNodeIds": [],
+        "baseline": {
+          "capturedFrom": "a012935801c83e583d2e9a53c70ed9112d63582d",
+          "sourceEvidence": "phase0-test-baseline-20260806.json",
+          "minimumCollected": 3133,
+          "expected": {
+            "passed": 3094,
+            "failures": 31,
+            "errors": 8,
+            "warnings": 5
+          },
+          "nodeCount": 39
+        }
+      },
+      "junit": {
+        "path": "docs/perf-baselines/multi-chart-workspace/phase8-backend-full-junit-20260807.xml",
+        "sha256": "a811e5e106976743948d1dfbea53691adf6463735117931ab5fa875d319664f8"
+      }
+    }
+  ],
+  "evaluation": {
+    "required": [
+      "architecture",
+      "plugins",
+      "typecheck",
+      "lint",
+      "frontend-tests",
+      "desktop-tests",
+      "frontend-build",
+      "backend-tests"
+    ],
+    "passed": true,
+    "missing": [],
+    "failed": []
+  },
+  "result": "pass"
+}

@@ -124,7 +124,9 @@ def _is_ancestor(ancestor: str, descendant: str) -> bool:
     raise RuntimeError(f"git merge-base --is-ancestor failed: {detail}")
 
 
-def _reuse_binding(stage: str, captured_head: str, current_head: str) -> dict[str, object]:
+def _reuse_binding(
+    stage: str, captured_head: str, current_head: str
+) -> dict[str, object]:
     pathspecs = REUSABLE_STAGE_PATHS.get(stage)
     if pathspecs is None:
         raise ValueError(f"release stage {stage} must be rerun on the current HEAD")
@@ -202,7 +204,9 @@ def _load_release_artifact(
             continue
         try:
             raw = json.loads(candidate.read_text(encoding="utf-8"))
-            release_evidence = raw.get("release_evidence") if isinstance(raw, Mapping) else None
+            release_evidence = (
+                raw.get("release_evidence") if isinstance(raw, Mapping) else None
+            )
             captured_head = (
                 str(release_evidence.get("git_head", "")).lower()
                 if isinstance(release_evidence, Mapping)
@@ -340,12 +344,25 @@ def _validate_default_flags() -> dict[str, str]:
     return flags
 
 
-def _resolve_phase_parent(head: str) -> str:
-    return run_git("rev-parse", "--verify", f"{head}^").strip().lower()
+def _resolve_phase_parents(head: str) -> tuple[str, ...]:
+    fields = run_git("rev-list", "--parents", "-n", "1", head).strip().lower().split()
+    if not fields or fields[0] != head.lower() or len(fields) == 1:
+        raise RuntimeError(f"could not resolve Phase parents for {head}")
+    return tuple(fields[1:])
+
+
+def _revert_command(head: str, parents: Sequence[str]) -> list[str]:
+    command = ["git", "revert", "--no-commit"]
+    if len(parents) > 1:
+        command.extend(("--mainline", "1"))
+    command.append(head)
+    return command
 
 
 def _run_revert_drill(head: str) -> dict[str, object]:
-    parent = _resolve_phase_parent(head)
+    parents = _resolve_phase_parents(head)
+    parent = parents[0]
+    command = _revert_command(head, parents)
     with tempfile.TemporaryDirectory(prefix="replay-v2-revert-drill-") as directory:
         worktree = Path(directory) / "worktree"
         added = False
@@ -353,7 +370,7 @@ def _run_revert_drill(head: str) -> dict[str, object]:
             run_git("worktree", "add", "--detach", str(worktree), head)
             added = True
             completed = subprocess.run(
-                ["git", "revert", "--no-commit", head],
+                command,
                 cwd=worktree,
                 check=False,
                 capture_output=True,
@@ -390,9 +407,11 @@ def _run_revert_drill(head: str) -> dict[str, object]:
                     f"untracked={untracked}"
                 )
             return {
-                "command": ["git", "revert", "--no-commit", head],
+                "command": command,
                 "head": head,
                 "parent": parent,
+                "parent_count": len(parents),
+                "mainline_parent": 1 if len(parents) > 1 else None,
                 "worktree_matches_parent": True,
                 "index_matches_parent": True,
                 "untracked_count": 0,
@@ -423,7 +442,9 @@ def main() -> int:
     evidence = capture_clean_head()
     head = str(evidence["git_head"])
     evidence_directory = require_external_head_path(args.evidence_dir, head)
-    reuse_directories = [directory.expanduser().resolve() for directory in args.reuse_evidence_dir]
+    reuse_directories = [
+        directory.expanduser().resolve() for directory in args.reuse_evidence_dir
+    ]
     output = require_external_head_path(
         args.out or (evidence_directory / "release-manifest.json"), head
     )

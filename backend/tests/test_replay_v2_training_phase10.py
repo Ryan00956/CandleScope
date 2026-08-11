@@ -171,20 +171,44 @@ def test_release_stage_reuse_rejects_non_ancestors_and_non_reusable_stages(
         release_verifier._reuse_binding("v2_soak", old_head, new_head)
 
 
-def test_phase10_revert_drill_resolves_the_phase_first_parent(
+def test_phase10_revert_drill_resolves_all_phase_parents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     head = "a" * 40
+    first_parent = "b" * 40
+    second_parent = "c" * 40
     calls: list[tuple[str, ...]] = []
 
     def fake_run_git(*args: str, **_kwargs: object) -> str:
         calls.append(args)
-        return "B" * 40
+        return f"{head.upper()} {first_parent.upper()} {second_parent.upper()}"
 
     monkeypatch.setattr(release_verifier, "run_git", fake_run_git)
 
-    assert release_verifier._resolve_phase_parent(head) == "b" * 40
-    assert calls == [("rev-parse", "--verify", f"{head}^")]
+    assert release_verifier._resolve_phase_parents(head) == (
+        first_parent,
+        second_parent,
+    )
+    assert calls == [("rev-list", "--parents", "-n", "1", head)]
+
+
+def test_phase10_revert_drill_selects_mainline_only_for_merge_commits() -> None:
+    head = "a" * 40
+
+    assert release_verifier._revert_command(head, ("b" * 40,)) == [
+        "git",
+        "revert",
+        "--no-commit",
+        head,
+    ]
+    assert release_verifier._revert_command(head, ("b" * 40, "c" * 40)) == [
+        "git",
+        "revert",
+        "--no-commit",
+        "--mainline",
+        "1",
+        head,
+    ]
 
 
 def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
@@ -227,14 +251,16 @@ def test_phase10_browser_and_rollback_tools_expose_frozen_v2_gates() -> None:
         assert needle in rollback
     assert "--live-window" in smoke
     assert "--disable-gap-maintenance" in smoke
-    assert "--duration-ms 3600000 --cycles 100" in package["scripts"][
-        "soak:replay:v2:stability"
-    ]
+    assert (
+        "--duration-ms 3600000 --cycles 100"
+        in package["scripts"]["soak:replay:v2:stability"]
+    )
     assert "--cycles 10" in package["scripts"]["stress:replay:orders"]
     assert "replay_order_advisory_requests_bounded" in soak
-    assert "--observation-only --duration-ms 14400000" in package["scripts"][
-        "soak:replay:v2:4h"
-    ]
+    assert (
+        "--observation-only --duration-ms 14400000"
+        in package["scripts"]["soak:replay:v2:4h"]
+    )
     assert "VERIFIED_ANCESTOR_REUSE" in verifier
     assert "--product-v2" not in soak
     assert "--product-v2" not in rollback
@@ -270,9 +296,7 @@ def test_release_wall_clock_metrics_are_measure_only_without_skip_flag() -> None
         for relative in relative_paths
     }
 
-    assert all(
-        "MEASURE_ONLY_NON_BLOCKING" in source for source in sources.values()
-    )
+    assert all("MEASURE_ONLY_NON_BLOCKING" in source for source in sources.values())
     combined = "\n".join(sources.values())
     for forbidden in (
         "--skip-performance",

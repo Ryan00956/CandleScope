@@ -1,6 +1,7 @@
 import {
   useEffect,
   useState,
+  type CSSProperties,
   type FormEvent,
 } from "react";
 import type { ChartLinkViewportIssue } from "./chartLinkCoordinator.js";
@@ -8,15 +9,23 @@ import {
   summarizeChartDrawingLink,
   type ChartDrawingLinkSummary,
 } from "./chartWorkspaceDrawingLink.js";
-import { chartWorkspaceTemplateCellCount } from "./chartWorkspaceLayout.js";
+import {
+  chartWorkspaceTemplateCellCount,
+  visibleCellIds,
+} from "./chartWorkspaceLayout.js";
+import {
+  chartLinkGroupDepth,
+  isChartLinkGroupDescendant,
+} from "./chartWorkspaceLinkModel.js";
+import type { ChartLinkGroupSettingsPatch } from "./chartWorkspaceLinkModel.js";
 import type { ChartWorkspacePersistenceMode } from "./chartWorkspaceRepository.js";
 import {
   CHART_DRAWING_LAYER_SET_IDS,
-  CHART_LINK_GROUP_IDS,
   type ChartDrawingLayerSetId,
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
-  type ChartLinkRole,
+  type ChartLinkIndicatorSettings,
+  type ChartWorkspaceDocument,
   type ChartWorkspaceSummary,
   type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
@@ -66,7 +75,7 @@ const LAYOUT_LABELS: Record<ChartWorkspaceSummary["layout"], string> = {
 };
 
 const LINK_SETTING_OPTIONS: ReadonlyArray<{
-  key: keyof ChartLinkGroupSettings;
+  key: Exclude<keyof ChartLinkGroupSettings, "indicators">;
   label: string;
   description: string;
 }> = [
@@ -78,15 +87,84 @@ const LINK_SETTING_OPTIONS: ReadonlyArray<{
   { key: "drawings", label: "绘图", description: "同市场、同图层集共享绘图文档" },
 ];
 
-const LINK_ROLE_OPTIONS: ReadonlyArray<{
-  id: ChartLinkRole;
+const INDICATOR_LINK_OPTIONS: ReadonlyArray<{
+  key: keyof ChartLinkIndicatorSettings;
   label: string;
   description: string;
 }> = [
-  { id: "bidirectional", label: "↔ 双向", description: "本图既发送也接收联动变化" },
-  { id: "source", label: "→ 源图", description: "本图只发送品种、周期与视图变化" },
-  { id: "destination", label: "← 目标图", description: "本图只接收联动变化" },
+  { key: "definitions", label: "指标列表", description: "同步新增、删除与指标类型" },
+  { key: "parameters", label: "指标参数", description: "按稳定绑定 ID 同步参数" },
+  { key: "visual", label: "显示样式", description: "同步显隐、线条和渲染样式" },
+  { key: "paneLayout", label: "窗格位置", description: "同步主图或副图窗格位置" },
 ];
+
+function LinkPolicyEditor({
+  title,
+  description,
+  policy,
+  disabled,
+  includeDrawings = true,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  policy: ChartLinkGroupSettings;
+  disabled: boolean;
+  includeDrawings?: boolean;
+  onChange(patch: ChartLinkGroupSettingsPatch): void;
+}) {
+  return (
+    <section className="workspace-panel-section">
+      <div className="workspace-panel-section-heading">
+        <div>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
+      </div>
+      <div className="workspace-panel-link-settings">
+        {LINK_SETTING_OPTIONS.filter((option) => includeDrawings || option.key !== "drawings")
+          .map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            className={policy[option.key] ? "active" : ""}
+            aria-pressed={policy[option.key]}
+            title={option.description}
+            disabled={disabled}
+            onClick={() => onChange({ [option.key]: !policy[option.key] })}
+          >
+            <span>{option.label}</span>
+            <small>{option.description}</small>
+          </button>
+          ))}
+      </div>
+      <div className="workspace-panel-section-heading">
+        <div>
+          <h3>指标联动</h3>
+          <p>只传配置，不复制计算结果；每个目标图仍按自己的数据计算</p>
+        </div>
+      </div>
+      <div className="workspace-panel-link-settings">
+        {INDICATOR_LINK_OPTIONS.map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            className={policy.indicators[option.key] ? "active" : ""}
+            aria-pressed={policy.indicators[option.key]}
+            title={option.description}
+            disabled={disabled}
+            onClick={() => onChange({
+              indicators: { [option.key]: !policy.indicators[option.key] },
+            })}
+          >
+            <span>{option.label}</span>
+            <small>{option.description}</small>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function saveStateLabel(state: ChartWorkspaceSaveState): string {
   if (state === "loading") return "正在恢复";
@@ -109,6 +187,21 @@ function drawingLinkStatusText(summary: ChartDrawingLinkSummary): string {
   if (summary.state === "market-mismatch") return "绘图未共享：同组图表的市场身份不同";
   if (summary.state === "layer-mismatch") return "绘图未共享：请选择相同图层集";
   return summary.state === "disabled" ? "绘图联动未开启" : "独立绘图文档";
+}
+
+function orderedLinkGroupTree(document: ChartWorkspaceDocument) {
+  const ordered: Array<ChartWorkspaceDocument["linkGroups"][ChartLinkGroupId]> = [];
+  const visit = (parentId: ChartLinkGroupId | null) => {
+    Object.values(document.linkGroups)
+      .filter((group) => group.parentId === parentId)
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+      .forEach((group) => {
+        ordered.push(group);
+        visit(group.id);
+      });
+  };
+  visit(null);
+  return ordered;
 }
 
 export interface WorkspacePanelDesktopModel {
@@ -137,6 +230,9 @@ export default function WorkspacePanel({
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(runtime.view.activeWorkspaceName);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState<ChartLinkGroupId | null>(
+    runtime.view.activeCell.linkGroupId,
+  );
 
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -163,8 +259,18 @@ export default function WorkspacePanel({
   } = runtime;
   const stateLabel = saveStateLabel(status.saveState);
   const activeCellOrdinal = Math.max(0, view.layoutCellIds.indexOf(view.activeCellId)) + 1;
-  const linkGroup = view.activeCell.linkGroup;
-  const linkSettings = linkGroup ? view.document.linkGroups[linkGroup] : null;
+  const activeLinkGroupId = view.activeCell.linkGroupId;
+  const orderedLinkGroups = orderedLinkGroupTree(view.document);
+  const mountedLinkCellIds = new Set(Object.values(view.document.windows)
+    .flatMap((window) => visibleCellIds(window.layoutTree)));
+  const effectiveSelectedGroupId = selectedGroupId && view.document.linkGroups[selectedGroupId]
+    ? selectedGroupId
+    : activeLinkGroupId && view.document.linkGroups[activeLinkGroupId]
+      ? activeLinkGroupId
+      : orderedLinkGroups[0]?.id ?? null;
+  const selectedGroup = effectiveSelectedGroupId
+    ? view.document.linkGroups[effectiveSelectedGroupId] ?? null
+    : null;
   const drawingSummary = summarizeChartDrawingLink(
     view.document,
     view.activeCellId,
@@ -494,25 +600,80 @@ export default function WorkspacePanel({
 
           {tab === "links" && (
             <div className="workspace-panel-section-stack" data-workspace-panel-tab="links">
-              <section className="workspace-panel-context-card" data-link-group={linkGroup ?? "none"}>
+              <section
+                className="workspace-panel-context-card"
+                data-link-group={activeLinkGroupId ?? "none"}
+                style={activeLinkGroupId ? {
+                  "--chart-link-group-color": view.document.linkGroups[activeLinkGroupId]?.color,
+                } as CSSProperties : undefined}
+              >
                 <div>
                   <span>当前活动图表</span>
                   <strong>图表 {activeCellOrdinal} / {view.layoutCellIds.length}</strong>
                 </div>
-                <span>{linkGroup ? `联动组 ${linkGroup}` : "独立图表"}</span>
+                <span>{activeLinkGroupId
+                  ? view.document.linkGroups[activeLinkGroupId]?.name ?? "未知联动组"
+                  : "独立图表"}</span>
               </section>
 
               <section className="workspace-panel-section">
                 <div className="workspace-panel-section-heading">
                   <div>
-                    <h3>联动组</h3>
-                    <p>同组图表可以按需同步品种、周期与视图</p>
+                    <h3>父子联动组</h3>
+                    <p>同组平级互联；父组向全部子孙组单向传递</p>
                   </div>
+                  <span className="workspace-panel-count-pill">{orderedLinkGroups.length} 组</span>
+                </div>
+                <div className="workspace-panel-workspace-list workspace-panel-link-group-tree">
+                  {orderedLinkGroups.map((group) => {
+                    const depth = chartLinkGroupDepth(view.document, group.id) - 1;
+                    const cellCount = Object.values(view.document.cells)
+                      .filter((cell) => mountedLinkCellIds.has(cell.id)
+                        && cell.linkGroupId === group.id).length;
+                    return (
+                      <button
+                        key={group.id}
+                        type="button"
+                        className={effectiveSelectedGroupId === group.id ? "active" : ""}
+                        disabled={!view.ready}
+                        style={{ paddingLeft: `${8 + depth * 18}px` }}
+                        onClick={() => setSelectedGroupId(group.id)}
+                      >
+                        <span
+                          className="workspace-panel-option-check"
+                          style={{ color: group.color }}
+                          aria-hidden="true"
+                        >
+                          {group.parentId ? "└" : "●"}
+                        </span>
+                        <span>
+                          <strong>{group.name}</strong>
+                          <small>{group.parentId ? "接收父组 · " : "根组 · "}{cellCount} 个图表</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="workspace-panel-window-actions">
+                  <button
+                    type="button"
+                    disabled={!view.ready}
+                    onClick={() => actions.createLinkGroup(null)}
+                  >
+                    + 根组
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!view.ready || !selectedGroup}
+                    onClick={() => actions.createLinkGroup(selectedGroup?.id ?? null)}
+                  >
+                    + 子组
+                  </button>
                 </div>
                 <label className="workspace-panel-field">
                   <span>当前图表加入</span>
                   <select
-                    value={linkGroup ?? ""}
+                    value={activeLinkGroupId ?? ""}
                     disabled={!view.ready}
                     onChange={(event) => actions.setCellLinkGroup(
                       view.activeCellId,
@@ -520,66 +681,107 @@ export default function WorkspacePanel({
                     )}
                   >
                     <option value="">独立，不联动</option>
-                    {CHART_LINK_GROUP_IDS.map((group) => (
-                      <option key={group} value={group}>组 {group}</option>
+                    {orderedLinkGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {"— ".repeat(chartLinkGroupDepth(view.document, group.id) - 1)}{group.name}
+                      </option>
                     ))}
                   </select>
                 </label>
               </section>
 
-              {linkGroup && linkSettings ? (
+              {selectedGroup ? (
                 <>
                   <section className="workspace-panel-section">
                     <div className="workspace-panel-section-heading">
                       <div>
-                        <h3>本图角色</h3>
-                        <p>{LINK_ROLE_OPTIONS.find((option) => option.id === view.activeCell.linkRole)?.description}</p>
+                        <h3>组信息</h3>
+                        <p>调整名称、颜色与父级；最多支持四层</p>
                       </div>
                     </div>
-                    <div className="workspace-panel-segmented" role="group" aria-label="当前图表联动角色">
-                      {LINK_ROLE_OPTIONS.map((option) => (
-                        <button
-                          key={option.id}
-                          type="button"
-                          className={view.activeCell.linkRole === option.id ? "active" : ""}
-                          aria-pressed={view.activeCell.linkRole === option.id}
+                    <div className="workspace-panel-link-group-fields">
+                      <label className="workspace-panel-field">
+                        <span>名称</span>
+                        <input
+                          value={selectedGroup.name}
                           disabled={!view.ready}
-                          onClick={() => actions.setCellLinkRole(view.activeCellId, option.id)}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="workspace-panel-section">
-                    <div className="workspace-panel-section-heading">
-                      <div>
-                        <h3>同步内容</h3>
-                        <p>设置会应用到整个联动组 {linkGroup}</p>
-                      </div>
-                    </div>
-                    <div className="workspace-panel-link-settings">
-                      {LINK_SETTING_OPTIONS.map((option) => (
-                        <button
-                          key={option.key}
-                          type="button"
-                          className={linkSettings[option.key] ? "active" : ""}
-                          aria-pressed={linkSettings[option.key]}
-                          title={option.description}
+                          maxLength={32}
+                          onChange={(event) => actions.updateLinkGroup(selectedGroup.id, {
+                            name: event.currentTarget.value,
+                          })}
+                        />
+                      </label>
+                      <label className="workspace-panel-field workspace-panel-color-field">
+                        <span>颜色</span>
+                        <input
+                          type="color"
+                          value={selectedGroup.color}
                           disabled={!view.ready}
-                          onClick={() => actions.updateLinkGroupSettings(linkGroup, {
-                            [option.key]: !linkSettings[option.key],
+                          onChange={(event) => actions.updateLinkGroup(selectedGroup.id, {
+                            color: event.currentTarget.value,
+                          })}
+                        />
+                      </label>
+                      <label className="workspace-panel-field">
+                        <span>父组</span>
+                        <select
+                          value={selectedGroup.parentId ?? ""}
+                          disabled={!view.ready}
+                          onChange={(event) => actions.updateLinkGroup(selectedGroup.id, {
+                            parentId: (event.currentTarget.value || null) as ChartLinkGroupId | null,
                           })}
                         >
-                          <span>{option.label}</span>
-                          <small>{option.description}</small>
-                        </button>
-                      ))}
+                          <option value="">无，作为根组</option>
+                          {orderedLinkGroups
+                            .filter((group) => group.id !== selectedGroup.id
+                              && !isChartLinkGroupDescendant(view.document, group.id, selectedGroup.id))
+                            .map((group) => (
+                              <option key={group.id} value={group.id}>{group.name}</option>
+                            ))}
+                        </select>
+                      </label>
                     </div>
+                    <button
+                      type="button"
+                      className="danger workspace-panel-delete-link-group"
+                      disabled={!view.ready || orderedLinkGroups.length <= 1}
+                      onClick={() => {
+                        actions.deleteLinkGroup(selectedGroup.id);
+                        setSelectedGroupId(selectedGroup.parentId);
+                      }}
+                    >
+                      删除此组
+                    </button>
                   </section>
 
-                  {linkSettings.drawings && (
+                  <LinkPolicyEditor
+                    title="同组平级联动"
+                    description={`${selectedGroup.name} 内任意图表操作都会同步给同组其他图表`}
+                    policy={selectedGroup.peerPolicy}
+                    disabled={!view.ready}
+                    onChange={(policyPatch) => actions.updateLinkGroupPolicy(
+                      selectedGroup.id,
+                      "peers",
+                      policyPatch,
+                    )}
+                  />
+
+                  {selectedGroup.parentId && (
+                    <LinkPolicyEditor
+                      title="接收父组"
+                      description={`只接收 ${view.document.linkGroups[selectedGroup.parentId]?.name ?? "父组"} 及其上游事件，不会反向影响父组；绘图因写隔离仅同组共享`}
+                      policy={selectedGroup.receiveFromParent}
+                      disabled={!view.ready}
+                      includeDrawings={false}
+                      onChange={(policyPatch) => actions.updateLinkGroupPolicy(
+                        selectedGroup.id,
+                        "parent",
+                        policyPatch,
+                      )}
+                    />
+                  )}
+
+                  {activeLinkGroupId === selectedGroup.id && selectedGroup.peerPolicy.drawings && (
                     <section className="workspace-panel-section">
                       <div className="workspace-panel-section-heading">
                         <div>
@@ -609,16 +811,16 @@ export default function WorkspacePanel({
                 </>
               ) : (
                 <div className="workspace-panel-empty-state">
-                  <span aria-hidden="true">↔</span>
-                  <strong>当前图表保持独立</strong>
-                  <p>选择 A–D 任一联动组后，可继续设置同步方向与内容。</p>
+                  <span aria-hidden="true">⌘</span>
+                  <strong>请选择一个联动组</strong>
+                  <p>可以创建根组或在现有组下创建子组。</p>
                 </div>
               )}
 
               <div className="workspace-panel-link-status" data-state={drawingSummary.state}>
                 {drawingLinkStatusText(drawingSummary)}
               </div>
-              {viewportIssue?.group === linkGroup && (
+              {viewportIssue?.group === activeLinkGroupId && (
                 <div className="workspace-panel-link-status warning" role="status">
                   {viewportIssue.kind === "timeAnchor" ? "右端时间" : "日期范围"}
                   {`无法映射到 ${viewportIssue.failedCellIds.length} 个目标图，目标图已保持原位。`}

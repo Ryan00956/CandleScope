@@ -44,8 +44,9 @@ export function chartCellDrawingScopeBase(
   cellId: ChartCellId,
 ): string {
   const cell = chartWorkspaceCell(document, cellId);
-  const group = cell.linkGroup;
-  if (group === null || !document.linkGroups[group].drawings) {
+  const groupId = cell.linkGroupId;
+  const group = groupId === null ? null : document.linkGroups[groupId];
+  if (!group || !group.peerPolicy.drawings) {
     return [
       "workspace",
       chartCellStorageScope(workspaceId, cellId),
@@ -57,7 +58,7 @@ export function chartCellDrawingScopeBase(
   return [
     "workspace-link",
     scopeSegment(workspaceId),
-    group,
+    groupId,
     `layer-${cell.drawingLayerSet}`,
     cell.session.exchange,
     cell.session.marketType,
@@ -71,17 +72,18 @@ export function summarizeChartDrawingLink(
   candidateCellIds: readonly ChartCellId[],
 ): ChartDrawingLinkSummary {
   const cell = chartWorkspaceCell(document, cellId);
-  const group = cell.linkGroup;
-  if (group === null) {
+  const groupId = cell.linkGroupId;
+  const group = groupId === null ? null : document.linkGroups[groupId];
+  if (!group) {
     return { state: "independent", linkedPeerCount: 0, groupPeerCount: 0 };
   }
-  if (!document.linkGroups[group].drawings) {
+  if (!group.peerPolicy.drawings) {
     return { state: "disabled", linkedPeerCount: 0, groupPeerCount: 0 };
   }
   const peers = candidateCellIds
     .filter((candidateId) => candidateId !== cellId)
     .map((candidateId) => chartWorkspaceCell(document, candidateId))
-    .filter((candidate) => candidate.linkGroup === group);
+    .filter((candidate) => candidate.linkGroupId === groupId);
   if (peers.length === 0) {
     return { state: "waiting", linkedPeerCount: 0, groupPeerCount: 0 };
   }

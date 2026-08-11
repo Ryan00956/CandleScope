@@ -1,6 +1,8 @@
 import {
   CHART_CELL_IDS,
+  CHART_LINK_GROUP_COLORS,
   CHART_WORKSPACE_RECORD_SCHEMA_VERSION,
+  DEFAULT_CHART_LINK_GROUP_ID,
   type ChartCellState,
   type ChartCellId,
   type ChartWorkspaceDocument,
@@ -156,13 +158,28 @@ export function createTemplateChartWorkspaceDocument(
     occupied.add(cellId);
     targetCellIds.push(cellId);
   }
+  const confirmationGroupId = "group-confirmation";
+  if (templateId === "main-confirmation") {
+    const primaryGroup = document.linkGroups[DEFAULT_CHART_LINK_GROUP_ID]!;
+    document.linkGroups = {
+      ...document.linkGroups,
+      [confirmationGroupId]: {
+        id: confirmationGroupId,
+        name: "多周期确认组",
+        color: CHART_LINK_GROUP_COLORS[1],
+        parentId: DEFAULT_CHART_LINK_GROUP_ID,
+        peerPolicy: cloneSerializable(primaryGroup.peerPolicy),
+        receiveFromParent: cloneSerializable(primaryGroup.receiveFromParent),
+      },
+    };
+  }
   document.cells = Object.fromEntries(targetCellIds.map((cellId, index) => [
     cellId,
     {
       ...copyCellPreferences(document.cells[cellId] ?? { ...anchor, id: cellId }, index),
-      linkRole: templateId === "main-confirmation"
-        ? index === 0 ? "source" : index < 3 ? "destination" : "bidirectional"
-        : "bidirectional",
+      linkGroupId: templateId === "main-confirmation" && index > 0 && index < 3
+        ? confirmationGroupId
+        : DEFAULT_CHART_LINK_GROUP_ID,
     },
   ])) as ChartWorkspaceDocument["cells"];
   const window = activeChartWorkspaceWindow(document);

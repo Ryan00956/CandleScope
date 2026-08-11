@@ -1,12 +1,4 @@
 import {
-  CHART_WORKSPACE_STORAGE_KEY,
-  LEGACY_CHART_WORKSPACE_STORAGE_KEY,
-  loadLegacyChartWorkspace,
-} from "./chartWorkspaceStorage.js";
-import {
-  DEFAULT_CHART_WORKSPACE_ID,
-  DEFAULT_CHART_WORKSPACE_NAME,
-  createChartWorkspaceRecord,
   createDefaultChartWorkspaceRecord,
   mergeWorkspaceRecoveryRecord,
   normalizeChartWorkspaceId,
@@ -20,21 +12,13 @@ import type {
   ChartWorkspaceRecord,
 } from "./chartWorkspaceTypes.js";
 
-/** The v5 database is deliberately frozen so an old build can still roll back. */
-export const LEGACY_CHART_WORKSPACE_DATABASE_NAME = "candlescope-chart-workspaces";
-export const LEGACY_CHART_WORKSPACE_DATABASE_VERSION = 1;
-export const LEGACY_CHART_WORKSPACE_OBJECT_STORE = "workspaces";
-export const LEGACY_CHART_WORKSPACE_ACTIVE_ID_KEY = "candlescope-active-workspace-id-v1";
-export const LEGACY_CHART_WORKSPACE_BOOTSTRAP_KEY = "candlescope-active-workspace-bootstrap-v1";
-export const LEGACY_CHART_WORKSPACE_FALLBACK_LIBRARY_KEY = "candlescope-workspace-library-fallback-v1";
-
-/** v6 uses an independent database, rather than a version upgrade of the v5 slot. */
-export const CHART_WORKSPACE_DATABASE_NAME = "candlescope-chart-workspaces-v6";
+/** v7 intentionally starts from an independent store; flat v6 workspaces are not imported. */
+export const CHART_WORKSPACE_DATABASE_NAME = "candlescope-chart-workspaces-v7";
 export const CHART_WORKSPACE_DATABASE_VERSION = 1;
-export const CHART_WORKSPACE_OBJECT_STORE = "workspaces-v6";
-export const CHART_WORKSPACE_ACTIVE_ID_KEY = "candlescope-active-workspace-id-v2";
-export const CHART_WORKSPACE_BOOTSTRAP_KEY = "candlescope-active-workspace-bootstrap-v2";
-export const CHART_WORKSPACE_FALLBACK_LIBRARY_KEY = "candlescope-workspace-library-fallback-v2";
+export const CHART_WORKSPACE_OBJECT_STORE = "workspaces-v7";
+export const CHART_WORKSPACE_ACTIVE_ID_KEY = "candlescope-active-workspace-id-v3";
+export const CHART_WORKSPACE_BOOTSTRAP_KEY = "candlescope-active-workspace-bootstrap-v3";
+export const CHART_WORKSPACE_FALLBACK_LIBRARY_KEY = "candlescope-workspace-library-fallback-v3";
 
 export type ChartWorkspacePersistenceMode = "indexeddb" | "local-storage" | "memory" | "workspace-bus";
 export type ChartWorkspaceRevisionMap = ReadonlyMap<ChartWorkspaceId, number>;
@@ -50,9 +34,8 @@ export interface ChartWorkspaceKeyValueStorage {
 }
 
 export interface ChartWorkspaceRepositoryAdapter {
-  loadV6Records(): Promise<unknown[]>;
-  loadV5Records(): Promise<unknown[]>;
-  compareAndSwapV6Library(
+  loadV7Records(): Promise<unknown[]>;
+  compareAndSwapV7Library(
     snapshot: ChartWorkspaceLibrarySnapshot,
     expectedRevisions: ChartWorkspaceRevisionMap,
   ): Promise<void>;
@@ -190,7 +173,7 @@ async function loadIndexedDbRecords(
 class IndexedDbChartWorkspaceAdapter implements ChartWorkspaceRepositoryAdapter {
   constructor(private readonly factory: IDBFactory) {}
 
-  loadV6Records(): Promise<unknown[]> {
+  loadV7Records(): Promise<unknown[]> {
     return loadIndexedDbRecords(
       this.factory,
       CHART_WORKSPACE_DATABASE_NAME,
@@ -199,16 +182,7 @@ class IndexedDbChartWorkspaceAdapter implements ChartWorkspaceRepositoryAdapter 
     );
   }
 
-  loadV5Records(): Promise<unknown[]> {
-    return loadIndexedDbRecords(
-      this.factory,
-      LEGACY_CHART_WORKSPACE_DATABASE_NAME,
-      LEGACY_CHART_WORKSPACE_DATABASE_VERSION,
-      LEGACY_CHART_WORKSPACE_OBJECT_STORE,
-    );
-  }
-
-  async compareAndSwapV6Library(
+  async compareAndSwapV7Library(
     snapshot: ChartWorkspaceLibrarySnapshot,
     expectedRevisions: ChartWorkspaceRevisionMap,
   ): Promise<void> {
@@ -249,7 +223,7 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
   private readonly storage: ChartWorkspaceKeyValueStorage | null;
   private readonly now: () => number;
   private memorySnapshot: ChartWorkspaceLibrarySnapshot | null = null;
-  private expectedV6Revisions = new Map<ChartWorkspaceId, number>();
+  private expectedV7Revisions = new Map<ChartWorkspaceId, number>();
   private expectedFallbackRevisions = new Map<ChartWorkspaceId, number>();
 
   constructor(options: CreateChartWorkspaceRepositoryOptions) {
@@ -264,10 +238,8 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
   loadBootstrapLibrary(): ChartWorkspaceLibrarySnapshot {
     const recovery = this.readBootstrapRecord();
     if (recovery) return { activeWorkspaceId: recovery.id, workspaces: [recovery] };
-    const fallback = this.readFallbackLibrary() ?? this.readLegacyFallbackLibrary();
+    const fallback = this.readFallbackLibrary();
     if (fallback) return fallback;
-    const legacy = this.readLegacyRecord();
-    if (legacy) return { activeWorkspaceId: legacy.id, workspaces: [legacy] };
     const workspace = createDefaultChartWorkspaceRecord(this.now());
     return { activeWorkspaceId: workspace.id, workspaces: [workspace] };
   }
@@ -278,36 +250,35 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     const fallback = this.readFallbackLibrary();
     if (this.adapter) {
       try {
-        const rawV6 = await this.adapter.loadV6Records();
-        const v6Records = normalizedRecords(rawV6, this.now());
-        const seed = v6Records.length > 0
-          ? { activeWorkspaceId: requestedActiveId, workspaces: v6Records }
-          : await this.legacySeed(requestedActiveId, fallback);
+        const rawV7 = await this.adapter.loadV7Records();
+        const v7Records = normalizedRecords(rawV7, this.now());
+        const seed = v7Records.length > 0
+          ? { activeWorkspaceId: requestedActiveId, workspaces: v7Records }
+          : fallback ?? { activeWorkspaceId: requestedActiveId, workspaces: [] };
         const normalized = normalizeChartWorkspaceLibrary(
           { ...seed, activeWorkspaceId: requestedActiveId ?? seed.activeWorkspaceId },
           recovery ?? createDefaultChartWorkspaceRecord(this.now()),
           this.now(),
         );
         const snapshot = mergeWorkspaceRecoveryRecord(normalized, recovery, requestedActiveId);
-        this.expectedV6Revisions = v6Records.length > 0
-          ? revisionMap(normalizeChartWorkspaceLibrary({ workspaces: v6Records }))
+        this.expectedV7Revisions = v7Records.length > 0
+          ? revisionMap(normalizeChartWorkspaceLibrary({ workspaces: v7Records }))
           : new Map<ChartWorkspaceId, number>();
-        if (v6Records.length === 0) {
-          await this.adapter.compareAndSwapV6Library(snapshot, this.expectedV6Revisions);
-          this.expectedV6Revisions = revisionMap(snapshot);
+        if (v7Records.length === 0) {
+          await this.adapter.compareAndSwapV7Library(snapshot, this.expectedV7Revisions);
+          this.expectedV7Revisions = revisionMap(snapshot);
         }
         this.memorySnapshot = snapshot;
         this.writeBootstrap(snapshot);
         return { ...snapshot, persistenceMode: "indexeddb" };
       } catch (error) {
         if (error instanceof ChartWorkspaceRevisionConflictError) throw error;
-        // IndexedDB can be disabled or temporarily unavailable. Keep the v6 fallback usable.
+        // IndexedDB can be disabled or temporarily unavailable. Keep the v7 fallback usable.
       }
     }
     const localSeed = fallback
       ?? this.memorySnapshot
-      ?? this.readLegacyFallbackLibrary()
-      ?? this.legacyOrDefaultLibrary();
+      ?? { activeWorkspaceId: null, workspaces: [createDefaultChartWorkspaceRecord(this.now())] };
     const snapshot = mergeWorkspaceRecoveryRecord(
       normalizeChartWorkspaceLibrary(
         localSeed,
@@ -328,14 +299,14 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     const snapshot = normalizeChartWorkspaceLibrary(value, activeRecord(value), this.now());
     if (this.adapter) {
       try {
-        await this.adapter.compareAndSwapV6Library(snapshot, this.expectedV6Revisions);
-        this.expectedV6Revisions = revisionMap(snapshot);
+        await this.adapter.compareAndSwapV7Library(snapshot, this.expectedV7Revisions);
+        this.expectedV7Revisions = revisionMap(snapshot);
         this.memorySnapshot = snapshot;
         this.writeBootstrap(snapshot);
         return "indexeddb";
       } catch (error) {
         if (error instanceof ChartWorkspaceRevisionConflictError) throw error;
-        // Fall through to the synchronous v6 local backup.
+        // Fall through to the synchronous v7 local backup.
       }
     }
     if (this.writeFallbackLibraryCas(snapshot)) {
@@ -359,29 +330,11 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     }
   }
 
-  private async legacySeed(
-    requestedActiveId: ChartWorkspaceId | null,
-    fallback: ChartWorkspaceLibrarySnapshot | null,
-  ): Promise<ChartWorkspaceLibrarySnapshot> {
-    const rawV5 = await this.adapter!.loadV5Records();
-    const v5Records = normalizedRecords(rawV5, this.now());
-    if (v5Records.length > 0) {
-      return normalizeChartWorkspaceLibrary({
-        activeWorkspaceId: requestedActiveId,
-        workspaces: v5Records,
-      });
-    }
-    return fallback
-      ?? this.readLegacyFallbackLibrary()
-      ?? this.legacyOrDefaultLibrary();
-  }
-
   private readActiveWorkspaceId(): ChartWorkspaceId | null {
     if (!this.storage) return null;
     try {
       return normalizeChartWorkspaceId(
-        this.storage.getItem(CHART_WORKSPACE_ACTIVE_ID_KEY)
-        ?? this.storage.getItem(LEGACY_CHART_WORKSPACE_ACTIVE_ID_KEY),
+        this.storage.getItem(CHART_WORKSPACE_ACTIVE_ID_KEY),
       );
     } catch {
       return null;
@@ -392,8 +345,7 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     if (!this.storage) return null;
     try {
       return normalizeChartWorkspaceRecord(parseJson(
-        this.storage.getItem(CHART_WORKSPACE_BOOTSTRAP_KEY)
-        ?? this.storage.getItem(LEGACY_CHART_WORKSPACE_BOOTSTRAP_KEY),
+        this.storage.getItem(CHART_WORKSPACE_BOOTSTRAP_KEY),
       ), this.now());
     } catch {
       return null;
@@ -419,18 +371,6 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     }
   }
 
-  private readLegacyFallbackLibrary(): ChartWorkspaceLibrarySnapshot | null {
-    if (!this.storage) return null;
-    try {
-      const raw = this.storage.getItem(LEGACY_CHART_WORKSPACE_FALLBACK_LIBRARY_KEY);
-      return raw
-        ? normalizeChartWorkspaceLibrary(parseJson(raw), createDefaultChartWorkspaceRecord(this.now()))
-        : null;
-    } catch {
-      return null;
-    }
-  }
-
   private writeFallbackLibraryCas(snapshot: ChartWorkspaceLibrarySnapshot): boolean {
     if (!this.storage) return false;
     try {
@@ -451,31 +391,6 @@ class BrowserChartWorkspaceRepository implements ChartWorkspaceRepository {
     }
   }
 
-  private readLegacyRecord(): ChartWorkspaceRecord | null {
-    if (!this.storage) return null;
-    try {
-      const hasLegacy = this.storage.getItem(CHART_WORKSPACE_STORAGE_KEY) !== null
-        || this.storage.getItem(LEGACY_CHART_WORKSPACE_STORAGE_KEY) !== null;
-      if (!hasLegacy) return null;
-      const document = loadLegacyChartWorkspace(this.storage);
-      if (!document) return null;
-      return createChartWorkspaceRecord({
-        id: DEFAULT_CHART_WORKSPACE_ID,
-        name: DEFAULT_CHART_WORKSPACE_NAME,
-        document,
-        createdAt: this.now(),
-        updatedAt: this.now(),
-      });
-    } catch {
-      return null;
-    }
-  }
-
-  private legacyOrDefaultLibrary(): ChartWorkspaceLibrarySnapshot {
-    const legacy = this.readLegacyRecord();
-    const workspace = legacy ?? createDefaultChartWorkspaceRecord(this.now());
-    return { activeWorkspaceId: workspace.id, workspaces: [workspace] };
-  }
 }
 
 export function createChartWorkspaceRepository(

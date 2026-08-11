@@ -7,6 +7,7 @@ import {
 } from "../chartWorkspaceDrawingLink.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
 import { chartWorkspaceCell } from "../chartWorkspaceDocument.js";
+import { DEFAULT_CHART_LINK_GROUP_ID } from "../chartWorkspaceTypes.js";
 
 const visibleCells = ["cell-1", "cell-2", "cell-3"] as const;
 
@@ -21,7 +22,7 @@ test("drawing scopes preserve independent storage until drawing linking is enabl
     chartCellDrawingScopeBase("workspace-default", document, "cell-2"),
   );
 
-  document.linkGroups.A.drawings = true;
+  document.linkGroups[DEFAULT_CHART_LINK_GROUP_ID]!.peerPolicy.drawings = true;
   assert.equal(
     chartCellDrawingScopeBase("workspace-default", document, "cell-1"),
     chartCellDrawingScopeBase("workspace-default", document, "cell-2"),
@@ -30,7 +31,7 @@ test("drawing scopes preserve independent storage until drawing linking is enabl
 
 test("linked drawings require both full market identity and the same layer set", () => {
   const document = createDefaultChartWorkspace();
-  document.linkGroups.A.drawings = true;
+  document.linkGroups[DEFAULT_CHART_LINK_GROUP_ID]!.peerPolicy.drawings = true;
   assert.deepEqual(summarizeChartDrawingLink(document, "cell-1", visibleCells), {
     state: "linked",
     linkedPeerCount: 2,

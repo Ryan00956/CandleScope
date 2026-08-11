@@ -1,112 +1,118 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import type { IndicatorDefinition } from "../../indicators/indicatorTypes.js";
 import { chartWorkspaceCell } from "../chartWorkspaceDocument.js";
 import {
   applyChartLinkSettingsPatch,
+  applyLinkedIndicatorUpdate,
   applyLinkedSessionUpdate,
-  assignCellLinkGroup,
-  assignCellLinkRole,
+  cloneChartLinkSettings,
+  resolveChartLinkTargets,
+  resolveChartLinkTargetsForChannel,
 } from "../chartWorkspaceLinkModel.js";
+import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
+import {
+  DEFAULT_CHART_LINK_GROUP_ID,
+  DEFAULT_CHART_LINK_GROUP_SETTINGS,
+  type ChartWorkspaceDocument,
+} from "../chartWorkspaceTypes.js";
 
-test("market linking preserves each target interval when interval linking is disabled", () => {
-  const workspace = createDefaultChartWorkspace();
-  const previousIntervals = Object.fromEntries(
-    Object.values(workspace.cells).map((cell) => [cell.id, cell.session.interval]),
-  );
-  const next = applyLinkedSessionUpdate(workspace, "cell-1", {
-    exchange: "binance",
-    marketType: "futures",
+function hierarchicalWorkspace(): ChartWorkspaceDocument {
+  const document = createDefaultChartWorkspace();
+  document.linkGroups["group-child"] = {
+    id: "group-child",
+    name: "确认组",
+    color: "#8b5cf6",
+    parentId: DEFAULT_CHART_LINK_GROUP_ID,
+    peerPolicy: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
+    receiveFromParent: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
+  };
+  chartWorkspaceCell(document, "cell-3").linkGroupId = "group-child";
+  chartWorkspaceCell(document, "cell-4").linkGroupId = "group-child";
+  return document;
+}
+
+test("parent events reach peers and descendants while child events never reach the parent", () => {
+  const document = hierarchicalWorkspace();
+  const fromParent = applyLinkedSessionUpdate(document, "cell-1", {
+    ...chartWorkspaceCell(document, "cell-1").session,
     symbol: "ETHUSDT",
-    interval: "30m",
   });
 
-  assert.equal(chartWorkspaceCell(next, "cell-1").session.interval, "30m");
-  for (const cellId of ["cell-2", "cell-3", "cell-4"] as const) {
-    assert.equal(chartWorkspaceCell(next, cellId).session.symbol, "ETHUSDT");
-    assert.equal(chartWorkspaceCell(next, cellId).session.marketType, "futures");
-    assert.equal(chartWorkspaceCell(next, cellId).session.interval, previousIntervals[cellId]);
+  for (const cellId of ["cell-1", "cell-2", "cell-3", "cell-4"]) {
+    assert.equal(chartWorkspaceCell(fromParent, cellId).session.symbol, "ETHUSDT");
   }
-});
 
-test("interval linking propagates only inside the source group", () => {
-  const workspace = createDefaultChartWorkspace();
-  workspace.linkGroups.A.interval = true;
-  chartWorkspaceCell(workspace, "cell-4").linkGroup = "B";
-  const cell4Interval = chartWorkspaceCell(workspace, "cell-4").session.interval;
-  const next = applyLinkedSessionUpdate(workspace, "cell-1", {
-    ...chartWorkspaceCell(workspace, "cell-1").session,
-    interval: "30m",
-  });
-
-  assert.equal(chartWorkspaceCell(next, "cell-2").session.interval, "30m");
-  assert.equal(chartWorkspaceCell(next, "cell-3").session.interval, "30m");
-  assert.equal(chartWorkspaceCell(next, "cell-4").session.interval, cell4Interval);
-});
-
-test("joining a populated group aligns enabled fields without overwriting independent fields", () => {
-  const workspace = createDefaultChartWorkspace();
-  chartWorkspaceCell(workspace, "cell-4").linkGroup = null;
-  chartWorkspaceCell(workspace, "cell-4").session = {
-    exchange: "okx",
-    marketType: "futures",
-    symbol: "SOLUSDT",
-    interval: "1d",
-  };
-  const next = assignCellLinkGroup(workspace, "cell-4", "A");
-
-  assert.equal(chartWorkspaceCell(next, "cell-4").linkGroup, "A");
-  assert.equal(chartWorkspaceCell(next, "cell-4").session.symbol, chartWorkspaceCell(workspace, "cell-1").session.symbol);
-  assert.equal(chartWorkspaceCell(next, "cell-4").session.exchange, chartWorkspaceCell(workspace, "cell-1").session.exchange);
-  assert.equal(chartWorkspaceCell(next, "cell-4").session.interval, "1d");
-});
-
-test("source, destination, and bidirectional roles constrain session propagation", () => {
-  const workspace = createDefaultChartWorkspace();
-  chartWorkspaceCell(workspace, "cell-1").linkRole = "source";
-  chartWorkspaceCell(workspace, "cell-2").linkRole = "source";
-  chartWorkspaceCell(workspace, "cell-3").linkRole = "destination";
-  chartWorkspaceCell(workspace, "cell-4").linkRole = "bidirectional";
-
-  const fromSource = applyLinkedSessionUpdate(workspace, "cell-1", {
-    ...chartWorkspaceCell(workspace, "cell-1").session,
-    symbol: "ETHUSDT",
-  });
-  assert.notEqual(chartWorkspaceCell(fromSource, "cell-2").session.symbol, "ETHUSDT");
-  assert.equal(chartWorkspaceCell(fromSource, "cell-3").session.symbol, "ETHUSDT");
-  assert.equal(chartWorkspaceCell(fromSource, "cell-4").session.symbol, "ETHUSDT");
-
-  const fromDestination = applyLinkedSessionUpdate(fromSource, "cell-3", {
-    ...chartWorkspaceCell(fromSource, "cell-3").session,
+  const fromChild = applyLinkedSessionUpdate(fromParent, "cell-3", {
+    ...chartWorkspaceCell(fromParent, "cell-3").session,
     symbol: "SOLUSDT",
   });
-  assert.equal(chartWorkspaceCell(fromDestination, "cell-3").session.symbol, "SOLUSDT");
-  assert.equal(chartWorkspaceCell(fromDestination, "cell-1").session.symbol, "ETHUSDT");
-  assert.equal(chartWorkspaceCell(fromDestination, "cell-4").session.symbol, "ETHUSDT");
+  assert.equal(chartWorkspaceCell(fromChild, "cell-3").session.symbol, "SOLUSDT");
+  assert.equal(chartWorkspaceCell(fromChild, "cell-4").session.symbol, "SOLUSDT");
+  assert.equal(chartWorkspaceCell(fromChild, "cell-1").session.symbol, "ETHUSDT");
+  assert.equal(chartWorkspaceCell(fromChild, "cell-2").session.symbol, "ETHUSDT");
 });
 
-test("a cell becoming a destination aligns from the group's explicit source", () => {
-  const workspace = createDefaultChartWorkspace();
-  chartWorkspaceCell(workspace, "cell-1").linkRole = "source";
-  chartWorkspaceCell(workspace, "cell-1").session = {
-    ...chartWorkspaceCell(workspace, "cell-1").session,
-    symbol: "ETHUSDT",
+test("descendant policies compose across every parent-child edge", () => {
+  const document = hierarchicalWorkspace();
+  document.linkGroups["group-grandchild"] = {
+    id: "group-grandchild",
+    name: "执行组",
+    color: "#0f9f8f",
+    parentId: "group-child",
+    peerPolicy: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
+    receiveFromParent: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
   };
-  chartWorkspaceCell(workspace, "cell-2").session = {
-    ...chartWorkspaceCell(workspace, "cell-2").session,
-    symbol: "SOLUSDT",
-  };
+  document.linkGroups["group-child"]!.receiveFromParent.market = false;
+  chartWorkspaceCell(document, "cell-4").linkGroupId = "group-grandchild";
 
-  const next = assignCellLinkRole(workspace, "cell-2", "destination");
-  assert.equal(chartWorkspaceCell(next, "cell-2").linkRole, "destination");
-  assert.equal(chartWorkspaceCell(next, "cell-2").session.symbol, "ETHUSDT");
-  assert.equal(chartWorkspaceCell(next, "cell-2").session.interval, chartWorkspaceCell(workspace, "cell-2").session.interval);
+  const targets = resolveChartLinkTargets(document, "cell-1");
+  const grandchild = targets.find((target) => target.cellId === "cell-4");
+  assert.equal(grandchild?.relationship, "descendant");
+  assert.equal(grandchild?.policy.market, false);
+  assert.equal(grandchild?.policy.crosshair, true);
+});
+
+test("drawing documents stay peer-only so child edits cannot mutate a parent scope", () => {
+  const document = hierarchicalWorkspace();
+  document.linkGroups[DEFAULT_CHART_LINK_GROUP_ID]!.peerPolicy.drawings = true;
+  document.linkGroups["group-child"]!.receiveFromParent.drawings = true;
+  const targets = resolveChartLinkTargetsForChannel(document, "cell-1", "drawings");
+  assert.deepEqual(targets.map((target) => target.cellId), ["cell-2"]);
+});
+
+test("indicator linking uses stable bindings and keeps target visuals and pane layout by default", () => {
+  const document = hierarchicalWorkspace();
+  const source: IndicatorDefinition[] = [{
+    id: "sma",
+    bindingId: "trend-fast",
+    name: "SMA",
+    params: { length: 21 },
+    visible: true,
+    paneTarget: "pane-2",
+  }];
+  chartWorkspaceCell(document, "cell-3").indicators = [{
+    id: "sma-local",
+    bindingId: "trend-fast",
+    name: "Local SMA",
+    params: { length: 7 },
+    visible: false,
+    paneTarget: "main",
+  }];
+
+  const next = applyLinkedIndicatorUpdate(document, "cell-1", source);
+  const childIndicator = chartWorkspaceCell(next, "cell-3").indicators[0]!;
+  assert.equal(childIndicator.bindingId, "trend-fast");
+  assert.equal(childIndicator.params?.length, 21);
+  assert.equal(childIndicator.visible, false);
+  assert.equal(childIndicator.paneTarget, "main");
 });
 
 test("time-anchor and date-range settings remain mutually exclusive", () => {
-  const workspace = createDefaultChartWorkspace();
-  const anchor = applyChartLinkSettingsPatch(workspace.linkGroups.A, { timeAnchor: true });
+  const anchor = applyChartLinkSettingsPatch(DEFAULT_CHART_LINK_GROUP_SETTINGS, {
+    timeAnchor: true,
+  });
   assert.equal(anchor.timeAnchor, true);
   assert.equal(anchor.dateRange, false);
 

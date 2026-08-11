@@ -13,29 +13,25 @@ import {
   CELL_CHART_SETTING_KEYS,
   CHART_CELL_IDS,
   CHART_DRAWING_LAYER_SET_IDS,
-  CHART_LINK_GROUP_IDS,
-  CHART_LINK_ROLES,
+  CHART_LINK_GROUP_COLORS,
   CHART_WORKSPACE_SCHEMA_VERSION,
-  CHART_WORKSPACE_TEMPLATE_IDS,
+  DEFAULT_CHART_LINK_GROUP_ID,
   DEFAULT_CHART_LINK_GROUP_SETTINGS,
-  DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS,
-  LEGACY_CHART_WORKSPACE_SCHEMA_VERSION,
   MAIN_CHART_WINDOW_ID,
+  MAX_CHART_LINK_GROUP_DEPTH,
   type ChartCellChartSettings,
   type ChartCellId,
   type ChartCellPriceScale,
   type ChartCellState,
   type ChartDrawingLayerSetId,
+  type ChartLinkGroup,
   type ChartLinkGroupId,
   type ChartLinkGroupSettings,
-  type ChartLinkRole,
   type ChartWindowBoundsDip,
   type ChartWindowDisplayState,
   type ChartWindowId,
   type ChartWindowState,
   type ChartWorkspaceDocument,
-  type ChartWorkspaceLayoutRatios,
-  type ChartWorkspaceTemplateId,
 } from "./chartWorkspaceTypes.js";
 import {
   MAX_CELLS_PER_APP,
@@ -48,16 +44,11 @@ import {
 } from "./chartWorkspaceIdentity.js";
 import {
   createChartWorkspaceLayoutTree,
-  normalizeChartSplitRatio,
-  normalizeChartWorkspaceLayoutTree,
   parseChartWorkspaceLayoutTree,
   visibleCellIds,
 } from "./chartWorkspaceLayout.js";
 
-export const CHART_WORKSPACE_V6_STORAGE_KEY = "candlescope-chart-workspace-v6";
-export const CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v2";
-export const LEGACY_CHART_WORKSPACE_STORAGE_KEY = "candlescope-chart-workspace-v1";
-const RECURSIVE_LAYOUT_SCHEMA_VERSION = 3;
+export const CHART_WORKSPACE_V7_STORAGE_KEY = "candlescope-chart-workspace-v7";
 
 export interface ChartWorkspaceStorageLike {
   getItem(key: string): string | null;
@@ -71,6 +62,12 @@ export interface ChartWorkspaceNormalizationDiagnostic {
     | "invalid-revision"
     | "invalid-cell-record"
     | "invalid-cell-id"
+    | "invalid-cell-link-group"
+    | "invalid-link-groups"
+    | "invalid-link-group"
+    | "invalid-link-parent"
+    | "link-group-cycle"
+    | "max-link-depth"
     | "max-cells-app"
     | "invalid-window-record"
     | "invalid-window-id"
@@ -145,24 +142,15 @@ function normalizeIndicators(value: unknown): IndicatorDefinition[] {
   return Array.isArray(value) ? value.filter(isIndicatorDefinition) : [];
 }
 
-function normalizeLinkGroup(value: unknown, fallback: ChartLinkGroupId | null): ChartLinkGroupId | null {
-  if (value === null || value === "") return null;
-  return CHART_LINK_GROUP_IDS.includes(value as ChartLinkGroupId)
-    ? value as ChartLinkGroupId
-    : fallback;
-}
-
 function normalizeLinkGroupSettings(value: unknown): ChartLinkGroupSettings {
   const source = isRecord(value) ? value : {};
-  const legacyTimeRange = typeof source.timeRange === "boolean"
-    ? source.timeRange
-    : DEFAULT_CHART_LINK_GROUP_SETTINGS.dateRange;
   const dateRange = typeof source.dateRange === "boolean"
     ? source.dateRange
-    : legacyTimeRange;
+    : DEFAULT_CHART_LINK_GROUP_SETTINGS.dateRange;
   const requestedTimeAnchor = typeof source.timeAnchor === "boolean"
     ? source.timeAnchor
     : DEFAULT_CHART_LINK_GROUP_SETTINGS.timeAnchor;
+  const indicatorSource = isRecord(source.indicators) ? source.indicators : {};
   return {
     market: typeof source.market === "boolean" ? source.market : DEFAULT_CHART_LINK_GROUP_SETTINGS.market,
     interval: typeof source.interval === "boolean" ? source.interval : DEFAULT_CHART_LINK_GROUP_SETTINGS.interval,
@@ -170,29 +158,34 @@ function normalizeLinkGroupSettings(value: unknown): ChartLinkGroupSettings {
     timeAnchor: dateRange ? false : requestedTimeAnchor,
     dateRange,
     drawings: typeof source.drawings === "boolean" ? source.drawings : DEFAULT_CHART_LINK_GROUP_SETTINGS.drawings,
+    indicators: {
+      definitions: typeof indicatorSource.definitions === "boolean"
+        ? indicatorSource.definitions
+        : DEFAULT_CHART_LINK_GROUP_SETTINGS.indicators.definitions,
+      parameters: typeof indicatorSource.parameters === "boolean"
+        ? indicatorSource.parameters
+        : DEFAULT_CHART_LINK_GROUP_SETTINGS.indicators.parameters,
+      visual: typeof indicatorSource.visual === "boolean"
+        ? indicatorSource.visual
+        : DEFAULT_CHART_LINK_GROUP_SETTINGS.indicators.visual,
+      paneLayout: typeof indicatorSource.paneLayout === "boolean"
+        ? indicatorSource.paneLayout
+        : DEFAULT_CHART_LINK_GROUP_SETTINGS.indicators.paneLayout,
+    },
   };
 }
 
-function normalizeLinkRole(value: unknown): ChartLinkRole {
-  return CHART_LINK_ROLES.includes(value as ChartLinkRole)
-    ? value as ChartLinkRole
-    : "bidirectional";
+function cloneDefaultLinkGroupSettings(): ChartLinkGroupSettings {
+  return {
+    ...DEFAULT_CHART_LINK_GROUP_SETTINGS,
+    indicators: { ...DEFAULT_CHART_LINK_GROUP_SETTINGS.indicators },
+  };
 }
 
 function normalizeDrawingLayerSet(value: unknown): ChartDrawingLayerSetId {
   return CHART_DRAWING_LAYER_SET_IDS.includes(value as ChartDrawingLayerSetId)
     ? value as ChartDrawingLayerSetId
     : "1";
-}
-
-function normalizeLayoutRatios(value: unknown): ChartWorkspaceLayoutRatios {
-  const source = isRecord(value) ? value : {};
-  return {
-    splitVertical: normalizeChartSplitRatio(source.splitVertical, DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS.splitVertical),
-    splitHorizontal: normalizeChartSplitRatio(source.splitHorizontal, DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS.splitHorizontal),
-    quadColumns: normalizeChartSplitRatio(source.quadColumns, DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS.quadColumns),
-    quadRows: normalizeChartSplitRatio(source.quadRows, DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS.quadRows),
-  };
 }
 
 function defaultCell(
@@ -205,8 +198,7 @@ function defaultCell(
   const interval = canonicalizeIntervalValue(DEFAULT_CELL_INTERVALS[index]) || baseSession.interval;
   return {
     id,
-    linkGroup: "A",
-    linkRole: "bidirectional",
+    linkGroupId: DEFAULT_CHART_LINK_GROUP_ID,
     drawingLayerSet: "1",
     session: { ...baseSession, interval: index === 0 ? baseSession.interval : interval },
     chartSettings: { ...chartSettings },
@@ -243,105 +235,99 @@ export function createDefaultChartWorkspace(): ChartWorkspaceDocument {
     revision: 0,
     activeWindowId: MAIN_CHART_WINDOW_ID,
     windows: { [MAIN_CHART_WINDOW_ID]: mainWindow },
-    linkGroups: Object.fromEntries(CHART_LINK_GROUP_IDS.map((group) => [
-      group,
-      { ...DEFAULT_CHART_LINK_GROUP_SETTINGS },
-    ])) as Record<ChartLinkGroupId, ChartLinkGroupSettings>,
+    linkGroups: {
+      [DEFAULT_CHART_LINK_GROUP_ID]: {
+        id: DEFAULT_CHART_LINK_GROUP_ID,
+        name: "主控组",
+        color: CHART_LINK_GROUP_COLORS[0],
+        parentId: null,
+        peerPolicy: cloneDefaultLinkGroupSettings(),
+        receiveFromParent: cloneDefaultLinkGroupSettings(),
+      },
+    },
     cells,
   };
 }
 
-function normalizeLegacyLayout(value: unknown): ChartWorkspaceTemplateId {
-  return CHART_WORKSPACE_TEMPLATE_IDS.includes(value as ChartWorkspaceTemplateId)
-    ? value as ChartWorkspaceTemplateId
-    : "single";
-}
-
-function normalizeLegacyCellId(value: unknown, fallback: ChartCellId): ChartCellId {
-  return typeof value === "string" && CHART_CELL_IDS.includes(value as typeof CHART_CELL_IDS[number])
-    ? value
-    : fallback;
-}
-
-function normalizedLinkGroups(value: unknown): Record<ChartLinkGroupId, ChartLinkGroupSettings> {
-  const source = isRecord(value) ? value : {};
-  return Object.fromEntries(CHART_LINK_GROUP_IDS.map((group) => [
-    group,
-    normalizeLinkGroupSettings(source[group]),
-  ])) as Record<ChartLinkGroupId, ChartLinkGroupSettings>;
+function normalizeLinkGroups(
+  value: unknown,
+  diagnostics: ChartWorkspaceNormalizationDiagnostic[],
+): Record<ChartLinkGroupId, ChartLinkGroup> {
+  if (!isRecord(value) || Object.keys(value).length === 0) {
+    diagnostics.push({ code: "invalid-link-groups", path: "linkGroups" });
+    return {};
+  }
+  const groups: Record<ChartLinkGroupId, ChartLinkGroup> = {};
+  for (const [id, candidate] of Object.entries(value)) {
+    if (!id.trim() || id.length > 128 || !isRecord(candidate) || candidate.id !== id) {
+      diagnostics.push({ code: "invalid-link-group", path: `linkGroups.${id}` });
+      continue;
+    }
+    groups[id] = {
+      id,
+      name: typeof candidate.name === "string" && candidate.name.trim()
+        ? candidate.name.trim().slice(0, 64)
+        : id,
+      color: typeof candidate.color === "string" && candidate.color.trim()
+        ? candidate.color.trim().slice(0, 32)
+        : CHART_LINK_GROUP_COLORS[Object.keys(groups).length % CHART_LINK_GROUP_COLORS.length]!,
+      parentId: typeof candidate.parentId === "string" && candidate.parentId.trim()
+        ? candidate.parentId
+        : null,
+      peerPolicy: normalizeLinkGroupSettings(candidate.peerPolicy),
+      receiveFromParent: normalizeLinkGroupSettings(candidate.receiveFromParent),
+    };
+  }
+  for (const group of Object.values(groups)) {
+    if (group.parentId && !groups[group.parentId]) {
+      diagnostics.push({ code: "invalid-link-parent", path: `linkGroups.${group.id}.parentId` });
+      continue;
+    }
+    const visited = new Set<ChartLinkGroupId>();
+    let current: ChartLinkGroup | null = group;
+    let depth = 1;
+    while (current?.parentId) {
+      if (visited.has(current.id)) {
+        diagnostics.push({ code: "link-group-cycle", path: `linkGroups.${group.id}.parentId` });
+        break;
+      }
+      visited.add(current.id);
+      current = groups[current.parentId] ?? null;
+      depth += 1;
+      if (depth > MAX_CHART_LINK_GROUP_DEPTH) {
+        diagnostics.push({ code: "max-link-depth", path: `linkGroups.${group.id}.parentId` });
+        break;
+      }
+    }
+  }
+  return groups;
 }
 
 function normalizeCellState(
   id: ChartCellId,
   value: unknown,
   fallback: ChartCellState,
-  hasLinkGroups = true,
-  hasAdvancedLinks = true,
+  linkGroups: Record<ChartLinkGroupId, ChartLinkGroup>,
+  diagnostics: ChartWorkspaceNormalizationDiagnostic[],
 ): ChartCellState {
   const source = isRecord(value) ? value : {};
+  const requestedLinkGroupId = source.linkGroupId === null
+    ? null
+    : typeof source.linkGroupId === "string" && linkGroups[source.linkGroupId]
+      ? source.linkGroupId
+      : fallback.linkGroupId;
+  if (source.linkGroupId !== null
+    && (typeof source.linkGroupId !== "string" || !linkGroups[source.linkGroupId])) {
+    diagnostics.push({ code: "invalid-cell-link-group", path: `cells.${id}.linkGroupId` });
+  }
   return {
     id,
-    linkGroup: hasLinkGroups ? normalizeLinkGroup(source.linkGroup, fallback.linkGroup) : null,
-    linkRole: hasAdvancedLinks ? normalizeLinkRole(source.linkRole) : "bidirectional",
-    drawingLayerSet: hasAdvancedLinks ? normalizeDrawingLayerSet(source.drawingLayerSet) : "1",
+    linkGroupId: requestedLinkGroupId,
+    drawingLayerSet: normalizeDrawingLayerSet(source.drawingLayerSet),
     session: normalizeSession(source.session, fallback.session),
     chartSettings: normalizeCellChartSettings(source.chartSettings),
     priceScale: normalizePriceScale(source.priceScale),
     indicators: normalizeIndicators(source.indicators),
-  };
-}
-
-function migrateLegacyChartWorkspace(
-  value: Record<string, unknown>,
-  sourceSchemaVersion: number,
-): ChartWorkspaceDocument {
-  const fallback = createDefaultChartWorkspace();
-  const fallbackWindow = fallback.windows[MAIN_CHART_WINDOW_ID]!;
-  const sourceCells = isRecord(value.cells) ? value.cells : {};
-  const cells = Object.fromEntries(CHART_CELL_IDS.map((id) => [
-    id,
-    normalizeCellState(
-      id,
-      sourceCells[id],
-      fallback.cells[id]!,
-      sourceSchemaVersion >= 2,
-      sourceSchemaVersion >= 4,
-    ),
-  ])) as Record<ChartCellId, ChartCellState>;
-  const legacyTree = createChartWorkspaceLayoutTree(
-    normalizeLegacyLayout(value.layout),
-    normalizeLayoutRatios(value.layoutRatios),
-  );
-  const layoutTree = sourceSchemaVersion >= RECURSIVE_LAYOUT_SCHEMA_VERSION
-    ? normalizeChartWorkspaceLayoutTree(value.layoutTree, legacyTree, {
-      knownCellIds: new Set(CHART_CELL_IDS),
-      maxCells: CHART_CELL_IDS.length,
-    })
-    : legacyTree;
-  const requestedActiveCellId = normalizeLegacyCellId(value.activeCellId, "cell-1");
-  const maximizedCellId = value.maximizedCellId == null
-    ? null
-    : normalizeLegacyCellId(value.maximizedCellId, requestedActiveCellId);
-  const layoutCellIds = visibleCellIds(layoutTree);
-  const activeCellId = maximizedCellId
-    ?? (layoutCellIds.includes(requestedActiveCellId)
-      ? requestedActiveCellId
-      : layoutCellIds[0] ?? "cell-1");
-  const mainWindow: ChartWindowState = {
-    ...fallbackWindow,
-    layoutTree,
-    layoutLocked: sourceSchemaVersion >= LEGACY_CHART_WORKSPACE_SCHEMA_VERSION
-      && value.layoutLocked === true,
-    activeCellId,
-    maximizedCellId,
-  };
-  return {
-    schemaVersion: CHART_WORKSPACE_SCHEMA_VERSION,
-    revision: 0,
-    activeWindowId: MAIN_CHART_WINDOW_ID,
-    windows: { [MAIN_CHART_WINDOW_ID]: mainWindow },
-    linkGroups: normalizedLinkGroups(value.linkGroups),
-    cells,
   };
 }
 
@@ -372,7 +358,7 @@ function failResult(
   };
 }
 
-function normalizeV6ChartWorkspace(
+function normalizeV7ChartWorkspace(
   value: Record<string, unknown>,
 ): NormalizeChartWorkspaceResult {
   const fallback = createDefaultChartWorkspace();
@@ -381,6 +367,7 @@ function normalizeV6ChartWorkspace(
   if (!Number.isSafeInteger(revision) || revision < 0) {
     diagnostics.push({ code: "invalid-revision", path: "revision" });
   }
+  const linkGroups = normalizeLinkGroups(value.linkGroups, diagnostics);
   const sourceCells = isRecord(value.cells) ? value.cells : null;
   if (!sourceCells) diagnostics.push({ code: "invalid-cell-record", path: "cells" });
   const sourceCellEntries = sourceCells ? Object.entries(sourceCells) : [];
@@ -394,10 +381,13 @@ function normalizeV6ChartWorkspace(
       diagnostics.push({ code: "invalid-cell-id", path: `cells.${key}` });
       continue;
     }
-    cells[key] = normalizeCellState(key, candidate, fallback.cells[key] ?? {
-      ...dynamicFallback,
-      id: key,
-    });
+    cells[key] = normalizeCellState(
+      key,
+      candidate,
+      fallback.cells[key] ?? { ...dynamicFallback, id: key },
+      linkGroups,
+      diagnostics,
+    );
   }
   const sourceWindows = isRecord(value.windows) ? value.windows : null;
   if (!sourceWindows) diagnostics.push({ code: "invalid-window-record", path: "windows" });
@@ -470,7 +460,7 @@ function normalizeV6ChartWorkspace(
       revision,
       activeWindowId,
       windows,
-      linkGroups: normalizedLinkGroups(value.linkGroups),
+      linkGroups,
       cells,
     },
     diagnostics: [],
@@ -488,17 +478,7 @@ export function normalizeChartWorkspaceWithDiagnostics(
   }
   const rawSchemaVersion = value.schemaVersion == null ? 1 : Number(value.schemaVersion);
   if (rawSchemaVersion === CHART_WORKSPACE_SCHEMA_VERSION) {
-    return normalizeV6ChartWorkspace(value);
-  }
-  if (Number.isInteger(rawSchemaVersion)
-    && rawSchemaVersion >= 1
-    && rawSchemaVersion <= LEGACY_CHART_WORKSPACE_SCHEMA_VERSION) {
-    return {
-      document: migrateLegacyChartWorkspace(value, rawSchemaVersion),
-      diagnostics: [],
-      migratedFromSchemaVersion: rawSchemaVersion,
-      usedFallback: false,
-    };
+    return normalizeV7ChartWorkspace(value);
   }
   return failResult(fallback, [{ code: "unsupported-schema", path: "schemaVersion" }]);
 }
@@ -523,29 +503,13 @@ function loadRawWorkspace(
   return null;
 }
 
-export function loadLegacyChartWorkspace(
-  storage: ChartWorkspaceStorageLike | null = browserStorage(),
-): ChartWorkspaceDocument | null {
-  if (!storage) return null;
-  try {
-    const raw = loadRawWorkspace(storage, [
-      CHART_WORKSPACE_STORAGE_KEY,
-      LEGACY_CHART_WORKSPACE_STORAGE_KEY,
-    ]);
-    return raw ? normalizeChartWorkspace(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
 export function loadChartWorkspace(
   storage: ChartWorkspaceStorageLike | null = browserStorage(),
 ): ChartWorkspaceDocument {
   if (!storage) return createDefaultChartWorkspace();
   try {
-    const v6 = loadRawWorkspace(storage, [CHART_WORKSPACE_V6_STORAGE_KEY]);
-    if (v6) return normalizeChartWorkspace(v6);
-    return loadLegacyChartWorkspace(storage) ?? createDefaultChartWorkspace();
+    const v7 = loadRawWorkspace(storage, [CHART_WORKSPACE_V7_STORAGE_KEY]);
+    return v7 ? normalizeChartWorkspace(v7) : createDefaultChartWorkspace();
   } catch {
     return createDefaultChartWorkspace();
   }
@@ -558,7 +522,7 @@ export function saveChartWorkspace(
   if (!storage) return;
   try {
     storage.setItem(
-      CHART_WORKSPACE_V6_STORAGE_KEY,
+      CHART_WORKSPACE_V7_STORAGE_KEY,
       JSON.stringify(normalizeChartWorkspace(workspace)),
     );
   } catch {

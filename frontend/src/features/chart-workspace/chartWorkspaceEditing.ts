@@ -84,8 +84,7 @@ function blankCell(
   return {
     ...cloneSerializable(existing ?? source),
     id,
-    linkGroup: null,
-    linkRole: "bidirectional",
+    linkGroupId: null,
     session: cloneSerializable(source.session),
     priceScale: { invertScale: false, priceScaleMode: 0 },
     indicators: [],

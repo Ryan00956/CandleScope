@@ -1,7 +1,4 @@
-import {
-  canPublishChartLinks,
-  canReceiveChartLinks,
-} from "./chartWorkspaceLinkModel.js";
+import { resolveChartLinkTargetsForChannel } from "./chartWorkspaceLinkModel.js";
 import type {
   ChartCellId,
   ChartLinkGroupId,
@@ -93,7 +90,7 @@ interface WorkspaceViewportState {
     sequence: number;
     readinessGeneration: number;
   }>;
-  latestByGroup: Map<ChartLinkGroupId, RetainedViewportEvent>;
+  latestBySourceAndKind: Map<string, RetainedViewportEvent>;
   readinessGenerationByCell: Map<ChartCellId, number>;
 }
 
@@ -111,9 +108,13 @@ function sameViewportIssue(
 function createWorkspaceViewportState(): WorkspaceViewportState {
   return {
     deliveredByCell: new Map(),
-    latestByGroup: new Map(),
+    latestBySourceAndKind: new Map(),
     readinessGenerationByCell: new Map(),
   };
+}
+
+function viewportEventKey(event: Pick<RetainedViewportEvent, "sourceCellId" | "kind">): string {
+  return `${event.sourceCellId}\u0000${event.kind}`;
 }
 
 export class ChartLinkCoordinator {
@@ -182,10 +183,7 @@ export class ChartLinkCoordinator {
       const normalizedGeneration = Number.isFinite(generation)
         ? Math.max(0, Math.floor(generation))
         : 0;
-      this.viewportState(scopeKey).readinessGenerationByCell.set(
-        cellId,
-        normalizedGeneration,
-      );
+      this.viewportState(scopeKey).readinessGenerationByCell.set(cellId, normalizedGeneration);
       this.catchUpViewport(cellId, true, normalizedGeneration);
     }) ?? (() => {});
     this.catchUpViewport(cellId, false);
@@ -226,12 +224,11 @@ export class ChartLinkCoordinator {
     option: LinkOption,
   ): ChartLinkGroupId | null {
     const sourceCell = this.document.cells[sourceCellId];
-    if (!sourceCell) return null;
-    const sourceGroup = sourceCell.linkGroup;
-    if (sourceGroup === null
-      || !canPublishChartLinks(sourceCell.linkRole)
-      || !this.document.linkGroups[sourceGroup]?.[option]) return null;
-    return sourceGroup;
+    const sourceGroupId = sourceCell?.linkGroupId ?? null;
+    if (!sourceCell || !sourceGroupId || !this.document.linkGroups[sourceGroupId]) return null;
+    return resolveChartLinkTargetsForChannel(this.document, sourceCellId, option).length > 0
+      ? sourceGroupId
+      : null;
   }
 
   private linkedTargets(
@@ -240,32 +237,30 @@ export class ChartLinkCoordinator {
   ): { group: ChartLinkGroupId | null; targets: LinkedTarget[] } {
     const group = this.sourceGroupForOption(sourceCellId, option);
     if (group === null) return { group: null, targets: [] };
-    const targets: LinkedTarget[] = [];
-    for (const [cellId, registration] of this.surfaces) {
-      if (registration.scopeKey !== this.scopeKey) continue;
-      const cell = this.document.cells[cellId];
-      if (!cell
-        || cellId === sourceCellId
-        || cell.linkGroup !== group
-        || !canReceiveChartLinks(cell.linkRole)) continue;
-      targets.push({ cellId, surface: registration.surface });
-    }
+    const targets = resolveChartLinkTargetsForChannel(this.document, sourceCellId, option)
+      .flatMap(({ cellId }) => {
+        const registration = this.surfaces.get(cellId);
+        return registration?.scopeKey === this.scopeKey
+          ? [{ cellId, surface: registration.surface }]
+          : [];
+      });
     return { group, targets };
+  }
+
+  private eventTargetsCell(event: RetainedViewportEvent, cellId: ChartCellId): boolean {
+    return resolveChartLinkTargetsForChannel(this.document, event.sourceCellId, event.kind)
+      .some((target) => target.cellId === cellId);
   }
 
   private reconcileRetainedViewportEvents(): void {
     const state = this.viewportState();
-    for (const [group, event] of state.latestByGroup) {
-      if (this.sourceGroupForOption(event.sourceCellId, event.kind) !== group) {
-        state.latestByGroup.delete(group);
+    for (const [key, event] of state.latestBySourceAndKind) {
+      if (this.sourceGroupForOption(event.sourceCellId, event.kind) !== event.group) {
+        state.latestBySourceAndKind.delete(key);
       }
     }
     for (const cellId of state.deliveredByCell.keys()) {
-      const cell = this.document.cells[cellId];
-      const event = !cell || cell.linkGroup == null
-        ? null
-        : state.latestByGroup.get(cell.linkGroup) ?? null;
-      if (!cell || !event || !canReceiveChartLinks(cell.linkRole)) {
+      if (!this.document.cells[cellId]) {
         state.deliveredByCell.delete(cellId);
         state.readinessGenerationByCell.delete(cellId);
       }
@@ -290,7 +285,6 @@ export class ChartLinkCoordinator {
           }
         } catch {
           this.diagnostics.crosshairTargetFailures += 1;
-          // One unavailable target must not block the other linked charts.
         }
       }
     } finally {
@@ -440,7 +434,7 @@ export class ChartLinkCoordinator {
     targets: LinkedTarget[],
   ): void {
     const state = this.viewportState();
-    state.latestByGroup.set(event.group, event);
+    state.latestBySourceAndKind.set(viewportEventKey(event), event);
     this.setViewportIssue(null);
     for (const target of targets) {
       this.deliverViewportEvent(
@@ -460,19 +454,14 @@ export class ChartLinkCoordinator {
   ): boolean {
     if (this.publishingViewport) return false;
     const registration = this.surfaces.get(cellId);
-    if (!registration || registration.scopeKey !== this.scopeKey) return false;
-    const cell = this.document.cells[cellId];
-    if (!cell) return false;
-    const group = cell.linkGroup;
-    if (group === null || !canReceiveChartLinks(cell.linkRole)) return false;
-    const state = this.viewportState();
-    const event = state.latestByGroup.get(group);
-    const delivered = state.deliveredByCell.get(cellId);
-    if (!event
-      || event.sourceCellId === cellId
-      || (delivered?.sequence === event.sequence
-        && delivered.readinessGeneration >= readinessGeneration)
-      || this.sourceGroupForOption(event.sourceCellId, event.kind) !== group) return false;
+    if (!registration || registration.scopeKey !== this.scopeKey || !this.document.cells[cellId]) return false;
+    const event = [...this.viewportState().latestBySourceAndKind.values()]
+      .filter((candidate) => candidate.sourceCellId !== cellId && this.eventTargetsCell(candidate, cellId))
+      .sort((left, right) => right.sequence - left.sequence)[0];
+    if (!event) return false;
+    const delivered = this.viewportState().deliveredByCell.get(cellId);
+    if (delivered?.sequence === event.sequence
+      && delivered.readinessGeneration >= readinessGeneration) return false;
     const applied = this.deliverViewportEvent(event, {
       cellId,
       surface: registration.surface,
@@ -482,12 +471,10 @@ export class ChartLinkCoordinator {
   }
 
   private publishViewportIssue(event: RetainedViewportEvent): void {
-    const current = this.viewportState().latestByGroup.get(event.group);
+    const current = this.viewportState().latestBySourceAndKind.get(viewportEventKey(event));
     if (current !== event) return;
-    const failedCellIds = [...event.failedCellIds].filter((cellId) => {
-      const cell = this.document.cells[cellId];
-      return cell?.linkGroup === event.group && canReceiveChartLinks(cell.linkRole);
-    });
+    const failedCellIds = [...event.failedCellIds]
+      .filter((cellId) => this.eventTargetsCell(event, cellId));
     if (failedCellIds.length === 0) {
       if (this.viewportIssue?.group === event.group
         && this.viewportIssue.sourceCellId === event.sourceCellId
@@ -513,9 +500,9 @@ export class ChartLinkCoordinator {
     return {
       scopeKey: this.scopeKey,
       registeredCellIds: this.registeredCellIds().sort(),
-      retainedViewportGroups: [...state.latestByGroup.entries()]
-        .map(([group, event]) => ({
-          group,
+      retainedViewportGroups: [...state.latestBySourceAndKind.values()]
+        .map((event) => ({
+          group: event.group,
           kind: event.kind,
           sourceCellId: event.sourceCellId,
           failedCellIds: [...event.failedCellIds].sort(),
@@ -532,6 +519,6 @@ export function sameLinkGroup(
   left: ChartCellId,
   right: ChartCellId,
 ): ChartLinkGroupId | null {
-  const group = document.cells[left]?.linkGroup ?? null;
-  return group !== null && document.cells[right]?.linkGroup === group ? group : null;
+  const group = document.cells[left]?.linkGroupId ?? null;
+  return group !== null && document.cells[right]?.linkGroupId === group ? group : null;
 }

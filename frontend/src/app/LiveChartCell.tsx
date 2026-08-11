@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
   type Dispatch,
+  type CSSProperties,
   type ReactNode,
   type RefObject,
   type SetStateAction,
@@ -23,13 +24,12 @@ import type {
   ChartCellCreationMode,
   ChartCellId,
   ChartCellState,
-  ChartLinkGroupId,
+  ChartLinkGroup,
   ChartWorkspaceCellRole,
   ChartWorkspaceId,
   ChartWindowId,
   ChartWorkspaceSplitDirection,
 } from "../features/chart-workspace/chartWorkspaceTypes.js";
-import { CHART_LINK_GROUP_IDS } from "../features/chart-workspace/chartWorkspaceTypes.js";
 import { chartCellStorageScope } from "../features/chart-workspace/chartWorkspaceLibrary.js";
 import type { ChartLinkCoordinator } from "../features/chart-workspace/chartLinkCoordinator.js";
 import {
@@ -112,6 +112,7 @@ export interface LiveChartCellProps {
   workspaceId: ChartWorkspaceId;
   windowId: ChartWindowId;
   cell: ChartCellState;
+  linkGroup: ChartLinkGroup | null;
   linkedDrawingScopeBase: string;
   layoutRole: ChartWorkspaceCellRole | null;
   active: boolean;
@@ -131,7 +132,6 @@ export interface LiveChartCellProps {
   workspaceControls: ReactNode;
   linkCoordinator: ChartLinkCoordinator;
   onActivate(cellId: ChartCellId): void;
-  onLinkGroupChange(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
   onSplitCell(
     cellId: ChartCellId,
     direction: ChartWorkspaceSplitDirection,
@@ -152,6 +152,7 @@ function LiveChartCell({
   workspaceId,
   windowId,
   cell,
+  linkGroup,
   linkedDrawingScopeBase,
   layoutRole,
   active,
@@ -171,7 +172,6 @@ function LiveChartCell({
   workspaceControls,
   linkCoordinator,
   onActivate,
-  onLinkGroupChange,
   onSplitCell,
   onCloseCell,
   onSwapCells,
@@ -331,7 +331,7 @@ function LiveChartCell({
   );
 
   const indicators = useIndicatorRuntime({
-    // Workspace schema v6 persists an explicit indicator list for every cell.
+    // Workspace schema v7 persists an explicit indicator list for every cell.
     // An empty list is therefore intentional (and is required by capacity
     // scenarios such as S3), not a signal to inject the legacy VOL default.
     autoAddVolume: false,
@@ -605,8 +605,7 @@ function LiveChartCell({
         data-work-tier={workScheduler?.tier(cell.id) || "fallback"}
         data-active={active ? "true" : "false"}
         data-layout-role={layoutRole ?? "standard"}
-        data-link-group={cell.linkGroup ?? "none"}
-        data-link-role={cell.linkRole}
+        data-link-group={cell.linkGroupId ?? "none"}
         role="group"
         aria-label={`${chartSession.view.symbol} ${chartSession.view.interval} 图表`}
         tabIndex={obscured ? -1 : active ? 0 : -1}
@@ -643,39 +642,21 @@ function LiveChartCell({
           <span className="multi-chart-cell-market">
             {chartSession.view.exchange} · {chartSession.view.marketType}
           </span>
-          <label className="multi-chart-cell-link" data-link-group={cell.linkGroup ?? "none"}>
-            <span className="sr-only">联动组</span>
-            {cell.linkGroup && (
-              <span
-                className="multi-chart-cell-link-role"
-                aria-label={cell.linkRole === "source"
-                  ? "源图"
-                  : cell.linkRole === "destination" ? "目标图" : "双向图"}
-                title={cell.linkRole === "source"
-                  ? "源图：只发送品种、周期与视图联动"
-                  : cell.linkRole === "destination"
-                    ? "目标图：只接收品种、周期与视图联动"
-                    : "双向发送和接收品种、周期与视图联动"}
-              >
-                {cell.linkRole === "source" ? "源" : cell.linkRole === "destination" ? "目" : "↔"}
-              </span>
-            )}
-            <select
-              aria-label={`${cell.id} 联动组`}
-              value={cell.linkGroup ?? ""}
-              onChange={(event) => onLinkGroupChange(
-                cell.id,
-                (event.currentTarget.value || null) as ChartLinkGroupId | null,
-              )}
-              onDoubleClick={(event) => event.stopPropagation()}
-              title={cell.linkGroup ? `联动组 ${cell.linkGroup}` : "独立图表"}
+          {linkGroup && (
+            <span
+              className="multi-chart-cell-link"
+              data-link-group={linkGroup.id}
+              style={{ "--chart-link-group-color": linkGroup.color } as CSSProperties}
+              title={linkGroup.parentId
+                ? `${linkGroup.name} · 接收父组联动`
+                : `${linkGroup.name} · 根联动组`}
             >
-              <option value="">独立</option>
-              {CHART_LINK_GROUP_IDS.map((group) => (
-                <option key={group} value={group}>组 {group}</option>
-              ))}
-            </select>
-          </label>
+              <span className="multi-chart-cell-link-role" aria-hidden="true">
+                {linkGroup.parentId ? "↓" : "↔"}
+              </span>
+              {linkGroup.name}
+            </span>
+          )}
           <WorkspaceCellLayoutMenu
             cellId={cell.id}
             layoutCellIds={layoutCellIds}

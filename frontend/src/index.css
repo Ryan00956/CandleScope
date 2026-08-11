@@ -9821,9 +9821,19 @@ body {
 
 .multi-chart-cell-link {
   display: flex;
+  max-width: 120px;
   align-items: center;
   gap: 3px;
+  padding: 2px 5px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chart-link-group-color) 54%, var(--border-color));
+  border-radius: 999px;
   margin-left: auto;
+  color: var(--chart-link-group-color);
+  font-size: 9px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .multi-chart-cell-link-role {
@@ -11067,7 +11077,8 @@ body {
   .workspace-panel-rename-form
 ) button,
 .workspace-panel-rename-form input,
-.workspace-panel-field select {
+.workspace-panel-field select,
+.workspace-panel-field input:not([type="color"]) {
   min-width: 0;
   min-height: 30px;
   padding: 0 8px;
@@ -11084,7 +11095,8 @@ body {
   .workspace-panel-rename-form
 ) button,
 [data-theme="light"] .workspace-panel-rename-form input,
-[data-theme="light"] .workspace-panel-field select {
+[data-theme="light"] .workspace-panel-field select,
+[data-theme="light"] .workspace-panel-field input:not([type="color"]) {
   background: rgba(255, 255, 255, 0.82);
 }
 
@@ -11143,7 +11155,8 @@ body {
 }
 
 .workspace-panel-rename-form input:focus,
-.workspace-panel-field select:focus {
+.workspace-panel-field select:focus,
+.workspace-panel-field input:not([type="color"]):focus {
   border-color: rgba(59, 130, 246, 0.62);
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.14);
 }
@@ -11352,10 +11365,50 @@ body {
   font-size: 10px;
 }
 
-.workspace-panel-field select {
+.workspace-panel-field :is(select, input:not([type="color"])) {
   width: 100%;
   color: var(--text-primary);
   outline: 0;
+}
+
+.workspace-panel-link-group-tree {
+  max-height: 240px;
+}
+
+.workspace-panel-link-group-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 62px;
+  gap: 8px;
+}
+
+.workspace-panel-link-group-fields .workspace-panel-field:last-child {
+  grid-column: 1 / -1;
+}
+
+.workspace-panel-color-field input {
+  width: 100%;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--bg-primary);
+  cursor: pointer;
+}
+
+.workspace-panel-delete-link-group {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  margin-top: 8px;
+  background: rgba(2, 6, 23, 0.28);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+[data-theme="light"] .workspace-panel-delete-link-group {
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .workspace-panel-segmented {

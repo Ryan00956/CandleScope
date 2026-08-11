@@ -27,15 +27,18 @@ import {
   type ChartWorkspaceRepository,
 } from "./chartWorkspaceRepository.js";
 import {
+  CHART_LINK_GROUP_COLORS,
   CELL_CHART_SETTING_KEYS,
+  DEFAULT_CHART_LINK_GROUP_SETTINGS,
+  MAX_CHART_LINK_GROUP_DEPTH,
   type ChartCellCreationMode,
   type ChartCellChartSettings,
   type ChartDrawingLayerSetId,
   type ChartCellId,
   type ChartCellPriceScale,
   type ChartLinkGroupId,
+  type ChartLinkGroup,
   type ChartLinkGroupSettings,
-  type ChartLinkRole,
   type ChartWindowId,
   type ChartWindowState,
   type ChartWorkspaceDocument,
@@ -68,10 +71,13 @@ import {
 } from "./chartWorkspaceEditing.js";
 import {
   applyChartLinkSettingsPatch,
+  applyLinkedIndicatorUpdate,
   applyLinkedSessionUpdate,
   assignCellLinkGroup,
-  assignCellLinkRole,
-  preferredChartLinkPublisher,
+  chartLinkGroupDepth,
+  cloneChartLinkSettings,
+  isChartLinkGroupDescendant,
+  type ChartLinkGroupSettingsPatch,
 } from "./chartWorkspaceLinkModel.js";
 import {
   CHART_WORKSPACE_FEATURE_FLAGS,
@@ -142,11 +148,17 @@ export interface ChartWorkspaceRuntime {
     setActiveCell(cellId: ChartCellId): void;
     toggleMaximize(cellId: ChartCellId): void;
     setCellLinkGroup(cellId: ChartCellId, group: ChartLinkGroupId | null): void;
-    setCellLinkRole(cellId: ChartCellId, role: ChartLinkRole): void;
+    createLinkGroup(parentId?: ChartLinkGroupId | null): void;
+    updateLinkGroup(
+      groupId: ChartLinkGroupId,
+      patch: Partial<Pick<ChartLinkGroup, "name" | "color" | "parentId">>,
+    ): void;
+    deleteLinkGroup(groupId: ChartLinkGroupId): void;
     setCellDrawingLayerSet(cellId: ChartCellId, layerSet: ChartDrawingLayerSetId): void;
-    updateLinkGroupSettings(
-      group: ChartLinkGroupId,
-      patch: Partial<ChartLinkGroupSettings>,
+    updateLinkGroupPolicy(
+      groupId: ChartLinkGroupId,
+      relationship: "peers" | "parent",
+      patch: ChartLinkGroupSettingsPatch,
     ): void;
     setLayoutRatio(splitId: string, ratio: number): void;
     updateCellSession(cellId: ChartCellId, session: ChartSession): void;
@@ -219,6 +231,36 @@ function sameIndicatorDefinitions(
   right: readonly IndicatorDefinition[],
 ): boolean {
   return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+function createChartLinkGroupId(document: ChartWorkspaceDocument): ChartLinkGroupId {
+  let candidate = "";
+  try {
+    candidate = typeof globalThis.crypto?.randomUUID === "function"
+      ? `group-${globalThis.crypto.randomUUID()}`
+      : "";
+  } catch {
+    candidate = "";
+  }
+  if (candidate && !document.linkGroups[candidate]) return candidate;
+  let suffix = Object.keys(document.linkGroups).length + 1;
+  while (document.linkGroups[`group-${suffix}`]) suffix += 1;
+  return `group-${suffix}`;
+}
+
+function maxGroupDescendantDistance(
+  document: ChartWorkspaceDocument,
+  groupId: ChartLinkGroupId,
+): number {
+  const children = Object.values(document.linkGroups)
+    .filter((group) => group.parentId === groupId);
+  return children.length === 0
+    ? 0
+    : 1 + Math.max(...children.map((group) => maxGroupDescendantDistance(document, group.id)));
+}
+
+function sameLinkSettings(left: ChartLinkGroupSettings, right: ChartLinkGroupSettings): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function activeWorkspace(snapshot: ChartWorkspaceLibrarySnapshot) {
@@ -700,8 +742,71 @@ export function useChartWorkspaceRuntime(
     updateActiveDocument((current) => assignCellLinkGroup(current, cellId, group));
   }, [updateActiveDocument]);
 
-  const setCellLinkRole = useCallback((cellId: ChartCellId, role: ChartLinkRole) => {
-    updateActiveDocument((current) => assignCellLinkRole(current, cellId, role));
+  const createLinkGroup = useCallback((parentId: ChartLinkGroupId | null = null) => {
+    updateActiveDocument((current) => {
+      const normalizedParentId = parentId && current.linkGroups[parentId] ? parentId : null;
+      if (normalizedParentId
+        && chartLinkGroupDepth(current, normalizedParentId) >= MAX_CHART_LINK_GROUP_DEPTH) {
+        return current;
+      }
+      const id = createChartLinkGroupId(current);
+      const index = Object.keys(current.linkGroups).length;
+      const group: ChartLinkGroup = {
+        id,
+        name: `联动组 ${index + 1}`,
+        color: CHART_LINK_GROUP_COLORS[index % CHART_LINK_GROUP_COLORS.length]!,
+        parentId: normalizedParentId,
+        peerPolicy: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
+        receiveFromParent: cloneChartLinkSettings(DEFAULT_CHART_LINK_GROUP_SETTINGS),
+      };
+      return { ...current, linkGroups: { ...current.linkGroups, [id]: group } };
+    });
+  }, [updateActiveDocument]);
+
+  const updateLinkGroup = useCallback((
+    groupId: ChartLinkGroupId,
+    patch: Partial<Pick<ChartLinkGroup, "name" | "color" | "parentId">>,
+  ) => {
+    updateActiveDocument((current) => {
+      const previous = current.linkGroups[groupId];
+      if (!previous) return current;
+      const parentId = patch.parentId === undefined ? previous.parentId : patch.parentId;
+      if (parentId === groupId
+        || (parentId !== null && !current.linkGroups[parentId])
+        || (parentId !== null && isChartLinkGroupDescendant(current, parentId, groupId))) {
+        return current;
+      }
+      const parentDepth = parentId === null ? 0 : chartLinkGroupDepth(current, parentId);
+      if (parentDepth + 1 + maxGroupDescendantDistance(current, groupId)
+        > MAX_CHART_LINK_GROUP_DEPTH) return current;
+      const name = patch.name === undefined
+        ? previous.name
+        : patch.name.trim().replace(/\s+/g, " ").slice(0, 32) || previous.name;
+      const color = patch.color?.trim() || previous.color;
+      const next = { ...previous, name, color, parentId };
+      return next.name === previous.name
+        && next.color === previous.color
+        && next.parentId === previous.parentId
+        ? current
+        : { ...current, linkGroups: { ...current.linkGroups, [groupId]: next } };
+    });
+  }, [updateActiveDocument]);
+
+  const deleteLinkGroup = useCallback((groupId: ChartLinkGroupId) => {
+    updateActiveDocument((current) => {
+      const removed = current.linkGroups[groupId];
+      if (!removed || Object.keys(current.linkGroups).length <= 1) return current;
+      const linkGroups = Object.fromEntries(Object.entries(current.linkGroups)
+        .filter(([candidateId]) => candidateId !== groupId)
+        .map(([candidateId, group]) => [candidateId, group.parentId === groupId
+          ? { ...group, parentId: removed.parentId }
+          : group])) as ChartWorkspaceDocument["linkGroups"];
+      const cells = Object.fromEntries(Object.entries(current.cells)
+        .map(([cellId, cell]) => [cellId, cell.linkGroupId === groupId
+          ? { ...cell, linkGroupId: null }
+          : cell])) as ChartWorkspaceDocument["cells"];
+      return { ...current, linkGroups, cells };
+    });
   }, [updateActiveDocument]);
 
   const setCellDrawingLayerSet = useCallback((
@@ -721,25 +826,41 @@ export function useChartWorkspaceRuntime(
     });
   }, [updateActiveDocument]);
 
-  const updateLinkGroupSettings = useCallback((
-    group: ChartLinkGroupId,
-    patch: Partial<ChartLinkGroupSettings>,
+  const updateLinkGroupPolicy = useCallback((
+    groupId: ChartLinkGroupId,
+    relationship: "peers" | "parent",
+    patch: ChartLinkGroupSettingsPatch,
   ) => {
     updateActiveDocument((current) => {
-      const previous = current.linkGroups[group];
+      const group = current.linkGroups[groupId];
+      if (!group || (relationship === "parent" && group.parentId === null)) return current;
+      const policyKey = relationship === "peers" ? "peerPolicy" : "receiveFromParent";
+      const previous = group[policyKey];
       const nextSettings = applyChartLinkSettingsPatch(previous, patch);
-      if ((Object.keys(nextSettings) as Array<keyof ChartLinkGroupSettings>).every((key) => (
-        nextSettings[key] === previous[key]
-      ))) return current;
+      if (sameLinkSettings(previous, nextSettings)) return current;
       let next: ChartWorkspaceDocument = {
         ...current,
-        linkGroups: { ...current.linkGroups, [group]: nextSettings },
+        linkGroups: {
+          ...current.linkGroups,
+          [groupId]: { ...group, [policyKey]: nextSettings },
+        },
       };
       const enablesSessionLink = (patch.market === true && !previous.market)
         || (patch.interval === true && !previous.interval);
-      const anchor = preferredChartLinkPublisher(next, group);
+      const enablesIndicatorLink = patch.indicators
+        ? Object.entries(patch.indicators).some(([key, enabled]) => (
+          enabled === true
+          && previous.indicators[key as keyof typeof previous.indicators] === false
+        ))
+        : false;
+      const anchorGroupId = relationship === "parent" ? group.parentId : groupId;
+      const anchor = Object.values(next.cells)
+        .find((cell) => cell.linkGroupId === anchorGroupId);
       if (enablesSessionLink && anchor) {
         next = applyLinkedSessionUpdate(next, anchor.id, anchor.session);
+      }
+      if (enablesIndicatorLink && anchor) {
+        next = applyLinkedIndicatorUpdate(next, anchor.id, anchor.indicators);
       }
       return next;
     });
@@ -804,10 +925,7 @@ export function useChartWorkspaceRuntime(
       const cell = chartWorkspaceCell(current, cellId);
       return sameIndicatorDefinitions(cell.indicators, indicators)
         ? current
-        : {
-          ...current,
-          cells: { ...current.cells, [cellId]: { ...cell, indicators } },
-        };
+        : applyLinkedIndicatorUpdate(current, cellId, indicators);
     });
   }, [updateActiveDocument]);
 
@@ -930,9 +1048,11 @@ export function useChartWorkspaceRuntime(
       setActiveCell,
       toggleMaximize,
       setCellLinkGroup,
-      setCellLinkRole,
+      createLinkGroup,
+      updateLinkGroup,
+      deleteLinkGroup,
       setCellDrawingLayerSet,
-      updateLinkGroupSettings,
+      updateLinkGroupPolicy,
       setLayoutRatio,
       updateCellSession,
       updateCellChartSettings,

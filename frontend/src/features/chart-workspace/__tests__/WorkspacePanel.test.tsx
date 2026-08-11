@@ -12,7 +12,7 @@ function createRuntime(): ChartWorkspaceRuntime {
   const document = record.document;
   const activeWindow = document.windows[document.activeWindowId]!;
   const activeCell = document.cells[activeWindow.activeCellId]!;
-  activeCell.linkGroup = null;
+  activeCell.linkGroupId = null;
 
   return {
     view: {
@@ -57,9 +57,11 @@ function createRuntime(): ChartWorkspaceRuntime {
       setActiveCell: () => undefined,
       toggleMaximize: () => undefined,
       setCellLinkGroup: () => undefined,
-      setCellLinkRole: () => undefined,
+      createLinkGroup: () => undefined,
+      updateLinkGroup: () => undefined,
+      deleteLinkGroup: () => undefined,
       setCellDrawingLayerSet: () => undefined,
-      updateLinkGroupSettings: () => undefined,
+      updateLinkGroupPolicy: () => undefined,
       setLayoutRatio: () => undefined,
       updateCellSession: () => undefined,
       updateCellChartSettings: () => undefined,

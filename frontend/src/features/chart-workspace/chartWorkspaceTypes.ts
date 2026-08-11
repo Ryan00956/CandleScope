@@ -2,19 +2,25 @@ import type { ChartSession } from "../chart-session/chartSessionTypes.js";
 import type { ChartSettings } from "../settings/chartAppearanceSettings.js";
 import type { IndicatorDefinition } from "../indicators/indicatorTypes.js";
 
-export const CHART_WORKSPACE_SCHEMA_VERSION = 6 as const;
+export const CHART_WORKSPACE_SCHEMA_VERSION = 7 as const;
 export const CHART_WORKSPACE_RECORD_SCHEMA_VERSION = 1 as const;
-export const LEGACY_CHART_WORKSPACE_SCHEMA_VERSION = 5 as const;
 export type ChartCellId = string;
 export type ChartWindowId = string;
 export const CHART_CELL_IDS = ["cell-1", "cell-2", "cell-3", "cell-4"] as const satisfies readonly ChartCellId[];
 export const MAIN_CHART_WINDOW_ID = "main-window" as const satisfies ChartWindowId;
-export const CHART_LINK_GROUP_IDS = ["A", "B", "C", "D"] as const;
-export const CHART_LINK_ROLES = ["bidirectional", "source", "destination"] as const;
+export const DEFAULT_CHART_LINK_GROUP_ID = "group-primary" as const;
+export const CHART_LINK_GROUP_COLORS = [
+  "#4f7cff",
+  "#8b5cf6",
+  "#0f9f8f",
+  "#d97706",
+  "#dc5a6b",
+  "#64748b",
+] as const;
+export const MAX_CHART_LINK_GROUP_DEPTH = 4 as const;
 export const CHART_DRAWING_LAYER_SET_IDS = ["1", "2", "3", "4"] as const;
 
-export type ChartLinkGroupId = (typeof CHART_LINK_GROUP_IDS)[number];
-export type ChartLinkRole = (typeof CHART_LINK_ROLES)[number];
+export type ChartLinkGroupId = string;
 export type ChartDrawingLayerSetId = (typeof CHART_DRAWING_LAYER_SET_IDS)[number];
 
 export type ChartWorkspaceTemplateId =
@@ -77,6 +83,13 @@ export interface ChartCellPriceScale {
   priceScaleMode: number;
 }
 
+export interface ChartLinkIndicatorSettings {
+  definitions: boolean;
+  parameters: boolean;
+  visual: boolean;
+  paneLayout: boolean;
+}
+
 export interface ChartLinkGroupSettings {
   market: boolean;
   interval: boolean;
@@ -84,6 +97,16 @@ export interface ChartLinkGroupSettings {
   timeAnchor: boolean;
   dateRange: boolean;
   drawings: boolean;
+  indicators: ChartLinkIndicatorSettings;
+}
+
+export interface ChartLinkGroup {
+  id: ChartLinkGroupId;
+  name: string;
+  color: string;
+  parentId: ChartLinkGroupId | null;
+  peerPolicy: ChartLinkGroupSettings;
+  receiveFromParent: ChartLinkGroupSettings;
 }
 
 export interface ChartWorkspaceLayoutRatios {
@@ -95,8 +118,7 @@ export interface ChartWorkspaceLayoutRatios {
 
 export interface ChartCellState {
   id: ChartCellId;
-  linkGroup: ChartLinkGroupId | null;
-  linkRole: ChartLinkRole;
+  linkGroupId: ChartLinkGroupId | null;
   drawingLayerSet: ChartDrawingLayerSetId;
   session: ChartSession;
   chartSettings: ChartCellChartSettings;
@@ -130,7 +152,7 @@ export interface ChartWorkspaceDocument {
   revision: number;
   activeWindowId: ChartWindowId;
   windows: Record<ChartWindowId, ChartWindowState>;
-  linkGroups: Record<ChartLinkGroupId, ChartLinkGroupSettings>;
+  linkGroups: Record<ChartLinkGroupId, ChartLinkGroup>;
   cells: Record<ChartCellId, ChartCellState>;
 }
 
@@ -163,6 +185,12 @@ export const DEFAULT_CHART_LINK_GROUP_SETTINGS: ChartLinkGroupSettings = Object.
   timeAnchor: false,
   dateRange: true,
   drawings: false,
+  indicators: Object.freeze({
+    definitions: true,
+    parameters: true,
+    visual: false,
+    paneLayout: false,
+  }),
 });
 
 export const DEFAULT_CHART_WORKSPACE_LAYOUT_RATIOS: ChartWorkspaceLayoutRatios = Object.freeze({

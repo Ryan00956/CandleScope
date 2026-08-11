@@ -44,7 +44,7 @@ test("Cell ID allocation delegates to the factory and fails closed at capacity",
   assert.equal(firstAvailableChartCellId(tree, { maxCells: 2 }), null);
 });
 
-test("flag-off projection exposes only the first four cells without mutating the v6 tree", () => {
+test("flag-off projection exposes only the first four cells without mutating the v7 tree", () => {
   const tree = createChartWorkspaceLayoutTree("grid-16");
   const serialized = JSON.stringify(tree);
   const projected = projectChartWorkspaceLayoutTree(tree, 4);

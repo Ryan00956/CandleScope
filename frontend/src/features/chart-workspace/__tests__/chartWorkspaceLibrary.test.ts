@@ -80,14 +80,15 @@ test("main and confirmation template uses one primary and two higher-timeframe c
   assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-1"), "main");
   assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-2"), "confirmation");
   assert.equal(findChartWorkspaceCellRole(window.layoutTree, "cell-3"), "confirmation");
-  assert.deepEqual([
-    chartWorkspaceCell(document, "cell-1").linkRole,
-    chartWorkspaceCell(document, "cell-2").linkRole,
-    chartWorkspaceCell(document, "cell-3").linkRole,
-  ], ["source", "destination", "destination"]);
+  const parentGroupId = chartWorkspaceCell(document, "cell-1").linkGroupId;
+  const childGroupId = chartWorkspaceCell(document, "cell-2").linkGroupId;
+  assert.ok(parentGroupId);
+  assert.ok(childGroupId);
+  assert.equal(chartWorkspaceCell(document, "cell-3").linkGroupId, childGroupId);
+  assert.equal(document.linkGroups[childGroupId]!.parentId, parentGroupId);
 });
 
-test("library normalization fails a structurally malformed v6 document closed", () => {
+test("library normalization fails a structurally malformed v7 document closed", () => {
   const record = createDefaultChartWorkspaceRecord(100);
   const raw = structuredClone(record) as unknown as Record<string, unknown>;
   const rawDocument = raw.document as Record<string, unknown>;

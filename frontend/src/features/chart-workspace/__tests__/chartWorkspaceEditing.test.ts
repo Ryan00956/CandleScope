@@ -19,7 +19,11 @@ import {
 import { activeChartWorkspaceWindow, chartWorkspaceCell, replaceChartWorkspaceWindow } from "../chartWorkspaceDocument.js";
 import { visibleCellIds } from "../chartWorkspaceLayout.js";
 import { createDefaultChartWorkspace } from "../chartWorkspaceStorage.js";
-import type { ChartCellId, ChartWorkspaceDocument } from "../chartWorkspaceTypes.js";
+import {
+  DEFAULT_CHART_LINK_GROUP_ID,
+  type ChartCellId,
+  type ChartWorkspaceDocument,
+} from "../chartWorkspaceTypes.js";
 
 const windowOf = (document: ChartWorkspaceDocument) => activeChartWorkspaceWindow(document);
 const cellOf = (document: ChartWorkspaceDocument, id: ChartCellId) => chartWorkspaceCell(document, id);
@@ -27,14 +31,14 @@ const visible = (document: ChartWorkspaceDocument) => visibleCellIds(windowOf(do
 
 test("copy split duplicates cell configuration into the first unused stable cell", () => {
   const document = createDefaultChartWorkspace();
-  cellOf(document, "cell-1").linkGroup = "B";
+  cellOf(document, "cell-1").linkGroupId = DEFAULT_CHART_LINK_GROUP_ID;
   cellOf(document, "cell-1").indicators = [{ id: "copy-me", params: { length: 21 } }];
   const result = splitChartWorkspaceDocument(document, "cell-1", "columns", "copy");
 
   assert.deepEqual(visible(result.document), ["cell-1", "cell-2"]);
   assert.equal(windowOf(result.document).activeCellId, "cell-2");
   assert.deepEqual(result.restoreCellIds, ["cell-2"]);
-  assert.equal(cellOf(result.document, "cell-2").linkGroup, "B");
+  assert.equal(cellOf(result.document, "cell-2").linkGroupId, DEFAULT_CHART_LINK_GROUP_ID);
   assert.deepEqual(cellOf(result.document, "cell-2").session, cellOf(document, "cell-1").session);
   assert.deepEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
   assert.notEqual(cellOf(result.document, "cell-2").indicators, cellOf(document, "cell-1").indicators);
@@ -42,15 +46,14 @@ test("copy split duplicates cell configuration into the first unused stable cell
 
 test("blank split keeps market context while clearing links, indicators, and price transforms", () => {
   const document = createDefaultChartWorkspace();
-  cellOf(document, "cell-1").linkGroup = "C";
+  cellOf(document, "cell-1").linkGroupId = DEFAULT_CHART_LINK_GROUP_ID;
   cellOf(document, "cell-1").priceScale = { invertScale: true, priceScaleMode: 2 };
   cellOf(document, "cell-1").indicators = [{ id: "do-not-copy" }];
   const result = splitChartWorkspaceDocument(document, "cell-1", "rows", "blank");
   const blank = cellOf(result.document, "cell-2");
 
   assert.deepEqual(blank.session, cellOf(document, "cell-1").session);
-  assert.equal(blank.linkGroup, null);
-  assert.equal(blank.linkRole, "bidirectional");
+  assert.equal(blank.linkGroupId, null);
   assert.deepEqual(blank.indicators, []);
   assert.deepEqual(blank.priceScale, { invertScale: false, priceScaleMode: 0 });
 });

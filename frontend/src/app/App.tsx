@@ -12,7 +12,10 @@ import { createPortal, flushSync } from "react-dom";
 import { ForegroundPreloadGate } from "../features/market-data/foregroundPreloadGate.js";
 import { MarketDataWorkspaceProvider } from "../features/market-data/MarketDataWorkspaceProvider.js";
 import { useChartWorkspaceRuntime } from "../features/chart-workspace/useChartWorkspaceRuntime.js";
-import type { ChartCellId } from "../features/chart-workspace/chartWorkspaceTypes.js";
+import {
+  DEFAULT_CHART_LINK_GROUP_ID,
+  type ChartCellId,
+} from "../features/chart-workspace/chartWorkspaceTypes.js";
 import {
   ChartLinkCoordinator,
   type ChartLinkViewportIssue,
@@ -293,9 +296,13 @@ function LiveWorkspaceApp() {
           throw new Error("Phase 7 W2 requires exactly 64 unique Cell ids and symbols");
         }
         configureScenario(symbols, []);
-        workspace.actions.updateLinkGroupSettings("A", { market: false, interval: false, crosshair: true });
+        workspace.actions.updateLinkGroupPolicy(
+          DEFAULT_CHART_LINK_GROUP_ID,
+          "peers",
+          { market: false, interval: false, crosshair: true },
+        );
         Object.values(workspace.view.document.windows).forEach((windowState) => {
-          workspace.actions.setCellLinkGroup(windowState.activeCellId, "A");
+          workspace.actions.setCellLinkGroup(windowState.activeCellId, DEFAULT_CHART_LINK_GROUP_ID);
         });
       },
       configureW3: (symbols: string[]) => {
@@ -610,6 +617,9 @@ function LiveWorkspaceApp() {
                       workspaceId={workspace.view.activeWorkspaceId}
                       windowId={workspace.view.window.id}
                       cell={chartWorkspaceCell(workspace.view.document, cellId)}
+                      linkGroup={workspace.view.document.linkGroups[
+                        chartWorkspaceCell(workspace.view.document, cellId).linkGroupId ?? ""
+                      ] ?? null}
                       linkedDrawingScopeBase={chartCellDrawingScopeBase(
                         workspace.view.activeWorkspaceId,
                         workspace.view.document,
@@ -633,7 +643,6 @@ function LiveWorkspaceApp() {
                       workspaceControls={workspaceControls}
                       linkCoordinator={linkCoordinator}
                       onActivate={workspace.actions.setActiveCell}
-                      onLinkGroupChange={workspace.actions.setCellLinkGroup}
                       onSplitCell={workspace.actions.splitCell}
                       onCloseCell={workspace.actions.closeCell}
                       onSwapCells={workspace.actions.swapCells}

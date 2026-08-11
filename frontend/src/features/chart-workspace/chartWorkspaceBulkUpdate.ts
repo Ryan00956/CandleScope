@@ -36,13 +36,13 @@ export function configureChartWorkspaceCellsCandidate(
     }
     seen.add(configuration.cellId);
     const cell = chartWorkspaceCell(document, configuration.cellId);
-    if (cell.linkGroup === null
+    if (cell.linkGroupId === null
       && sameSession(cell.session, configuration.session)
       && sameIndicators(cell.indicators, configuration.indicators)) continue;
     if (cells === document.cells) cells = { ...document.cells };
     cells[configuration.cellId] = {
       ...cell,
-      linkGroup: null,
+      linkGroupId: null,
       session: { ...configuration.session },
       indicators: configuration.indicators.map((indicator) => ({
         ...indicator,

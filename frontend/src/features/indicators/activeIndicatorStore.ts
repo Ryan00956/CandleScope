@@ -90,7 +90,7 @@ function persistedIndicatorSignature(indicators: readonly IndicatorDefinition[])
 }
 
 /**
- * Reconcile a durable owner (workspace v6, local storage, etc.) with the live
+ * Reconcile a durable owner (workspace v7, local storage, etc.) with the live
  * indicator store. Runtime-only fields are retained when the durable
  * definitions are semantically unchanged; a genuine external edit replaces
  * the live definitions so restored and peer-window state cannot drift.

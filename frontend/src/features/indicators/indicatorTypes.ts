@@ -39,6 +39,8 @@ export interface ScriptRuntimeCatalog {
 
 export interface IndicatorDefinition {
   id: string;
+  /** Stable identity shared by linked chart groups; computed results remain cell-local. */
+  bindingId?: string;
   /** Explicit execution ownership. Existing indicators remain hosted by default. */
   executionTarget?: "hosted" | "local";
   name?: string;

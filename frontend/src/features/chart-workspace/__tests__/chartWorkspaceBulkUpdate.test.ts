@@ -25,7 +25,7 @@ test("bulk capacity configuration updates independent sessions in one document c
     "SYMBOL2USDT",
     "SYMBOL3USDT",
   ]);
-  assert.ok(Object.values(configured.cells).every((cell) => cell.linkGroup === null));
+  assert.ok(Object.values(configured.cells).every((cell) => cell.linkGroupId === null));
   assert.ok(Object.values(configured.cells).every((cell) => cell.indicators.length === 1));
   assert.equal(original.cells["cell-1"]!.session.symbol, "BTCUSDT");
 });

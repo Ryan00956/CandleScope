@@ -41,7 +41,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 - `ONE_WAY` 与 `HEDGE`；
 - Binance USD-M 规则级确定性模拟的保证金、资金费和强平生命周期；
 - 版本化、物化并由 Run pin 的保险基金和 ADL cohort 模型；
-- 有连续历史 L2 时的确定性强平执行。
+- 有连续历史 L2 时的逐档确定性强平执行，以及明确关闭 L2 时的冻结 mark + 不利滑点强平执行。
 
 “完整”指上述模拟账户与风险生命周期完整，不代表重建历史交易所中不可观测的保险基金账本、ADL 私有队列或其他用户订单排队。产品固定显示“交易所规则级确定性模拟”。若最终要求历史成交逐笔 queue-exact 或 insurance/ADL historical exact，必须另行取得权威私有数据并升级合同；仅有 L2 和合成 cohort 时不得作此声明。
 
@@ -72,7 +72,7 @@ Phase 0 数据可得性审计见 [`KLINE_REPLAY_HEDGE_PHASE0_DATA_CONTRACT_AUDIT
 | HEDGE 只能 `APPROX_PROXY` | `training/models.py` 创建合同 | HEDGE 只接受版本化 `DETERMINISTIC_SIMULATION` manifest；公开输入与模拟私有状态分别标记 |
 | HEDGE 只能 `CROSS` | 创建合同和 Hub 禁用项 | 同时支持 CROSS 与逐腿 ISOLATED |
 | HEDGE 强制 funding OFF | 创建合同和 Hub 禁用项 | 支持历史 exact funding，逐腿独立入账 |
-| HEDGE 强制 book OFF | 创建合同和 Hub 禁用项 | 完整模式要求连续历史 L2，不允许 Touch/Tape 回退 |
+| HEDGE 强制 book OFF | 创建合同和 Hub 禁用项 | HEDGE 可显式选择 `OFF` 或 `BOOK_ASSISTED_REQUIRED`；BOOK 模式要求连续历史 L2 且不允许运行中回退，OFF 模式不读取 L2 |
 | account-history 固定 ONE_WAY | `account_history.py` archive contract | 新 archive 版本支持 HEDGE 与 simulation input refs |
 | 保证金主要按 gross notional / max leverage | broker/training account projection | 使用交易所适配器冻结的逐腿初始保证金和维持保证金公式 |
 | 两腿一起强平时破产价为 null | liquidation detection | 每条腿和每一步都有可审计的破产/接管价格或明确的公式不适用原因 |
@@ -133,7 +133,7 @@ HEDGE 不允许依赖旧通用代理规则。每个 Run 必须 pin 一个不可�
 | 商品与账户规则 | symbol filters、contract size、leverage bracket、risk limit、maintenance rate/deduction、liquidation fee、effective time | 覆盖 Run 全区间，规则变更有单调序号 | 拒绝创建或暂停 |
 | mark/index | event time、sequence、mark、index、来源 | 严格单调、无未解释 gap、同毫秒总序冻结 | 暂停，不使用 last/trade 代理 |
 | funding | settlement time、rate、settlement mark、规则版本 | 覆盖所有结算点，幂等键唯一 | 暂停，不按 0 跳过 |
-| 历史 L2 | snapshot、增量、exchange sequence、gap/resync | 每个强制 FULL track 连续 | 整个 Run 暂停，不回退 Touch/Tape |
+| 历史 L2 | snapshot、增量、exchange sequence、gap/resync | 仅 `BOOK_ASSISTED_REQUIRED` 下每个强制 FULL track 连续 | BOOK Run 整体暂停且不回退；OFF Run 不绑定 L2 |
 | 保险基金模拟 | 资产、非负初值、变动、effective time、simulation model version | 能重建每次接管前后的余额；manifest 标记 simulated | 暂停，不使用无限或固定运行时 fallback |
 | ADL cohort 模拟 | model version、物化参与集合、方向、数量、margin/position 输入、effective time | 能按冻结公式确定性重建选择顺序；manifest 标记 simulated | 暂停，不生成运行时随机候选 |
 | 手续费 | maker/taker/liquidation fee policy、账户 tier、生效时间 | 覆盖每个 fill | 暂停，不使用当前配置替代历史策略 |
@@ -250,14 +250,14 @@ Phase 0 必须冻结目标交易所适配器的总序，至少覆盖：
 4. 取消规则要求取消的活动订单，逐笔记录并释放订单保证金。
 5. 使用撤单后的账户状态重新计算；若恢复安全，记录 `RECOVERED_AFTER_CANCEL` 并结束 case。
 6. 若仍不安全，按照 risk tier 和交易所降档规则计算最小部分强平数量。
-7. 通过强平订单走历史 L2 执行，保存全部 partial fills、滑点、费用和未成交量。
+7. `BOOK_ASSISTED_REQUIRED` 通过强平订单走历史 L2 并保存全部 partial fills、滑点、费用和未成交量；`OFF` 使用 case 创建时冻结的 mark proof + 配置的不利滑点，并保存 `TOUCH_OR_TAPE_MARK_SLIPPAGE_V1` fidelity。
 8. 每次 fill 后更新腿、账户、tier 和风险快照；达到安全阈值立即停止继续减仓。
 9. 无法通过部分强平恢复时进入全平；两条腿是否同时处理、先后顺序和共享保证金释放由适配器规则决定。
 10. 计算每条腿的接管价/破产价、账户缺口和 liquidation fee，禁止仅保存净数量。
 11. 缺口先进入版本化模拟保险基金账本；基金不足时按冻结的物化 ADL cohort 和排名规则执行 ADL。
 12. 最终原子提交 case、steps、orders、fills、ledger、account、positions、report projection 和 state hash。
 
-任何一步缺数据、违反数量/价格 filter、盘口断档或不能确定 ADL 顺序，都进入 `FAILED_CLOSED`，不得直接把 quantity 清零。
+任何一步缺少所选模式要求的数据、违反数量/价格 filter、BOOK 盘口断档或不能确定 ADL 顺序，都进入 `FAILED_CLOSED`，不得直接把 quantity 清零。OFF 不得读取未来事件或伪造 L2/queue 证明。
 
 ---
 
@@ -463,7 +463,7 @@ diff check 通过。阶段证据见
 
 工作内容：
 
-- HEDGE 完整模式强制 `BOOK_ASSISTED_REQUIRED` 数据合同。
+- HEDGE 的 `BOOK_ASSISTED_REQUIRED` 模式强制连续历史 L2 数据合同；`OFF` 是显式、独立的 no-book 合同。
 - 强平订单按历史 L2 的可见深度逐档成交，产生 partial fills。
 - 冻结无法观测 queue position 时的保守执行规则，并在产品命名中保持数据边界。
 - book gap、深度不足、price band/filter 冲突进入暂停或下一条交易所规则分支。
@@ -489,6 +489,12 @@ L2 fills。优化开启的 advance 仍选择 `FULL_EVENT_SCAN`，与逐步 refer
 和 execution plan hashes 一致。完整 replay 后端 `875 passed`，前端 replay `326 passed`，
 typecheck、lint、build、Ruff、compile 与 diff check 通过。阶段证据见
 [`evidence/KLINE_REPLAY_HEDGE_PHASE6_RESULT_20260806_zh.md`](evidence/KLINE_REPLAY_HEDGE_PHASE6_RESULT_20260806_zh.md)。
+
+合同修订（2026-08-11）：HEDGE 不再被强制绑定 L2。`book_mode=OFF` 时不导入、投影或读取
+历史盘口；强平触发仍使用 pinned mark/rule/funding/fee，执行使用 case 创建时冻结的已揭示
+mark proof 加配置的不利滑点，并记录 `TOUCH_OR_TAPE_MARK_SLIPPAGE_V1`。LONG/SHORT 各腿独立
+从冻结 mark 计算，前一腿成交价不会污染后一腿。`BOOK_ASSISTED_REQUIRED` 的既有连续性、
+深度和 fail-closed 合同保持不变，且不得在运行中自动降级为 OFF。
 
 ### Phase 7：API、右栏、报告与默认体验
 

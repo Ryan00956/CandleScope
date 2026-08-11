@@ -107,7 +107,7 @@ from .multitrack import (
     TrainingRunActor,
     stable_market_event_order,
 )
-from .storage import TrainingRunStore
+from .storage import HISTORICAL_L2_LIQUIDATION_FIDELITY, TrainingRunStore
 from .storage_governance import ReplayStorageGovernance
 from .segments import (
     ReplaySegmentManager,
@@ -2585,13 +2585,6 @@ class TrainingRunService:
                 raise TrainingRunError(
                     "HEDGE_INPUT_MANUAL_START_REQUIRED",
                     "pinned HEDGE inputs require an exact manual start",
-                    status_code=409,
-                    details={"fallback_applied": False},
-                )
-            if request.book_mode is not BookMode.BOOK_ASSISTED_REQUIRED:
-                raise TrainingRunError(
-                    "HEDGE_HISTORICAL_BOOK_REQUIRED",
-                    "HEDGE deterministic simulation requires historical L2",
                     status_code=409,
                     details={"fallback_applied": False},
                 )
@@ -5969,10 +5962,18 @@ class TrainingRunService:
                         snapshot = self._snapshot(session)
                         hedge_execution = plan.get("position_mode") == "HEDGE"
                         book_execution = plan.get("book_execution")
-                        if hedge_execution and not isinstance(book_execution, Mapping):
+                        historical_book_execution = isinstance(book_execution, Mapping)
+                        revealed_reference_execution = (
+                            hedge_execution and not historical_book_execution
+                        )
+                        if (
+                            plan.get("execution_model")
+                            == HISTORICAL_L2_LIQUIDATION_FIDELITY
+                            and not historical_book_execution
+                        ):
                             raise TrainingRunError(
                                 "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
-                                "HEDGE liquidation lost its frozen historical L2 plan",
+                                "historical L2 liquidation lost its frozen execution plan",
                                 status_code=409,
                             )
                         close = ReplayCommand(
@@ -5989,8 +5990,12 @@ class TrainingRunService:
                             ),
                             type=(
                                 InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE
-                                if hedge_execution
-                                else CommandType.CLOSE_POSITION
+                                if historical_book_execution
+                                else (
+                                    InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE
+                                    if revealed_reference_execution
+                                    else CommandType.CLOSE_POSITION
+                                )
                             ),
                             payload=(
                                 {
@@ -6008,8 +6013,26 @@ class TrainingRunService:
                                     ),
                                     "queue_exact": False,
                                 }
-                                if isinstance(book_execution, Mapping)
-                                else {"quantity": str(plan["quantity"])}
+                                if historical_book_execution
+                                else (
+                                    {
+                                        "position_side": str(plan["position_side"]),
+                                        "quantity": str(plan["quantity"]),
+                                        "reference_mark": str(plan["reference_mark"]),
+                                        "market_slippage_bps": str(
+                                            plan["market_slippage_bps"]
+                                        ),
+                                        "price_tick": str(plan["price_tick"]),
+                                        "execution_price": str(plan["execution_price"]),
+                                        "execution_fidelity": str(
+                                            plan["execution_model"]
+                                        ),
+                                    }
+                                    if revealed_reference_execution
+                                    else {
+                                        "quantity": str(plan["quantity"]),
+                                    }
+                                )
                             ),
                         )
                         close = await self._resume_durable_liquidation_command(
@@ -6019,7 +6042,10 @@ class TrainingRunService:
                         closed = await self.replay_service.command(
                             session_id,
                             close,
-                            _training_internal=hedge_execution,
+                            _training_internal=(
+                                historical_book_execution
+                                or revealed_reference_execution
+                            ),
                         )
                         data = _stored_mapping(
                             closed.get("data"), field_name="liquidation close data"

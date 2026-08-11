@@ -45,6 +45,7 @@ PUBLIC_INPUT_FIDELITY = "PINNED_HISTORICAL_PUBLIC_INPUT"
 SIMULATION_INPUT_FIDELITY = "VERSIONED_DETERMINISTIC_SIMULATION"
 _ROOT_HASH = "sha256:" + "0" * 64
 _DIGEST_LENGTH = 71
+_NO_HISTORICAL_L2_ARCHIVE_ID = "no-historical-l2"
 
 _PUBLIC_PHASES = {
     "RULE": 10,
@@ -156,7 +157,9 @@ def _identity(value: object, field_name: str) -> str:
     return value.strip()
 
 
-def _l2_ref(value: object) -> dict[str, str]:
+def _l2_ref(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
     if not isinstance(value, Mapping) or set(value) != {
         "archive_id",
         "dataset_epoch",
@@ -359,7 +362,7 @@ def build_hedge_public_history_archive(
     max_mark_gap_ms: int,
     source_identity: str,
     capture_receipt: str,
-    historical_l2_ref: Mapping[str, object],
+    historical_l2_ref: Mapping[str, object] | None,
     events: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     """Build a canonical operator-importable public input archive."""
@@ -451,7 +454,7 @@ class HedgePublicArchiveDescriptor:
     checksum_sha256: str
     event_chain_tail: str
     proof_hash: str
-    historical_l2_ref: Mapping[str, str]
+    historical_l2_ref: Mapping[str, str] | None
     event_count: int
     byte_size: int
     source_path: str
@@ -754,6 +757,17 @@ def bind_hedge_track_public_input(
         "DELETE FROM replay_training_instrument_rule WHERE run_id = ? AND track_id = ?",
         (run_id, track_id),
     )
+    run_policy = connection.execute(
+        "SELECT book_mode FROM replay_training_run WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if run_policy is None:
+        raise TypeError("HEDGE track run policy is missing")
+    historical_l2_capability = (
+        "AVAILABLE_PINNED_CONTINUITY_GATED"
+        if str(run_policy["book_mode"]) == "BOOK_ASSISTED_REQUIRED"
+        else "OFF_NOT_REQUESTED"
+    )
     connection.execute(
         """
         INSERT INTO replay_training_instrument_rule(
@@ -784,7 +798,7 @@ def bind_hedge_track_public_input(
                     "HISTORICAL_INSTRUMENT_RULE": "AVAILABLE_PINNED",
                     "HISTORICAL_FEE_POLICY": "AVAILABLE_PINNED_ACCOUNT_WIDE",
                     "HISTORICAL_FUNDING": "AVAILABLE_PINNED",
-                    "HISTORICAL_L2": "AVAILABLE_PINNED_CONTINUITY_GATED",
+                    "HISTORICAL_L2": historical_l2_capability,
                     "SIMULATED_INSURANCE_FUND": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
                     "SIMULATED_ADL_COHORT": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
                 }
@@ -1523,10 +1537,10 @@ class HedgeInputArchiveManager:
     ) -> dict[str, object]:
         """Resolve the exact immutable refs required by a default HEDGE create.
 
-        The selected public archive must point at the same historical L2 object
-        that the book manager will deterministically select.  This prevents the
-        planning endpoint from advertising a pair that would later fail the
-        create-time cross-object proof.
+        BOOK_ASSISTED_REQUIRED selects a public archive that points at the same
+        historical L2 object as the book manager.  OFF selects only the pinned
+        mark/index, rule, fee and funding history and does not require an L2
+        object to exist locally.
         """
 
         base: dict[str, object] = {
@@ -1562,13 +1576,12 @@ class HedgeInputArchiveManager:
         if (
             request.exchange != "binance"
             or request.market_type != "futures"
-            or request.book_mode.value != "BOOK_ASSISTED_REQUIRED"
             or request.funding_mode.value != "HISTORICAL_EXACT"
         ):
             return {
                 **base,
                 "capability_state": "UNSUPPORTED_SOURCE_MODE",
-                "reason": "BINANCE_USDM_EXACT_L2_AND_FUNDING_REQUIRED",
+                "reason": "BINANCE_USDM_EXACT_FUNDING_REQUIRED",
                 "coverage": None,
                 "historical_l2_ref": None,
                 "hedge_public_history_ref": None,
@@ -1603,7 +1616,7 @@ class HedgeInputArchiveManager:
                 ),
             ).fetchone()
             public = None
-            if book is not None:
+            if request.book_mode.value == "BOOK_ASSISTED_REQUIRED" and book is not None:
                 public = connection.execute(
                     """
                     SELECT * FROM replay_hedge_public_archive
@@ -1625,6 +1638,25 @@ class HedgeInputArchiveManager:
                         book["archive_id"],
                         book["dataset_epoch"],
                         book["checksum_sha256"],
+                    ),
+                ).fetchone()
+            elif request.book_mode.value == "OFF":
+                public = connection.execute(
+                    """
+                    SELECT * FROM replay_hedge_public_archive
+                    WHERE exchange = ? AND market_type = ? AND symbol = ?
+                      AND settlement_asset = ? AND health = 'READY'
+                      AND range_start_ms <= ? AND range_end_ms >= ?
+                    ORDER BY byte_size, range_start_ms DESC, archive_id
+                    LIMIT 1
+                    """,
+                    (
+                        request.exchange,
+                        request.market_type,
+                        request.symbol,
+                        request.settlement_asset,
+                        requested_start,
+                        requested_end,
                     ),
                 ).fetchone()
             simulations = tuple(
@@ -1663,9 +1695,13 @@ class HedgeInputArchiveManager:
             )
             return book, public, simulations, degraded
 
-        book_row, public_row, simulation_rows, degraded = (
-            await self.store.run_extension_read(read)
-        )
+        (
+            book_row,
+            public_row,
+            simulation_rows,
+            degraded,
+        ) = await self.store.run_extension_read(read)
+
         def covers_requested_symbol(row: sqlite3.Row) -> bool:
             try:
                 symbols = json.loads(str(row["required_symbols_json"]))
@@ -1679,7 +1715,12 @@ class HedgeInputArchiveManager:
             (row for row in simulation_rows if covers_requested_symbol(row)),
             None,
         )
-        if book_row is None or public_row is None or simulation_row is None:
+        book_required = request.book_mode.value == "BOOK_ASSISTED_REQUIRED"
+        if (
+            (book_required and book_row is None)
+            or public_row is None
+            or simulation_row is None
+        ):
             return {
                 **base,
                 "capability_state": (
@@ -1698,9 +1739,7 @@ class HedgeInputArchiveManager:
             simulation_path = await self._guard_catalog_row(
                 simulation_row, source_kind="SIMULATION"
             )
-            public = await asyncio.to_thread(
-                verify_hedge_public_history, public_path
-            )
+            public = await asyncio.to_thread(verify_hedge_public_history, public_path)
             simulation = await asyncio.to_thread(
                 verify_hedge_simulation_manifest, simulation_path
             )
@@ -1714,20 +1753,23 @@ class HedgeInputArchiveManager:
                 "hedge_public_history_ref": None,
                 "simulation_manifest_ref": None,
             }
-        expected_l2 = {
-            "archive_id": str(book_row["archive_id"]),
-            "dataset_epoch": str(book_row["dataset_epoch"]),
-            "checksum_sha256": str(book_row["checksum_sha256"]),
-        }
+        expected_l2 = (
+            {
+                "archive_id": str(book_row["archive_id"]),
+                "dataset_epoch": str(book_row["dataset_epoch"]),
+                "checksum_sha256": str(book_row["checksum_sha256"]),
+            }
+            if book_required and book_row is not None
+            else None
+        )
         if (
-            dict(public.historical_l2_ref) != expected_l2
+            (book_required and public.historical_l2_ref != expected_l2)
             or public.archive_id != str(public_row["archive_id"])
             or public.dataset_epoch != str(public_row["dataset_epoch"])
             or public.checksum_sha256 != str(public_row["checksum_sha256"])
             or simulation.manifest_id != str(simulation_row["manifest_id"])
             or simulation.dataset_epoch != str(simulation_row["dataset_epoch"])
-            or simulation.checksum_sha256
-            != str(simulation_row["checksum_sha256"])
+            or simulation.checksum_sha256 != str(simulation_row["checksum_sha256"])
             or simulation.contract_hash != str(simulation_row["contract_hash"])
             or request.symbol not in simulation.required_symbols
         ):
@@ -1758,9 +1800,7 @@ class HedgeInputArchiveManager:
                 "checksum_sha256": public.checksum_sha256,
             },
             "simulation_manifest_ref": {
-                "schema_version": (
-                    REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION
-                ),
+                "schema_version": (REPLAY_HEDGE_SIMULATION_MANIFEST_REF_SCHEMA_VERSION),
                 "manifest_id": simulation.manifest_id,
                 "dataset_epoch": simulation.dataset_epoch,
                 "checksum_sha256": simulation.checksum_sha256,
@@ -1912,9 +1952,13 @@ class HedgeInputArchiveManager:
                             descriptor.checksum_sha256,
                             descriptor.event_chain_tail,
                             descriptor.proof_hash,
-                            l2["archive_id"],
-                            l2["dataset_epoch"],
-                            l2["checksum_sha256"],
+                            (
+                                _NO_HISTORICAL_L2_ARCHIVE_ID
+                                if l2 is None
+                                else l2["archive_id"]
+                            ),
+                            _ROOT_HASH if l2 is None else l2["dataset_epoch"],
+                            _ROOT_HASH if l2 is None else l2["checksum_sha256"],
                             descriptor.event_count,
                             descriptor.byte_size,
                             relative,
@@ -2056,22 +2100,30 @@ class HedgeInputArchiveManager:
                 status_code=409,
                 details={"fallback_applied": False},
             )
-        if historical_book_binding is None:
+        if request.book_mode.value == "BOOK_ASSISTED_REQUIRED":
+            if historical_book_binding is None:
+                raise TrainingRunError(
+                    "HEDGE_HISTORICAL_BOOK_REQUIRED",
+                    "BOOK_ASSISTED_REQUIRED HEDGE simulation requires pinned historical L2",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+            book = historical_book_binding.descriptor
+            if public.historical_l2_ref != {
+                "archive_id": book.archive_id,
+                "dataset_epoch": book.dataset_epoch,
+                "checksum_sha256": book.checksum_sha256,
+            }:
+                raise TrainingRunError(
+                    "HEDGE_L2_REF_MISMATCH",
+                    "public archive L2 ref differs from the verified book binding",
+                    status_code=409,
+                    details={"fallback_applied": False},
+                )
+        elif historical_book_binding is not None:
             raise TrainingRunError(
-                "HEDGE_HISTORICAL_BOOK_REQUIRED",
-                "HEDGE deterministic simulation requires pinned historical L2",
-                status_code=409,
-                details={"fallback_applied": False},
-            )
-        book = historical_book_binding.descriptor
-        if dict(public.historical_l2_ref) != {
-            "archive_id": book.archive_id,
-            "dataset_epoch": book.dataset_epoch,
-            "checksum_sha256": book.checksum_sha256,
-        }:
-            raise TrainingRunError(
-                "HEDGE_L2_REF_MISMATCH",
-                "public archive L2 ref differs from the verified book binding",
+                "HEDGE_UNEXPECTED_HISTORICAL_BOOK_BINDING",
+                "book_mode OFF cannot carry a historical L2 binding",
                 status_code=409,
                 details={"fallback_applied": False},
             )
@@ -2152,14 +2204,6 @@ class HedgeInputArchiveManager:
     ) -> PreparedHedgeTrackPublicBinding | None:
         """Resolve and pin the exact public archive for one added HEDGE track."""
 
-        if historical_book_binding is None:
-            raise TrainingRunError(
-                "HEDGE_TRACK_HISTORICAL_BOOK_REQUIRED",
-                "a HEDGE FULL track requires pinned historical L2",
-                status_code=409,
-                details={"track_id": track_id, "fallback_applied": False},
-            )
-
         def read(connection: sqlite3.Connection) -> dict[str, object]:
             existing = connection.execute(
                 """
@@ -2183,30 +2227,51 @@ class HedgeInputArchiveManager:
                     (run_binding["simulation_manifest_id"],),
                 ).fetchone()
             )
-            candidates = tuple(
-                connection.execute(
-                    """
-                    SELECT * FROM replay_hedge_public_archive
-                    WHERE exchange = ? AND market_type = ? AND symbol = ?
-                      AND settlement_asset = ? AND health = 'READY'
-                      AND range_start_ms <= ? AND range_end_ms >= ?
-                      AND l2_archive_id = ? AND l2_dataset_epoch = ?
-                      AND l2_checksum_sha256 = ?
-                    ORDER BY (range_end_ms - range_start_ms), archive_id
-                    """,
-                    (
-                        exchange,
-                        market_type,
-                        symbol,
-                        settlement_asset,
-                        bound_range_start_ms,
-                        bound_range_end_ms,
-                        historical_book_binding.descriptor.archive_id,
-                        historical_book_binding.descriptor.dataset_epoch,
-                        historical_book_binding.descriptor.checksum_sha256,
-                    ),
-                ).fetchall()
-            )
+            if historical_book_binding is None:
+                candidates = tuple(
+                    connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_public_archive
+                        WHERE exchange = ? AND market_type = ? AND symbol = ?
+                          AND settlement_asset = ? AND health = 'READY'
+                          AND range_start_ms <= ? AND range_end_ms >= ?
+                        ORDER BY (range_end_ms - range_start_ms), archive_id
+                        """,
+                        (
+                            exchange,
+                            market_type,
+                            symbol,
+                            settlement_asset,
+                            bound_range_start_ms,
+                            bound_range_end_ms,
+                        ),
+                    ).fetchall()
+                )
+            else:
+                candidates = tuple(
+                    connection.execute(
+                        """
+                        SELECT * FROM replay_hedge_public_archive
+                        WHERE exchange = ? AND market_type = ? AND symbol = ?
+                          AND settlement_asset = ? AND health = 'READY'
+                          AND range_start_ms <= ? AND range_end_ms >= ?
+                          AND l2_archive_id = ? AND l2_dataset_epoch = ?
+                          AND l2_checksum_sha256 = ?
+                        ORDER BY (range_end_ms - range_start_ms), archive_id
+                        """,
+                        (
+                            exchange,
+                            market_type,
+                            symbol,
+                            settlement_asset,
+                            bound_range_start_ms,
+                            bound_range_end_ms,
+                            historical_book_binding.descriptor.archive_id,
+                            historical_book_binding.descriptor.dataset_epoch,
+                            historical_book_binding.descriptor.checksum_sha256,
+                        ),
+                    ).fetchall()
+                )
             return {
                 "existing": existing,
                 "run_binding": run_binding,
@@ -2252,33 +2317,34 @@ class HedgeInputArchiveManager:
                 "HEDGE_TRACK_SIMULATION_COVERAGE_MISMATCH",
                 "the pinned simulation manifest does not cover the added symbol",
                 status_code=409,
-                details={"track_id": track_id, "symbol": symbol, "fallback_applied": False},
+                details={
+                    "track_id": track_id,
+                    "symbol": symbol,
+                    "fallback_applied": False,
+                },
             )
         candidates = rows["candidates"]
         if not isinstance(candidates, tuple) or not candidates:
             raise TrainingRunError(
                 "HEDGE_TRACK_PUBLIC_INPUT_UNAVAILABLE",
-                "no exact public HEDGE archive matches the track and L2 binding",
+                "no exact public HEDGE archive matches the track input policy",
                 status_code=409,
-                details={"track_id": track_id, "symbol": symbol, "fallback_applied": False},
+                details={
+                    "track_id": track_id,
+                    "symbol": symbol,
+                    "fallback_applied": False,
+                },
             )
         public_row = candidates[0]
         if not isinstance(public_row, sqlite3.Row):
             raise TypeError("HEDGE public catalog row is invalid")
         public_path = await self._guard_catalog_row(public_row, source_kind="PUBLIC")
         public = await asyncio.to_thread(verify_hedge_public_history, public_path)
-        book = historical_book_binding.descriptor
         if (
             public.exchange != exchange
             or public.market_type != market_type
             or public.symbol != symbol
             or public.settlement_asset != settlement_asset
-            or dict(public.historical_l2_ref)
-            != {
-                "archive_id": book.archive_id,
-                "dataset_epoch": book.dataset_epoch,
-                "checksum_sha256": book.checksum_sha256,
-            }
         ):
             raise TrainingRunError(
                 "HEDGE_TRACK_PUBLIC_INPUT_MISMATCH",
@@ -2286,6 +2352,19 @@ class HedgeInputArchiveManager:
                 status_code=409,
                 details={"track_id": track_id, "fallback_applied": False},
             )
+        if historical_book_binding is not None:
+            book = historical_book_binding.descriptor
+            if public.historical_l2_ref != {
+                "archive_id": book.archive_id,
+                "dataset_epoch": book.dataset_epoch,
+                "checksum_sha256": book.checksum_sha256,
+            }:
+                raise TrainingRunError(
+                    "HEDGE_TRACK_L2_REF_MISMATCH",
+                    "resolved public HEDGE input differs from the verified L2 binding",
+                    status_code=409,
+                    details={"track_id": track_id, "fallback_applied": False},
+                )
         public_events = await asyncio.to_thread(_read_public_events, public_path)
         projection = _projection(
             public_events,
@@ -2355,9 +2434,7 @@ class HedgeInputArchiveManager:
         if cached is not None:
             return cached
         reader = (
-            _read_public_events
-            if source_kind == "PUBLIC"
-            else _read_simulation_events
+            _read_public_events if source_kind == "PUBLIC" else _read_simulation_events
         )
         events = await asyncio.to_thread(reader, path)
         if len(self._verified_event_cache) >= 64:
@@ -2397,9 +2474,7 @@ class HedgeInputArchiveManager:
             )
         return binding, public, simulation
 
-    async def _runtime_events(
-        self, run_id: str
-    ) -> HedgeInputRuntimeSnapshot:
+    async def _runtime_events(self, run_id: str) -> HedgeInputRuntimeSnapshot:
         binding, _primary_public_row, simulation_row = await self._binding_rows(run_id)
         if binding["status"] != "ACTIVE":
             raise TrainingRunError(
@@ -2412,11 +2487,12 @@ class HedgeInputArchiveManager:
             simulation_path = await self._guard_catalog_row(
                 simulation_row, source_kind="SIMULATION"
             )
-            if int(binding["simulation_generation"]) != int(
-                simulation_row["generation"]
-            ) or binding["simulation_checksum_sha256"] != simulation_row[
-                "checksum_sha256"
-            ]:
+            if (
+                int(binding["simulation_generation"])
+                != int(simulation_row["generation"])
+                or binding["simulation_checksum_sha256"]
+                != simulation_row["checksum_sha256"]
+            ):
                 raise ValueError("pinned HEDGE input generation changed")
             track_rows, full_track_ids = await self.store.run_extension_read(
                 lambda connection: (
@@ -2944,9 +3020,7 @@ class HedgeInputArchiveManager:
                 ),
             }
         )
-        track_bindings = {
-            str(row["track_id"]): row for row in track_inputs["bindings"]
-        }
+        track_bindings = {str(row["track_id"]): row for row in track_inputs["bindings"]}
         if tuple(sorted(track_bindings)) != track_inputs["full_track_ids"]:
             difference(
                 "track_public_bindings",
@@ -2965,17 +3039,13 @@ class HedgeInputArchiveManager:
                 path = await self._guard_catalog_row(
                     track_binding, source_kind="PUBLIC"
                 )
-                descriptor = await asyncio.to_thread(
-                    verify_hedge_public_history, path
-                )
+                descriptor = await asyncio.to_thread(verify_hedge_public_history, path)
                 expected_track_proof = hedge_track_public_proof_hash(
                     run_id=run_id,
                     track_id=track_id,
                     public=descriptor,
                     public_generation=int(track_binding["public_generation"]),
-                    bound_range_start_ms=int(
-                        track_binding["bound_range_start_ms"]
-                    ),
+                    bound_range_start_ms=int(track_binding["bound_range_start_ms"]),
                     bound_range_end_ms=int(track_binding["bound_range_end_ms"]),
                 )
                 if str(track_binding["input_proof_hash"]) != expected_track_proof:
@@ -2997,21 +3067,15 @@ class HedgeInputArchiveManager:
                         )
                 projection_row = track_projections.get(track_id)
                 if projection_row is None:
-                    difference(
-                        f"track_projection.{track_id}", "PRESENT", "MISSING"
-                    )
+                    difference(f"track_projection.{track_id}", "PRESENT", "MISSING")
                     continue
                 state = json.loads(str(projection_row["state_json"]))
                 projection_payload = {
                     "schema_version": "replay.hedge-track-public-projection.v1",
                     "run_id": run_id,
                     "track_id": track_id,
-                    "last_event_sequence": int(
-                        projection_row["last_event_sequence"]
-                    ),
-                    "as_of_actual_time_ms": int(
-                        projection_row["as_of_actual_time_ms"]
-                    ),
+                    "last_event_sequence": int(projection_row["last_event_sequence"]),
+                    "as_of_actual_time_ms": int(projection_row["as_of_actual_time_ms"]),
                     "as_of_virtual_time_ms": int(
                         projection_row["as_of_virtual_time_ms"]
                     ),
@@ -3088,9 +3152,7 @@ class HedgeInputArchiveManager:
                         {
                             "run_id": run_id,
                             "track_id": track_id,
-                            "virtual_time_ms": int(
-                                receipt["applied_virtual_time_ms"]
-                            ),
+                            "virtual_time_ms": int(receipt["applied_virtual_time_ms"]),
                             "source_kind": "PUBLIC",
                             "source_id": descriptor.archive_id,
                             "event_sequence": event.event_sequence,
@@ -3121,9 +3183,7 @@ class HedgeInputArchiveManager:
                         "last_event_sequence": int(
                             projection_row["last_event_sequence"]
                         ),
-                        "input_chain_hash": str(
-                            projection_row["input_chain_hash"]
-                        ),
+                        "input_chain_hash": str(projection_row["input_chain_hash"]),
                         "component_hash": str(projection_row["component_hash"]),
                         "applied_event_count": len(receipts),
                     }

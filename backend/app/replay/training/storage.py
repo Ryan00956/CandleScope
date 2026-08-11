@@ -12,6 +12,7 @@ from typing import cast
 from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.archive_pins import persisted_bar_archive_reference
 from app.replay.broker.models import decimal_to_string
+from app.replay.internal_commands import REVEALED_REFERENCE_CLOSE_FIDELITY
 from app.replay.period_summary import (
     EncodedPeriodSummaryCandidate,
     MAX_PERIOD_SUMMARY_CANDIDATES,
@@ -128,6 +129,7 @@ _COMPATIBILITY_FILTERS = {"READY", "UNAVAILABLE"}
 _STATES = {"AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"}
 _SOURCES = {"BAR", "AGG_TRADE"}
 _VIEW_EVENT_LIMIT = 2_048
+TOUCH_OR_TAPE_LIQUIDATION_FIDELITY = REVEALED_REFERENCE_CLOSE_FIDELITY
 _PUBLIC_TIME_BATCH_LIMIT = 20_000
 _EQUITY_RESOLUTIONS: tuple[tuple[str, int, int], ...] = (
     ("EVENT", 0, 2_048),
@@ -2073,15 +2075,11 @@ class TrainingRunStore:
                     "track_id": str(track["track_id"]),
                     "last_event_sequence": int(projection["last_event_sequence"]),
                     "as_of_actual_time_ms": int(projection["as_of_actual_time_ms"]),
-                    "as_of_virtual_time_ms": int(
-                        projection["as_of_virtual_time_ms"]
-                    ),
+                    "as_of_virtual_time_ms": int(projection["as_of_virtual_time_ms"]),
                     "state": state,
                     "input_chain_hash": str(projection["input_chain_hash"]),
                 }
-                if canonical_sha256(projection_payload) != projection[
-                    "component_hash"
-                ]:
+                if canonical_sha256(projection_payload) != projection["component_hash"]:
                     raise ValueError("track public projection hash is invalid")
                 mark_state = state["mark_index"]
                 mark = Decimal(str(mark_state["mark_price"]))
@@ -2463,9 +2461,7 @@ class TrainingRunStore:
                             "revision": revision,
                             "policy_version": event.payload["policy_version"],
                             "account_tier": event.payload["account_tier"],
-                            "liquidation_fee_bps": event.payload[
-                                "liquidation_fee_bps"
-                            ],
+                            "liquidation_fee_bps": event.payload["liquidation_fee_bps"],
                             "source_kind": "PUBLIC",
                             "source_id": event.source_id,
                             "source_event_sequence": event.event_sequence,
@@ -4433,16 +4429,35 @@ class TrainingRunStore:
             plan = cast(Mapping[str, object], reason["plan"])
             track_id = str(plan["track_id"])
             hedge_execution = str(plan.get("position_mode")) == "HEDGE"
+            execution_model = str(plan.get("execution_model", ""))
             book_execution_raw = plan.get("book_execution")
             book_execution = (
                 cast(Mapping[str, object], book_execution_raw)
                 if isinstance(book_execution_raw, Mapping)
                 else None
             )
-            if hedge_execution and book_execution is None:
+            historical_book_execution = (
+                execution_model == HISTORICAL_L2_LIQUIDATION_FIDELITY
+            )
+            if historical_book_execution and book_execution is None:
                 raise TrainingRunError(
                     "HISTORICAL_BOOK_EXECUTION_UNAVAILABLE",
-                    "HEDGE liquidation has no frozen historical L2 execution proof",
+                    "historical L2 liquidation has no frozen execution proof",
+                    status_code=409,
+                )
+            if book_execution is not None and not historical_book_execution:
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "non-L2 liquidation cannot carry a historical book execution proof",
+                    status_code=409,
+                )
+            if hedge_execution and execution_model not in {
+                HISTORICAL_L2_LIQUIDATION_FIDELITY,
+                TOUCH_OR_TAPE_LIQUIDATION_FIDELITY,
+            }:
+                raise TrainingRunError(
+                    "LIQUIDATION_EXECUTION_FAILED",
+                    "HEDGE liquidation execution model is missing or unsupported",
                     status_code=409,
                 )
             order_row = connection.execute(
@@ -4551,6 +4566,20 @@ class TrainingRunStore:
                         raise TrainingRunError(
                             "LIQUIDATION_EXECUTION_FAILED",
                             "historical L2 broker fills differ from the frozen level plan",
+                            status_code=409,
+                        )
+            elif hedge_execution:
+                for row in fill_rows:
+                    raw_fill = json.loads(str(row["fill_json"]))
+                    if (
+                        str(raw_fill.get("reason")) != "MARKET_REVEALED_REFERENCE"
+                        or str(raw_fill.get("position_side"))
+                        != str(plan["position_side"])
+                        or str(raw_fill.get("price")) != str(plan["execution_price"])
+                    ):
+                        raise TrainingRunError(
+                            "LIQUIDATION_EXECUTION_FAILED",
+                            "no-book HEDGE liquidation fill differs from the pinned mark-slippage plan",
                             status_code=409,
                         )
             now_ms = self.base_store._validated_now_ms()
@@ -4698,11 +4727,11 @@ class TrainingRunStore:
                         else book_execution["execution_plan_hash"]
                     ),
                     "execution_fidelity": (
-                        None
+                        execution_model
                         if book_execution is None
                         else book_execution["execution_fidelity"]
                     ),
-                    "queue_exact": False if book_execution is not None else None,
+                    "queue_exact": False if hedge_execution else None,
                 }
                 connection.execute(
                     """
@@ -4761,9 +4790,7 @@ class TrainingRunStore:
             self._append_contract_ledger(
                 connection,
                 run_id=run_id,
-                posting_id=(
-                    f"liquidation-fee:{liquidation_id}:{evidence_order_id}"
-                ),
+                posting_id=(f"liquidation-fee:{liquidation_id}:{evidence_order_id}"),
                 track_id=track_id,
                 kind="LIQUIDATION_FEE",
                 cash_delta=-total_liquidation_fee,
@@ -4779,6 +4806,8 @@ class TrainingRunStore:
                 fidelity=(
                     HISTORICAL_L2_LIQUIDATION_FIDELITY
                     if book_execution is not None
+                    else TOUCH_OR_TAPE_LIQUIDATION_FIDELITY
+                    if hedge_execution
                     else "PINNED_RULE_REAL_BROKER_FILL"
                 ),
                 rule_revision=int(plan["rule_revision"]),
@@ -7014,8 +7043,7 @@ class TrainingRunStore:
                 expected_posting_sequence += 1
                 insurance_posting_count += 1
                 posting_prefix = (
-                    f"{prefix}.posting[{row['posting_sequence']}:"
-                    f"{row['posting_id']}]"
+                    f"{prefix}.posting[{row['posting_sequence']}:{row['posting_id']}]"
                 )
                 compare(
                     f"{posting_prefix}.posting_sequence",
@@ -7203,7 +7231,9 @@ class TrainingRunStore:
                 state = json.loads(str(projection["state_json"]))
             except (json.JSONDecodeError, TypeError, ValueError):
                 state = None
-            snapshots = state.get("adl_snapshots") if isinstance(state, Mapping) else None
+            snapshots = (
+                state.get("adl_snapshots") if isinstance(state, Mapping) else None
+            )
             if isinstance(snapshots, Mapping):
                 for raw in snapshots.values():
                     if isinstance(raw, Mapping) and isinstance(
@@ -7397,7 +7427,9 @@ class TrainingRunStore:
                 "completed_notional": completed_notional,
             }
             for field, expected in event_payload.items():
-                actual = int(event[field]) if field == "step_sequence" else str(event[field])
+                actual = (
+                    int(event[field]) if field == "step_sequence" else str(event[field])
+                )
                 compare(f"adl_event[{event['adl_event_id']}].{field}", expected, actual)
             compare(
                 f"adl_event[{event['adl_event_id']}].state",
@@ -7973,12 +8005,10 @@ class TrainingRunStore:
                 portfolio=portfolio,
                 differences=differences,
             )
-            independent_state["insurance_and_adl"] = (
-                cls._audit_hedge_insurance_and_adl(
-                    connection,
-                    run_id=run_id,
-                    differences=differences,
-                )
+            independent_state["insurance_and_adl"] = cls._audit_hedge_insurance_and_adl(
+                connection,
+                run_id=run_id,
+                differences=differences,
             )
             independent_state["historical_l2_liquidation_proof_count"] = (
                 cls._audit_historical_book_liquidations(
@@ -11110,11 +11140,14 @@ class TrainingRunStore:
     ) -> dict[str, object]:
         def read(
             connection: sqlite3.Connection,
-        ) -> tuple[
-            sqlite3.Row,
-            tuple[sqlite3.Row, ...],
-            dict[str, object],
-        ] | None:
+        ) -> (
+            tuple[
+                sqlite3.Row,
+                tuple[sqlite3.Row, ...],
+                dict[str, object],
+            ]
+            | None
+        ):
             event = connection.execute(
                 """
                 SELECT event.*, run.dataset_epoch, run.adapter_session_id
@@ -12715,9 +12748,7 @@ class TrainingRunStore:
                 try:
                     portfolio = self._public_contract_portfolio_projection(
                         portfolio,
-                        time_disclosure_policy=str(
-                            run["run_time_disclosure_policy"]
-                        ),
+                        time_disclosure_policy=str(run["run_time_disclosure_policy"]),
                         revealed=bool(run["run_revealed"]),
                         actual_start_ms=int(run["run_actual_start_ms"]),
                         actual_end_ms=int(run["run_actual_end_ms"]),
@@ -13510,7 +13541,7 @@ class TrainingRunStore:
         account = connection.execute(
             """
             SELECT account.*, run.initial_equity, run.settlement_asset,
-                   run.position_mode
+                   run.position_mode, run.book_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -13615,10 +13646,7 @@ class TrainingRunStore:
                     "isolated_equity": isolated_equity,
                 }
             )
-        cross_breached = (
-            bool(active_legs)
-            and equity <= total_maintenance + reserved
-        )
+        cross_breached = bool(active_legs) and equity <= total_maintenance + reserved
         affected = (
             list(active_legs)
             if str(account["margin_mode"]) == "CROSS" and cross_breached
@@ -13926,18 +13954,86 @@ class TrainingRunStore:
             if step_type == "PARTIAL_LIQUIDATION"
             else "ZERO",
         }
-        if str(cast(sqlite3.Row, risk["account"])["position_mode"]) == "HEDGE":
-            plan["execution_model"] = HISTORICAL_L2_LIQUIDATION_FIDELITY
-            plan["book_execution"] = cls._historical_book_liquidation_plan(
-                connection,
-                run_id=run_id,
-                case_id=case_id,
-                track_id=str(leg["track_id"]),
-                side=str(plan["side"]),
-                quantity=close_quantity,
-                price_tick=Decimal(rule.price_tick),
-                quantity_step=Decimal(rule.quantity_step),
-            )
+        risk_account = cast(sqlite3.Row, risk["account"])
+        if str(risk_account["position_mode"]) == "HEDGE":
+            if str(risk_account["book_mode"]) == "BOOK_ASSISTED_REQUIRED":
+                plan["execution_model"] = HISTORICAL_L2_LIQUIDATION_FIDELITY
+                plan["book_execution"] = cls._historical_book_liquidation_plan(
+                    connection,
+                    run_id=run_id,
+                    case_id=case_id,
+                    track_id=str(leg["track_id"]),
+                    side=str(plan["side"]),
+                    quantity=close_quantity,
+                    price_tick=Decimal(rule.price_tick),
+                    quantity_step=Decimal(rule.quantity_step),
+                )
+            else:
+                plan["execution_model"] = TOUCH_OR_TAPE_LIQUIDATION_FIDELITY
+                price_proof = connection.execute(
+                    """
+                    SELECT mark_price
+                    FROM replay_training_liquidation_leg_price_proof
+                    WHERE run_id = ? AND case_id = ? AND liquidation_leg_id = ?
+                    """,
+                    (run_id, case_id, plan["liquidation_leg_id"]),
+                ).fetchone()
+                if price_proof is None:
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "no-book liquidation lost its frozen revealed mark proof",
+                        status_code=409,
+                    )
+                reference_mark = Decimal(str(price_proof["mark_price"]))
+                broker_row = connection.execute(
+                    """
+                    SELECT broker_config_json FROM replay_session
+                    WHERE session_id = ?
+                    """,
+                    (plan["adapter_session_id"],),
+                ).fetchone()
+                if broker_row is None:
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "no-book liquidation lost its pinned broker execution policy",
+                        status_code=409,
+                    )
+                broker_config = json.loads(str(broker_row["broker_config_json"]))
+                if not isinstance(broker_config, Mapping):
+                    raise TypeError("no-book broker execution policy is invalid")
+                market_slippage_bps = Decimal(str(broker_config["market_slippage_bps"]))
+                if not market_slippage_bps.is_finite() or market_slippage_bps < 0:
+                    raise TypeError("no-book market slippage policy is invalid")
+                slipped = reference_mark * (
+                    Decimal(1)
+                    + market_slippage_bps
+                    / Decimal(10_000)
+                    * (Decimal(1) if str(plan["side"]) == "BUY" else Decimal(-1))
+                )
+                if slipped <= 0:
+                    raise TrainingRunError(
+                        "LIQUIDATION_EXECUTION_FAILED",
+                        "no-book adverse slippage produced a non-positive execution price",
+                        status_code=409,
+                    )
+                execution_price = round_to_step(
+                    slipped,
+                    Decimal(rule.price_tick),
+                    upward=str(plan["side"]) == "BUY",
+                )
+                plan["reference_mark"] = decimal_to_string(
+                    reference_mark,
+                    field_name="liquidation revealed reference mark",
+                )
+                plan["market_slippage_bps"] = decimal_to_string(
+                    market_slippage_bps,
+                    field_name="liquidation market slippage bps",
+                )
+                plan["price_tick"] = rule.price_tick
+                plan["execution_price"] = decimal_to_string(
+                    execution_price,
+                    field_name="liquidation no-book execution price",
+                )
         return step_type, plan
 
     @staticmethod
@@ -16112,7 +16208,10 @@ class TrainingRunStore:
                     "input_proof_hash": str(row["input_proof_hash"]),
                     "status": str(row["status"]),
                     "degraded_reason": row["degraded_reason"],
-                    "projection": {**payload, "component_hash": str(row["component_hash"])},
+                    "projection": {
+                        **payload,
+                        "component_hash": str(row["component_hash"]),
+                    },
                 }
             )
         audit = connection.execute(
@@ -16271,14 +16370,10 @@ class TrainingRunStore:
                     "status": str(item["status"]),
                     "degraded_reason": item["degraded_reason"],
                     "projection": {
-                        "schema_version": (
-                            "replay.hedge-track-public-projection.v2"
-                        ),
+                        "schema_version": ("replay.hedge-track-public-projection.v2"),
                         "run_id": str(projection["run_id"]),
                         "track_id": str(projection["track_id"]),
-                        "last_event_sequence": int(
-                            projection["last_event_sequence"]
-                        ),
+                        "last_event_sequence": int(projection["last_event_sequence"]),
                         "as_of_time_ms": public_time(
                             projection["as_of_actual_time_ms"],
                             projection["as_of_virtual_time_ms"],
@@ -16286,9 +16381,7 @@ class TrainingRunStore:
                         "time_domain": time_domain,
                         "state_hash": canonical_sha256(state),
                         "input_chain_hash": str(projection["input_chain_hash"]),
-                        "source_component_hash": str(
-                            projection["component_hash"]
-                        ),
+                        "source_component_hash": str(projection["component_hash"]),
                     },
                 }
             )
@@ -17239,6 +17332,11 @@ class TrainingRunStore:
                     else HEDGE_INSURANCE_ADL_FIDELITY
                     if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "AVAILABLE_APPROX_SIMULATED_ACCOUNT"
+                ),
+                "liquidation_execution": (
+                    HISTORICAL_L2_LIQUIDATION_FIDELITY
+                    if run_contract["book_mode"] == "BOOK_ASSISTED_REQUIRED"
+                    else TOUCH_OR_TAPE_LIQUIDATION_FIDELITY
                 ),
             },
         }
@@ -18232,23 +18330,15 @@ class TrainingRunStore:
                     "public": {
                         "archive_id": str(track_binding["public_archive_id"]),
                         "generation": int(track_binding["public_generation"]),
-                        "dataset_epoch": str(
-                            track_binding["public_dataset_epoch"]
-                        ),
-                        "checksum_sha256": str(
-                            track_binding["public_checksum_sha256"]
-                        ),
+                        "dataset_epoch": str(track_binding["public_dataset_epoch"]),
+                        "checksum_sha256": str(track_binding["public_checksum_sha256"]),
                         "event_chain_tail": str(
                             track_binding["public_event_chain_tail"]
                         ),
                         "proof_hash": str(track_binding["proof_hash"]),
                     },
-                    "bound_range_start_ms": int(
-                        track_binding["bound_range_start_ms"]
-                    ),
-                    "bound_range_end_ms": int(
-                        track_binding["bound_range_end_ms"]
-                    ),
+                    "bound_range_start_ms": int(track_binding["bound_range_start_ms"]),
+                    "bound_range_end_ms": int(track_binding["bound_range_end_ms"]),
                 }
             )
             connection.execute(
@@ -18329,9 +18419,7 @@ class TrainingRunStore:
                     {
                         "run_id": child_run_id,
                         "track_id": child_track_id,
-                        "virtual_time_ms": int(
-                            event_row["applied_virtual_time_ms"]
-                        ),
+                        "virtual_time_ms": int(event_row["applied_virtual_time_ms"]),
                         "source_kind": "PUBLIC",
                         "source_id": str(track_binding["public_archive_id"]),
                         "event_sequence": int(event_row["event_sequence"]),
@@ -18693,7 +18781,7 @@ class TrainingRunStore:
         parent = connection.execute(
             """
             SELECT account.*, run.initial_equity, run.settlement_asset,
-                   run.position_mode
+                   run.position_mode, run.book_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -21030,7 +21118,7 @@ class TrainingRunStore:
         account = connection.execute(
             """
             SELECT account.*, run.initial_equity, run.settlement_asset,
-                   run.position_mode
+                   run.position_mode, run.book_mode
             FROM replay_training_contract_account AS account
             JOIN replay_training_run AS run USING(run_id)
             WHERE run_id = ?
@@ -22015,7 +22103,10 @@ class TrainingRunStore:
                     now_ms,
                 ),
             )
-            if str(account["position_mode"]) == "HEDGE":
+            if (
+                str(account["position_mode"]) == "HEDGE"
+                and str(account["book_mode"]) == "BOOK_ASSISTED_REQUIRED"
+            ):
                 cls._freeze_liquidation_book_snapshots(
                     connection,
                     run_id=run_id,
@@ -22983,15 +23074,13 @@ class TrainingRunStore:
             if not isinstance(mutation_payload, Mapping):
                 raise TypeError("latest replay command mutation must be an object")
             mutation_command_type = mutation_payload.get("type")
-        coordinated_hedge_advance = (
-            str(track["position_mode"]) == "HEDGE"
-            and mutation_command_type
-            in {
-                "step",
-                "advance_by",
-                "_training_fast_forward_final_state",
-            }
-        )
+        coordinated_hedge_advance = str(
+            track["position_mode"]
+        ) == "HEDGE" and mutation_command_type in {
+            "step",
+            "advance_by",
+            "_training_fast_forward_final_state",
+        }
         if not coordinated_hedge_advance:
             self._settle_contract_funding(
                 connection,

@@ -38,9 +38,9 @@
 - mark/index 时间线；
 - funding 结算时刻、费率与 settlement mark；
 - maker/taker/liquidation fee policy；
-- 连续历史 L2 snapshot/delta/sequence/gap proof。
+- 当 `book_mode=BOOK_ASSISTED_REQUIRED` 时，连续历史 L2 snapshot/delta/sequence/gap proof。
 
-这些输入缺失时 Run 暂停，不得退回 last/trade/bar close、0 funding 或 Touch/Tape。
+规则、mark/index、funding 或 fee 输入缺失时 Run 暂停，不得退回 last/trade/bar close 或 0 funding。L2 只在 `BOOK_ASSISTED_REQUIRED` 中是强制输入；`book_mode=OFF` 不导入、不投影也不读取 L2，并使用本合同第 5 节冻结的 no-book 强平执行模型。
 
 ### 2.2 明确属于确定性模拟的私有状态
 
@@ -101,10 +101,12 @@ ACTIVE -> RISK_BREACH_DETECTED -> CANCELING_ORDERS -> RISK_RECHECK
 2. 撤单后立即重算；恢复安全则记录 `RECOVERED_AFTER_CANCEL`。
 3. 仍不安全时，选腿顺序固定为 maintenance margin 降序、绝对 notional 降序、track ID 升序、同 track 下 LONG 先于 SHORT。
 4. 每张部分强平单最多下降一个 risk tier；第一档目标为零仓位。
-5. 强平单只按连续历史 L2 可见深度逐档成交，每个 fill 后重算；恢复安全立即停止。
-6. L2 gap、深度耗尽、filter 冲突或价格越界均暂停 Run，不清零剩余数量。
+5. `BOOK_ASSISTED_REQUIRED` 强平单按连续历史 L2 可见深度逐档成交；`OFF` 强平单按 case 创建时冻结的已揭示 mark 加配置的不利 market slippage 成交。两种模式都在每个 durable step 后重算，恢复安全立即停止。
+6. `BOOK_ASSISTED_REQUIRED` 的 L2 gap、深度耗尽、filter 冲突或价格越界均暂停 Run，不回退 no-book；`OFF` 不创建 L2 证明，缺失冻结 mark、规则或滑点合同则暂停 Run。
 7. liquidation price 是 adverse tick grid 上第一个满足 scope equity 小于等于 maintenance margin 的价格。
 8. bankruptcy/takeover price 是 adverse tick grid 上 scope equity 到零的根；CROSS 的逐腿证明固定其他腿 mark 不变，并明确标记为 counterfactual leg proof。
+
+`OFF` 模式的执行 fidelity 固定为 `TOUCH_OR_TAPE_MARK_SLIPPAGE_V1`。同一 liquidation case 的每条 HEDGE 腿必须使用各自在 case 创建时冻结的 mark proof 独立计算滑点；成交价不是市场数据更新，不能污染另一条腿的参考 mark。该模式不声称可见深度、partial queue 或 queue-exact。
 
 ## 6. 保险基金模拟
 

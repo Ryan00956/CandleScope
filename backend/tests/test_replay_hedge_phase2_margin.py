@@ -17,6 +17,7 @@ from app.replay.broker.models import (
     TOUCH_OR_TAPE_EXECUTION_MODE,
 )
 from app.replay.errors import ReplayDomainError
+from app.replay.internal_commands import REVEALED_REFERENCE_CLOSE_FIDELITY
 from app.replay.training.account import InstrumentRule, MaintenanceTier
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
@@ -64,9 +65,7 @@ def test_rule_adapter_rounds_initial_and_maintenance_margin_upward() -> None:
         effective_virtual_time_ms=0,
     )
 
-    assert rule.initial_margin(Decimal("100.01"), Decimal("3")) == Decimal(
-        "33.34"
-    )
+    assert rule.initial_margin(Decimal("100.01"), Decimal("3")) == Decimal("33.34")
     assert rule.maintenance_margin(Decimal("100.01")) == Decimal("0.51")
     assert rule.active_maintenance_tier(Decimal("500"))[0] == 1
     assert rule.active_maintenance_tier(Decimal("500.01"))[0] == 2
@@ -156,6 +155,53 @@ def test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg() -> None:
     assert isinstance(restored.position, PositionBook)
     assert restored.position.long.leverage == "3"
     assert restored.position.short.leverage == "5"
+
+
+def test_revealed_reference_close_rejects_price_drift_and_restores_chart_mark() -> None:
+    broker = make_broker(
+        config=replace(CONFIG, position_mode=PositionMode.HEDGE),
+        execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
+    )
+    broker.apply_bar(bar(0, 100))
+    broker.place_order(
+        replace(
+            request(client_order_id="no-book-long", quantity="1"),
+            position_side=PositionSide.LONG,
+        ),
+        command_id="no-book-long",
+    )
+    assert isinstance(broker.position, PositionBook)
+    chart_mark = broker.position.long.mark_price
+    with pytest.raises(ReplayDomainError, match="pinned execution plan"):
+        broker.execute_revealed_reference_close(
+            position_side="LONG",
+            quantity="1",
+            reference_mark="50",
+            market_slippage_bps="1",
+            price_tick="0.1",
+            execution_price="49.8",
+            execution_fidelity=REVEALED_REFERENCE_CLOSE_FIDELITY,
+            command_id="no-book-invalid-close",
+            accepted_source_sequence=1,
+            created_time_ms=0,
+        )
+    order = broker.execute_revealed_reference_close(
+        position_side="LONG",
+        quantity="1",
+        reference_mark="50",
+        market_slippage_bps="1",
+        price_tick="0.1",
+        execution_price="49.9",
+        execution_fidelity=REVEALED_REFERENCE_CLOSE_FIDELITY,
+        command_id="no-book-close",
+        accepted_source_sequence=1,
+        created_time_ms=0,
+    )
+    assert broker.fills[-1].order_id == order.order_id
+    assert broker.fills[-1].price == "49.9"
+    assert isinstance(broker.position, PositionBook)
+    assert broker.position.long.mark_price == chart_mark
+    assert broker.position.is_flat is True
 
 
 async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
@@ -251,9 +297,7 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
             payload={"position_side": "LONG", "leverage": "1.5"},
         )
         portfolio = changed["data"]["portfolio"]
-        positions = {
-            item["position_side"]: item for item in portfolio["positions"]
-        }
+        positions = {item["position_side"]: item for item in portfolio["positions"]}
         assert positions["LONG"]["leverage"] == "1.5"
         assert positions["SHORT"]["leverage"] == "3"
         assert portfolio["margin_used"] == str(
@@ -315,9 +359,7 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
             - Decimal(str(row["reserved_margin"]))
             for row in buckets.values()
         )
-        before_rejection = adjusted["data"]["portfolio"]["hedge_state"][
-            "state_hash"
-        ]
+        before_rejection = adjusted["data"]["portfolio"]["hedge_state"]["state_hash"]
         with pytest.raises(TrainingRunError) as rejected:
             await _send(
                 service,
@@ -341,8 +383,9 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
         child = await service.training.get_market_tracks(  # type: ignore[union-attr]
             str(forked["run"]["run_id"])
         )
-        assert child["portfolio"]["hedge_inputs"]["input_proof_hash"] == (
-            adjusted["data"]["portfolio"]["hedge_inputs"]["input_proof_hash"]
+        assert (
+            child["portfolio"]["hedge_inputs"]["input_proof_hash"]
+            == (adjusted["data"]["portfolio"]["hedge_inputs"]["input_proof_hash"])
         )
         assert child["portfolio"]["hedge_inputs"]["auditor"]["status"] == "PASS"
         child_legs = {
@@ -376,8 +419,7 @@ async def test_isolated_hedge_wallets_leverage_fork_restart_and_corruption(
             "track-1:SHORT": "100"
         }
         assert {
-            item["position_side"]
-            for item in closed["data"]["portfolio"]["positions"]
+            item["position_side"] for item in closed["data"]["portfolio"]["positions"]
         } == {"SHORT"}
 
         with sqlite3.connect(database) as connection:

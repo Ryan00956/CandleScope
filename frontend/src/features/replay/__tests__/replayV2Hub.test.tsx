@@ -695,7 +695,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.account_data_mode, "DETERMINISTIC_SIMULATION");
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
-  assert.equal(request.book_mode, "BOOK_ASSISTED_REQUIRED");
+  assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
   assert.equal(request.position_mode, "HEDGE");
   assert.equal(request.allow_rule_changes, false);

@@ -11,7 +11,10 @@ from ..bars.builder import ReplayBarBuilder, ReplayDisplayBar
 from ..bars.trade_builder import TradeReplayBarBuilder
 from ..canonical import canonical_sha256
 from ..constants import CommandType
-from ..internal_commands import InternalCommandType
+from ..internal_commands import (
+    REVEALED_REFERENCE_CLOSE_FIDELITY,
+    InternalCommandType,
+)
 from ..dataset import ReplayBar
 from ..errors import ReplayDomainError, ReplayErrorCode
 from ..models import validate_counter, validate_identifier
@@ -63,6 +66,7 @@ from .risk import (
     effective_order_leverage,
     fee_for_fill,
     mark_position,
+    round_to_step,
     validate_order_risk,
     validate_trigger_position_notional,
 )
@@ -706,6 +710,110 @@ class ConservativeBarBroker:
                 ReplayErrorCode.ORDER_REJECTED,
                 "historical book close did not fill the durable quantity",
             )
+        working.position = mark_position(working.position, mark_before)
+        account = self._account_from(working.ledger or self._ledger, working.position)
+        self._commit_working(working, account=account)
+        self._has_trading_activity = True
+        return self._orders[order.order_id]
+
+    def execute_revealed_reference_close(
+        self,
+        *,
+        position_side: str,
+        quantity: str,
+        reference_mark: str,
+        market_slippage_bps: str,
+        price_tick: str,
+        execution_price: str,
+        execution_fidelity: str,
+        command_id: str,
+        accepted_source_sequence: int,
+        created_time_ms: int,
+    ) -> ReplayOrder:
+        """Atomically reduce one HEDGE leg from one pinned revealed mark."""
+
+        if self.config.position_mode is not PositionMode.HEDGE:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close requires HEDGE position mode",
+            )
+        if execution_fidelity != REVEALED_REFERENCE_CLOSE_FIDELITY:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close fidelity is invalid",
+            )
+        normalized_position_side = PositionSide(position_side)
+        target = self._position_for_side(self._position, normalized_position_side)
+        target_quantity = Decimal(target.quantity)
+        if target_quantity == 0:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close has no selected position leg",
+            )
+        requested = Decimal(quantity)
+        if requested <= 0 or requested > abs(target_quantity):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close quantity exceeds the selected position leg",
+            )
+        expected_execution_price = round_to_step(
+            Decimal(reference_mark)
+            * (
+                Decimal(1)
+                + Decimal(market_slippage_bps)
+                / Decimal(10_000)
+                * (Decimal(1) if target_quantity < 0 else Decimal(-1))
+            ),
+            Decimal(price_tick),
+            upward=target_quantity < 0,
+        )
+        if Decimal(execution_price) != expected_execution_price:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close price differs from the pinned execution plan",
+            )
+        mark_before = target.mark_price
+        normalized_side = OrderSide.SELL if target_quantity > 0 else OrderSide.BUY
+        order = self.place_order(
+            OrderRequest(
+                client_order_id=f"close-{self._next_order:010d}",
+                side=normalized_side,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+                reduce_only=True,
+                position_side=normalized_position_side,
+            ),
+            command_id=command_id,
+            accepted_source_sequence=accepted_source_sequence,
+            created_time_ms=created_time_ms,
+            _defer_immediate=True,
+        )
+        working = self._working_state()
+        current = working.orders[order.order_id]
+        filled = self._fill_working(
+            working,
+            current,
+            source_sequence=accepted_source_sequence,
+            event_time_ms=created_time_ms,
+            trigger=(
+                execution_price,
+                LiquidityRole.TAKER,
+                FillReason.MARKET_REVEALED_REFERENCE,
+            ),
+            historical_execution=True,
+            skip_trigger_risk=True,
+        )
+        if (
+            not filled
+            or working.orders[order.order_id].status is not OrderStatus.FILLED
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close did not fill the durable quantity",
+            )
+        # A fill price is not a market-data update. Restore the adapter's
+        # shared chart mark; the trusted training command pins the separate
+        # exchange mark input used by the liquidation engine.
         working.position = mark_position(working.position, mark_before)
         account = self._account_from(working.ledger or self._ledger, working.position)
         self._commit_working(working, account=account)
@@ -1627,7 +1735,34 @@ class ConservativeBarBroker:
                 source_sequence=source_sequence,
                 event_time_ms=virtual_time_ms,
             ).to_dict()
-        if normalized is InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE:
+        if normalized is InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE:
+            if set(values) != {
+                "position_side",
+                "quantity",
+                "reference_mark",
+                "market_slippage_bps",
+                "price_tick",
+                "execution_price",
+                "execution_fidelity",
+            }:
+                raise ReplayDomainError(
+                    ReplayErrorCode.ORDER_REJECTED,
+                    "revealed-reference close payload is invalid",
+                )
+            order = self.execute_revealed_reference_close(
+                position_side=str(values["position_side"]),
+                quantity=str(values["quantity"]),
+                reference_mark=str(values["reference_mark"]),
+                market_slippage_bps=str(values["market_slippage_bps"]),
+                price_tick=str(values["price_tick"]),
+                execution_price=str(values["execution_price"]),
+                execution_fidelity=str(values["execution_fidelity"]),
+                command_id=command_id,
+                accepted_source_sequence=source_sequence,
+                created_time_ms=virtual_time_ms,
+            )
+            orders = (order,)
+        elif normalized is InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE:
             if set(values) != {
                 "position_side",
                 "side",

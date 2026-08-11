@@ -308,6 +308,7 @@ async def prepare_hedge_request(
     book_level_quantities: list[str] | None = None,
     book_price_offset: str = "0",
     required_symbols: list[str] | None = None,
+    book_mode: str = "BOOK_ASSISTED_REQUIRED",
 ) -> TrainingRunCreateRequest:
     training = getattr(service, "training")
     if training is None:
@@ -321,22 +322,24 @@ async def prepare_hedge_request(
     marks = mark_prices or ["100"] * ((end - start) // interval_ms + 1)
     if len(marks) != (end - start) // interval_ms + 1:
         raise ValueError("mark_prices does not cover the requested range")
-    book_path = build_book_archive(
-        root / f"{prefix}-book.sqlite3",
-        exchange=request.exchange,
-        market_type=request.market_type,
-        symbol=request.symbol,
-        range_start_ms=start,
-        range_end_ms=book_end,
-        interval_ms=interval_ms,
-        mid_prices=marks,
-        level_quantities=book_level_quantities,
-        price_offset=book_price_offset,
-    )
-    book = await training.historical_books.import_archive(
-        book_path,
-        trusted_origin="TEST_CAPTURE",
-    )
+    book = None
+    if book_mode == "BOOK_ASSISTED_REQUIRED":
+        book_path = build_book_archive(
+            root / f"{prefix}-book.sqlite3",
+            exchange=request.exchange,
+            market_type=request.market_type,
+            symbol=request.symbol,
+            range_start_ms=start,
+            range_end_ms=book_end,
+            interval_ms=interval_ms,
+            mid_prices=marks,
+            level_quantities=book_level_quantities,
+            price_offset=book_price_offset,
+        )
+        book = await training.historical_books.import_archive(
+            book_path,
+            trusted_origin="TEST_CAPTURE",
+        )
     events: list[dict[str, object]] = [
         {
             "event_time_ms": start,
@@ -417,11 +420,15 @@ async def prepare_hedge_request(
         max_mark_gap_ms=interval_ms,
         source_identity="TEST_PINNED_PUBLIC_CAPTURE",
         capture_receipt=f"receipt:{prefix}",
-        historical_l2_ref={
-            "archive_id": book["archive_id"],
-            "dataset_epoch": book["dataset_epoch"],
-            "checksum_sha256": book["checksum_sha256"],
-        },
+        historical_l2_ref=(
+            None
+            if book is None
+            else {
+                "archive_id": book["archive_id"],
+                "dataset_epoch": book["dataset_epoch"],
+                "checksum_sha256": book["checksum_sha256"],
+            }
+        ),
         events=events,
     )
     simulation_path = root / f"{prefix}-simulation.json"
@@ -475,7 +482,7 @@ async def prepare_hedge_request(
             "position_mode": "HEDGE",
             "account_data_mode": "DETERMINISTIC_SIMULATION",
             "account_history_ref": None,
-            "book_mode": "BOOK_ASSISTED_REQUIRED",
+            "book_mode": book_mode,
             "funding_mode": "HISTORICAL_EXACT",
             "fixed_funding_rate": None,
             "funding_interval_ms": None,

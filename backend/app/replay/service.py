@@ -1666,6 +1666,7 @@ class ReplayService:
             in {
                 InternalCommandType.ADJUST_CAPITAL,
                 InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE,
+                InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE,
                 InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
                 InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
                 InternalCommandType.FAST_FORWARD_FINAL_STATE,

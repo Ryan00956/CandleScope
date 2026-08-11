@@ -149,7 +149,7 @@ export function createTrainingRunDraft(
     accountDataMode: "DETERMINISTIC_SIMULATION",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
-    bookMode: "BOOK_ASSISTED_REQUIRED",
+    bookMode: "OFF",
     integrityMode: "CHALLENGE",
     timeDisclosurePolicy: "NONE",
     allowedMutations: [],
@@ -397,9 +397,6 @@ export function evaluateTrainingRunDraft(
     if (draft.exchange !== "binance" || draft.marketType !== "futures") {
       errors.push("双向持仓当前要求 Binance USD-M futures 历史输入");
     }
-    if (draft.bookMode !== "BOOK_ASSISTED_REQUIRED") {
-      errors.push("双向持仓必须启用连续历史 L2 强平执行");
-    }
     if (draft.fundingMode !== "HISTORICAL_EXACT") {
       errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");
     }
@@ -537,9 +534,6 @@ export function evaluateTrainingRunSetupDraft(
     }
     if (draft.startMode !== "MANUAL" || draft.requestedStartMs === null) {
       errors.push("双向持仓必须使用明确的手动开始时间以 pin 全部历史输入");
-    }
-    if (draft.bookMode !== "BOOK_ASSISTED_REQUIRED") {
-      errors.push("双向持仓必须启用连续历史 L2 强平执行");
     }
     if (draft.fundingMode !== "HISTORICAL_EXACT") {
       errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");

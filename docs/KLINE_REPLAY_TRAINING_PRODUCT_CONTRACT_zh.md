@@ -194,7 +194,7 @@ flowchart LR
 | 前向缓存长度 | 表示创建时优先准备的未来历史窗口，不等于训练强制结束时间；用量与预计磁盘占用必须可见。 |
 | 初始金额 | 使用结算资产的 Decimal 字符串；创建后只可通过已授权“入金/出金”事件改变。 |
 | 最大杠杆 | 是训练级上限；实际商品上限取训练上限、商品规则上限和风险模型上限的最小值。 |
-| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。新 Run 默认 `HEDGE`；HEDGE 唯一允许 `DETERMINISTIC_SIMULATION`，支持 CROSS、逐腿 ISOLATED、历史 funding 与 `BOOK_ASSISTED_REQUIRED`，旧 `APPROX_PROXY` HEDGE payload 必须拒绝。 |
+| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。新 Run 默认 `HEDGE`；HEDGE 唯一允许 `DETERMINISTIC_SIMULATION`，支持 CROSS、逐腿 ISOLATED、历史 funding，以及免 L2 的 `OFF` 或连续历史 L2 的 `BOOK_ASSISTED_REQUIRED`，旧 `APPROX_PROXY` HEDGE payload 必须拒绝。 |
 | 手续费 | 至少区分 maker/taker；必须写入版本化 fee policy，不能只保存在前端。 |
 | 资金费 | `OFF`、`HISTORICAL_EXACT` 或明确标为沙盒的自定义模型；历史数据不完整时不得宣称 exact。 |
 | 保证金模式 | 可允许 `CROSS`、`ISOLATED` 或两者；具体订单/仓位必须记录选择。 |
@@ -481,7 +481,7 @@ flowchart LR
 
 `HEDGE` 的每个开仓、平仓和保护命令都必须显式携带 `position_side=LONG|SHORT`：`BUY/LONG` 开多、`SELL/LONG + reduce-only` 平多、`SELL/SHORT` 开空、`BUY/SHORT + reduce-only` 平空。风险与保证金按两腿 gross notional 求和；等量多空不是空仓。双向模式禁止“反手”快捷动作，必须分别管理两条腿。
 
-双向模式只使用 `DETERMINISTIC_SIMULATION`：公开 mark/index、funding、规则、fee 和历史 L2 必须由 Run pin；不可观测的保险基金和 ADL cohort 必须在运行前物化并标记为 `VERSIONED_DETERMINISTIC_SIMULATION`。HEDGE 支持 CROSS、逐腿 ISOLATED、历史资金费与 `BOOK_ASSISTED_REQUIRED`，但不得宣称历史交易所 insurance/ADL exact 或 L2 queue-exact。旧 `APPROX_PROXY` HEDGE 组合必须拒绝，不能静默降级。组合保证金和期权 Greeks 仍不属于闭环。
+双向模式只使用 `DETERMINISTIC_SIMULATION`：公开 mark/index、funding、规则和 fee 必须由 Run pin；只有选择 `BOOK_ASSISTED_REQUIRED` 时才额外要求 pin 连续历史 L2。不可观测的保险基金和 ADL cohort 必须在运行前物化并标记为 `VERSIONED_DETERMINISTIC_SIMULATION`。HEDGE 支持 CROSS、逐腿 ISOLATED、历史资金费，以及免 L2 的 `OFF` 或连续历史 L2 的 `BOOK_ASSISTED_REQUIRED`，但不得宣称历史交易所 insurance/ADL exact 或 L2 queue-exact。旧 `APPROX_PROXY` HEDGE 组合必须拒绝，不能静默降级。组合保证金和期权 Greeks 仍不属于闭环。
 
 产品统一命名为“交易所规则级确定性模拟”。Hub、工作台、强平时间线、报告、Review 和导出必须同时显示 public-input fidelity 与 private-state simulation model/version；不能只在帮助文档中披露。冻结公式、总序、保险基金和 ADL 规则见 [`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md)。
 
@@ -495,6 +495,8 @@ flowchart LR
 - BAR 模式：没有 bar 内路径时采用冻结的保守顺序；同一最小 K 内止盈和止损都触发时选择对账户更不利的可行结果并警告。
 - AGG_TRADE 模式：按聚合成交顺序和可见成交量约束撮合；由 tape 生成的 K 线允许与官方 K 线不同，且不能证明 aggregate 内部原始 fill 顺序或真实 queue position。
 - resting limit 可按 maker fee 计费，但“maker”只表示费用分类，不表示真实排队位置得到还原。
+- HEDGE 强平的风险触发继续使用已 pin 的权威 mark、规则、fee 和 funding；成交引用在 case 创建时冻结的已揭示 mark，并按强平方向应用 Run 已配置的 adverse market slippage 和 price tick。LONG/SHORT 各自从冻结引用价计算，前一腿成交价不得成为后一腿的 mark 输入。
+- 免 L2 强平必须标记 `TOUCH_OR_TAPE_MARK_SLIPPAGE_V1`，不得生成 L2 snapshot、depth execution proof 或 queue-exact 声明；这是一种明确披露的保守执行模型，不改变强平触发公式。
 
 ### 12.3 开启历史盘口时
 
@@ -524,7 +526,7 @@ flowchart LR
 - 维护保证金必须使用版本化商品阶梯；最大杠杆不能替代维护保证金规则。
 - 爆仓检查使用权威 mark；若只能用 last/trade/bar price 代理，必须标为 approximate，不能写“真实爆仓”。
 - 爆仓是领域事件，必须有触发价、mark、维护保证金、费用、前后账户状态和 fidelity。
-- 平仓也走正常市价或限价订单流程，不允许直接改 position quantity。
+- 平仓也走可审计订单/fill 流程，不允许直接改 position quantity。`BOOK_ASSISTED_REQUIRED` 强平逐档消耗冻结 L2；`OFF` 强平使用冻结 mark + adverse slippage，两者均保存执行 fidelity。
 
 ---
 

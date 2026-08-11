@@ -419,7 +419,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               BOOK_ASSISTED_REQUIRED · 连续历史 L2
             </option>
           </select>
-          <small>只有服务端证明 snapshot + ordered deltas 连续且可 pin 时可选；始终不声明 queue-exact。</small>
+          <small>OFF 时双向持仓强平按已 pin 的当前 mark + Run 冻结的不利滑点成交；L2 模式只有连续性可证明时可选，且始终不声明 queue-exact。</small>
         </label>
         {draft.fundingMode === "SANDBOX_FIXED" && (
           <>

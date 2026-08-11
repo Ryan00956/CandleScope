@@ -2197,6 +2197,7 @@ class ReplaySessionActor:
             CommandType.SET_POSITION_LEVERAGE,
             InternalCommandType.ADJUST_CAPITAL,
             InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE,
+            InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE,
         }:
             if self._state not in {SessionState.PAUSED, SessionState.PLAYING}:
                 self._invalid_transition(command_type)

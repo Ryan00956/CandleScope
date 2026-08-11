@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +32,7 @@ async def _create_bankrupt_hedge_run(
     maintenance_tiers: list[dict[str, str]] | None = None,
     book_level_quantities: list[str] | None = None,
     book_price_offset: str = "0",
+    book_mode: str = "BOOK_ASSISTED_REQUIRED",
 ) -> tuple[str, str]:
     request = replace(
         _sandbox_request(await _request(service), initial_equity=initial_equity),
@@ -47,6 +49,7 @@ async def _create_bankrupt_hedge_run(
         maintenance_tiers=maintenance_tiers,
         book_level_quantities=book_level_quantities,
         book_price_offset=book_price_offset,
+        book_mode=book_mode,
     )
     created = await service.training.create_run(request)  # type: ignore[union-attr]
     run_id = str(created["run"]["run_id"])
@@ -161,6 +164,119 @@ async def test_hedge_liquidation_persists_full_state_machine_and_insurance(
             not str(posting["balance_after"]).startswith("-") for posting in postings
         )
         assert hedge_state["adl_events"] == []
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_hedge_liquidation_without_l2_uses_current_mark_and_pinned_slippage(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase5-no-book.db"
+    service = await _risk_service(database)
+    try:
+        run_id, session_id = await _create_bankrupt_hedge_run(
+            service,
+            root=tmp_path,
+            prefix="phase5-no-book",
+            book_mode="OFF",
+        )
+        await _trigger_crash(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            prefix="phase5-no-book",
+        )
+        projection = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        portfolio = projection["portfolio"]
+        assert portfolio["positions"] == []
+        assert portfolio["execution_fidelity"] == "NO_BOOK_TOUCH_OR_TAPE_APPROX"
+        assert portfolio["fidelity"]["liquidation_execution"] == (
+            "TOUCH_OR_TAPE_MARK_SLIPPAGE_V1"
+        )
+        event = portfolio["liquidations"][0]
+        execution_steps = [
+            step
+            for step in event["steps"]
+            if step["step_type"] in {"PARTIAL_LIQUIDATION", "FULL_LIQUIDATION"}
+        ]
+        assert execution_steps
+        assert all(step["book_execution"] is None for step in execution_steps)
+        assert all(
+            order["remaining_quantity"] == "0"
+            for step in execution_steps
+            for order in step["orders"]
+        )
+        assert projection["tracks"][0]["historical_book"]["status"] == "OFF"
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_historical_book_archive"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_liquidation_book_snapshot"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_liquidation_book_execution"
+                ).fetchone()[0]
+                == 0
+            )
+            fills = connection.execute(
+                """
+                SELECT fill.fill_json
+                FROM replay_training_contract_fill AS fill
+                JOIN replay_training_contract_order AS order_row
+                  ON order_row.run_id = fill.run_id
+                 AND order_row.track_id = fill.track_id
+                 AND order_row.order_id = json_extract(fill.fill_json, '$.order_id')
+                WHERE fill.run_id = ?
+                  AND json_extract(order_row.order_json, '$.client_order_id')
+                      LIKE 'close-%'
+                ORDER BY fill.fill_id
+                """,
+                (run_id,),
+            ).fetchall()
+            assert fills
+            raw_fills = [json.loads(str(row["fill_json"])) for row in fills]
+            assert all(
+                fill["reason"] == "MARKET_REVEALED_REFERENCE" for fill in raw_fills
+            )
+            assert {fill["position_side"] for fill in raw_fills} == {
+                "LONG",
+                "SHORT",
+            }
+            plan_rows = connection.execute(
+                """
+                SELECT reason
+                FROM replay_training_liquidation_step
+                WHERE run_id = ?
+                  AND step_type IN ('PARTIAL_LIQUIDATION', 'FULL_LIQUIDATION')
+                ORDER BY step_sequence
+                """,
+                (run_id,),
+            ).fetchall()
+            plans = {
+                str(plan["position_side"]): plan
+                for row in plan_rows
+                for plan in [json.loads(str(row["reason"]))["plan"]]
+            }
+            assert {plan["reference_mark"] for plan in plans.values()} == {"50"}
+            assert {plan["market_slippage_bps"] for plan in plans.values()} == {"1"}
+            assert {plan["price_tick"] for plan in plans.values()} == {"0.1"}
+            assert {side: plan["execution_price"] for side, plan in plans.items()} == {
+                "LONG": "49.9",
+                "SHORT": "50.1",
+            }
+            for fill in raw_fills:
+                assert str(fill["price"]) == str(
+                    plans[str(fill["position_side"])]["execution_price"]
+                )
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -449,9 +565,12 @@ async def test_cross_margin_breach_creates_one_account_case_across_full_tracks(
                 clock_count,
             )
 
-        case_count, leg_tracks, ordered_legs, clock_count = (
-            await store.base_store.run_extension_write(seed_and_detect)
-        )
+        (
+            case_count,
+            leg_tracks,
+            ordered_legs,
+            clock_count,
+        ) = await store.base_store.run_extension_write(seed_and_detect)
         assert case_count == 1
         assert leg_tracks == {"track-1", "track-2"}
         assert clock_count == 1

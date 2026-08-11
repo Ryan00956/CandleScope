@@ -11,7 +11,10 @@ from .canonical import canonical_sha256
 from .clock import validate_speed
 from .constants import CommandType, SessionState
 from .errors import ReplayDomainError, ReplayErrorCode
-from .internal_commands import InternalCommandType
+from .internal_commands import (
+    REVEALED_REFERENCE_CLOSE_FIDELITY,
+    InternalCommandType,
+)
 from .models import (
     ReplayCommand,
     ReplayCursor,
@@ -616,6 +619,77 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
         return ParsedCommand(
             command_type,
             {"kind": kind, "amount": amount, "reason": normalized_reason},
+        )
+    if command_type is InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE:
+        _exact_keys(
+            payload,
+            {
+                "position_side",
+                "quantity",
+                "reference_mark",
+                "market_slippage_bps",
+                "price_tick",
+                "execution_price",
+                "execution_fidelity",
+            },
+        )
+        if payload["position_side"] not in {"LONG", "SHORT"}:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close position_side is invalid",
+            )
+        try:
+            quantity = normalize_decimal_string(
+                payload["quantity"], field_name="revealed-reference close quantity"
+            )
+            reference_mark = normalize_decimal_string(
+                payload["reference_mark"],
+                field_name="revealed-reference close mark",
+            )
+            market_slippage_bps = normalize_decimal_string(
+                payload["market_slippage_bps"],
+                field_name="revealed-reference close slippage",
+            )
+            price_tick = normalize_decimal_string(
+                payload["price_tick"],
+                field_name="revealed-reference close price tick",
+            )
+            execution_price = normalize_decimal_string(
+                payload["execution_price"],
+                field_name="revealed-reference close execution price",
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close decimal is invalid",
+            ) from exc
+        if (
+            Decimal(quantity) <= 0
+            or Decimal(reference_mark) <= 0
+            or Decimal(market_slippage_bps) < 0
+            or Decimal(price_tick) <= 0
+            or Decimal(execution_price) <= 0
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close quantity, mark, tick and price must be positive and slippage must be non-negative",
+            )
+        if payload["execution_fidelity"] != REVEALED_REFERENCE_CLOSE_FIDELITY:
+            raise ReplayDomainError(
+                ReplayErrorCode.ORDER_REJECTED,
+                "revealed-reference close fidelity is invalid",
+            )
+        return ParsedCommand(
+            command_type,
+            {
+                "position_side": payload["position_side"],
+                "quantity": quantity,
+                "reference_mark": reference_mark,
+                "market_slippage_bps": market_slippage_bps,
+                "price_tick": price_tick,
+                "execution_price": execution_price,
+                "execution_fidelity": payload["execution_fidelity"],
+            },
         )
     if command_type is InternalCommandType.EXECUTE_HISTORICAL_BOOK_CLOSE:
         _exact_keys(

@@ -786,6 +786,7 @@ class ReviewRecorder:
                 "step",
                 "advance_by",
                 "_training_execute_historical_book_close",
+                "_training_execute_revealed_reference_close",
             }
         return command_id.startswith("v2part-") and command_type in {
             "_training_fast_forward_empty_account",
@@ -838,9 +839,7 @@ class ReviewRecorder:
             {
                 "ledger_sequence": int(row["ledger_sequence"]),
                 "posting_id": str(row["posting_id"]),
-                "track_id": (
-                    None if row["track_id"] is None else str(row["track_id"])
-                ),
+                "track_id": (None if row["track_id"] is None else str(row["track_id"])),
                 "kind": str(row["kind"]),
                 "cash_delta": str(row["cash_delta"]),
                 "asset": str(row["asset"]),

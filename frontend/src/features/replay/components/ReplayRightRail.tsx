@@ -1642,6 +1642,17 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               const showProtection = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "protection";
               const showLeverage = selected && positionPanel?.trackId === item.track_id && samePanelLeg && positionPanel.kind === "leverage";
               const uPnl = finiteNumber(item.position.unrealized_pnl) ?? 0;
+              const maintenanceTierExtrapolated = (
+                item.maintenance_margin_proof?.position_tier_extrapolated === true
+              );
+              const liquidationTierExtrapolated = (
+                item.maintenance_margin_proof?.liquidation_tier_extrapolated === true
+              );
+              const maintenanceProofTitle = item.maintenance_margin_proof === undefined
+                ? "未声明维持保证金档位外推状态。"
+                : maintenanceTierExtrapolated
+                ? `仓位名义价值已超过固定规则的末档上限 ${item.maintenance_margin_proof?.last_tier_notional_cap ?? "--"}；当前维持保证金沿用末档费率和速算扣除数外推，不是交易所发布的额外档位。`
+                : "维持保证金使用固定的版本化档位规则。";
               const marginLabel = item.margin_equity ?? item.isolated_margin ?? null;
               const protectionOrders = item.protection?.orders ?? [];
               const itemQtyAsset = baseAsset(item.symbol, settlementAsset);
@@ -1683,7 +1694,7 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                   <dl className="replay-metric-flat">
                      <div><dt>持仓量 ({itemQtyAsset})</dt><dd>{formatDecimal(Math.abs(quantityValue))}</dd></div>
                      <div><dt>初始保证金</dt><dd>{formatDecimal(item.initial_margin, 4)}</dd></div>
-                     <div><dt>维持保证金</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
+                     <div title={maintenanceProofTitle}><dt>维持保证金{maintenanceTierExtrapolated ? "（末档外推≈）" : ""}</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
                      <div><dt>风险覆盖</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
                      <div><dt>开仓均价</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
                      <div>
@@ -1691,7 +1702,9 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                        <dd>{formatDecimal(replayPositiveModelPrice(item.position.mark_price), 6)}</dd>
                      </div>
                      <div><dt>逐腿杠杆</dt><dd>{formatDecimal(item.leverage, 2)}x</dd></div>
-                     <div title="模拟账户风险模型；不是历史交易所精确值"><dt>强平价格（模拟≈）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.liquidation_price), 6)}</dd></div>
+                     <div title={liquidationTierExtrapolated
+                       ? `强平价搜索超过固定规则的末档上限 ${item.maintenance_margin_proof?.last_tier_notional_cap ?? "--"}；越界候选价沿用末档费率和速算扣除数外推。`
+                       : "模拟账户风险模型；不是历史交易所精确值"}><dt>强平价格（模拟≈{liquidationTierExtrapolated ? "，末档外推" : ""}）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.liquidation_price), 6)}</dd></div>
                      <div title="模拟账户风险模型；不是历史交易所精确值"><dt>破产价格（模拟≈）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.bankruptcy_price), 6)}</dd></div>
                      <div><dt>累计资金费</dt><dd>{formatDecimal(item.accumulated_funding, 8)}</dd></div>
                      <div className="wide"><dt>保护单</dt><dd>{protectionOrders.length === 0
@@ -2004,6 +2017,20 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
               <header><strong>精度边界</strong><span className="replay-chip">{contract?.account_history.auditor.status ?? "NOT_RUN"}</span></header>
               <p>当前模型{contract?.execution_fidelity === "BOOK_ASSISTED_CONTINUITY_GATED_NO_QUEUE" ? "使用连续历史盘口辅助，但仍不含真实队列位置。" : "不含盘口排队，并按已揭示价格保守模拟成交。"}</p>
               <p>Mark：{contract === null ? "--" : recordText(contract.fidelity, "mark")}</p>
+              <p>维持保证金：{contract === null
+                ? "--"
+                : recordText(contract.fidelity, "maintenance_margin") === "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED"
+                  ? "存在仓位超过历史末档，按末档费率和速算扣除数外推≈"
+                  : recordText(contract.fidelity, "maintenance_margin") === "VERSIONED_MAINTENANCE_TIER_APPLIED"
+                    ? "全部仓位位于固定规则档位内"
+                    : "未声明档位外推状态"}</p>
+              <p>强平投影：{contract === null
+                ? "--"
+                : recordText(contract.fidelity, "liquidation_projection") === "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED"
+                  ? "至少一个候选强平价越过历史末档，末档外推≈"
+                  : recordText(contract.fidelity, "liquidation_projection") === "VERSIONED_MAINTENANCE_TIER_APPLIED"
+                    ? "候选强平价位于固定规则档位内"
+                    : "未声明档位外推状态"}</p>
               <button type="button" className="replay-pill-btn" data-replay-action="audit-account" disabled={viewer.viewerPending} onClick={() => void viewer.actions.auditAccount().catch(() => undefined)}>重新运行独立账户审计</button>
             </section>
             {contract !== null && (

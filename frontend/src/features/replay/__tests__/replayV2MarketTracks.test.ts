@@ -283,6 +283,21 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
         rule_revision: 1,
         rule_hash: `sha256:${"a".repeat(64)}`,
         mark_fidelity: "REVEALED_BAR_CLOSE_PROXY",
+        maintenance_margin_proof: {
+          schema_version: "replay.maintenance-margin-proof.v1",
+          rule_revision: 1,
+          rule_hash: `sha256:${"a".repeat(64)}`,
+          rule_fidelity: "AVAILABLE_APPROX_SIMULATION_RULES",
+          risk_tier: 1,
+          last_tier_notional_cap: "1000000",
+          position_notional: "204.5",
+          position_tier_extrapolated: false,
+          liquidation_price_notional: "197.2",
+          liquidation_tier_extrapolated: false,
+          fidelity: "VERSIONED_MAINTENANCE_TIER_APPLIED",
+          explanation: null,
+          proof_hash: `sha256:${"f".repeat(64)}`,
+        },
       }],
       orders: [{ order_id: "ord-1", track_id: "track-2", status: "OPEN" }],
       fills: [],
@@ -368,6 +383,47 @@ test("Phase 6 contract portfolio parser keeps account, ledger, and liquidation d
   assert.equal(parsed.portfolio.margin_mode, "ISOLATED");
   assert.equal(parsed.portfolio.ledger.reconciliation_delta, "0");
   assert.equal(parsed.portfolio.liquidations.length, 1);
+  assert.equal(
+    parsed.portfolio.positions[0]?.maintenance_margin_proof?.fidelity,
+    "VERSIONED_MAINTENANCE_TIER_APPLIED",
+  );
+  const extrapolated = parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      positions: [{
+        ...contractPortfolio.positions[0],
+        maintenance_margin_proof: {
+          ...contractPortfolio.positions[0]?.maintenance_margin_proof,
+          position_notional: "1000000.1",
+          position_tier_extrapolated: true,
+          fidelity: "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED",
+          explanation: "POSITION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP",
+        },
+      }],
+    },
+  });
+  if (extrapolated.portfolio.schema_version !== "replay.training.portfolio.v2") {
+    assert.fail("extrapolated maintenance proof did not survive parsing");
+  }
+  assert.equal(
+    extrapolated.portfolio.positions[0]?.maintenance_margin_proof
+      ?.position_tier_extrapolated,
+    true,
+  );
+  assert.throws(() => parseReplayMarketTracksResponse({
+    ...payload,
+    portfolio: {
+      ...contractPortfolio,
+      positions: [{
+        ...contractPortfolio.positions[0],
+        maintenance_margin_proof: {
+          ...contractPortfolio.positions[0]?.maintenance_margin_proof,
+          fidelity: "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED",
+        },
+      }],
+    },
+  }), /fidelity is inconsistent/);
   const failedClosed = parseReplayMarketTracksResponse({
     ...payload,
     portfolio: { ...contractPortfolio, status: "FAILED_CLOSED" },

@@ -21,7 +21,12 @@ from app.replay.internal_commands import REVEALED_REFERENCE_CLOSE_FIDELITY
 from app.replay.training.account import InstrumentRule, MaintenanceTier
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
-from app.replay.training.storage import _project_liquidation_price_pair
+from app.replay.training.storage import (
+    EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY,
+    VERSIONED_MAINTENANCE_TIER_FIDELITY,
+    _maintenance_margin_proof,
+    _project_liquidation_price_pair,
+)
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, make_broker, request
 from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.test_replay_v2_training_phase5 import _acquire, _request
@@ -158,6 +163,169 @@ def test_high_equity_short_liquidation_extends_last_maintenance_tier() -> None:
     assert Decimal("1000000") - (liquidation_price - Decimal("100")) <= (
         rule.maintenance_margin(liquidation_price, extend_last_tier=True)
     )
+
+    proof = _maintenance_margin_proof(
+        rule=rule,
+        rule_revision=7,
+        rule_hash=rule.rule_hash,
+        rule_fidelity="PINNED_HISTORICAL_EXCHANGE_RULE",
+        position_notional=Decimal("100"),
+        risk_tier=1,
+        liquidation_price=liquidation_price,
+        absolute_quantity=Decimal("1"),
+    )
+    assert proof == {
+        "schema_version": "replay.maintenance-margin-proof.v1",
+        "rule_revision": 7,
+        "rule_hash": rule.rule_hash,
+        "rule_fidelity": "PINNED_HISTORICAL_EXCHANGE_RULE",
+        "risk_tier": 1,
+        "last_tier_notional_cap": "100000",
+        "position_notional": "100",
+        "position_tier_extrapolated": False,
+        "liquidation_price_notional": "995124.4",
+        "liquidation_tier_extrapolated": True,
+        "fidelity": EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY,
+        "explanation": "LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP",
+        "proof_hash": proof["proof_hash"],
+    }
+    assert proof["proof_hash"].startswith("sha256:")
+
+    in_tier = _maintenance_margin_proof(
+        rule=rule,
+        rule_revision=7,
+        rule_hash=rule.rule_hash,
+        rule_fidelity="PINNED_HISTORICAL_EXCHANGE_RULE",
+        position_notional=Decimal("100"),
+        risk_tier=1,
+        liquidation_price=Decimal("90.4"),
+        absolute_quantity=Decimal("1"),
+    )
+    assert in_tier["fidelity"] == VERSIONED_MAINTENANCE_TIER_FIDELITY
+    assert in_tier["explanation"] is None
+
+    position_extrapolated = _maintenance_margin_proof(
+        rule=rule,
+        rule_revision=7,
+        rule_hash=rule.rule_hash,
+        rule_fidelity="PINNED_HISTORICAL_EXCHANGE_RULE",
+        position_notional=Decimal("100000.1"),
+        risk_tier=1,
+        liquidation_price=Decimal("90.4"),
+        absolute_quantity=Decimal("1"),
+    )
+    assert position_extrapolated["position_tier_extrapolated"] is True
+    assert position_extrapolated["liquidation_tier_extrapolated"] is False
+    assert position_extrapolated["fidelity"] == (
+        EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+    )
+    assert position_extrapolated["explanation"] == (
+        "POSITION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    )
+
+
+async def test_hedge_portfolio_discloses_liquidation_tier_extrapolation(
+    tmp_path: Path,
+) -> None:
+    service = await _risk_service(tmp_path / "tier-extrapolation.db")
+    try:
+        request_value = replace(
+            _sandbox_request(
+                await _request(service),
+                initial_equity="2000000",
+            ),
+            market_type="futures",
+        )
+        request_value = await prepare_hedge_request(
+            service,
+            request_value,
+            root=tmp_path,
+            prefix="phase2-tier-extrapolation",
+            book_mode="OFF",
+        )
+        created = await service.training.create_run(request_value)  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        session_id = str(created["run"]["adapter_session_id"])
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="tier-extrapolation-acquire",
+        )
+        opened = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="tier-extrapolation-short",
+            command_type=ReplayV2CommandType.PLACE_ORDER,
+            payload={
+                "client_order_id": "tier-extrapolation-short",
+                "side": "SELL",
+                "position_side": "SHORT",
+                "order_type": "MARKET",
+                "quantity": "1",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+                "leverage": "3",
+            },
+        )
+
+        portfolio = opened["data"]["portfolio"]
+        position = portfolio["positions"][0]
+        proof = position["maintenance_margin_proof"]
+        assert proof["rule_fidelity"] == "PINNED_HISTORICAL_EXCHANGE_RULE"
+        assert proof["position_tier_extrapolated"] is False
+        assert Decimal(proof["position_notional"]) < Decimal(
+            proof["last_tier_notional_cap"]
+        )
+        assert proof["liquidation_tier_extrapolated"] is True
+        assert Decimal(proof["liquidation_price_notional"]) > Decimal(
+            proof["last_tier_notional_cap"]
+        )
+        assert proof["fidelity"] == EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+        assert proof["explanation"] == (
+            "LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+        )
+        assert portfolio["fidelity"]["instrument_rules"] == (
+            "PINNED_PUBLIC_HISTORY_VERSIONED_RULE"
+        )
+        assert portfolio["fidelity"]["maintenance_margin"] == (
+            VERSIONED_MAINTENANCE_TIER_FIDELITY
+        )
+        assert portfolio["fidelity"]["liquidation_projection"] == (
+            EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+        )
+        assert portfolio["fidelity"]["maintenance_tier_extrapolation"] == {
+            "applied": True,
+            "position_count": 0,
+            "liquidation_projection_count": 1,
+            "reason": (
+                "EXISTING_POSITION_OR_PROJECTED_PRICE_ABOVE_LAST_VERSIONED_TIER_CAP"
+            ),
+            "admission_policy": "STRICT_VERSIONED_ORDER_LIMITS_UNCHANGED",
+        }
+        audit = await service.training.audit_account(run_id)  # type: ignore[union-attr]
+        assert audit["status"] == "PASS"
+        audit_portfolio = audit["snapshot"]["portfolio"]
+        assert audit_portfolio["risk_fidelity"] == {
+            key: portfolio["fidelity"][key]
+            for key in (
+                "instrument_rules",
+                "maintenance_margin",
+                "liquidation_projection",
+                "maintenance_tier_extrapolation",
+            )
+        }
+        assert audit_portfolio["position_maintenance_proofs"] == [
+            {
+                "track_id": position["track_id"],
+                "position_side": "SHORT",
+                "proof": proof,
+            }
+        ]
+    finally:
+        await service.shutdown(step_timeout=1.0)
 
 
 def test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg() -> None:

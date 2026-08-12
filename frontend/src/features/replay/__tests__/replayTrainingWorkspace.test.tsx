@@ -267,8 +267,10 @@ test("right-rail trading workstation keeps positions and account history out of 
   assert.match(rail, /data-replay-action="close-partial"/);
   assert.match(rail, /aria-live="polite"/);
   assert.match(rail, /className="replay-position-card"/);
+  assert.match(rail, /维持保证金\{maintenanceTierExtrapolated \? "（末档外推≈）" : ""\}/);
+  assert.match(rail, /强平价格（模拟≈\{liquidationTierExtrapolated \? "，末档外推" : ""\}）/);
+  assert.match(rail, /存在仓位超过历史末档，按末档费率和速算扣除数外推≈/);
   assert.match(rail, /标记价格（\{replayMarkFidelityLabel\(item\.mark_fidelity\)\}）/);
-  assert.match(rail, /强平价格（模拟≈）/);
   assert.match(rail, /破产价格（模拟≈）/);
   assert.match(rail, /replayPositiveModelPrice\(item\.liquidation_price\)/);
   assert.match(rail, /className="replay-compact-record"/);

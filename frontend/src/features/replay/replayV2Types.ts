@@ -640,6 +640,29 @@ export interface ReplayTrainingPortfolioPosition {
   readonly rule_revision?: number;
   readonly rule_hash?: string;
   readonly mark_fidelity?: string;
+  readonly maintenance_margin_proof?: ReplayMaintenanceMarginProof;
+}
+
+export interface ReplayMaintenanceMarginProof {
+  readonly schema_version: "replay.maintenance-margin-proof.v1";
+  readonly rule_revision: number;
+  readonly rule_hash: `sha256:${string}`;
+  readonly rule_fidelity: string;
+  readonly risk_tier: number;
+  readonly last_tier_notional_cap: string;
+  readonly position_notional: string;
+  readonly position_tier_extrapolated: boolean;
+  readonly liquidation_price_notional: string | null;
+  readonly liquidation_tier_extrapolated: boolean;
+  readonly fidelity:
+    | "VERSIONED_MAINTENANCE_TIER_APPLIED"
+    | "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED";
+  readonly explanation:
+    | "POSITION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    | "LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    | "POSITION_AND_LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    | null;
+  readonly proof_hash: `sha256:${string}`;
 }
 
 export interface ReplayGlobalClock {
@@ -2477,6 +2500,86 @@ export function parseReplayLiquidationCases(
   return value.map((item, index) => parseReplayLiquidationCase(item, `${field}[${index}]`));
 }
 
+function parseReplayMaintenanceMarginProof(
+  value: unknown,
+  field: string,
+): ReplayMaintenanceMarginProof {
+  const proof = exactObject(value, field, [
+    "schema_version",
+    "rule_revision",
+    "rule_hash",
+    "rule_fidelity",
+    "risk_tier",
+    "last_tier_notional_cap",
+    "position_notional",
+    "position_tier_extrapolated",
+    "liquidation_price_notional",
+    "liquidation_tier_extrapolated",
+    "fidelity",
+    "explanation",
+    "proof_hash",
+  ]);
+  if (proof.schema_version !== "replay.maintenance-margin-proof.v1") {
+    throw new TypeError(`${field} schema is unsupported`);
+  }
+  const fidelity = enumValue(
+    proof.fidelity,
+    [
+      "VERSIONED_MAINTENANCE_TIER_APPLIED",
+      "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED",
+    ] as const,
+    `${field}.fidelity`,
+  );
+  const positionTierExtrapolated = boolValue(
+    proof.position_tier_extrapolated,
+    `${field}.position_tier_extrapolated`,
+  );
+  const liquidationTierExtrapolated = boolValue(
+    proof.liquidation_tier_extrapolated,
+    `${field}.liquidation_tier_extrapolated`,
+  );
+  const expectedExplanation = positionTierExtrapolated
+    ? liquidationTierExtrapolated
+      ? "POSITION_AND_LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+      : "POSITION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    : liquidationTierExtrapolated
+      ? "LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+      : null;
+  if (
+    (positionTierExtrapolated || liquidationTierExtrapolated)
+      !== (fidelity === "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED")
+    || proof.explanation !== expectedExplanation
+  ) {
+    throw new TypeError(`${field} fidelity is inconsistent`);
+  }
+  return {
+    schema_version: "replay.maintenance-margin-proof.v1",
+    rule_revision: counter(proof.rule_revision, `${field}.rule_revision`),
+    rule_hash: digest(proof.rule_hash, `${field}.rule_hash`),
+    rule_fidelity: identifier(proof.rule_fidelity, `${field}.rule_fidelity`),
+    risk_tier: counter(proof.risk_tier, `${field}.risk_tier`),
+    last_tier_notional_cap: canonicalDecimal(
+      proof.last_tier_notional_cap,
+      `${field}.last_tier_notional_cap`,
+    ),
+    position_notional: canonicalDecimal(
+      proof.position_notional,
+      `${field}.position_notional`,
+    ),
+    position_tier_extrapolated: positionTierExtrapolated,
+    liquidation_price_notional: proof.liquidation_price_notional === null
+      ? null
+      : canonicalDecimal(
+          proof.liquidation_price_notional,
+          `${field}.liquidation_price_notional`,
+        ),
+    liquidation_tier_extrapolated: liquidationTierExtrapolated,
+    fidelity,
+    explanation: expectedExplanation,
+    proof_hash: digest(proof.proof_hash, `${field}.proof_hash`),
+  };
+}
+
 export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPortfolio {
   if (
     typeof value === "object"
@@ -2615,7 +2718,16 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         "rule_revision",
         "rule_hash",
         "mark_fidelity",
+        ...(Object.hasOwn(position as object, "maintenance_margin_proof")
+          ? ["maintenance_margin_proof"]
+          : []),
       ]);
+      const maintenanceProof = Object.hasOwn(item, "maintenance_margin_proof")
+        ? parseReplayMaintenanceMarginProof(
+            item.maintenance_margin_proof,
+            `${field}.maintenance_margin_proof`,
+          )
+        : null;
       return {
         track_id: identifier(item.track_id, `${field}.track_id`),
         symbol: identifier(item.symbol, `${field}.symbol`),
@@ -2696,6 +2808,9 @@ export function parseReplayTrainingPortfolio(value: unknown): ReplayTrainingPort
         rule_revision: counter(item.rule_revision, `${field}.rule_revision`),
         rule_hash: digest(item.rule_hash, `${field}.rule_hash`),
         mark_fidelity: identifier(item.mark_fidelity, `${field}.mark_fidelity`),
+        ...(maintenanceProof === null
+          ? {}
+          : { maintenance_margin_proof: maintenanceProof }),
       };
     });
     const objectArray = (items: readonly unknown[], field: string) => items.map((item, index) => (

@@ -130,6 +130,10 @@ _STATES = {"AWAITING_MARKET", "PAUSED", "PLAYING", "ADVANCING", "ENDED", "ERROR"
 _SOURCES = {"BAR", "AGG_TRADE"}
 _VIEW_EVENT_LIMIT = 2_048
 TOUCH_OR_TAPE_LIQUIDATION_FIDELITY = REVEALED_REFERENCE_CLOSE_FIDELITY
+VERSIONED_MAINTENANCE_TIER_FIDELITY = "VERSIONED_MAINTENANCE_TIER_APPLIED"
+EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY = (
+    "LAST_MAINTENANCE_TIER_RATE_DEDUCTION_EXTRAPOLATED"
+)
 _PUBLIC_TIME_BATCH_LIMIT = 20_000
 _EQUITY_RESOLUTIONS: tuple[tuple[str, int, int], ...] = (
     ("EVENT", 0, 2_048),
@@ -213,6 +217,75 @@ def _project_liquidation_price_pair(
                 safe_units = candidate_units
         liquidation_price = Decimal(breached_units) * tick
     return liquidation_price, bankruptcy_price
+
+
+def _maintenance_margin_proof(
+    *,
+    rule: InstrumentRule,
+    rule_revision: int,
+    rule_hash: str,
+    rule_fidelity: str,
+    position_notional: Decimal,
+    risk_tier: int,
+    liquidation_price: Decimal | None,
+    absolute_quantity: Decimal,
+) -> dict[str, object]:
+    """Describe when retained-position risk leaves the pinned tier envelope."""
+
+    last_tier_cap = Decimal(rule.maintenance_tiers[-1].notional_cap)
+    position_extrapolated = position_notional > last_tier_cap
+    liquidation_notional = (
+        None
+        if liquidation_price is None
+        else absolute_quantity
+        * Decimal(rule.contract_size)
+        * liquidation_price
+    )
+    liquidation_extrapolated = (
+        liquidation_notional is not None and liquidation_notional > last_tier_cap
+    )
+    if position_extrapolated and liquidation_extrapolated:
+        explanation = (
+            "POSITION_AND_LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+        )
+    elif position_extrapolated:
+        explanation = "POSITION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    elif liquidation_extrapolated:
+        explanation = "LIQUIDATION_NOTIONAL_ABOVE_LAST_VERSIONED_TIER_CAP"
+    else:
+        explanation = None
+    payload = {
+        "schema_version": "replay.maintenance-margin-proof.v1",
+        "rule_revision": rule_revision,
+        "rule_hash": rule_hash,
+        "rule_fidelity": rule_fidelity,
+        "risk_tier": risk_tier,
+        "last_tier_notional_cap": decimal_to_string(
+            last_tier_cap,
+            field_name="last maintenance tier cap",
+        ),
+        "position_notional": decimal_to_string(
+            position_notional,
+            field_name="maintenance proof position notional",
+        ),
+        "position_tier_extrapolated": position_extrapolated,
+        "liquidation_price_notional": (
+            None
+            if liquidation_notional is None
+            else decimal_to_string(
+                liquidation_notional,
+                field_name="maintenance proof liquidation notional",
+            )
+        ),
+        "liquidation_tier_extrapolated": liquidation_extrapolated,
+        "fidelity": (
+            EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+            if position_extrapolated or liquidation_extrapolated
+            else VERSIONED_MAINTENANCE_TIER_FIDELITY
+        ),
+        "explanation": explanation,
+    }
+    return {**payload, "proof_hash": canonical_sha256(payload)}
 
 
 _CARD_CTE = """
@@ -8240,6 +8313,25 @@ class TrainingRunStore:
                     "actual": hedge_funding_orphans,
                 }
             )
+        portfolio_fidelity = cast(Mapping[str, object], portfolio["fidelity"])
+        risk_fidelity = {
+            key: portfolio_fidelity[key]
+            for key in (
+                "instrument_rules",
+                "maintenance_margin",
+                "liquidation_projection",
+                "maintenance_tier_extrapolation",
+            )
+        }
+        position_maintenance_proofs = [
+            {
+                "track_id": str(position["track_id"]),
+                "position_side": position.get("position_side"),
+                "proof": position["maintenance_margin_proof"],
+            }
+            for position in cast(Sequence[Mapping[str, object]], portfolio["positions"])
+            if "maintenance_margin_proof" in position
+        ]
         snapshot = {
             "schema_version": ACCOUNT_AUDIT_SCHEMA_VERSION,
             "run_id": run_id,
@@ -8262,6 +8354,10 @@ class TrainingRunStore:
                     "liquidation_fees_paid",
                     "status",
                 )
+            }
+            | {
+                "risk_fidelity": risk_fidelity,
+                "position_maintenance_proofs": position_maintenance_proofs,
             },
             "authoritative_projection_verification": projection_verification,
             "independent_exact_state": independent_state,
@@ -16720,6 +16816,8 @@ class TrainingRunStore:
             configured_max_leverage = Decimal(str(leverage_policy["max_leverage"]))
             total_initial_margin = Decimal(0)
             total_maintenance = Decimal(0)
+            maintenance_tier_extrapolated_positions = 0
+            liquidation_tier_extrapolated_positions = 0
             for item in position_items:
                 if not isinstance(item, Mapping):
                     continue
@@ -16787,6 +16885,28 @@ class TrainingRunStore:
                     if str(account["margin_mode"]) == "CROSS"
                     else isolated_equity
                 )
+                raw_liquidation_price = item.get("liquidation_price")
+                liquidation_price = (
+                    None
+                    if raw_liquidation_price is None
+                    else Decimal(str(raw_liquidation_price))
+                )
+                maintenance_proof = _maintenance_margin_proof(
+                    rule=rule,
+                    rule_revision=int(rule_row["revision"]),
+                    rule_hash=str(rule_row["rule_hash"]),
+                    rule_fidelity=str(rule_row["fidelity"]),
+                    position_notional=notional,
+                    risk_tier=risk_tier,
+                    liquidation_price=liquidation_price,
+                    absolute_quantity=abs(Decimal(str(position["quantity"]))),
+                )
+                maintenance_tier_extrapolated_positions += int(
+                    maintenance_proof["position_tier_extrapolated"] is True
+                )
+                liquidation_tier_extrapolated_positions += int(
+                    maintenance_proof["liquidation_tier_extrapolated"] is True
+                )
                 risk_positions.append(
                     {
                         **dict(item),
@@ -16827,6 +16947,7 @@ class TrainingRunStore:
                         "rule_revision": int(rule_row["revision"]),
                         "rule_hash": str(rule_row["rule_hash"]),
                         "mark_fidelity": rule.mark_fidelity,
+                        "maintenance_margin_proof": maintenance_proof,
                     }
                 )
             margin_used = total_initial_margin
@@ -17355,6 +17476,33 @@ class TrainingRunStore:
                     if account_data_mode == "DETERMINISTIC_SIMULATION"
                     else "AVAILABLE_APPROX_SIMULATION_RULES"
                 ),
+                "maintenance_margin": (
+                    EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+                    if maintenance_tier_extrapolated_positions > 0
+                    else VERSIONED_MAINTENANCE_TIER_FIDELITY
+                ),
+                "liquidation_projection": (
+                    EXTRAPOLATED_MAINTENANCE_TIER_FIDELITY
+                    if liquidation_tier_extrapolated_positions > 0
+                    else VERSIONED_MAINTENANCE_TIER_FIDELITY
+                ),
+                "maintenance_tier_extrapolation": {
+                    "applied": (
+                        maintenance_tier_extrapolated_positions > 0
+                        or liquidation_tier_extrapolated_positions > 0
+                    ),
+                    "position_count": maintenance_tier_extrapolated_positions,
+                    "liquidation_projection_count": (
+                        liquidation_tier_extrapolated_positions
+                    ),
+                    "reason": (
+                        "EXISTING_POSITION_OR_PROJECTED_PRICE_ABOVE_LAST_VERSIONED_TIER_CAP"
+                        if maintenance_tier_extrapolated_positions > 0
+                        or liquidation_tier_extrapolated_positions > 0
+                        else None
+                    ),
+                    "admission_policy": "STRICT_VERSIONED_ORDER_LIMITS_UNCHANGED",
+                },
                 "fees": (
                     "PINNED_HISTORICAL_FEE_POLICY"
                     if account_data_mode == "DETERMINISTIC_SIMULATION"

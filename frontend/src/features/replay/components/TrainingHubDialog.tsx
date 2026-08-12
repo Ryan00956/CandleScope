@@ -131,16 +131,23 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           历史源
           <select
             value={draft.sourceKind}
-            onChange={(event) => patchDraft(runtime, {
-              sourceKind: event.target.value as ReplayV2SourceKind,
-            })}
+            disabled={busy}
+            onChange={(event) => {
+              const sourceKind = event.target.value as ReplayV2SourceKind;
+              patchDraft(runtime, {
+                sourceKind,
+                requestedStartMs: null,
+                randomRangeStartMs: null,
+                randomRangeEndMs: null,
+              });
+            }}
           >
             <option value="BAR">BAR · 精确 OHLCV</option>
             <option
               value="AGG_TRADE"
               disabled={!runtime.capabilities?.sources.agg_trade.enabled}
             >
-              AGG_TRADE · 成交归档已校验，K 线近似聚合
+              AGG_TRADE · 官方可用性校验，选择时下载并校验成交归档
             </option>
           </select>
         </label>
@@ -207,6 +214,11 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
         <p className="training-hub-field-note" role="note">
           创建确认后 T0 永久不变。商品只做兼容性判断；不支持时需另开一局，系统不会改时间或重抽。
         </p>
+        {runtime.catalog !== null && (
+          <p className="training-hub-field-note" role="status">
+            当前历史源可选商品 {runtime.catalog.entries.length} 个；时间输入已按其覆盖范围校验。
+          </p>
+        )}
         <label>
           完整性模式
           <select
@@ -423,7 +435,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               BOOK_ASSISTED_REQUIRED · 连续历史 L2
             </option>
           </select>
-          <small>OFF 时不结算资金费；mark/index 可使用已揭示 BAR/AGG_TRADE 价格代理。L2 模式只有连续性可证明时可选，且始终不声明 queue-exact。</small>
+          <small>盘口 OFF 时使用 Touch/Tape；资金费是否结算由上方资金费模式决定。mark/index 可使用已揭示 BAR/AGG_TRADE 价格代理。L2 只有连续性可证明时可选，且始终不声明 queue-exact。</small>
         </label>
         {draft.fundingMode === "SANDBOX_FIXED" && (
           <>

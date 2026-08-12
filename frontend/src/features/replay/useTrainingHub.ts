@@ -85,6 +85,7 @@ export interface TrainingHubApiBoundary {
       horizonMs?: number;
       qualityMode?: "exact" | "best_effort";
       blindMode?: boolean;
+      sourceKind?: ReplayV2SourceKind;
     },
     signal?: AbortSignal,
   ): Promise<ReplayCatalog>;
@@ -240,27 +241,31 @@ export class TrainingHubLifecycle {
     const preservedDraft = this.draft;
     this.createOpen = true;
     this.error = null;
-    if (this.capabilities !== null) {
-      this.draft ??= createTrainingRunDraft();
-      this.evaluation = evaluateTrainingRunSetupDraft(
-        this.draft,
-        this.capabilities,
-      );
-      this.publish();
-      return;
-    }
     this.operation = "create-context";
     this.publish();
     const token = ++this.requestToken;
     try {
-      const capabilities = await this.api.capabilities(this.abortController.signal);
+      const capabilities = this.capabilities
+        ?? await this.api.capabilities(this.abortController.signal);
       if (!this.accept(token)) return;
       this.capabilities = capabilities;
-      this.catalog = null;
-      this.draft = preservedDraft ?? createTrainingRunDraft();
-      this.evaluation = evaluateTrainingRunSetupDraft(
+      const seedDraft = preservedDraft ?? createTrainingRunDraft();
+      const catalog = await this.api.catalog({
+        warmupBars: seedDraft.indicatorWarmupBars,
+        horizonMs: seedDraft.forwardCacheMs,
+        qualityMode: "exact",
+        blindMode: false,
+        sourceKind: seedDraft.sourceKind,
+      }, this.abortController.signal);
+      if (!this.accept(token)) return;
+      this.catalog = catalog;
+      this.draft = preservedDraft ?? createTrainingRunDraft(catalog, this.launchContext);
+      if (preservedDraft === null) {
+        this.draft = this.sourceAwareDraft(this.draft, catalog);
+      }
+      this.evaluation = this.evaluateSourceCoverage(
         this.draft,
-        capabilities,
+        catalog,
       );
       this.operation = null;
       this.publish();
@@ -435,10 +440,22 @@ export class TrainingHubLifecycle {
 
   setDraft(draft: TrainingRunDraft): void {
     if (this.disposed) return;
+    const sourceChanged = this.draft !== null
+      && this.draft.sourceKind !== draft.sourceKind;
     this.draft = draft;
     this.segmentPlan = null;
-    this.evaluation = this.capabilities !== null
-      ? evaluateTrainingRunSetupDraft(draft, this.capabilities)
+    if (sourceChanged) {
+      this.catalog = null;
+      this.evaluation = null;
+      this.operation = "create-context";
+      this.publish();
+      void this.loadCreateCatalog(draft, true);
+      return;
+    }
+    this.evaluation = this.capabilities !== null && this.catalog !== null
+      ? this.evaluateSourceCoverage(draft, this.catalog)
+      : this.capabilities !== null
+        ? evaluateTrainingRunSetupDraft(draft, this.capabilities)
       : null;
     this.publish();
   }
@@ -447,17 +464,16 @@ export class TrainingHubLifecycle {
     if (this.disposed || this.capabilities === null || this.draft === null) {
       return;
     }
-    this.segmentPlan = null;
-    this.evaluation = evaluateTrainingRunSetupDraft(
-      this.draft,
-      this.capabilities,
-    );
-    this.publish();
+    await this.loadCreateCatalog(this.draft);
   }
 
   async createRun(draft: TrainingRunDraft): Promise<void> {
     if (this.disposed || this.capabilities === null) return;
-    const evaluation = evaluateTrainingRunSetupDraft(draft, this.capabilities);
+    const ready = await this.loadCreateCatalog(draft);
+    if (!ready) return;
+    if (this.catalog === null || this.draft === null) return;
+    draft = this.draft;
+    const evaluation = this.evaluateSourceCoverage(draft, this.catalog);
     this.draft = draft;
     this.evaluation = evaluation;
     if (!evaluation.canSubmit) {
@@ -565,6 +581,98 @@ export class TrainingHubLifecycle {
 
   private accept(token: number): boolean {
     return !this.disposed && token === this.requestToken;
+  }
+
+  private sourceAwareDraft(
+    draft: TrainingRunDraft,
+    catalog: ReplayCatalog,
+  ): TrainingRunDraft {
+    const ranges = catalog.entries.flatMap((entry) => entry.eligible_ranges);
+    if (ranges.length === 0) return draft;
+    const earliest = Math.min(...ranges.map((range) => range.first_start_ms));
+    const latest = Math.max(...ranges.map((range) => range.last_start_ms));
+    if (draft.startMode === "MANUAL") {
+      return { ...draft, requestedStartMs: latest };
+    }
+    return {
+      ...draft,
+      randomRangeStartMs: earliest,
+      randomRangeEndMs: latest,
+    };
+  }
+
+  private evaluateSourceCoverage(
+    draft: TrainingRunDraft,
+    catalog: ReplayCatalog,
+  ): TrainingRunDraftEvaluation {
+    if (this.capabilities === null) {
+      throw new TypeError("replay capabilities are required for source validation");
+    }
+    const evaluation = evaluateTrainingRunSetupDraft(draft, this.capabilities);
+    const errors = [...evaluation.errors];
+    const ranges = catalog.entries.flatMap((entry) => entry.eligible_ranges);
+    if (catalog.entries.length === 0 || ranges.length === 0) {
+      errors.push("当前历史源没有可用覆盖商品");
+    } else if (draft.startMode === "MANUAL" && (
+      draft.requestedStartMs === null
+      || !ranges.some((range) => (
+        draft.requestedStartMs! >= range.first_start_ms
+        && draft.requestedStartMs! <= range.last_start_ms
+        && (draft.requestedStartMs! - range.first_start_ms) % range.interval_ms === 0
+      ))
+    )) {
+      errors.push("开始时间不在当前历史源的可用覆盖范围");
+    } else if (draft.startMode === "RANDOM"
+      && draft.randomRangeStartMs !== null
+      && draft.randomRangeEndMs !== null
+      && !ranges.some((range) => {
+        const first = Math.max(range.first_start_ms, draft.randomRangeStartMs!);
+        const last = Math.min(range.last_start_ms, draft.randomRangeEndMs!);
+        const alignedFirst = first
+          + ((range.interval_ms - ((first - range.first_start_ms) % range.interval_ms))
+            % range.interval_ms);
+        return alignedFirst <= last;
+      })) {
+      errors.push("随机区间与当前历史源的可用覆盖范围不相交");
+    }
+    return {
+      ...evaluation,
+      canSubmit: errors.length === 0,
+      errors,
+    };
+  }
+
+  private async loadCreateCatalog(
+    draft: TrainingRunDraft,
+    normalizeStart = false,
+  ): Promise<boolean> {
+    if (this.disposed || this.capabilities === null) return false;
+    const token = ++this.requestToken;
+    this.operation = "create-context";
+    this.error = null;
+    this.publish();
+    try {
+      const catalog = await this.api.catalog({
+        warmupBars: draft.indicatorWarmupBars,
+        horizonMs: draft.forwardCacheMs,
+        qualityMode: "exact",
+        blindMode: false,
+        sourceKind: draft.sourceKind,
+      }, this.abortController.signal);
+      if (!this.accept(token)) return false;
+      this.catalog = catalog;
+      this.draft = normalizeStart ? this.sourceAwareDraft(draft, catalog) : draft;
+      this.evaluation = this.evaluateSourceCoverage(
+        this.draft,
+        catalog,
+      );
+      this.operation = null;
+      this.publish();
+      return true;
+    } catch (error) {
+      this.fail(token, error);
+      return false;
+    }
   }
 
   private fail(token: number, error: unknown): void {

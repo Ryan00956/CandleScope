@@ -1373,12 +1373,14 @@ async def replay_catalog(
     horizon_ms: int = Query(default=86_400_000, ge=1, le=_MAX_HORIZON_MS),
     quality_mode: QualityMode = Query(default=QualityMode.EXACT),
     blind_mode: bool = Query(default=False),
+    source_kind: ReplaySource = Query(default=ReplaySource.BAR),
 ) -> dict[str, object]:
     return await _service(request).catalog(
         warmup_bars=warmup_bars,
         horizon_ms=horizon_ms,
         quality_mode=quality_mode.value,
         blind_mode=blind_mode,
+        source_kind=source_kind.value,
     )
 
 

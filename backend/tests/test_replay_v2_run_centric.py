@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+import app.replay.training.service as training_service_module
 from app.api.v1.replay import (
     TrainingRunPreparationPayload,
     TrainingRunSetupPayload,
@@ -28,6 +29,12 @@ from tests.fixtures.replay.service_fakes import (
     replay_repository,
     replay_settings,
 )
+from tests.fixtures.replay.trade_service_fakes import (
+    TRADE_NOW_MS,
+    TRADE_REPLAY_START_MS,
+    trade_replay_repository,
+    verified_trade_archive,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -41,6 +48,22 @@ async def _service(path: Path, *, random_seed: int = 1) -> ReplayService:
         now_ms=lambda: NOW_MS,
         session_id_factory=SessionIdFactory("adapter"),
         training_run_id_factory=SessionIdFactory("run"),
+        training_random_seed_factory=lambda: random_seed,
+        native_intervals=lambda _identity: ("1m",),
+    )
+    await service.start()
+    return service
+
+
+async def _trade_service(path: Path, archive_root: Path, *, random_seed: int = 1):
+    service = ReplayService(
+        settings=replay_settings(path),
+        store=ReplaySQLiteStore(path, now_ms=lambda: TRADE_NOW_MS),
+        repository=trade_replay_repository(),
+        raw_trade_archive=verified_trade_archive(archive_root),
+        now_ms=lambda: TRADE_NOW_MS,
+        session_id_factory=SessionIdFactory("trade-adapter"),
+        training_run_id_factory=SessionIdFactory("trade-run"),
         training_random_seed_factory=lambda: random_seed,
         native_intervals=lambda _identity: ("1m",),
     )
@@ -290,6 +313,218 @@ async def test_failed_first_market_selection_leaves_run_empty(tmp_path: Path) ->
         tracks = await _request(app, "GET", "/api/v1/replay/runs/run-1/tracks")
         assert tracks.status_code == 200
         assert tracks.json()["tracks"] == []
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_agg_run_creation_rejects_dead_manual_start_without_persisting(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agg-dead-start.db"
+    service = await _trade_service(database, tmp_path / "agg-dead-start-archive")
+    app = _app(service)
+    payload = _setup_payload()
+    payload.update({
+        "source_kind": "AGG_TRADE",
+        "requested_start_ms": TRADE_REPLAY_START_MS - INTERVAL_MS,
+        "time_disclosure_policy": "NONE",
+    })
+    try:
+        rejected = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert rejected.status_code == 409
+        assert rejected.json()["error"]["code"] == (
+            "NO_ELIGIBLE_SOURCE_MARKET_AT_START"
+        )
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone() == (0,)
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_legacy_dead_agg_run_projects_unavailable_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agg-legacy-dead.db"
+    service = await _trade_service(database, tmp_path / "agg-legacy-dead-archive")
+    setup = _setup_payload()
+    setup.update({
+        "source_kind": "AGG_TRADE",
+        "requested_start_ms": TRADE_REPLAY_START_MS - INTERVAL_MS,
+        "time_disclosure_policy": "NONE",
+    })
+    try:
+        assert service.training is not None
+        # Reproduce an archive created before source-aware admission existed.
+        await service.training.store.create_empty_run(
+            run_id="legacy-dead",
+            request=TrainingRunSetupRequest.from_dict(setup),
+            committed_start_ms=TRADE_REPLAY_START_MS - INTERVAL_MS,
+            random_seed=None,
+        )
+        with sqlite3.connect(database) as connection:
+            before = connection.execute(
+                "SELECT compatibility, state FROM replay_training_run WHERE run_id = ?",
+                ("legacy-dead",),
+            ).fetchone()
+        detail = await service.training.get_run("legacy-dead")
+        listed = await service.training.list_runs(
+            limit=10,
+            cursor=None,
+            state=None,
+            source_kind=None,
+            compatibility="UNAVAILABLE",
+        )
+        with sqlite3.connect(database) as connection:
+            after = connection.execute(
+                "SELECT compatibility, state FROM replay_training_run WHERE run_id = ?",
+                ("legacy-dead",),
+            ).fetchone()
+        assert before == after == ("READY", "AWAITING_MARKET")
+        assert detail["compatibility"] == "UNAVAILABLE"
+        assert detail["resume_action"] == "UNAVAILABLE"
+        assert detail["status"]["code"] == "NO_COMPATIBLE_SOURCE_MARKET"
+        assert [item["run_id"] for item in listed["items"]] == ["legacy-dead"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_source_compatibility_filter_paginates_projected_legacy_runs(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agg-projected-pagination.db"
+    service = await _trade_service(
+        database,
+        tmp_path / "agg-projected-pagination-archive",
+    )
+    try:
+        assert service.training is not None
+        for run_id, committed_start_ms in (
+            ("z-dead", TRADE_REPLAY_START_MS - INTERVAL_MS),
+            ("y-ready", TRADE_REPLAY_START_MS),
+            ("x-dead", TRADE_REPLAY_START_MS - INTERVAL_MS),
+            ("w-ready", TRADE_REPLAY_START_MS),
+        ):
+            setup = _setup_payload()
+            setup.update({
+                "source_kind": "AGG_TRADE",
+                "requested_start_ms": committed_start_ms,
+                "time_disclosure_policy": "NONE",
+            })
+            await service.training.store.create_empty_run(
+                run_id=run_id,
+                request=TrainingRunSetupRequest.from_dict(setup),
+                committed_start_ms=committed_start_ms,
+                random_seed=None,
+            )
+
+        async def projected_pages(compatibility: str) -> tuple[list[str], list[str]]:
+            cursor = None
+            run_ids: list[str] = []
+            cursors: list[str] = []
+            while True:
+                page = await service.training.list_runs(
+                    limit=1,
+                    cursor=cursor,
+                    state="AWAITING_MARKET",
+                    source_kind="AGG_TRADE",
+                    compatibility=compatibility,
+                )
+                run_ids.extend(str(item["run_id"]) for item in page["items"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+                cursors.append(str(cursor))
+            return run_ids, cursors
+
+        unavailable_ids, unavailable_cursors = await projected_pages("UNAVAILABLE")
+        ready_ids, ready_cursors = await projected_pages("READY")
+        assert unavailable_ids == ["z-dead", "x-dead"]
+        assert ready_ids == ["y-ready", "w-ready"]
+        assert len(unavailable_cursors) == len(ready_cursors) == 1
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_agg_random_sampling_deduplicates_t0_shared_by_markets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def controlled_hash(payload: dict[str, object]) -> str:
+        schema = str(payload["schema_version"])
+        attempt = int(payload["attempt"])
+        calls.append((schema, attempt))
+        if schema == "replay.source-time-sample.v1":
+            # On retry choose multiset index 3, the unique final timestamp.
+            suffix = "3"
+        elif attempt == 0:
+            # Reject the first draw: seed 1 maps to the duplicated timestamp.
+            suffix = "1"
+        else:
+            suffix = "0"
+        return "sha256:" + "0" * 63 + suffix
+
+    monkeypatch.setattr(training_service_module, "canonical_sha256", controlled_hash)
+    selected = training_service_module._sample_unique_source_time(
+        (
+            (0, INTERVAL_MS, 2),
+            (INTERVAL_MS, INTERVAL_MS, 2),
+        ),
+        random_seed=1,
+    )
+    assert selected == 2 * INTERVAL_MS
+    assert calls == [
+        ("replay.source-time-deduplication.v1", 0),
+        ("replay.source-time-sample.v1", 1),
+        ("replay.source-time-deduplication.v1", 1),
+    ]
+
+
+async def test_agg_run_catalog_and_random_commit_use_trade_intersection(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "agg-source-aware.db"
+    service = await _trade_service(
+        database,
+        tmp_path / "agg-source-aware-archive",
+        random_seed=1,
+    )
+    app = _app(service)
+    payload = _setup_payload()
+    payload.update({
+        "source_kind": "AGG_TRADE",
+        "start_mode": "RANDOM",
+        "requested_start_ms": None,
+        "random_range_start_ms": TRADE_REPLAY_START_MS - 86_400_000,
+        "random_range_end_ms": TRADE_REPLAY_START_MS + 2 * INTERVAL_MS,
+        "forward_cache_ms": 4 * INTERVAL_MS,
+        "time_disclosure_policy": "NONE",
+    })
+    try:
+        created = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert created.status_code == 201, created.text
+        catalog = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/trade-run-1/market-catalog",
+        )
+        assert catalog.status_code == 200, catalog.text
+        body = catalog.json()
+        assert [entry["identity"] for entry in body["entries"]] == [{
+            "exchange": "binance",
+            "market_type": "futures",
+            "symbol": "BTCUSDT",
+        }]
+        assert body["entries"][0]["start_compatibility"]["state"] == "READY"
+        with sqlite3.connect(database) as connection:
+            committed = connection.execute(
+                "SELECT committed_start_ms FROM replay_training_time_commitment"
+            ).fetchone()[0]
+        assert TRADE_REPLAY_START_MS <= committed <= (
+            TRADE_REPLAY_START_MS + 2 * INTERVAL_MS
+        )
     finally:
         await service.shutdown(step_timeout=1.0)
 

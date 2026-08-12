@@ -223,6 +223,7 @@ async def _trade_request(service: ReplayService) -> TrainingRunCreateRequest:
         horizon_ms=TRADE_REPLAY_MINUTES * INTERVAL_MS,
         quality_mode="exact",
         blind_mode=False,
+        source_kind="AGG_TRADE",
     )
     return TrainingRunCreateRequest.from_dict(
         {

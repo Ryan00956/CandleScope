@@ -17,6 +17,7 @@ from app.replay.constants import (
     SessionState,
     StartPolicy,
 )
+from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from app.replay.models import ReplayCommand
 from app.replay.service import ReplayService, SYNTHETIC_TIME_ANCHOR_MS
 from app.replay.storage import ReplaySQLiteStore
@@ -57,11 +58,12 @@ async def _service(
     archive,
     *,
     prefix: str,
+    repository=None,
 ) -> ReplayService:
     service = ReplayService(
         settings=replay_settings(database),
         store=ReplaySQLiteStore(database, now_ms=lambda: TRADE_NOW_MS),
-        repository=trade_replay_repository(),
+        repository=repository or trade_replay_repository(),
         raw_trade_archive=archive,
         now_ms=lambda: TRADE_NOW_MS,
         session_id_factory=SessionIdFactory(prefix),
@@ -122,6 +124,136 @@ async def test_trade_capability_stays_closed_without_a_verified_exact_partition(
     await service.shutdown(step_timeout=1.0)
 
 
+async def test_trade_catalog_filters_identities_and_intersects_official_coverage(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "catalog-archive")
+    repository = trade_replay_repository()
+    futures_rows = next(iter(repository.rows.values()))
+    repository.add_rows(
+        FixtureIdentity("binance", "spot", "BTCUSDT"),
+        "1m",
+        futures_rows,
+    )
+    service = await _service(
+        tmp_path / "catalog.db",
+        archive,
+        prefix="trade-catalog",
+        repository=repository,
+    )
+    try:
+        bar_catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=4 * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        assert {
+            entry["identity"]["market_type"] for entry in bar_catalog["entries"]
+        } == {"futures", "spot"}
+
+        trade_catalog = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=4 * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+            source_kind="AGG_TRADE",
+        )
+        assert [entry["identity"] for entry in trade_catalog["entries"]] == [{
+            "exchange": "binance",
+            "market_type": "futures",
+            "symbol": "BTCUSDT",
+        }]
+        entry = trade_catalog["entries"][0]
+        assert entry["quality"] == "VERIFIED_AGG_TRADE_APPROXIMATE_BARS"
+        assert entry["eligible_ranges"][0]["first_start_ms"] == (
+            TRADE_REPLAY_START_MS
+        )
+        assert entry["eligible_ranges"][0]["last_start_ms"] == (
+            TRADE_REPLAY_START_MS + 2 * 60_000
+        )
+        assert entry["eligible_ranges"][0]["count"] == 3
+        assert entry["eligible_ranges"][0]["replay_bars"] == 4
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_trade_catalog_epoch_binds_official_availability_epoch(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "epoch-archive")
+    service = await _service(
+        tmp_path / "epoch.db",
+        archive,
+        prefix="trade-epoch",
+    )
+    windows = archive.list_selection_windows(
+        exchange="binance",
+        market_type="futures",
+        symbol="BTCUSDT",
+    )
+    try:
+        archive.selection_snapshot = lambda **_kwargs: (  # type: ignore[attr-defined]
+            "sha256:" + "a" * 64,
+            windows,
+        )
+        first = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=4 * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+            source_kind="AGG_TRADE",
+        )
+        archive.selection_snapshot = lambda **_kwargs: (  # type: ignore[attr-defined]
+            "sha256:" + "b" * 64,
+            windows,
+        )
+        second = await service.catalog(
+            warmup_bars=2,
+            horizon_ms=4 * 60_000,
+            quality_mode="exact",
+            blind_mode=False,
+            source_kind="AGG_TRADE",
+        )
+        assert first["catalog_epoch"] != second["catalog_epoch"]
+        assert first["entries"][0]["catalog_epoch"] == first["catalog_epoch"]
+        assert second["entries"][0]["catalog_epoch"] == second["catalog_epoch"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_manual_trade_selection_rejects_bar_only_window_before_freeze(
+    tmp_path: Path,
+) -> None:
+    archive = verified_trade_archive(tmp_path / "manual-archive")
+    service = await _service(
+        tmp_path / "manual.db",
+        archive,
+        prefix="trade-manual",
+    )
+    try:
+        config = replace(
+            trade_replay_config(),
+            requested_start_ms=TRADE_REPLAY_START_MS - 60_000,
+        )
+        catalog = await service.catalog(
+            warmup_bars=config.warmup_bars,
+            horizon_ms=config.horizon_ms,
+            quality_mode=config.quality_mode.value,
+            blind_mode=False,
+            source_kind="AGG_TRADE",
+        )
+        with pytest.raises(ReplayDomainError, match="not eligible") as exc_info:
+            await service.select_training_window(
+                config,
+                expected_catalog_epoch=str(catalog["catalog_epoch"]),
+            )
+        assert exc_info.value.code is ReplayErrorCode.NO_ELIGIBLE_WINDOW
+        assert archive.diagnostics()["active_pins"] == 0
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_random_trade_selection_uses_only_verified_trade_coverage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -169,9 +301,10 @@ async def test_random_trade_selection_uses_only_verified_trade_coverage(
             horizon_ms=config.horizon_ms,
             quality_mode=config.quality_mode.value,
             blind_mode=False,
+            source_kind="AGG_TRADE",
         )
         entry = catalog["entries"][0]
-        assert entry["eligible_window_count"] == 6
+        assert entry["eligible_window_count"] == 3
         assert archive.list_verified_bar_windows(
             exchange="binance",
             market_type="futures",

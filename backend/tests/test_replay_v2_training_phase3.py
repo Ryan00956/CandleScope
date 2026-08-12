@@ -757,6 +757,7 @@ async def test_agg_trade_supports_event_base_display_and_arbitrary_time_controls
             horizon_ms=TRADE_REPLAY_MINUTES * INTERVAL_MS,
             quality_mode="exact",
             blind_mode=False,
+            source_kind="AGG_TRADE",
         )
         request = TrainingRunCreateRequest.from_dict(
             {

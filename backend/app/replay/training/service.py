@@ -272,6 +272,70 @@ def _hedge_leg_leverage(
     return Decimal(str(leg["leverage"]))
 
 
+def _sample_unique_source_time(
+    candidate_ranges: Sequence[tuple[int, int, int]],
+    *,
+    random_seed: int,
+) -> int:
+    """Map a seed to a uniformly weighted T0 without materializing every minute.
+
+    The input is a compact multiset of ``(first, interval, count)`` progressions
+    contributed by source-compatible markets. A timestamp present in more than
+    one progression still represents one Run T0, so deterministic rejection
+    removes the otherwise accidental market-count weighting.
+    """
+
+    candidate_count = sum(count for _first, _step, count in candidate_ranges)
+    if candidate_count < 1:
+        raise ValueError("candidate_ranges must contain at least one timestamp")
+    for attempt in range(10_000):
+        if attempt == 0:
+            candidate_index = random_seed % candidate_count
+        else:
+            draw = canonical_sha256(
+                {
+                    "schema_version": "replay.source-time-sample.v1",
+                    "random_seed": random_seed,
+                    "attempt": attempt,
+                }
+            )
+            candidate_index = int(draw[7:], 16) % candidate_count
+        mapped_index = candidate_index
+        candidate_start_ms: int | None = None
+        for first, interval_ms, count in candidate_ranges:
+            if mapped_index < count:
+                candidate_start_ms = first + mapped_index * interval_ms
+                break
+            mapped_index -= count
+        if candidate_start_ms is None:
+            raise RuntimeError("aggregate-trade random range mapping drifted")
+        multiplicity = sum(
+            1
+            for first, interval_ms, count in candidate_ranges
+            if first <= candidate_start_ms <= first + (count - 1) * interval_ms
+            and (candidate_start_ms - first) % interval_ms == 0
+        )
+        if multiplicity < 1:
+            raise RuntimeError(
+                "aggregate-trade random coverage multiplicity drifted"
+            )
+        acceptance = canonical_sha256(
+            {
+                "schema_version": "replay.source-time-deduplication.v1",
+                "random_seed": random_seed,
+                "attempt": attempt,
+                "candidate_start_ms": candidate_start_ms,
+            }
+        )
+        if int(acceptance[7:], 16) % multiplicity == 0:
+            return candidate_start_ms
+    raise TrainingRunError(
+        "TRAINING_RANDOM_SEED_UNAVAILABLE",
+        "server could not map the random seed to a unique source time",
+        status_code=503,
+    )
+
+
 class TrainingRunService:
     """Own Hub metadata and delegate active single-track execution to replay.v1."""
 
@@ -450,16 +514,106 @@ class TrainingRunService:
         source_kind: str | None,
         compatibility: str | None,
     ) -> dict[str, object]:
-        return await self.store.list_runs(
-            limit=limit,
-            cursor=cursor,
-            state=state,
-            source_kind=source_kind,
-            compatibility=compatibility,
-        )
+        if compatibility is not None and compatibility not in {
+            "READY",
+            "UNAVAILABLE",
+        }:
+            raise TrainingRunError(
+                "TRAINING_RUN_INVALID",
+                "compatibility filter is invalid",
+                status_code=422,
+            )
+        if compatibility is None:
+            result = await self.store.list_runs(
+                limit=limit,
+                cursor=cursor,
+                state=state,
+                source_kind=source_kind,
+                compatibility=None,
+            )
+            result["items"] = [
+                await self._project_awaiting_market_compatibility(item)
+                for item in cast(list[dict[str, object]], result["items"])
+            ]
+            return result
+
+        # Source-aware compatibility is a live projection for legacy empty Runs,
+        # so it cannot be filtered by the persisted SQL column. Walk one opaque
+        # storage row at a time and look ahead to the next projected match. The
+        # returned cursor resumes immediately before that match, avoiding both
+        # skipped archives and a false final cursor whose next page is empty.
+        scan_cursor = cursor
+        matches: list[dict[str, object]] = []
+        next_cursor: str | None = None
+        while True:
+            cursor_before_row = scan_cursor
+            page = await self.store.list_runs(
+                limit=1,
+                cursor=scan_cursor,
+                state=state,
+                source_kind=source_kind,
+                compatibility=None,
+            )
+            rows = cast(list[dict[str, object]], page["items"])
+            if not rows:
+                break
+            projected = await self._project_awaiting_market_compatibility(rows[0])
+            scan_cursor = cast(str | None, page["next_cursor"])
+            if projected.get("compatibility") == compatibility:
+                if len(matches) == limit:
+                    next_cursor = cursor_before_row
+                    break
+                matches.append(projected)
+            if scan_cursor is None:
+                break
+        return {
+            "protocol": REPLAY_V2_PROTOCOL,
+            "schema_version": "replay.training.v2",
+            "items": matches,
+            "next_cursor": next_cursor,
+        }
 
     async def get_run(self, run_id: str) -> dict[str, object]:
-        return await self.store.get_run(self._identifier(run_id, field_name="run_id"))
+        card = await self.store.get_run(
+            self._identifier(run_id, field_name="run_id")
+        )
+        return await self._project_awaiting_market_compatibility(card)
+
+    async def _project_awaiting_market_compatibility(
+        self,
+        card: dict[str, object],
+    ) -> dict[str, object]:
+        if card.get("state") != RunState.AWAITING_MARKET.value:
+            return card
+        try:
+            catalog = await self.market_catalog(str(card["run_id"]))
+        except (ReplayDomainError, TrainingRunError):
+            return {
+                **card,
+                "compatibility": "UNAVAILABLE",
+                "resume_action": "UNAVAILABLE",
+                "status": {
+                    "code": "SOURCE_CATALOG_UNAVAILABLE",
+                    "message": "该存档的历史源目录当前不可用，不能继续选择商品。",
+                },
+            }
+        compatible = any(
+            isinstance(entry.get("start_compatibility"), Mapping)
+            and entry["start_compatibility"].get("state")  # type: ignore[union-attr]
+            == "READY"
+            for entry in cast(list[Mapping[str, object]], catalog["entries"])
+        )
+        if compatible:
+            return card
+        return {
+            **card,
+            "compatibility": "UNAVAILABLE",
+            "resume_action": "UNAVAILABLE",
+            "status": {
+                "code": "NO_COMPATIBLE_SOURCE_MARKET",
+                "message": "该存档的固定开始时间没有兼容历史源商品；请用合法覆盖时间新建 Run。",
+            },
+        }
 
     async def create_empty_run(
         self,
@@ -469,15 +623,80 @@ class TrainingRunService:
             raise TypeError("request must be TrainingRunSetupRequest")
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
         settings = request.to_dict()
+        aggregate_trade = settings["source_kind"] == ReplaySource.AGG_TRADE.value
+        entries: list[Mapping[str, object]] = []
+        if aggregate_trade:
+            catalog = await self.replay_service.catalog(
+                warmup_bars=int(settings["indicator_warmup_bars"]),
+                horizon_ms=int(settings["forward_cache_ms"]),
+                quality_mode="exact",
+                blind_mode=False,
+                source_kind=str(settings["source_kind"]),
+            )
+            entries = cast(list[Mapping[str, object]], catalog["entries"])
+            if not entries:
+                raise TrainingRunError(
+                    "NO_ELIGIBLE_SOURCE_MARKET",
+                    "the selected replay source has no market with eligible coverage",
+                    status_code=409,
+                    details={"source_kind": settings["source_kind"]},
+                )
         if settings["start_mode"] == StartMode.MANUAL.value:
             committed_start_ms = int(settings["requested_start_ms"])
             random_seed = None
+            if aggregate_trade and not any(
+                self._market_start_compatibility(entry, committed_start_ms)["state"]
+                == "READY"
+                for entry in entries
+            ):
+                raise TrainingRunError(
+                    "NO_ELIGIBLE_SOURCE_MARKET_AT_START",
+                    "no market for the selected replay source can use the "
+                    "requested start",
+                    status_code=409,
+                    details={
+                        "source_kind": settings["source_kind"],
+                        "requires_new_start": True,
+                    },
+                )
         else:
             random_seed = self._authoritative_random_seed()
             range_start = int(settings["random_range_start_ms"])
             range_end = int(settings["random_range_end_ms"])
-            minute_count = ((range_end - range_start) // 60_000) + 1
-            committed_start_ms = range_start + (random_seed % minute_count) * 60_000
+            if aggregate_trade:
+                candidate_ranges: list[tuple[int, int, int]] = []
+                for entry in entries:
+                    for eligible_range in cast(
+                        list[Mapping[str, object]], entry.get("eligible_ranges", [])
+                    ):
+                        first = max(range_start, int(eligible_range["first_start_ms"]))
+                        last = min(range_end, int(eligible_range["last_start_ms"]))
+                        interval_ms = int(eligible_range["interval_ms"])
+                        origin = int(eligible_range["first_start_ms"])
+                        first += (-((first - origin) % interval_ms)) % interval_ms
+                        if first <= last:
+                            count = ((last - first) // interval_ms) + 1
+                            candidate_ranges.append((first, interval_ms, count))
+                if not candidate_ranges:
+                    raise TrainingRunError(
+                        "NO_ELIGIBLE_SOURCE_MARKET_IN_RANGE",
+                        "no market for the selected replay source overlaps the "
+                        "requested range",
+                        status_code=409,
+                        details={
+                            "source_kind": settings["source_kind"],
+                            "requires_new_range": True,
+                        },
+                    )
+                committed_start_ms = _sample_unique_source_time(
+                    candidate_ranges,
+                    random_seed=random_seed,
+                )
+            else:
+                minute_count = ((range_end - range_start) // 60_000) + 1
+                committed_start_ms = (
+                    range_start + (random_seed % minute_count) * 60_000
+                )
         try:
             await self.store.create_empty_run(
                 run_id=run_id,
@@ -581,6 +800,7 @@ class TrainingRunService:
             horizon_ms=int(settings["forward_cache_ms"]),
             quality_mode="exact",
             blind_mode=blind_mode,
+            source_kind=str(settings["source_kind"]),
         )
         internal_catalog = (
             await self.replay_service.catalog(
@@ -588,6 +808,7 @@ class TrainingRunService:
                 horizon_ms=int(settings["forward_cache_ms"]),
                 quality_mode="exact",
                 blind_mode=False,
+                source_kind=str(settings["source_kind"]),
             )
             if blind_mode
             else catalog
@@ -4760,6 +4981,7 @@ class TrainingRunService:
                 horizon_ms=config.horizon_ms,
                 quality_mode=config.quality_mode,
                 blind_mode=config.blind_mode,
+                source_kind=config.source_kind,
             )
             track_catalog_epoch = str(track_catalog["catalog_epoch"])
             selection = await self.replay_service.select_training_window(
@@ -10938,6 +11160,7 @@ class TrainingRunService:
             horizon_ms=int(settings["forward_cache_ms"]),
             quality_mode="exact",
             blind_mode=False,
+            source_kind=str(settings["source_kind"]),
         )
         if catalog["catalog_epoch"] != selection.catalog_epoch:
             raise TrainingRunError(

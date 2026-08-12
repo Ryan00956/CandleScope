@@ -46,6 +46,7 @@ export interface ReplayCatalogQuery {
   horizonMs?: number;
   qualityMode?: "exact" | "best_effort";
   blindMode?: boolean;
+  sourceKind?: "BAR" | "AGG_TRADE";
 }
 
 export interface ReplayApiClientOptions {
@@ -84,6 +85,7 @@ export class ReplayApiClient {
     if (query.horizonMs !== undefined) params.set("horizon_ms", String(query.horizonMs));
     if (query.qualityMode !== undefined) params.set("quality_mode", query.qualityMode);
     if (query.blindMode !== undefined) params.set("blind_mode", String(query.blindMode));
+    if (query.sourceKind !== undefined) params.set("source_kind", query.sourceKind);
     const suffix = params.size ? `?${params.toString()}` : "";
     return this.request(`/catalog${suffix}`, parseReplayCatalog, signal ? { signal } : {});
   }

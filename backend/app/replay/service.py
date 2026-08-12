@@ -63,6 +63,7 @@ from .catalog import (
     KlinesReadRepository,
     ReplayCatalog,
     ReplayCatalogEntry,
+    ReplayCatalogSnapshot,
     ReplaySeriesIdentity,
     SeriesBounds,
 )
@@ -422,8 +423,25 @@ class ReplayService:
         horizon_ms: int,
         quality_mode: str,
         blind_mode: bool,
+        source_kind: SourceKind | str = SourceKind.BAR,
     ) -> dict[str, object]:
         self._ensure_available(blind_mode=blind_mode)
+        try:
+            source = (
+                source_kind
+                if isinstance(source_kind, SourceKind)
+                else SourceKind(str(source_kind).lower())
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReplayDomainError(
+                ReplayErrorCode.UNSUPPORTED_SOURCE,
+                f"unsupported replay source: {source_kind}",
+            ) from exc
+        if source is SourceKind.AGG_TRADE:
+            try:
+                self._require_trade_capability()
+            except ReplayDomainError as exc:
+                raise self._blind_safe_dataset_error(blind_mode, exc) from exc
         try:
             snapshot = await asyncio.to_thread(
                 self._catalog.build,
@@ -443,19 +461,79 @@ class ReplayService:
             if blind_mode:
                 raise self._blind_unexpected_dataset_error() from exc
             raise
+        try:
+            source_catalog_epoch, source_entries = await self._source_catalog_view(
+                snapshot,
+                source_kind=source,
+            )
+        except ReplayDomainError as exc:
+            raise self._blind_safe_dataset_error(blind_mode, exc) from exc
         entries = [
             self._catalog_entry_payload(entry, blind_mode=blind_mode)
-            for entry in snapshot.entries
+            for entry in source_entries
         ]
         return {
             "protocol": REPLAY_PROTOCOL,
-            "catalog_epoch": snapshot.catalog_epoch,
+            "catalog_epoch": source_catalog_epoch,
             "warmup_bars": snapshot.warmup_bars,
             "horizon_ms": snapshot.horizon_ms,
             "quality_mode": snapshot.quality_mode.value,
             "blind_mode": blind_mode,
             "entries": entries,
         }
+
+    async def _source_catalog_view(
+        self,
+        snapshot: ReplayCatalogSnapshot,
+        *,
+        source_kind: SourceKind,
+    ) -> tuple[str, tuple[ReplayCatalogEntry, ...]]:
+        if source_kind is SourceKind.BAR:
+            return snapshot.catalog_epoch, snapshot.entries
+        filtered: list[tuple[ReplayCatalogEntry, str | None]] = []
+        for entry in snapshot.entries:
+            trade_epoch, eligible_ranges = await self._trade_eligible_ranges(entry)
+            if not eligible_ranges:
+                continue
+            filtered.append(
+                (
+                    replace(
+                        entry,
+                        eligible_ranges=eligible_ranges,
+                        quality=DataFidelity.VERIFIED_AGG_TRADE_APPROXIMATE_BARS,
+                        limitations=tuple(
+                            dict.fromkeys(
+                                (
+                                    *entry.limitations,
+                                    "AGG_TRADE_OFFICIAL_AVAILABILITY_INTERSECTION",
+                                )
+                            )
+                        ),
+                    ),
+                    trade_epoch,
+                )
+            )
+        source_epoch = canonical_sha256(
+            {
+                "schema_version": "replay-agg-trade-source-catalog.v1",
+                "bar_catalog_epoch": snapshot.catalog_epoch,
+                "entries": [
+                    {
+                        "identity": entry.identity.to_dict(),
+                        "bar_source_fingerprint": entry.source_fingerprint,
+                        "agg_trade_catalog_epoch": trade_epoch,
+                        "eligible_ranges": [
+                            item.to_dict() for item in entry.eligible_ranges
+                        ],
+                    }
+                    for entry, trade_epoch in filtered
+                ],
+            }
+        )
+        return source_epoch, tuple(
+            replace(entry, catalog_epoch=source_epoch)
+            for entry, _trade_epoch in filtered
+        )
 
     async def select_training_window(
         self,
@@ -505,21 +583,39 @@ class ReplayService:
                 "replay history catalog is unavailable",
             )
             raise self._blind_safe_dataset_error(config, unavailable) from exc
-        if catalog.catalog_epoch != expected_catalog_epoch:
-            # The client already supplied the opaque epoch, so reporting this
-            # comparison does not disclose source dates or a hidden start.
-            raise ReplayDomainError(
-                ReplayErrorCode.DATASET_MISMATCH,
-                "replay catalog changed after capability validation",
-                details={"reason": "CATALOG_EPOCH_MISMATCH"},
-            )
         try:
+            source_catalog_epoch, source_entries = await self._source_catalog_view(
+                catalog,
+                source_kind=config.source_kind,
+            )
+            if source_catalog_epoch != expected_catalog_epoch:
+                # The client already supplied the opaque epoch, so reporting this
+                # comparison does not disclose source dates or a hidden start.
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "replay catalog changed after capability validation",
+                    details={"reason": "CATALOG_EPOCH_MISMATCH"},
+                )
             identity = ReplaySeriesIdentity(
                 config.exchange,
                 config.market_type,
                 config.symbol,
             )
-            entry = catalog.require_entry(identity)
+            entry = next(
+                (
+                    candidate
+                    for candidate in source_entries
+                    if candidate.identity == identity
+                ),
+                None,
+            )
+            if entry is None:
+                raise ReplayDomainError(
+                    ReplayErrorCode.UNSUPPORTED_SOURCE,
+                    "replay series is not present in source catalog: "
+                    f"{identity.key}",
+                    details={"identity": identity.to_dict()},
+                )
             trade_catalog_epoch: str | None = None
             if config.start_policy is StartPolicy.RANDOM_ELIGIBLE:
                 window, trade_catalog_epoch = await self._select_random_window_bound(
@@ -529,15 +625,33 @@ class ReplayService:
                     minimum_history_bars=required_history_bars,
                 )
             else:
-                window = self._select_manual_window(
+                window, trade_catalog_epoch = await self._select_manual_window_bound(
                     self._catalog,
                     entry,
                     config,
                     start_ms=self._required_manual_start(config),
                 )
-                trade_catalog_epoch = await self._trade_selection_catalog_epoch(config)
         except ReplayDomainError as exc:
             raise self._blind_safe_dataset_error(config, exc) from exc
+        if config.source_kind is SourceKind.AGG_TRADE:
+            try:
+                current_source_epoch, _current_entries = (
+                    await self._source_catalog_view(
+                        catalog,
+                        source_kind=config.source_kind,
+                    )
+                )
+            except ReplayDomainError as exc:
+                raise self._blind_safe_dataset_error(config, exc) from exc
+            if current_source_epoch != source_catalog_epoch:
+                raise self._blind_safe_dataset_error(
+                    config,
+                    ReplayDomainError(
+                        ReplayErrorCode.DATASET_MISMATCH,
+                        "aggregate-trade catalog changed during selection",
+                        details={"reason": "CATALOG_EPOCH_MISMATCH"},
+                    ),
+                )
         if entry.bounds is None:
             raise self._blind_safe_dataset_error(
                 config,
@@ -604,7 +718,7 @@ class ReplayService:
                     ),
                 )
         return {
-            "catalog_epoch": catalog.catalog_epoch,
+            "catalog_epoch": source_catalog_epoch,
             "source_fingerprint": entry.source_fingerprint,
             "source_revision": entry.source_revision,
             "identity": entry.identity.to_dict(),
@@ -1118,9 +1232,15 @@ class ReplayService:
                         horizon_ms=config.horizon_ms,
                         quality_mode=config.quality_mode,
                     )
+                    source_catalog_epoch, source_entries = (
+                        await self._source_catalog_view(
+                            catalog,
+                            source_kind=config.source_kind,
+                        )
+                    )
                     if (
                         _expected_catalog_epoch is not None
-                        and catalog.catalog_epoch != _expected_catalog_epoch
+                        and source_catalog_epoch != _expected_catalog_epoch
                     ):
                         raise ReplayDomainError(
                             ReplayErrorCode.DATASET_MISMATCH,
@@ -1132,7 +1252,21 @@ class ReplayService:
                 identity = ReplaySeriesIdentity(
                     config.exchange, config.market_type, config.symbol
                 )
-                entry = catalog.require_entry(identity)
+                entry = next(
+                    (
+                        candidate
+                        for candidate in source_entries
+                        if candidate.identity == identity
+                    ),
+                    None,
+                )
+                if entry is None:
+                    raise ReplayDomainError(
+                        ReplayErrorCode.UNSUPPORTED_SOURCE,
+                        "replay series is not present in source catalog: "
+                        f"{identity.key}",
+                        details={"identity": identity.to_dict()},
+                    )
             if (
                 _internal_expected_source_fingerprint is not None
                 and entry.source_fingerprint != _internal_expected_source_fingerprint
@@ -1164,7 +1298,7 @@ class ReplayService:
                         )
                     window = bound_window
                 elif _internal_forced_start_ms is not None:
-                    window = self._select_manual_window(
+                    window = await self._select_manual_window(
                         catalog_owner,
                         entry,
                         config,
@@ -1178,7 +1312,7 @@ class ReplayService:
                             config,
                         )
                         if config.start_policy is StartPolicy.RANDOM_ELIGIBLE
-                        else self._select_manual_window(
+                        else await self._select_manual_window(
                             catalog_owner,
                             entry,
                             config,
@@ -3915,7 +4049,7 @@ class ReplayService:
             )
         return tuple(reachable)
 
-    def _select_manual_window(
+    async def _select_manual_window(
         self,
         catalog: ReplayCatalog,
         entry: ReplayCatalogEntry,
@@ -3923,13 +4057,38 @@ class ReplayService:
         *,
         start_ms: int,
     ) -> EligibleWindow:
+        window, _trade_catalog_epoch = await self._select_manual_window_bound(
+            catalog,
+            entry,
+            config,
+            start_ms=start_ms,
+        )
+        return window
+
+    async def _select_manual_window_bound(
+        self,
+        catalog: ReplayCatalog,
+        entry: ReplayCatalogEntry,
+        config: ReplaySessionConfig,
+        *,
+        start_ms: int,
+    ) -> tuple[EligibleWindow, str | None]:
         selection_entry = entry
+        trade_catalog_epoch: str | None = None
         if config.source_kind is SourceKind.BAR:
             selection_entry = replace(
                 entry,
                 eligible_ranges=self._bar_tail_reachable_ranges(entry),
             )
-        return catalog.select_manual(selection_entry, start_ms=start_ms)
+        else:
+            trade_catalog_epoch, eligible_ranges = (
+                await self._trade_eligible_ranges(entry)
+            )
+            selection_entry = replace(entry, eligible_ranges=eligible_ranges)
+        return (
+            catalog.select_manual(selection_entry, start_ms=start_ms),
+            trade_catalog_epoch,
+        )
 
     async def _select_random_window_bound(
         self,
@@ -3965,53 +4124,13 @@ class ReplayService:
                 ),
                 None,
             )
-        if parse_interval_ms(config.base_interval) is None:
-            raise ReplayDomainError(
-                ReplayErrorCode.UNSUPPORTED_INTERVAL,
-                "aggregate-trade random selection requires a fixed BAR interval",
-            )
-        try:
-            snapshot = getattr(self._raw_trade_archive, "selection_snapshot", None)
-            if callable(snapshot):
-                trade_catalog_epoch, selection_windows = await asyncio.to_thread(
-                    snapshot,
-                    exchange=config.exchange,
-                    market_type=config.market_type,
-                    symbol=config.symbol,
-                )
-                trade_catalog_epoch = self._validated_trade_catalog_epoch(
-                    trade_catalog_epoch
-                )
-            else:
-                selection_windows = await asyncio.to_thread(
-                    self._raw_trade_archive.list_selection_windows,
-                    exchange=config.exchange,
-                    market_type=config.market_type,
-                    symbol=config.symbol,
-                )
-                trade_catalog_epoch = None
-            eligible_ranges = self._minimum_history_ranges(
-                entry,
-                self._intersect_trade_eligible_ranges(
-                    entry,
-                    selection_windows,
-                ),
-                configured_warmup_bars=config.warmup_bars,
-                minimum_history_bars=required_history_bars,
-            )
-        except ReplayDomainError:
-            raise
-        except Exception as exc:
-            diagnostics = self._raw_trade_archive.diagnostics()
-            code = (
-                ReplayErrorCode.ARCHIVE_DEGRADED
-                if diagnostics.get("state") != "ready"
-                else ReplayErrorCode.DATASET_INCOMPLETE
-            )
-            raise ReplayDomainError(
-                code,
-                "official aggregate-trade daily availability is unavailable",
-            ) from exc
+        trade_catalog_epoch, trade_ranges = await self._trade_eligible_ranges(entry)
+        eligible_ranges = self._minimum_history_ranges(
+            entry,
+            trade_ranges,
+            configured_warmup_bars=config.warmup_bars,
+            minimum_history_bars=required_history_bars,
+        )
         return (
             catalog.select_random_from_ranges(
                 entry,
@@ -4080,26 +4199,50 @@ class ReplayService:
             )
         return tuple(restricted)
 
-    async def _trade_selection_catalog_epoch(
+    async def _trade_eligible_ranges(
         self,
-        config: ReplaySessionConfig,
-    ) -> str | None:
-        if config.source_kind is not SourceKind.AGG_TRADE:
-            return None
-        snapshot = getattr(self._raw_trade_archive, "selection_snapshot", None)
-        if not callable(snapshot):
-            return None
-        try:
-            catalog_epoch, _windows = await asyncio.to_thread(
-                snapshot,
-                exchange=config.exchange,
-                market_type=config.market_type,
-                symbol=config.symbol,
-            )
-            return self._validated_trade_catalog_epoch(catalog_epoch)
-        except Exception as exc:
+        entry: ReplayCatalogEntry,
+    ) -> tuple[str | None, tuple[EligibleWindowRange, ...]]:
+        if entry.selected_base_interval is None:
+            return None, ()
+        if parse_interval_ms(entry.selected_base_interval) is None:
             raise ReplayDomainError(
-                ReplayErrorCode.DATASET_INCOMPLETE,
+                ReplayErrorCode.UNSUPPORTED_INTERVAL,
+                "aggregate-trade selection requires a fixed BAR interval",
+            )
+        snapshot = getattr(self._raw_trade_archive, "selection_snapshot", None)
+        try:
+            if callable(snapshot):
+                catalog_epoch, selection_windows = await asyncio.to_thread(
+                    snapshot,
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                    symbol=entry.identity.symbol,
+                )
+                trade_catalog_epoch = self._validated_trade_catalog_epoch(
+                    catalog_epoch
+                )
+            else:
+                selection_windows = await asyncio.to_thread(
+                    self._raw_trade_archive.list_selection_windows,
+                    exchange=entry.identity.exchange,
+                    market_type=entry.identity.market_type,
+                    symbol=entry.identity.symbol,
+                )
+                trade_catalog_epoch = None
+            return (
+                trade_catalog_epoch,
+                self._intersect_trade_eligible_ranges(entry, selection_windows),
+            )
+        except Exception as exc:
+            diagnostics = self._raw_trade_archive.diagnostics()
+            code = (
+                ReplayErrorCode.ARCHIVE_DEGRADED
+                if diagnostics.get("state") != "ready"
+                else ReplayErrorCode.DATASET_INCOMPLETE
+            )
+            raise ReplayDomainError(
+                code,
                 "official aggregate-trade daily availability is unavailable",
             ) from exc
 

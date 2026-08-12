@@ -425,6 +425,7 @@ async def test_agg_trade_training_all_available_history_uses_chart_only_bars(
             horizon_ms=TRADE_REPLAY_MINUTES * INTERVAL_MS,
             quality_mode="exact",
             blind_mode=False,
+            source_kind="AGG_TRADE",
         )
         request = TrainingRunCreateRequest.from_dict(
             {

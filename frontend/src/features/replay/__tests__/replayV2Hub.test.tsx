@@ -357,6 +357,27 @@ function exactHedgeInputPlan() {
   };
 }
 
+function tradeCatalog() {
+  const catalog = hedgeCatalog();
+  const epoch: `sha256:${string}` = `sha256:${"c".repeat(64)}`;
+  const startMs = 1_700_000_000_000;
+  return {
+    ...catalog,
+    catalog_epoch: epoch,
+    entries: catalog.entries.map((entry) => ({
+      ...entry,
+      quality: "VERIFIED_AGG_TRADE_APPROXIMATE_BARS" as const,
+      catalog_epoch: epoch,
+      eligible_ranges: [{
+        ...entry.eligible_ranges[0]!,
+        first_start_ms: startMs,
+        last_start_ms: startMs + 60_000,
+        count: 2,
+      }],
+    })),
+  };
+}
+
 test("HEDGE prepare-plan parser accepts pinned hybrid inputs without requiring L2", () => {
   const response = segmentPlanResponse();
   const parsed = parseReplaySegmentPreparePlan({
@@ -565,7 +586,7 @@ test("Hub creates an empty run without planning a market dataset", async (contex
       },
       async catalog() {
         calls.push("catalog");
-        return blindCatalog();
+        return hedgeCatalog();
       },
       async segmentPlan() {
         calls.push("segment-plan");
@@ -583,12 +604,12 @@ test("Hub creates an empty run without planning a market dataset", async (contex
   await settle();
   assert.deepEqual(calls, ["runs"]);
   await lifecycle.openCreate();
-  assert.deepEqual(calls, ["runs", "capabilities"]);
+  assert.deepEqual(calls, ["runs", "capabilities", "catalog"]);
   assert.equal(lifecycle.getSnapshot().segmentPlan, null);
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
   await lifecycle.createRun(draft);
-  assert.deepEqual(calls.slice(-2), ["create", "navigate:run-1"]);
+  assert.deepEqual(calls.slice(-3), ["catalog", "create", "navigate:run-1"]);
 });
 
 test("hub bootstrap loads only lightweight saves; create capability work starts on demand", async (context) => {
@@ -605,7 +626,7 @@ test("hub bootstrap loads only lightweight saves; create capability work starts 
       },
       async catalog() {
         calls.push("catalog");
-        return blindCatalog();
+        return hedgeCatalog();
       },
       async createRun() {
         calls.push("create");
@@ -622,13 +643,15 @@ test("hub bootstrap loads only lightweight saves; create capability work starts 
   assert.equal(lifecycle.getSnapshot().phase, "READY");
 
   await lifecycle.openCreate();
-  assert.deepEqual(calls, ["runs", "capabilities"]);
+  assert.deepEqual(calls, ["runs", "capabilities", "catalog"]);
   const draft = lifecycle.getSnapshot().draft;
   assert.ok(draft);
   await lifecycle.createRun(draft);
   assert.deepEqual(calls, [
     "runs",
     "capabilities",
+    "catalog",
+    "catalog",
     "create",
     "navigate:run-1",
   ]);
@@ -646,7 +669,7 @@ test("create errors stay visible and reopening refreshes setup context without l
       },
       async catalog() {
         catalogCalls += 1;
-        return blindCatalog();
+        return hedgeCatalog();
       },
       async createRun() {
         throw new ReplayV2ApiError(
@@ -672,14 +695,14 @@ test("create errors stay visible and reopening refreshes setup context without l
   await lifecycle.createRun(preservedDraft);
   assert.equal(lifecycle.getSnapshot().error?.code, "CATALOG_EPOCH_MISMATCH");
   await lifecycle.openCreate();
-  assert.equal(catalogCalls, 0);
+  assert.equal(catalogCalls, 3);
   assert.equal(lifecycle.getSnapshot().error, null);
   assert.equal(lifecycle.getSnapshot().draft?.name, "保留这份训练");
   assert.equal(lifecycle.getSnapshot().draft?.indicatorWarmupBars, 300);
 });
 
-test("create posts market-independent setup and defers catalog refresh to the run", async (context) => {
-  const catalogQueries: Array<{ warmupBars?: number; horizonMs?: number; blindMode?: boolean }> = [];
+test("create validates the source-aware catalog before posting market-independent setup", async (context) => {
+  const catalogQueries: Array<{ warmupBars?: number; horizonMs?: number; blindMode?: boolean; sourceKind?: "BAR" | "AGG_TRADE" }> = [];
   let submitted: Record<string, unknown> | null = null;
   const lifecycle = new TrainingHubLifecycle({
     api: {
@@ -691,7 +714,7 @@ test("create posts market-independent setup and defers catalog refresh to the ru
       },
       async catalog(query) {
         catalogQueries.push(query ?? {});
-        const catalog = blindCatalog();
+        const catalog = hedgeCatalog();
         return catalog;
       },
       async createRun(payload) {
@@ -713,7 +736,21 @@ test("create posts market-independent setup and defers catalog refresh to the ru
   };
   lifecycle.setDraft(edited);
   await lifecycle.createRun(edited);
-  assert.equal(catalogQueries.length, 0);
+  assert.equal(catalogQueries.length, 2);
+  assert.deepEqual(catalogQueries[0], {
+    warmupBars: 200,
+    horizonMs: 86_400_000,
+    qualityMode: "exact",
+    blindMode: false,
+    sourceKind: "BAR",
+  });
+  assert.deepEqual(catalogQueries[1], {
+    warmupBars: 300,
+    horizonMs: 43_200_000,
+    qualityMode: "exact",
+    blindMode: false,
+    sourceKind: "BAR",
+  });
   assert.ok(submitted);
   const submittedPayload = submitted as unknown as Record<string, unknown>;
   assert.equal(submittedPayload.indicator_warmup_bars, 300);
@@ -755,6 +792,84 @@ test("create model defaults to a selectable ONE_WAY run and exposes fail-closed 
   assert.equal(request.position_mode, "ONE_WAY");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
+});
+
+test("switching to AGG_TRADE reloads source coverage and resets T0", async (context) => {
+  const queries: Array<{ sourceKind?: "BAR" | "AGG_TRADE" }> = [];
+  const lifecycle = new TrainingHubLifecycle({
+    api: {
+      async listRuns() {
+        return parseTrainingRunListResponse(listResponse([]));
+      },
+      async capabilities() {
+        return parseReplayCapabilities(enabledCapabilities());
+      },
+      async catalog(query) {
+        queries.push(query ?? {});
+        return query?.sourceKind === "AGG_TRADE" ? tradeCatalog() : hedgeCatalog();
+      },
+      async createRun() {
+        return parseTrainingRunMutationResponse(mutationResponse());
+      },
+    },
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+  await lifecycle.openCreate();
+  const draft = lifecycle.getSnapshot().draft;
+  assert.ok(draft);
+  lifecycle.setDraft({
+    ...draft,
+    sourceKind: "AGG_TRADE",
+    requestedStartMs: null,
+  });
+  await settle();
+  const switched = lifecycle.getSnapshot();
+  assert.equal(queries.at(-1)?.sourceKind, "AGG_TRADE");
+  assert.equal(switched.draft?.requestedStartMs, 1_700_000_060_000);
+  assert.equal(switched.evaluation?.errors.includes(
+    "开始时间不在当前历史源的可用覆盖范围",
+  ), false);
+});
+
+test("create rejects an explicit BAR T0 outside source coverage without rewriting it", async (context) => {
+  let createCalls = 0;
+  const lifecycle = new TrainingHubLifecycle({
+    api: {
+      async listRuns() {
+        return parseTrainingRunListResponse(listResponse([]));
+      },
+      async capabilities() {
+        return parseReplayCapabilities(enabledCapabilities());
+      },
+      async catalog() {
+        return hedgeCatalog();
+      },
+      async createRun() {
+        createCalls += 1;
+        return parseTrainingRunMutationResponse(mutationResponse());
+      },
+    },
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+  await lifecycle.openCreate();
+  const draft = lifecycle.getSnapshot().draft;
+  assert.ok(draft);
+  const explicitInvalidStart = 1_600_000_000_000;
+  const edited = { ...draft, requestedStartMs: explicitInvalidStart };
+  lifecycle.setDraft(edited);
+  await lifecycle.createRun(edited);
+  const rejected = lifecycle.getSnapshot();
+  assert.equal(rejected.draft?.requestedStartMs, explicitInvalidStart);
+  assert.equal(rejected.evaluation?.canSubmit, false);
+  assert.equal(rejected.evaluation?.errors.includes(
+    "开始时间不在当前历史源的可用覆盖范围",
+  ), true);
+  assert.equal(rejected.error?.code, "TRAINING_RUN_INVALID");
+  assert.equal(createCalls, 0);
 });
 
 test("HEDGE create model accepts explicit Sandbox funding and keeps exact inputs when available", () => {

@@ -153,7 +153,7 @@ test("create payload delegates random seed ownership to the server", () => {
   assert.equal(evaluateTrainingRunDraft(manual, capabilities, visible).canSubmit, true);
 });
 
-test("Hub creates a product-independent Run without reading or rebinding catalogs", async (context) => {
+test("Hub reads source coverage once before creating a product-independent Run", async (context) => {
   const blindQueries: boolean[] = [];
   const lifecycle = new TrainingHubLifecycle({
     api: {
@@ -182,15 +182,15 @@ test("Hub creates a product-independent Run without reading or rebinding catalog
   lifecycle.start();
   await settle();
   await lifecycle.openCreate();
-  assert.deepEqual(blindQueries, []);
-  assert.equal(lifecycle.getSnapshot().catalog, null);
+  assert.deepEqual(blindQueries, [false]);
+  assert.notEqual(lifecycle.getSnapshot().catalog, null);
   const initial = lifecycle.getSnapshot().draft;
   assert.ok(initial);
 
   lifecycle.setDraft({ ...initial, timeDisclosurePolicy: "NONE" });
   await settle();
-  assert.deepEqual(blindQueries, []);
-  assert.equal(lifecycle.getSnapshot().catalog, null);
+  assert.deepEqual(blindQueries, [false]);
+  assert.notEqual(lifecycle.getSnapshot().catalog, null);
 
   const visibleDraft = lifecycle.getSnapshot().draft;
   assert.ok(visibleDraft);
@@ -201,7 +201,7 @@ test("Hub creates a product-independent Run without reading or rebinding catalog
     requestedStartMs: START_MS + 2 * MINUTE_MS,
   });
   await settle();
-  assert.deepEqual(blindQueries, []);
+  assert.deepEqual(blindQueries, [false]);
 
   const manual = lifecycle.getSnapshot().draft;
   assert.ok(manual);
@@ -211,7 +211,7 @@ test("Hub creates a product-independent Run without reading or rebinding catalog
     requestedStartMs: null,
   });
   await settle();
-  assert.deepEqual(blindQueries, []);
+  assert.deepEqual(blindQueries, [false]);
 });
 
 test("manual create panel renders UTC setup and defers product coverage to the Run", () => {

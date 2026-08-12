@@ -21,6 +21,7 @@ from app.replay.internal_commands import REVEALED_REFERENCE_CLOSE_FIDELITY
 from app.replay.training.account import InstrumentRule, MaintenanceTier
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.models import ReplayV2CommandType
+from app.replay.training.storage import _project_liquidation_price_pair
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, make_broker, request
 from tests.fixtures.replay.hedge_input_fakes import prepare_hedge_request
 from tests.test_replay_v2_training_phase5 import _acquire, _request
@@ -69,6 +70,46 @@ def test_rule_adapter_rounds_initial_and_maintenance_margin_upward() -> None:
     assert rule.maintenance_margin(Decimal("100.01")) == Decimal("0.51")
     assert rule.active_maintenance_tier(Decimal("500"))[0] == 1
     assert rule.active_maintenance_tier(Decimal("500.01"))[0] == 2
+
+
+def test_liquidation_projection_uses_candidate_price_maintenance_margin() -> None:
+    rule = InstrumentRule(
+        track_id="track-1",
+        rule_version="PHASE2_LIQUIDATION_V1",
+        source_kind="BAR",
+        price_tick="0.1",
+        quantity_step="0.001",
+        min_quantity="0.001",
+        max_quantity="100",
+        min_notional="5",
+        max_notional="100000",
+        contract_size="1",
+        quote_step="0.01",
+        max_leverage="20",
+        maintenance_tiers=(MaintenanceTier("100000", "0.005", "0"),),
+        liquidation_fee_bps="25",
+        mark_fidelity="PINNED_MARK",
+        rule_fidelity="VERSIONED_EXCHANGE_RULE",
+        effective_virtual_time_ms=0,
+    )
+
+    liquidation_price, bankruptcy_price = _project_liquidation_price_pair(
+        mark_price=Decimal("100"),
+        scope_equity=Decimal("10"),
+        scope_maintenance_margin=rule.maintenance_margin(Decimal("100")),
+        absolute_quantity=Decimal("1"),
+        position_side="LONG",
+        rule=rule,
+    )
+
+    assert liquidation_price == Decimal("90.4")
+    assert bankruptcy_price == Decimal("90")
+    assert Decimal("10") + (Decimal("90.5") - Decimal("100")) > (
+        rule.maintenance_margin(Decimal("90.5"))
+    )
+    assert Decimal("10") + (liquidation_price - Decimal("100")) <= (
+        rule.maintenance_margin(liquidation_price)
+    )
 
 
 def test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg() -> None:

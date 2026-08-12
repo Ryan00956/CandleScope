@@ -153,29 +153,64 @@ def _project_liquidation_price_pair(
     if absolute_quantity <= 0:
         raise ValueError("liquidation price projection requires positive quantity")
     direction = Decimal(1) if position_side == "LONG" else Decimal(-1)
-    denominator = direction * absolute_quantity * Decimal(rule.contract_size)
-    liquidation_raw = (
-        mark_price + (scope_maintenance_margin - scope_equity) / denominator
-    )
+    contract_quantity = absolute_quantity * Decimal(rule.contract_size)
+    denominator = direction * contract_quantity
     bankruptcy_raw = mark_price - scope_equity / denominator
-    return (
-        max(
-            Decimal(0),
-            round_to_step(
-                max(Decimal(0), liquidation_raw),
-                Decimal(rule.price_tick),
-                upward=position_side == "SHORT",
-            ),
-        ),
-        max(
-            Decimal(0),
-            round_to_step(
-                max(Decimal(0), bankruptcy_raw),
-                Decimal(rule.price_tick),
-                upward=position_side == "SHORT",
-            ),
+    tick = Decimal(rule.price_tick)
+    upward = position_side == "SHORT"
+    bankruptcy_price = max(
+        Decimal(0),
+        round_to_step(
+            max(Decimal(0), bankruptcy_raw),
+            tick,
+            upward=upward,
         ),
     )
+    current_leg_maintenance = rule.maintenance_margin(
+        contract_quantity * mark_price
+    )
+    other_maintenance = scope_maintenance_margin - current_leg_maintenance
+    if other_maintenance < 0:
+        raise ValueError("scope maintenance is below selected leg maintenance")
+
+    def breached(candidate_price: Decimal) -> bool:
+        candidate_equity = scope_equity + (
+            direction * (candidate_price - mark_price) * contract_quantity
+        )
+        candidate_maintenance = other_maintenance + rule.maintenance_margin(
+            contract_quantity * candidate_price
+        )
+        return candidate_equity <= candidate_maintenance
+
+    current_grid = round_to_step(mark_price, tick, upward=upward)
+    if breached(current_grid):
+        liquidation_price = current_grid
+    elif position_side == "LONG":
+        if not breached(Decimal(0)):
+            liquidation_price = Decimal(0)
+        else:
+            breached_units = 0
+            safe_units = int(current_grid / tick)
+            while safe_units - breached_units > 1:
+                candidate_units = (breached_units + safe_units) // 2
+                if breached(Decimal(candidate_units) * tick):
+                    breached_units = candidate_units
+                else:
+                    safe_units = candidate_units
+            liquidation_price = Decimal(breached_units) * tick
+    else:
+        safe_units = int(current_grid / tick)
+        breached_units = max(safe_units, int(bankruptcy_price / tick))
+        if not breached(Decimal(breached_units) * tick):
+            raise ValueError("short bankruptcy tick does not breach maintenance")
+        while breached_units - safe_units > 1:
+            candidate_units = (safe_units + breached_units) // 2
+            if breached(Decimal(candidate_units) * tick):
+                breached_units = candidate_units
+            else:
+                safe_units = candidate_units
+        liquidation_price = Decimal(breached_units) * tick
+    return liquidation_price, bankruptcy_price
 
 
 _CARD_CTE = """

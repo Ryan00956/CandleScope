@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
@@ -134,6 +135,29 @@ ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
 _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
 _NativeDisplayPinProofKey = tuple[str, str, str, str, str, int, int, int, str]
 _NativeDisplayPinProof = tuple[int, str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketSetupAdmission:
+    windows: tuple[tuple[int, int], ...]
+    code: str
+    message: str
+
+    def eligible_start_windows(self, required_span_ms: int) -> tuple[tuple[int, int], ...]:
+        merged: list[list[int]] = []
+        for first, last in sorted(self.windows):
+            if not merged or first > merged[-1][1]:
+                merged.append([first, last])
+            else:
+                merged[-1][1] = max(merged[-1][1], last)
+        return tuple(
+            (first, last - required_span_ms)
+            for first, last in merged
+            if last - required_span_ms >= first
+        )
+
+
+_SetupAdmissionCacheKey = tuple[str, str, str, str, str]
 
 
 def _stored_counter(value: object, *, field_name: str) -> int:
@@ -531,8 +555,17 @@ class TrainingRunService:
                 source_kind=source_kind,
                 compatibility=None,
             )
+            catalog_cache: dict[tuple[int, int, str, bool], dict[str, object]] = {}
+            admission_cache: dict[
+                _SetupAdmissionCacheKey,
+                dict[tuple[str, str, str], _MarketSetupAdmission],
+            ] = {}
             result["items"] = [
-                await self._project_awaiting_market_compatibility(item)
+                await self._project_awaiting_market_compatibility(
+                    item,
+                    catalog_cache=catalog_cache,
+                    admission_cache=admission_cache,
+                )
                 for item in cast(list[dict[str, object]], result["items"])
             ]
             return result
@@ -545,6 +578,11 @@ class TrainingRunService:
         scan_cursor = cursor
         matches: list[dict[str, object]] = []
         next_cursor: str | None = None
+        catalog_cache: dict[tuple[int, int, str, bool], dict[str, object]] = {}
+        admission_cache: dict[
+            _SetupAdmissionCacheKey,
+            dict[tuple[str, str, str], _MarketSetupAdmission],
+        ] = {}
         while True:
             cursor_before_row = scan_cursor
             page = await self.store.list_runs(
@@ -557,7 +595,11 @@ class TrainingRunService:
             rows = cast(list[dict[str, object]], page["items"])
             if not rows:
                 break
-            projected = await self._project_awaiting_market_compatibility(rows[0])
+            projected = await self._project_awaiting_market_compatibility(
+                rows[0],
+                catalog_cache=catalog_cache,
+                admission_cache=admission_cache,
+            )
             scan_cursor = cast(str | None, page["next_cursor"])
             if projected.get("compatibility") == compatibility:
                 if len(matches) == limit:
@@ -582,11 +624,21 @@ class TrainingRunService:
     async def _project_awaiting_market_compatibility(
         self,
         card: dict[str, object],
+        *,
+        catalog_cache: dict[tuple[int, int, str, bool], dict[str, object]] | None = None,
+        admission_cache: dict[
+            _SetupAdmissionCacheKey,
+            dict[tuple[str, str, str], _MarketSetupAdmission],
+        ] | None = None,
     ) -> dict[str, object]:
         if card.get("state") != RunState.AWAITING_MARKET.value:
             return card
         try:
-            catalog = await self.market_catalog(str(card["run_id"]))
+            catalog = await self.market_catalog(
+                str(card["run_id"]),
+                _catalog_cache=catalog_cache,
+                _admission_cache=admission_cache,
+            )
         except (ReplayDomainError, TrainingRunError):
             return {
                 **card,
@@ -623,30 +675,42 @@ class TrainingRunService:
             raise TypeError("request must be TrainingRunSetupRequest")
         run_id = self._identifier(self._run_id_factory(), field_name="run_id")
         settings = request.to_dict()
-        aggregate_trade = settings["source_kind"] == ReplaySource.AGG_TRADE.value
-        entries: list[Mapping[str, object]] = []
-        if aggregate_trade:
-            catalog = await self.replay_service.catalog(
-                warmup_bars=int(settings["indicator_warmup_bars"]),
-                horizon_ms=int(settings["forward_cache_ms"]),
-                quality_mode="exact",
-                blind_mode=False,
-                source_kind=str(settings["source_kind"]),
+        catalog = await self._source_catalog_for_setup(settings)
+        capability_admission = await self._setup_capability_admission(settings)
+        entries = [
+            entry
+            for entry in cast(list[Mapping[str, object]], catalog["entries"])
+            if self._setup_market_compatibility(
+                settings,
+                entry,
+                capability_admission=capability_admission,
+                committed_start_ms=None,
+            )["state"] == "READY"
+        ]
+        if not entries:
+            raise TrainingRunError(
+                "NO_SETUP_COMPATIBLE_SOURCE_MARKET",
+                "no market satisfies the run's structural data requirements",
+                status_code=409,
+                details={
+                    "source_kind": settings["source_kind"],
+                    "position_mode": settings["position_mode"],
+                    "book_mode": settings["book_mode"],
+                    "account_data_mode": settings["account_data_mode"],
+                },
             )
-            entries = cast(list[Mapping[str, object]], catalog["entries"])
-            if not entries:
-                raise TrainingRunError(
-                    "NO_ELIGIBLE_SOURCE_MARKET",
-                    "the selected replay source has no market with eligible coverage",
-                    status_code=409,
-                    details={"source_kind": settings["source_kind"]},
-                )
         if settings["start_mode"] == StartMode.MANUAL.value:
             committed_start_ms = int(settings["requested_start_ms"])
             random_seed = None
-            if aggregate_trade and not any(
+            if not any(
                 self._market_start_compatibility(entry, committed_start_ms)["state"]
                 == "READY"
+                and self._setup_market_compatibility(
+                    settings,
+                    entry,
+                    capability_admission=capability_admission,
+                    committed_start_ms=committed_start_ms,
+                )["state"] == "READY"
                 for entry in entries
             ):
                 raise TrainingRunError(
@@ -663,40 +727,27 @@ class TrainingRunService:
             random_seed = self._authoritative_random_seed()
             range_start = int(settings["random_range_start_ms"])
             range_end = int(settings["random_range_end_ms"])
-            if aggregate_trade:
-                candidate_ranges: list[tuple[int, int, int]] = []
-                for entry in entries:
-                    for eligible_range in cast(
-                        list[Mapping[str, object]], entry.get("eligible_ranges", [])
-                    ):
-                        first = max(range_start, int(eligible_range["first_start_ms"]))
-                        last = min(range_end, int(eligible_range["last_start_ms"]))
-                        interval_ms = int(eligible_range["interval_ms"])
-                        origin = int(eligible_range["first_start_ms"])
-                        first += (-((first - origin) % interval_ms)) % interval_ms
-                        if first <= last:
-                            count = ((last - first) // interval_ms) + 1
-                            candidate_ranges.append((first, interval_ms, count))
-                if not candidate_ranges:
-                    raise TrainingRunError(
-                        "NO_ELIGIBLE_SOURCE_MARKET_IN_RANGE",
-                        "no market for the selected replay source overlaps the "
-                        "requested range",
-                        status_code=409,
-                        details={
-                            "source_kind": settings["source_kind"],
-                            "requires_new_range": True,
-                        },
-                    )
-                committed_start_ms = _sample_unique_source_time(
-                    candidate_ranges,
-                    random_seed=random_seed,
+            candidate_ranges = self._eligible_source_ranges(
+                entries,
+                range_start_ms=range_start,
+                range_end_ms=range_end,
+                settings=settings,
+                capability_admission=capability_admission,
+            )
+            if not candidate_ranges:
+                raise TrainingRunError(
+                    "NO_ELIGIBLE_SOURCE_MARKET_IN_RANGE",
+                    "no setup-compatible market overlaps the requested range",
+                    status_code=409,
+                    details={
+                        "source_kind": settings["source_kind"],
+                        "requires_new_range": True,
+                    },
                 )
-            else:
-                minute_count = ((range_end - range_start) // 60_000) + 1
-                committed_start_ms = (
-                    range_start + (random_seed % minute_count) * 60_000
-                )
+            committed_start_ms = _sample_unique_source_time(
+                candidate_ranges,
+                random_seed=random_seed,
+            )
         try:
             await self.store.create_empty_run(
                 run_id=run_id,
@@ -784,36 +835,65 @@ class TrainingRunService:
             "run": result["run"],
         }
 
-    async def market_catalog(self, run_id: str) -> dict[str, object]:
+    async def market_catalog(
+        self,
+        run_id: str,
+        *,
+        _catalog_cache: dict[tuple[int, int, str, bool], dict[str, object]] | None = None,
+        _admission_cache: dict[
+            _SetupAdmissionCacheKey,
+            dict[tuple[str, str, str], _MarketSetupAdmission],
+        ] | None = None,
+    ) -> dict[str, object]:
         normalized = self._identifier(run_id, field_name="run_id")
         setup = await self.store.get_run_setup(
             normalized,
             require_awaiting_market=False,
         )
         settings = setup.to_dict()
+        cache_prefix = (
+            int(settings["indicator_warmup_bars"]),
+            int(settings["forward_cache_ms"]),
+            str(settings["source_kind"]),
+        )
         # A MANUAL start means the user knows the committed start; it does not
         # authorize exposing the source tail, eligible future windows, or data
         # fingerprint while the Run's disclosure policy is still active.
         blind_mode = settings["time_disclosure_policy"] != "NONE"
-        catalog = await self.replay_service.catalog(
-            warmup_bars=int(settings["indicator_warmup_bars"]),
-            horizon_ms=int(settings["forward_cache_ms"]),
-            quality_mode="exact",
-            blind_mode=blind_mode,
-            source_kind=str(settings["source_kind"]),
-        )
-        internal_catalog = (
-            await self.replay_service.catalog(
+        cache_key = (*cache_prefix, blind_mode)
+        catalog = None if _catalog_cache is None else _catalog_cache.get(cache_key)
+        if catalog is None:
+            catalog = await self.replay_service.catalog(
                 warmup_bars=int(settings["indicator_warmup_bars"]),
                 horizon_ms=int(settings["forward_cache_ms"]),
                 quality_mode="exact",
-                blind_mode=False,
+                blind_mode=blind_mode,
                 source_kind=str(settings["source_kind"]),
             )
-            if blind_mode
-            else catalog
-        )
+            if _catalog_cache is not None:
+                _catalog_cache[cache_key] = catalog
+        if blind_mode:
+            internal_key = (*cache_prefix, False)
+            internal_catalog = (
+                None if _catalog_cache is None else _catalog_cache.get(internal_key)
+            )
+            if internal_catalog is None:
+                internal_catalog = await self._source_catalog_for_setup(settings)
+                if _catalog_cache is not None:
+                    _catalog_cache[internal_key] = internal_catalog
+        else:
+            internal_catalog = catalog
         commitment = await self.store.get_time_commitment(normalized)
+        admission_key = self._setup_admission_cache_key(settings)
+        capability_admission = (
+            None
+            if _admission_cache is None
+            else _admission_cache.get(admission_key)
+        )
+        if capability_admission is None:
+            capability_admission = await self._setup_capability_admission(settings)
+            if _admission_cache is not None:
+                _admission_cache[admission_key] = capability_admission
         internal_by_identity = {
             self._catalog_identity_key(entry): entry
             for entry in cast(list[Mapping[str, object]], internal_catalog["entries"])
@@ -822,9 +902,20 @@ class TrainingRunService:
             internal_entry = internal_by_identity.get(
                 self._catalog_identity_key(entry), entry
             )
-            entry["start_compatibility"] = self._market_start_compatibility(
+            time_compatibility = self._market_start_compatibility(
                 internal_entry,
                 int(commitment["committed_start_ms"]),
+            )
+            identity_compatibility = self._setup_market_compatibility(
+                settings,
+                internal_entry,
+                capability_admission=capability_admission,
+                committed_start_ms=int(commitment["committed_start_ms"]),
+            )
+            entry["start_compatibility"] = (
+                time_compatibility
+                if time_compatibility["state"] != "READY"
+                else identity_compatibility
             )
         catalog["time_commitment"] = self._public_time_commitment(
             commitment,
@@ -11194,6 +11285,15 @@ class TrainingRunService:
                 entry,
                 int(commitment["committed_start_ms"]),
             )
+            if compatibility["state"] == "READY":
+                compatibility = self._setup_market_compatibility(
+                    settings,
+                    entry,
+                    capability_admission=await self._setup_capability_admission(
+                        settings
+                    ),
+                    committed_start_ms=int(commitment["committed_start_ms"]),
+                )
         if compatibility["state"] != "READY":
             raise TrainingRunError(
                 str(compatibility["code"]),
@@ -11204,6 +11304,318 @@ class TrainingRunService:
                     "time_commitment_hash": commitment["commitment_hash"],
                 },
             )
+
+    async def _source_catalog_for_setup(
+        self,
+        settings: Mapping[str, object],
+    ) -> dict[str, object]:
+        return await self.replay_service.catalog(
+            warmup_bars=int(settings["indicator_warmup_bars"]),
+            horizon_ms=int(settings["forward_cache_ms"]),
+            quality_mode="exact",
+            blind_mode=False,
+            source_kind=str(settings["source_kind"]),
+        )
+
+    @staticmethod
+    def _setup_market_compatibility(
+        settings: Mapping[str, object],
+        entry: Mapping[str, object],
+        *,
+        capability_admission: Mapping[tuple[str, str, str], _MarketSetupAdmission],
+        committed_start_ms: int | None,
+    ) -> dict[str, object]:
+        identity = entry.get("identity")
+        exchange = str(identity.get("exchange", "")) if isinstance(identity, Mapping) else ""
+        market_type = (
+            str(identity.get("market_type", ""))
+            if isinstance(identity, Mapping)
+            else ""
+        )
+        if settings.get("position_mode") == "HEDGE" and (
+            exchange != "binance" or market_type != "futures"
+        ):
+            return {
+                "state": "UNSUPPORTED",
+                "code": "HEDGE_BINANCE_USDM_REQUIRED",
+                "message": "双向持仓当前只支持 Binance futures（USD-M 线性合约）。",
+            }
+        if settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED" and (
+            exchange != "binance" or market_type != "futures"
+        ):
+            return {
+                "state": "UNSUPPORTED",
+                "code": "BOOK_BINANCE_USDM_REQUIRED",
+                "message": "历史盘口辅助当前只支持 Binance futures（USD-M）。",
+            }
+        identity_key = (exchange, market_type, str(identity.get("symbol", "")))
+        admission = capability_admission.get(identity_key)
+        requires_local_capability = (
+            settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
+            or settings.get("account_data_mode") == "HISTORICAL_EXACT"
+        )
+        if requires_local_capability and admission is None:
+            return {
+                "state": "UNSUPPORTED",
+                "code": "REQUIRED_HISTORY_UNAVAILABLE",
+                "message": (
+                    "该商品缺少本局要求的完整精确账户历史或连续历史盘口。"
+                ),
+            }
+        interval_ms = parse_interval_ms(str(entry.get("selected_base_interval", "")))
+        required_span_ms = int(settings.get("forward_cache_ms", 0)) + (
+            interval_ms
+            if settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
+            and interval_ms is not None
+            else 0
+        )
+        if admission is not None and committed_start_ms is not None and not any(
+            first <= committed_start_ms <= last
+            for first, last in admission.eligible_start_windows(required_span_ms)
+        ):
+            return {
+                "state": "UNSUPPORTED",
+                "code": admission.code,
+                "message": admission.message,
+            }
+        return {
+            "state": "READY",
+            "code": "SETUP_COMPATIBLE",
+            "message": "该商品支持本局已选择的账户与执行模式。",
+        }
+
+    async def _setup_capability_admission(
+        self,
+        settings: Mapping[str, object],
+    ) -> dict[tuple[str, str, str], _MarketSetupAdmission]:
+        require_book = settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
+        require_account = settings.get("account_data_mode") == "HISTORICAL_EXACT"
+        if not require_book and not require_account:
+            return {}
+
+        settlement_asset = str(settings.get("settlement_asset", ""))
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> dict[tuple[str, str, str], _MarketSetupAdmission]:
+            book_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+            if require_book and self.historical_books.enabled:
+                for row in connection.execute(
+                    """
+            SELECT exchange, market_type, symbol,
+                           range_start_ms, range_end_ms, local_path
+                    FROM replay_historical_book_archive
+                    WHERE health = 'READY' AND coverage_state = 'EXACT'
+                      AND continuity_state = 'CONTIGUOUS'
+                    """
+                ).fetchall():
+                    key = (str(row["exchange"]), str(row["market_type"]), str(row["symbol"]))
+                    if not isinstance(row["local_path"], str) or not row["local_path"]:
+                        continue
+                    book_windows.setdefault(key, []).append(
+                        (int(row["range_start_ms"]), int(row["range_end_ms"]))
+                    )
+
+            account_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+            if require_account and self.account_history.enabled:
+                funding_clause = (
+                    " AND funding_count > 0"
+                    if settings.get("funding_mode") == "HISTORICAL_EXACT"
+                    else ""
+                )
+                for row in connection.execute(
+                    f"""
+                    SELECT exchange, market_type, symbol,
+                           range_start_ms, range_end_ms, local_path
+                    FROM replay_account_history_archive
+                    WHERE health = 'READY' AND settlement_asset = ?{funding_clause}
+                    """,
+                    (settlement_asset,),
+                ).fetchall():
+                    key = (str(row["exchange"]), str(row["market_type"]), str(row["symbol"]))
+                    if not isinstance(row["local_path"], str) or not row["local_path"]:
+                        continue
+                    account_windows.setdefault(key, []).append(
+                        (int(row["range_start_ms"]), int(row["range_end_ms"]))
+                    )
+
+            hedge_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+            require_exact_hedge = (
+                settings.get("position_mode") == "HEDGE" and require_book
+            )
+            if require_exact_hedge:
+                for public in connection.execute(
+                    """
+                    SELECT exchange, market_type, symbol, settlement_asset,
+                           range_start_ms, range_end_ms,
+                           l2_archive_id, l2_dataset_epoch, l2_checksum_sha256,
+                           local_path
+                    FROM replay_hedge_public_archive
+                    WHERE health = 'READY' AND settlement_asset = ?
+                      AND archive_id NOT LIKE 'hybrid-public-%'
+                    """,
+                    (settlement_asset,),
+                ).fetchall():
+                    if not isinstance(public["local_path"], str) or not public["local_path"]:
+                        continue
+                    symbol = str(public["symbol"])
+                    matching_simulations = []
+                    for simulation in connection.execute(
+                        """
+                        SELECT range_start_ms, range_end_ms, required_symbols_json,
+                               local_path
+                        FROM replay_hedge_simulation_manifest
+                        WHERE health = 'READY' AND settlement_asset = ?
+                        """,
+                        (settlement_asset,),
+                    ).fetchall():
+                        if not isinstance(simulation["local_path"], str) or not simulation["local_path"]:
+                            continue
+                        try:
+                            required_symbols = json.loads(
+                                str(simulation["required_symbols_json"])
+                            )
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        if isinstance(required_symbols, list) and symbol in {
+                            str(item) for item in required_symbols
+                        }:
+                            matching_simulations.append(simulation)
+                    if require_book and connection.execute(
+                        """
+                        SELECT 1 FROM replay_historical_book_archive
+                        WHERE archive_id = ? AND dataset_epoch = ?
+                          AND checksum_sha256 = ? AND health = 'READY'
+                          AND coverage_state = 'EXACT'
+                          AND continuity_state = 'CONTIGUOUS'
+                          AND local_path IS NOT NULL
+                        """,
+                        (
+                            public["l2_archive_id"],
+                            public["l2_dataset_epoch"],
+                            public["l2_checksum_sha256"],
+                        ),
+                    ).fetchone() is None:
+                        continue
+                    key = (
+                        str(public["exchange"]),
+                        str(public["market_type"]),
+                        symbol,
+                    )
+                    for simulation in matching_simulations:
+                        start = max(
+                            int(public["range_start_ms"]),
+                            int(simulation["range_start_ms"]),
+                        )
+                        end = min(
+                            int(public["range_end_ms"]),
+                            int(simulation["range_end_ms"]),
+                        )
+                        if start <= end:
+                            hedge_windows.setdefault(key, []).append((start, end))
+
+            keys = (
+                set(book_windows) & set(account_windows)
+                if require_book and require_account
+                else set(book_windows if require_book else account_windows)
+            )
+            if require_exact_hedge:
+                keys &= set(hedge_windows)
+            result: dict[tuple[str, str, str], _MarketSetupAdmission] = {}
+            for key in keys:
+                windows = (
+                    [
+                        (max(book_start, account_start), min(book_end, account_end))
+                        for book_start, book_end in book_windows[key]
+                        for account_start, account_end in account_windows[key]
+                        if max(book_start, account_start) <= min(book_end, account_end)
+                    ]
+                    if require_book and require_account
+                    else list(
+                        (book_windows if require_book else account_windows)[key]
+                        if require_book or require_account
+                        else hedge_windows[key]
+                    )
+                )
+                if windows:
+                    if require_exact_hedge:
+                        windows = [
+                            (max(start, hedge_start), min(end, hedge_end))
+                            for start, end in windows
+                            for hedge_start, hedge_end in hedge_windows[key]
+                            if max(start, hedge_start) <= min(end, hedge_end)
+                        ]
+                    result[key] = _MarketSetupAdmission(
+                        windows=tuple(windows),
+                        code="REQUIRED_HISTORY_COVERAGE_UNAVAILABLE",
+                        message="本局固定开始时间不在精确账户历史或连续盘口覆盖内。",
+                    )
+            return result
+
+        return await self.store.base_store.run_extension_read(read)
+
+    @staticmethod
+    def _setup_admission_cache_key(
+        settings: Mapping[str, object],
+    ) -> _SetupAdmissionCacheKey:
+        return (
+            str(settings.get("book_mode", "")),
+            str(settings.get("account_data_mode", "")),
+            str(settings.get("position_mode", "")),
+            str(settings.get("funding_mode", "")),
+            str(settings.get("settlement_asset", "")),
+        )
+
+    @staticmethod
+    def _eligible_source_ranges(
+        entries: Sequence[Mapping[str, object]],
+        *,
+        range_start_ms: int,
+        range_end_ms: int,
+        settings: Mapping[str, object],
+        capability_admission: Mapping[tuple[str, str, str], _MarketSetupAdmission],
+    ) -> list[tuple[int, int, int]]:
+        candidate_ranges: list[tuple[int, int, int]] = []
+        for entry in entries:
+            identity = entry.get("identity")
+            identity_key = (
+                str(identity.get("exchange", "")),
+                str(identity.get("market_type", "")),
+                str(identity.get("symbol", "")),
+            ) if isinstance(identity, Mapping) else ("", "", "")
+            admission = capability_admission.get(identity_key)
+            interval_ms = parse_interval_ms(str(entry.get("selected_base_interval", "")))
+            required_span_ms = int(settings.get("forward_cache_ms", 0)) + (
+                interval_ms
+                if settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
+                and interval_ms is not None
+                else 0
+            )
+            capability_windows = (
+                ((range_start_ms, range_end_ms),)
+                if admission is None
+                else admission.eligible_start_windows(required_span_ms)
+            )
+            for eligible_range in cast(
+                list[Mapping[str, object]], entry.get("eligible_ranges", [])
+            ):
+                source_first = int(eligible_range["first_start_ms"])
+                source_last = int(eligible_range["last_start_ms"])
+                source_interval_ms = int(eligible_range["interval_ms"])
+                origin = int(eligible_range["first_start_ms"])
+                for capability_first, capability_last in capability_windows:
+                    first = max(range_start_ms, source_first, capability_first)
+                    last = min(range_end_ms, source_last, capability_last)
+                    first += (-((first - origin) % source_interval_ms)) % source_interval_ms
+                    if first <= last:
+                        candidate_ranges.append(
+                            (
+                                first,
+                                source_interval_ms,
+                                ((last - first) // source_interval_ms) + 1,
+                            )
+                        )
+        return candidate_ranges
 
     @staticmethod
     def _public_time_commitment(

@@ -317,6 +317,102 @@ async def test_failed_first_market_selection_leaves_run_empty(tmp_path: Path) ->
         await service.shutdown(step_timeout=1.0)
 
 
+@pytest.mark.parametrize(
+    "setup_updates",
+    (
+        {
+            "position_mode": "HEDGE",
+            "account_data_mode": "DETERMINISTIC_SIMULATION",
+        },
+        {"book_mode": "BOOK_ASSISTED_REQUIRED"},
+        {"account_data_mode": "HISTORICAL_EXACT"},
+    ),
+    ids=("hedge", "historical-book", "historical-account"),
+)
+async def test_setup_without_any_compatible_market_is_rejected_before_persisting(
+    tmp_path: Path,
+    setup_updates: dict[str, object],
+) -> None:
+    database = tmp_path / "no-setup-compatible-market.db"
+    service = await _service(database)
+    app = _app(service)
+    payload = {**_setup_payload(), **setup_updates}
+    try:
+        rejected = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert rejected.status_code == 409, rejected.text
+        assert rejected.json()["error"]["code"] == "NO_SETUP_COMPATIBLE_SOURCE_MARKET"
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone() == (0,)
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_legacy_hedge_shell_catalog_and_selection_share_setup_admission(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "legacy-hedge-shell.db")
+    app = _app(service)
+    payload = _setup_payload()
+    payload.update({
+        "position_mode": "HEDGE",
+        "account_data_mode": "DETERMINISTIC_SIMULATION",
+    })
+    try:
+        assert service.training is not None
+        await service.training.store.create_empty_run(
+            run_id="legacy-hedge",
+            request=TrainingRunSetupRequest.from_dict(payload),
+            committed_start_ms=START_MS + 4 * INTERVAL_MS,
+            random_seed=None,
+        )
+        catalog_response = await _request(
+            app,
+            "GET",
+            "/api/v1/replay/runs/legacy-hedge/market-catalog",
+        )
+        assert catalog_response.status_code == 200, catalog_response.text
+        catalog = catalog_response.json()
+        assert catalog["entries"][0]["start_compatibility"] == {
+            "state": "UNSUPPORTED",
+            "code": "HEDGE_BINANCE_USDM_REQUIRED",
+            "message": "双向持仓当前只支持 Binance futures（USD-M 线性合约）。",
+        }
+        rejected = await _request(
+            app,
+            "POST",
+            "/api/v1/replay/runs/legacy-hedge/markets",
+            json={
+                "catalog_epoch": catalog["catalog_epoch"],
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "account_history_ref": None,
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            },
+        )
+        assert rejected.status_code == 409, rejected.text
+        assert rejected.json()["error"]["code"] == "HEDGE_BINANCE_USDM_REQUIRED"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+def test_setup_admission_merges_adjacent_archive_windows() -> None:
+    admission = training_service_module._MarketSetupAdmission(
+        windows=((0, 2 * INTERVAL_MS), (2 * INTERVAL_MS, 5 * INTERVAL_MS)),
+        code="REQUIRED_HISTORY_COVERAGE_UNAVAILABLE",
+        message="coverage unavailable",
+    )
+
+    assert admission.eligible_start_windows(4 * INTERVAL_MS) == (
+        (0, INTERVAL_MS),
+    )
+
+
 async def test_agg_run_creation_rejects_dead_manual_start_without_persisting(
     tmp_path: Path,
 ) -> None:
@@ -447,6 +543,56 @@ async def test_source_compatibility_filter_paginates_projected_legacy_runs(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_run_list_reuses_source_catalog_across_awaiting_market_cards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _service(tmp_path / "catalog-request-cache.db")
+    assert service.training is not None
+    try:
+        setup = TrainingRunSetupRequest.from_dict(_setup_payload())
+        for index in range(4):
+            await service.training.store.create_empty_run(
+                run_id=f"cached-{index}",
+                request=setup,
+                committed_start_ms=START_MS + 4 * INTERVAL_MS,
+                random_seed=None,
+            )
+        calls = 0
+        admission_calls = 0
+        original_catalog = service.catalog
+        original_admission = service.training._setup_capability_admission
+
+        async def counted_catalog(**kwargs):
+            nonlocal calls
+            calls += 1
+            return await original_catalog(**kwargs)
+
+        async def counted_admission(settings):
+            nonlocal admission_calls
+            admission_calls += 1
+            return await original_admission(settings)
+
+        monkeypatch.setattr(service, "catalog", counted_catalog)
+        monkeypatch.setattr(
+            service.training,
+            "_setup_capability_admission",
+            counted_admission,
+        )
+        listed = await service.training.list_runs(
+            limit=10,
+            cursor=None,
+            state="AWAITING_MARKET",
+            source_kind="BAR",
+            compatibility=None,
+        )
+        assert len(listed["items"]) == 4
+        assert calls == 2
+        assert admission_calls == 1
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_agg_random_sampling_deduplicates_t0_shared_by_markets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,52 +675,20 @@ async def test_agg_run_catalog_and_random_commit_use_trade_intersection(
         await service.shutdown(step_timeout=1.0)
 
 
-async def test_unsupported_market_never_moves_the_committed_start(tmp_path: Path) -> None:
+async def test_bar_dead_manual_start_is_rejected_before_persisting(tmp_path: Path) -> None:
     database = tmp_path / "immutable-start.db"
     service = await _service(database)
     app = _app(service)
     payload = _setup_payload()
     payload["requested_start_ms"] = START_MS - INTERVAL_MS
     try:
-        created = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
-        assert created.status_code == 201, created.text
-        catalog = await _request(
-            app,
-            "GET",
-            "/api/v1/replay/runs/run-1/market-catalog",
-        )
-        assert catalog.status_code == 200, catalog.text
-        body = catalog.json()
-        assert body["time_commitment"]["committed_start_ms"] is None
-        assert body["entries"][0]["start_compatibility"] == {
-            "state": "UNSUPPORTED",
-            "code": "MARKET_NOT_LISTED_AT_START",
-            "message": "本局开始时该商品尚未上市或尚无历史数据。",
-        }
-        rejected = await _request(
-            app,
-            "POST",
-            "/api/v1/replay/runs/run-1/markets",
-            json={
-                "catalog_epoch": body["catalog_epoch"],
-                "exchange": "binance",
-                "market_type": "spot",
-                "symbol": "BTCUSDT",
-                "base_interval": "1m",
-                "display_interval": "1m",
-                "account_history_ref": None,
-            },
-        )
+        rejected = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
         assert rejected.status_code == 409
-        assert rejected.json()["error"]["code"] == "MARKET_NOT_LISTED_AT_START"
-        assert rejected.json()["error"]["details"]["requires_new_run"] is True
+        assert rejected.json()["error"]["code"] == "NO_ELIGIBLE_SOURCE_MARKET_AT_START"
         with sqlite3.connect(database) as connection:
             assert connection.execute(
-                "SELECT committed_start_ms FROM replay_training_time_commitment"
-            ).fetchone() == (START_MS - INTERVAL_MS,)
-            assert connection.execute(
-                "SELECT state, virtual_time_ms FROM replay_training_run"
-            ).fetchone() == ("AWAITING_MARKET", START_MS - INTERVAL_MS)
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone() == (0,)
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -624,5 +738,28 @@ async def test_range_random_commits_once_before_market_selection(tmp_path: Path)
             assert connection.execute(
                 "SELECT random_seed, actual_start_ms FROM replay_training_start_selection"
             ).fetchone() == (1, START_MS + 4 * INTERVAL_MS)
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_bar_random_samples_only_from_source_eligible_union(tmp_path: Path) -> None:
+    database = tmp_path / "bar-range-clamped.db"
+    service = await _service(database, random_seed=0)
+    app = _app(service)
+    payload = _setup_payload()
+    payload.update({
+        "start_mode": "RANDOM",
+        "requested_start_ms": None,
+        "random_range_start_ms": START_MS - 86_400_000,
+        "random_range_end_ms": START_MS + 4 * INTERVAL_MS,
+    })
+    try:
+        created = await _request(app, "POST", "/api/v1/replay/runs", json=payload)
+        assert created.status_code == 201, created.text
+        with sqlite3.connect(database) as connection:
+            committed = connection.execute(
+                "SELECT committed_start_ms FROM replay_training_time_commitment"
+            ).fetchone()[0]
+        assert committed == START_MS + 2 * INTERVAL_MS
     finally:
         await service.shutdown(step_timeout=1.0)

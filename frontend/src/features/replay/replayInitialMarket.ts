@@ -44,6 +44,12 @@ function selectionFromEntry(
   };
 }
 
+export interface ReplayInitialMarketPreparedSelection {
+  readonly selection: TrainingRunMarketSelectionPayload;
+  readonly plan: Awaited<ReturnType<ReplayInitialMarketApi["planInitialMarket"]>>;
+  readonly downgradeConfirmation: string | null;
+}
+
 function hedgeInputUnavailableMessage(reason: string): string {
   switch (reason) {
     case "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET":
@@ -93,6 +99,37 @@ function selectionWithPreparedInputs(
   };
 }
 
+export function replayInitialMarketDowngradeConfirmation(
+  plan: Awaited<ReturnType<ReplayInitialMarketApi["planInitialMarket"]>>,
+): string | null {
+  if (plan.hedge_inputs.requested_position_mode !== "HEDGE"
+    || plan.hedge_inputs.capability_state !== "AVAILABLE_APPROX"
+    || !plan.hedge_inputs.fallback_applied) {
+    return null;
+  }
+  return "将使用 HEDGE_HYBRID：mark/index、规则与费率来自已揭示 K 线代理；历史资金费将关闭（OFF）。这不是交易所精确历史。";
+}
+
+export async function prepareReplayInitialMarketSelection({
+  api,
+  runId,
+  catalog,
+  entry,
+}: {
+  readonly api: ReplayInitialMarketApi;
+  readonly runId: string;
+  readonly catalog: ReplayCatalog;
+  readonly entry: ReplayCatalogEntry;
+}): Promise<ReplayInitialMarketPreparedSelection> {
+  const selection = selectionFromEntry(catalog, entry);
+  const plan = await api.planInitialMarket(runId, selection);
+  return {
+    selection: selectionWithPreparedInputs(selection, plan),
+    plan,
+    downgradeConfirmation: replayInitialMarketDowngradeConfirmation(plan),
+  };
+}
+
 /**
  * Prepare and select the first market against one catalog epoch at a time.
  * Archive preparation can legitimately advance the capability epoch. Only
@@ -113,11 +150,15 @@ export async function selectReplayInitialMarketWithEpochRetry({
   let activeEntry = entry;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const selection = selectionFromEntry(activeCatalog, activeEntry);
-      const plan = await api.planInitialMarket(runId, selection);
+      const prepared = await prepareReplayInitialMarketSelection({
+        api,
+        runId,
+        catalog: activeCatalog,
+        entry: activeEntry,
+      });
       const response = await api.selectInitialMarket(
         runId,
-        selectionWithPreparedInputs(selection, plan),
+        prepared.selection,
       );
       return {
         response,

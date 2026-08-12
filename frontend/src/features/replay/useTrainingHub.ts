@@ -660,8 +660,15 @@ export class TrainingHubLifecycle {
         sourceKind: draft.sourceKind,
       }, this.abortController.signal);
       if (!this.accept(token)) return false;
+      const latestDraft = this.draft;
+      if (latestDraft !== null && latestDraft.sourceKind !== draft.sourceKind) {
+        return false;
+      }
       this.catalog = catalog;
-      this.draft = normalizeStart ? this.sourceAwareDraft(draft, catalog) : draft;
+      const currentDraft = latestDraft ?? draft;
+      this.draft = normalizeStart
+        ? this.sourceAwareDraft(currentDraft, catalog)
+        : currentDraft;
       this.evaluation = this.evaluateSourceCoverage(
         this.draft,
         catalog,

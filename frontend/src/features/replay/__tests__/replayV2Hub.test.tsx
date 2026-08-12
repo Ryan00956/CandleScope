@@ -6,8 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import TrainingHubDialog, {
   TrainingRunDeleteConfirmation,
 } from "../components/TrainingHubDialog.js";
+import { ReplayInitialMarketPicker } from "../ReplayApp.js";
 import { ReplayV2ApiClient, ReplayV2ApiError } from "../replayV2Api.js";
-import { selectReplayInitialMarketWithEpochRetry } from "../replayInitialMarket.js";
+import {
+  prepareReplayInitialMarketSelection,
+  selectReplayInitialMarketWithEpochRetry,
+} from "../replayInitialMarket.js";
 import {
   buildTrainingRunCreateRequest,
   buildTrainingRunPreparationRequest,
@@ -80,6 +84,7 @@ function segmentPlanResponse(overrides: Record<string, unknown> = {}) {
     protocol: "replay.data.prepare.v1",
     state: "PREPARE_ON_CREATE",
     source_kind: "BAR",
+    source_estimate_kind: "BAR_ROW_MODEL",
     identity: {
       exchange: "binance",
       market_type: "spot",
@@ -395,6 +400,42 @@ test("HEDGE prepare-plan parser accepts pinned hybrid inputs without requiring L
   assert.equal(parsed.hedge_inputs.fallback_applied, true);
   assert.equal(parsed.hedge_inputs.historical_l2_ref, null);
   assert.notEqual(parsed.hedge_inputs.hedge_public_history_ref, null);
+});
+
+test("initial HEDGE hybrid selection requires an explicit funding downgrade confirmation", async () => {
+  const catalog = hedgeCatalog();
+  const response = segmentPlanResponse();
+  let selectionCalls = 0;
+  const prepared = await prepareReplayInitialMarketSelection({
+    runId: "run-hybrid",
+    catalog,
+    entry: catalog.entries[0]!,
+    api: {
+      async marketCatalog() {
+        return catalog;
+      },
+      async planInitialMarket() {
+        return parseReplaySegmentPreparePlan({
+          ...response,
+          hedge_inputs: {
+            ...exactHedgeInputPlan(),
+            capability_state: "AVAILABLE_APPROX",
+            reason: "PINNED_HYBRID_PUBLIC_AND_SIMULATION_INPUTS",
+            public_fidelity: "VERSIONED_HYBRID_PUBLIC_INPUT",
+            fallback_applied: true,
+            historical_l2_ref: null,
+          },
+        });
+      },
+      async selectInitialMarket() {
+        selectionCalls += 1;
+        throw new Error("selection must wait for explicit confirmation");
+      },
+    },
+  });
+  assert.match(prepared.downgradeConfirmation ?? "", /HEDGE_HYBRID/);
+  assert.match(prepared.downgradeConfirmation ?? "", /资金费.*OFF/);
+  assert.equal(selectionCalls, 0);
 });
 
 async function settle(): Promise<void> {
@@ -794,6 +835,54 @@ test("create model defaults to a selectable ONE_WAY run and exposes fail-closed 
   assert.deepEqual(request.allowed_mutations, []);
 });
 
+test("source catalog response preserves edits made while the new source is loading", async (context) => {
+  let resolveTradeCatalog: ((catalog: ReturnType<typeof hedgeCatalog>) => void) | null = null;
+  const tradeCatalogPromise = new Promise<ReturnType<typeof hedgeCatalog>>((resolve) => {
+    resolveTradeCatalog = resolve;
+  });
+  const lifecycle = new TrainingHubLifecycle({
+    api: {
+      async listRuns() {
+        return parseTrainingRunListResponse(listResponse([]));
+      },
+      async capabilities() {
+        return parseReplayCapabilities(enabledCapabilities());
+      },
+      async catalog(query) {
+        return query?.sourceKind === "AGG_TRADE"
+          ? tradeCatalogPromise
+          : hedgeCatalog();
+      },
+      async createRun() {
+        return parseTrainingRunMutationResponse(mutationResponse());
+      },
+    },
+  });
+  context.after(() => lifecycle.dispose());
+  lifecycle.start();
+  await settle();
+  await lifecycle.openCreate();
+  const initial = lifecycle.getSnapshot().draft;
+  assert.ok(initial);
+  lifecycle.setDraft({ ...initial, sourceKind: "AGG_TRADE" });
+  lifecycle.setDraft({
+    ...lifecycle.getSnapshot().draft!,
+    name: "加载时继续编辑",
+    marginMode: "ISOLATED",
+  });
+  resolveTradeCatalog!({
+    ...hedgeCatalog(),
+    entries: hedgeCatalog().entries.map((entry) => ({
+      ...entry,
+      quality: "VERIFIED_AGG_TRADE_APPROXIMATE_BARS" as const,
+    })),
+  });
+  await settle();
+  assert.equal(lifecycle.getSnapshot().draft?.sourceKind, "AGG_TRADE");
+  assert.equal(lifecycle.getSnapshot().draft?.name, "加载时继续编辑");
+  assert.equal(lifecycle.getSnapshot().draft?.marginMode, "ISOLATED");
+});
+
 test("switching to AGG_TRADE reloads source coverage and resets T0", async (context) => {
   const queries: Array<{ sourceKind?: "BAR" | "AGG_TRADE" }> = [];
   const lifecycle = new TrainingHubLifecycle({
@@ -1015,6 +1104,23 @@ test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan"
     buildTrainingRunPreparationRequest(draft, evaluation, catalog).book_mode,
     "BOOK_ASSISTED_REQUIRED",
   );
+});
+
+test("AGG initial market picker discloses unknown full-day download size", () => {
+  const run = parseTrainingRunListResponse(listResponse([runCard({
+    state: "AWAITING_MARKET",
+    source_kind: "AGG_TRADE",
+    last_symbol: null,
+    adapter_session_id: null,
+    resume_action: "SELECT_MARKET",
+  })])).items[0];
+  assert.ok(run);
+  const html = renderToStaticMarkup(
+    <ReplayInitialMarketPicker run={run} onInitialized={() => {}} />,
+  );
+  assert.match(html, /data-replay-agg-trade-download-note/);
+  assert.match(html, /首次选择需下载并校验整日成交档/);
+  assert.match(html, /下载量未知/);
 });
 
 test("hub markup exposes saves, native actions, filters and explicit unavailable capability reasons", () => {

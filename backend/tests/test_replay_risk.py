@@ -4,7 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from app.replay.broker.models import BrokerConfig, OrderType
+from app.replay.broker.models import (
+    BrokerConfig,
+    OrderCapacityRequest,
+    OrderSide,
+    OrderType,
+)
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
 from tests.fixtures.replay.broker_fakes import CONFIG, bar, make_broker, request
 
@@ -64,4 +69,29 @@ def test_trigger_time_gap_cannot_bypass_hard_position_notional_limit() -> None:
     result = broker.apply_bar(bar(0, 200))
     assert result.fills == ()
     assert broker.order(order.order_id).status.value == "REJECTED"
+    assert broker.position.quantity == "0"
+
+
+def test_reduce_only_can_close_position_below_minimum_notional() -> None:
+    broker = make_broker()
+    broker.place_order(
+        request(client_order_id="dust-entry", quantity="0.05"),
+        command_id="cmd-dust-entry",
+    )
+    broker.apply_bar(bar(0, 101))
+    broker.apply_bar(bar(1, 81))
+
+    assert broker.position.quantity == "0.05"
+    assert broker.position.notional == "4.1"
+    assert broker.order_capacity(
+        OrderCapacityRequest(
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            reduce_only=True,
+        )
+    )["max_quantity"] == "0.05"
+
+    order = broker.close_position(command_id="cmd-dust-close")
+    assert order.reduce_only is True
+    broker.apply_bar(bar(2, 81))
     assert broker.position.quantity == "0"

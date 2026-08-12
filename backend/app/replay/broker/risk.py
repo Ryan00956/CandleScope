@@ -205,8 +205,13 @@ def validate_order_risk(
 
     reference = order_reference_price(request, position.mark_price)
     notional = reference * quantity
-    if notional < Decimal(filters.min_notional) or notional > Decimal(
-        filters.max_notional
+    # Exit-only orders must remain usable after price or rule changes leave an
+    # otherwise valid position below the instrument's minimum order notional.
+    # The quantity-step/bounds checks above and the position clamp below still
+    # apply, so this exception cannot increase exposure.
+    if not request.reduce_only and (
+        notional < Decimal(filters.min_notional)
+        or notional > Decimal(filters.max_notional)
     ):
         _order_rejected("order notional is outside instrument bounds")
 
@@ -313,12 +318,17 @@ def build_order_capacity(
         Decimal(filters.quantity_step),
         upward=False,
     )
-    minimum_for_notional = round_to_step(
-        Decimal(filters.min_notional) / reference,
-        Decimal(filters.quantity_step),
-        upward=True,
-    )
-    if maximum < max(Decimal(filters.min_quantity), minimum_for_notional):
+    minimum = Decimal(filters.min_quantity)
+    if not request.reduce_only:
+        minimum = max(
+            minimum,
+            round_to_step(
+                Decimal(filters.min_notional) / reference,
+                Decimal(filters.quantity_step),
+                upward=True,
+            ),
+        )
+    if maximum < minimum:
         maximum = Decimal(0)
     return {
         "schema_version": "replay.order-capacity.v1",

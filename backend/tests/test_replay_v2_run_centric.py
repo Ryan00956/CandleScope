@@ -8,10 +8,15 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from app.api.v1.replay import router
+from app.api.v1.replay import (
+    TrainingRunPreparationPayload,
+    TrainingRunSetupPayload,
+    router,
+)
 from app.replay.service import ReplayService
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.models import (
+    TrainingRunCreateRequest,
     TrainingRunMarketSelectionRequest,
     TrainingRunSetupRequest,
 )
@@ -89,6 +94,39 @@ def _setup_payload() -> dict[str, object]:
         "allowed_mutations": [],
         "market_selection_hint": None,
     }
+
+
+def test_omitted_position_policy_defaults_to_selectable_one_way() -> None:
+    payload = _setup_payload()
+    payload.pop("position_mode")
+    payload.pop("account_data_mode")
+    api_payload = TrainingRunSetupPayload.model_validate(payload).model_dump(mode="json")
+    setup = TrainingRunSetupRequest.from_dict(api_payload)
+
+    assert setup.to_dict()["position_mode"] == "ONE_WAY"
+    assert setup.to_dict()["account_data_mode"] == "APPROX_PROXY"
+    assert setup.to_dict()["funding_mode"] == "OFF"
+
+    preparation_payload = {
+        **payload,
+        "catalog_epoch": "sha256:" + "a" * 64,
+        "exchange": "binance",
+        "market_type": "futures",
+        "symbol": "BTCUSDT",
+        "base_interval": "1m",
+        "display_interval": "1m",
+        "launch_context": None,
+    }
+    preparation_payload.pop("market_selection_hint")
+    preparation_api_payload = TrainingRunPreparationPayload.model_validate(
+        preparation_payload
+    ).model_dump(mode="json")
+    preparation = TrainingRunCreateRequest.from_dict(preparation_api_payload)
+
+    assert preparation.position_mode.value == "ONE_WAY"
+    assert preparation.account_data_mode.value == "APPROX_PROXY"
+    assert preparation.account_fidelity is None
+    assert preparation.insurance_adl_fidelity is None
 
 
 def test_live_market_hint_preserves_watchlist_without_binding_the_first_symbol() -> None:

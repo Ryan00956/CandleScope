@@ -194,7 +194,7 @@ flowchart LR
 | 前向缓存长度 | 表示创建时优先准备的未来历史窗口，不等于训练强制结束时间；用量与预计磁盘占用必须可见。 |
 | 初始金额 | 使用结算资产的 Decimal 字符串；创建后只可通过已授权“入金/出金”事件改变。 |
 | 最大杠杆 | 是训练级上限；实际商品上限取训练上限、商品规则上限和风险模型上限的最小值。 |
-| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。新 Run 默认 `HEDGE`；HEDGE 唯一允许 `DETERMINISTIC_SIMULATION`，支持 CROSS、逐腿 ISOLATED、历史 funding，以及免 L2 的 `OFF` 或连续历史 L2 的 `BOOK_ASSISTED_REQUIRED`，旧 `APPROX_PROXY` HEDGE payload 必须拒绝。 |
+| 持仓模式 | `ONE_WAY` 或 `HEDGE`，创建后不可修改。新 Run 默认 `ONE_WAY + APPROX_PROXY + funding OFF`；HEDGE 必须由用户显式选择，唯一允许 `DETERMINISTIC_SIMULATION` 账户模型。完整历史公开输入优先；缺少可近似项时允许 pin `HEDGE_HYBRID`，使用已揭示 BAR/AGG_TRADE 价格代理、版本化近似规则、Run 配置费用、`funding OFF` 与确定性私有状态。旧的 HEDGE `APPROX_PROXY` 账户 payload 仍必须拒绝。 |
 | 手续费 | 至少区分 maker/taker；必须写入版本化 fee policy，不能只保存在前端。 |
 | 资金费 | `OFF`、`HISTORICAL_EXACT` 或明确标为沙盒的自定义模型；历史数据不完整时不得宣称 exact。 |
 | 保证金模式 | 可允许 `CROSS`、`ISOLATED` 或两者；具体订单/仓位必须记录选择。 |
@@ -481,7 +481,7 @@ flowchart LR
 
 `HEDGE` 的每个开仓、平仓和保护命令都必须显式携带 `position_side=LONG|SHORT`：`BUY/LONG` 开多、`SELL/LONG + reduce-only` 平多、`SELL/SHORT` 开空、`BUY/SHORT + reduce-only` 平空。风险与保证金按两腿 gross notional 求和；等量多空不是空仓。双向模式禁止“反手”快捷动作，必须分别管理两条腿。
 
-双向模式只使用 `DETERMINISTIC_SIMULATION`：公开 mark/index、funding、规则和 fee 必须由 Run pin；只有选择 `BOOK_ASSISTED_REQUIRED` 时才额外要求 pin 连续历史 L2。不可观测的保险基金和 ADL cohort 必须在运行前物化并标记为 `VERSIONED_DETERMINISTIC_SIMULATION`。HEDGE 支持 CROSS、逐腿 ISOLATED、历史资金费，以及免 L2 的 `OFF` 或连续历史 L2 的 `BOOK_ASSISTED_REQUIRED`，但不得宣称历史交易所 insurance/ADL exact 或 L2 queue-exact。旧 `APPROX_PROXY` HEDGE 组合必须拒绝，不能静默降级。组合保证金和期权 Greeks 仍不属于闭环。
+双向模式只使用 `DETERMINISTIC_SIMULATION` 账户模型。Run 必须 pin 公开输入与确定性 simulation manifest，但公开输入可分为 `PINNED_HISTORICAL_PUBLIC_INPUT` 或明确披露的 `VERSIONED_HYBRID_PUBLIC_INPUT`。Hybrid 使用已揭示 BAR/AGG_TRADE 价格作为 mark/index 代理、版本化近似规则、Run 配置 fee；历史 funding 缺失时自动降为 `OFF`，不得继续声称 exact。只有选择 `BOOK_ASSISTED_REQUIRED` 时才额外要求 pin 连续历史 L2。不可观测的保险基金和 ADL cohort 必须在运行前物化并标记为 `VERSIONED_DETERMINISTIC_SIMULATION`，不得宣称历史交易所 insurance/ADL exact 或 L2 queue-exact。旧 HEDGE `APPROX_PROXY` 账户组合仍必须拒绝。组合保证金和期权 Greeks 仍不属于闭环。
 
 产品统一命名为“交易所规则级确定性模拟”。Hub、工作台、强平时间线、报告、Review 和导出必须同时显示 public-input fidelity 与 private-state simulation model/version；不能只在帮助文档中披露。冻结公式、总序、保险基金和 ADL 规则见 [`KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md`](KLINE_REPLAY_HEDGE_DETERMINISTIC_SIMULATION_CONTRACT_zh.md)。
 
@@ -517,7 +517,7 @@ flowchart LR
 - 所有费用使用 Decimal，写入独立账本分录并进入权益、可用保证金和报告。
 - maker/taker fee policy 有版本和生效虚拟时刻。
 - 历史资金费必须按真实结算时刻、当时持仓、历史费率和权威 mark 结算。
-- 缺少费率、mark、商品规则或结算覆盖时，`HISTORICAL_EXACT` 必须拒绝或暂停；不得按 0 静默跳过。
+- 缺少费率、mark、商品规则或结算覆盖时，`HISTORICAL_EXACT` 资格必须拒绝；若存在可靠执行价格且未要求 L2，可在开始前显式降级并重新 pin 为 `HEDGE_HYBRID`。funding 降为 `OFF` 必须写入最终 Run 策略和 fidelity，不能保留 exact 标签或静默按 0 跳过。
 - 自定义固定资金费只能用于 `SANDBOX` 或明确标为近似的练习。
 
 ### 12.5 保证金与爆仓

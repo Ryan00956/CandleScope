@@ -451,7 +451,7 @@ async def test_high_rate_hedge_playback_yields_control_lock_after_each_bar(
 
 
 @pytest.mark.parametrize("setup_start_mode", ("MANUAL", "RANDOM"))
-async def test_segment_plan_resolves_cross_verified_default_hedge_refs(
+async def test_segment_plan_resolves_cross_verified_explicit_hedge_refs(
     tmp_path: Path,
     setup_start_mode: str,
 ) -> None:
@@ -550,6 +550,65 @@ async def test_segment_plan_resolves_cross_verified_default_hedge_refs(
             assert persisted[1] == "SERVER"
             assert persisted[2] == commitment["random_seed"]
             assert persisted[3] == commitment["committed_start_ms"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_hedge_without_imported_archives_materializes_playable_hybrid(
+    tmp_path: Path,
+) -> None:
+    service = await _risk_service(tmp_path / "phase9-hybrid.db")
+    try:
+        payload = _sandbox_request(
+            await _request(service),
+            initial_equity="1000",
+        ).to_dict()
+        payload.update(
+            {
+                "market_type": "futures",
+                "position_mode": "HEDGE",
+                "account_data_mode": "DETERMINISTIC_SIMULATION",
+                "account_fidelity": (
+                    "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE"
+                ),
+                "insurance_adl_fidelity": (
+                    "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT"
+                ),
+                "funding_mode": "HISTORICAL_EXACT",
+                "hedge_public_history_ref": None,
+                "simulation_manifest_ref": None,
+            }
+        )
+        request = TrainingRunCreateRequest.from_dict(payload)
+        assert service.training is not None
+
+        plan = await service.training.segment_plan(request)
+        hedge_plan = plan["hedge_inputs"]
+        assert hedge_plan["capability_state"] == "AVAILABLE_APPROX"
+        assert hedge_plan["public_fidelity"] == "VERSIONED_HYBRID_PUBLIC_INPUT"
+        assert hedge_plan["fallback_applied"] is True
+        assert hedge_plan["historical_l2_ref"] is None
+        assert hedge_plan["hedge_public_history_ref"] is not None
+        assert hedge_plan["simulation_manifest_ref"] is not None
+
+        created = await service.training.create_run(request)
+        run_id = str(created["run"]["run_id"])
+        projection = await service.training.get_market_tracks(run_id)
+        portfolio = projection["portfolio"]
+        assert portfolio["position_mode"] == "HEDGE"
+        assert portfolio["funding_mode"] == "OFF"
+        account_fidelity = await service.training.store.base_store.run_extension_read(
+            lambda connection: connection.execute(
+                "SELECT fidelity FROM replay_training_contract_account WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()["fidelity"]
+        )
+        assert account_fidelity == ("HYBRID_PUBLIC_INPUT_MODELLED_HEDGE_ACCOUNT")
+        capabilities = projection["tracks"][0]["capabilities"]
+        assert capabilities["HISTORICAL_MARK_INDEX"] == "AVAILABLE_APPROX"
+        assert capabilities["HISTORICAL_INSTRUMENT_RULE"] == "AVAILABLE_APPROX"
+        assert capabilities["HISTORICAL_FUNDING"] == "OFF_NOT_REQUESTED"
+        assert (await service.training.audit_account(run_id))["status"] == "PASS"
     finally:
         await service.shutdown(step_timeout=1.0)
 

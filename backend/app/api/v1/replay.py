@@ -28,8 +28,6 @@ from app.replay.service import ReplayService
 from app.replay.training.errors import TrainingRunError
 from app.replay.training.commands import ReplayV2Command
 from app.replay.training.models import (
-    HEDGE_ACCOUNT_FIDELITY,
-    HEDGE_INSURANCE_ADL_FIDELITY,
     REPLAY_V2_PROTOCOL,
     AccountDataMode,
     BookMode,
@@ -292,18 +290,18 @@ class TrainingRunPreparationPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    position_mode: PositionMode = PositionMode.HEDGE
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
-    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_history_ref: AccountHistoryRefPayload | None = None
     hedge_public_history_ref: HedgePublicHistoryRefPayload | None = None
     simulation_manifest_ref: HedgeSimulationManifestRefPayload | None = None
     account_fidelity: str | None = Field(
-        default=HEDGE_ACCOUNT_FIDELITY,
+        default=None,
         max_length=128,
     )
     insurance_adl_fidelity: str | None = Field(
-        default=HEDGE_INSURANCE_ADL_FIDELITY,
+        default=None,
         max_length=128,
     )
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)
@@ -338,9 +336,9 @@ class TrainingRunSetupPayload(_StrictModel):
     time_disclosure_policy: TimeDisclosurePolicy
     book_mode: BookMode
     margin_mode: MarginMode
-    position_mode: PositionMode = PositionMode.HEDGE
+    position_mode: PositionMode = PositionMode.ONE_WAY
     funding_mode: FundingMode
-    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_fidelity: str | None = Field(default=None, max_length=128)
     insurance_adl_fidelity: str | None = Field(default=None, max_length=128)
     fixed_funding_rate: str | None = Field(default=None, min_length=1, max_length=128)

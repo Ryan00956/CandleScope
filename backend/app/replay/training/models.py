@@ -1286,8 +1286,8 @@ class TrainingRunCreateRequest:
     margin_mode: MarginMode
     funding_mode: FundingMode
     allow_rule_changes: bool
-    position_mode: PositionMode = PositionMode.HEDGE
-    account_data_mode: AccountDataMode = AccountDataMode.DETERMINISTIC_SIMULATION
+    position_mode: PositionMode = PositionMode.ONE_WAY
+    account_data_mode: AccountDataMode = AccountDataMode.APPROX_PROXY
     account_history_ref: "AccountHistoryRef | None" = None
     hedge_public_history_ref: "HedgePublicHistoryRef | None" = None
     simulation_manifest_ref: "HedgeSimulationManifestRef | None" = None
@@ -1633,9 +1633,9 @@ class TrainingRunCreateRequest:
         )
         normalized.setdefault(
             "account_data_mode",
-            AccountDataMode.DETERMINISTIC_SIMULATION.value,
+            AccountDataMode.APPROX_PROXY.value,
         )
-        normalized.setdefault("position_mode", PositionMode.HEDGE.value)
+        normalized.setdefault("position_mode", PositionMode.ONE_WAY.value)
         if normalized["position_mode"] == PositionMode.HEDGE.value:
             normalized.setdefault("account_fidelity", HEDGE_ACCOUNT_FIDELITY)
             normalized.setdefault(
@@ -1876,10 +1876,10 @@ class TrainingRunSetupRequest:
         payload = dict(expect_mapping(value, field_name="training run setup"))
         payload.setdefault("random_range_start_ms", None)
         payload.setdefault("random_range_end_ms", None)
-        payload.setdefault("position_mode", PositionMode.HEDGE.value)
+        payload.setdefault("position_mode", PositionMode.ONE_WAY.value)
         payload.setdefault(
             "account_data_mode",
-            AccountDataMode.DETERMINISTIC_SIMULATION.value,
+            AccountDataMode.APPROX_PROXY.value,
         )
         if payload["position_mode"] == PositionMode.HEDGE.value:
             if payload.get("account_fidelity") is None:

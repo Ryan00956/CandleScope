@@ -406,6 +406,31 @@ async def test_v2_http_delete_archive_removes_run_and_adapter_session(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_v2_http_delete_empty_awaiting_market_run(tmp_path: Path) -> None:
+    service = await _service(tmp_path / "delete-empty-api.db")
+    app = _app(service)
+    try:
+        created = await _create_empty_run(app, service)
+        assert created.status_code == 201
+        assert created.json()["run"]["run_id"] == "run-1"
+        assert created.json()["run"]["adapter_session_id"] is None
+
+        deleted = await _request(app, "DELETE", "/api/v1/replay/runs/run-1")
+        assert deleted.status_code == 200
+        assert deleted.json() == {
+            "protocol": "replay.v3",
+            "deleted": True,
+            "run_id": "run-1",
+            "session_ids": [],
+        }
+
+        listed = await _request(app, "GET", "/api/v1/replay/runs?limit=10")
+        assert listed.status_code == 200
+        assert listed.json()["items"] == []
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_archive_delete_fences_lazy_recovery_until_sqlite_commits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

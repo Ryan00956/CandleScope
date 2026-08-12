@@ -560,9 +560,9 @@ test("Phase 16 Hub defers exact archive binding until a market is selected", () 
     },
   } satisfies TrainingHubRuntime;
   const html = renderToStaticMarkup(<TrainingHubDialog runtime={runtime} />);
-  assert.match(html, /历史 L2 与 pinned funding 默认属于可用产品能力/);
-  assert.match(html, /选中具体商品后绑定 archive ref/);
-  assert.match(html, /数据不连续时明确 fail closed/);
+  assert.match(html, /缺少可近似项时自动使用清楚标记的 HEDGE_HYBRID/);
+  assert.match(html, /HEDGE 会优先绑定完整历史输入/);
+  assert.match(html, /连续历史 L2 仍是硬门槛/);
   assert.match(html, /HISTORICAL_EXACT · pinned 归档结算/);
   assert.doesNotMatch(html, /data-account-history-capability|account-btc-202403/);
 });

@@ -4194,7 +4194,7 @@ async function main() {
           === "PINNED_PUBLIC_INPUTS_DETERMINISTIC_SIMULATED_PRIVATE_STATE"
         && v2CreatePayload?.insurance_adl_fidelity
           === "DETERMINISTIC_SIMULATION_NOT_HISTORICAL_EXCHANGE_FACT",
-      "training create payload was not the default HEDGE exchange-parity contract",
+      "training create payload was not the explicit HEDGE exchange-parity contract",
       v2CreateRequest,
     );
     const v2MarketRequest = [...replayCapture.requests].reverse().find((item) => (

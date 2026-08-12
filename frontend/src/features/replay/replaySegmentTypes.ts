@@ -84,14 +84,17 @@ export interface ReplayHedgeInputCapabilityPlan {
   readonly capability_state:
     | "NOT_REQUIRED"
     | "AVAILABLE_EXACT"
+    | "AVAILABLE_APPROX"
     | "UNSUPPORTED_NO_HISTORY"
     | "UNSUPPORTED_SOURCE_MODE"
     | "DEGRADED";
   readonly reason: string;
-  readonly public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT";
+  readonly public_fidelity:
+    | "PINNED_HISTORICAL_PUBLIC_INPUT"
+    | "VERSIONED_HYBRID_PUBLIC_INPUT";
   readonly private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION";
   readonly historical_exchange_private_state: false;
-  readonly fallback_applied: false;
+  readonly fallback_applied: boolean;
   readonly coverage: {
     readonly range_start_ms: number;
     readonly range_end_ms: number;
@@ -450,14 +453,16 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     || ![
       "NOT_REQUIRED",
       "AVAILABLE_EXACT",
+      "AVAILABLE_APPROX",
       "UNSUPPORTED_NO_HISTORY",
       "UNSUPPORTED_SOURCE_MODE",
       "DEGRADED",
     ].includes(String(hedgeInputs.capability_state))
-    || hedgeInputs.public_fidelity !== "PINNED_HISTORICAL_PUBLIC_INPUT"
+    || (hedgeInputs.public_fidelity !== "PINNED_HISTORICAL_PUBLIC_INPUT"
+      && hedgeInputs.public_fidelity !== "VERSIONED_HYBRID_PUBLIC_INPUT")
     || hedgeInputs.private_fidelity !== "VERSIONED_DETERMINISTIC_SIMULATION"
     || hedgeInputs.historical_exchange_private_state !== false
-    || hedgeInputs.fallback_applied !== false) {
+    || typeof hedgeInputs.fallback_applied !== "boolean") {
     throw new TypeError("HEDGE input capability plan is unsupported");
   }
   const hedgeCapability = hedgeInputs.capability_state as (
@@ -489,21 +494,27 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
         hedgeInputs.simulation_manifest_ref,
         "segment prepare plan.hedge_inputs.simulation_manifest_ref",
       );
-  const hedgeExact = hedgeCapability === "AVAILABLE_EXACT";
+  const hedgeAvailable = hedgeCapability === "AVAILABLE_EXACT"
+    || hedgeCapability === "AVAILABLE_APPROX";
   if ((hedgeInputs.requested_position_mode === "ONE_WAY")
       !== (hedgeCapability === "NOT_REQUIRED")
-    || hedgeExact !== (
+    || hedgeAvailable !== (
       hedgeCoverage !== null
-      && hedgeL2 !== null
       && hedgePublicRef !== null
       && hedgeSimulationRef !== null
     )
-    || (!hedgeExact && (
+    || (!hedgeAvailable && (
       hedgeCoverage !== null
       || hedgeL2 !== null
       || hedgePublicRef !== null
       || hedgeSimulationRef !== null
-    ))) {
+    ))
+    || (hedgeCapability === "AVAILABLE_EXACT"
+      && (hedgeInputs.public_fidelity !== "PINNED_HISTORICAL_PUBLIC_INPUT"
+        || hedgeInputs.fallback_applied !== false))
+    || (hedgeCapability === "AVAILABLE_APPROX"
+      && (hedgeInputs.public_fidelity !== "VERSIONED_HYBRID_PUBLIC_INPUT"
+        || hedgeInputs.fallback_applied !== true))) {
     throw new TypeError("HEDGE input capability proof is inconsistent");
   }
   return {
@@ -591,10 +602,10 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
       requested_position_mode: hedgeInputs.requested_position_mode,
       capability_state: hedgeCapability,
       reason: displayString(hedgeInputs.reason, "HEDGE input.reason"),
-      public_fidelity: "PINNED_HISTORICAL_PUBLIC_INPUT",
+      public_fidelity: hedgeInputs.public_fidelity,
       private_fidelity: "VERSIONED_DETERMINISTIC_SIMULATION",
       historical_exchange_private_state: false,
-      fallback_applied: false,
+      fallback_applied: hedgeInputs.fallback_applied,
       coverage: hedgeCoverage === null ? null : {
         range_start_ms: count(
           hedgeCoverage.range_start_ms,

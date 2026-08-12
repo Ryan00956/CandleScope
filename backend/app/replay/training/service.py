@@ -75,7 +75,11 @@ from .account_history import (
     AccountHistoryArchiveManager,
 )
 from .historical_book import HistoricalBookArchiveManager, HistoricalBookProjection
-from .hedge_inputs import HedgeInputArchiveManager, PreparedHedgeInputBinding
+from .hedge_inputs import (
+    HYBRID_PUBLIC_INPUT_FIDELITY,
+    HedgeInputArchiveManager,
+    PreparedHedgeInputBinding,
+)
 from .account import isolated_margin_key, round_to_step
 from .fast_forward import FastForwardContext, FastForwardDecision, FastForwardPlanner
 from .models import (
@@ -84,6 +88,8 @@ from .models import (
     BookMode,
     FastForwardPlan,
     FundingMode,
+    HedgePublicHistoryRef,
+    HedgeSimulationManifestRef,
     IntegrityMode,
     REPLAY_V2_PROTOCOL,
     ReplaySource,
@@ -670,15 +676,21 @@ class TrainingRunService:
                 if kind == "V2":
                     pause_task = actor.request_ordered_pause(reason="DELETE_RUN")
                 try:
-                    deleted_session_ids = (
-                        await self.replay_service.delete_sessions_atomically(
-                            session_ids,
-                            lambda: self.store.delete_run(
-                                normalized,
-                                expected_session_ids=session_ids,
-                            ),
+                    if session_ids:
+                        deleted_session_ids = (
+                            await self.replay_service.delete_sessions_atomically(
+                                session_ids,
+                                lambda: self.store.delete_run(
+                                    normalized,
+                                    expected_session_ids=session_ids,
+                                ),
+                            )
                         )
-                    )
+                    else:
+                        deleted_session_ids = await self.store.delete_run(
+                            normalized,
+                            expected_session_ids=(),
+                        )
                 except ReplayDomainError as exc:
                     if exc.http_status == 409:
                         raise TrainingRunError(
@@ -720,12 +732,48 @@ class TrainingRunService:
             request,
             max_dataset_rows=self.replay_service.settings.max_bar_dataset_rows,
         )
+        hedge_plan = await self._hedge_plan_with_playable_fallback(request)
         return {
             **plan,
             "historical_book": await self.historical_books.plan_for_request(request),
             "account_history": await self.account_history.plan_for_request(request),
-            "hedge_inputs": await self.hedge_inputs.plan_for_request(request),
+            "hedge_inputs": hedge_plan,
         }
+
+    async def _hedge_plan_with_playable_fallback(
+        self,
+        request: TrainingRunCreateRequest,
+        *,
+        selection: Mapping[str, object] | None = None,
+        warmup_bars: int | None = None,
+    ) -> dict[str, object]:
+        plan = await self.hedge_inputs.plan_for_request(request)
+        if (
+            request.position_mode.value != "HEDGE"
+            or request.book_mode is not BookMode.OFF
+            or plan.get("capability_state") in {"AVAILABLE_EXACT", "AVAILABLE_APPROX"}
+            or plan.get("reason") != "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET"
+            or request.start_mode is not StartMode.MANUAL
+            or request.requested_start_ms is None
+        ):
+            return plan
+        effective_warmup = (
+            self._selection_warmup_bars(request) if warmup_bars is None else warmup_bars
+        )
+        config = self._adapter_config(request, warmup_bars=effective_warmup)
+        bound_selection = selection
+        if bound_selection is None:
+            bound_selection = await self.replay_service.select_training_window(
+                config,
+                expected_catalog_epoch=request.catalog_epoch,
+                minimum_history_bars=effective_warmup,
+            )
+        seed = await self.replay_service.materialize_training_hybrid_input_seed(
+            config,
+            bound_selection,
+        )
+        await self.hedge_inputs.ensure_hybrid_inputs(request, seed)
+        return await self.hedge_inputs.plan_for_request(request)
 
     async def list_account_history_archives(self) -> dict[str, object]:
         return await self.account_history.list_archives()
@@ -2514,6 +2562,44 @@ class TrainingRunService:
             selection,
             max_dataset_rows=self.replay_service.settings.max_bar_dataset_rows,
         )
+        if request.position_mode.value == "HEDGE":
+            if (
+                request.hedge_public_history_ref is None
+                and request.simulation_manifest_ref is None
+            ):
+                hedge_plan = await self._hedge_plan_with_playable_fallback(
+                    request,
+                    selection=selection,
+                    warmup_bars=history_policy.effective_warmup_bars,
+                )
+                public_ref = hedge_plan.get("hedge_public_history_ref")
+                simulation_ref = hedge_plan.get("simulation_manifest_ref")
+                if isinstance(public_ref, Mapping) and isinstance(
+                    simulation_ref, Mapping
+                ):
+                    request = replace(
+                        request,
+                        hedge_public_history_ref=HedgePublicHistoryRef.from_dict(
+                            public_ref
+                        ),
+                        simulation_manifest_ref=(
+                            HedgeSimulationManifestRef.from_dict(simulation_ref)
+                        ),
+                    )
+            if request.hedge_public_history_ref is not None:
+                public_fidelity = await self.hedge_inputs.fidelity_for_public_ref(
+                    request.hedge_public_history_ref
+                )
+                if (
+                    public_fidelity == HYBRID_PUBLIC_INPUT_FIDELITY
+                    and request.funding_mode is FundingMode.HISTORICAL_EXACT
+                ):
+                    request = replace(
+                        request,
+                        funding_mode=FundingMode.OFF,
+                        fixed_funding_rate=None,
+                        funding_interval_ms=None,
+                    )
         # Empty Run creation commits T0 before a market is selected.  RANDOM
         # remains the durable/user-facing start mode, while input binding needs
         # the exact committed instant just like a manual request.  Keep this
@@ -2600,13 +2686,6 @@ class TrainingRunService:
                 raise TrainingRunError(
                     "HEDGE_INPUT_MANUAL_START_REQUIRED",
                     "pinned HEDGE inputs require an exact manual start",
-                    status_code=409,
-                    details={"fallback_applied": False},
-                )
-            if request.funding_mode is not FundingMode.HISTORICAL_EXACT:
-                raise TrainingRunError(
-                    "HEDGE_HISTORICAL_FUNDING_REQUIRED",
-                    "HEDGE deterministic simulation requires pinned historical funding",
                     status_code=409,
                     details={"fallback_applied": False},
                 )

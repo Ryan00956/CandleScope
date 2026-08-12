@@ -44,6 +44,18 @@ function selectionFromEntry(
   };
 }
 
+function hedgeInputUnavailableMessage(reason: string): string {
+  switch (reason) {
+    case "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET":
+      return "当前商品缺少可验证的执行价格或所选盘口模式要求连续 L2，无法安全生成双向持仓输入。";
+    case "BINANCE_USDM_EXACT_FUNDING_REQUIRED":
+    case "BINANCE_USDM_EXACT_L2_AND_FUNDING_REQUIRED":
+      return "双向持仓仅支持 Binance USD-M，并要求固定的 funding、mark、规则、费率与模拟清单；只有盘口辅助模式才要求历史 L2。";
+    default:
+      return `双向持仓输入不可用（${reason}）`;
+  }
+}
+
 function selectionWithPreparedInputs(
   selection: TrainingRunMarketSelectionPayload,
   plan: Awaited<ReturnType<ReplayInitialMarketApi["planInitialMarket"]>>,
@@ -62,9 +74,10 @@ function selectionWithPreparedInputs(
   }
   if (plan.hedge_inputs.requested_position_mode === "HEDGE"
     && (plan.hedge_inputs.capability_state !== "AVAILABLE_EXACT"
+      && plan.hedge_inputs.capability_state !== "AVAILABLE_APPROX"
       || plan.hedge_inputs.hedge_public_history_ref === null
       || plan.hedge_inputs.simulation_manifest_ref === null)) {
-    throw new Error(`双向持仓输入不可用：${plan.hedge_inputs.reason}`);
+    throw new Error(hedgeInputUnavailableMessage(plan.hedge_inputs.reason));
   }
   return {
     ...selection,

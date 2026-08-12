@@ -637,6 +637,64 @@ class ReplayService:
             ),
         }
 
+    async def materialize_training_hybrid_input_seed(
+        self,
+        config: ReplaySessionConfig,
+        selection: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Materialize the bounded BAR evidence used by playable HEDGE fallback.
+
+        The seed deliberately exposes only prices that become revealed on the
+        replay clock: the last warm-up close at T0, followed by each replay bar
+        close at ``close_time + 1``.  It is internal input-building evidence,
+        not an exchange mark/index-history claim.
+        """
+
+        if not isinstance(config, ReplaySessionConfig):
+            raise TypeError("config must be ReplaySessionConfig")
+        if not isinstance(selection, Mapping):
+            raise TypeError("selection must be an object")
+        entry, window = self._bound_training_entry_and_window(config, selection)
+        dataset = await asyncio.to_thread(self._dataset_builder.create, entry, window)
+        broker = self._broker_config(config, dataset)
+        range_start_ms = dataset.replay_start_ms
+        range_end_ms = range_start_ms + config.horizon_ms
+        initial_price = (
+            dataset.warmup_rows[-1].close
+            if dataset.warmup_rows
+            else dataset.replay_rows[0].open
+        )
+        marks: list[dict[str, object]] = [
+            {"event_time_ms": range_start_ms, "price": initial_price}
+        ]
+        for row in dataset.replay_rows:
+            reveal_time_ms = row.close_time_ms + 1
+            if reveal_time_ms <= range_start_ms:
+                continue
+            if reveal_time_ms > range_end_ms:
+                break
+            marks.append({"event_time_ms": reveal_time_ms, "price": row.close})
+        if marks[-1]["event_time_ms"] != range_end_ms:
+            marks.append(
+                {
+                    "event_time_ms": range_end_ms,
+                    "price": marks[-1]["price"],
+                }
+            )
+        return {
+            "schema_version": "replay.hedge-hybrid-seed.v1",
+            "source_kind": (
+                "BAR" if config.source_kind is SourceKind.BAR else "AGG_TRADE"
+            ),
+            "source_fingerprint": entry.source_fingerprint,
+            "data_epoch": dataset.data_epoch,
+            "range_start_ms": range_start_ms,
+            "range_end_ms": range_end_ms,
+            "max_mark_gap_ms": window.interval_ms,
+            "marks": marks,
+            "broker_config": broker.to_dict(),
+        }
+
     @staticmethod
     def _bound_training_entry_and_window(
         config: ReplaySessionConfig,

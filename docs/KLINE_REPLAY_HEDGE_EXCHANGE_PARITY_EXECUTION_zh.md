@@ -1,5 +1,7 @@
 # CandleScope K 线回放交易所规则级双向持仓与强平硬切换执行文档
 
+> 2026-08-12 可用性修订：本文保留当时 HEDGE hard-cutover 的实施与验收记录，但当前产品把“双向持仓可玩性”与“历史交易所精确资格”分离。HEDGE 仍唯一使用 `DETERMINISTIC_SIMULATION` 账户模型；完整 archive 优先，缺少可近似的 mark/rule/fee/funding 时允许生成并 pin `HEDGE_HYBRID` 输入，逐项标记代理或配置来源。只有损坏、矛盾、无可靠执行价格、声称 exact 却存在缺口，或明确要求连续 L2 但无覆盖时 fail closed。
+
 状态：`PHASE_0_COMPLETE_DETERMINISTIC_SIMULATION / HARD_CUTOVER / NO_GRAY_RUNTIME / DEFAULT_ON_REQUIRED`
 
 日期：2026-08-06

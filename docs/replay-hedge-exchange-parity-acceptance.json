@@ -179,12 +179,12 @@
     },
     {
       "id": 20,
-      "title": "无环境变量默认入口 HEDGE exact book 全部启用",
+      "title": "显式 HEDGE exact 路径无需环境变量且完整启用",
       "release_gates": ["backend_full", "frontend_full", "browser_soak", "fresh_boot", "static_audit"],
       "evidence": [
-        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_segment_plan_resolves_cross_verified_default_hedge_refs"},
-        {"path": "frontend/src/features/replay/__tests__/replayV2Hub.test.tsx", "needle": "HEDGE create mode is the default and accepts the exchange-parity policy matrix"},
-        {"path": "frontend/scripts/replay-soak.mjs", "needle": "training create payload was not the default HEDGE exchange-parity contract"}
+        {"path": "backend/tests/test_replay_v2_training_hedge_phase9.py", "needle": "test_segment_plan_resolves_cross_verified_explicit_hedge_refs"},
+        {"path": "frontend/src/features/replay/__tests__/replayV2Hub.test.tsx", "needle": "HEDGE create mode remains an explicit exchange-parity policy"},
+        {"path": "frontend/scripts/replay-soak.mjs", "needle": "training create payload was not the explicit HEDGE exchange-parity contract"}
       ]
     },
     {

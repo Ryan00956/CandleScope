@@ -68,7 +68,7 @@ export interface TrainingRunDraft {
 
 export interface TrainingHubUnsupportedCapabilities {
   readonly account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact";
-  readonly funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed";
+  readonly funding: "HEDGE 优先使用 pinned historical funding；缺失时可明确降级为 OFF 或 Sandbox 固定模型";
   readonly historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队";
   readonly rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更";
   readonly isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金";
@@ -86,7 +86,7 @@ export interface TrainingRunDraftEvaluation {
 
 export const PHASE_6_BOUNDARIES: TrainingHubUnsupportedCapabilities = Object.freeze({
   account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
-  funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed",
+  funding: "HEDGE 优先使用 pinned historical funding；缺失时可明确降级为 OFF 或 Sandbox 固定模型",
   historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
   rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
   isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
@@ -144,9 +144,9 @@ export function createTrainingRunDraft(
     takerFeeBps: "5",
     marketSlippageBps: "1",
     marginMode: "CROSS",
-    positionMode: "HEDGE",
-    fundingMode: "HISTORICAL_EXACT",
-    accountDataMode: "DETERMINISTIC_SIMULATION",
+    positionMode: "ONE_WAY",
+    fundingMode: "OFF",
+    accountDataMode: "APPROX_PROXY",
     fixedFundingRate: "0.0001",
     fundingIntervalMs: 28_800_000,
     bookMode: "OFF",
@@ -388,14 +388,12 @@ export function evaluateTrainingRunDraft(
     if (draft.exchange !== "binance" || draft.marketType !== "futures") {
       errors.push("双向持仓当前要求 Binance USD-M futures 历史输入");
     }
-    if (draft.fundingMode !== "HISTORICAL_EXACT") {
-      errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");
-    }
     const hedgePlan = segmentPlan?.hedge_inputs ?? null;
     if (hedgePlan === null) {
       errors.push("尚未按当前参数校验双向持仓公开历史与模拟清单");
     } else if (hedgePlan.requested_position_mode !== "HEDGE"
-      || hedgePlan.capability_state !== "AVAILABLE_EXACT"
+      || (hedgePlan.capability_state !== "AVAILABLE_EXACT"
+        && hedgePlan.capability_state !== "AVAILABLE_APPROX")
       || hedgePlan.hedge_public_history_ref === null
       || hedgePlan.simulation_manifest_ref === null) {
       errors.push(`双向持仓输入不可用：${hedgePlan.reason}`);
@@ -515,9 +513,6 @@ export function evaluateTrainingRunSetupDraft(
   if (draft.positionMode === "HEDGE") {
     if (draft.accountDataMode !== "DETERMINISTIC_SIMULATION") {
       errors.push("双向持仓必须使用版本化确定性模拟账户");
-    }
-    if (draft.fundingMode !== "HISTORICAL_EXACT") {
-      errors.push("双向持仓必须使用已 pin 的历史资金费与同刻 mark");
     }
   } else if (draft.accountDataMode === "DETERMINISTIC_SIMULATION") {
     errors.push("确定性双向模拟账户不能用于单向持仓");

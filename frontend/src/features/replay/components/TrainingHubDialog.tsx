@@ -338,8 +338,12 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
                 positionMode,
                 ...(positionMode === "HEDGE" ? {
                   accountDataMode: "DETERMINISTIC_SIMULATION",
+                  fundingMode: "OFF",
                 } : draft.accountDataMode === "DETERMINISTIC_SIMULATION" ? {
                   accountDataMode: "APPROX_PROXY",
+                  fundingMode: draft.fundingMode === "HISTORICAL_EXACT"
+                    ? "OFF"
+                    : draft.fundingMode,
                 } : {}),
               });
             }}
@@ -347,7 +351,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
             <option value="ONE_WAY">ONE_WAY · 单向净持仓</option>
             <option value="HEDGE">HEDGE · 多空双向持仓</option>
           </select>
-          <small>双向模式下多空腿独立计算保证金、资金费、强平与保护单；私有 insurance/ADL 固定为版本化确定性模拟。</small>
+          <small>显式选择双向模式后，多空腿独立计算保证金、强平与保护单。完整历史输入优先；缺少可近似项时自动使用清楚标记的 HEDGE_HYBRID，不会改成单向。</small>
         </label>
         <label>
           保证金模式
@@ -377,7 +381,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
           >
             {draft.positionMode === "HEDGE" ? (
               <option value="DETERMINISTIC_SIMULATION">
-                DETERMINISTIC_SIMULATION · pinned 公开输入 + 模拟私有状态
+                DETERMINISTIC_SIMULATION · 精确或混合公开输入 + 模拟私有状态
               </option>
             ) : (
               <>
@@ -419,7 +423,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
               BOOK_ASSISTED_REQUIRED · 连续历史 L2
             </option>
           </select>
-          <small>OFF 时双向持仓强平按已 pin 的当前 mark + Run 冻结的不利滑点成交；L2 模式只有连续性可证明时可选，且始终不声明 queue-exact。</small>
+          <small>OFF 时不结算资金费；mark/index 可使用已揭示 BAR/AGG_TRADE 价格代理。L2 模式只有连续性可证明时可选，且始终不声明 queue-exact。</small>
         </label>
         {draft.fundingMode === "SANDBOX_FIXED" && (
           <>
@@ -490,7 +494,7 @@ function TrainingRunCreatePanel({ runtime }: TrainingHubDialogProps) {
       <div className="training-hub-capability-boundary" aria-label="选品与数据边界">
         <h3>商品在 Run 内选择</h3>
         <p>创建时不固定商品、交易所、市场类型、基础周期或数据集，但会提交不可变 T0。进入空 Run 后搜索商品，服务端只校验它是否支持这个时间，再原子创建首条 MarketTrack。</p>
-        <p>历史 L2 与 pinned funding 默认属于可用产品能力；选中具体商品后绑定 archive ref，数据不连续时明确 fail closed，绝不降级为代理成交。</p>
+        <p>HEDGE 会优先绑定完整历史输入；缺失 mark/rule/fee/funding 时可生成版本化混合输入并逐项降级披露。只有明确选择盘口辅助模式时，连续历史 L2 仍是硬门槛。</p>
         <h3>能力与 fidelity 边界</h3>
         <ul>
           <li><strong>账户历史</strong> — {evaluation.unsupported.account_history}</li>

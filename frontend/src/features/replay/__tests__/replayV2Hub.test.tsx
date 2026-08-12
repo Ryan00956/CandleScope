@@ -284,6 +284,42 @@ test("initial market selection replans exactly once after capability epoch drift
   assert.deepEqual(selectedEpochs, [initialCatalog.catalog_epoch, refreshedEpoch]);
 });
 
+test("initial HEDGE selection explains missing pinned inputs without exposing an internal reason code", async () => {
+  const catalog = blindCatalog();
+  const response = segmentPlanResponse();
+  const unavailablePlan = parseReplaySegmentPreparePlan({
+    ...response,
+    hedge_inputs: {
+      ...response.hedge_inputs,
+      requested_position_mode: "HEDGE",
+      capability_state: "UNSUPPORTED_NO_HISTORY",
+      reason: "NO_COMPLETE_CROSS_VERIFIED_INPUT_SET",
+    },
+  });
+
+  await assert.rejects(
+    selectReplayInitialMarketWithEpochRetry({
+      runId: "run-hedge",
+      catalog,
+      entry: catalog.entries[0]!,
+      api: {
+        async marketCatalog() {
+          return catalog;
+        },
+        async planInitialMarket() {
+          return unavailablePlan;
+        },
+        async selectInitialMarket() {
+          throw new Error("unreachable");
+        },
+      },
+    }),
+    (reason: unknown) => reason instanceof Error
+      && reason.message.includes("缺少可验证的执行价格")
+      && !reason.message.includes("NO_COMPLETE_CROSS_VERIFIED_INPUT_SET"),
+  );
+});
+
 function exactHedgeInputPlan() {
   return {
     schema_version: "replay.hedge-input-plan.v1",
@@ -320,6 +356,25 @@ function exactHedgeInputPlan() {
     },
   };
 }
+
+test("HEDGE prepare-plan parser accepts pinned hybrid inputs without requiring L2", () => {
+  const response = segmentPlanResponse();
+  const parsed = parseReplaySegmentPreparePlan({
+    ...response,
+    hedge_inputs: {
+      ...exactHedgeInputPlan(),
+      capability_state: "AVAILABLE_APPROX",
+      reason: "PINNED_HYBRID_PUBLIC_AND_SIMULATION_INPUTS",
+      public_fidelity: "VERSIONED_HYBRID_PUBLIC_INPUT",
+      fallback_applied: true,
+      historical_l2_ref: null,
+    },
+  });
+  assert.equal(parsed.hedge_inputs.capability_state, "AVAILABLE_APPROX");
+  assert.equal(parsed.hedge_inputs.fallback_applied, true);
+  assert.equal(parsed.hedge_inputs.historical_l2_ref, null);
+  assert.notEqual(parsed.hedge_inputs.hedge_public_history_ref, null);
+});
 
 async function settle(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -669,7 +724,7 @@ test("create posts market-independent setup and defers catalog refresh to the ru
   assert.equal(Object.hasOwn(submittedPayload, "symbol"), false);
 });
 
-test("create model covers Phase 6 account fields and exposes fail-closed boundaries", () => {
+test("create model defaults to a selectable ONE_WAY run and exposes fail-closed boundaries", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = hedgeCatalog();
   const draft = createTrainingRunDraft(catalog);
@@ -677,7 +732,7 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(evaluation.canSubmit, true);
   assert.deepEqual(evaluation.unsupported, {
     account_history: "精确账户只接受服务端已校验并固定的 mark/index/funding/规则归档；公开 K 线代理不算 exact",
-    funding: "HEDGE 可使用 pinned historical funding；事件、同刻 mark 或规则覆盖不完整时 fail closed",
+    funding: "HEDGE 优先使用 pinned historical funding；缺失时可明确降级为 OFF 或 Sandbox 固定模型",
     historical_l2: "仅连续、可 pin、已验证的 Binance USD-M 历史 L2 可开启；不含真实盘口排队",
     rule_changes: "费率、杠杆与 Sandbox 固定资金费可按白名单审计变更",
     isolated_margin: "CROSS 与 ISOLATED 均可用；逐仓开仓前必须显式分配保证金",
@@ -691,21 +746,26 @@ test("create model covers Phase 6 account fields and exposes fail-closed boundar
   assert.equal(request.random_range_start_ms, null);
   assert.equal(request.random_range_end_ms, null);
   assert.equal(request.integrity_mode, "CHALLENGE");
-  assert.equal(request.funding_mode, "HISTORICAL_EXACT");
-  assert.equal(request.account_data_mode, "DETERMINISTIC_SIMULATION");
+  assert.equal(request.funding_mode, "OFF");
+  assert.equal(request.account_data_mode, "APPROX_PROXY");
   assert.equal(request.fixed_funding_rate, null);
   assert.equal(request.funding_interval_ms, null);
   assert.equal(request.book_mode, "OFF");
   assert.equal(request.margin_mode, "CROSS");
-  assert.equal(request.position_mode, "HEDGE");
+  assert.equal(request.position_mode, "ONE_WAY");
   assert.equal(request.allow_rule_changes, false);
   assert.deepEqual(request.allowed_mutations, []);
 });
 
-test("HEDGE create model rejects Sandbox funding and keeps pinned historical inputs", () => {
+test("HEDGE create model accepts explicit Sandbox funding and keeps exact inputs when available", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = hedgeCatalog();
-  const base = createTrainingRunDraft(catalog);
+  const base = {
+    ...createTrainingRunDraft(catalog),
+    positionMode: "HEDGE" as const,
+    fundingMode: "HISTORICAL_EXACT" as const,
+    accountDataMode: "DETERMINISTIC_SIMULATION" as const,
+  };
   const sandbox = {
     ...base,
     integrityMode: "SANDBOX" as const,
@@ -715,8 +775,10 @@ test("HEDGE create model rejects Sandbox funding and keeps pinned historical inp
     fundingIntervalMs: 28_800_000,
   };
   const sandboxEvaluation = evaluateTrainingRunSetupDraft(sandbox, capabilities);
-  assert.equal(sandboxEvaluation.canSubmit, false);
-  assert.match(sandboxEvaluation.errors.join("\n"), /历史资金费/);
+  assert.equal(sandboxEvaluation.canSubmit, true);
+  const sandboxPayload = buildTrainingRunCreateRequest(sandbox, sandboxEvaluation);
+  assert.equal(sandboxPayload.funding_mode, "SANDBOX_FIXED");
+  assert.equal(sandboxPayload.fixed_funding_rate, "-0.0001");
 
   const exactPlan = parseReplaySegmentPreparePlan(segmentPlanResponse({
     historical_book: {
@@ -756,11 +818,19 @@ test("HEDGE create model rejects Sandbox funding and keeps pinned historical inp
   );
 });
 
-test("HEDGE create mode is the default and accepts the exchange-parity policy matrix", () => {
+test("HEDGE create mode remains an explicit exchange-parity policy", () => {
   const capabilities = parseReplayCapabilities(enabledCapabilities());
   const catalog = hedgeCatalog();
   const base = createTrainingRunDraft(catalog);
-  const hedge = { ...base, positionMode: "HEDGE" as const };
+  assert.equal(base.positionMode, "ONE_WAY");
+  assert.equal(base.accountDataMode, "APPROX_PROXY");
+  assert.equal(base.fundingMode, "OFF");
+  const hedge = {
+    ...base,
+    positionMode: "HEDGE" as const,
+    accountDataMode: "DETERMINISTIC_SIMULATION" as const,
+    fundingMode: "HISTORICAL_EXACT" as const,
+  };
   const evaluation = evaluateTrainingRunSetupDraft(hedge, capabilities);
   assert.equal(evaluation.canSubmit, true);
   assert.equal(buildTrainingRunCreateRequest(hedge, evaluation).position_mode, "HEDGE");
@@ -796,6 +866,9 @@ test("Phase 9 create model enables BOOK_ASSISTED only with an exact server plan"
   const catalog = hedgeCatalog();
   const draft = {
     ...createTrainingRunDraft(catalog),
+    positionMode: "HEDGE" as const,
+    fundingMode: "HISTORICAL_EXACT" as const,
+    accountDataMode: "DETERMINISTIC_SIMULATION" as const,
     startMode: "MANUAL" as const,
     requestedStartMs: 1_710_000_000_000,
     bookMode: "BOOK_ASSISTED_REQUIRED" as const,
@@ -902,7 +975,7 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.doesNotMatch(endedCardHtml, /训练可继续|继续训练|STALE_ENDED_STATUS/);
   assert.match(html, /删除存档/);
   assert.match(html, /新建训练/);
-  assert.match(html, /资金费.*HISTORICAL_EXACT/);
+  assert.match(html, /资金费.*OFF/);
   assert.match(html, /完整性模式/);
   assert.match(html, /HIDE_MINUTE/);
   assert.match(html, /Practice 可审计变更白名单/);
@@ -910,7 +983,8 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(html, /商品在 Run 内选择/);
   assert.match(html, /创建时不固定商品、交易所、市场类型、基础周期或数据集/);
   assert.match(html, /原子创建首条 MarketTrack/);
-  assert.match(html, /历史 L2 与 pinned funding 默认属于可用产品能力/);
+  assert.match(html, /缺少可近似项时自动使用清楚标记的 HEDGE_HYBRID/);
+  assert.match(html, /HEDGE 会优先绑定完整历史输入/);
   assert.doesNotMatch(html, /DETERMINISTIC_SIMULATION[^<]*disabled|APPROX_PROXY[^<]*disabled/);
   assert.match(html, /公开 K 线代理不算 exact/);
   assert.match(html, /指标预热 BAR/);

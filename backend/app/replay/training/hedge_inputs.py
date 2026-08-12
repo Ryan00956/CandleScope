@@ -19,7 +19,7 @@ from app.replay.canonical import canonical_json, canonical_sha256
 from app.replay.models import validate_identifier, validate_timestamp_ms
 from app.replay.storage import ReplaySQLiteStore
 
-from .account import MaintenanceTier
+from .account import MaintenanceTier, instrument_rule_from_broker_config
 from .errors import TrainingRunError
 from .hedge_simulation_contract import (
     MODEL_VERSION,
@@ -42,7 +42,12 @@ SIMULATION_EVENT_SCHEMA_VERSION = "replay.hedge-simulation-input.event.v1"
 HEDGE_INPUT_PROOF_SCHEMA_VERSION = "replay.hedge-input-binding.v1"
 HEDGE_INPUT_AUDIT_SCHEMA_VERSION = "replay.hedge-input-audit.v1"
 PUBLIC_INPUT_FIDELITY = "PINNED_HISTORICAL_PUBLIC_INPUT"
+HYBRID_PUBLIC_INPUT_FIDELITY = "VERSIONED_HYBRID_PUBLIC_INPUT"
 SIMULATION_INPUT_FIDELITY = "VERSIONED_DETERMINISTIC_SIMULATION"
+HYBRID_PUBLIC_SOURCE_IDENTITY = "LOCAL_REVEALED_PRICE_PROXY_V1"
+HYBRID_MARK_FIDELITY = "REVEALED_BAR_OR_TAPE_PRICE_PROXY"
+HYBRID_RULE_FIDELITY = "VERSIONED_APPROXIMATE_INSTRUMENT_RULE"
+HYBRID_FEE_FIDELITY = "CONFIGURED_RUN_FEE_POLICY"
 _ROOT_HASH = "sha256:" + "0" * 64
 _DIGEST_LENGTH = 71
 _NO_HISTORICAL_L2_ARCHIVE_ID = "no-historical-l2"
@@ -479,6 +484,14 @@ class HedgeSimulationDescriptor:
     metadata: Mapping[str, object]
 
 
+def public_input_fidelity(public: HedgePublicArchiveDescriptor) -> str:
+    return (
+        HYBRID_PUBLIC_INPUT_FIDELITY
+        if public.metadata.get("source_identity") == HYBRID_PUBLIC_SOURCE_IDENTITY
+        else PUBLIC_INPUT_FIDELITY
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HedgeInputEvent:
     source_kind: str
@@ -545,8 +558,10 @@ def runtime_hedge_rule(
     track_id: str,
     source_kind: str,
     effective_virtual_time_ms: int,
+    public_fidelity: str = PUBLIC_INPUT_FIDELITY,
 ) -> dict[str, object]:
     rule = _rule_payload(payload)
+    hybrid = public_fidelity == HYBRID_PUBLIC_INPUT_FIDELITY
     return {
         "track_id": track_id,
         "rule_version": rule["rule_version"],
@@ -562,8 +577,12 @@ def runtime_hedge_rule(
         "max_leverage": rule["max_leverage"],
         "liquidation_fee_bps": rule["liquidation_fee_bps"],
         "maintenance_tiers": rule["maintenance_tiers"],
-        "mark_fidelity": "PINNED_HISTORICAL_MARK_INDEX",
-        "rule_fidelity": "PINNED_HISTORICAL_EXCHANGE_RULE",
+        "mark_fidelity": (
+            HYBRID_MARK_FIDELITY if hybrid else "PINNED_HISTORICAL_MARK_INDEX"
+        ),
+        "rule_fidelity": (
+            HYBRID_RULE_FIDELITY if hybrid else "PINNED_HISTORICAL_EXCHANGE_RULE"
+        ),
         "effective_virtual_time_ms": effective_virtual_time_ms,
     }
 
@@ -747,11 +766,17 @@ def bind_hedge_track_public_input(
             now_ms,
         ),
     )
+    bound_public_fidelity = public_input_fidelity(binding.public)
+    hybrid_public = bound_public_fidelity == HYBRID_PUBLIC_INPUT_FIDELITY
+    rule_fidelity = (
+        HYBRID_RULE_FIDELITY if hybrid_public else "PINNED_HISTORICAL_EXCHANGE_RULE"
+    )
     runtime_rule = runtime_hedge_rule(
         rule,
         track_id=track_id,
         source_kind=source_kind,
         effective_virtual_time_ms=virtual_time_ms,
+        public_fidelity=bound_public_fidelity,
     )
     connection.execute(
         "DELETE FROM replay_training_instrument_rule WHERE run_id = ? AND track_id = ?",
@@ -773,7 +798,7 @@ def bind_hedge_track_public_input(
         INSERT INTO replay_training_instrument_rule(
             run_id, track_id, revision, effective_virtual_time_ms,
             rule_json, rule_hash, fidelity, created_at_ms
-        ) VALUES (?, ?, 1, ?, ?, ?, 'PINNED_HISTORICAL_EXCHANGE_RULE', ?)
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -781,6 +806,7 @@ def bind_hedge_track_public_input(
             virtual_time_ms,
             canonical_json(runtime_rule),
             canonical_sha256(runtime_rule),
+            rule_fidelity,
             now_ms,
         ),
     )
@@ -794,10 +820,20 @@ def bind_hedge_track_public_input(
             mark["mark_price"],
             canonical_json(
                 {
-                    "HISTORICAL_MARK_INDEX": "AVAILABLE_PINNED",
-                    "HISTORICAL_INSTRUMENT_RULE": "AVAILABLE_PINNED",
-                    "HISTORICAL_FEE_POLICY": "AVAILABLE_PINNED_ACCOUNT_WIDE",
-                    "HISTORICAL_FUNDING": "AVAILABLE_PINNED",
+                    "HISTORICAL_MARK_INDEX": (
+                        "AVAILABLE_APPROX" if hybrid_public else "AVAILABLE_PINNED"
+                    ),
+                    "HISTORICAL_INSTRUMENT_RULE": (
+                        "AVAILABLE_APPROX" if hybrid_public else "AVAILABLE_PINNED"
+                    ),
+                    "HISTORICAL_FEE_POLICY": (
+                        "AVAILABLE_APPROX"
+                        if hybrid_public
+                        else "AVAILABLE_PINNED_ACCOUNT_WIDE"
+                    ),
+                    "HISTORICAL_FUNDING": (
+                        "OFF_NOT_REQUESTED" if hybrid_public else "AVAILABLE_PINNED"
+                    ),
                     "HISTORICAL_L2": historical_l2_capability,
                     "SIMULATED_INSURANCE_FUND": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
                     "SIMULATED_ADL_COHORT": "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
@@ -959,6 +995,12 @@ def bind_hedge_inputs(
     fee = public_state.get("fee_policy")
     if not isinstance(fee, Mapping):
         raise TypeError("HEDGE public start projection is incomplete")
+    hybrid_public = (
+        public_input_fidelity(binding.public) == HYBRID_PUBLIC_INPUT_FIDELITY
+    )
+    fee_fidelity = (
+        HYBRID_FEE_FIDELITY if hybrid_public else "PINNED_HISTORICAL_FEE_POLICY"
+    )
     fee_policy = {
         "schema_version": "replay.training.fee-policy.v1",
         "run_id": run_id,
@@ -969,7 +1011,7 @@ def bind_hedge_inputs(
         "liquidation_fee_bps": fee["liquidation_fee_bps"],
         "policy_version": fee["policy_version"],
         "account_tier": fee["account_tier"],
-        "fidelity": "PINNED_HISTORICAL_FEE_POLICY",
+        "fidelity": fee_fidelity,
     }
     connection.execute(
         "DELETE FROM replay_training_fee_policy WHERE run_id = ?",
@@ -980,8 +1022,7 @@ def bind_hedge_inputs(
         INSERT INTO replay_training_fee_policy(
             run_id, revision, effective_virtual_time_ms, maker_fee_bps,
             taker_fee_bps, policy_hash, fidelity, reason, created_at_ms
-        ) VALUES (?, 1, ?, ?, ?, ?, 'PINNED_HISTORICAL_FEE_POLICY',
-                  'HEDGE public input T0', ?)
+        ) VALUES (?, 1, ?, ?, ?, ?, ?, 'HEDGE public input T0', ?)
         """,
         (
             run_id,
@@ -989,6 +1030,7 @@ def bind_hedge_inputs(
             fee["maker_fee_bps"],
             fee["taker_fee_bps"],
             canonical_sha256(fee_policy),
+            fee_fidelity,
             now_ms,
         ),
     )
@@ -1046,10 +1088,18 @@ def bind_hedge_inputs(
     connection.execute(
         """
         UPDATE replay_training_contract_account
-        SET fidelity = 'PINNED_PUBLIC_INPUT_MODELLED_HEDGE_ACCOUNT',
+        SET fidelity = ?,
             updated_at_ms = ? WHERE run_id = ?
         """,
-        (now_ms, run_id),
+        (
+            (
+                "HYBRID_PUBLIC_INPUT_MODELLED_HEDGE_ACCOUNT"
+                if hybrid_public
+                else "PINNED_PUBLIC_INPUT_MODELLED_HEDGE_ACCOUNT"
+            ),
+            now_ms,
+            run_id,
+        ),
     )
     connection.execute(
         """
@@ -1524,6 +1574,7 @@ class HedgeInputArchiveManager:
             else store.path.parent / f"{store.path.stem}-hedge-inputs"
         ).resolve()
         self._lock = asyncio.Lock()
+        self._hybrid_provision_lock = asyncio.Lock()
         self._verified_event_cache: dict[
             tuple[str, str, str], tuple[HedgeInputEvent, ...]
         ] = {}
@@ -1531,11 +1582,252 @@ class HedgeInputArchiveManager:
     async def start(self) -> None:
         await asyncio.to_thread(self._ensure_dirs)
 
+    async def ensure_hybrid_inputs(
+        self,
+        request: TrainingRunCreateRequest,
+        seed: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Build deterministic, pinned HEDGE inputs from revealed local prices.
+
+        These objects are intentionally tagged as hybrid.  They preserve the
+        immutable input/audit machinery without claiming historical exchange
+        mark, rule, fee, funding, insurance, or ADL fidelity.
+        """
+
+        if request.position_mode.value != "HEDGE":
+            raise ValueError("hybrid HEDGE inputs require HEDGE position mode")
+        if request.book_mode.value != "OFF":
+            raise ValueError("hybrid HEDGE inputs cannot satisfy required L2")
+        expected_seed_keys = {
+            "schema_version",
+            "source_kind",
+            "source_fingerprint",
+            "data_epoch",
+            "range_start_ms",
+            "range_end_ms",
+            "max_mark_gap_ms",
+            "marks",
+            "broker_config",
+        }
+        if set(seed) != expected_seed_keys or seed.get("schema_version") != (
+            "replay.hedge-hybrid-seed.v1"
+        ):
+            raise ValueError("hybrid HEDGE seed fields are incompatible")
+        start = _counter(seed["range_start_ms"], "hybrid.range_start_ms")
+        end = _counter(seed["range_end_ms"], "hybrid.range_end_ms")
+        if (
+            request.requested_start_ms != start
+            or end != start + request.forward_cache_ms
+        ):
+            raise ValueError("hybrid HEDGE seed range does not match the request")
+        raw_marks = seed["marks"]
+        if not isinstance(raw_marks, list) or not raw_marks:
+            raise ValueError("hybrid HEDGE seed marks must be non-empty")
+        marks: list[dict[str, object]] = []
+        previous_time: int | None = None
+        for raw_mark in raw_marks:
+            if not isinstance(raw_mark, Mapping) or set(raw_mark) != {
+                "event_time_ms",
+                "price",
+            }:
+                raise ValueError("hybrid HEDGE mark fields are incompatible")
+            event_time = validate_timestamp_ms(
+                raw_mark["event_time_ms"], field_name="hybrid.mark.event_time_ms"
+            )
+            if previous_time is not None and event_time <= previous_time:
+                raise ValueError("hybrid HEDGE marks must be strictly ordered")
+            previous_time = event_time
+            marks.append(
+                {
+                    "event_time_ms": event_time,
+                    "price": _canonical_decimal(
+                        raw_mark["price"], "hybrid.mark.price", positive=True
+                    ),
+                }
+            )
+        if marks[0]["event_time_ms"] != start or marks[-1]["event_time_ms"] != end:
+            raise ValueError("hybrid HEDGE marks do not cover the requested range")
+        broker_config = seed["broker_config"]
+        if not isinstance(broker_config, Mapping):
+            raise TypeError("hybrid HEDGE broker_config must be an object")
+        source_kind = str(seed["source_kind"])
+        rule = instrument_rule_from_broker_config(
+            track_id="track-1",
+            source_kind=source_kind,
+            broker_config=broker_config,
+            effective_virtual_time_ms=start,
+        ).to_dict()
+        rule_payload = {key: rule[key] for key in _RULE_KEYS}
+        events: list[dict[str, object]] = [
+            {
+                "event_time_ms": start,
+                "event_kind": "RULE",
+                "payload": rule_payload,
+            },
+            {
+                "event_time_ms": start,
+                "event_kind": "FEE_POLICY",
+                "payload": {
+                    "policy_version": "RUN_CONFIGURED_FEE_V1",
+                    "account_tier": "RUN_CONFIGURED",
+                    "maker_fee_bps": request.maker_fee_bps,
+                    "taker_fee_bps": request.taker_fee_bps,
+                    "liquidation_fee_bps": rule_payload["liquidation_fee_bps"],
+                },
+            },
+        ]
+        events.extend(
+            {
+                "event_time_ms": int(mark["event_time_ms"]),
+                "event_kind": "MARK_INDEX",
+                "payload": {
+                    "mark_price": mark["price"],
+                    "index_price": mark["price"],
+                },
+            }
+            for mark in marks
+        )
+        # The v1 immutable archive requires a funding component.  A single T0
+        # zero event is fully consumed by the initial projection; OFF runs have
+        # no future funding event to settle.
+        events.append(
+            {
+                "event_time_ms": start,
+                "event_kind": "FUNDING",
+                "payload": {
+                    "funding_rate": "0",
+                    "mark_price": marks[0]["price"],
+                },
+            }
+        )
+        events.sort(
+            key=lambda item: (
+                int(item["event_time_ms"]),
+                _PUBLIC_PHASES[str(item["event_kind"])],
+                str(item["event_kind"]),
+            )
+        )
+        seed_proof = canonical_sha256(
+            {
+                "schema_version": "replay.hedge-hybrid-provision.v1",
+                "exchange": request.exchange,
+                "market_type": request.market_type,
+                "symbol": request.symbol,
+                "settlement_asset": request.settlement_asset,
+                "source_kind": source_kind,
+                "source_fingerprint": seed["source_fingerprint"],
+                "data_epoch": seed["data_epoch"],
+                "range_start_ms": start,
+                "range_end_ms": end,
+                "rule": rule_payload,
+                "maker_fee_bps": request.maker_fee_bps,
+                "taker_fee_bps": request.taker_fee_bps,
+                "marks": marks,
+            }
+        )
+        token = seed_proof[7:39]
+        archive_id = f"hybrid-public-{token}"
+        manifest_id = f"hybrid-simulation-{token}"
+        first_mark = Decimal(str(marks[0]["price"]))
+        leverage = Decimal(request.max_leverage)
+        initial_margin = first_mark / max(leverage, Decimal(1))
+        insurance_opening = max(
+            Decimal(request.initial_equity) * leverage * Decimal(100),
+            Decimal("1000000"),
+        )
+        candidate = {
+            "candidate_id": f"hybrid-{request.symbol.lower()}-{token[:12]}",
+            "symbol": request.symbol,
+            "position_side": "SHORT",
+            "quantity": "1",
+            "entry_price": canonical_decimal(
+                format(first_mark * Decimal("1.1"), "f"),
+                field_name="hybrid.adl.entry_price",
+                positive=True,
+            ),
+            "mark_price": canonical_decimal(
+                format(first_mark, "f"),
+                field_name="hybrid.adl.mark_price",
+                positive=True,
+            ),
+            "initial_margin": canonical_decimal(
+                format(initial_margin, "f"),
+                field_name="hybrid.adl.initial_margin",
+                positive=True,
+            ),
+            "margin_balance": canonical_decimal(
+                format(initial_margin * Decimal(2), "f"),
+                field_name="hybrid.adl.margin_balance",
+                positive=True,
+            ),
+        }
+        async with self._hybrid_provision_lock:
+            self._ensure_dirs()
+            public_path = self.root / "generated" / f"{archive_id}.json"
+            simulation_path = self.root / "generated" / f"{manifest_id}.json"
+            await asyncio.to_thread(
+                build_hedge_public_history_archive,
+                public_path,
+                archive_id=archive_id,
+                exchange=request.exchange,
+                market_type=request.market_type,
+                symbol=request.symbol,
+                settlement_asset=request.settlement_asset,
+                range_start_ms=start,
+                range_end_ms=end,
+                max_mark_gap_ms=_counter(
+                    seed["max_mark_gap_ms"],
+                    "hybrid.max_mark_gap_ms",
+                    positive=True,
+                ),
+                source_identity=HYBRID_PUBLIC_SOURCE_IDENTITY,
+                capture_receipt=f"local-seed-{token}",
+                historical_l2_ref=None,
+                events=events,
+            )
+            await asyncio.to_thread(
+                build_hedge_simulation_manifest,
+                simulation_path,
+                manifest_id=manifest_id,
+                range_start_ms=start,
+                range_end_ms=end,
+                settlement_asset=request.settlement_asset,
+                required_symbols=[request.symbol],
+                insurance_events=[
+                    {
+                        "effective_time_ms": start,
+                        "kind": "OPENING_BALANCE",
+                        "amount": canonical_decimal(
+                            format(insurance_opening, "f"),
+                            field_name="hybrid.insurance.opening_balance",
+                            positive=True,
+                        ),
+                    }
+                ],
+                adl_snapshots=[
+                    {
+                        "symbol": request.symbol,
+                        "effective_time_ms": start,
+                        "valid_until_ms": end,
+                        "candidates": [candidate],
+                    }
+                ],
+            )
+            public_receipt = await self.import_public(public_path)
+            simulation_receipt = await self.import_simulation(simulation_path)
+        return {
+            "public": public_receipt,
+            "simulation": simulation_receipt,
+            "public_fidelity": HYBRID_PUBLIC_INPUT_FIDELITY,
+            "funding_fidelity": "OFF_NOT_REQUESTED",
+            "fallback_applied": True,
+        }
+
     async def plan_for_request(
         self,
         request: TrainingRunCreateRequest,
     ) -> dict[str, object]:
-        """Resolve the exact immutable refs required by a default HEDGE create.
+        """Resolve the exact immutable refs required by an explicit HEDGE create.
 
         BOOK_ASSISTED_REQUIRED selects a public archive that points at the same
         historical L2 object as the book manager.  OFF selects only the pinned
@@ -1573,15 +1865,11 @@ class HedgeInputArchiveManager:
                 "hedge_public_history_ref": None,
                 "simulation_manifest_ref": None,
             }
-        if (
-            request.exchange != "binance"
-            or request.market_type != "futures"
-            or request.funding_mode.value != "HISTORICAL_EXACT"
-        ):
+        if request.exchange != "binance" or request.market_type != "futures":
             return {
                 **base,
                 "capability_state": "UNSUPPORTED_SOURCE_MODE",
-                "reason": "BINANCE_USDM_EXACT_FUNDING_REQUIRED",
+                "reason": "BINANCE_USDM_REQUIRED",
                 "coverage": None,
                 "historical_l2_ref": None,
                 "hedge_public_history_ref": None,
@@ -1647,7 +1935,14 @@ class HedgeInputArchiveManager:
                     WHERE exchange = ? AND market_type = ? AND symbol = ?
                       AND settlement_asset = ? AND health = 'READY'
                       AND range_start_ms <= ? AND range_end_ms >= ?
-                    ORDER BY byte_size, range_start_ms DESC, archive_id
+                      AND (? = 'HISTORICAL_EXACT'
+                           OR archive_id LIKE 'hybrid-public-%')
+                    ORDER BY
+                      CASE
+                        WHEN archive_id LIKE 'hybrid-public-%' THEN 1
+                        ELSE 0
+                      END,
+                      byte_size, range_start_ms DESC, archive_id
                     LIMIT 1
                     """,
                     (
@@ -1657,6 +1952,7 @@ class HedgeInputArchiveManager:
                         request.settlement_asset,
                         requested_start,
                         requested_end,
+                        request.funding_mode.value,
                     ),
                 ).fetchone()
             simulations = tuple(
@@ -1784,10 +2080,20 @@ class HedgeInputArchiveManager:
             }
         coverage_start = max(public.range_start_ms, simulation.range_start_ms)
         coverage_end = min(public.range_end_ms, simulation.range_end_ms)
+        resolved_public_fidelity = public_input_fidelity(public)
+        hybrid_public = resolved_public_fidelity == HYBRID_PUBLIC_INPUT_FIDELITY
         return {
             **base,
-            "capability_state": "AVAILABLE_EXACT",
-            "reason": "CROSS_VERIFIED_PINNED_PUBLIC_AND_SIMULATION_INPUTS",
+            "capability_state": (
+                "AVAILABLE_APPROX" if hybrid_public else "AVAILABLE_EXACT"
+            ),
+            "reason": (
+                "PINNED_HYBRID_PUBLIC_AND_SIMULATION_INPUTS"
+                if hybrid_public
+                else "CROSS_VERIFIED_PINNED_PUBLIC_AND_SIMULATION_INPUTS"
+            ),
+            "public_fidelity": resolved_public_fidelity,
+            "fallback_applied": hybrid_public,
             "coverage": {
                 "range_start_ms": coverage_start,
                 "range_end_ms": coverage_end,
@@ -1809,8 +2115,41 @@ class HedgeInputArchiveManager:
             },
         }
 
+    async def fidelity_for_public_ref(self, ref: object) -> str:
+        archive_id = getattr(ref, "archive_id", None)
+        dataset_epoch = getattr(ref, "dataset_epoch", None)
+        checksum_sha256 = getattr(ref, "checksum_sha256", None)
+        if not isinstance(archive_id, str):
+            raise TypeError("HEDGE public ref is invalid")
+        row = await self.store.run_extension_read(
+            lambda connection: connection.execute(
+                "SELECT * FROM replay_hedge_public_archive WHERE archive_id = ?",
+                (archive_id,),
+            ).fetchone()
+        )
+        if row is None:
+            raise TrainingRunError(
+                "HEDGE_PUBLIC_INPUT_NOT_FOUND",
+                "the selected HEDGE public input is unavailable",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        path = await self._guard_catalog_row(row, source_kind="PUBLIC")
+        public = await asyncio.to_thread(verify_hedge_public_history, path)
+        if (
+            public.dataset_epoch != dataset_epoch
+            or public.checksum_sha256 != checksum_sha256
+        ):
+            raise TrainingRunError(
+                "HEDGE_PUBLIC_INPUT_REF_MISMATCH",
+                "the selected HEDGE public input ref no longer matches",
+                status_code=409,
+                details={"fallback_applied": False},
+            )
+        return public_input_fidelity(public)
+
     def _ensure_dirs(self) -> None:
-        for name in ("public", "simulation", ".tmp", ".quarantine"):
+        for name in ("public", "simulation", "generated", ".tmp", ".quarantine"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
 
     def _owned_path(self, relative: str) -> Path:
@@ -3355,6 +3694,7 @@ __all__ = [
     "PreparedHedgeInputBinding",
     "PUBLIC_ARCHIVE_PROTOCOL",
     "PUBLIC_ARCHIVE_SCHEMA_VERSION",
+    "HYBRID_PUBLIC_INPUT_FIDELITY",
     "PUBLIC_INPUT_FIDELITY",
     "SIMULATION_INPUT_FIDELITY",
     "build_hedge_public_history_archive",

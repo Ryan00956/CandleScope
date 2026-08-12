@@ -234,6 +234,38 @@ def _rule_payload(value: object) -> dict[str, object]:
     }
 
 
+def _supported_hedge_rule(
+    value: object,
+    *,
+    archive_id: str | None = None,
+    track_id: str | None = None,
+    event_sequence: int | None = None,
+) -> dict[str, object]:
+    """Fail closed outside the currently supported Binance USDM quantity model."""
+
+    rule = _rule_payload(value)
+    if Decimal(str(rule["contract_size"])) == Decimal(1):
+        return rule
+    details: dict[str, object] = {
+        "contract_size": rule["contract_size"],
+        "supported_contract_size": "1",
+        "supported_market_model": "BINANCE_USDM_LINEAR_BASE_QUANTITY",
+        "fallback_applied": False,
+    }
+    if archive_id is not None:
+        details["archive_id"] = archive_id
+    if track_id is not None:
+        details["track_id"] = track_id
+    if event_sequence is not None:
+        details["event_sequence"] = event_sequence
+    raise TrainingRunError(
+        "HEDGE_CONTRACT_SIZE_UNSUPPORTED",
+        "HEDGE replay currently supports contract_size=1 Binance USDM linear quantity only",
+        status_code=409,
+        details=details,
+    )
+
+
 def _fee_payload(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or set(value) != _FEE_KEYS:
         raise ValueError("FEE_POLICY payload fields do not match the v1 contract")
@@ -560,7 +592,7 @@ def runtime_hedge_rule(
     effective_virtual_time_ms: int,
     public_fidelity: str = PUBLIC_INPUT_FIDELITY,
 ) -> dict[str, object]:
-    rule = _rule_payload(payload)
+    rule = _supported_hedge_rule(payload, track_id=track_id)
     hybrid = public_fidelity == HYBRID_PUBLIC_INPUT_FIDELITY
     return {
         "track_id": track_id,
@@ -2467,6 +2499,13 @@ class HedgeInputArchiveManager:
                 details={"fallback_applied": False},
             )
         public_events = await asyncio.to_thread(_read_public_events, public_path)
+        for event in public_events:
+            if event.event_kind == "RULE":
+                _supported_hedge_rule(
+                    event.payload,
+                    archive_id=public.archive_id,
+                    event_sequence=event.event_sequence,
+                )
         simulation_events = await asyncio.to_thread(
             _read_simulation_events, simulation_path
         )
@@ -2705,6 +2744,14 @@ class HedgeInputArchiveManager:
                     details={"track_id": track_id, "fallback_applied": False},
                 )
         public_events = await asyncio.to_thread(_read_public_events, public_path)
+        for event in public_events:
+            if event.event_kind == "RULE":
+                _supported_hedge_rule(
+                    event.payload,
+                    archive_id=public.archive_id,
+                    track_id=track_id,
+                    event_sequence=event.event_sequence,
+                )
         projection = _projection(
             public_events,
             source_kind="PUBLIC",

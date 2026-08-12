@@ -309,6 +309,7 @@ async def prepare_hedge_request(
     book_price_offset: str = "0",
     required_symbols: list[str] | None = None,
     book_mode: str = "BOOK_ASSISTED_REQUIRED",
+    contract_size: str = "1",
 ) -> TrainingRunCreateRequest:
     training = getattr(service, "training")
     if training is None:
@@ -353,7 +354,7 @@ async def prepare_hedge_request(
                 "min_notional": "5",
                 "max_notional": "1000000",
                 "quote_step": "0.01",
-                "contract_size": "1",
+                "contract_size": contract_size,
                 "max_leverage": "20",
                 "liquidation_fee_bps": "25",
                 "maintenance_tiers": maintenance_tiers

@@ -5635,7 +5635,10 @@ class TrainingRunService:
             reference = (
                 payload.get("limit_price")
                 or payload.get("stop_price")
-                or position.get("mark_price")
+                or _position_mark(
+                    position,
+                    position_side=payload.get("position_side"),
+                )
             )
             price = Decimal(str(reference))
             contract_size = Decimal(str(rule["contract_size"]))
@@ -5646,7 +5649,7 @@ class TrainingRunService:
                 existing_notional = (
                     Decimal(0)
                     if replace_position
-                    else Decimal(str(position.get("notional", "0")))
+                    else _position_gross_notional(position)
                 )
                 if (
                     notional < minimum_notional

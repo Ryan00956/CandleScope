@@ -21,6 +21,7 @@ from app.replay.training.models import (
     ReplayV2CommandType,
     TrainingRunCreateRequest,
 )
+from app.replay.training.service import TrainingRunService
 from scripts.import_replay_account_history import _run as import_account_history
 from tests.fixtures.replay.account_history import (
     account_rule_fixture,
@@ -52,6 +53,56 @@ pytestmark = pytest.mark.anyio
 
 REPLAY_START = START_MS + 4 * INTERVAL_MS
 ARCHIVE_END = REPLAY_START + 20 * INTERVAL_MS
+
+
+def test_exact_hedge_order_filter_counts_both_legs_gross_notional() -> None:
+    rule = {
+        "quantity_step": "1",
+        "min_quantity": "1",
+        "max_quantity": "100",
+        "price_tick": "0.1",
+        "min_notional": "10",
+        "max_notional": "1000",
+        "contract_size": "1",
+    }
+    portfolio = {
+        "account_history": {"mode": "HISTORICAL_EXACT", "status": "ACTIVE"},
+        "instrument_rules": [
+            {"track_id": "track-1", "revision": 1, "rule": rule}
+        ],
+    }
+    selected_track = {
+        "track_id": "track-1",
+        "position": {
+            "position_mode": "HEDGE",
+            "long": {"quantity": "6", "mark_price": "100", "notional": "600"},
+            "short": {"quantity": "-3", "mark_price": "100", "notional": "300"},
+        },
+    }
+    payload = {
+        "quantity": "2",
+        "position_side": "LONG",
+        "reduce_only": False,
+        "limit_price": None,
+        "stop_price": None,
+    }
+    # Existing gross is 600 + 300.  The new 2 * 100 * 1 = 200 order must be
+    # rejected at 1100 even though either leg considered alone is below 1000.
+    with pytest.raises(TrainingRunError) as rejected:
+        TrainingRunService._assert_exact_account_order_filters(
+            payload=payload,
+            selected_track=selected_track,
+            portfolio=portfolio,
+        )
+    assert rejected.value.code == "ACCOUNT_HISTORY_NOTIONAL_FILTER"
+    assert rejected.value.details["order_notional"] == "200"
+
+    selected_track["position"]["short"]["notional"] = "100"
+    TrainingRunService._assert_exact_account_order_filters(
+        payload=payload,
+        selected_track=selected_track,
+        portfolio=portfolio,
+    )
 
 
 async def test_operator_account_history_import_cli_contract(tmp_path: Path) -> None:

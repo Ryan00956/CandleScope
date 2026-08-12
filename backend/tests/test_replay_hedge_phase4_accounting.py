@@ -158,6 +158,53 @@ async def _run_with_opposite_legs(
     return run_id, session_id, funding_time
 
 
+async def test_hedge_contract_size_other_than_one_fails_before_run_binding(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase4-contract-size-unsupported.db"
+    service = await _risk_service(database)
+    try:
+        request = await prepare_hedge_request(
+            service,
+            replace(
+                _sandbox_request(await _request(service)),
+                market_type="futures",
+            ),
+            root=tmp_path,
+            prefix="phase4-contract-size-unsupported",
+            contract_size="10",
+        )
+        training = service.training
+        assert training is not None
+        with pytest.raises(TrainingRunError) as unsupported:
+            await training.create_run(request)
+        assert unsupported.value.code == "HEDGE_CONTRACT_SIZE_UNSUPPORTED"
+        assert unsupported.value.status_code == 409
+        assert unsupported.value.details == {
+            "contract_size": "10",
+            "supported_contract_size": "1",
+            "supported_market_model": "BINANCE_USDM_LINEAR_BASE_QUANTITY",
+            "fallback_applied": False,
+            "archive_id": "phase4-contract-size-unsupported-public",
+            "event_sequence": 2,
+        }
+
+        # The archive remains inspectable, but no half-bound Run/account/rule is
+        # persisted and no order can reach the broker under an unsupported model.
+        with sqlite3.connect(database) as connection:
+            counts = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM replay_training_run),
+                    (SELECT COUNT(*) FROM replay_hedge_input_binding),
+                    (SELECT COUNT(*) FROM replay_training_instrument_rule)
+                """
+            ).fetchone()
+        assert counts == (0, 0, 0)
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_opposite_funding_fee_revision_retry_and_restart_are_exact(
     tmp_path: Path,
 ) -> None:

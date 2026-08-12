@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.request
 import zipfile
 from collections.abc import Iterator
@@ -43,6 +44,7 @@ _MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
 _MAX_OFFICIAL_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_LISTING_PAGE_BYTES = 16 * 1024 * 1024
 _MAX_LISTING_PAGES = 10_000
+_OFFICIAL_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 
 class ReplayTradeImportError(RuntimeError):
@@ -409,6 +411,7 @@ def import_official_date_range(
     download_timeout_seconds: float = 60.0,
     max_download_bytes: int = _MAX_OFFICIAL_DOWNLOAD_BYTES,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, object]:
     if exchange.strip().lower() != "binance":
         raise ReplayTradeImportError("only Binance official public data is accepted")
@@ -449,6 +452,7 @@ def import_official_date_range(
                     opener=opener,
                     timeout_seconds=download_timeout_seconds,
                     max_bytes=min(max_download_bytes, 1024 * 1024),
+                    monotonic=monotonic,
                 )
                 _download_official(
                     source_url,
@@ -456,6 +460,7 @@ def import_official_date_range(
                     opener=opener,
                     timeout_seconds=download_timeout_seconds,
                     max_bytes=max_download_bytes,
+                    monotonic=monotonic,
                 )
                 accepted, metadata = import_local_verified_day(
                     archive,
@@ -511,6 +516,7 @@ def _download_official(
     opener: Callable[..., BinaryIO],
     timeout_seconds: float,
     max_bytes: int,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     parsed = urlparse(url)
     if (
@@ -520,18 +526,42 @@ def _download_official(
     ):
         raise ReplayTradeImportError("download URL is not Binance official public data")
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    started_at = monotonic()
     try:
         with opener(url, timeout=timeout_seconds) as response, temporary.open(
             "wb"
         ) as output:
             total = 0
-            while chunk := response.read(1024 * 1024):
+            read1 = getattr(response, "read1", None)
+            read_chunk = read1 if callable(read1) else response.read
+            while True:
+                remaining = timeout_seconds - (monotonic() - started_at)
+                if remaining <= 0:
+                    raise ReplayTradeImportError(
+                        "official aggregate-trade download exceeded its total time budget"
+                    )
+                _set_response_read_timeout(response, remaining)
+                chunk = read_chunk(_OFFICIAL_DOWNLOAD_CHUNK_BYTES)
+                if monotonic() - started_at >= timeout_seconds:
+                    raise ReplayTradeImportError(
+                        "official aggregate-trade download exceeded its total time budget"
+                    )
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise ReplayTradeImportError(
+                        "official aggregate-trade download returned a non-binary body"
+                    )
                 total += len(chunk)
                 if total > max_bytes:
                     raise ReplayTradeImportError(
                         "official aggregate-trade object exceeds its byte limit"
                     )
                 output.write(chunk)
+                # Keep the temporary object visibly progressing.  This is not
+                # an integrity boundary (the final fsync below is); it prevents
+                # a healthy short-read transfer from looking stuck at 0 B.
+                output.flush()
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)
@@ -541,6 +571,17 @@ def _download_official(
         raise ReplayTradeImportError(f"failed to download official object: {url}") from exc
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _set_response_read_timeout(response: object, remaining_seconds: float) -> None:
+    """Bound the next urllib ``read1`` socket operation by the total deadline."""
+
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if callable(settimeout):
+        settimeout(remaining_seconds)
 
 
 def _read_bounded(stream: BinaryIO, *, max_bytes: int) -> bytes:

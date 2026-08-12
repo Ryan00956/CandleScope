@@ -115,6 +115,7 @@ function exactPlan(overrides: Record<string, unknown> = {}) {
     },
     estimated_size_bytes: 394_560,
     estimated_rows: 1_641,
+    source_estimate_kind: "BAR_ROW_MODEL",
     history_policy: {
       schema_version: "replay.data-policy.v1",
       indicator_warmup_bars: 200,

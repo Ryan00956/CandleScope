@@ -14,6 +14,7 @@ from app.data_engine.storage.raw_trade_archive import (
 )
 from app.replay.trade_import import (
     ReplayTradeImportError,
+    _download_official,
     import_local_verified_day,
     import_official_date_range,
     list_official_agg_trade_days,
@@ -27,6 +28,46 @@ START_MS = int(
     * 1000
 )
 SYMBOL = "BTCUSDT"
+
+
+class _StepClock:
+    def __init__(self, values: list[float]) -> None:
+        self._values = iter(values)
+
+    def __call__(self) -> float:
+        return next(self._values)
+
+
+class _ShortReadResponse:
+    def __init__(self, chunks: list[bytes], *, destination: Path | None = None) -> None:
+        self._chunks = iter(chunks)
+        self._destination = destination
+        self.read_sizes: list[int] = []
+        self.observed_partial_size: int | None = None
+        self.socket_timeouts: list[float] = []
+        socket = type(
+            "FakeSocket",
+            (),
+            {"settimeout": lambda _self, value: self.socket_timeouts.append(value)},
+        )()
+        raw = type("FakeRaw", (), {"_sock": socket})()
+        self.fp = type("FakeFp", (), {"raw": raw})()
+
+    def __enter__(self) -> _ShortReadResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read1(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        if self._destination is not None and len(self.read_sizes) == 2:
+            temporary = tuple(
+                self._destination.parent.glob(f".{self._destination.name}.*.tmp")
+            )
+            assert len(temporary) == 1
+            self.observed_partial_size = temporary[0].stat().st_size
+        return next(self._chunks)
 
 
 def test_official_listing_requires_complete_zip_checksum_pairs_across_pages() -> None:
@@ -77,6 +118,50 @@ def test_official_listing_requires_complete_zip_checksum_pairs_across_pages() ->
         as_of_date=date(2026, 6, 3),
         opener=opener,
     ) == (date(2026, 6, 1), date(2026, 6, 2))
+
+
+def test_official_download_streams_short_reads_with_visible_progress(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "BTCUSDT-aggTrades-2026-06-01.zip"
+    response = _ShortReadResponse([b"abc", b"de", b""], destination=destination)
+
+    _download_official(
+        "https://data.binance.vision/data/futures/um/daily/aggTrades/"
+        "BTCUSDT/BTCUSDT-aggTrades-2026-06-01.zip",
+        destination,
+        opener=lambda *_args, **_kwargs: response,
+        timeout_seconds=5,
+        max_bytes=10,
+        monotonic=_StepClock([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
+    )
+
+    assert destination.read_bytes() == b"abcde"
+    assert response.observed_partial_size == 3
+    assert response.read_sizes == [64 * 1024, 64 * 1024, 64 * 1024]
+    assert response.socket_timeouts == pytest.approx([4.9, 4.7, 4.5])
+
+
+def test_official_download_enforces_total_budget_despite_continuous_short_reads(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "BTCUSDT-aggTrades-2026-06-01.zip"
+    response = _ShortReadResponse([b"a", b"b", b"c", b""])
+
+    with pytest.raises(ReplayTradeImportError, match="total time budget"):
+        _download_official(
+            "https://data.binance.vision/data/futures/um/daily/aggTrades/"
+            "BTCUSDT/BTCUSDT-aggTrades-2026-06-01.zip",
+            destination,
+            opener=lambda *_args, **_kwargs: response,
+            timeout_seconds=1,
+            max_bytes=10,
+            monotonic=_StepClock([0, 0.1, 0.4, 0.7, 1.1]),
+        )
+
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".*.tmp"))
+    assert response.socket_timeouts == pytest.approx([0.9, 0.3])
 
 
 def _rows(*, bad_schema: bool = False, wrong_date: bool = False) -> list[list[str]]:

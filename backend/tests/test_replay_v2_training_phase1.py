@@ -463,6 +463,72 @@ async def test_failed_materialization_retry_reuses_committed_random_selection(
         await service.shutdown(step_timeout=1.0)
 
 
+async def test_restart_marks_interrupted_preparation_retryable_and_reuses_commitment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "restart-interrupted-preparation.db"
+    service = await _service(path)
+    training = service.training
+    assert training is not None
+    request = replace(
+        await _request(service),
+        start_mode=StartMode.RANDOM,
+        requested_start_ms=None,
+    )
+    selection = await service.select_training_window(
+        service.training._adapter_config(request),
+        expected_catalog_epoch=request.catalog_epoch,
+        minimum_history_bars=request.indicator_warmup_bars,
+    )
+    selected_start_ms = int(selection["selected_start_ms"])
+    await training.store.create_selection_preparation(
+        preparation_id="restart-retry-1",
+        start_mode=request.start_mode.value,
+        random_seed=request.random_seed,
+        catalog_epoch=request.catalog_epoch,
+        source_fingerprint=str(selection["source_fingerprint"]),
+        selected_start_ms=selected_start_ms,
+        required_start_ms=selected_start_ms - 2 * INTERVAL_MS,
+        required_end_ms=selected_start_ms + 4 * INTERVAL_MS,
+        interval_ms=INTERVAL_MS,
+        request=request,
+        selection=selection,
+    )
+    await service.shutdown(step_timeout=1.0)
+
+    restarted = await _service(path, run_prefix="restart-run")
+    assert restarted.training is not None
+    selection_attempts = 0
+    original_select = restarted.select_training_window
+
+    async def track_selection(*args, **kwargs):
+        nonlocal selection_attempts
+        selection_attempts += 1
+        return await original_select(*args, **kwargs)
+
+    monkeypatch.setattr(restarted, "select_training_window", track_selection)
+    try:
+        interrupted = await restarted.training.get_selection_preparation(
+            "restart-retry-1"
+        )
+        assert interrupted["preparation"]["status"] == "FAILED"
+        assert interrupted["preparation"]["error_code"] == "PROCESS_RESTARTED"
+
+        retried = await restarted.training.retry_selection_preparation(
+            "restart-retry-1"
+        )
+        assert retried["run"]["run_id"] == "restart-retry-1"
+        assert selection_attempts == 0
+        completed = await restarted.training.get_selection_preparation(
+            "restart-retry-1"
+        )
+        assert completed["preparation"]["status"] == "READY"
+        assert completed["preparation"]["retry_count"] == 1
+    finally:
+        await restarted.shutdown(step_timeout=1.0)
+
+
 async def test_create_rejects_catalog_epoch_drift_without_partial_rows(
     tmp_path: Path,
 ) -> None:

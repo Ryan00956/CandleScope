@@ -47,6 +47,7 @@ function plan(overrides: Record<string, unknown> = {}) {
     },
     estimated_size_bytes: 393_840,
     estimated_rows: 1_641,
+    source_estimate_kind: "BAR_ROW_MODEL",
     history_policy: {
       schema_version: "replay.data-policy.v1",
       indicator_warmup_bars: 200,
@@ -225,4 +226,20 @@ test("Phase 14 prepare plan carries strict role estimates and blocks rejected bu
   assert.throws(() => parseReplaySegmentPreparePlan(plan({
     effective_warmup_bars_estimate: 199,
   })));
+
+  const unknownTradeObject = parseReplaySegmentPreparePlan({
+    ...plan(),
+    source_kind: "AGG_TRADE",
+    estimated_rows: null,
+    estimated_size_bytes: null,
+    source_estimate_kind: "UNKNOWN_OFFICIAL_OBJECT",
+    prepare_action: "VERIFY_LOCAL_AGG_TRADE",
+  });
+  assert.equal(unknownTradeObject.estimated_rows, null);
+  assert.equal(unknownTradeObject.estimated_size_bytes, null);
+  assert.equal(unknownTradeObject.source_estimate_kind, "UNKNOWN_OFFICIAL_OBJECT");
+  assert.throws(() => parseReplaySegmentPreparePlan({
+    ...unknownTradeObject,
+    estimated_rows: 1_641,
+  }));
 });

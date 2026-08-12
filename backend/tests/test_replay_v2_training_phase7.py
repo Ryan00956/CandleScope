@@ -443,7 +443,13 @@ async def test_agg_trade_partition_set_uses_unified_checksum_bound_adapter(
     )
     try:
         assert service.training is not None
-        created = await service.training.create_run(await _trade_request(service))
+        request = await _trade_request(service)
+        plan = await service.training.segment_plan(request)
+        assert plan["source_estimate_kind"] == "UNKNOWN_OFFICIAL_OBJECT"
+        assert plan["estimated_rows"] is None
+        assert plan["estimated_size_bytes"] is None
+        assert plan["history_policy"]["estimate_kind"] == "EXACT"
+        created = await service.training.create_run(request)
         run_id = str(created["run"]["run_id"])
         listed = await service.training.segments.list_segments(run_id=run_id)
         assert listed["summary"]["segment_count"] == 1

@@ -861,8 +861,18 @@ class ReplaySegmentManager:
         estimated_rows = effective_warmup + forward_rows + 1
         if block_reason is None and estimated_rows > max_dataset_rows:
             block_reason = "VISIBLE_HISTORY_BUDGET_EXCEEDED"
-        bytes_per_row = 320 if request.source_kind.value == "AGG_TRADE" else 240
-        estimated_size = estimated_rows * bytes_per_row
+        if request.source_kind.value == "AGG_TRADE":
+            # The BAR execution window does not predict the number or compressed
+            # size of aggregate trades in Binance's selected daily object.  The
+            # official listing exposes neither value, so numbers here would be
+            # false precision until the object has been downloaded and verified.
+            source_estimate_kind = "UNKNOWN_OFFICIAL_OBJECT"
+            source_estimated_rows: int | None = None
+            source_estimated_size: int | None = None
+        else:
+            source_estimate_kind = "BAR_ROW_MODEL"
+            source_estimated_rows = estimated_rows
+            source_estimated_size = estimated_rows * 240
 
         def read(connection: sqlite3.Connection) -> tuple[int, int]:
             row = connection.execute(
@@ -900,8 +910,9 @@ class ReplaySegmentManager:
                 "symbol": request.symbol,
                 "base_interval": request.base_interval,
             },
-            "estimated_size_bytes": estimated_size,
-            "estimated_rows": estimated_rows,
+            "estimated_size_bytes": source_estimated_size,
+            "estimated_rows": source_estimated_rows,
+            "source_estimate_kind": source_estimate_kind,
             "history_policy": {
                 "schema_version": DATA_POLICY_PROTOCOL,
                 "indicator_warmup_bars": request.indicator_warmup_bars,

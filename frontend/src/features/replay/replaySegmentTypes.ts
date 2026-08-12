@@ -118,8 +118,9 @@ export interface ReplaySegmentPreparePlan {
     readonly symbol: string;
     readonly base_interval: string;
   };
-  readonly estimated_size_bytes: number;
-  readonly estimated_rows: number;
+  readonly estimated_size_bytes: number | null;
+  readonly estimated_rows: number | null;
+  readonly source_estimate_kind: "BAR_ROW_MODEL" | "UNKNOWN_OFFICIAL_OBJECT";
   readonly history_policy: ReplaySegmentHistoryPolicyPlan;
   readonly prepare_action: "SNAPSHOT_LOCAL_BAR_RANGE" | "VERIFY_LOCAL_AGG_TRADE";
   readonly existing_ready_segments: number;
@@ -188,6 +189,7 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     "identity",
     "estimated_size_bytes",
     "estimated_rows",
+    "source_estimate_kind",
     "history_policy",
     "prepare_action",
     "existing_ready_segments",
@@ -341,11 +343,28 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
     historyPolicy.forward_rows_estimate,
     "segment history policy.forward_rows_estimate",
   );
+  const estimatedRows = nullableCount(payload.estimated_rows, "estimated_rows");
+  const estimatedSizeBytes = nullableCount(
+    payload.estimated_size_bytes,
+    "estimated_size_bytes",
+  );
+  if (payload.source_estimate_kind !== "BAR_ROW_MODEL"
+    && payload.source_estimate_kind !== "UNKNOWN_OFFICIAL_OBJECT") {
+    throw new TypeError("segment source estimate kind is unsupported");
+  }
   if (indicatorWarmup < 1
     || effectiveWarmup < indicatorWarmup
     || (visibleRows !== null && effectiveWarmup < visibleRows)
-    || count(payload.estimated_rows, "estimated_rows")
-      !== effectiveWarmup + forwardRows + 1) {
+    || (payload.source_kind === "BAR" && (
+      payload.source_estimate_kind !== "BAR_ROW_MODEL"
+      || estimatedRows !== effectiveWarmup + forwardRows + 1
+      || estimatedSizeBytes === null
+    ))
+    || (payload.source_kind === "AGG_TRADE" && (
+      payload.source_estimate_kind !== "UNKNOWN_OFFICIAL_OBJECT"
+      || estimatedRows !== null
+      || estimatedSizeBytes !== null
+    ))) {
     throw new TypeError("segment history policy row estimates are inconsistent");
   }
   if (payload.selection_loads_history !== false
@@ -527,8 +546,9 @@ export function parseReplaySegmentPreparePlan(value: unknown): ReplaySegmentPrep
       symbol: displayString(identity.symbol, "segment identity.symbol"),
       base_interval: displayString(identity.base_interval, "segment identity.base_interval"),
     },
-    estimated_size_bytes: count(payload.estimated_size_bytes, "estimated_size_bytes"),
-    estimated_rows: count(payload.estimated_rows, "estimated_rows"),
+    estimated_size_bytes: estimatedSizeBytes,
+    estimated_rows: estimatedRows,
+    source_estimate_kind: payload.source_estimate_kind,
     history_policy: {
       schema_version: "replay.data-policy.v1",
       indicator_warmup_bars: indicatorWarmup,

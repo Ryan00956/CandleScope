@@ -50,6 +50,7 @@ import {
   rebuildReplayViewerSeries,
 } from "./replayViewerProjection.js";
 import { handleReplayShortcut } from "./replayShortcuts.js";
+import { buildReplayPositionHlines } from "./replayPositionHlines.js";
 import {
   formatReplayTimeAxisLabel,
   replayTimeAxisMaxCharacterLength,
@@ -766,66 +767,14 @@ export default function ReplayTrainingPageShell({
   const replayTradeHlines = useMemo<IndicatorHLine[]>(() => {
     const selectedTrackId = viewer.viewerState?.selected_track_id;
     const portfolio = viewer.marketTracks?.portfolio;
-    const selectedPositions = selectedTrackId === undefined
-      ? []
-      : (portfolio?.positions.filter((item) => item.track_id === selectedTrackId) ?? []);
-    const lines: IndicatorHLine[] = [];
-    for (const selectedPosition of selectedPositions) {
-      const position = selectedPosition.position;
-      const entryPrice = Number(position.entry_price ?? Number.NaN);
-      const quantity = Number(position.quantity ?? 0);
-      const positionSide = selectedPosition.position_side;
-      const sideLabel = positionSide === "LONG" ? "多仓" : positionSide === "SHORT" ? "空仓" : "持仓";
-      const lineSuffix = positionSide?.toLowerCase() ?? "net";
-      if (quantity !== 0 && Number.isFinite(entryPrice) && entryPrice > 0) {
-        lines.push({
-          id: "replay-position-average" + (positionSide === undefined ? "" : `-${lineSuffix}`),
-          pane: "main",
-          price: entryPrice,
-          title: `${sideLabel}均价 ${entryPrice}`,
-          color: positionSide === "SHORT" ? "#7c3aed" : "#2563eb",
-          linestyle: "solid",
-          linewidth: 1,
-        });
-      }
-      if (quantity === 0 || portfolio?.position_mode === "HEDGE") continue;
-      const mark = Number(position?.mark_price ?? Number.NaN);
-      const marginEquity = Number(selectedPosition.margin_equity ?? Number.NaN);
-      const maintenance = Number(selectedPosition.maintenance_margin ?? Number.NaN);
-      let contractSize = 1;
-      if (portfolio?.schema_version === "replay.training.portfolio.v2") {
-        const rule = portfolio.instrument_rules.find((item) => item.track_id === selectedTrackId);
-        const rawRule = rule?.rule;
-        if (typeof rawRule === "object" && rawRule !== null && !Array.isArray(rawRule)) {
-          const parsed = Number((rawRule as Readonly<Record<string, unknown>>).contract_size ?? 1);
-          if (Number.isFinite(parsed) && parsed > 0) contractSize = parsed;
-        }
-      }
-      const sensitivity = Math.abs(quantity) * contractSize;
-      const buffer = marginEquity - maintenance;
-      const riskPrice = quantity > 0
-        ? mark - buffer / sensitivity
-        : mark + buffer / sensitivity;
-      if (
-        Number.isFinite(mark)
-        && Number.isFinite(marginEquity)
-        && Number.isFinite(maintenance)
-        && sensitivity > 0
-        && buffer >= 0
-        && Number.isFinite(riskPrice)
-        && riskPrice > 0
-      ) {
-        lines.push({
-          id: "replay-position-risk-reference" + (positionSide === undefined ? "" : `-${lineSuffix}`),
-          pane: "main",
-          price: riskPrice,
-          title: `风险参考≈ ${riskPrice.toFixed(6)}`,
-          color: "#f59e0b",
-          linestyle: "dotted",
-          linewidth: 1,
-        });
-      }
-    }
+    const lines = buildReplayPositionHlines({
+      selectedTrackId,
+      positionMode: portfolio?.position_mode,
+      positions: portfolio?.positions ?? [],
+      instrumentRules: portfolio?.schema_version === "replay.training.portfolio.v2"
+        ? portfolio.instrument_rules
+        : [],
+    });
     for (const order of runtime.store.orders) {
       if (order.status !== "OPEN" && order.status !== "PARTIALLY_FILLED") continue;
       const rawPrice = order.limit_price ?? order.stop_price;

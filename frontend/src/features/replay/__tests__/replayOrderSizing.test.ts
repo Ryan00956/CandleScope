@@ -6,6 +6,7 @@ import {
   replayOrderContextSide,
   replayOrderPreviewSide,
   replayOrderSizingAvailability,
+  replayReduceOnlyUnavailableMessage,
 } from "../replayOrderSizing.js";
 
 const BASE_INPUT = {
@@ -61,6 +62,39 @@ test("capacity context follows the closing side for reduce-only orders", () => {
   assert.equal(replayOrderContextSide(-1, "SELL", true), "BUY");
   assert.equal(replayOrderContextSide(0, "SELL", true), "SELL");
   assert.equal(replayOrderContextSide(1, "SELL", false), "BUY");
+});
+
+test("reduce-only advisories stop locally when the selected leg is empty", () => {
+  assert.equal(replayReduceOnlyUnavailableMessage({
+    reduceOnly: false,
+    positionQuantity: 0,
+    positionMode: "ONE_WAY",
+    targetPositionSide: "LONG",
+  }), null);
+  assert.equal(replayReduceOnlyUnavailableMessage({
+    reduceOnly: true,
+    positionQuantity: 1,
+    positionMode: "ONE_WAY",
+    targetPositionSide: "LONG",
+  }), null);
+  assert.equal(replayReduceOnlyUnavailableMessage({
+    reduceOnly: true,
+    positionQuantity: 0,
+    positionMode: "ONE_WAY",
+    targetPositionSide: "SHORT",
+  }), "无持仓可平");
+  assert.equal(replayReduceOnlyUnavailableMessage({
+    reduceOnly: true,
+    positionQuantity: 0,
+    positionMode: "HEDGE",
+    targetPositionSide: "LONG",
+  }), "无多仓可平");
+  assert.equal(replayReduceOnlyUnavailableMessage({
+    reduceOnly: true,
+    positionQuantity: 0,
+    positionMode: "HEDGE",
+    targetPositionSide: "SHORT",
+  }), "无空仓可平");
 });
 
 test("an oversized rejected draft cannot destroy independent slider capacity", () => {

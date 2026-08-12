@@ -12,8 +12,13 @@ import {
   rebaseReplayMaxQuantity,
   replayOrderContextSide,
   replayOrderSizingAvailability,
+  replayReduceOnlyUnavailableMessage,
 } from "../replayOrderSizing.js";
 import { createReplayOrderAdvisoryScheduler } from "../replayOrderAdvisoryScheduler.js";
+import {
+  replayMarkFidelityLabel,
+  replayPositiveModelPrice,
+} from "../replayPositionHlines.js";
 import type { ReplayClosedTrade } from "../replayTypes.js";
 import type {
   ReplayOrderPreview,
@@ -443,6 +448,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     && (positionMode !== "HEDGE" || item.position_side === activePositionSide)
   )) ?? null;
   const positionQty = finiteNumber(selectedPosition?.position.quantity) ?? 0;
+  const reduceOnlyUnavailableMessage = replayReduceOnlyUnavailableMessage({
+    reduceOnly,
+    positionQuantity: positionQty,
+    positionMode,
+    targetPositionSide: activePositionSide,
+  });
   const previewSide = replayOrderContextSide(positionQty, side, reduceOnly);
   const maxLeverage = Math.max(1, finiteNumber(config?.max_leverage) ?? 1);
   const [selectedLeverage, setLeverage] = useState(maxLeverage);
@@ -564,6 +575,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
       || store.state !== "PAUSED"
       || store.virtualTimeMs === null
       || tradeValidationSide !== null
+      || reduceOnlyUnavailableMessage !== null
       || (orderType !== "MARKET" && !price.trim())
     ) {
       return undefined;
@@ -646,6 +658,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     previewPositionIntent,
     price,
     reduceOnly,
+    reduceOnlyUnavailableMessage,
     sizingAvailableEquity,
     store.connectionState,
     store.state,
@@ -1313,8 +1326,8 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
           >{submitting && (side === "SELL" || tradeValidationSide === "SELL") ? "提交中…" : ctaLabel("SELL")}</button>
         </div>
 
-        <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null ? "error" : "idle")}>
-          {notice?.message ?? capacityValidationError ?? capacityError ?? previewError ?? viewer.error ?? "提交前会按点击方向重新校验游标、保证金与数量上限。"}
+        <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null || reduceOnlyUnavailableMessage !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null || reduceOnlyUnavailableMessage !== null ? "error" : "idle")}>
+          {notice?.message ?? reduceOnlyUnavailableMessage ?? capacityValidationError ?? capacityError ?? previewError ?? viewer.error ?? "提交前会按点击方向重新校验游标、保证金与数量上限。"}
         </div>
       </section>
     </div>
@@ -1673,10 +1686,13 @@ export function ReplayTradingWorkbench({ runtime, viewer, formatTime }: ReplayRi
                      <div><dt>维持保证金</dt><dd>{formatDecimal(item.maintenance_margin, 4)}</dd></div>
                      <div><dt>风险覆盖</dt><dd>{item.risk_ratio == null ? "--" : `${formatDecimal(item.risk_ratio, 2)}×`}</dd></div>
                      <div><dt>开仓均价</dt><dd>{formatDecimal(item.position.entry_price, 6)}</dd></div>
-                     <div><dt>标记价格</dt><dd>{formatDecimal(item.position.mark_price, 6)}</dd></div>
+                     <div>
+                       <dt title={item.mark_fidelity ?? "未声明标记价格来源"}>标记价格（{replayMarkFidelityLabel(item.mark_fidelity)}）</dt>
+                       <dd>{formatDecimal(replayPositiveModelPrice(item.position.mark_price), 6)}</dd>
+                     </div>
                      <div><dt>逐腿杠杆</dt><dd>{formatDecimal(item.leverage, 2)}x</dd></div>
-                     <div><dt>强平价格</dt><dd>{formatDecimal(item.liquidation_price, 6)}</dd></div>
-                     <div><dt>破产价格</dt><dd>{formatDecimal(item.bankruptcy_price, 6)}</dd></div>
+                     <div title="模拟账户风险模型；不是历史交易所精确值"><dt>强平价格（模拟≈）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.liquidation_price), 6)}</dd></div>
+                     <div title="模拟账户风险模型；不是历史交易所精确值"><dt>破产价格（模拟≈）</dt><dd>{formatDecimal(replayPositiveModelPrice(item.bankruptcy_price), 6)}</dd></div>
                      <div><dt>累计资金费</dt><dd>{formatDecimal(item.accumulated_funding, 8)}</dd></div>
                      <div className="wide"><dt>保护单</dt><dd>{protectionOrders.length === 0
                        ? "无"

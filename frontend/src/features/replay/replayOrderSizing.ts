@@ -14,6 +14,22 @@ export interface ReplayOrderSizingAvailability {
   readonly quantityExceedsCapacity: boolean;
 }
 
+export function replayReduceOnlyUnavailableMessage({
+  reduceOnly,
+  positionQuantity,
+  positionMode,
+  targetPositionSide,
+}: {
+  readonly reduceOnly: boolean;
+  readonly positionQuantity: number;
+  readonly positionMode: "ONE_WAY" | "HEDGE";
+  readonly targetPositionSide: "LONG" | "SHORT";
+}): string | null {
+  if (!reduceOnly || positionQuantity !== 0) return null;
+  if (positionMode !== "HEDGE") return "无持仓可平";
+  return targetPositionSide === "LONG" ? "无多仓可平" : "无空仓可平";
+}
+
 /**
  * Derive draft validity only from the independent capacity channel. Preview
  * failures intentionally are not an input, so they cannot disable the slider.

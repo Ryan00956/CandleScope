@@ -245,6 +245,8 @@ test("order-size capacity is independent from draft preview failures", () => {
   assert.match(rail, /value=\{resolvedSizeInput\}/);
   assert.match(rail, /aria-label="下单金额快速选择"/);
   assert.match(rail, /onLostPointerCapture=\{\(\) => setSliderDragging\(false\)\}/);
+  assert.match(rail, /\|\| reduceOnlyUnavailableMessage !== null/);
+  assert.match(rail, /notice\?\.message \?\? reduceOnlyUnavailableMessage/);
 });
 
 test("right-rail trading workstation keeps positions and account history out of the chart stack", () => {
@@ -265,6 +267,10 @@ test("right-rail trading workstation keeps positions and account history out of 
   assert.match(rail, /data-replay-action="close-partial"/);
   assert.match(rail, /aria-live="polite"/);
   assert.match(rail, /className="replay-position-card"/);
+  assert.match(rail, /标记价格（\{replayMarkFidelityLabel\(item\.mark_fidelity\)\}）/);
+  assert.match(rail, /强平价格（模拟≈）/);
+  assert.match(rail, /破产价格（模拟≈）/);
+  assert.match(rail, /replayPositiveModelPrice\(item\.liquidation_price\)/);
   assert.match(rail, /className="replay-compact-record"/);
   assert.match(styles, /\.replay-trading-workbench\[data-replay-workbench="rail"\]/);
   assert.match(styles, /\.replay-rail-account-scroll \{/);

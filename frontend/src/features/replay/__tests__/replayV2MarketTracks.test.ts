@@ -168,7 +168,7 @@ test("Phase 5 market-track parser keeps tier, public price, and force reasons st
   }), /FULL.*cursor|cursor.*FULL/);
 });
 
-test("HEDGE track parser accepts every pinned and materialized exchange-parity capability", () => {
+test("HEDGE track parser accepts pinned, materialized, and explicitly disabled capabilities", () => {
   const payload = marketTracksResponse();
   const parsed = parseReplayMarketTracksResponse({
     ...payload,
@@ -178,8 +178,8 @@ test("HEDGE track parser accepts every pinned and materialized exchange-parity c
         HISTORICAL_MARK_INDEX: "AVAILABLE_PINNED",
         HISTORICAL_INSTRUMENT_RULE: "AVAILABLE_PINNED",
         HISTORICAL_FEE_POLICY: "AVAILABLE_PINNED_ACCOUNT_WIDE",
-        HISTORICAL_FUNDING: "AVAILABLE_PINNED",
-        HISTORICAL_L2: "AVAILABLE_PINNED_CONTINUITY_GATED",
+        HISTORICAL_FUNDING: "OFF_NOT_REQUESTED",
+        HISTORICAL_L2: "OFF_NOT_REQUESTED",
         SIMULATED_INSURANCE_FUND: "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
         SIMULATED_ADL_COHORT: "AVAILABLE_MATERIALIZED_ACCOUNT_WIDE",
       },
@@ -187,7 +187,11 @@ test("HEDGE track parser accepts every pinned and materialized exchange-parity c
   });
   assert.equal(
     parsed.tracks[0]?.capabilities.HISTORICAL_L2,
-    "AVAILABLE_PINNED_CONTINUITY_GATED",
+    "OFF_NOT_REQUESTED",
+  );
+  assert.equal(
+    parsed.tracks[0]?.capabilities.HISTORICAL_FUNDING,
+    "OFF_NOT_REQUESTED",
   );
   assert.equal(
     parsed.tracks[0]?.capabilities.SIMULATED_ADL_COHORT,

@@ -15377,26 +15377,68 @@ class TrainingRunStore:
         ordered = stable_market_event_order(events)
 
         def write(connection: sqlite3.Connection) -> dict[str, object]:
-            sequence_row = connection.execute(
+            tail_row = connection.execute(
                 """
-                SELECT COALESCE(MAX(global_sequence), 0) AS sequence
-                FROM replay_training_global_event WHERE run_id = ?
+                SELECT global_sequence, actual_event_time_ms, event_phase,
+                       track_id, source_sequence
+                FROM replay_training_global_event
+                WHERE run_id = ?
+                ORDER BY global_sequence DESC
+                LIMIT 1
                 """,
                 (run_id,),
             ).fetchone()
-            global_sequence = int(sequence_row["sequence"])
+            global_sequence = 0 if tail_row is None else int(tail_row["global_sequence"])
+            tail_key = (
+                None
+                if tail_row is None
+                else (
+                    int(tail_row["actual_event_time_ms"]),
+                    int(tail_row["event_phase"]),
+                    str(tail_row["track_id"]),
+                    int(tail_row["source_sequence"]),
+                )
+            )
             now_ms = self.base_store._validated_now_ms()
             inserted = 0
             for event in ordered:
                 exists = connection.execute(
                     """
-                    SELECT global_sequence FROM replay_training_global_event
+                    SELECT global_sequence, actual_event_time_ms, event_phase,
+                           track_id, source_sequence
+                    FROM replay_training_global_event
                     WHERE run_id = ? AND track_id = ? AND source_sequence = ?
                     """,
                     (run_id, event.market_track_stable_id, event.source_sequence),
                 ).fetchone()
                 if exists is not None:
+                    existing_key = (
+                        int(exists["actual_event_time_ms"]),
+                        int(exists["event_phase"]),
+                        str(exists["track_id"]),
+                        int(exists["source_sequence"]),
+                    )
+                    if existing_key != event.ordering_key:
+                        raise TrainingRunError(
+                            "GLOBAL_EVENT_IDENTITY_MISMATCH",
+                            "a durable global event identity changed its ordering key",
+                            status_code=503,
+                            details={
+                                "existing_ordering_key": list(existing_key),
+                                "requested_ordering_key": list(event.ordering_key),
+                            },
+                        )
                     continue
+                if tail_key is not None and event.ordering_key < tail_key:
+                    raise TrainingRunError(
+                        "GLOBAL_EVENT_ORDER_VIOLATION",
+                        "global events cannot be appended behind a later durable event",
+                        status_code=409,
+                        details={
+                            "durable_tail_ordering_key": list(tail_key),
+                            "requested_ordering_key": list(event.ordering_key),
+                        },
+                    )
                 global_sequence += 1
                 connection.execute(
                     """
@@ -15419,6 +15461,7 @@ class TrainingRunStore:
                     ),
                 )
                 inserted += 1
+                tail_key = event.ordering_key
             checkpoint = self._insert_global_checkpoint(
                 connection,
                 run_id=run_id,

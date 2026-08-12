@@ -601,6 +601,65 @@ print(json.dumps({'hash': global_ordering_hash(events)}))
     assert hashes == [hashes[0], hashes[0]]
 
 
+async def test_global_event_store_rejects_cross_batch_order_regression_atomically(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "global-order-regression.db")
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        store = service.training.store  # type: ignore[union-attr]
+        durable = StableMarketEvent(START_MS + 100, 20, "track-1", 1)
+        await store.record_global_events(run_id, (durable,))
+        later = StableMarketEvent(START_MS + 100, 30, "account:track-1", 1)
+        appended = await store.record_global_events(run_id, (durable, later))
+        assert appended["inserted"] == 1
+        before_events = await store.global_events(run_id)
+        assert [
+            (
+                event["actual_event_time_ms"],
+                event["event_phase"],
+                event["track_id"],
+                event["source_sequence"],
+            )
+            for event in before_events
+        ] == [durable.ordering_key, later.ordering_key]
+        with sqlite3.connect(tmp_path / "global-order-regression.db") as connection:
+            before_checkpoints = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_global_checkpoint "
+                    "WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            )
+
+        with pytest.raises(TrainingRunError) as exc_info:
+            await store.record_global_events(
+                run_id,
+                (StableMarketEvent(START_MS + 99, 20, "track-1", 2),),
+            )
+        assert exc_info.value.code == "GLOBAL_EVENT_ORDER_VIOLATION"
+        assert await store.global_events(run_id) == before_events
+        with sqlite3.connect(tmp_path / "global-order-regression.db") as connection:
+            assert int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM replay_training_global_checkpoint "
+                    "WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+            ) == before_checkpoints
+
+        with pytest.raises(TrainingRunError) as identity_error:
+            await store.record_global_events(
+                run_id,
+                (StableMarketEvent(START_MS + 101, 20, "track-1", 1),),
+            )
+        assert identity_error.value.code == "GLOBAL_EVENT_IDENTITY_MISMATCH"
+        assert await store.global_events(run_id) == before_events
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
 async def test_none_track_performs_zero_history_reads_then_selects_atomically(
     tmp_path: Path,
 ) -> None:

@@ -2942,10 +2942,20 @@ def build_display_projection(
             status_code=503,
         )
     actual_start_ms = mapper.actual_anchor_ms
-    aggregate_start_ms = actual_start_ms
+    # At an exactly aligned initial cursor there is no elapsed base interval
+    # inside ordinal zero yet.  The viewer still needs one authoritative
+    # source-phase row to connect its first history page, just like the
+    # warmup-only partial bucket returned when the replay starts mid-bucket.
+    # Seed that row from the immediately preceding, fully revealed bucket.
+    initial_context_only = actual_end_ms == actual_start_ms
+    aggregate_start_ms = (
+        mapper.actual_bucket_open(-1)
+        if initial_context_only
+        else actual_start_ms
+    )
     aggregate_limit = limit
-    aggregate_required = True
-    if display_source_revision is not None:
+    aggregate_required = aggregate_start_ms >= 0
+    if display_source_revision is not None and not initial_context_only:
         last_observed_open_ms = mapper.actual_containing_bucket_open(
             actual_end_ms - 1
         )

@@ -1751,6 +1751,129 @@ def test_archive_blind_weekly_projection_keeps_native_monday_buckets(
     assert str(monday_ms) not in json.dumps(projected, sort_keys=True)
 
 
+@pytest.mark.anyio
+async def test_aligned_initial_display_projection_survives_service_recovery(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "aligned-initial-display-history"
+    writer = ReplayHistoryArchiveWriter(root, now_ms=lambda: NOW_MS)
+    writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                list(range(20)),
+                price_base=100,
+                source_key="fixture-aligned-initial-display",
+                digest_character="2",
+            )
+        ],
+    )
+    database = tmp_path / "aligned-initial-display.db"
+
+    async def start_service() -> ReplayService:
+        instance = ReplayService(
+            settings=replace(
+                replay_settings(database),
+                replay_history_archive_dir=root,
+            ),
+            store=ReplaySQLiteStore(database, now_ms=lambda: NOW_MS),
+            now_ms=lambda: NOW_MS,
+            session_id_factory=SessionIdFactory("aligned-display-session"),
+            training_run_id_factory=SessionIdFactory("aligned-display-run"),
+            # Keep 5m off the native catalog so this exercises the same
+            # revision-bound 1m fallback as futures archives without 5m data.
+            native_intervals=lambda _identity: ("1m",),
+        )
+        await instance.start()
+        return instance
+
+    service = await start_service()
+    try:
+        catalog = await service.catalog(
+            warmup_bars=5,
+            horizon_ms=5 * INTERVAL_MS,
+            quality_mode="exact",
+            blind_mode=False,
+        )
+        request = TrainingRunCreateRequest.from_dict(
+            {
+                "protocol": "replay.v3",
+                "catalog_epoch": catalog["catalog_epoch"],
+                "name": "Aligned initial display projection",
+                "source_kind": "BAR",
+                "start_mode": "MANUAL",
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "settlement_asset": "USDT",
+                "base_interval": "1m",
+                "display_interval": "1m",
+                "requested_start_ms": START_MS + 10 * INTERVAL_MS,
+                "indicator_warmup_bars": 5,
+                "visible_history_lookback": {
+                    "mode": "ALL_AVAILABLE",
+                    "duration_ms": None,
+                },
+                "forward_cache_ms": 5 * INTERVAL_MS,
+                "random_seed": None,
+                "initial_equity": "10000",
+                "max_leverage": "3",
+                "maker_fee_bps": "2",
+                "taker_fee_bps": "5",
+                "market_slippage_bps": "1",
+                "integrity_mode": "CHALLENGE",
+                "time_disclosure_policy": "NONE",
+                "book_mode": "OFF",
+                "margin_mode": "CROSS",
+                "position_mode": "ONE_WAY",
+                "account_data_mode": "APPROX_PROXY",
+                "funding_mode": "OFF",
+                "allow_rule_changes": False,
+            }
+        )
+        assert service.training is not None
+        created = await service.training.create_run(request)
+        session_id = str(created["run"]["adapter_session_id"])
+        snapshot = (await service.get_session(session_id))["snapshot"]
+        replay_start_ms = int(
+            snapshot["components"]["bar_builder"]["replay_start_ms"]
+        )
+        assert replay_start_ms % (5 * INTERVAL_MS) == 0
+
+        async def initial_projection(instance: ReplayService) -> dict[str, object]:
+            assert instance.training is not None
+            current = (await instance.get_session(session_id))["snapshot"]
+            return await instance.training.display_projection(
+                session_id,
+                track_id="track-1",
+                revealed_boundary_ms=int(current["cursor"]["virtual_time_ms"]),
+                limit=500,
+                data_epoch=str(current["data_epoch"]),
+                display_interval="5m",
+            )
+
+        first = await initial_projection(service)
+        assert first["has_more"] is False
+        assert [bar["open_time_ms"] for bar in first["bars"]] == [
+            replay_start_ms - 5 * INTERVAL_MS
+        ]
+        assert first["bars"][0]["last_base_open_ms"] == (
+            replay_start_ms - INTERVAL_MS
+        )
+        assert first["bars"][0]["component_count"] == 5
+        assert first["bars"][0]["is_closed"] is True
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+    recovered = await start_service()
+    try:
+        recovered_projection = await initial_projection(recovered)
+        assert recovered_projection["bars"] == first["bars"]
+    finally:
+        await recovered.shutdown(step_timeout=1.0)
+
+
 def test_dataset_and_history_reads_stay_pinned_to_the_selected_catalog_revision(
     tmp_path: Path,
 ) -> None:

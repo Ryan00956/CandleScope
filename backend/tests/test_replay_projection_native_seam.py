@@ -319,6 +319,121 @@ def test_persisted_bar_snapshot_decode_is_reused_across_projection_reads() -> No
     assert history_module._decode_bar_snapshot_blob.cache_info().hits == 1
 
 
+def test_initial_projection_on_exact_display_boundary_seeds_history_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "archive"
+    row_opens = [
+        ANCHOR_MS + offset * MINUTE_MS
+        for offset in range(21)
+    ]
+    writer = ReplayHistoryArchiveWriter(
+        root,
+        now_ms=lambda: ANCHOR_MS + 30 * MINUTE_MS,
+    )
+    base_manifest = writer.import_batches(
+        IDENTITY,
+        "1m",
+        [
+            _batch(
+                [
+                    make_bar(
+                        open_ms,
+                        price=str(100 + index),
+                        source="binance_archive_verified",
+                    )
+                    for index, open_ms in enumerate(row_opens)
+                ],
+                source_key="base-1m-exact-display-seam",
+                digest_character="2",
+            )
+        ],
+    )
+    replay_start_ms = ANCHOR_MS + DISPLAY_MS
+    snapshot = _snapshot_for_rows(
+        source_revision=base_manifest.catalog_epoch,
+        base_interval="1m",
+        base_interval_ms=MINUTE_MS,
+        replay_start_ms=replay_start_ms,
+        row_opens=row_opens,
+        source_earliest_open_ms=row_opens[0],
+        source_latest_open_ms=row_opens[-1],
+        gap_count=0,
+    )
+    config = replace(
+        replay_config(),
+        requested_start_ms=replay_start_ms,
+        warmup_bars=15,
+        horizon_ms=6 * MINUTE_MS,
+    )
+    binding: dict[str, object] = {
+        "run_id": "run-1",
+        "session_id": "session-1",
+        "track_id": "track-1",
+        "primary_adapter_session_id": "session-1",
+        "track_dataset_epoch": snapshot.data_epoch,
+        "session_data_epoch": snapshot.data_epoch,
+        "run_dataset_epoch": snapshot.data_epoch,
+        "virtual_time_ms": replay_start_ms + MINUTE_MS - 1,
+        "degraded_reason": None,
+        "config": config.to_dict(),
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "source_kind": "BAR",
+        "base_interval": "1m",
+        "display_interval": "1m",
+    }
+    repository = ReplayHistoryRepository(root)
+
+    initial = build_display_projection(
+        binding=binding,
+        persisted=_persisted(snapshot, actual_replay_start_ms=replay_start_ms),
+        revealed_boundary_ms=replay_start_ms,
+        limit=500,
+        data_epoch=snapshot.data_epoch,
+        display_interval=DISPLAY_INTERVAL,
+        repository=repository,
+    )
+
+    assert initial["has_more"] is False
+    assert initial["bars"] == [
+        {
+            "open_time_ms": ANCHOR_MS,
+            "close_time_ms": replay_start_ms - 1,
+            "open": "100",
+            "high": "115",
+            "low": "99",
+            "close": "114.5",
+            "volume": "150",
+            "quote_volume": "15075",
+            "trades": 105,
+            "taker_buy_base": "60",
+            "taker_buy_quote": "6030",
+            "first_base_open_ms": ANCHOR_MS,
+            "last_base_open_ms": replay_start_ms - MINUTE_MS,
+            "component_count": 15,
+            "expected_components": 15,
+            "is_closed": True,
+            "synthetic": False,
+        }
+    ]
+
+    forming = build_display_projection(
+        binding=binding,
+        persisted=_persisted(snapshot, actual_replay_start_ms=replay_start_ms),
+        revealed_boundary_ms=replay_start_ms + MINUTE_MS - 1,
+        limit=500,
+        data_epoch=snapshot.data_epoch,
+        display_interval=DISPLAY_INTERVAL,
+        repository=repository,
+    )
+    assert len(forming["bars"]) == 1
+    assert forming["bars"][0]["open_time_ms"] == replay_start_ms
+    assert forming["bars"][0]["component_count"] == 1
+    assert forming["bars"][0]["is_closed"] is False
+
+
 def test_projection_uses_pinned_native_bar_only_after_gap_bucket_is_closed(
     tmp_path: Path,
 ) -> None:

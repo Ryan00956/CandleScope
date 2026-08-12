@@ -2,16 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canCommitInitialFeedResult,
   canFinalizePendingInitialHistory,
   canUseWarmCacheWithoutImmediateRevalidation,
   initialHistoryCacheProof,
   initialViewportCountBackCapForCellCount,
+  isInitialHistoryTailFresh,
   shouldEnableWorkspaceIntervalPrefetch,
   INITIAL_VIEWPORT_MAX_WAIT_MS,
   INITIAL_VIEWPORT_PROBE_WAIT_MS,
   planInitialHistoryCountBack,
   planInitialViewportCountBack,
   shouldRequestInitialLatest,
+  shouldRequestInitialLatestForReadiness,
   WARM_CACHE_REVALIDATE_TTL_MS,
 } from "../useChartInitialLoad.js";
 import {
@@ -28,6 +31,64 @@ test("initial latest is reserved for exchange-native intervals", () => {
   assert.equal(shouldRequestInitialLatest("60m", nativeIntervals), true);
   assert.equal(shouldRequestInitialLatest("47m", nativeIntervals), false);
   assert.equal(shouldRequestInitialLatest("8h", nativeIntervals), false);
+});
+
+test("renderable stale history still takes the bounded native tail fast path", () => {
+  const nativeIntervals = ["1m", "5m", "1h", "4h"];
+
+  assert.equal(shouldRequestInitialLatestForReadiness("1h", nativeIntervals, {
+    initialPaintReady: true,
+    tailFresh: false,
+  }), true, "old rows can paint without proving that the current tail is present");
+  assert.equal(shouldRequestInitialLatestForReadiness("1h", nativeIntervals, {
+    initialPaintReady: true,
+    tailFresh: true,
+  }), false, "a proven-fresh warm page avoids duplicate latest traffic");
+  assert.equal(shouldRequestInitialLatestForReadiness("1h", nativeIntervals, {
+    initialPaintReady: false,
+    tailFresh: false,
+  }), true, "an empty cold probe retains the existing fast path");
+  assert.equal(shouldRequestInitialLatestForReadiness("47m", nativeIntervals, {
+    initialPaintReady: true,
+    tailFresh: false,
+  }), false, "derived intervals cannot bypass source-row aggregation via latest");
+
+  assert.equal(isInitialHistoryTailFresh({
+    data: [{ time: epochSeconds(1) }],
+    has_tail_gap: false,
+    history_state: "ready",
+    complete: true,
+    retryable: false,
+  }), true);
+  assert.equal(isInitialHistoryTailFresh({
+    data: [{ time: epochSeconds(1) }],
+    has_tail_gap: true,
+    history_state: "pending",
+    complete: false,
+    retryable: true,
+  }), false, "non-empty tail-gap history is paint-ready but not tail-fresh");
+  assert.equal(isInitialHistoryTailFresh({
+    data: [{ time: epochSeconds(1) }],
+    has_tail_gap: false,
+    history_state: "pending",
+    complete: false,
+    retryable: true,
+  }), false, "pending repair metadata fails closed even if the tail-gap flag disagrees");
+});
+
+test("initial history and latest results fail closed after ownership changes", () => {
+  const owned = {
+    active: true,
+    currentEpoch: 7,
+    expectedEpoch: 7,
+  };
+
+  assert.equal(canCommitInitialFeedResult(owned), true);
+  assert.equal(canCommitInitialFeedResult({ ...owned, stale: true }), false);
+  assert.equal(canCommitInitialFeedResult({ ...owned, resultActive: false }), false);
+  assert.equal(canCommitInitialFeedResult({ ...owned, active: false }), false);
+  assert.equal(canCommitInitialFeedResult({ ...owned, currentEpoch: 8 }), false);
+  assert.equal(canCommitInitialFeedResult({ ...owned, aborted: true }), false);
 });
 
 test("initial viewport probes storage without blocking before bounded cold retries", () => {

@@ -818,6 +818,7 @@ class DataManager:
         auto_backfill: bool | None = None,
         backfill_reason: str | None = "latest_refresh",
         backfill_requester: str = "query_latest",
+        backfill_metadata: dict[str, Any] | None = None,
     ) -> QueryResult:
         """Get the latest N bars.  Shorthand for ``query(limit=N)``."""
         market_type = self._normalize_market_type(market_type)
@@ -841,6 +842,7 @@ class DataManager:
             result,
             reason=backfill_reason,
             requester=backfill_requester,
+            backfill_metadata=backfill_metadata,
             submit=(
                 self.query_engine.auto_backfill_default
                 if auto_backfill is None

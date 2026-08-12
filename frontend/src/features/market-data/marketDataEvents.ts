@@ -54,6 +54,7 @@ export function useMarketDataEvents({
     start: unknown,
     end: unknown,
     reason: IndicatorRangeRequestReason,
+    metadata?: Pick<IndicatorRangeEvent, "initialSettlementRelease">,
   ) => boolean;
   createIndicatorRangeRequester: (
     reason: IndicatorRangeRequestReason,
@@ -71,6 +72,7 @@ export function useMarketDataEvents({
     start: unknown,
     end: unknown,
     reason: IndicatorRangeRequestReason,
+    metadata: Pick<IndicatorRangeEvent, "initialSettlementRelease"> = {},
   ): boolean => {
     if (!isIndicatorRangeSessionCurrent(
       activeSessionRef.current,
@@ -89,6 +91,9 @@ export function useMarketDataEvents({
       interval,
       reason,
       createdAt: Date.now(),
+      ...(metadata.initialSettlementRelease === true
+        ? { initialSettlementRelease: true }
+        : {}),
     };
     setIndicatorRangeRequests((current) => [
       ...retainCurrentIndicatorRangeRequests(current, { interval, sessionKey }),

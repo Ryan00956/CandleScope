@@ -28,6 +28,7 @@ interface RangeCall {
   start: number;
   end: number;
   reason?: string | undefined;
+  initialSettlementRelease?: boolean | undefined;
 }
 
 test("indicator range runtime forwards the full range once", () => {
@@ -79,6 +80,59 @@ test("indicator range runtime publishes planned window delta range once", () => 
     end: 1_700_000_120,
     reason: "window-mid-merge",
   }]);
+});
+
+test("initial owner settlement marks every retained correction for pre-initial coalescing", () => {
+  const calls: RangeCall[] = [];
+  requestIndicatorRangeForWindowMeta((start, end, reason, metadata) => {
+    calls.push({
+      start,
+      end,
+      reason,
+      initialSettlementRelease: metadata?.initialSettlementRelease,
+    });
+  }, {
+    source: "initial-history-settled",
+    changedRanges: [
+      { start: 100, end: 160, type: "mid-merge" },
+      { start: 40, end: 80, type: "prepend" },
+    ],
+  });
+
+  assert.deepEqual(calls, [
+    {
+      start: 100,
+      end: 160,
+      reason: "window-mid-merge",
+      initialSettlementRelease: true,
+    },
+    {
+      start: 40,
+      end: 80,
+      reason: "window-prepend",
+      initialSettlementRelease: true,
+    },
+  ]);
+});
+
+test("ordinary and terminal window commits do not impersonate an initial settlement release", () => {
+  const markers: Array<boolean | undefined> = [];
+  const publish = (_start: number, _end: number, _reason?: string, metadata?: {
+    initialSettlementRelease?: boolean;
+  }) => {
+    markers.push(metadata?.initialSettlementRelease);
+  };
+
+  requestIndicatorRangeForWindowMeta(publish, {
+    source: "initial-history-terminal",
+    changedRanges: [{ start: 100, end: 160, type: "mid-merge" }],
+  });
+  requestIndicatorRangeForWindowMeta(publish, {
+    source: "backfill-completed",
+    changedRanges: [{ start: 200, end: 260, type: "mid-merge" }],
+  });
+
+  assert.deepEqual(markers, [undefined, undefined]);
 });
 
 test("indicator range runtime prefers exact changed ranges over a large merge envelope", () => {

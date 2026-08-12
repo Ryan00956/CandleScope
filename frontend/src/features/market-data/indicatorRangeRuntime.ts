@@ -1,4 +1,5 @@
 import type {
+  IndicatorRangeEvent,
   IndicatorRangeRequest,
   IndicatorWindowMeta,
   WindowChangedRange,
@@ -10,6 +11,7 @@ export type IndicatorRangeRequester = (
   start: EpochSeconds,
   end: EpochSeconds,
   reason?: IndicatorRangeRequest["reason"],
+  metadata?: Pick<IndicatorRangeEvent, "initialSettlementRelease">,
 ) => unknown;
 
 export function mergeIndicatorWindowChangedRanges(
@@ -52,6 +54,7 @@ export function requestIndicatorRangeInChunks(
   start: unknown,
   end: unknown,
   reason?: IndicatorRangeRequest["reason"],
+  metadata?: Pick<IndicatorRangeEvent, "initialSettlementRelease">,
 ): void {
   if (typeof requestRange !== "function") return;
   const startSec = toEpochSeconds(Math.floor(Number(start)));
@@ -59,7 +62,7 @@ export function requestIndicatorRangeInChunks(
   if (startSec == null || endSec == null || startSec <= 0 || endSec <= 0 || startSec > endSec) {
     return;
   }
-  requestRange(startSec, endSec, reason);
+  requestRange(startSec, endSec, reason, metadata);
 }
 
 export function resolveIndicatorRangeFromWindowMeta(
@@ -98,9 +101,19 @@ export function requestIndicatorRangeForWindowMeta(
   requestRange: IndicatorRangeRequester | null | undefined,
   meta: IndicatorWindowMeta | null | undefined = {},
 ): boolean {
-  const ranges = resolveIndicatorRangesFromWindowMeta(meta);
+  const source = meta || {};
+  const ranges = resolveIndicatorRangesFromWindowMeta(source);
+  const metadata = source.source === "initial-history-settled"
+    ? { initialSettlementRelease: true }
+    : undefined;
   for (const range of ranges) {
-    requestIndicatorRangeInChunks(requestRange, range.start, range.end, range.reason);
+    requestIndicatorRangeInChunks(
+      requestRange,
+      range.start,
+      range.end,
+      range.reason,
+      metadata,
+    );
   }
   return ranges.length > 0;
 }

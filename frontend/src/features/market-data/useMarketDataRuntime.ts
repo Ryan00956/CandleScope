@@ -236,9 +236,9 @@ export function useMarketDataRuntime({
     ? backgroundPrefetchPriority
     : inactivePrefetchGateRef.current;
   const publishIndicatorWindowRange = useCallback((meta: IndicatorWindowMeta) => {
-    requestIndicatorRangeForWindowMeta((start, end, reason) => {
+    requestIndicatorRangeForWindowMeta((start, end, reason, metadata) => {
       if (!reason) return false;
-      const published = publishIndicatorRangeRequest(start, end, reason);
+      const published = publishIndicatorRangeRequest(start, end, reason, metadata);
       if (published) backgroundPrefetchPriority.yieldToForeground();
       return published;
     }, meta);

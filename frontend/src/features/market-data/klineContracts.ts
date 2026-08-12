@@ -115,6 +115,13 @@ export interface KlineRequestOptions {
   demandGeneration?: number;
 }
 
+export interface KlineLatestRequestOptions extends KlineRequestOptions {
+  /** Whether this latest read may run one bounded foreground tail repair. */
+  repair?: "none" | "wait";
+  /** Backend wait budget for repair="wait". */
+  waitMs?: number;
+}
+
 export type KlineHistoryIntent = "viewport" | "active_hydration";
 
 export interface KlineHistoryRequestOptions extends KlineRequestOptions {
@@ -188,7 +195,7 @@ export interface KlineApi {
     marketType: string,
     exchange: string,
     source: string,
-    options: KlineRequestOptions,
+    options: KlineLatestRequestOptions,
   ): Promise<KlineFetchResult>;
   getMultiStreamUrl(symbol: string, marketType: string, exchange: string): string;
 }
@@ -433,6 +440,7 @@ export interface IndicatorWindowMeta {
   incomingFirstTime?: unknown;
   incomingLastTime?: unknown;
   changedRanges?: unknown;
+  source?: unknown;
 }
 
 export interface IndicatorRangeRequest {
@@ -449,6 +457,8 @@ export interface IndicatorRangeEvent {
   interval: IntervalString;
   reason: string;
   createdAt: number;
+  /** The initial-history owner released and published its retained window delta. */
+  initialSettlementRelease?: boolean;
 }
 
 export interface CrosshairData {

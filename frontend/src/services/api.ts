@@ -69,6 +69,11 @@ export interface KlineRangeOptions extends RequestSignalOptions {
   strict?: boolean;
 }
 
+export interface KlineLatestOptions extends RequestSignalOptions {
+  repair?: "none" | "wait";
+  waitMs?: number;
+}
+
 export interface TransportKlineHistoryBatchRequest {
   symbol: string;
   interval: string;
@@ -297,7 +302,7 @@ export async function fetchLatestKlines(
   marketType = "spot",
   exchange = "binance",
   source = "",
-  options: RequestSignalOptions = {},
+  options: KlineLatestOptions = {},
 ): Promise<TransportKlineResponse> {
   const payload = await request(buildUrl("/klines/latest", {
     symbol,
@@ -307,6 +312,10 @@ export async function fetchLatestKlines(
     market_type: marketType,
     client_id: CLIENT_INSTANCE_ID,
     source,
+    repair: options.repair,
+    max_wait_ms: options.waitMs,
+    request_scope: options.demandScope,
+    request_generation: options.demandGeneration,
   }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/latest");
 }

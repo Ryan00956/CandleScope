@@ -9,6 +9,7 @@ import {
   fetchExchanges,
   fetchKlinesBefore,
   fetchKlinesHistory,
+  fetchLatestKlines,
   fetchKlinesRange,
   fetchSubscriptions,
   request,
@@ -153,6 +154,29 @@ test("K-line history transports forward chart demand scope and generation", asyn
     assert.equal(params.get("request_scope"), demand.demandScope);
     assert.equal(params.get("request_generation"), String(demand.demandGeneration));
   }
+});
+
+test("latest forwards bounded foreground repair and chart demand", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let capturedUrl = "";
+  globalThis.fetch = async (url) => {
+    capturedUrl = String(url);
+    return jsonResponse({ data: [], has_tail_gap: true });
+  };
+
+  await fetchLatestKlines("ETHUSDT", "1m", 5, "spot", "binance", "initial-latest", {
+    repair: "wait",
+    waitMs: 1_500,
+    demandScope: "chart:client:pane-1",
+    demandGeneration: 8,
+  });
+
+  const params = new URL(capturedUrl, "http://localhost").searchParams;
+  assert.equal(params.get("repair"), "wait");
+  assert.equal(params.get("max_wait_ms"), "1500");
+  assert.equal(params.get("request_scope"), "chart:client:pane-1");
+  assert.equal(params.get("request_generation"), "8");
 });
 
 test("before-page validation forwards a zero long-poll budget", async (context) => {

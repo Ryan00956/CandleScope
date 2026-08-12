@@ -85,6 +85,22 @@ _BACKGROUND_BACKFILL_REASONS = frozenset({
     "background_gap_audit",
 })
 
+# Demand that directly gates the chart's current visible state.  When the
+# configured scheduler is deliberately single-lane, one such request may use
+# a tightly bounded reserve lane while that lane is occupied by speculative or
+# maintenance work.  This avoids turning low concurrency into head-of-line
+# blocking without reopening the old unbounded/multi-background burst.
+_INTERACTIVE_BACKFILL_REASONS = frozenset({
+    "initial_history",
+    "visible_load_more",
+    "visible_range_gap",
+    "visible_seed_gap",
+    "tail_gap",
+})
+_MAINTENANCE_BACKFILL_REASONS = (
+    _BACKGROUND_BACKFILL_REASONS | frozenset({"price_daily_open"})
+)
+
 # Public API waits are capped at eight seconds, so one minute preserves useful
 # late-wait resolution while the count limits protect a long-running process.
 _SCHEDULER_OUTCOME_HISTORY_LIMIT = 256
@@ -548,6 +564,7 @@ class _BackfillScheduler:
         self.cancelled_pending = 0
         self.cancelled_after_chunk = 0
         self.background_dispatches = 0
+        self.foreground_reserve_dispatches = 0
         self.covered_chunks_skipped = 0
         self.fairness_rotations = 0
 
@@ -1075,6 +1092,7 @@ class _BackfillScheduler:
             "cancelled_pending": self.cancelled_pending,
             "cancelled_after_chunk": self.cancelled_after_chunk,
             "background_dispatches": self.background_dispatches,
+            "foreground_reserve_dispatches": self.foreground_reserve_dispatches,
             "covered_chunks_skipped": self.covered_chunks_skipped,
             "fairness_rotations": self.fairness_rotations,
             "running_background_chunks": self._running_background_count(),
@@ -1298,7 +1316,13 @@ class _BackfillScheduler:
         skipped: list[tuple[int, int, int, str]] = []
         next_delay: float | None = None
         try:
-            while len(self._tasks) < self._max_concurrency and self._ready:
+            # The extra candidate slot exists only for the deliberately
+            # single-lane configuration. It is admitted below solely for one
+            # interactive request while maintenance occupies that lane.
+            candidate_capacity = self._max_concurrency + (
+                1 if self._max_concurrency == 1 else 0
+            )
+            while len(self._tasks) < candidate_capacity and self._ready:
                 item = heapq.heappop(self._ready)
                 chunk = self._chunks.get(item[3])
                 if chunk is None:
@@ -1306,6 +1330,13 @@ class _BackfillScheduler:
                 state = self._requests.get(chunk.parent_id)
                 if state is None or state.stale or state.failed is not None:
                     self._chunks.pop(chunk.chunk_id, None)
+                    continue
+                using_foreground_reserve = len(self._tasks) >= self._max_concurrency
+                if (
+                    using_foreground_reserve
+                    and not self._can_use_foreground_reserve(chunk.request)
+                ):
+                    skipped.append(item)
                     continue
                 now_monotonic = time.monotonic()
                 if chunk.eligible_at_monotonic > now_monotonic:
@@ -1367,6 +1398,8 @@ class _BackfillScheduler:
                     self.background_dispatches += 1
                 else:
                     self._active_foreground_chunks.add(chunk.chunk_id)
+                    if using_foreground_reserve:
+                        self.foreground_reserve_dispatches += 1
                 task.add_done_callback(
                     lambda _task, chunk_id=chunk.chunk_id: (
                         self._active_foreground_chunks.discard(chunk_id),
@@ -1383,12 +1416,52 @@ class _BackfillScheduler:
 
     @staticmethod
     def _is_background(request: RepairRequest) -> bool:
-        reasons = {
+        reasons = _BackfillScheduler._reasons(request)
+        return bool(reasons) and reasons.issubset(_BACKGROUND_BACKFILL_REASONS)
+
+    @staticmethod
+    def _reasons(request: RepairRequest) -> set[str]:
+        return {
             part.strip()
             for part in str(request.reason or "").split("+")
             if part.strip()
         }
-        return bool(reasons) and reasons.issubset(_BACKGROUND_BACKFILL_REASONS)
+
+    @classmethod
+    def _is_interactive(cls, request: RepairRequest) -> bool:
+        reasons = cls._reasons(request)
+        if reasons & _INTERACTIVE_BACKFILL_REASONS:
+            return True
+        # The initial chart's bounded /latest repair is intentionally tagged
+        # as an internal completion event, but it is still foreground demand.
+        # Admit only that explicit API requester; generic query_latest callers
+        # must not consume the single maintenance reserve.
+        return (
+            "latest_refresh" in reasons
+            and request.requester == "klines_latest"
+        )
+
+    @classmethod
+    def _is_maintenance(cls, request: RepairRequest) -> bool:
+        reasons = cls._reasons(request)
+        return (
+            bool(reasons)
+            and not bool(reasons & _INTERACTIVE_BACKFILL_REASONS)
+            and reasons.issubset(_MAINTENANCE_BACKFILL_REASONS)
+        )
+
+    def _can_use_foreground_reserve(self, request: RepairRequest) -> bool:
+        """Admit one visible request beside one single-lane maintenance task."""
+
+        if (
+            self._max_concurrency != 1
+            or len(self._tasks) != 1
+            or not self._is_interactive(request)
+        ):
+            return False
+        active_chunk_id = next(iter(self._tasks), None)
+        active_chunk = self._chunks.get(active_chunk_id or "")
+        return active_chunk is not None and self._is_maintenance(active_chunk.request)
 
     def _running_background_count(self) -> int:
         return len(self._active_background_chunks)
@@ -1461,6 +1534,25 @@ class _BackfillScheduler:
         """
 
         return self._has_foreground_work()
+
+    def has_backfill_work(self) -> bool:
+        """Return whether any runnable/deferred/running repair owns resources.
+
+        Speculative producers use this stronger admission fence so they do not
+        add network pressure behind maintenance work merely because no visible
+        chart request is currently queued.
+        """
+
+        if self._tasks:
+            return True
+        for item in self._ready:
+            chunk = self._chunks.get(item[3])
+            if chunk is None:
+                continue
+            state = self._requests.get(chunk.parent_id)
+            if state is not None and not state.stale and state.failed is None:
+                return True
+        return False
 
     def foreground_idle_seconds(self) -> float:
         if self.has_foreground_work():
@@ -2407,6 +2499,11 @@ class BackfillCoordinator:
         """Expose scheduler foreground ownership to speculative producers."""
 
         return self._scheduler.has_foreground_work()
+
+    def has_backfill_work(self) -> bool:
+        """Expose all scheduler ownership to speculative producers."""
+
+        return self._scheduler.has_backfill_work()
 
     def foreground_idle_seconds(self) -> float:
         """Return continuous scheduler idle time since foreground ownership."""

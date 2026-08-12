@@ -712,7 +712,7 @@ def test_backfill_scheduler_runs_different_series_concurrently() -> None:
     asyncio.run(_run())
 
 
-def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
+def test_backfill_scheduler_reserves_foreground_lane_beside_active_background() -> None:
     async def _run() -> None:
         class _Engine:
             def __init__(self) -> None:
@@ -724,7 +724,7 @@ def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
                 self.calls.append(kwargs)
                 if len(self.calls) == 1:
                     self.first_started.set()
-                    await self.release_first.wait()
+                await self.release_first.wait()
                 return _RepairReport(status="completed")
 
         engine = _Engine()
@@ -753,7 +753,7 @@ def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
         await engine.first_started.wait()
 
         foreground = asyncio.create_task(coord.request_and_wait(RepairRequest(
-            symbol="BTCUSDT",
+            symbol="ETHUSDT",
             interval="1m",
             start_ms=240_000,
             end_ms=240_000,
@@ -763,13 +763,156 @@ def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
             request_id="foreground",
         )))
 
-        engine.release_first.set()
         await _wait_until(lambda: len(engine.calls) >= 2)
         assert engine.calls[0]["range_start_ms"] == 0
         assert engine.calls[1]["range_start_ms"] == 240_000
         assert engine.calls[1]["metadata"]["reason"] == "initial_history"
+        snapshot = coord.snapshot()
+        assert snapshot["running_chunks"] == 2
+        assert snapshot["max_concurrency"] == 1
+        assert snapshot["foreground_reserve_dispatches"] == 1
 
+        engine.release_first.set()
         await asyncio.gather(background, foreground)
+
+    asyncio.run(_run())
+
+
+def test_backfill_scheduler_visible_repair_bypasses_running_daily_open_maintenance() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.daily_open_started = asyncio.Event()
+                self.visible_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                reason = kwargs["metadata"]["reason"]
+                if reason == "price_daily_open":
+                    self.daily_open_started.set()
+                if reason == "visible_range_gap":
+                    self.visible_started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+
+        daily_open = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="BNBUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="price_daily_open",
+            request_id="daily-open-maintenance",
+        )))
+        await engine.daily_open_started.wait()
+
+        visible = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="ETHUSDT",
+            interval="1d",
+            start_ms=0,
+            end_ms=0,
+            reason="visible_range_gap",
+            request_id="visible-tail-repair",
+        )))
+        await asyncio.wait_for(engine.visible_started.wait(), timeout=1.0)
+
+        assert {call["metadata"]["reason"] for call in engine.calls} == {
+            "price_daily_open",
+            "visible_range_gap",
+        }
+        assert coordinator.snapshot()["foreground_reserve_dispatches"] == 1
+
+        engine.release.set()
+        await asyncio.gather(daily_open, visible)
+
+    asyncio.run(_run())
+
+
+def test_backfill_scheduler_internal_query_cannot_consume_visible_reserve() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.daily_open_started = asyncio.Event()
+                self.visible_started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                reason = kwargs["metadata"]["reason"]
+                if reason == "price_daily_open":
+                    self.daily_open_started.set()
+                if reason == "latest_refresh":
+                    self.visible_started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coordinator = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+        )
+
+        daily_open = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="BNBUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="price_daily_open",
+            request_id="daily-open",
+        )))
+        await engine.daily_open_started.wait()
+
+        internal = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="XRPUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="query_gap",
+            request_id="internal-query",
+        )))
+        await asyncio.sleep(0)
+        assert [call["metadata"]["reason"] for call in engine.calls] == [
+            "price_daily_open",
+        ]
+
+        visible = asyncio.create_task(coordinator.request_and_wait(RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=0,
+            reason="latest_refresh",
+            requester="klines_latest",
+            request_id="visible-history",
+        )))
+        await asyncio.wait_for(engine.visible_started.wait(), timeout=1.0)
+        assert [call["metadata"]["reason"] for call in engine.calls] == [
+            "price_daily_open",
+            "latest_refresh",
+        ]
+        assert coordinator.snapshot()["foreground_reserve_dispatches"] == 1
+
+        engine.release.set()
+        await asyncio.gather(daily_open, internal, visible)
 
     asyncio.run(_run())
 

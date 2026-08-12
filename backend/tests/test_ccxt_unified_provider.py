@@ -722,9 +722,11 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
             }
             self.params: dict[str, Any] | None = None
             self.closed = False
+            self.load_count = 0
+            self.fetch_count = 0
 
         async def load_markets(self) -> None:
-            return None
+            self.load_count += 1
 
         def market(self, symbol: str) -> dict[str, Any]:
             return self.markets[symbol]
@@ -734,6 +736,7 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
             params: dict[str, Any],
         ) -> list[list[Any]]:
             self.params = params
+            self.fetch_count += 1
             return [[1000, "1", "2", "0.5", "1.5", "3", 1999, "4", 5, "1", "2", "0"]]
 
         async def close(self, clean_instance_data: bool = False) -> None:
@@ -746,6 +749,7 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
         lambda *_args, **_kwargs: exchange,
     )
     plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
     descriptor = StreamDescriptor(
         "BTCUSDT",
         StreamType.KLINE,
@@ -753,17 +757,29 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
         exchange="binance",
         market_type="futures",
     )
-    messages = asyncio.run(
-        plugin.fetch_history_with_config(
+    async def run() -> list[RawMessage]:
+        messages = await plugin.fetch_history_with_config(
             TransportRequest(
                 descriptor,
                 limit=2000,
                 start_ms=1000,
                 end_ms=2000,
             ),
-            IngestionConfig(proxy_mode="none"),
+            config,
         )
-    )
+        await plugin.fetch_history_with_config(
+            TransportRequest(descriptor, limit=2000, start_ms=1000, end_ms=2000),
+            config,
+        )
+        snapshot = plugin.history_transport_snapshot(config)
+        assert snapshot["clients_created"] == 1
+        assert snapshot["client_reuses"] == 1
+        assert snapshot["requests"] == 2
+        assert exchange.closed is False
+        await plugin.close_history_transport(config)
+        return messages
+
+    messages = asyncio.run(run())
 
     assert exchange.params == {
         "symbol": "BTCUSDT",
@@ -777,7 +793,391 @@ def test_binance_primary_kline_rest_uses_ccxt_implicit_method(
     assert event is not None
     assert event.data["quote_volume"] == 4.0
     assert event.data["trades"] == 5
+    assert exchange.load_count == 1
+    assert exchange.fetch_count == 2
     assert exchange.closed is True
+
+
+def test_binance_primary_rest_pool_survives_creator_cancellation(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets = {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "swap": True,
+                    "linear": True,
+                }
+            }
+            self.load_started = asyncio.Event()
+            self.release_load = asyncio.Event()
+            self.load_count = 0
+            self.fetch_count = 0
+            self.closed = False
+
+        async def load_markets(self) -> None:
+            self.load_count += 1
+            self.load_started.set()
+            await self.release_load.wait()
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_klines(
+            self,
+            _params: dict[str, Any],
+        ) -> list[list[Any]]:
+            self.fetch_count += 1
+            return [[1000, "1", "2", "0.5", "1.5", "3", 1999, "4", 5, "1", "2", "0"]]
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
+    request = TransportRequest(
+        StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="futures",
+        ),
+        limit=5,
+        start_ms=1000,
+        end_ms=2000,
+    )
+
+    async def run() -> None:
+        creator = asyncio.create_task(
+            plugin.fetch_history_with_config(request, config),
+        )
+        await exchange.load_started.wait()
+        joiner = asyncio.create_task(
+            plugin.fetch_history_with_config(request, config),
+        )
+        await asyncio.sleep(0)
+
+        creator.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await creator
+        assert exchange.closed is False
+
+        exchange.release_load.set()
+        messages = await joiner
+        assert len(messages) == 1
+        assert exchange.load_count == 1
+        assert exchange.fetch_count == 1
+        snapshot = plugin.history_transport_snapshot(config)
+        assert snapshot["clients_created"] == 1
+        assert snapshot["client_reuses"] == 1
+        assert snapshot["requests"] == 1
+
+        await plugin.close_history_transport(config)
+        assert exchange.closed is True
+
+    asyncio.run(run())
+
+
+def test_binance_primary_rest_pool_drains_borrower_without_replacement_leak(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets = {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "swap": True,
+                    "linear": True,
+                }
+            }
+            self.fetch_started = asyncio.Event()
+            self.release_fetch = asyncio.Event()
+            self.closed = False
+
+        async def load_markets(self) -> None:
+            return None
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_klines(
+            self,
+            _params: dict[str, Any],
+        ) -> list[list[Any]]:
+            self.fetch_started.set()
+            await self.release_fetch.wait()
+            assert self.closed is False
+            return [[1000, "1", "2", "0.5", "1.5", "3", 1999, "4", 5, "1", "2", "0"]]
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchanges: list[Exchange] = []
+
+    def create_exchange(*_args: Any, **_kwargs: Any) -> Exchange:
+        exchange = Exchange()
+        exchanges.append(exchange)
+        return exchange
+
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        create_exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
+    request = TransportRequest(
+        StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="futures",
+        ),
+        limit=5,
+        start_ms=1000,
+        end_ms=2000,
+    )
+
+    async def run() -> None:
+        fetch = asyncio.create_task(plugin.fetch_history_with_config(request, config))
+        while not exchanges:
+            await asyncio.sleep(0)
+        exchange = exchanges[0]
+        await exchange.fetch_started.wait()
+
+        close = asyncio.create_task(plugin.close_history_transport(config))
+        await asyncio.sleep(0)
+        assert close.done() is False
+        assert exchange.closed is False
+        with pytest.raises(RuntimeError, match="closing"):
+            await plugin.fetch_history_with_config(request, config)
+        assert len(exchanges) == 1
+
+        exchange.release_fetch.set()
+        assert len(await fetch) == 1
+        await close
+        assert exchange.closed is True
+        assert plugin.history_transport_snapshot(config)["clients"] == 0
+
+    asyncio.run(run())
+
+
+def test_binance_primary_rest_pool_reloads_stale_symbol_catalog_once(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets: dict[str, dict[str, Any]] = {}
+            self.initial_loads = 0
+            self.reloads = 0
+            self.reload_started = asyncio.Event()
+            self.release_reload = asyncio.Event()
+            self.fetch_count = 0
+            self.closed = False
+
+        async def load_markets(self, reload: bool = False) -> None:
+            if not reload:
+                self.initial_loads += 1
+                return
+            self.reloads += 1
+            self.reload_started.set()
+            await self.release_reload.wait()
+            self.markets["BTC/USDT:USDT"] = {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "swap": True,
+                "linear": True,
+            }
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_klines(
+            self,
+            _params: dict[str, Any],
+        ) -> list[list[Any]]:
+            self.fetch_count += 1
+            return [[1000, "1", "2", "0.5", "1.5", "3", 1999, "4", 5, "1", "2", "0"]]
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
+    request = TransportRequest(
+        StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="futures",
+        ),
+        limit=5,
+        start_ms=1000,
+        end_ms=2000,
+    )
+
+    async def run() -> None:
+        first = asyncio.create_task(plugin.fetch_history_with_config(request, config))
+        await exchange.reload_started.wait()
+        second = asyncio.create_task(plugin.fetch_history_with_config(request, config))
+        await asyncio.sleep(0)
+        exchange.release_reload.set()
+
+        first_result, second_result = await asyncio.gather(first, second)
+        assert len(first_result) == len(second_result) == 1
+        assert exchange.initial_loads == 1
+        assert exchange.reloads == 1
+        assert exchange.fetch_count == 2
+        snapshot = plugin.history_transport_snapshot(config)
+        assert snapshot["market_reloads"] == 1
+        assert snapshot["market_reload_failures"] == 0
+        await plugin.close_history_transport(config)
+        assert exchange.closed is True
+
+    asyncio.run(run())
+
+
+def test_binance_primary_rest_pool_releases_borrower_after_repeated_cancel(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets = {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "swap": True,
+                    "linear": True,
+                }
+            }
+            self.fetch_started = asyncio.Event()
+            self.closed = False
+
+        async def load_markets(self) -> None:
+            return None
+
+        def market(self, symbol: str) -> dict[str, Any]:
+            return self.markets[symbol]
+
+        async def fapipublic_get_klines(
+            self,
+            _params: dict[str, Any],
+        ) -> list[list[Any]]:
+            self.fetch_started.set()
+            await asyncio.Future()
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
+    request = TransportRequest(
+        StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="futures",
+        ),
+        limit=5,
+    )
+
+    async def run() -> None:
+        fetch = asyncio.create_task(plugin.fetch_history_with_config(request, config))
+        await exchange.fetch_started.wait()
+        fetch.cancel()
+        fetch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fetch
+        await asyncio.wait_for(plugin.close_history_transport(config), timeout=0.5)
+        assert exchange.closed is True
+
+    asyncio.run(run())
+
+
+def test_binance_primary_rest_pool_tracks_reload_after_creator_cancel(
+    monkeypatch: Any,
+) -> None:
+    class Exchange:
+        def __init__(self) -> None:
+            self.markets: dict[str, dict[str, Any]] = {}
+            self.reload_started = asyncio.Event()
+            self.release_reload = asyncio.Event()
+            self.closed = False
+
+        async def load_markets(self, reload: bool = False) -> None:
+            if not reload:
+                return
+            self.reload_started.set()
+            while not self.release_reload.is_set():
+                try:
+                    await self.release_reload.wait()
+                except asyncio.CancelledError:
+                    continue
+            assert self.closed is False
+
+        async def close(self, clean_instance_data: bool = False) -> None:
+            assert clean_instance_data is True
+            self.closed = True
+
+    exchange = Exchange()
+    monkeypatch.setattr(
+        "app.exchanges.ccxt_ext.primary._create_exchange",
+        lambda *_args, **_kwargs: exchange,
+    )
+    plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
+    request = TransportRequest(
+        StreamDescriptor(
+            "NEWUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="futures",
+        ),
+        limit=5,
+    )
+
+    async def run() -> None:
+        creator = asyncio.create_task(plugin.fetch_history_with_config(request, config))
+        await exchange.reload_started.wait()
+        creator.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await creator
+
+        close = asyncio.create_task(plugin.close_history_transport(config))
+        await asyncio.sleep(0)
+        assert close.done() is False
+        assert exchange.closed is False
+        exchange.release_reload.set()
+        await asyncio.wait_for(close, timeout=0.5)
+        assert exchange.closed is True
+
+    asyncio.run(run())
 
 
 def test_binance_primary_full_depth_rest_preserves_snapshot_limit(
@@ -825,6 +1225,7 @@ def test_binance_primary_full_depth_rest_preserves_snapshot_limit(
         lambda *_args, **_kwargs: exchange,
     )
     plugin = create_binance_ccxt_plugin()
+    config = IngestionConfig(proxy_mode="none")
     descriptor = StreamDescriptor(
         "BTCUSDT",
         StreamType.FULL_DEPTH,
@@ -832,12 +1233,16 @@ def test_binance_primary_full_depth_rest_preserves_snapshot_limit(
         market_type="futures",
         update_interval_ms=250,
     )
-    messages = asyncio.run(
-        plugin.fetch_history_with_config(
+    async def run() -> list[RawMessage]:
+        messages = await plugin.fetch_history_with_config(
             TransportRequest(descriptor, limit=1000),
-            IngestionConfig(proxy_mode="none"),
+            config,
         )
-    )
+        assert exchange.closed is False
+        await plugin.close_history_transport(config)
+        return messages
+
+    messages = asyncio.run(run())
 
     assert exchange.params == {"symbol": "BTCUSDT", "limit": 1000}
     assert messages[0].request_limit == 1000

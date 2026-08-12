@@ -23,12 +23,16 @@ class _Coordinator:
     def __init__(self) -> None:
         self.current = 1
         self.foreground_busy = False
+        self.network_busy = False
 
     def is_demand_generation_current(self, _scope: str, generation: int) -> bool:
         return generation >= self.current
 
     def has_foreground_work(self) -> bool:
         return self.foreground_busy
+
+    def has_backfill_work(self) -> bool:
+        return self.network_busy or self.foreground_busy
 
 
 def _schedule(
@@ -68,11 +72,11 @@ def test_related_warmup_singleflights_pending_batch_and_ttl_dedupes_targets() ->
         for _ in range(20):
             _schedule(dm, coordinator, scheduler)
         await asyncio.sleep(0.04)
-        assert len(dm.calls) == 3
+        assert len(dm.calls) == 1
 
         _schedule(dm, coordinator, scheduler)
         await asyncio.sleep(0.04)
-        assert len(dm.calls) == 3
+        assert len(dm.calls) == 1
 
         # A new target closed-open/range identity bypasses the older TTL.
         _schedule(dm, coordinator, scheduler, end_ms=10_060_000)
@@ -82,10 +86,10 @@ def test_related_warmup_singleflights_pending_batch_and_ttl_dedupes_targets() ->
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 6
+    assert len(dm.calls) == 2
     assert snapshot["singleflight_joined"] == 19
-    assert snapshot["ttl_hits"] == 3
-    assert snapshot["submitted"] == 6
+    assert snapshot["ttl_hits"] == 1
+    assert snapshot["submitted"] == 2
     assert snapshot["pending"] == 0
 
 
@@ -110,7 +114,32 @@ def test_related_warmup_waits_for_foreground_quiet_dwell() -> None:
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 3
+    assert len(dm.calls) == 1
+    assert snapshot["foreground_deferred"] >= 1
+
+
+def test_related_warmup_waits_while_non_foreground_network_work_is_active() -> None:
+    async def run() -> tuple[_WarmupDataManager, dict[str, int]]:
+        dm = _WarmupDataManager()
+        coordinator = _Coordinator()
+        coordinator.network_busy = True
+        scheduler = RelatedIntervalWarmupScheduler(
+            ttl_seconds=1,
+            dwell_seconds=0.01,
+            busy_recheck_seconds=0.005,
+        )
+        _schedule(dm, coordinator, scheduler)
+        await asyncio.sleep(0.03)
+        assert dm.calls == []
+
+        coordinator.network_busy = False
+        await asyncio.sleep(0.03)
+        snapshot = scheduler.snapshot()
+        scheduler.cancel()
+        return dm, snapshot
+
+    dm, snapshot = asyncio.run(run())
+    assert len(dm.calls) == 1
     assert snapshot["foreground_deferred"] >= 1
 
 
@@ -132,7 +161,7 @@ def test_related_warmup_keeps_only_latest_scope_generation_during_dwell() -> Non
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 3
+    assert len(dm.calls) == 1
     assert {
         kwargs["metadata"]["demand_generation"]
         for _, kwargs in dm.calls
@@ -151,7 +180,7 @@ def test_related_warmup_does_not_reuse_old_generation_ttl() -> None:
         )
         _schedule(dm, coordinator, scheduler, generation=1)
         await asyncio.sleep(0.04)
-        assert len(dm.calls) == 3
+        assert len(dm.calls) == 1
 
         coordinator.current = 2
         _schedule(dm, coordinator, scheduler, generation=2)
@@ -161,12 +190,12 @@ def test_related_warmup_does_not_reuse_old_generation_ttl() -> None:
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 6
+    assert len(dm.calls) == 2
     assert {
         kwargs["metadata"]["demand_generation"]
         for _, kwargs in dm.calls
     } == {1, 2}
-    assert snapshot["submitted"] == 6
+    assert snapshot["submitted"] == 2
     assert snapshot["ttl_hits"] == 0
 
 
@@ -182,7 +211,7 @@ def test_rejected_related_warmup_does_not_poison_ttl() -> None:
         dm.accept = False
         _schedule(dm, coordinator, scheduler)
         await asyncio.sleep(0.04)
-        assert len(dm.calls) == 3
+        assert len(dm.calls) == 1
 
         dm.accept = True
         _schedule(dm, coordinator, scheduler)
@@ -192,10 +221,10 @@ def test_rejected_related_warmup_does_not_poison_ttl() -> None:
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 6
-    assert snapshot["submit_failed"] == 3
-    assert snapshot["submitted"] == 3
-    assert snapshot["ttl_entries"] == 3
+    assert len(dm.calls) == 2
+    assert snapshot["submit_failed"] == 1
+    assert snapshot["submitted"] == 1
+    assert snapshot["ttl_entries"] == 1
 
 
 def test_related_warmup_cancel_releases_pending_timer_without_submission() -> None:
@@ -245,7 +274,7 @@ def test_related_warmup_ttl_expires_and_allows_same_target_again() -> None:
         _schedule(dm, coordinator, scheduler)
         now[0] += 0.02
         await asyncio.sleep(0.02)
-        assert len(dm.calls) == 3
+        assert len(dm.calls) == 1
 
         now[0] += 1.01
         _schedule(dm, coordinator, scheduler)
@@ -256,9 +285,9 @@ def test_related_warmup_ttl_expires_and_allows_same_target_again() -> None:
         return dm, snapshot
 
     dm, snapshot = asyncio.run(run())
-    assert len(dm.calls) == 6
-    assert snapshot["submitted"] == 6
-    assert snapshot["ttl_entries"] == 3
+    assert len(dm.calls) == 2
+    assert snapshot["submitted"] == 2
+    assert snapshot["ttl_entries"] == 1
 
 
 def test_related_warmup_bounds_pending_and_ttl_registries() -> None:

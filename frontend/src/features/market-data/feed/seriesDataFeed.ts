@@ -148,6 +148,8 @@ interface GetLatestOptions {
   signal?: AbortSignal;
   commit?: FeedCommitMode;
   priority?: FeedRequestPriority;
+  repair?: "none" | "wait";
+  waitMs?: number;
 }
 
 export interface KlineRequestDemand {
@@ -194,6 +196,8 @@ interface PendingGapRepair {
   attempts: number;
   nextPollAt: number;
   dormant: boolean;
+  /** Consecutive transport failures; pending/usable responses reset this. */
+  failureAttempts?: number;
   terminalReason?: string;
   onResolved?: (result: KlineFetchResult) => void;
   onTerminal?: (reason: string) => void;
@@ -266,6 +270,8 @@ export interface PollPendingRepairOptions {
 const PENDING_REPAIR_POLL_BASE_MS = 2_000;
 const PENDING_REPAIR_MAX_ATTEMPTS = 5;
 const PENDING_REPAIR_DORMANT_POLL_MS = 10 * 60_000;
+export const ACTIVE_EXACT_REPAIR_POLL_MS = 1_500;
+const ACTIVE_EXACT_REPAIR_ERROR_MAX_MS = 30_000;
 const BACKFILL_EVENT_SEEN_LIMIT = 1_024;
 const GAP_PLANNER_THROTTLE_MS = 1_000;
 const FRONTEND_CONTINUOUS_EXCHANGES: ReadonlySet<string> = new Set(["binance", "okx"]);
@@ -1623,7 +1629,7 @@ export class SeriesDataFeed {
     series: MarketSeries,
     range: TimeRangeSec,
     attempts?: number,
-    dormant?: boolean,
+    _dormant?: boolean,
     onResolved?: (result: KlineFetchResult) => void,
     terminalReason?: string | null,
     onTerminal?: (reason: string) => void,
@@ -1631,22 +1637,24 @@ export class SeriesDataFeed {
     const key = this.gapRepairKey(series, range);
     const current = this.pendingGapRepairs.get(key);
     const nextAttempts = attempts ?? current?.attempts ?? 0;
-    const nextDormant = dormant ?? current?.dormant ?? false;
     const nextTerminalReason = terminalReason === null
       ? undefined
       : (terminalReason || current?.terminalReason);
+    // Exact ranges in this map belong to the active visible series. Keep them
+    // promptly observable even when query-triggered backend work emits no
+    // browser completion event. Dormant backoff remains on pendingBeforePages.
+    const nextDormant = Boolean(nextTerminalReason);
     const nextResolved = combineResolvedCallbacks(current?.onResolved, onResolved);
     const nextTerminal = combineTerminalCallbacks(current?.onTerminal, onTerminal);
     const pending = {
       series,
       range,
       attempts: nextAttempts,
+      failureAttempts: current?.failureAttempts ?? 0,
       nextPollAt: nextTerminalReason
         ? Number.POSITIVE_INFINITY
-        : Date.now() + (nextDormant
-          ? PENDING_REPAIR_DORMANT_POLL_MS
-          : PENDING_REPAIR_POLL_BASE_MS * (2 ** Math.min(4, nextAttempts))),
-      dormant: nextDormant || Boolean(nextTerminalReason),
+        : Date.now() + ACTIVE_EXACT_REPAIR_POLL_MS,
+      dormant: nextDormant,
       ...(nextTerminalReason ? { terminalReason: nextTerminalReason } : {}),
       ...(nextResolved ? { onResolved: nextResolved } : {}),
       ...(nextTerminal ? { onTerminal: nextTerminal } : {}),
@@ -1996,8 +2004,8 @@ export class SeriesDataFeed {
       this.releaseEpochLease(this.gapRepairInFlight, key, lease);
       return false;
     }
-    const attempts = Math.min(PENDING_REPAIR_MAX_ATTEMPTS, (current?.attempts ?? 0) + 1);
-    const dormant = Boolean(current?.dormant || attempts >= PENDING_REPAIR_MAX_ATTEMPTS);
+    const attempts = (current?.attempts ?? 0) + 1;
+    const dormant = false;
     this.trackPendingGapRepair(series, range, attempts, dormant);
     try {
       const result = await this.getRange(series, {
@@ -2012,6 +2020,8 @@ export class SeriesDataFeed {
         requestScope: repairContext.requestScope,
       });
       if (this.currentGapRepairGeneration(series) !== repairGeneration) return true;
+      const tracked = this.pendingGapRepairs.get(key);
+      if (tracked) tracked.failureAttempts = 0;
       if (result.stale || result.active === false) {
         this.pendingGapRepairs.delete(key);
         return true;
@@ -2024,6 +2034,15 @@ export class SeriesDataFeed {
         || this.currentGapRepairGeneration(series) !== repairGeneration
       ) return false;
       this.trackPendingGapRepair(series, range, attempts, dormant);
+      const tracked = this.pendingGapRepairs.get(key);
+      if (tracked) {
+        const failureAttempts = (current?.failureAttempts ?? 0) + 1;
+        tracked.failureAttempts = failureAttempts;
+        tracked.nextPollAt = Date.now() + Math.min(
+          ACTIVE_EXACT_REPAIR_ERROR_MAX_MS,
+          ACTIVE_EXACT_REPAIR_POLL_MS * (2 ** Math.min(4, failureAttempts)),
+        );
+      }
       console.warn(`[GapRepair] Exact range request failed for ${key}:`, error);
       return false;
     } finally {
@@ -2863,11 +2882,23 @@ export class SeriesDataFeed {
       signal,
       commit = "patch-active",
       priority = "foreground",
+      repair = "none",
+      waitMs,
     }: GetLatestOptions = {},
   ): Promise<AppliedKlineResult> {
     if (!this.isSeriesRequestAllowed(series)) return dataPlaneDisabledResult();
     const epoch = this.currentEpoch(series);
-    const key = requestKeyFor("latest", series, { apiSource, epoch, limit, priority, source });
+    const transportDemand = this.transportDemandOptions(series);
+    const key = requestKeyFor("latest", series, {
+      apiSource,
+      epoch,
+      limit,
+      priority,
+      repair,
+      source,
+      waitMs,
+      ...transportDemand,
+    });
     const realtimeFence = this.beginRealtimeRequest(series);
     return this.inflight.run(key, () => this.runPhysicalTransport(
       priority,
@@ -2883,7 +2914,12 @@ export class SeriesDataFeed {
         series.marketType,
         series.exchange,
         apiSource,
-        signal === undefined ? {} : { signal },
+        {
+          ...(signal === undefined ? {} : { signal }),
+          repair,
+          ...(waitMs === undefined ? {} : { waitMs }),
+          ...transportDemand,
+        },
       );
       throwIfAborted(signal);
       return this.applyResult(series, result, {

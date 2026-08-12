@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ACTIVE_EXACT_REPAIR_POLL_MS,
   aggregateResolvedGapRepairResult,
   capContinuationRanges,
   countIntervalBarsInRange,
@@ -17,6 +18,7 @@ import type {
   KlineBeforeRequestOptions,
   KlineFetchResult,
   KlineHistoryRequestOptions,
+  KlineLatestRequestOptions,
   KlineRequestOptions,
   KlineStreamTickEvent,
   KlineStreamSocket,
@@ -1971,7 +1973,7 @@ test("pending exact gap repairs are re-read without a websocket completion", asy
   assert.equal(feed.pendingRepairCount(SERIES), 0);
 });
 
-test("an initial pending range still resolves after the normal retry window without switching interval", async () => {
+test("an active initial exact range keeps polling promptly after five pending probes", async () => {
   const originalNow = Date.now;
   let now = 1_000_000;
   let backendReady = false;
@@ -2024,17 +2026,73 @@ test("an initial pending range still resolves after the normal retry window with
     }
 
     backendReady = true;
-    now += 61_000;
+    now += ACTIVE_EXACT_REPAIR_POLL_MS - 1;
     assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 0);
     assert.equal(feed.pendingRepairCount(SERIES), 1);
 
-    now += 10 * 60_000;
+    now += 1;
     assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 1);
     assert.equal(calls, 6);
     assert.equal(resolved, 1);
     assert.equal(feed.pendingRepairCount(SERIES), 0);
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test("exact repair transport failures use bounded exponential backoff", async () => {
+  let calls = 0;
+  let now = 2_000_000;
+  const originalNow = Date.now;
+  const originalWarn = console.warn;
+  Date.now = () => now;
+  console.warn = () => {};
+  try {
+    const feed = new SeriesDataFeed({
+      api: {
+        fetchKlinesRange: async () => {
+          calls += 1;
+          throw new Error("temporary transport failure");
+        },
+      },
+      getActiveSeries: () => SERIES,
+      commitMergedChartData: () => {},
+    });
+    feed.trackPendingResultRepair(SERIES, {
+      data: [],
+      start_ms: 7_200_000,
+      end_ms: 7_200_000,
+      history_state: "pending",
+      complete: false,
+      retryable: true,
+      verified_contiguous: false,
+      missing_ranges: [{ start_ms: 7_200_000, end_ms: 7_200_000 }],
+    });
+
+    assert.equal(
+      await feed.pollPendingRepairs(SERIES, { force: true, maxRequests: 1 }),
+      0,
+    );
+    assert.equal(calls, 1);
+
+    now += (2 * ACTIVE_EXACT_REPAIR_POLL_MS) - 1;
+    assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 0);
+    assert.equal(calls, 1);
+
+    now += 1;
+    assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 0);
+    assert.equal(calls, 2);
+
+    now += (4 * ACTIVE_EXACT_REPAIR_POLL_MS) - 1;
+    assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 0);
+    assert.equal(calls, 2);
+
+    now += 1;
+    assert.equal(await feed.pollPendingRepairs(SERIES, { maxRequests: 1 }), 0);
+    assert.equal(calls, 3);
+  } finally {
+    Date.now = originalNow;
+    console.warn = originalWarn;
   }
 });
 
@@ -3091,6 +3149,7 @@ test("multiple initial completion chunks coalesce into one full-range verificati
 
 test("chart demand generation reaches every history transport and is cleared on cancel", async () => {
   const seen: KlineRequestOptions[] = [];
+  let latestSeen: KlineLatestRequestOptions | null = null;
   const feed = new SeriesDataFeed({
     api: {
       fetchKlinesHistory: async (_symbol, _interval, _days, _marketType, _exchange, options) => {
@@ -3105,6 +3164,11 @@ test("chart demand generation reaches every history transport and is cleared on 
         seen.push(options);
         return { data: [] };
       },
+      fetchLatestKlines: async (_symbol, _interval, _limit, _marketType, _exchange, _source, options) => {
+        latestSeen = options;
+        seen.push(options);
+        return { data: [] };
+      },
     },
   });
   feed.setRequestDemand(SERIES, { scope: "chart:test:1", generation: 9 });
@@ -3112,12 +3176,15 @@ test("chart demand generation reaches every history transport and is cleared on 
   await feed.getHistory(SERIES);
   await feed.getBefore(SERIES, { before: epochSeconds(20) });
   await feed.getRange(SERIES, { start: epochSeconds(1), end: epochSeconds(20) });
+  await feed.getLatest(SERIES, { repair: "wait", waitMs: 1_500 });
 
-  assert.equal(seen.length, 3);
+  assert.equal(seen.length, 4);
   for (const options of seen) {
     assert.equal(options.demandScope, "chart:test:1");
     assert.equal(options.demandGeneration, 9);
   }
+  assert.equal((latestSeen as KlineLatestRequestOptions | null)?.repair, "wait");
+  assert.equal((latestSeen as KlineLatestRequestOptions | null)?.waitMs, 1_500);
 
   feed.cancelSeriesRequests(SERIES);
   await feed.getHistory(SERIES);

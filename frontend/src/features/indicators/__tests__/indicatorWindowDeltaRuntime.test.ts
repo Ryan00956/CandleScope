@@ -94,6 +94,24 @@ test("new window deltas wait briefly so matching WS corrections can own the refr
   ), 0);
 });
 
+test("initial owner settlement bypasses event debounce so initial-visible can join its microtask", () => {
+  const request = {
+    ...rangeEvent("window-mid-merge", 600, 900),
+    createdAt: 10_000,
+    initialSettlementRelease: true,
+  };
+
+  assert.equal(indicatorWindowCorrectionCoalesceDelay(request, 10_001, 250), 0);
+  assert.equal(
+    indicatorWindowCorrectionCoalesceDelay(
+      { ...request, initialSettlementRelease: false },
+      10_001,
+      250,
+    ),
+    249,
+  );
+});
+
 test("mid-window refresh bridges a repaired prefix to progressive computed coverage", () => {
   assert.deepEqual(
     bridgeIndicatorWindowDeltaToComputedCoverage(

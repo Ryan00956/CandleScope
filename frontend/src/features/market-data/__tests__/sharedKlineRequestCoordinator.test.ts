@@ -40,12 +40,16 @@ test("exact history requests join one physical request and retain independent ca
   const coordinator = new SharedKlineRequestCoordinator(fakeApi(() => work.promise, calls));
 
   const first = coordinator.fetchKlinesHistory(
-    "BTCUSDT", "1m", 7, "futures", "binance", { countBack: 500 },
+    "BTCUSDT", "1m", 7, "futures", "binance", {
+      countBack: 500,
+      demandScope: "chart:a",
+      demandGeneration: 9,
+    },
   );
   const second = coordinator.fetchKlinesHistory(
     "btcusdt", "1m", 7, "futures", "BINANCE", {
       countBack: 500,
-      demandScope: "another-cell",
+      demandScope: "chart:a",
       demandGeneration: 9,
     },
   );
@@ -59,7 +63,7 @@ test("exact history requests join one physical request and retain independent ca
     requests: [{
       ageMs: 0,
       consumers: 2,
-      key: '["history","binance","futures","BTCUSDT","1m",7,500,null,null]',
+      key: '["history","binance","futures","BTCUSDT","1m",7,500,null,null,"chart:a",9]',
       kind: "history",
     }],
     totalLogical: 2,
@@ -128,6 +132,56 @@ test("request semantics that can change rows do not join", async () => {
     coordinator.fetchKlinesRange("BTCUSDT", "1m", 1 as never, 2 as never, "spot", "binance", { repair: "none" }),
   ]);
   assert.equal(calls.value, 2);
+});
+
+test("latest repair policy and demand generation are part of shared request identity", async () => {
+  const calls = { value: 0 };
+  const coordinator = new SharedKlineRequestCoordinator(fakeApi(async () => result, calls));
+  await Promise.all([
+    coordinator.fetchLatestKlines(
+      "BTCUSDT", "1m", 5, "spot", "binance", "initial-latest",
+      { repair: "wait", waitMs: 1_500, demandScope: "chart:a", demandGeneration: 1 },
+    ),
+    coordinator.fetchLatestKlines(
+      "BTCUSDT", "1m", 5, "spot", "binance", "initial-latest",
+      { repair: "none", demandScope: "chart:a", demandGeneration: 1 },
+    ),
+    coordinator.fetchLatestKlines(
+      "BTCUSDT", "1m", 5, "spot", "binance", "initial-latest",
+      { repair: "wait", waitMs: 1_500, demandScope: "chart:a", demandGeneration: 2 },
+    ),
+  ]);
+  assert.equal(calls.value, 3);
+});
+
+test("history, before, and range requests do not inherit another demand owner", async () => {
+  const calls = { value: 0 };
+  const coordinator = new SharedKlineRequestCoordinator(fakeApi(async () => result, calls));
+  const firstDemand = { demandScope: "chart:a", demandGeneration: 1 };
+  const nextDemand = { demandScope: "chart:a", demandGeneration: 2 };
+
+  await Promise.all([
+    coordinator.fetchKlinesHistory(
+      "BTCUSDT", "1m", 7, "spot", "binance", { countBack: 500, ...firstDemand },
+    ),
+    coordinator.fetchKlinesHistory(
+      "BTCUSDT", "1m", 7, "spot", "binance", { countBack: 500, ...nextDemand },
+    ),
+    coordinator.fetchKlinesBefore(
+      "BTCUSDT", "1m", 100 as never, 500, "spot", "binance", firstDemand,
+    ),
+    coordinator.fetchKlinesBefore(
+      "BTCUSDT", "1m", 100 as never, 500, "spot", "binance", nextDemand,
+    ),
+    coordinator.fetchKlinesRange(
+      "BTCUSDT", "1m", 1 as never, 2 as never, "spot", "binance", firstDemand,
+    ),
+    coordinator.fetchKlinesRange(
+      "BTCUSDT", "1m", 1 as never, 2 as never, "spot", "binance", nextDemand,
+    ),
+  ]);
+
+  assert.equal(calls.value, 6);
 });
 
 test("distinct history requests in one browser task use one bounded physical batch", async () => {

@@ -377,12 +377,22 @@ class GapDetector:
                 )
                 gaps.append(gap)
 
-        # ── Case 3: Tail gap — DB is behind the live edge ──
-        # Calendar stepping skips market closures and also handles monthly bars.
-        next_expected = calendar.next_expected_open(db_latest, interval)
+        # ── Case 3: Tail gap — DB is behind the requested live edge ──
+        # A stale database may be much older than a narrow caller-owned range
+        # (for example, the exact one-minute bar used for a daily-open price).
+        # Tail repair must stay inside that requested range; otherwise one
+        # exact lookup can accidentally expand into days of maintenance work.
+        # Calendar alignment preserves closed-session and monthly semantics.
+        tail_start = max(range_start_ms, db_latest + 1)
+        tail_end = min(range_end_ms, reference_ms)
+        next_expected = calendar.first_expected_open(
+            tail_start,
+            tail_end,
+            interval,
+        )
         last_expected = calendar.last_expected_open(
-            db_latest + 1,
-            reference_ms,
+            tail_start,
+            tail_end,
             interval,
         )
         if (

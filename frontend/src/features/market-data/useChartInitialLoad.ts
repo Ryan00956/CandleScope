@@ -211,6 +211,54 @@ export function shouldRequestInitialLatest(
   ));
 }
 
+export interface InitialLoadReadiness {
+  initialPaintReady: boolean;
+  tailFresh: boolean;
+}
+
+/**
+ * Decide whether the bounded native-interval tail request is still useful
+ * after the non-blocking history probe. Rendering old storage rows and proving
+ * that the right edge is current are separate readiness states: a renderable
+ * page must not suppress the tail fast path while its repair is pending.
+ */
+export function shouldRequestInitialLatestForReadiness(
+  interval: IntervalString,
+  nativeIntervalValues: readonly IntervalString[],
+  readiness: InitialLoadReadiness,
+): boolean {
+  return shouldRequestInitialLatest(interval, nativeIntervalValues)
+    && !readiness.tailFresh;
+}
+
+export function isInitialHistoryTailFresh(
+  result: KlineFetchResult | null | undefined,
+): boolean {
+  return Boolean(result?.has_tail_gap === false && !isKlineResultRepairPending(result));
+}
+
+export function canCommitInitialFeedResult({
+  aborted = false,
+  active = false,
+  currentEpoch = -1,
+  expectedEpoch = -1,
+  resultActive = true,
+  stale = false,
+}: {
+  aborted?: boolean;
+  active?: boolean;
+  currentEpoch?: number;
+  expectedEpoch?: number;
+  resultActive?: boolean;
+  stale?: boolean;
+} = {}): boolean {
+  return !aborted
+    && active
+    && resultActive !== false
+    && !stale
+    && currentEpoch === expectedEpoch;
+}
+
 export function planInitialHistoryCountBack(
   interval: IntervalString,
   nativeIntervalValues: readonly IntervalString[],
@@ -357,13 +405,15 @@ export function useChartInitialLoad({
     };
     const cached = initialRows.rows;
     const hasCacheHit = cached && cached.length > 0;
-    let shownInitialData = false;
+    let initialPaintReady = false;
+    let tailFresh = false;
     let initialRetryStarted = false;
     let stopInitialHistoryRetry: (() => void) | null = null;
     let trackedInitialRepairRange: TimeRangeSec | null = null;
+    let ownedPendingInitial: PendingInitialSeries | null = null;
     let warmActivation: CachedChartDataActivation | null = null;
     const markInitialDataShown = () => {
-      shownInitialData = true;
+      initialPaintReady = true;
     };
 
     if (hasCacheHit) {
@@ -440,8 +490,38 @@ export function useChartInitialLoad({
       return;
     }
 
+    function ownsInitialResult(result: FeedResult | null | undefined): boolean {
+      return canCommitInitialFeedResult({
+        aborted: controller.signal.aborted,
+        active: seriesDataFeed.shouldCommitActive(series),
+        currentEpoch: seriesDataFeed.currentEpoch(series),
+        expectedEpoch: initialEpoch,
+        resultActive: result?.active !== false,
+        stale: result?.stale === true,
+      });
+    }
+
+    function relinquishInitialOwnership(): void {
+      if (controller.signal.aborted) return;
+      stopInitialHistoryRetry?.();
+      seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
+      trackedInitialRepairRange = null;
+      if (
+        ownedPendingInitial
+        && pendingInitialHistoryRef.current === ownedPendingInitial
+      ) {
+        pendingInitialHistoryRef.current = null;
+      }
+      ownedPendingInitial = null;
+      setInitialHistoryPending(false);
+    }
+
     function commitQuickResult(quickResult: FeedResult | null | undefined): void {
-      if (controller.signal.aborted || !quickResult?.data?.length) return;
+      if (!ownsInitialResult(quickResult)) {
+        relinquishInitialOwnership();
+        return;
+      }
+      if (!quickResult?.data?.length) return;
       markPerf("chart.initialLoad.latest.commit", {
         source: quickResult.source || "unknown",
         bars: quickResult.data.length,
@@ -455,16 +535,23 @@ export function useChartInitialLoad({
       const latestTick = quickResult.data[quickResult.data.length - 1];
       if (latestTick) updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
+      // /latest may legally return stale storage while a bounded repair is in
+      // flight. Only the explicit history-quality contract can prove freshness.
+      tailFresh = isInitialHistoryTailFresh(quickResult);
 
-      if (!shownInitialData) {
+      if (!initialPaintReady) {
         setLoading(false);
         markInitialDataShown();
       }
     }
 
-    function commitHistoryResult(historyResult: FeedResult | null | undefined): void {
-      if (controller.signal.aborted) return;
+    function commitHistoryResult(historyResult: FeedResult | null | undefined): boolean {
+      if (!ownsInitialResult(historyResult)) {
+        relinquishInitialOwnership();
+        return false;
+      }
       const repairPending = isKlineResultRepairPending(historyResult);
+      tailFresh = isInitialHistoryTailFresh(historyResult);
       let terminalFailed = false;
 
       recordPerfEvent("chart.initialLoad.history.result", {
@@ -487,6 +574,7 @@ export function useChartInitialLoad({
             ? numericRange(historyResult.start_ms, historyResult.end_ms)
             : null,
         };
+        ownedPendingInitial = pendingInitial;
         pendingInitialHistoryRef.current = pendingInitial;
         const previousTrackedRange = trackedInitialRepairRange;
         const finalizePending = (settledResult: KlineFetchResult) => {
@@ -506,6 +594,7 @@ export function useChartInitialLoad({
             return;
           }
           pendingInitialHistoryRef.current = null;
+          ownedPendingInitial = null;
           setInitialHistoryPending(false);
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
@@ -534,6 +623,7 @@ export function useChartInitialLoad({
             seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
           }
           pendingInitialHistoryRef.current = null;
+          ownedPendingInitial = null;
           setInitialHistoryPending(false);
           trackedInitialRepairRange = null;
           stopInitialHistoryRetry?.();
@@ -574,6 +664,7 @@ export function useChartInitialLoad({
         trackedInitialRepairRange = trackedRange;
       } else if (!repairPending) {
         pendingInitialHistoryRef.current = null;
+        ownedPendingInitial = null;
         setInitialHistoryPending(false);
         seriesDataFeed.clearPendingResultRepair(series, trackedInitialRepairRange);
         trackedInitialRepairRange = null;
@@ -617,7 +708,7 @@ export function useChartInitialLoad({
           setConnectionStatus("connected");
           setLoading(false);
         }
-        return;
+        return true;
       }
 
       markPerf("chart.initialLoad.history.commit", {
@@ -639,17 +730,22 @@ export function useChartInitialLoad({
         historyResult.source === "mock" || repairPending ? "loading" : "connected",
       );
 
-      if (!shownInitialData) {
+      if (!initialPaintReady) {
         markInitialDataShown();
       }
       setLoading(false);
       void seriesDataFeed.repairVisibleGaps(series, historyResult.data, null, {
         source: "initial-held-gap-planner",
       });
+      return true;
     }
 
     function startInitialHistoryRetry(): void {
       if (initialRetryStarted) return;
+      if (!ownsInitialResult(undefined)) {
+        relinquishInitialOwnership();
+        return;
+      }
       initialRetryStarted = true;
       markPerf("chart.initialLoad.retry.start", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
       setConnectionStatus("loading");
@@ -723,7 +819,7 @@ export function useChartInitialLoad({
       safetyTimer = setTimeout(async () => {
         if (controller.signal.aborted) return;
         if (await retryInitialHistory()) return;
-        if (!shownInitialData) {
+        if (!initialPaintReady) {
           markPerf("chart.initialLoad.retry.timeout", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
           setError(new Error(`K-line history unavailable for ${sym}@${intv}`));
           setConnectionStatus("disconnected");
@@ -757,15 +853,22 @@ export function useChartInitialLoad({
         source: result?.source || "unknown",
         bars: result?.data?.length || 0,
       });
-      commitHistoryResult(result);
+      if (!commitHistoryResult(result)) return;
     } catch {
       if (!controller.signal.aborted) startInitialHistoryRetry();
     }
+    if (!ownsInitialResult(undefined)) {
+      relinquishInitialOwnership();
+      return;
+    }
 
-    // A warm storage page is already a better initial seed than /latest and
-    // avoids doubling the per-Cell bootstrap traffic. Cold/empty probes retain
-    // the latest fast path before the bounded history retry takes ownership.
-    if (!shownInitialData && shouldRequestInitialLatest(intv, nativeIntervalValues)) {
+    // A proven-fresh warm storage page avoids duplicate bootstrap traffic.
+    // Renderable-but-stale rows are only initial-paint ready: keep them visible
+    // while a bounded native tail request patches the current right edge.
+    if (shouldRequestInitialLatestForReadiness(intv, nativeIntervalValues, {
+      initialPaintReady,
+      tailFresh,
+    })) {
       markPerf("chart.initialLoad.latest.request", {
         exchange: ex,
         marketType: mt,
@@ -778,6 +881,8 @@ export function useChartInitialLoad({
         source: "initial-latest",
         signal: controller.signal,
         commit: "patch-active",
+        repair: "wait",
+        waitMs: INITIAL_VIEWPORT_MAX_WAIT_MS,
       }).then((result) => {
         markPerf("chart.initialLoad.latest.response", {
           source: result?.source || "unknown",
@@ -791,13 +896,13 @@ export function useChartInitialLoad({
         marketType: mt,
         symbol: sym,
         interval: intv,
-        reason: shownInitialData
-          ? "viewport-history-already-renderable"
+        reason: tailFresh
+          ? "viewport-history-tail-already-fresh"
           : "derived-interval-history-owns-tail",
       });
     }
 
-    if (shownInitialData) {
+    if (initialPaintReady) {
       setLoading(false);
     }
   }, [

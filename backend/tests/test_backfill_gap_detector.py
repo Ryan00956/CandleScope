@@ -166,3 +166,60 @@ def test_gap_detector_reports_requested_range_edge_holes() -> None:
         ]
 
     asyncio.run(_run())
+
+
+def test_gap_detector_clamps_stale_tail_to_exact_requested_bar() -> None:
+    async def _run() -> None:
+        day_ms = 24 * 60 * 60 * 1_000
+        stale_open = _ms(2026, 8, 2)
+        requested_open = _ms(2026, 8, 12)
+        detector = GapDetector(
+            BackfillConfig(gap_tolerance_bars=0),
+            _Storage({stale_open}),
+        )
+
+        gaps = await detector.detect(
+            symbol="BNBUSDT",
+            intervals=["1m"],
+            range_start_ms=requested_open,
+            range_end_ms=requested_open,
+            exchange="binance",
+            market_type="spot",
+        )
+
+        assert [(gap.gap_type, gap.start_ms, gap.end_ms, gap.missing_bars) for gap in gaps] == [
+            (GapType.TAIL, requested_open, requested_open, 1)
+        ]
+        # Guard the regression's exact scale: the stale storage edge is ten
+        # days away, but must not widen this caller-owned one-bar request.
+        assert requested_open - stale_open == 10 * day_ms
+
+    asyncio.run(_run())
+
+
+def test_gap_detector_tail_range_clamp_preserves_head_and_interior_holes() -> None:
+    async def _run() -> None:
+        detector = GapDetector(
+            BackfillConfig(gap_tolerance_bars=0),
+            _Storage({120_000, 240_000}),
+        )
+
+        gaps = await detector.detect(
+            symbol="BTC-USDT",
+            intervals=["1m"],
+            range_start_ms=0,
+            range_end_ms=360_000,
+            exchange="okx",
+            market_type="spot",
+        )
+
+        assert [
+            (gap.gap_type, gap.start_ms, gap.end_ms, gap.missing_bars)
+            for gap in gaps
+        ] == [
+            (GapType.HEAD, 0, 60_000, 2),
+            (GapType.TAIL, 300_000, 360_000, 2),
+            (GapType.INTERIOR, 180_000, 180_000, 1),
+        ]
+
+    asyncio.run(_run())

@@ -160,6 +160,12 @@ export function indicatorWindowCorrectionCoalesceDelay(
     !request
     || (request.reason !== "window-prepend" && request.reason !== "window-mid-merge")
   ) return 0;
+  // The owner-release commit and initial-visible hydration are published by
+  // the same React commit. Let this event invalidate and enqueue first so the
+  // range scheduler's microtask can union both intents into one batch. Other
+  // window deltas retain the debounce that gives a later WS correction
+  // ownership of the refresh.
+  if (request.initialSettlementRelease === true) return 0;
   const createdAt = Number(request.createdAt);
   const normalizedWindowMs = Math.max(0, Math.floor(Number(windowMs) || 0));
   if (!Number.isFinite(createdAt) || createdAt <= 0 || normalizedWindowMs === 0) return 0;

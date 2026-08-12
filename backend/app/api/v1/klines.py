@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import logging
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
@@ -63,7 +64,8 @@ logger = logging.getLogger("api.klines")
 
 RELATED_WARMUP_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 MAX_RANGE_RESPONSE_BARS = 5_000
-RELATED_WARMUP_TARGET_BARS = 1_000
+RELATED_WARMUP_MAX_INTERVALS = 1
+RELATED_WARMUP_MAX_TARGET_BARS = 256
 RELATED_WARMUP_TTL_SECONDS = 5 * 60.0
 RELATED_WARMUP_DWELL_SECONDS = 1.0
 RELATED_WARMUP_BUSY_RECHECK_SECONDS = 0.25
@@ -840,6 +842,60 @@ def _previous_expected_open_ms(open_ms: int, interval: str) -> int:
     return compute_bucket_start_ms(open_ms - 1, interval_ms, interval=interval)
 
 
+def _bounded_latest_tail_range(
+    *,
+    interval: str,
+    limit: int,
+    calendar: TradingCalendar | None,
+) -> tuple[int, int]:
+    """Plan only the newest closed buckets for opt-in latest repair.
+
+    This helper is deliberately synchronous and runs on the storage executor:
+    third-party/session calendar iteration can be CPU-heavy and must not block
+    the ASGI event loop.
+    """
+
+    tail_end_ms = _last_closed_open_ms(interval, calendar=calendar)
+    tail_start_ms = tail_end_ms
+    if calendar is not None:
+        lookback_ms = min(
+            tail_end_ms,
+            max(
+                7 * 86_400_000,
+                limit * max(_interval_ms_for_request(interval), 60_000) * 4,
+            ),
+        )
+        recent_opens: deque[int] = deque(maxlen=limit)
+        while True:
+            search_start_ms = max(0, tail_end_ms - lookback_ms)
+            recent_opens.clear()
+            for open_ms in calendar.expected_opens(
+                search_start_ms,
+                tail_end_ms,
+                interval,
+            ):
+                recent_opens.append(int(open_ms))
+            if len(recent_opens) >= limit or search_start_ms == 0:
+                break
+            lookback_ms = min(tail_end_ms, max(lookback_ms + 1, lookback_ms * 2))
+        if recent_opens:
+            tail_start_ms = recent_opens[0]
+    elif is_monthly_interval(interval):
+        for _ in range(limit - 1):
+            if tail_start_ms <= 0:
+                break
+            previous = _previous_expected_open_ms(tail_start_ms, interval)
+            if previous < 0 or previous >= tail_start_ms:
+                break
+            tail_start_ms = previous
+    else:
+        tail_start_ms = max(
+            0,
+            tail_end_ms - ((limit - 1) * _interval_ms_for_request(interval)),
+        )
+    return tail_start_ms, tail_end_ms
+
+
 def _interval_ms_for_request(interval: str) -> int:
     interval_ms = parse_interval_ms(interval)
     if interval_ms is not None and interval_ms > 0:
@@ -1493,7 +1549,11 @@ def _attach_verification_suppressions(
     result.excluded_ranges = exclusions
 
 
-def _related_warmup_intervals(current_interval: str, *, limit: int = 3) -> list[str]:
+def _related_warmup_intervals(
+    current_interval: str,
+    *,
+    limit: int = RELATED_WARMUP_MAX_INTERVALS,
+) -> list[str]:
     if current_interval not in RELATED_WARMUP_INTERVALS:
         return []
 
@@ -1546,6 +1606,12 @@ def _schedule_related_interval_warmup(
         return True
 
     def _foreground_busy() -> bool:
+        # Related history is entirely speculative. Wait behind both visible
+        # demand and maintenance/network work; otherwise a daily-open refresh
+        # or audit can become a second upstream burst immediately after paint.
+        has_backfill_work = getattr(coordinator, "has_backfill_work", None)
+        if callable(has_backfill_work) and has_backfill_work():
+            return True
         has_foreground_work = getattr(coordinator, "has_foreground_work", None)
         return bool(
             callable(has_foreground_work)
@@ -1581,11 +1647,24 @@ def _schedule_related_interval_warmup(
                     end_ms,
                     _last_closed_open_ms(interval, calendar=warmup_calendar),
                 )
+                visible_span_ms = max(0, end_ms - start_ms)
+                viewport_target_bars = max(
+                    1,
+                    (visible_span_ms // interval_ms) + 1,
+                )
+                target_bars = min(
+                    RELATED_WARMUP_MAX_TARGET_BARS,
+                    viewport_target_bars,
+                )
                 warmup_start_ms = max(
                     start_ms,
-                    warmup_end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms),
+                    warmup_end_ms - ((target_bars - 1) * interval_ms),
                 )
                 warmup_start_ms = min(warmup_start_ms, warmup_end_ms)
+                planned_bars = max(
+                    1,
+                    ((warmup_end_ms - warmup_start_ms) // interval_ms) + 1,
+                )
                 metadata: dict[str, Any] = {
                     "focus_scope": "related",
                     "current_interval": current_interval,
@@ -1597,7 +1676,8 @@ def _schedule_related_interval_warmup(
                     "warmup_range": {
                         "start_ms": warmup_start_ms,
                         "end_ms": warmup_end_ms,
-                        "target_bars": RELATED_WARMUP_TARGET_BARS,
+                        "target_bars": planned_bars,
+                        "max_target_bars": RELATED_WARMUP_MAX_TARGET_BARS,
                     },
                 }
                 if normalized_scope is not None and demand_generation is not None:
@@ -1802,14 +1882,67 @@ async def get_latest_klines(
     limit: int = Query(2, ge=1, le=1000, description="Number of latest rows"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    repair: Annotated[
+        Literal["none", "wait"],
+        Query(description="Optionally repair the bounded closed tail before returning"),
+    ] = "none",
+    max_wait_ms: int = Query(
+        0,
+        ge=0,
+        le=1500,
+        description="Bounded foreground tail-repair wait; used only with repair=wait",
+    ),
+    request_scope: str | None = Query(
+        None,
+        max_length=128,
+        description="Stable chart/pane scope used to supersede stale tail work",
+    ),
+    request_generation: int | None = Query(
+        None,
+        ge=0,
+        description="Monotonic generation within request_scope",
+    ),
 ):
     """Get the very latest K-line bars (typically 1-2 for live updates)."""
     _validate_interval(interval)
     exchange = _validate_exchange(exchange)
     market_type = _validate_market_type(market_type)
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
+    demand_owner_id = _new_request_demand_owner_id(
+        request_scope,
+        request_generation,
+    )
+    demand_metadata = _request_backfill_demand_metadata(
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+        demand_owner_id=demand_owner_id,
+    )
+    await _reject_stale_request_generation(
+        request,
+        demand_scope=request_scope,
+        demand_generation=request_generation,
+    )
 
     dm = _require_data_manager(request)
+    bounded_tail_repair = False
+    tail_start_ms = 0
+    tail_end_ms = 0
+    if repair == "wait":
+        tail_calendar, tail_calendar_known = _resolve_history_calendar(
+            dm,
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+        )
+        bounded_tail_repair = tail_calendar_known
+        if bounded_tail_repair:
+            tail_start_ms, tail_end_ms = await run_storage(
+                _bounded_latest_tail_range,
+                interval=interval,
+                limit=limit,
+                calendar=tail_calendar,
+            )
     consumer_id = f"rest:klines_latest:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
     stream_ensured = False
     try:
@@ -1822,15 +1955,82 @@ async def get_latest_klines(
             consumer_id=consumer_id,
         )
         stream_ensured = True
-        result = await run_storage(
-            _call_data_manager_method,
-            dm.query_latest, symbol, interval, limit,
-            exchange,
-            market_type=market_type,
-            auto_backfill=False,
-            backfill_reason="latest_refresh",
-            backfill_requester="klines_latest",
+
+        async def _run_latest_query(auto_backfill: bool):
+            query_method = dm.query if bounded_tail_repair else dm.query_latest
+            query_args = (
+                (symbol, interval)
+                if bounded_tail_repair
+                else (symbol, interval, limit)
+            )
+            return await run_storage(
+                _call_data_manager_method,
+                query_method,
+                *query_args,
+                exchange=exchange,
+                market_type=market_type,
+                **(
+                    {
+                        "start_ms": tail_start_ms,
+                        "end_ms": tail_end_ms,
+                        "limit": limit,
+                    }
+                    if bounded_tail_repair
+                    else {}
+                ),
+                auto_backfill=auto_backfill,
+                backfill_reason="latest_refresh",
+                backfill_requester="klines_latest",
+                **(
+                    {"backfill_metadata": demand_metadata}
+                    if demand_metadata is not None
+                    else {}
+                ),
+            )
+
+        result = await _run_latest_query(bounded_tail_repair)
+        backfill_triggered = bool(result.backfill_triggered)
+        await _acquire_scope_demand_for_result(
+            request,
+            result,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            demand_owner_id=demand_owner_id,
         )
+        await _reject_stale_request_generation(
+            request,
+            demand_scope=request_scope,
+            demand_generation=request_generation,
+            advance=False,
+        )
+        if (
+            bounded_tail_repair
+            and max_wait_ms > 0
+            and _should_wait_for_backfill(result)
+        ):
+            result = await _poll_backfill_storage(
+                request,
+                result,
+                timeout_seconds=max_wait_ms / 1000,
+                requery=_run_latest_query,
+                wait_through_partial_rows=True,
+                ready=_history_page_finality_ready,
+                demand_scope=request_scope,
+                demand_generation=request_generation,
+                demand_owner_id=demand_owner_id,
+            )
+            backfill_triggered = backfill_triggered or bool(
+                result.backfill_triggered
+            )
+    except asyncio.CancelledError:
+        await _revoke_request_demand_owner(
+            request,
+            demand_owner_id,
+            reason="http_query_cancelled",
+        )
+        raise
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _query_http_exception(exc, "DataManager latest query failed") from exc
     finally:
@@ -1857,7 +2057,9 @@ async def get_latest_klines(
         "count": len(data),
         "source": result.source.value,
         "fetched": result.total,
-        "backfill_triggered": result.backfill_triggered,
+        "backfill_triggered": backfill_triggered,
+        "has_tail_gap": result.has_tail_gap,
+        "missing_ranges": [item.to_dict() for item in result.missing_ranges],
         **_history_contract_payload(result),
         "cache": result.metadata,
         "data": data,

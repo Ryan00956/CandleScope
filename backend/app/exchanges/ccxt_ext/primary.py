@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,6 +38,280 @@ from .generic import (
 )
 from .unified import CCXT_UNIFIED_MARKER, CcxtUnifiedNormalizer, make_unified_payload
 from .runtime import close_ccxt_exchange
+
+
+def _consume_task_outcome(task: asyncio.Task[Any]) -> None:
+    """Retrieve detached bootstrap failures without changing await semantics."""
+
+    try:
+        task.exception()
+    except BaseException:
+        pass
+
+
+@dataclass(slots=True)
+class _RestExchangeEntry:
+    exchange: Any
+    load_task: asyncio.Task[Any]
+    borrowers: int
+    idle: asyncio.Event
+    reload_task: asyncio.Task[Any] | None = None
+
+
+class _RestExchangePool:
+    """Transport-owned CCXT REST clients with one market bootstrap per rail.
+
+    Primary history fetches used to construct, ``load_markets()``, and close a
+    CCXT exchange for every page.  Besides repeating catalog work, that also
+    discarded DNS/TLS state between adjacent backfill pages.  One
+    ``IngestionConfig`` belongs to one ``TransportLayer``; keeping the pool
+    scoped to that exact config gives the transport connection reuse without
+    sharing proxy/session state between transport owners.
+    """
+
+    def __init__(self, entry: Any, config: IngestionConfig) -> None:
+        self._catalog_entry = entry
+        self._config = config
+        self._entries: dict[str, _RestExchangeEntry] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._created = 0
+        self._reused = 0
+        self._load_failures = 0
+        self._request_count = 0
+        self._request_failures = 0
+        self._market_load_ms_total = 0.0
+        self._market_load_ms_last = 0.0
+        self._request_ms_total = 0.0
+        self._request_ms_last = 0.0
+        self._request_ms_max = 0.0
+        self._market_reloads = 0
+        self._market_reload_failures = 0
+        self._symbol_reload_attempts: dict[tuple[str, str], float] = {}
+
+    async def _load_markets(self, exchange: Any) -> Any:
+        """Bootstrap one client and measure the physical task, not a waiter.
+
+        The bootstrap is shielded from individual request cancellation.  Its
+        timing therefore has to live on the shared task itself; measuring in
+        ``get()`` would under-report whenever the request that created the
+        client was superseded while another request kept using the bootstrap.
+        """
+
+        started = time.perf_counter()
+        try:
+            return await exchange.load_markets()
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            self._load_failures += 1
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self._market_load_ms_last = elapsed_ms
+            self._market_load_ms_total += elapsed_ms
+
+    async def _acquire(self, selection: str) -> _RestExchangeEntry:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("CCXT REST pool is closed")
+            current = self._entries.get(selection)
+            if current is None:
+                exchange = _create_exchange(
+                    self._catalog_entry,
+                    self._config,
+                    market_type=selection,
+                    websocket=False,
+                )
+                load_task = asyncio.create_task(self._load_markets(exchange))
+                load_task.add_done_callback(_consume_task_outcome)
+                idle = asyncio.Event()
+                idle.set()
+                current = _RestExchangeEntry(
+                    exchange=exchange,
+                    load_task=load_task,
+                    borrowers=0,
+                    idle=idle,
+                )
+                self._entries[selection] = current
+                self._created += 1
+            else:
+                self._reused += 1
+
+        try:
+            await asyncio.shield(current.load_task)
+        except asyncio.CancelledError:
+            # The shared market bootstrap belongs to the transport, not to one
+            # HTTP consumer.  A superseded chart request must not tear down the
+            # client while another backfill page is joining the same task.
+            raise
+        except BaseException:
+            should_close = False
+            async with self._lock:
+                if self._entries.get(selection) is current:
+                    self._entries.pop(selection, None)
+                    should_close = True
+            if should_close:
+                await close_ccxt_exchange(current.exchange)
+            raise
+        async with self._lock:
+            if self._closed or self._entries.get(selection) is not current:
+                raise RuntimeError("CCXT REST pool closed during client acquisition")
+            current.borrowers += 1
+            current.idle.clear()
+        return current
+
+    @staticmethod
+    def _release(current: _RestExchangeEntry) -> None:
+        # All pool mutations belong to one asyncio loop.  Keeping borrower
+        # release synchronous makes this cleanup immune to repeated task
+        # cancellation; an await here could strand ``idle`` forever and hang
+        # transport shutdown after a second cancel arrived.
+        current.borrowers = max(0, current.borrowers - 1)
+        if current.borrowers == 0:
+            current.idle.set()
+
+    async def resolve_symbol(
+        self,
+        selection: str,
+        exchange: Any,
+        descriptor: StreamDescriptor,
+        *,
+        market_type: str | None = None,
+    ) -> str:
+        """Resolve a symbol, refreshing a stale pooled catalog once on miss."""
+
+        try:
+            return resolve_ccxt_symbol(
+                exchange,
+                descriptor,
+                market_type=market_type,
+            )
+        except ValueError:
+            pass
+
+        requested = str(descriptor.symbol or "").strip().upper()
+        attempt_key = (selection, requested)
+        now = time.monotonic()
+        async with self._lock:
+            current = self._entries.get(selection)
+            if current is None or current.exchange is not exchange or self._closed:
+                raise RuntimeError("CCXT REST pool changed during symbol refresh")
+            reload_task = current.reload_task
+            last_attempt = self._symbol_reload_attempts.get(attempt_key, 0.0)
+            if reload_task is None and now - last_attempt >= 60.0:
+                self._symbol_reload_attempts[attempt_key] = now
+                reload_task = asyncio.create_task(exchange.load_markets(reload=True))
+                reload_task.add_done_callback(_consume_task_outcome)
+                current.reload_task = reload_task
+                self._market_reloads += 1
+
+        if reload_task is not None:
+            try:
+                await asyncio.shield(reload_task)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                self._market_reload_failures += 1
+                raise
+            finally:
+                async with self._lock:
+                    current = self._entries.get(selection)
+                    if (
+                        current is not None
+                        and current.reload_task is reload_task
+                        and reload_task.done()
+                    ):
+                        current.reload_task = None
+
+        return resolve_ccxt_symbol(
+            exchange,
+            descriptor,
+            market_type=market_type,
+        )
+
+    def record_request(self, *, elapsed_ms: float, failed: bool) -> None:
+        self._request_count += 1
+        if failed:
+            self._request_failures += 1
+        self._request_ms_last = max(0.0, float(elapsed_ms))
+        self._request_ms_total += self._request_ms_last
+        self._request_ms_max = max(self._request_ms_max, self._request_ms_last)
+
+    @asynccontextmanager
+    async def request(self, selection: str):
+        current = await self._acquire(selection)
+        started = time.perf_counter()
+        failed = True
+        try:
+            yield current.exchange
+            failed = False
+        finally:
+            self.record_request(
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                failed=failed,
+            )
+            self._release(current)
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            entries = tuple(self._entries.values())
+            self._entries.clear()
+        if entries:
+            for entry in entries:
+                if not entry.load_task.done():
+                    entry.load_task.cancel()
+                if entry.reload_task is not None and not entry.reload_task.done():
+                    entry.reload_task.cancel()
+            await asyncio.gather(
+                *(
+                    task
+                    for entry in entries
+                    for task in (entry.load_task, entry.reload_task)
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
+            # Never close a shared connector while a physical CCXT request is
+            # still borrowing it. Runtime shutdown first drains backfill work;
+            # this fence also makes direct/restart races deterministic.
+            await asyncio.gather(*(entry.idle.wait() for entry in entries))
+            await asyncio.gather(
+                *(close_ccxt_exchange(entry.exchange) for entry in entries),
+                return_exceptions=True,
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        request_average = (
+            self._request_ms_total / self._request_count
+            if self._request_count
+            else 0.0
+        )
+        load_average = (
+            self._market_load_ms_total / self._created
+            if self._created
+            else 0.0
+        )
+        return {
+            "closed": self._closed,
+            "rails": sorted(self._entries),
+            "clients": len(self._entries),
+            "clients_created": self._created,
+            "client_reuses": self._reused,
+            "market_load_failures": self._load_failures,
+            "market_reloads": self._market_reloads,
+            "market_reload_failures": self._market_reload_failures,
+            "market_load_ms_last": round(self._market_load_ms_last, 3),
+            "market_load_ms_average": round(load_average, 3),
+            "requests": self._request_count,
+            "request_failures": self._request_failures,
+            "request_ms_last": round(self._request_ms_last, 3),
+            "request_ms_average": round(request_average, 3),
+            "request_ms_max": round(self._request_ms_max, 3),
+        }
 
 
 class OkxCombinedSummaryProfile:
@@ -259,6 +534,49 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             ),
         )
         self._rest_book_revision = 0
+        self._rest_pools: dict[int, tuple[IngestionConfig, _RestExchangePool]] = {}
+        self._rest_pools_closing: set[int] = set()
+
+    def _rest_pool(self, config: IngestionConfig) -> _RestExchangePool:
+        key = id(config)
+        if key in self._rest_pools_closing:
+            raise RuntimeError("CCXT REST transport is closing")
+        current = self._rest_pools.get(key)
+        if current is not None and current[0] is config:
+            return current[1]
+        pool = _RestExchangePool(self.entry, config)
+        self._rest_pools[key] = (config, pool)
+        return pool
+
+    async def close_history_transport(self, config: IngestionConfig) -> None:
+        """Close only the REST clients owned by one transport configuration."""
+
+        current = self._rest_pools.get(id(config))
+        if current is None or current[0] is not config:
+            return
+        key = id(config)
+        self._rest_pools_closing.add(key)
+        self._rest_pools.pop(key, None)
+        try:
+            await current[1].close()
+        finally:
+            self._rest_pools_closing.discard(key)
+
+    def history_transport_snapshot(
+        self,
+        config: IngestionConfig,
+    ) -> dict[str, Any]:
+        current = self._rest_pools.get(id(config))
+        if current is None or current[0] is not config:
+            return {
+                "closed": False,
+                "rails": [],
+                "clients": 0,
+                "clients_created": 0,
+                "client_reuses": 0,
+                "requests": 0,
+            }
+        return current[1].snapshot()
 
     def _strict_profile(self, descriptor: StreamDescriptor) -> Any | None:
         if self.venue == "binance":
@@ -380,6 +698,15 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             return await self._fetch_okx_summary(req, config)
         return await super().fetch_history_with_config(req, config)
 
+    async def fetch_history(self, req: TransportRequest) -> list[RawMessage]:
+        """Compatibility one-shot fetch without leaking a config-scoped pool."""
+
+        config = IngestionConfig()
+        try:
+            return await self.fetch_history_with_config(req, config)
+        finally:
+            await self.close_history_transport(config)
+
     async def _fetch_binance_raw(
         self,
         req: TransportRequest,
@@ -391,15 +718,10 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             if descriptor.market_type == "futures"
             else descriptor.market_type
         )
-        exchange = _create_exchange(
-            self.entry,
-            config,
-            market_type=selection,
-            websocket=False,
-        )
-        try:
-            await exchange.load_markets()
-            symbol = resolve_ccxt_symbol(
+        pool = self._rest_pool(config)
+        async with pool.request(selection) as exchange:
+            symbol = await pool.resolve_symbol(
+                selection,
                 exchange,
                 descriptor,
                 market_type=selection,
@@ -479,8 +801,6 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
                 "ccxt+rest://binance",
                 request_limit=params.get("limit"),
             )
-        finally:
-            await close_ccxt_exchange(exchange)
 
     async def _fetch_binance_summary(
         self,
@@ -488,15 +808,10 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
         config: IngestionConfig,
     ) -> list[RawMessage]:
         descriptor = req.descriptor
-        exchange = _create_exchange(
-            self.entry,
-            config,
-            market_type="swap.linear",
-            websocket=False,
-        )
-        try:
-            await exchange.load_markets()
-            symbol = resolve_ccxt_symbol(
+        pool = self._rest_pool(config)
+        async with pool.request("swap.linear") as exchange:
+            symbol = await pool.resolve_symbol(
+                "swap.linear",
                 exchange,
                 descriptor,
                 market_type="swap.linear",
@@ -526,8 +841,6 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
                 [make_unified_payload("derivatives_summary", value)],
                 "ccxt+rest://binance",
             )
-        finally:
-            await close_ccxt_exchange(exchange)
 
     async def _fetch_okx_kline_raw(
         self,
@@ -540,15 +853,10 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             if descriptor.market_type == "futures"
             else descriptor.market_type
         )
-        exchange = _create_exchange(
-            self.entry,
-            config,
-            market_type=selection,
-            websocket=False,
-        )
-        try:
-            await exchange.load_markets()
-            symbol = resolve_ccxt_symbol(
+        pool = self._rest_pool(config)
+        async with pool.request(selection) as exchange:
+            symbol = await pool.resolve_symbol(
+                selection,
                 exchange,
                 descriptor,
                 market_type=selection,
@@ -571,8 +879,6 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
             values = response.get("data") if isinstance(response, dict) else None
             rows = list(reversed(values)) if isinstance(values, list) else []
             return _raw_messages(descriptor, rows, "ccxt+rest://okx")
-        finally:
-            await close_ccxt_exchange(exchange)
 
     async def _fetch_okx_summary(
         self,
@@ -580,15 +886,10 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
         config: IngestionConfig,
     ) -> list[RawMessage]:
         descriptor = req.descriptor
-        exchange = _create_exchange(
-            self.entry,
-            config,
-            market_type="swap.linear",
-            websocket=False,
-        )
-        try:
-            await exchange.load_markets()
-            symbol = resolve_ccxt_symbol(
+        pool = self._rest_pool(config)
+        async with pool.request("swap.linear") as exchange:
+            symbol = await pool.resolve_symbol(
+                "swap.linear",
                 exchange,
                 descriptor,
                 market_type="swap.linear",
@@ -638,8 +939,6 @@ class CcxtPrimaryPlugin(CcxtUnifiedPlugin):
                 [make_unified_payload("derivatives_summary", value)],
                 "ccxt+rest://okx",
             )
-        finally:
-            await close_ccxt_exchange(exchange)
 
 
 def create_binance_ccxt_plugin() -> CcxtPrimaryPlugin:

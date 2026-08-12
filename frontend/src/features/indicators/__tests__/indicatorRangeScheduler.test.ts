@@ -10,6 +10,7 @@ import {
   subtractIndicatorRange,
 } from "../indicatorRangeCoverage.js";
 import { createIndicatorRangeScheduler } from "../indicatorRangeScheduler.js";
+import { createIndicatorRangeBatcher } from "../indicatorRangeBatcher.js";
 import { buildIndicatorRangeLifecycleKey } from "../indicatorRangeLifecycle.js";
 import { resolveDirectIndicatorRangeRevision } from "../indicatorRangeRequestDedupe.js";
 import {
@@ -18,7 +19,11 @@ import {
   type IndicatorVisibleNavigationState,
 } from "../indicatorRangePlanning.js";
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
-import type { IndicatorRange } from "../indicatorTypes.js";
+import type {
+  IndicatorRange,
+  IndicatorRangeSegment,
+  IndicatorRevision,
+} from "../indicatorTypes.js";
 import { malformedFixture, mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 const flushMicrotask = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
@@ -211,6 +216,140 @@ test("overlapping intents in the same turn are unioned into one request", async 
   scheduler.ensureCoverage({ ...common, range: { start: 120, end: 300 } });
   await scheduler.drain();
   assert.deepEqual(requests, [{ start: 60, end: 300 }]);
+});
+
+test("initial settlement invalidates stale progressive coverage and joins initial-visible in one physical batch", async () => {
+  const targets = [
+    { key: "ema", id: "ema" },
+    { key: "rsi", id: "rsi" },
+  ];
+  const revision: IndicatorRevision = { correctionRevision: "settled" };
+  const covered = new Map<string, IndicatorRangeSegment[]>(targets.map((target) => [target.key, [{
+    start: 420,
+    end: 600,
+    revision,
+  }]]));
+  const physicalBatches: Array<Array<{
+    clientId: string;
+    start: number;
+    end: number;
+    reason: string;
+  }>> = [];
+  const batcher = createIndicatorRangeBatcher({
+    sendBatch: async ({ requests }) => {
+      physicalBatches.push(requests.map((request) => ({
+        clientId: request.clientId,
+        start: Number(Reflect.get(request, "start")),
+        end: Number(Reflect.get(request, "end")),
+        reason: String(Reflect.get(request, "reason")),
+      })));
+      return { results: requests.map(() => ({ payload: { ok: true } })) };
+    },
+  });
+  const scheduler = createIndicatorRangeScheduler<
+    (typeof targets)[number],
+    { ok: boolean }
+  >();
+
+  // A progressive preview covered the suffix, but those values were computed
+  // before the retained K-line owner published its repaired prefix. The
+  // settlement correction must invalidate that suffix before initial-visible
+  // consults coverage; otherwise the stale preview would be treated as warm.
+  for (const target of targets) {
+    const invalidated = invalidateIndicatorRangeSegments(
+      covered.get(target.key),
+      { start: 100, end: 180 },
+      { cascadeRight: true, revision, step: 60 },
+    );
+    covered.set(target.key, invalidated);
+  }
+  assert.deepEqual(Array.from(covered.values()), [[], []]);
+
+  const common = {
+    sessionKey: "settled-series",
+    targets,
+    step: 60,
+    revision,
+    getCoveredSegments: (target: (typeof targets)[number]) => covered.get(target.key) || [],
+    execute: async ({ range, reason, target }: {
+      range: IndicatorRange;
+      reason: string;
+      target: (typeof targets)[number];
+    }) => batcher.schedule(structuralMock({
+      clientId: target.id,
+      exchange: "binance",
+      marketType: "spot",
+      symbol: "BTCUSDT",
+      interval: "1m",
+      start: range.start,
+      end: range.end,
+      reason,
+    })),
+  };
+  scheduler.ensureCoverage({
+    ...common,
+    range: { start: 100, end: 180 },
+    reason: "window-mid-merge",
+  });
+  scheduler.ensureCoverage({
+    ...common,
+    range: { start: 100, end: 600 },
+    reason: "initial-visible",
+  });
+
+  await scheduler.drain();
+  assert.equal(physicalBatches.length, 1);
+  assert.deepEqual(physicalBatches[0], [
+    { clientId: "ema", start: 100, end: 600, reason: "initial-visible" },
+    { clientId: "rsi", start: 100, end: 600, reason: "initial-visible" },
+  ]);
+  batcher.dispose();
+});
+
+test("a correction arriving after initial-visible still invalidates and schedules a new suffix", async () => {
+  const target = { key: "ema", id: "ema" };
+  let revision: IndicatorRevision = { correctionRevision: "initial" };
+  let covered: IndicatorRangeSegment[] = [{ start: 100, end: 600, revision }];
+  const requests: Array<{ range: IndicatorRange; reason: string }> = [];
+  const scheduler = createIndicatorRangeScheduler<typeof target, { ok: boolean }>();
+  const execute = async ({ range, reason }: { range: IndicatorRange; reason: string }) => {
+    requests.push({ range, reason });
+    return { ok: true };
+  };
+
+  scheduler.ensureCoverage({
+    sessionKey: "late-correction",
+    targets: [target],
+    range: { start: 100, end: 600 },
+    reason: "initial-visible",
+    revision,
+    getCoveredSegments: () => [],
+    execute,
+  });
+  await scheduler.drain();
+
+  revision = { correctionRevision: "corrected" };
+  covered = invalidateIndicatorRangeSegments(
+    covered,
+    { start: 300, end: 360 },
+    { cascadeRight: true, revision, step: 60 },
+  );
+  assert.deepEqual(covered, [{ start: 100, end: 240, revision }]);
+  scheduler.ensureCoverage({
+    sessionKey: "late-correction",
+    targets: [target],
+    range: { start: 300, end: 600 },
+    reason: "window-mid-merge",
+    revision,
+    getCoveredSegments: () => covered,
+    execute,
+  });
+  await scheduler.drain();
+
+  assert.deepEqual(requests, [
+    { range: { start: 100, end: 600 }, reason: "initial-visible" },
+    { range: { start: 300, end: 600 }, reason: "window-mid-merge" },
+  ]);
 });
 
 test("in-flight coverage prevents overlap and requests only the new tail", async () => {

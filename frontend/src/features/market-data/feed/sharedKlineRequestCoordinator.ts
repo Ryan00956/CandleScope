@@ -6,6 +6,7 @@ import type {
   KlineFetchResult,
   KlineHistoryBatchRequest,
   KlineHistoryRequestOptions,
+  KlineLatestRequestOptions,
   KlineRangeRequestOptions,
   KlineRequestOptions,
 } from "../klineContracts.js";
@@ -121,6 +122,8 @@ export class SharedKlineRequestCoordinator implements KlineApi {
       options.countBack ?? null,
       options.maxWaitMs ?? null,
       options.intent ?? null,
+      options.demandScope ?? null,
+      options.demandGeneration ?? null,
     ];
     return this.join(
       "history",
@@ -169,6 +172,8 @@ export class SharedKlineRequestCoordinator implements KlineApi {
       before ?? null,
       bars,
       options.maxWaitMs ?? null,
+      options.demandScope ?? null,
+      options.demandGeneration ?? null,
     ];
     return this.join(
       "before",
@@ -202,6 +207,8 @@ export class SharedKlineRequestCoordinator implements KlineApi {
       options.repair ?? null,
       options.waitMs ?? null,
       options.strict ?? null,
+      options.demandScope ?? null,
+      options.demandGeneration ?? null,
     ];
     return this.join(
       "range",
@@ -226,12 +233,16 @@ export class SharedKlineRequestCoordinator implements KlineApi {
     marketType: string,
     exchange: string,
     source: string,
-    options: KlineRequestOptions,
+    options: KlineLatestRequestOptions,
   ): Promise<KlineFetchResult> {
     const identity = [
       ...seriesIdentity(symbol, interval, marketType, exchange),
       limit,
       String(source || ""),
+      options.repair ?? "none",
+      options.waitMs ?? null,
+      options.demandScope ?? null,
+      options.demandGeneration ?? null,
     ];
     return this.join(
       "latest",

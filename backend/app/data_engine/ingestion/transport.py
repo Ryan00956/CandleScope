@@ -167,7 +167,22 @@ class TransportLayer:
             },
             "metrics": self._metrics.snapshot(),
             "exchange_rate_limits": self._rate_limits.snapshot(),
+            "provider_history_transports": self._provider_history_snapshots(),
         }
+
+    def _provider_history_snapshots(self) -> dict[str, dict[str, Any]]:
+        snapshots: dict[str, dict[str, Any]] = {}
+        for plugin in self._registry.list_plugins():
+            snapshot = getattr(plugin, "history_transport_snapshot", None)
+            if not callable(snapshot):
+                continue
+            try:
+                value = snapshot(self._cfg)
+            except Exception as exc:
+                value = {"diagnostic_error": f"{type(exc).__name__}: {exc}"}
+            if isinstance(value, dict):
+                snapshots[str(plugin.id)] = value
+        return snapshots
 
     # ── Public: Lifecycle ────────────────────────────────────
 
@@ -192,6 +207,22 @@ class TransportLayer:
 
     async def stop(self) -> None:
         """Release shared resources."""
+        for plugin in self._registry.list_plugins():
+            close_history_transport = getattr(
+                plugin,
+                "close_history_transport",
+                None,
+            )
+            if not callable(close_history_transport):
+                continue
+            try:
+                await close_history_transport(self._cfg)
+            except Exception:
+                logger.warning(
+                    "Failed to close %s provider history transport",
+                    plugin.id,
+                    exc_info=True,
+                )
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
             self._http_session = None

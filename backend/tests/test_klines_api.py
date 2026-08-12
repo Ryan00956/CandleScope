@@ -5,6 +5,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.responses import ORJSONResponse
@@ -17,7 +18,13 @@ from app.api.v1.klines import (
     router as klines_router,
 )
 from app.data_engine.data_manager import DataManager
-from app.data_engine.data_manager.models import BarData, MissingRange, QueryResult, QuerySource
+from app.data_engine.data_manager.models import (
+    BarData,
+    MissingRange,
+    QueryResult,
+    QuerySource,
+    SeriesKey,
+)
 from app.data_engine.history import AlwaysOpenCalendar, SessionCalendar
 
 
@@ -1532,6 +1539,58 @@ def test_history_mid_query_generation_supersede_remains_409_and_carries_token() 
     assert dm.metadata["demand_owner_id"].startswith("scope:pane-mid-query:1:")
 
 
+def test_latest_mid_query_generation_supersede_remains_409() -> None:
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.current = 0
+
+        def is_demand_generation_current(self, scope: str, generation: int) -> bool:
+            return generation >= self.current
+
+        async def advance_demand_scope(self, scope: str, generation: int):
+            self.current = max(self.current, generation)
+            return 0
+
+    class _DataManager(_FakeDataManager):
+        def __init__(self, coordinator: _Coordinator) -> None:
+            super().__init__()
+            self.coordinator = coordinator
+
+        def query(self, symbol, interval, **kwargs):
+            self.coordinator.current = 2
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                source=QuerySource.EMPTY,
+                total=0,
+            )
+
+    coordinator = _Coordinator()
+    response = _client_with_runtime(
+        _DataManager(coordinator),
+        coordinator,
+    ).get(
+        "/api/v1/klines/latest",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "limit": 5,
+            "repair": "wait",
+            "max_wait_ms": 0,
+            "request_scope": "pane-mid-latest",
+            "request_generation": 1,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "stale_request_generation",
+        "request_scope": "pane-mid-latest",
+        "request_generation": 1,
+    }
+
+
 def test_history_handler_cancel_revokes_atomic_query_owner() -> None:
     async def _run() -> None:
         class _Coordinator:
@@ -2335,6 +2394,133 @@ def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> No
     assert calls == []
 
 
+def test_latest_endpoint_wait_repairs_bounded_tail_with_scope_metadata() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    interval_ms = 60_000
+    stale_open_ms = (
+        klines_api._last_closed_open_ms("1m")
+        - (10 * 24 * 60 * interval_ms)
+    )
+    dm.cache.bulk_load(
+        SeriesKey("ETHUSDT", "1m", exchange="binance", market_type="spot"),
+        [BarData(
+            time=stale_open_ms // 1000,
+            open=1,
+            high=2,
+            low=1,
+            close=2,
+            volume=1,
+            source="backfill",
+            is_closed=True,
+        )],
+    )
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)) or "tail-1")
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/latest",
+        params={
+            "symbol": "ETHUSDT",
+            "interval": "1m",
+            "limit": 5,
+            "repair": "wait",
+            "max_wait_ms": 1,
+            "request_scope": "pane-tail",
+            "request_generation": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backfill_triggered"] is True
+    assert payload["missing_ranges"]
+    assert payload["history_state"] == "pending"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0:2] == ("ETHUSDT", "1m")
+    assert args[3] - args[2] <= 4 * interval_ms
+    assert kwargs["reason"] == "latest_refresh"
+    assert kwargs["priority"] == 30
+    assert kwargs["requester"] == "klines_latest"
+    assert kwargs["metadata"]["demand_scope"] == "pane-tail"
+    assert kwargs["metadata"]["demand_generation"] == 7
+
+
+def test_latest_endpoint_rejects_wait_beyond_fast_tail_budget() -> None:
+    response = _client(DataManager()).get(
+        "/api/v1/klines/latest",
+        params={"repair": "wait", "max_wait_ms": 1501},
+    )
+
+    assert response.status_code == 422
+
+
+def test_latest_default_skips_tail_calendar_planning(monkeypatch) -> None:
+    monkeypatch.setattr(
+        klines_api,
+        "_resolve_history_calendar",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("repair=none must not resolve a history calendar")
+        ),
+    )
+
+    response = _client(_FakeDataManager()).get(
+        "/api/v1/klines/latest",
+        params={"symbol": "BTCUSDT", "interval": "1m", "limit": 2},
+    )
+
+    assert response.status_code == 200
+
+
+def test_latest_wait_fails_closed_when_history_calendar_is_unknown(monkeypatch) -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        klines_api,
+        "_resolve_history_calendar",
+        lambda *_args, **_kwargs: (None, False),
+    )
+
+    response = _client(dm).get(
+        "/api/v1/klines/latest",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "limit": 5,
+            "repair": "wait",
+            "max_wait_ms": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["backfill_triggered"] is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("interval", ["1m", "30m", "1h"])
+def test_latest_session_tail_planning_is_bounded_for_large_limit(interval: str) -> None:
+    calendar = SessionCalendar(
+        calendar_id="test.latest.session",
+        timezone_name="UTC",
+        weekly_sessions={
+            weekday: (("09:30", "16:00"),)
+            for weekday in range(5)
+        },
+    )
+    started = time.perf_counter()
+    start_ms, end_ms = klines_api._bounded_latest_tail_range(
+        interval=interval,
+        limit=1_000,
+        calendar=calendar,
+    )
+
+    assert start_ms <= end_ms
+    assert calendar.count_expected(start_ms, end_ms, interval) == 1_000
+    assert time.perf_counter() - started < 1.0
+
+
 def test_latest_endpoint_exposes_untrusted_finality_as_pending() -> None:
     class _LatestDataManager(_FakeDataManager):
         def query_latest(
@@ -3077,7 +3263,7 @@ def test_range_query_caps_huge_range_from_newest_end() -> None:
     assert payload["verified_contiguous"] is True
 
 
-def test_related_interval_warmup_caps_each_interval_to_target_bars() -> None:
+def test_related_interval_warmup_uses_one_nearest_interval_and_viewport_budget() -> None:
     class _WarmupDataManager:
         def __init__(self) -> None:
             self.calls: list[tuple[tuple, dict]] = []
@@ -3098,15 +3284,16 @@ def test_related_interval_warmup_caps_each_interval_to_target_bars() -> None:
     )
 
     by_interval = {args[1]: (args, kwargs) for args, kwargs in dm.calls}
-    assert list(by_interval) == ["4h", "1h", "15m"]
-    args, kwargs = by_interval["15m"]
-    assert args[2] == 10_000_000_000 - (1_000 * 15 * 60 * 1_000)
+    assert list(by_interval) == ["4h"]
+    args, kwargs = by_interval["4h"]
+    assert args[2] == 10_000_000_000 - (255 * 4 * 60 * 60 * 1_000)
     assert args[3] == 10_000_000_000
     assert kwargs["metadata"]["visible_range"] == {"start_ms": 0, "end_ms": 10_000_000_000}
     assert kwargs["metadata"]["warmup_range"] == {
         "start_ms": args[2],
         "end_ms": 10_000_000_000,
-        "target_bars": 1_000,
+        "target_bars": 256,
+        "max_target_bars": 256,
     }
 
 
@@ -3143,16 +3330,20 @@ def test_related_interval_warmup_uses_each_target_last_closed_open(
     )
 
     by_interval = {args[1]: (args, kwargs) for args, kwargs in dm.calls}
-    assert list(by_interval) == ["5m", "1h", "1m"]
-    for interval, expected_end_ms in last_closed.items():
-        args, kwargs = by_interval[interval]
-        assert args[2] == expected_end_ms
-        assert args[3] == expected_end_ms
-        assert kwargs["metadata"]["visible_range"] == {
-            "start_ms": 9_750_000,
-            "end_ms": 9_900_000,
-        }
-        assert kwargs["metadata"]["warmup_range"]["end_ms"] == expected_end_ms
+    assert list(by_interval) == ["5m"]
+    args, kwargs = by_interval["5m"]
+    assert args[2] == last_closed["5m"]
+    assert args[3] == last_closed["5m"]
+    assert kwargs["metadata"]["visible_range"] == {
+        "start_ms": 9_750_000,
+        "end_ms": 9_900_000,
+    }
+    assert kwargs["metadata"]["warmup_range"] == {
+        "start_ms": last_closed["5m"],
+        "end_ms": last_closed["5m"],
+        "target_bars": 1,
+        "max_target_bars": 256,
+    }
 
 
 def test_related_warmup_carries_scope_lease_and_drops_stale_generation() -> None:
@@ -3195,7 +3386,7 @@ def test_related_warmup_carries_scope_lease_and_drops_stale_generation() -> None
         **common,
         demand_generation=4,
     )
-    assert len(dm.calls) == 3
+    assert len(dm.calls) == 1
     for _, kwargs in dm.calls:
         metadata = kwargs["metadata"]
         assert metadata["demand_scope"] == "pane-warmup"

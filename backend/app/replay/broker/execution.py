@@ -588,6 +588,7 @@ class ConservativeBarBroker:
         working = self._working_state()
         working.orders = orders
         working.ledger = ledger
+        revealed_mark = self._position.mark_price
         immediate = (
             None if _defer_immediate else self._revealed_reference_trigger(order)
         )
@@ -605,6 +606,10 @@ class ConservativeBarBroker:
                     source_sequence=sequence,
                     event_time_ms=event_time_ms,
                 )
+                # The slipped execution price belongs to the fill, not to the
+                # market-data projection. Keep the position (including every
+                # HEDGE leg) at the revealed reference until BAR/trade input.
+                working.position = mark_position(working.position, revealed_mark)
         account = self._account_from(
             working.ledger or ledger,
             working.position,

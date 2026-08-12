@@ -203,8 +203,9 @@ def test_hedge_mode_keeps_long_and_short_legs_independent_across_restore() -> No
     assert broker.position.long.quantity == "1"
     assert broker.position.short.quantity == "-2"
     assert broker.position.quantity == "-1"
-    assert broker.position.notional == "302.7"
-    assert broker.account.margin_used == "60.54"
+    assert broker.position.mark_price == "101"
+    assert broker.position.notional == "303"
+    assert broker.account.margin_used == "60.6"
 
     broker.set_position_protection(
         quantity=None,

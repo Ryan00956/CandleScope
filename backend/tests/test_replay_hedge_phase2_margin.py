@@ -198,6 +198,54 @@ def test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg() -> None:
     assert restored.position.short.leverage == "5"
 
 
+def test_immediate_hedge_fills_do_not_replace_revealed_mark_with_slippage() -> None:
+    broker = make_broker(
+        config=replace(CONFIG, position_mode=PositionMode.HEDGE),
+        execution_mode=TOUCH_OR_TAPE_EXECUTION_MODE,
+    )
+    broker.apply_bar(bar(0, 100))
+    assert isinstance(broker.position, PositionBook)
+    assert broker.position.mark_price == "101"
+
+    broker.place_order(
+        replace(
+            request(client_order_id="mark-long", quantity="1"),
+            position_side=PositionSide.LONG,
+        ),
+        command_id="mark-long",
+    )
+    assert broker.fills[-1].price == "101.1"
+    assert broker.position.long.entry_price == "101.1"
+    assert broker.position.long.mark_price == "101"
+    assert broker.position.short.mark_price == "101"
+
+    broker.place_order(
+        replace(
+            request(
+                client_order_id="mark-short",
+                side=OrderSide.SELL,
+                quantity="1",
+            ),
+            position_side=PositionSide.SHORT,
+        ),
+        command_id="mark-short",
+    )
+    assert broker.fills[-1].price == "100.9"
+    assert broker.position.short.entry_price == "100.9"
+    assert broker.position.long.mark_price == "101"
+    assert broker.position.short.mark_price == "101"
+
+    broker.apply_bar(bar(1, 101))
+    assert broker.position.mark_price == "102"
+    broker.close_position(command_id="mark-close-long", position_side=PositionSide.LONG)
+
+    assert broker.fills[-1].price == "101.9"
+    assert broker.position.long.realized_pnl == "0.8"
+    assert broker.position.long.mark_price == "102"
+    assert broker.position.short.mark_price == "102"
+    assert broker.position.short.unrealized_pnl == "-1.1"
+
+
 def test_revealed_reference_close_rejects_price_drift_and_restores_chart_mark() -> None:
     broker = make_broker(
         config=replace(CONFIG, position_mode=PositionMode.HEDGE),

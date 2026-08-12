@@ -167,7 +167,8 @@ def _project_liquidation_price_pair(
         ),
     )
     current_leg_maintenance = rule.maintenance_margin(
-        contract_quantity * mark_price
+        contract_quantity * mark_price,
+        extend_last_tier=True,
     )
     other_maintenance = scope_maintenance_margin - current_leg_maintenance
     if other_maintenance < 0:
@@ -178,7 +179,8 @@ def _project_liquidation_price_pair(
             direction * (candidate_price - mark_price) * contract_quantity
         )
         candidate_maintenance = other_maintenance + rule.maintenance_margin(
-            contract_quantity * candidate_price
+            contract_quantity * candidate_price,
+            extend_last_tier=True,
         )
         return candidate_equity <= candidate_maintenance
 
@@ -5792,7 +5794,10 @@ class TrainingRunStore:
                 continue
             try:
                 notional = Decimal(str(row["trigger_notional"]))
-                expected_maintenance = rule.maintenance_margin(notional)
+                expected_maintenance = rule.maintenance_margin(
+                    notional,
+                    extend_last_tier=True,
+                )
                 expected_fee = rule.liquidation_fee(notional)
             except (InvalidOperation, TypeError, ValueError) as exc:
                 add_difference(
@@ -5991,7 +5996,10 @@ class TrainingRunStore:
             )
             broker_margin = notional / leverage
             margin = active_rule.initial_margin(notional, leverage)
-            maintenance = active_rule.maintenance_margin(notional)
+            maintenance = active_rule.maintenance_margin(
+                notional,
+                extend_last_tier=True,
+            )
             open_orders = json.loads(str(track["open_orders_json"]))
             broker_reserved = Decimal(0)
             reserved = Decimal(0)
@@ -13947,7 +13955,10 @@ class TrainingRunStore:
         quantity = Decimal(str(leg["absolute_quantity"]))
         mark = Decimal(str(leg["mark_price"]))
         notional = Decimal(str(leg["notional"]))
-        tier_index, _tier = rule.active_maintenance_tier(notional)
+        tier_index, _tier = rule.active_maintenance_tier(
+            notional,
+            extend_last_tier=True,
+        )
         close_quantity = quantity
         step_type = "FULL_LIQUIDATION"
         if require_breach and tier_index > 1:
@@ -16740,8 +16751,14 @@ class TrainingRunStore:
                     Decimal(rule.max_leverage),
                 )
                 initial_margin = rule.initial_margin(notional, leverage)
-                risk_tier, _tier = rule.active_maintenance_tier(notional)
-                maintenance = rule.maintenance_margin(notional)
+                risk_tier, _tier = rule.active_maintenance_tier(
+                    notional,
+                    extend_last_tier=True,
+                )
+                maintenance = rule.maintenance_margin(
+                    notional,
+                    extend_last_tier=True,
+                )
                 if base["position_mode"] == "HEDGE":
                     for field_name, expected_value in (
                         ("initial_margin", initial_margin),
@@ -21235,7 +21252,8 @@ class TrainingRunStore:
             rule = InstrumentRule.from_mapping(json.loads(str(rule_row["rule_json"])))
             for position_side, leg in legs:
                 maintenance = rule.maintenance_margin(
-                    abs(Decimal(str(leg.get("notional", "0"))))
+                    abs(Decimal(str(leg.get("notional", "0")))),
+                    extend_last_tier=True,
                 )
                 item = (
                     track,
@@ -21312,7 +21330,10 @@ class TrainingRunStore:
                 Decimal(0),
             )
             total_reserved_margin += reserved_margin
-            risk_tier, _active_tier = rule.active_maintenance_tier(notional)
+            risk_tier, _active_tier = rule.active_maintenance_tier(
+                notional,
+                extend_last_tier=True,
+            )
             allocation_key = isolated_margin_key(
                 str(track["track_id"]),
                 position_side if raw_position_side is not None else None,

@@ -273,6 +273,8 @@ class InstrumentRule:
     def active_maintenance_tier(
         self,
         notional: Decimal,
+        *,
+        extend_last_tier: bool = False,
     ) -> tuple[int, MaintenanceTier]:
         if not notional.is_finite() or notional < 0:
             raise ValueError("notional must be finite and non-negative")
@@ -285,6 +287,8 @@ class InstrumentRule:
             None,
         )
         if match is None:
+            if extend_last_tier:
+                return len(self.maintenance_tiers), self.maintenance_tiers[-1]
             raise ValueError("notional exceeds the versioned maintenance tiers")
         return match
 
@@ -300,8 +304,16 @@ class InstrumentRule:
             raw = notional / leverage
         return round_to_step(raw, Decimal(self.quote_step), upward=True)
 
-    def maintenance_margin(self, notional: Decimal) -> Decimal:
-        _, tier = self.active_maintenance_tier(notional)
+    def maintenance_margin(
+        self,
+        notional: Decimal,
+        *,
+        extend_last_tier: bool = False,
+    ) -> Decimal:
+        _, tier = self.active_maintenance_tier(
+            notional,
+            extend_last_tier=extend_last_tier,
+        )
         with localcontext() as context:
             context.prec = 60
             maintenance = (

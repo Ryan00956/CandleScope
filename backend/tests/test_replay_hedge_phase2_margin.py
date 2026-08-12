@@ -112,6 +112,54 @@ def test_liquidation_projection_uses_candidate_price_maintenance_margin() -> Non
     )
 
 
+def test_high_equity_short_liquidation_extends_last_maintenance_tier() -> None:
+    rule = InstrumentRule(
+        track_id="track-1",
+        rule_version="PHASE2_SHORT_TIER_EXTENSION_V1",
+        source_kind="BAR",
+        price_tick="0.1",
+        quantity_step="0.001",
+        min_quantity="0.001",
+        max_quantity="100",
+        min_notional="5",
+        max_notional="100000",
+        contract_size="1",
+        quote_step="0.01",
+        max_leverage="20",
+        maintenance_tiers=(MaintenanceTier("100000", "0.005", "0"),),
+        liquidation_fee_bps="25",
+        mark_fidelity="PINNED_MARK",
+        rule_fidelity="VERSIONED_EXCHANGE_RULE",
+        effective_virtual_time_ms=0,
+    )
+
+    with pytest.raises(ValueError, match="exceeds the versioned maintenance tiers"):
+        rule.maintenance_margin(Decimal("100000.1"))
+    assert rule.maintenance_margin(
+        Decimal("100000.1"),
+        extend_last_tier=True,
+    ) == Decimal("500.01")
+
+    liquidation_price, bankruptcy_price = _project_liquidation_price_pair(
+        mark_price=Decimal("100"),
+        scope_equity=Decimal("1000000"),
+        scope_maintenance_margin=rule.maintenance_margin(Decimal("100")),
+        absolute_quantity=Decimal("1"),
+        position_side="SHORT",
+        rule=rule,
+    )
+
+    assert liquidation_price == Decimal("995124.4")
+    assert bankruptcy_price == Decimal("1000100")
+    previous_tick = liquidation_price - Decimal(rule.price_tick)
+    assert Decimal("1000000") - (previous_tick - Decimal("100")) > (
+        rule.maintenance_margin(previous_tick, extend_last_tier=True)
+    )
+    assert Decimal("1000000") - (liquidation_price - Decimal("100")) <= (
+        rule.maintenance_margin(liquidation_price, extend_last_tier=True)
+    )
+
+
 def test_cross_hedge_margin_leverage_capacity_and_restore_are_per_leg() -> None:
     broker = make_broker(
         config=replace(CONFIG, position_mode=PositionMode.HEDGE),

@@ -231,7 +231,7 @@
         ],
         "checks": {
           "checkpoint_restored": true,
-          "checkpoint_sha256": "8ed493a5338f25c6f12489bfbc3fd1c369c4bdcfa1be34babe21592b19d8d9a6"
+          "checkpoint_sha256": "50c08758f20511afb342f113b3a3a7fe2ec294cb2735395aa8b28ebfadb8ff32"
         }
       },
       "restart": {
@@ -267,7 +267,7 @@
         ],
         "checks": {
           "checkpoint_restored": true,
-          "checkpoint_sha256": "8ed493a5338f25c6f12489bfbc3fd1c369c4bdcfa1be34babe21592b19d8d9a6",
+          "checkpoint_sha256": "50c08758f20511afb342f113b3a3a7fe2ec294cb2735395aa8b28ebfadb8ff32",
           "process_count": 2
         }
       }

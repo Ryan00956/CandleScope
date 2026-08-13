@@ -905,6 +905,9 @@ async def test_real_add_track_uses_track_specific_mark_funding_and_audit(
             ]
         audit = await service.training.hedge_inputs.audit_run(run_id)
         assert audit["status"] == "PASS", audit["differences"]
+        assert (
+            await service.training.store.pending_hedge_input_global_events(run_id)
+        ) == ()
 
         def tamper(connection: sqlite3.Connection) -> None:
             row = connection.execute(

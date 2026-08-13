@@ -3301,40 +3301,95 @@ class TrainingRunStore:
         self, run_id: str
     ) -> tuple[StableMarketEvent, ...]:
         def read(connection: sqlite3.Connection) -> tuple[StableMarketEvent, ...]:
-            rows = connection.execute(
+            public_rows = connection.execute(
                 """
-                SELECT applied.*,
-                       CASE applied.source_kind
-                           WHEN 'PUBLIC' THEN binding.public_archive_id
-                           ELSE binding.simulation_manifest_id
-                       END AS source_id
+                SELECT applied.track_id, applied.event_sequence,
+                       applied.event_time_ms, applied.event_phase,
+                       binding.public_archive_id AS source_id
+                FROM replay_hedge_track_public_applied_event AS applied
+                JOIN replay_hedge_track_public_binding AS binding
+                  ON binding.run_id = applied.run_id
+                 AND binding.track_id = applied.track_id
+                LEFT JOIN replay_training_global_event AS global_event
+                  ON global_event.run_id = applied.run_id
+                 AND global_event.track_id =
+                     'hedge-public:' || binding.public_archive_id || ':' ||
+                     applied.track_id
+                 AND global_event.source_sequence = applied.event_sequence
+                WHERE applied.run_id = ? AND global_event.global_sequence IS NULL
+                """,
+                (run_id,),
+            ).fetchall()
+            simulation_rows = connection.execute(
+                """
+                SELECT applied.event_sequence, applied.event_time_ms,
+                       applied.event_phase,
+                       binding.simulation_manifest_id AS source_id
                 FROM replay_hedge_input_applied_event AS applied
                 JOIN replay_hedge_input_binding AS binding USING(run_id)
                 LEFT JOIN replay_training_global_event AS global_event
                   ON global_event.run_id = applied.run_id
-                 AND global_event.track_id =
-                     'hedge-' || lower(applied.source_kind) || ':' ||
-                     CASE applied.source_kind
-                         WHEN 'PUBLIC' THEN binding.public_archive_id
-                         ELSE binding.simulation_manifest_id
-                     END
+                 AND global_event.track_id = 'hedge-simulation:' ||
+                     binding.simulation_manifest_id
                  AND global_event.source_sequence = applied.event_sequence
-                WHERE applied.run_id = ? AND global_event.global_sequence IS NULL
-                ORDER BY applied.event_time_ms, applied.event_phase,
-                         applied.source_kind, applied.event_sequence
+                WHERE applied.run_id = ?
+                  AND applied.source_kind = 'SIMULATION'
+                  AND global_event.global_sequence IS NULL
                 """,
                 (run_id,),
             ).fetchall()
-            return tuple(
+            compatibility_public_rows = connection.execute(
+                """
+                SELECT applied.event_sequence, applied.event_time_ms,
+                       applied.event_phase, binding.public_archive_id AS source_id
+                FROM replay_hedge_input_applied_event AS applied
+                JOIN replay_hedge_input_binding AS binding USING(run_id)
+                LEFT JOIN replay_training_global_event AS global_event
+                  ON global_event.run_id = applied.run_id
+                 AND global_event.track_id = 'hedge-public:' ||
+                     binding.public_archive_id
+                 AND global_event.source_sequence = applied.event_sequence
+                WHERE applied.run_id = ?
+                  AND applied.source_kind = 'PUBLIC'
+                  AND global_event.global_sequence IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM replay_hedge_track_public_binding AS track_binding
+                      WHERE track_binding.run_id = applied.run_id
+                  )
+                """,
+                (run_id,),
+            ).fetchall()
+            public_events = tuple(
                 StableMarketEvent(
                     actual_event_time_ms=int(row["event_time_ms"]),
                     event_phase=int(row["event_phase"]),
                     market_track_stable_id=(
-                        f"hedge-{str(row['source_kind']).lower()}:{row['source_id']}"
+                        f"hedge-public:{row['source_id']}:{row['track_id']}"
                     ),
                     source_sequence=int(row["event_sequence"]),
                 )
-                for row in rows
+                for row in public_rows
+            )
+            simulation_events = tuple(
+                StableMarketEvent(
+                    actual_event_time_ms=int(row["event_time_ms"]),
+                    event_phase=int(row["event_phase"]),
+                    market_track_stable_id=(f"hedge-simulation:{row['source_id']}"),
+                    source_sequence=int(row["event_sequence"]),
+                )
+                for row in simulation_rows
+            )
+            compatibility_public_events = tuple(
+                StableMarketEvent(
+                    actual_event_time_ms=int(row["event_time_ms"]),
+                    event_phase=int(row["event_phase"]),
+                    market_track_stable_id=f"hedge-public:{row['source_id']}",
+                    source_sequence=int(row["event_sequence"]),
+                )
+                for row in compatibility_public_rows
+            )
+            return stable_market_event_order(
+                (*public_events, *simulation_events, *compatibility_public_events)
             )
 
         return await self.base_store.run_extension_read(read)

@@ -314,6 +314,9 @@ async def test_run_binds_owned_inputs_orders_same_ms_and_rehydrates_offline(
             assert [row[1] for row in same_ms] == [30, 40]
             assert same_ms[0][0] == same_ms[1][0]
             assert str(same_ms[0][2]).startswith("hedge-public:")
+            assert (
+                await training.store.pending_hedge_input_global_events(run_id)
+            ) == ()
             public_row = connection.execute(
                 """
                 SELECT local_path FROM replay_hedge_public_archive
@@ -413,6 +416,58 @@ async def test_runtime_tamper_pauses_run_without_market_fallback(
             ).fetchone()
             assert binding is not None and binding[0] == "PAUSED"
             assert binding[1] == "TrainingRunError"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_pending_hedge_global_events_preserve_legacy_public_identity(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase3-legacy-pending.db"
+    service = await _risk_service(database)
+    try:
+        request, run_id, session_id = await _prepared_run(
+            service, tmp_path, prefix="phase3-legacy-pending"
+        )
+        public_ref = request.hedge_public_history_ref
+        assert public_ref is not None
+        await _acquire(
+            service,
+            run_id=run_id,
+            selected_session_id=session_id,
+            command_id="phase3-legacy-pending-acquire",
+        )
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="phase3-legacy-pending-step",
+            command_type=ReplayV2CommandType.STEP_BASE,
+            payload={"count": 2},
+        )
+        training = service.training
+        assert training is not None
+        assert (await training.store.pending_hedge_input_global_events(run_id)) == ()
+
+        def emulate_legacy_run(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """
+                DELETE FROM replay_training_global_event
+                WHERE run_id = ? AND track_id LIKE 'hedge-public:%'
+                """,
+                (run_id,),
+            )
+            connection.execute(
+                "DELETE FROM replay_hedge_track_public_binding WHERE run_id = ?",
+                (run_id,),
+            )
+
+        await training.store.base_store.run_extension_write(emulate_legacy_run)
+        pending = await training.store.pending_hedge_input_global_events(run_id)
+        assert [event.event_phase for event in pending] == [30, 40]
+        assert {event.market_track_stable_id for event in pending} == {
+            f"hedge-public:{public_ref.archive_id}"
+        }
     finally:
         await service.shutdown(step_timeout=1.0)
 

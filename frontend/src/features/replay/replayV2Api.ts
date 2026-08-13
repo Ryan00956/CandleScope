@@ -39,6 +39,7 @@ import {
   parseReplayAccountRecordPage,
   parseReplayAccountAuditResponse,
   parseReplayAdvanceProgressResponse,
+  parseReplayMarketTrackPlan,
   parseReplayMarketTracksResponse,
   parseReplayOrderCapacity,
   parseReplayOrderPreview,
@@ -79,6 +80,7 @@ import type {
   ReplayAccountRecordType,
   ReplayAccountAuditResponse,
   ReplayMarketTracksResponse,
+  ReplayMarketTrackPlan,
   ReplayOrderCapacity,
   ReplayOrderCapacityRequest,
   ReplayOrderPreview,
@@ -523,6 +525,32 @@ export class ReplayV2ApiClient {
       `/runs/${safeSegment(runId, "run id")}/tracks`,
       parseReplayMarketTracksResponse,
       signal ? { signal } : {},
+    );
+  }
+
+  planMarketTrack(
+    runId: string,
+    identity: {
+      readonly exchange: string;
+      readonly marketType: string;
+      readonly symbol: string;
+      readonly subscriptionTier?: "NONE" | "WARM" | "FULL";
+    },
+    signal?: AbortSignal,
+  ): Promise<ReplayMarketTrackPlan> {
+    return this.request(
+      `/runs/${safeSegment(runId, "run id")}/tracks/plan`,
+      parseReplayMarketTrackPlan,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          exchange: safeIdentifier(identity.exchange, "exchange"),
+          market_type: safeIdentifier(identity.marketType, "market type"),
+          symbol: safeIdentifier(identity.symbol, "symbol"),
+          subscription_tier: identity.subscriptionTier ?? "NONE",
+        }),
+        ...(signal ? { signal } : {}),
+      },
     );
   }
 

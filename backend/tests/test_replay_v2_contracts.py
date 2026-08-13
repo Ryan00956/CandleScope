@@ -313,6 +313,34 @@ def test_training_websocket_path_fails_without_a_started_runtime(
             assert closed.value.code == 1013
 
 
+def test_training_run_projection_websocket_fails_without_a_started_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_api,
+        "REPLAY_SETTINGS",
+        replace(
+            replay_api.REPLAY_SETTINGS,
+            enabled=False,
+        ),
+    )
+    with TestClient(_app()) as client:
+        with client.websocket_connect(
+            "/api/v1/stream/replay/runs/run-1?protocol=replay.v3"
+        ) as websocket:
+            assert websocket.receive_json() == {
+                "protocol": "replay.v3",
+                "error": {
+                    "code": "REPLAY_TRAINING_UNAVAILABLE",
+                    "message": "Replay training runtime is unavailable",
+                    "details": {},
+                },
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1013
+
+
 def test_phase0_contract_does_not_freeze_retired_v1_product_assets() -> None:
     golden = _golden()
     assert golden["protocol"] == REPLAY_V2_PROTOCOL

@@ -657,7 +657,7 @@ export default function TrainingHubDialog({
                   <strong data-run-state={card.state}>{card.state}</strong>
                 </header>
                 <dl>
-                  <div><dt>当前商品</dt><dd>{card.last_symbol ?? "未选择"}</dd></div>
+                  <div><dt>账户商品</dt><dd>{card.last_symbol ?? "未选择"}{card.subscribed_track_count > 0 ? ` · ${card.subscribed_track_count} 个活动轨道` : ""}</dd></div>
                   <div><dt>历史源</dt><dd>{card.source_kind}</dd></div>
                   <div><dt>进度</dt><dd>#{card.progress.source_sequence}</dd></div>
                   <div>

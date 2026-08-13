@@ -31,10 +31,6 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
       symbolKey(track.symbol, track.market_type, track.exchange)
     )),
   ), [viewer.marketTracks]);
-  const settlementAsset = viewer.marketTracks?.tracks[0]?.settlement_asset
-    ?? config?.quote_asset
-    ?? "";
-
   useEffect(() => {
     if (runId === null) return;
     const controller = new AbortController();
@@ -74,7 +70,6 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
         exchange: entry.identity.exchange,
         marketType: entry.identity.market_type,
         symbol: entry.identity.symbol,
-        settlementAsset,
       });
       setMarketQuery("");
     } catch (reason) {
@@ -165,7 +160,6 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
             exchange: identity.exchange,
             marketType: identity.marketType,
             symbol: identity.symbol,
-            settlementAsset: config?.quote_asset ?? "",
           })
         : viewer.actions.selectTrack(track.track_id);
       void action.catch(() => undefined);
@@ -267,17 +261,20 @@ function ReplayWatchlistPanel({ runtime, viewer, collapsed, onCollapsedChange }:
                 );
                 const tracked = trackedKeys.has(key);
                 const available = entry.selected_base_interval !== null
-                  && entry.eligible_window_count > 0;
+                  && entry.eligible_window_count > 0
+                  && entry.start_compatibility?.state === "READY";
+                const unavailableReason = entry.start_compatibility?.message
+                  ?? "当前训练参数下无精确历史覆盖";
                 return (
                   <button
                     key={key}
                     type="button"
                     disabled={tracked || !available || addingMarket !== null || viewer.viewerPending}
-                    title={tracked ? "已在当前 Run 中" : available ? "添加并切换到该商品" : "当前训练参数下无精确历史覆盖"}
+                    title={tracked ? "已在当前 Run 中" : available ? "校验账户范围后添加并切换" : unavailableReason}
                     onClick={() => void addCatalogMarket(entry)}
                   >
                     <strong>{entry.identity.symbol}</strong>
-                    <small>{tracked ? "已添加" : addingMarket === key ? "对齐中…" : "添加"}</small>
+                    <small>{tracked ? "已添加" : addingMarket === key ? "校验并对齐中…" : available ? "添加" : "不可用"}</small>
                   </button>
                 );
               })}

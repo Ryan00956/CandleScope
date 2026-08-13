@@ -26,6 +26,7 @@ from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
 from app.api.v1.replay import replay_training_unavailable_payload
 from app.api.v1.stream_replay import stream_replay_session
+from app.api.v1.stream_replay_training import stream_replay_training_run
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
@@ -138,6 +139,55 @@ async def replay_stream(
         session_id=normalized_session_id,
         after_sequence=after_sequence,
         data_epoch=data_epoch,
+    )
+
+
+@router.websocket("/replay/runs/{run_id}")
+async def replay_training_run_stream(
+    websocket: WebSocket,
+    run_id: str,
+    protocol: str = Query(default=REPLAY_V2_PROTOCOL, min_length=1, max_length=32),
+) -> None:
+    """Deliver coalesced authoritative multi-market account projections."""
+
+    if protocol != REPLAY_V2_PROTOCOL:
+        await websocket.accept()
+        await _send_json_with_timeout(
+            websocket,
+            TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "unsupported replay training protocol",
+                status_code=422,
+                details={"protocol": protocol},
+            ).to_payload(),
+        )
+        await websocket.close(code=1008, reason="unsupported replay protocol")
+        return
+    service = getattr(websocket.app.state, "replay_service", None)
+    training = getattr(service, "training", None)
+    if training is None:
+        await websocket.accept()
+        await _send_json_with_timeout(websocket, replay_training_unavailable_payload())
+        await websocket.close(code=1013, reason="replay training unavailable")
+        return
+    try:
+        normalized_run_id = validate_identifier(run_id, field_name="run_id")
+    except (TypeError, ValueError):
+        await websocket.accept()
+        await _send_json_with_timeout(
+            websocket,
+            TrainingRunError(
+                "TRAINING_RUN_NOT_FOUND",
+                "training run does not exist",
+                status_code=404,
+            ).to_payload(),
+        )
+        await websocket.close(code=1008, reason="training run not found")
+        return
+    await stream_replay_training_run(
+        websocket,
+        training=training,
+        run_id=normalized_run_id,
     )
 
 

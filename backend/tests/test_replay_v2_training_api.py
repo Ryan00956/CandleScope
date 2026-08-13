@@ -1081,6 +1081,30 @@ async def test_phase5_market_track_routes_expose_replay_only_portfolio_contract(
         assert payload["portfolio"]["equity"] == "10000"
         assert "live_price" not in by_run.text
         assert "actual_event_time_ms" not in by_run.text
+
+        service.training._instrument_metadata_resolver = (  # type: ignore[union-attr]
+            lambda exchange, market_type, symbol: {
+                "exchange": exchange,
+                "marketType": market_type,
+                "symbol": symbol,
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT",
+            }
+        )
+        planned = await _request(
+            app,
+            "POST",
+            f"/api/v1/replay/runs/{run['run_id']}/tracks/plan",
+            json={
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "subscription_tier": "NONE",
+            },
+        )
+        assert planned.status_code == 200
+        assert planned.json()["identity"]["settlement_asset"] == "USDT"
+        assert "target_virtual_time_ms" not in planned.text
     finally:
         await service.shutdown(step_timeout=1.0)
 

@@ -607,6 +607,9 @@ export default function ReplayTrainingPageShell({
   const reviewSelectedTrack = review?.projection.tracks.find((track) => (
     track.track_id === review.projection.viewer_state.selected_track_id
   ));
+  const activeSelectedTrack = viewer.marketTracks?.tracks.find((track) => (
+    track.track_id === viewer.viewerState?.selected_track_id
+  ));
   const projectedInterval = review?.projection.viewer_state.display_interval;
   const displayedInterval = (
     review !== null
@@ -617,7 +620,7 @@ export default function ReplayTrainingPageShell({
   ) as IntervalString;
   const displayedSymbol = review !== null && typeof reviewSelectedTrack?.symbol === "string"
     ? reviewSelectedTrack.symbol
-    : config?.symbol ?? "--";
+    : activeSelectedTrack?.symbol ?? config?.symbol ?? "--";
   const baseInterval = (config?.base_interval ?? "1m") as IntervalString;
   const replayIntervalCatalog = useMemo(() => buildReplayIntervalCatalog({
     exchange: config?.exchange ?? "binance",
@@ -976,7 +979,7 @@ export default function ReplayTrainingPageShell({
           identity={config && (
             <button className="replay-identity-readonly" type="button" title="活动 run 的来源身份不可变；请新建或 Fork。">
               {review === null
-                ? `${config.exchange} · ${config.market_type} · ${config.symbol} · base ${config.base_interval}`
+                ? `${activeSelectedTrack?.exchange ?? config.exchange} · ${activeSelectedTrack?.market_type ?? config.market_type} · ${displayedSymbol} · 账户 ${viewer.marketTracks?.tracks.length ?? 1} 个商品 · base ${config.base_interval}`
                 : `REVIEW · ${String(
                   review.projection.tracks.find((track) => (
                     track.track_id === review.projection.viewer_state.selected_track_id

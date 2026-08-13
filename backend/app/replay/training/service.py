@@ -133,8 +133,24 @@ ORDERED_PLAYBACK_INTERACTIVE_BATCH_UNITS = 1
 ORDERED_PLAYBACK_FINAL_STATE_MIN_RATE = 60
 ORDERED_PLAYBACK_FINAL_STATE_TARGET_HZ = 3
 _NATIVE_DISPLAY_PIN_PROOF_CACHE_SIZE = 4_096
+_MARKET_TRACK_PLAN_CACHE_SIZE = 1_024
+_MARKET_TRACK_PLAN_TTL_MS = 60_000
 _NativeDisplayPinProofKey = tuple[str, str, str, str, str, int, int, int, str]
 _NativeDisplayPinProof = tuple[int, str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _MarketTrackPlan:
+    plan_id: str
+    run_id: str
+    exchange: str
+    market_type: str
+    symbol: str
+    base_asset: str
+    settlement_asset: str
+    subscription_tier: SubscriptionTier
+    target_virtual_time_ms: int
+    expires_at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +466,9 @@ class TrainingRunService:
         replay_service: "ReplayService",
         run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
         random_seed_factory: Callable[[], int] = (lambda: uuid.uuid4().int % (1 << 53)),
+        instrument_metadata_resolver: (
+            Callable[[str, str, str], Mapping[str, object] | None] | None
+        ) = None,
     ) -> None:
         self.replay_service = replay_service
         self.store = TrainingRunStore(replay_service.store)
@@ -489,6 +508,7 @@ class TrainingRunService:
         )
         self._run_id_factory = run_id_factory
         self._random_seed_factory = random_seed_factory
+        self._instrument_metadata_resolver = instrument_metadata_resolver
         self._fast_forward_planner = FastForwardPlanner()
         self._trade_flow_adapter = ReplayTradeFlowAdapter()
         self._advance_jobs: dict[tuple[str, str], dict[str, object]] = {}
@@ -499,6 +519,11 @@ class TrainingRunService:
             _NativeDisplayPinProofKey,
             _NativeDisplayPinProof,
         ] = OrderedDict()
+        self._market_track_plans: OrderedDict[str, _MarketTrackPlan] = OrderedDict()
+        self._market_track_subscribers: dict[
+            str,
+            set[asyncio.Queue[None]],
+        ] = {}
 
     def _remember_native_display_pin_proof(
         self,
@@ -1004,6 +1029,146 @@ class TrainingRunService:
         )
         return catalog
 
+    async def market_track_plan(
+        self,
+        run_id: str,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        subscription_tier: str,
+    ) -> dict[str, object]:
+        """Plan one authoritative MarketTrack without mutating the Run.
+
+        The plan binds exchange metadata, account scope, the selected Run clock,
+        and the requested tier.  The command path consumes only ``plan_id`` so a
+        browser cannot declare a quote/settlement asset on the account's behalf.
+        """
+
+        normalized_run = self._identifier(run_id, field_name="run_id")
+        normalized_exchange = self._identifier(exchange, field_name="exchange")
+        normalized_market = self._identifier(market_type, field_name="market_type")
+        normalized_symbol = self._identifier(symbol, field_name="symbol")
+        try:
+            tier = SubscriptionTier(subscription_tier)
+        except ValueError as exc:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                "subscription_tier is unsupported",
+                status_code=422,
+            ) from exc
+        identity = self._authoritative_instrument_identity(
+            exchange=normalized_exchange,
+            market_type=normalized_market,
+            symbol=normalized_symbol,
+        )
+        binding = await self.store.run_binding(normalized_run)
+        self._assert_same_market_scope(
+            binding=binding,
+            exchange=identity["exchange"],
+            market_type=identity["market_type"],
+            settlement_asset=identity["settlement_asset"],
+        )
+        adapter_config = binding.get("adapter_config")
+        if not isinstance(adapter_config, Mapping):
+            raise TrainingRunError(
+                "TRAINING_RUN_STORAGE_DEGRADED",
+                "training adapter config is invalid",
+                status_code=503,
+            )
+        config = ReplaySessionConfig.from_dict(adapter_config)
+        catalog = await self.replay_service.catalog(
+            warmup_bars=config.warmup_bars,
+            horizon_ms=config.horizon_ms,
+            quality_mode=config.quality_mode,
+            blind_mode=False,
+            source_kind=str(binding["source_kind"]),
+        )
+        entry = next(
+            (
+                candidate
+                for candidate in cast(list[Mapping[str, object]], catalog["entries"])
+                if self._catalog_identity_key(candidate)
+                == (
+                    identity["exchange"],
+                    identity["market_type"],
+                    identity["symbol"],
+                )
+            ),
+            None,
+        )
+        if entry is None:
+            raise TrainingRunError(
+                "MARKET_TRACK_UNAVAILABLE",
+                "market is not present in the Run capability catalog",
+                status_code=409,
+            )
+        if entry.get("selected_base_interval") != config.base_interval:
+            raise TrainingRunError(
+                "MARKET_MODE_INCOMPATIBLE",
+                "market does not support the Run's frozen base interval",
+                status_code=409,
+            )
+        compatibility = self._market_start_compatibility(
+            entry,
+            _stored_counter(
+                binding["actual_replay_start_ms"],
+                field_name="actual_replay_start_ms",
+            ),
+        )
+        if compatibility.get("state") != "READY":
+            raise TrainingRunError(
+                str(compatibility.get("code", "MARKET_TRACK_UNAVAILABLE")),
+                str(
+                    compatibility.get(
+                        "message",
+                        "market is not compatible with the Run's frozen start",
+                    )
+                ),
+                status_code=409,
+            )
+        selected_session = await self.replay_service.get_session(
+            str(binding["adapter_session_id"])
+        )
+        selected_snapshot = self._snapshot(selected_session)
+        now_ms = self.replay_service.now_ms()
+        plan = _MarketTrackPlan(
+            plan_id=f"track-plan-{uuid.uuid4().hex}",
+            run_id=normalized_run,
+            exchange=identity["exchange"],
+            market_type=identity["market_type"],
+            symbol=identity["symbol"],
+            base_asset=identity["base_asset"],
+            settlement_asset=identity["settlement_asset"],
+            subscription_tier=tier,
+            target_virtual_time_ms=self._cursor_time(selected_snapshot),
+            expires_at_ms=now_ms + _MARKET_TRACK_PLAN_TTL_MS,
+        )
+        self._prune_market_track_plans(now_ms)
+        self._market_track_plans[plan.plan_id] = plan
+        self._market_track_plans.move_to_end(plan.plan_id)
+        while len(self._market_track_plans) > _MARKET_TRACK_PLAN_CACHE_SIZE:
+            self._market_track_plans.popitem(last=False)
+        return {
+            "schema_version": "replay.market-track-plan.v1",
+            "plan_id": plan.plan_id,
+            "run_id": plan.run_id,
+            "identity": {
+                "exchange": plan.exchange,
+                "market_type": plan.market_type,
+                "symbol": plan.symbol,
+                "base_asset": plan.base_asset,
+                "settlement_asset": plan.settlement_asset,
+            },
+            "subscription_tier": plan.subscription_tier.value,
+            "compatibility": {
+                "state": "READY",
+                "code": "MARKET_TRACK_PLAN_READY",
+                "message": "商品身份、账户范围和冻结历史已校验。",
+            },
+            "expires_at_ms": plan.expires_at_ms,
+        }
+
     async def initial_market_plan(
         self,
         run_id: str,
@@ -1399,6 +1564,46 @@ class TrainingRunService:
         normalized = self._identifier(run_id, field_name="run_id")
         projection = await self.store.get_market_tracks(normalized)
         return await self._with_global_clock(normalized, projection)
+
+    async def subscribe_market_tracks(
+        self,
+        run_id: str,
+    ) -> tuple[dict[str, object], asyncio.Queue[None]]:
+        """Atomically attach a coalescing Run projection subscriber.
+
+        Registration happens before the initial read. A concurrent commit can
+        therefore only cause one harmless follow-up snapshot; it cannot create
+        a gap between the HTTP-equivalent initial projection and the live tail.
+        """
+
+        normalized = self._identifier(run_id, field_name="run_id")
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        subscribers = self._market_track_subscribers.setdefault(normalized, set())
+        subscribers.add(queue)
+        try:
+            projection = await self.get_market_tracks(normalized)
+        except BaseException:
+            self.unsubscribe_market_tracks(normalized, queue)
+            raise
+        return projection, queue
+
+    def unsubscribe_market_tracks(
+        self,
+        run_id: str,
+        queue: asyncio.Queue[None],
+    ) -> None:
+        subscribers = self._market_track_subscribers.get(run_id)
+        if subscribers is None:
+            return
+        subscribers.discard(queue)
+        if not subscribers:
+            self._market_track_subscribers.pop(run_id, None)
+
+    def _notify_market_tracks(self, run_id: str) -> None:
+        for queue in tuple(self._market_track_subscribers.get(run_id, ())):
+            if queue.full():
+                continue
+            queue.put_nowait(None)
 
     async def preview_order(
         self,
@@ -4008,7 +4213,9 @@ class TrainingRunService:
             ReplayV2CommandType.SET_DISPLAY_INTERVAL,
             ReplayV2CommandType.RECORD_VIEW_ACTION,
         }:
-            return await self._command_serialized(normalized, command)
+            result = await self._command_serialized(normalized, command)
+            self._notify_market_tracks(normalized)
+            return result
         actor = self._run_actors.setdefault(normalized, TrainingRunActor(normalized))
         ordered_pause_barrier = (
             command.type is ReplayV2CommandType.PAUSE and actor.playback_is_active()
@@ -4019,11 +4226,13 @@ class TrainingRunService:
             # high playback rate cannot consume the remaining dataset first.
             actor.signal_ordered_stop()
         async with actor.serialized():
-            return await self._command_serialized(
+            result = await self._command_serialized(
                 normalized,
                 command,
                 ordered_pause_barrier=ordered_pause_barrier,
             )
+        self._notify_market_tracks(normalized)
+        return result
 
     async def _command_serialized(
         self,
@@ -4747,33 +4956,62 @@ class TrainingRunService:
         )
         actor.request_ordered_pause(reason="TRACK_MUTATION")
         if command.type is ReplayV2CommandType.ADD_TRACK:
-            payload = self._exact_payload(
-                command.payload,
-                {
-                    "exchange",
-                    "market_type",
-                    "symbol",
-                    "settlement_asset",
-                    "subscription_tier",
-                },
-            )
-            exchange = self._identifier(payload["exchange"], field_name="exchange")
-            market_type = self._identifier(
-                payload["market_type"], field_name="market_type"
-            )
-            symbol = self._identifier(payload["symbol"], field_name="symbol")
-            settlement_asset = self._identifier(
-                payload["settlement_asset"],
-                field_name="settlement_asset",
-            )
-            try:
-                tier = SubscriptionTier(str(payload["subscription_tier"]))
-            except ValueError as exc:
-                raise TrainingRunError(
-                    "REPLAY_CONTROL_INVALID",
-                    "subscription_tier is unsupported",
-                    status_code=422,
-                ) from exc
+            if self._instrument_metadata_resolver is not None:
+                if set(command.payload) != {"plan_id"}:
+                    raise TrainingRunError(
+                        "MARKET_TRACK_PLAN_REQUIRED",
+                        "production MarketTrack creation requires an authoritative plan_id",
+                        status_code=409,
+                    )
+                payload = self._exact_payload(command.payload, {"plan_id"})
+                plan_id = self._identifier(payload["plan_id"], field_name="plan_id")
+                plan = self._claim_market_track_plan(
+                    run_id=command.run_id,
+                    plan_id=plan_id,
+                    selected_snapshot=selected_snapshot,
+                )
+                exchange = plan.exchange
+                market_type = plan.market_type
+                symbol = plan.symbol
+                settlement_asset = plan.settlement_asset
+                tier = plan.subscription_tier
+            else:
+                if set(command.payload) == {"plan_id"}:
+                    raise TrainingRunError(
+                        "INSTRUMENT_METADATA_UNAVAILABLE",
+                        "authoritative instrument metadata is unavailable",
+                        status_code=503,
+                    )
+                # Direct service fixtures may opt out of the application-owned
+                # instrument resolver. The production runtime always wires it
+                # and therefore never accepts this legacy payload.
+                payload = self._exact_payload(
+                    command.payload,
+                    {
+                        "exchange",
+                        "market_type",
+                        "symbol",
+                        "settlement_asset",
+                        "subscription_tier",
+                    },
+                )
+                exchange = self._identifier(payload["exchange"], field_name="exchange")
+                market_type = self._identifier(
+                    payload["market_type"], field_name="market_type"
+                )
+                symbol = self._identifier(payload["symbol"], field_name="symbol")
+                settlement_asset = self._identifier(
+                    payload["settlement_asset"],
+                    field_name="settlement_asset",
+                )
+                try:
+                    tier = SubscriptionTier(str(payload["subscription_tier"]))
+                except ValueError as exc:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_INVALID",
+                        "subscription_tier is unsupported",
+                        status_code=422,
+                    ) from exc
             self._assert_same_market_scope(
                 binding=binding,
                 exchange=exchange,
@@ -7970,6 +8208,7 @@ class TrainingRunService:
                         state=terminal_state,
                         reason=terminal_reason,
                     )
+            self._notify_market_tracks(run_id)
 
     async def _ordered_source_goal(
         self,
@@ -8833,6 +9072,7 @@ class TrainingRunService:
                     pending_global_events.clear()
                 else:
                     await self.store.checkpoint_market_tracks(command.run_id)
+                self._notify_market_tracks(command.run_id)
             if market_cohort_incomplete and source_goal is not None:
                 reached = await self.replay_service.get_session(
                     self._track_session_id(tracks[0])
@@ -9677,6 +9917,128 @@ class TrainingRunService:
                 status_code=409,
                 details={"expected": list(expected), "actual": list(actual)},
             )
+
+    def _authoritative_instrument_identity(
+        self,
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> dict[str, str]:
+        resolver = self._instrument_metadata_resolver
+        if resolver is None:
+            raise TrainingRunError(
+                "INSTRUMENT_METADATA_UNAVAILABLE",
+                "authoritative instrument metadata is unavailable",
+                status_code=503,
+            )
+        metadata = resolver(exchange, market_type, symbol)
+        if not isinstance(metadata, Mapping):
+            raise TrainingRunError(
+                "INSTRUMENT_METADATA_UNAVAILABLE",
+                "instrument is absent from the authoritative local catalog",
+                status_code=409,
+            )
+        try:
+            resolved = {
+                "exchange": self._identifier(
+                    metadata.get("exchange"), field_name="instrument.exchange"
+                ).lower(),
+                "market_type": self._identifier(
+                    metadata.get("marketType"), field_name="instrument.market_type"
+                ).lower(),
+                "symbol": self._identifier(
+                    metadata.get("symbol"), field_name="instrument.symbol"
+                ).upper(),
+                "base_asset": self._identifier(
+                    metadata.get("baseAsset"), field_name="instrument.base_asset"
+                ).upper(),
+                "settlement_asset": self._identifier(
+                    metadata.get("quoteAsset"),
+                    field_name="instrument.settlement_asset",
+                ).upper(),
+            }
+        except (TypeError, ValueError) as exc:
+            raise TrainingRunError(
+                "INSTRUMENT_METADATA_INVALID",
+                "authoritative instrument metadata is invalid",
+                status_code=503,
+            ) from exc
+        requested = (exchange.lower(), market_type.lower(), symbol.upper())
+        actual = (resolved["exchange"], resolved["market_type"], resolved["symbol"])
+        if actual != requested:
+            raise TrainingRunError(
+                "INSTRUMENT_IDENTITY_MISMATCH",
+                "instrument metadata does not match the requested market identity",
+                status_code=409,
+                details={"expected": list(requested), "actual": list(actual)},
+            )
+        return resolved
+
+    def _prune_market_track_plans(self, now_ms: int) -> None:
+        expired = [
+            plan_id
+            for plan_id, plan in self._market_track_plans.items()
+            if plan.expires_at_ms < now_ms
+        ]
+        for plan_id in expired:
+            self._market_track_plans.pop(plan_id, None)
+
+    def _claim_market_track_plan(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        selected_snapshot: Mapping[str, object],
+    ) -> _MarketTrackPlan:
+        now_ms = self.replay_service.now_ms()
+        self._prune_market_track_plans(now_ms)
+        plan = self._market_track_plans.get(plan_id)
+        if plan is None or plan.run_id != run_id:
+            raise TrainingRunError(
+                "MARKET_TRACK_PLAN_EXPIRED",
+                "market track plan is missing or expired; request a new plan",
+                status_code=409,
+            )
+        self._market_track_plans.pop(plan_id, None)
+        if plan.expires_at_ms < now_ms:
+            raise TrainingRunError(
+                "MARKET_TRACK_PLAN_EXPIRED",
+                "market track plan expired; request a new plan",
+                status_code=409,
+            )
+        if plan.target_virtual_time_ms != self._cursor_time(selected_snapshot):
+            raise TrainingRunError(
+                "MARKET_TRACK_PLAN_STALE",
+                "the Run clock changed after planning; request a new plan",
+                status_code=409,
+            )
+        current = self._authoritative_instrument_identity(
+            exchange=plan.exchange,
+            market_type=plan.market_type,
+            symbol=plan.symbol,
+        )
+        expected = (
+            plan.exchange,
+            plan.market_type,
+            plan.symbol,
+            plan.base_asset,
+            plan.settlement_asset,
+        )
+        actual = (
+            current["exchange"],
+            current["market_type"],
+            current["symbol"],
+            current["base_asset"],
+            current["settlement_asset"],
+        )
+        if actual != expected:
+            raise TrainingRunError(
+                "MARKET_TRACK_PLAN_STALE",
+                "authoritative instrument metadata changed after planning",
+                status_code=409,
+            )
+        return plan
 
     async def _execute_policy_command(
         self,

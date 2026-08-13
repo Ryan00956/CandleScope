@@ -216,9 +216,12 @@ async def _init_data_manager() -> None:
 async def _init_replay_runtime() -> None:
     """Start replay as an application sibling, independent of live DataEngine."""
 
+    from app.api.v1.symbols import get_cached_symbol_metadata
     from app.replay.runtime import start_replay_runtime
 
-    runtime = await start_replay_runtime()
+    runtime = await start_replay_runtime(
+        instrument_metadata_resolver=get_cached_symbol_metadata,
+    )
     app.state.replay_runtime = runtime
     app.state.replay_service = runtime.service
 

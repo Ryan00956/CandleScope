@@ -81,9 +81,11 @@ function ReplayTrainingWorkspaceSurface({
 }
 
 function ReplayInitializedRun({
+  onSelectedSessionChange,
   runId,
   sessionId,
 }: {
+  onSelectedSessionChange: (sessionId: string) => void;
   runId: string;
   sessionId: string;
 }) {
@@ -96,7 +98,7 @@ function ReplayInitializedRun({
     [runId],
   );
   const replay = useReplayRuntime(runtimeEntry, { clientInstanceId });
-  const viewer = useReplayViewerRuntime(replay);
+  const viewer = useReplayViewerRuntime(replay, { onSelectedSessionChange });
   return (
     <ReplayTrainingWorkspaceSurface
       key={`${runId}:${sessionId}`}
@@ -305,6 +307,7 @@ export function ReplayInitialMarketPicker({
 
 function ReplayTrainingRunApp({ runId }: { runId: string }) {
   const [run, setRun] = useState<TrainingRunCard | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -335,7 +338,14 @@ function ReplayTrainingRunApp({ runId }: { runId: string }) {
   if (run.adapter_session_id === null) {
     return <ReplayStatusSurface title="回放状态不完整" message="Run 已有时钟，但当前 Viewer 没有可用的 MarketTrack。" />;
   }
-  return <ReplayInitializedRun runId={run.run_id} sessionId={run.adapter_session_id} />;
+  return (
+    <ReplayInitializedRun
+      key={`${run.run_id}:${selectedSessionId ?? run.adapter_session_id}`}
+      runId={run.run_id}
+      sessionId={selectedSessionId ?? run.adapter_session_id}
+      onSelectedSessionChange={setSelectedSessionId}
+    />
+  );
 }
 
 /** Dedicated run-centric replay composition root. */

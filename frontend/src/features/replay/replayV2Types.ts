@@ -225,6 +225,26 @@ export interface ReplayTrainingMarketTrack {
   readonly historical_book: ReplayHistoricalBookProjection;
 }
 
+export interface ReplayMarketTrackPlan {
+  readonly schema_version: "replay.market-track-plan.v1";
+  readonly plan_id: string;
+  readonly run_id: string;
+  readonly identity: {
+    readonly exchange: string;
+    readonly market_type: string;
+    readonly symbol: string;
+    readonly base_asset: string;
+    readonly settlement_asset: string;
+  };
+  readonly subscription_tier: ReplayV2SubscriptionTier;
+  readonly compatibility: {
+    readonly state: "READY";
+    readonly code: string;
+    readonly message: string;
+  };
+  readonly expires_at_ms: number;
+}
+
 export interface ReplayHistoricalBookProjection {
   readonly mode: ReplayV2BookMode;
   readonly capability_state: ReplayV2CapabilityState;
@@ -3060,6 +3080,62 @@ export function parseReplayMarketTracksResponse(value: unknown): ReplayMarketTra
     global_clock: response.global_clock === null
       ? null
       : parseReplayGlobalClock(response.global_clock),
+  };
+}
+
+export function parseReplayMarketTrackPlan(value: unknown): ReplayMarketTrackPlan {
+  const plan = exactObject(value, "market track plan", [
+    "schema_version",
+    "plan_id",
+    "run_id",
+    "identity",
+    "subscription_tier",
+    "compatibility",
+    "expires_at_ms",
+  ]);
+  if (plan.schema_version !== "replay.market-track-plan.v1") {
+    throw new TypeError("market track plan schema is unsupported");
+  }
+  const identity = exactObject(plan.identity, "market track plan.identity", [
+    "exchange",
+    "market_type",
+    "symbol",
+    "base_asset",
+    "settlement_asset",
+  ]);
+  const compatibility = exactObject(
+    plan.compatibility,
+    "market track plan.compatibility",
+    ["state", "code", "message"],
+  );
+  if (compatibility.state !== "READY" || typeof compatibility.message !== "string") {
+    throw new TypeError("market track plan compatibility is unsupported");
+  }
+  return {
+    schema_version: "replay.market-track-plan.v1",
+    plan_id: identifier(plan.plan_id, "market track plan.plan_id"),
+    run_id: identifier(plan.run_id, "market track plan.run_id"),
+    identity: {
+      exchange: marketIdentity(identity.exchange, "market track plan.identity.exchange"),
+      market_type: marketIdentity(identity.market_type, "market track plan.identity.market_type"),
+      symbol: marketIdentity(identity.symbol, "market track plan.identity.symbol"),
+      base_asset: marketIdentity(identity.base_asset, "market track plan.identity.base_asset"),
+      settlement_asset: marketIdentity(
+        identity.settlement_asset,
+        "market track plan.identity.settlement_asset",
+      ),
+    },
+    subscription_tier: enumValue(
+      plan.subscription_tier,
+      REPLAY_V2_ENUMS.subscription_tier,
+      "market track plan.subscription_tier",
+    ),
+    compatibility: {
+      state: "READY",
+      code: identifier(compatibility.code, "market track plan.compatibility.code"),
+      message: compatibility.message,
+    },
+    expires_at_ms: timestamp(plan.expires_at_ms, "market track plan.expires_at_ms"),
   };
 }
 

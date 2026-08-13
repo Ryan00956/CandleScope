@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Callable, TypeVar
 
 from app.core.config import REPLAY_SETTINGS, ReplaySettings
@@ -88,6 +89,9 @@ async def start_replay_runtime(
     store_factory: Callable[[str], ReplaySQLiteStore] | None = None,
     service_factory: Callable[..., ReplayService] = ReplayService,
     raw_trade_archive: RawAggTradeArchive | None = None,
+    instrument_metadata_resolver: (
+        Callable[[str, str, str], Mapping[str, object] | None] | None
+    ) = None,
 ) -> ReplayRuntime:
     """Start replay only when enabled; disabled mode has no DB or task side effect."""
 
@@ -126,6 +130,10 @@ async def start_replay_runtime(
             "settings": settings,
             "store": store,
         }
+        if instrument_metadata_resolver is not None:
+            service_kwargs["instrument_metadata_resolver"] = (
+                instrument_metadata_resolver
+            )
         if raw_trade_archive is None:
             raw_trade_archive = (
                 (

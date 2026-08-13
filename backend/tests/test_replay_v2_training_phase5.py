@@ -91,6 +91,7 @@ async def _service(
     *,
     symbols: tuple[str, ...] = ("ETHUSDT",),
     controller_ttl_seconds: float | None = None,
+    instrument_metadata_resolver=None,
 ) -> ReplayService:
     settings = replay_settings(path)
     service = ReplayService(
@@ -108,6 +109,7 @@ async def _service(
         session_id_factory=SessionIdFactory("adapter"),
         training_run_id_factory=SessionIdFactory("run"),
         native_intervals=lambda _identity: ("1m",),
+        instrument_metadata_resolver=instrument_metadata_resolver,
     )
     await service.start()
     assert service.training is not None
@@ -730,6 +732,151 @@ async def test_none_track_performs_zero_history_reads_then_selects_atomically(
                 ),
             )
         assert stale_view.value.code == "VIEWER_REVISION_CONFLICT"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_market_track_plan_uses_authoritative_instrument_scope(
+    tmp_path: Path,
+) -> None:
+    metadata = {
+        "BTCUSDT": {
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "BTCUSDT",
+            "baseAsset": "BTC",
+            "quoteAsset": "USDT",
+        },
+        "ETHUSDT": {
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "ETHUSDT",
+            "baseAsset": "ETH",
+            "quoteAsset": "USDT",
+        },
+        "ETHBTC": {
+            "exchange": "binance",
+            "marketType": "spot",
+            "symbol": "ETHBTC",
+            "baseAsset": "ETH",
+            "quoteAsset": "BTC",
+        },
+    }
+
+    def resolve(exchange: str, market_type: str, symbol: str):
+        candidate = metadata.get(symbol)
+        if candidate is None:
+            return None
+        if candidate["exchange"] != exchange or candidate["marketType"] != market_type:
+            return None
+        return candidate
+
+    service = await _service(
+        tmp_path / "authoritative-track-plan.db",
+        symbols=("ETHUSDT", "ETHBTC"),
+        instrument_metadata_resolver=resolve,
+    )
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        primary_session = str(created["run"]["adapter_session_id"])
+        primary = await service.get_session(primary_session)
+
+        plan = await service.training.market_track_plan(  # type: ignore[union-attr]
+            run_id,
+            exchange="binance",
+            market_type="spot",
+            symbol="ETHUSDT",
+            subscription_tier="NONE",
+        )
+        assert plan["schema_version"] == "replay.market-track-plan.v1"
+        assert plan["identity"] == {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "ETHUSDT",
+            "base_asset": "ETH",
+            "settlement_asset": "USDT",
+        }
+        assert "target_virtual_time_ms" not in plan
+
+        with pytest.raises(TrainingRunError) as unplanned:
+            await service.training.command(  # type: ignore[union-attr]
+                run_id,
+                _command(
+                    run_id,
+                    "legacy-add",
+                    ReplayV2CommandType.ADD_TRACK,
+                    primary,
+                    {
+                        "exchange": "binance",
+                        "market_type": "spot",
+                        "symbol": "ETHUSDT",
+                        "settlement_asset": "USDT",
+                        "subscription_tier": "NONE",
+                    },
+                ),
+            )
+        assert unplanned.value.code == "MARKET_TRACK_PLAN_REQUIRED"
+
+        added = await service.training.command(  # type: ignore[union-attr]
+            run_id,
+            _command(
+                run_id,
+                "planned-add",
+                ReplayV2CommandType.ADD_TRACK,
+                primary,
+                {"plan_id": plan["plan_id"]},
+            ),
+        )
+        assert added["data"]["track"]["symbol"] == "ETHUSDT"
+        assert added["data"]["track"]["settlement_asset"] == "USDT"
+
+        with pytest.raises(TrainingRunError) as wrong_settlement:
+            await service.training.market_track_plan(  # type: ignore[union-attr]
+                run_id,
+                exchange="binance",
+                market_type="spot",
+                symbol="ETHBTC",
+                subscription_tier="NONE",
+            )
+        assert wrong_settlement.value.code == "MARKET_SCOPE_MISMATCH"
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_market_track_projection_subscription_is_gap_free_and_coalescing(
+    tmp_path: Path,
+) -> None:
+    service = await _service(tmp_path / "market-track-stream.db")
+    try:
+        created = await service.training.create_run(await _request(service))  # type: ignore[union-attr]
+        run_id = str(created["run"]["run_id"])
+        primary_session = str(created["run"]["adapter_session_id"])
+        initial, queue = await service.training.subscribe_market_tracks(run_id)  # type: ignore[union-attr]
+        assert initial["run_id"] == run_id
+        assert len(initial["tracks"]) == 1
+        assert queue.empty()
+
+        await _add_track(
+            service,
+            run_id=run_id,
+            selected_session_id=primary_session,
+            symbol="ETHUSDT",
+            tier="NONE",
+            command_id="stream-add-track",
+        )
+        await asyncio.wait_for(queue.get(), timeout=0.1)
+        updated = await service.training.get_market_tracks(run_id)  # type: ignore[union-attr]
+        assert [track["symbol"] for track in updated["tracks"]] == [
+            "BTCUSDT",
+            "ETHUSDT",
+        ]
+
+        service.training._notify_market_tracks(run_id)  # type: ignore[union-attr]
+        service.training._notify_market_tracks(run_id)  # type: ignore[union-attr]
+        assert queue.qsize() == 1
+        service.training.unsubscribe_market_tracks(run_id, queue)  # type: ignore[union-attr]
+        assert run_id not in service.training._market_track_subscribers  # type: ignore[union-attr]
     finally:
         await service.shutdown(step_timeout=1.0)
 

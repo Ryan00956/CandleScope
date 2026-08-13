@@ -360,6 +360,13 @@ class TrainingRunMarketSelectionPayload(_StrictModel):
     simulation_manifest_ref: HedgeSimulationManifestRefPayload | None = None
 
 
+class TrainingRunMarketTrackPlanPayload(_StrictModel):
+    exchange: str = Field(min_length=1, max_length=128)
+    market_type: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=128)
+    subscription_tier: Literal["NONE", "WARM", "FULL"] = "NONE"
+
+
 class TrainingCursorPayload(_StrictModel):
     virtual_time_ms: int = Field(ge=0, le=MAX_TIMESTAMP_MS)
     source_sequence: int = Field(ge=0, le=MAX_COUNTER)
@@ -1051,6 +1058,24 @@ async def replay_v2_training_tracks(
     return await _training_service(request).get_market_tracks(run_id)
 
 
+@router.post(
+    "/runs/{run_id}/tracks/plan",
+    dependencies=[Depends(_training_service), Depends(enforce_replay_request_limit)],
+)
+async def plan_replay_v2_training_track(
+    request: Request,
+    run_id: str,
+    payload: TrainingRunMarketTrackPlanPayload,
+) -> dict[str, object]:
+    return await _training_service(request).market_track_plan(
+        run_id,
+        exchange=payload.exchange,
+        market_type=payload.market_type,
+        symbol=payload.symbol,
+        subscription_tier=payload.subscription_tier,
+    )
+
+
 @router.get("/runs/{run_id}/fast-forward-plan")
 async def replay_v2_fast_forward_plan(
     request: Request,
@@ -1390,6 +1415,7 @@ __all__ = [
     "ReplayV2CommandPayload",
     "TrainingRunPreparationPayload",
     "TrainingRunMarketSelectionPayload",
+    "TrainingRunMarketTrackPlanPayload",
     "TrainingRunSetupPayload",
     "replay_error_payload",
     "replay_training_unavailable_payload",

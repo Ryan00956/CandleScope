@@ -89,7 +89,7 @@ test("Phase 13 workspace projects ViewerState and exposes capability-driven adva
   const composition = source("src/features/replay/ReplayApp.tsx");
   const controls = source("src/features/replay/components/ReplayControlBar.tsx");
   const viewerRuntime = source("src/features/replay/useReplayViewerRuntime.ts");
-  assert.match(composition, /useReplayViewerRuntime\(replay\)/);
+  assert.match(composition, /useReplayViewerRuntime\(replay, \{ onSelectedSessionChange \}\)/);
   assert.match(composition, /useReplaySharedIndicatorRuntime\(/);
   assert.match(workspace, /<IndicatorPanel/);
   assert.doesNotMatch(workspace, /ReplayIndicatorPanel/);

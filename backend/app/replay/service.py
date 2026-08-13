@@ -183,6 +183,9 @@ class ReplayService:
             lambda: secrets.randbits(53)
         ),
         native_intervals: Callable[[ReplaySeriesIdentity], Sequence[str]] | None = None,
+        instrument_metadata_resolver: (
+            Callable[[str, str, str], Mapping[str, object] | None] | None
+        ) = None,
     ) -> None:
         if not settings.enabled:
             raise ValueError(
@@ -212,6 +215,7 @@ class ReplayService:
             replay_service=self,
             run_id_factory=training_run_id_factory,
             random_seed_factory=training_random_seed_factory,
+            instrument_metadata_resolver=instrument_metadata_resolver,
         )
         self._native_intervals_explicit = native_intervals is not None
         self._native_intervals = native_intervals or self._all_local_intervals
@@ -4610,6 +4614,11 @@ class ReplayService:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("ReplayService clock must return a non-negative integer")
         return value
+
+    def now_ms(self) -> int:
+        """Return the validated process clock for replay-owned short-lived contracts."""
+
+        return self._validated_now_ms()
 
     @staticmethod
     def _recovery_error(

@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 
 import { ReplayV2ApiClient } from "../replayV2Api.js";
 import { parseReplayMarketTracksResponse } from "../replayV2Types.js";
+import {
+  buildReplayTrainingRunStreamUrl,
+  ReplayTrainingRunStream,
+  type ReplayTrainingRunStreamSocket,
+} from "../replayTrainingRunStream.js";
 
 
 function viewerState() {
@@ -678,6 +683,52 @@ test("Phase 5 API reads tracks by replay session without touching live subscript
   assert.deepEqual(requests, ["/api/v1/replay/runs/session/adapter-2/tracks"]);
 });
 
+test("market track planning sends identity only and accepts server-owned settlement", async () => {
+  const requests: Array<{ readonly url: string; readonly body: unknown }> = [];
+  const client = new ReplayV2ApiClient({
+    fetcher: async (input, init) => {
+      requests.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body ?? "null")),
+      });
+      return new Response(JSON.stringify({
+        schema_version: "replay.market-track-plan.v1",
+        plan_id: "track-plan-1",
+        run_id: "run-1",
+        identity: {
+          exchange: "binance",
+          market_type: "spot",
+          symbol: "ETHUSDT",
+          base_asset: "ETH",
+          settlement_asset: "USDT",
+        },
+        subscription_tier: "NONE",
+        compatibility: {
+          state: "READY",
+          code: "MARKET_TRACK_PLAN_READY",
+          message: "ready",
+        },
+        expires_at_ms: 1_800_000_000_000,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  const result = await client.planMarketTrack("run-1", {
+    exchange: "binance",
+    marketType: "spot",
+    symbol: "ETHUSDT",
+  });
+  assert.equal(result.identity.settlement_asset, "USDT");
+  assert.deepEqual(requests, [{
+    url: "/api/v1/replay/runs/run-1/tracks/plan",
+    body: {
+      exchange: "binance",
+      market_type: "spot",
+      symbol: "ETHUSDT",
+      subscription_tier: "NONE",
+    },
+  }]);
+});
+
 test("replay watchlist searches the Run catalog and adds products through track commands", () => {
   const testDirectory = dirname(fileURLToPath(import.meta.url));
   const watchlist = readFileSync(
@@ -688,9 +739,24 @@ test("replay watchlist searches the Run catalog and adds products through track 
   assert.match(watchlist, /launch_context\?\.watchlist_snapshot\.groups/);
   assert.match(watchlist, /data-replay-watchlist-source="run-archive"/);
   assert.match(watchlist, /marketCatalog\(runId/);
+  assert.match(watchlist, /start_compatibility\?\.state === "READY"/);
   assert.match(watchlist, /搜索当前 Run 可用商品/);
   assert.match(watchlist, /Run 不绑定单一商品/);
   assert.match(watchlist, /selectTrack|addAndSelectTrack/);
+  const runtime = readFileSync(
+    resolve(testDirectory, "../useReplayViewerRuntime.ts"),
+    "utf8",
+  );
+  assert.match(runtime, /planMarketTrack\(viewer\.run_id/);
+  assert.match(runtime, /\{ plan_id: plan\.plan_id \}/);
+  assert.doesNotMatch(runtime, /settlement_asset: identity\.settlementAsset/);
+  assert.match(runtime, /onSelectedSessionChange\?\.\(result\.session_id\)/);
+  assert.doesNotMatch(runtime, /location\.assign/);
+  assert.match(runtime, /new ReplayTrainingRunStream/);
+  assert.doesNotMatch(runtime, /setInterval\(.*pollMarketTracks/s);
+  const app = readFileSync(resolve(testDirectory, "../ReplayApp.tsx"), "utf8");
+  assert.match(app, /selectedSessionId \?\? run\.adapter_session_id/);
+  assert.match(app, /onSelectedSessionChange=\{setSelectedSessionId\}/);
   assert.match(
     watchlist,
     /const pending = viewer\.viewerPending \|\| viewer\.controlPending !== null/,
@@ -730,6 +796,43 @@ test("replay watchlist searches the Run catalog and adds products through track 
   assert.match(controls, /phase3Command\("acquire_controller", \{ takeover: false \}\)/);
   assert.match(controls, /readonly viewer: ReplayViewerRuntime/);
   assert.doesNotMatch(controls, /viewer === undefined|viewer !== undefined|runtime\.actions\.submitCommand/);
+});
+
+test("Run stream uses replay.v3 and publishes strict account projections", () => {
+  assert.equal(
+    buildReplayTrainingRunStreamUrl({
+      runId: "run-1",
+      baseUrl: "wss://example.test/",
+    }),
+    "wss://example.test/api/v1/stream/replay/runs/run-1?protocol=replay.v3",
+  );
+  let socket: ReplayTrainingRunStreamSocket | null = null;
+  let projectionCount = 0;
+  const stream = new ReplayTrainingRunStream({
+    runId: "run-1",
+    baseUrl: "ws://example.test",
+    socketFactory: () => {
+      socket = {
+        onopen: null,
+        onmessage: null,
+        onerror: null,
+        onclose: null,
+        close: () => undefined,
+      };
+      return socket;
+    },
+    onProjection: (projection) => {
+      assert.equal(projection.run_id, "run-1");
+      projectionCount += 1;
+    },
+  });
+  stream.start();
+  assert.notEqual(socket, null);
+  socket!.onmessage?.({
+    data: JSON.stringify(marketTracksResponse()),
+  } as MessageEvent<string>);
+  assert.equal(projectionCount, 1);
+  stream.stop();
 });
 
 test("account records API binds type, scope, cursor, and page limit", async () => {

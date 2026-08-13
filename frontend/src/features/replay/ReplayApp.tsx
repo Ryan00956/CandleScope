@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { useChartSurfaceRuntime } from "../../chart-adapter/useChartSurfaceRuntime.js";
-import type { ReplayEntry } from "./replayEntry.js";
-import type { ReplayCatalog, ReplayCatalogEntry } from "./replayTypes.js";
-import type { TrainingRunCard } from "./replayV2Types.js";
-import { defaultReplayV2Api, ReplayV2ApiError } from "./replayV2Api.js";
 import {
-  prepareReplayInitialMarketSelection,
-  selectReplayInitialMarketWithEpochRetry,
-} from "./replayInitialMarket.js";
+  useChartSettingsRuntime,
+  type ChartSettingsRuntime,
+} from "../settings/chartAppearanceSettings.js";
+import type { ReplayEntry } from "./replayEntry.js";
+import type { TrainingRunCard } from "./replayV2Types.js";
+import { defaultReplayV2Api } from "./replayV2Api.js";
 import { getReplayControllerClientInstanceId } from "./replayControllerIdentity.js";
+import ReplayInitialMarketPicker from "./components/ReplayInitialMarketPicker.js";
 import TrainingHubDialog from "./components/TrainingHubDialog.js";
 import ReplayTrainingPageShell from "./ReplayTrainingPageShell.js";
 import { useReplaySharedIndicatorRuntime } from "./useReplaySharedIndicatorRuntime.js";
 import { useReplayRuntime } from "./useReplayRuntime.js";
 import { useReplayViewerRuntime } from "./useReplayViewerRuntime.js";
 import { useTrainingHub } from "./useTrainingHub.js";
+
+export { default as ReplayInitialMarketPicker } from "./components/ReplayInitialMarketPicker.js";
 
 export interface ReplayAppProps {
   entry: ReplayEntry;
@@ -54,10 +56,12 @@ function ReplayStatusSurface({
 }
 
 function ReplayTrainingWorkspaceSurface({
+  chartSettingsRuntime,
   indicatorScope,
   replay,
   viewer,
 }: {
+  chartSettingsRuntime: ChartSettingsRuntime;
   indicatorScope: string;
   replay: ReturnType<typeof useReplayRuntime>;
   viewer: ReturnType<typeof useReplayViewerRuntime>;
@@ -76,15 +80,18 @@ function ReplayTrainingWorkspaceSurface({
       chartSurfaceRef={chartSurface.ref}
       chartSurfaceActions={chartSurface.actions}
       viewer={viewer}
+      chartSettingsRuntime={chartSettingsRuntime}
     />
   );
 }
 
 function ReplayInitializedRun({
+  chartSettingsRuntime,
   onSelectedSessionChange,
   runId,
   sessionId,
 }: {
+  chartSettingsRuntime: ChartSettingsRuntime;
   onSelectedSessionChange: (sessionId: string) => void;
   runId: string;
   sessionId: string;
@@ -102,6 +109,7 @@ function ReplayInitializedRun({
   return (
     <ReplayTrainingWorkspaceSurface
       key={`${runId}:${sessionId}`}
+      chartSettingsRuntime={chartSettingsRuntime}
       indicatorScope={runId}
       replay={replay}
       viewer={viewer}
@@ -109,203 +117,13 @@ function ReplayInitializedRun({
   );
 }
 
-function marketLabel(entry: ReplayCatalogEntry): string {
-  return `${entry.identity.exchange} · ${entry.identity.market_type}`;
-}
-
-export function ReplayInitialMarketPicker({
-  run,
-  onInitialized,
+function ReplayTrainingRunApp({
+  chartSettingsRuntime,
+  runId,
 }: {
-  run: TrainingRunCard;
-  onInitialized: (run: TrainingRunCard) => void;
+  chartSettingsRuntime: ChartSettingsRuntime;
+  runId: string;
 }) {
-  const [catalog, setCatalog] = useState<ReplayCatalog | null>(null);
-  const [query, setQuery] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [selecting, setSelecting] = useState<string | null>(null);
-  const [downgrade, setDowngrade] = useState<{
-    readonly entry: ReplayCatalogEntry;
-    readonly message: string;
-  } | null>(null);
-
-  const loadCatalog = () => {
-    setError(null);
-    setDowngrade(null);
-    setCatalog(null);
-    void defaultReplayV2Api.marketCatalog(run.run_id).then(setCatalog).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : "商品目录读取失败");
-    });
-  };
-
-  useEffect(() => {
-    const abort = new AbortController();
-    void defaultReplayV2Api.marketCatalog(run.run_id, abort.signal)
-      .then(setCatalog)
-      .catch((reason: unknown) => {
-        if (abort.signal.aborted) return;
-        setError(reason instanceof Error ? reason.message : "商品目录读取失败");
-      });
-    return () => abort.abort();
-  }, [run.run_id]);
-
-  const entries = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return (catalog?.entries ?? []).filter((entry) => (
-      needle.length === 0
-      || entry.identity.symbol.toLowerCase().includes(needle)
-      || entry.identity.exchange.toLowerCase().includes(needle)
-      || entry.identity.market_type.toLowerCase().includes(needle)
-    ));
-  }, [catalog, query]);
-  const timeCommitment = catalog?.time_commitment;
-  const committedTimeLabel = timeCommitment?.committed_start_ms === null
-    ? "已冻结（按披露策略隐藏）"
-    : timeCommitment?.committed_start_ms === undefined
-      ? "正在读取"
-      : new Date(timeCommitment.committed_start_ms).toISOString();
-
-  const selectMarket = async (entry: ReplayCatalogEntry, confirmed = false) => {
-    if (catalog === null || entry.selected_base_interval === null || selecting !== null) return;
-    setSelecting(entry.identity.symbol);
-    setError(null);
-    if (!confirmed) setDowngrade(null);
-    try {
-      if (!confirmed) {
-        const prepared = await prepareReplayInitialMarketSelection({
-          api: defaultReplayV2Api,
-          runId: run.run_id,
-          catalog,
-          entry,
-        });
-        if (prepared.downgradeConfirmation !== null) {
-          setDowngrade({ entry, message: prepared.downgradeConfirmation });
-          setSelecting(null);
-          return;
-        }
-      }
-      const result = await selectReplayInitialMarketWithEpochRetry({
-        api: defaultReplayV2Api,
-        runId: run.run_id,
-        catalog,
-        entry,
-      });
-      setCatalog(result.catalog);
-      setDowngrade(null);
-      onInitialized(result.response.run);
-    } catch (reason) {
-      const message = reason instanceof ReplayV2ApiError
-        ? `${reason.code}: ${reason.message}`
-        : reason instanceof Error ? reason.message : "商品初始化失败";
-      setError(message);
-      setSelecting(null);
-      if (reason instanceof ReplayV2ApiError && reason.code === "CATALOG_EPOCH_MISMATCH") {
-        loadCatalog();
-      }
-    }
-  };
-
-  return (
-    <main className="training-hub-page" data-replay-run-state="AWAITING_MARKET">
-      <section className="training-hub-shell">
-        <header className="training-hub-heading">
-          <div>
-            <span className="training-hub-kicker">T0 COMMITTED · NO MARKET LOADED</span>
-            <h1>{run.name}</h1>
-            <p>这局模拟账户的开始时间已经永久冻结。选择商品只会检查兼容性，不会改时间、顺延或重新随机。</p>
-          </div>
-          <div className="training-hub-heading-actions">
-            <button type="button" onClick={loadCatalog} disabled={selecting !== null}>刷新商品</button>
-            <a href="/replay.html">返回训练大厅</a>
-          </div>
-        </header>
-
-        <div className="training-hub-filters replay-market-picker-search">
-          <label>
-            搜索商品
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="BTC、ETH、交易所或市场类型"
-              autoFocus
-            />
-          </label>
-          <span>开局时间：{committedTimeLabel} · 账户结算：{run.settlement_asset} · 历史源：{run.source_kind}</span>
-        </div>
-        {run.source_kind === "AGG_TRADE" && (
-          <div className="replay-info-note" data-replay-agg-trade-download-note>
-            首次选择需下载并校验整日成交档；官方目录不提供可信行数或大小，下载量未知。
-          </div>
-        )}
-
-        {error !== null && <div className="replay-error-summary" role="alert">{error}</div>}
-        {downgrade !== null && (
-          <section className="replay-error-summary" role="alert" data-replay-market-downgrade="HEDGE_HYBRID">
-            <strong>确认降级后再选择 {downgrade.entry.identity.symbol}</strong>
-            <span>{downgrade.message}</span>
-            <div>
-              <button
-                type="button"
-                disabled={selecting !== null}
-                onClick={() => void selectMarket(downgrade.entry, true)}
-              >
-                确认使用 HEDGE_HYBRID 并选择
-              </button>
-              <button type="button" disabled={selecting !== null} onClick={() => setDowngrade(null)}>
-                取消
-              </button>
-            </div>
-          </section>
-        )}
-        {catalog === null ? (
-          <div className="training-hub-empty"><div className="replay-loading-spinner" />正在读取可用商品…</div>
-        ) : entries.length === 0 ? (
-          <div className="training-hub-empty"><strong>没有匹配商品</strong><span>清空搜索词或刷新能力目录。</span></div>
-        ) : (
-          <div className="training-hub-card-grid replay-market-picker-grid">
-            {entries.map((entry) => {
-              const interval = entry.selected_base_interval;
-              const compatibility = entry.start_compatibility;
-              const available = interval !== null
-                && compatibility?.state === "READY";
-              return (
-                <article className="training-hub-card" key={`${entry.identity.exchange}:${entry.identity.market_type}:${entry.identity.symbol}`}>
-                  <header>
-                    <div><span>MARKET</span><h2>{entry.identity.symbol}</h2></div>
-                    <strong data-run-state={available ? "PAUSED" : "ERROR"}>{available ? "选项兼容" : "不支持本局"}</strong>
-                  </header>
-                  <dl>
-                    <div><dt>市场</dt><dd>{marketLabel(entry)}</dd></div>
-                    <div><dt>基础周期</dt><dd>{interval ?? "—"}</dd></div>
-                    <div><dt>合格窗口</dt><dd>{entry.eligible_window_count}</dd></div>
-                    <div><dt>来源</dt><dd>{run.source_kind}</dd></div>
-                  </dl>
-                  <p>{compatibility?.message ?? "服务端尚未返回本局时间兼容性。"}</p>
-                  <footer>
-                    <button
-                      type="button"
-                      disabled={!available || selecting !== null}
-                      onClick={() => void selectMarket(entry)}
-                    >
-                      {selecting === entry.identity.symbol
-                        ? run.source_kind === "AGG_TRADE"
-                          ? "正在下载并校验…"
-                          : "正在初始化…"
-                        : `选择 ${entry.identity.symbol}`}
-                    </button>
-                    {!available && <a href="/replay.html">另开一局</a>}
-                  </footer>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
-    </main>
-  );
-}
-
-function ReplayTrainingRunApp({ runId }: { runId: string }) {
   const [run, setRun] = useState<TrainingRunCard | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -341,6 +159,7 @@ function ReplayTrainingRunApp({ runId }: { runId: string }) {
   return (
     <ReplayInitializedRun
       key={`${run.run_id}:${selectedSessionId ?? run.adapter_session_id}`}
+      chartSettingsRuntime={chartSettingsRuntime}
       runId={run.run_id}
       sessionId={selectedSessionId ?? run.adapter_session_id}
       onSelectedSessionChange={setSelectedSessionId}
@@ -348,9 +167,18 @@ function ReplayTrainingRunApp({ runId }: { runId: string }) {
   );
 }
 
-/** Dedicated run-centric replay composition root. */
+/** Run-centric replay composition root. */
 export default function ReplayApp({ entry }: ReplayAppProps) {
+  const chartSettingsRuntime = useChartSettingsRuntime();
   if (entry.kind === "configure") return <ReplayTrainingHubApp />;
-  if (entry.kind === "run") return <ReplayTrainingRunApp key={entry.runId} runId={entry.runId} />;
+  if (entry.kind === "run") {
+    return (
+      <ReplayTrainingRunApp
+        key={entry.runId}
+        chartSettingsRuntime={chartSettingsRuntime}
+        runId={entry.runId}
+      />
+    );
+  }
   return <ReplayStatusSurface title="回放地址无效" message={entry.message} />;
 }

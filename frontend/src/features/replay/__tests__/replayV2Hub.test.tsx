@@ -19,6 +19,11 @@ import {
   evaluateTrainingRunDraft,
   evaluateTrainingRunSetupDraft,
 } from "../trainingHubModel.js";
+import {
+  formatReplayUtcDateTime,
+  formatTrainingEquity,
+  trainingRunStateLabel,
+} from "../trainingHubLabels.js";
 import { returnToTrainingHub } from "../trainingHubNavigation.js";
 import {
   TrainingHubLifecycle,
@@ -1121,6 +1126,10 @@ test("AGG initial market picker discloses unknown full-day download size", () =>
   assert.match(html, /data-replay-agg-trade-download-note/);
   assert.match(html, /首次选择需下载并校验整日成交档/);
   assert.match(html, /下载量未知/);
+  assert.match(html, /replay-market-picker/);
+  assert.match(html, /只看可用/);
+  assert.doesNotMatch(html, /training-hub-card/);
+  assert.doesNotMatch(html, /合格窗口/);
 });
 
 test("hub markup exposes saves, native actions, filters and explicit unavailable capability reasons", () => {
@@ -1194,8 +1203,11 @@ test("hub markup exposes saves, native actions, filters and explicit unavailable
   assert.match(endedCardHtml, /训练已结束，可打开复盘/);
   assert.match(endedCardHtml, /打开复盘/);
   assert.doesNotMatch(endedCardHtml, /训练可继续|继续训练|STALE_ENDED_STATUS/);
-  assert.match(html, /删除存档/);
+  assert.match(html, /删除/);
+  assert.doesNotMatch(html, /删除存档/);
   assert.match(html, /新建训练/);
+  assert.match(html, /待选商品|已暂停|已结束/);
+  assert.doesNotMatch(html, />AWAITING_MARKET<|>PAUSED<|>ENDED</);
   assert.match(html, /资金费.*OFF/);
   assert.match(html, /完整性模式/);
   assert.match(html, /HIDE_MINUTE/);
@@ -1234,6 +1246,12 @@ test("archive deletion uses an application-owned explicit confirmation dialog", 
   assert.match(html, /取消/);
   assert.match(html, /确认永久删除/);
   assert.match(html, /本机工作区偏好/);
+});
+
+test("hub and picker labels stay user-facing", () => {
+  assert.equal(trainingRunStateLabel("AWAITING_MARKET"), "待选商品");
+  assert.equal(formatTrainingEquity("10000"), "10,000");
+  assert.equal(formatReplayUtcDateTime(Date.UTC(2021, 11, 14, 12, 18)), "2021-12-14 12:18 UTC");
 });
 
 test("Hub parser rejects every retired v1 archive shape", () => {

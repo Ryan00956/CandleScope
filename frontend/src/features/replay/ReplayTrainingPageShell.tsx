@@ -22,7 +22,7 @@ import type { CustomIntervalRecord } from "../chart-session/chartSessionTypes.js
 import { useDrawingRuntime } from "../drawings/useDrawingRuntime.js";
 import { createEmptyDrawingDocument } from "../drawings/core/drawingDocument.js";
 import { drawingDocumentSessionRegistry } from "../drawings/core/drawingDocumentStore.js";
-import { useChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
+import type { ChartSettingsRuntime } from "../settings/chartAppearanceSettings.js";
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import {
   intervalsSemanticallyEquivalent,
@@ -80,6 +80,7 @@ export interface ReplayTrainingPageShellProps {
   readonly chartSurfaceRef: RefObject<ChartSurfaceHandle | null>;
   readonly chartSurfaceActions: ChartSurfaceActions;
   readonly viewer: ReplayViewerRuntime;
+  readonly chartSettingsRuntime: ChartSettingsRuntime;
 }
 
 interface ReplayIntervalViewportTransfer {
@@ -164,6 +165,7 @@ export default function ReplayTrainingPageShell({
   chartSurfaceRef,
   chartSurfaceActions,
   viewer,
+  chartSettingsRuntime,
 }: ReplayTrainingPageShellProps) {
   const [returningToHub, setReturningToHub] = useState(false);
   const [returnToHubError, setReturnToHubError] = useState<string | null>(null);
@@ -193,7 +195,7 @@ export default function ReplayTrainingPageShell({
       mode: typeof preferences.priceScaleMode === "number" ? preferences.priceScaleMode : 0,
     };
   });
-  const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
+  const { settings, setSettings, resolvedTheme } = chartSettingsRuntime;
   const drawings = useDrawingRuntime({ chartSurfaceActions, session: null });
   const activeIntervalViewportTransfer = intervalViewportTransfer !== null
     && intervalsSemanticallyEquivalent(

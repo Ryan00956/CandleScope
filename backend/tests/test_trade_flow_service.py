@@ -754,6 +754,42 @@ async def test_attach_rejects_identity_while_gap_is_open(tmp_path) -> None:
 
 
 @_async_test
+async def test_attach_rebases_on_contiguous_tail_after_old_gap(tmp_path) -> None:
+    factory = _Factory()
+    service = _service(
+        factory,
+        tmp_path,
+        engine=TradeFlowEngine(raw_ring_size=4, initial_bucket_complete=True),
+        max_repair_attempts=1,
+    )
+    await service.ensure_stream(_key(), consumer_id="recovered-tail")
+
+    await factory.emit(_event(1))
+    await factory.emit(_event(4))
+    await _wait_until(lambda: service.diagnostics()["repairs_exhausted"] == 1)
+    for trade_id in range(5, 10):
+        await factory.emit(_event(trade_id))
+    await _wait_until(lambda: service.diagnostics()["commands_processed"] == 7)
+
+    assert service.engine.gap_snapshot(IDENTITY)
+    attachment = service.attach(_key(), recent_limit=4)
+    assert [
+        trade.agg_trade_id
+        for trade in attachment.recent[IDENTITY]
+    ] == [6, 7, 8, 9]
+
+    await factory.emit(_event(10))
+    await _wait_until(lambda: attachment.subscription.pending_batch_count > 0)
+    batch = await attachment.subscription.receive()
+    assert batch is not None
+    assert batch.continuity is True
+    assert [trade.agg_trade_id for trade in batch.records] == [10]
+
+    await attachment.subscription.close()
+    await service.shutdown()
+
+
+@_async_test
 async def test_transient_repair_failure_retries_and_recovers(tmp_path) -> None:
     factory = _Factory()
     factory.fetch_failures_remaining = 1

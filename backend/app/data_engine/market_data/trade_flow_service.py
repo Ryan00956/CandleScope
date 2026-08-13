@@ -586,17 +586,31 @@ class TradeFlowService:
                 "trade-flow attachment requires active leased physical streams; "
                 f"unavailable for {unavailable}",
             )
+        bounded_recent = max(0, min(int(recent_limit), self._max_attach_recent))
         degraded = [
             identity
             for identity in identities
             if self.engine.continuity_degraded(identity)
         ]
-        if degraded:
+        # A repaired/recovered feed can have an old unresolved gap outside the
+        # bounded raw tail.  That gap must continue to keep affected rollups and
+        # archive coverage incomplete, but it must not permanently brick a new
+        # live tape subscription once the exact handoff snapshot is contiguous.
+        #
+        # This probe and the subscribe-then-snapshot section below are all
+        # synchronous, so the ingestion worker cannot advance between them.
+        unrecoverable = [
+            identity
+            for identity in degraded
+            if not _is_contiguous_tail(
+                self.engine.raw_tail(identity, bounded_recent),
+            )
+        ]
+        if unrecoverable:
             raise RuntimeError(
                 "trade-flow attachment requires contiguous retained history; "
-                f"unresolved or collapsed gap for {degraded}",
+                f"unresolved or collapsed gap for {unrecoverable}",
             )
-        bounded_recent = max(0, min(int(recent_limit), self._max_attach_recent))
         identity_set = frozenset(identities)
 
         # AppendBatchHub assigns existing pending records at flush time, not
@@ -1639,6 +1653,21 @@ def _looks_like_identity(value: object) -> bool:
         and len(value) == 3
         and all(isinstance(item, str) for item in value)
     )
+
+
+def _is_contiguous_tail(records: Iterable[NormalizedAggTrade]) -> bool:
+    """Return whether a non-empty attachment tail provides an exact ID anchor."""
+
+    iterator = iter(records)
+    try:
+        previous = next(iterator).agg_trade_id
+    except StopIteration:
+        return False
+    for trade in iterator:
+        if trade.agg_trade_id != previous + 1:
+            return False
+        previous = trade.agg_trade_id
+    return True
 
 
 def _identity_part(

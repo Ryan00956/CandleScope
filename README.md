@@ -2,7 +2,7 @@
 
 [简体中文](README_zh.md)
 
-Lightweight trading chart software built with FastAPI, React, Vite, and Lightweight Charts. CandleScope supports Binance and OKX market data, spot and perpetual market types, a modular Data Engine, exchange-aware symbol metadata, realtime WebSocket streams, built-in indicators, and Pine-style Python scripting through Pyne.
+Local-first trading chart software built with FastAPI, React, Vite, and Lightweight Charts. CandleScope supports Binance and OKX market data, spot and perpetual market types, multi-chart workspaces, realtime alerts, deterministic replay training, a modular Data Engine, exchange-aware symbol metadata, realtime WebSocket streams, built-in indicators, and Pine-style Python scripting through Pyne.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
@@ -16,6 +16,8 @@ Lightweight trading chart software built with FastAPI, React, Vite, and Lightwei
 
 - [Quick Start](#quick-start)
 - [What It Does](#what-it-does)
+- [Multi-Chart Workspaces](#multi-chart-workspaces)
+- [Alerts](#alerts)
 - [Replay Training](#replay-training)
 - [Architecture](#architecture)
 - [Backend](#backend)
@@ -100,7 +102,52 @@ CandleScope is a local-first market charting application with:
 - Pyne, a Pine-style Python runtime for custom indicators.
 - Interactive chart tools: line variants, freehand drawing, text annotations, Fibonacci retracement, and long/short position tools.
 - Multi-pane chart layout for price, volume, and oscillator indicators.
+- Persistent multi-chart workspaces with single through 4 × 4 layouts, custom
+  split layouts, saved workspaces, and up to four desktop windows where the
+  desktop shell is available.
+- Hierarchical chart-link groups for scoped market, interval, crosshair,
+  time-range, indicator, and drawing coordination.
+- Local price and indicator alerts with in-app, browser, and sound delivery;
+  an opt-in, signed, durable webhook outbox is available for explicitly
+  allowlisted destinations.
+- An independent deterministic replay-training workbench with server-authoritative
+  clocks, run-level multi-market accounts, and paper-only order simulation.
 - Settings tools for proxy testing, symbol metadata refresh, storage repair, gap scanning, and retention limits.
+
+## Multi-Chart Workspaces
+
+Open **Workspace** from the top bar to manage saved layouts, chart windows, and
+link groups without crowding the live chart controls. A workspace can use the
+built-in single, split, quad, 6, 8, 9, 12, or 16-chart templates, or a custom
+recursive split layout. Layout state, per-cell sessions, and link-group settings
+are saved locally.
+
+Link groups form a bounded tree (maximum depth four). Charts in the same group
+can share the selected peer settings. A child group can selectively receive
+parent propagation, but never sends those changes back upward; drawing layers
+remain same-group only. This keeps confirmation views and downstream analysis
+charts coordinated without creating cycles or accidental reverse updates.
+
+The optional desktop shell can place a workspace across up to four native
+windows. Capacity depends on the host, monitor/DPI configuration, selected
+symbols, intervals, indicators, and available market-data resources; a 4 × 4
+layout is a supported workspace template, not a universal hardware guarantee.
+See the [16×4 workspace execution record](docs/MULTI_CHART_WORKSPACE_16X4_EXECUTION_zh.md)
+for the measured implementation boundary and rollback guidance.
+
+## Alerts
+
+Local price and indicator rules can notify through the application, the browser,
+or sound. Browser permission is controlled by the browser, and all alert state
+and history remain local by default.
+
+Webhook delivery is disabled by default. When explicitly enabled, CandleScope
+requires an exact destination-host allowlist and a high-entropy signing secret,
+persists deliveries in a SQLite outbox, retries bounded transient failures, and
+uses at-least-once delivery semantics. Receivers must verify the HMAC and
+deduplicate `X-CandleScope-Delivery` IDs. See the
+[alert delivery boundary](docs/ALERTS_DELIVERY_zh.md) and
+[`backend/.env.alerts.example`](backend/.env.alerts.example) before enabling it.
 
 ## Replay Training
 
@@ -158,6 +205,13 @@ intermediate state materialization and coalesces delivery before an exact reset.
 Any active order, position, funding, risk, book, or multi-track dependency uses
 `FULL_EVENT_SCAN`. BAR runs report Tape/order flow as
 `UNSUPPORTED_SOURCE_MODE`, and aggregate trades are never labeled raw fills.
+
+A TrainingRun has a frozen start context and one server-authoritative paper
+account. Compatible, catalog-validated MarketTracks can be added to that run so
+the workbench can train across multiple markets without giving each chart an
+independent clock or account. This remains local historical training, not live
+order routing or a claim of private exchange queue, maker-priority, or hidden
+liquidity fidelity.
 
 Phase 9 adds an optional, replay-owned historical L2 archive for Binance USD-M.
 It accepts only an operator-captured SQLite snapshot plus ordered diff-depth
@@ -454,21 +508,17 @@ Important frontend pieces:
 
 | Path | Purpose |
 |---|---|
-| `frontend/src/App.jsx` | Composition root for runtime hooks and UI surfaces |
-| `frontend/src/components/MultiPaneChart.jsx` | Multi-pane chart layout |
-| `frontend/src/components/ChartWidget.jsx` | Lightweight Charts wrapper |
-| `frontend/src/components/DrawingToolbar.jsx` | Drawing tool controls |
-| `frontend/src/components/IndicatorPanel.jsx` | Lazy-loaded indicator browsing/configuration |
-| `frontend/src/components/IndicatorEditor.jsx` | Pyne/custom indicator editor, loaded through indicator workflows |
-| `frontend/src/components/SymbolSearch*.jsx` | Exchange-aware symbol search |
-| `frontend/src/components/WatchlistSidebar.jsx` | Watchlists and price tracking |
-| `frontend/src/components/SettingsModal.jsx` | Lazy-loaded proxy, data, chart, and maintenance settings |
-| `frontend/src/runtime` | Runtime orchestration grouped by chart, streams, exchange, preferences, and workflows |
-| `frontend/src/services/apiConfig.js` | API base and HTTP-to-WebSocket URL configuration |
-| `frontend/src/services/api.js` | Main backend API client |
-| `frontend/src/services/indicatorApi.js` | Indicator API client |
-| `frontend/src/hooks/useIndicators.js` | Indicator HTTP/WS integration |
-| `frontend/src/hooks/useDrawing.js` | Drawing state |
+| `frontend/src/app/App.tsx` | Application composition root and live/replay entry boundaries |
+| `frontend/src/app/MarketChartWorkspace.tsx` | Live chart workspace composition |
+| `frontend/src/app/LiveChartCell.tsx` | Per-cell live chart runtime |
+| `frontend/src/components/SingleChartPanes.tsx` | Lightweight Charts pane surface |
+| `frontend/src/components/DrawingToolbar.tsx` | Drawing tool controls |
+| `frontend/src/features/chart-workspace/WorkspacePanel.tsx` | Lazy-loaded workspace, layout, window, and link-group management |
+| `frontend/src/features/replay` | Independent replay training workbench and paper-trading surface |
+| `frontend/src/features/alerts` | Alert rule and notification client models |
+| `frontend/src/features/symbol-search` | Exchange-aware symbol search |
+| `frontend/src/features/watchlist` | Watchlists, price tracking, and subscription runtime |
+| `frontend/src/components/settings` | Lazy-loaded proxy, data, chart, and maintenance settings |
 
 Frontend commands:
 
@@ -654,21 +704,23 @@ CandleScope/
 │   │   │   └── storage/
 │   │   ├── indicator/
 │   │   │   ├── indicators/
-│   │   │   └── pyne/
+│   │   │   └── runtime routing
+│   │   ├── alerts/
+│   │   ├── replay/
 │   │   └── plugin_runtime/
 │   └── tests/
 ├── packages/
 │   ├── candlescope-plugin-pyne/
 │   ├── candlescope-plugin-pyne-workbench/
 │   ├── candlescope-plugin-sdk/
-│   └── pyne-runtime/
+│   └── plugin-conformance/
 └── frontend/
     ├── package.json
     └── src/
+        ├── app/
         ├── components/
-        ├── hooks/
+        ├── features/
         ├── services/
-        ├── editor/
         └── utils/
 ```
 

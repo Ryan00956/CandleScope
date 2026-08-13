@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻量级交易看盘软件。当前支持 Binance 与 OKX 行情、现货与永续市场、多模块 Data Engine、交易所感知的交易对元数据、实时 WebSocket、内置指标，以及通过 Pyne 提供的 Pine 风格 Python 指标脚本。
+CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的本地优先交易看盘软件。当前支持 Binance 与 OKX 行情、现货与永续市场、多图表工作区、实时警报、确定性回放训练、多模块 Data Engine、交易所感知的交易对元数据、实时 WebSocket、内置指标，以及通过 Pyne 提供的 Pine 风格 Python 指标脚本。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12-blue?logo=python" />
@@ -16,6 +16,9 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 
 - [快速开始](#快速开始)
 - [项目能力](#项目能力)
+- [多图表工作区](#多图表工作区)
+- [警报](#警报)
+- [回放训练](#回放训练)
 - [架构](#架构)
 - [Backfill 智能调度摘要](#backfill-智能调度摘要)
 - [后端](#后端)
@@ -98,7 +101,31 @@ CandleScope 是本地优先的行情图表应用，当前包括：
 - Pyne：Pine 风格 Python 自定义指标 runtime。
 - 交互式绘图工具：线段/射线/直线、自由画笔、文字、斐波那契回撤、多空仓位工具。
 - 价格、成交量、震荡指标的多窗格图表布局。
+- 可持久化的多图表工作区：单图到 4 × 4、可编辑分割布局、已保存工作区；桌面壳可用时最多四个窗口。
+- 分层图表联动组：可按范围同步市场、周期、十字线、时间范围、指标与绘图。
+- 本地价格和指标警报：应用内、浏览器与声音通知；对显式白名单地址可选启用带签名、可恢复的 Webhook Outbox。
+- 独立、确定性的回放训练工作台：服务端权威时钟、Run 级多市场账户和仅纸面委托模拟。
 - 设置页运维能力：proxy 测试、交易对元数据刷新、storage repair、gap scan、retention limits。
+
+## 多图表工作区
+
+从顶部栏打开 **工作区**，即可在不挤占主图控件的情况下管理已保存布局、图表窗口和联动组。一个工作区可使用单图、分割、四图、6、8、9、12、16 图模板，也可编辑为递归分割布局。布局、各 Cell 的会话和联动组设置会保存在本地。
+
+联动组是最大深度为四层的有向树。同组图表可共享选定的 peer 设置；子组可以选择接收父组传播，但不会反向影响父组。绘图图层仍仅在同组内共享，从而让确认图或下游分析图保持协同，且不会产生环路或意外的反向更新。
+
+可选的桌面壳可把一个工作区分布到最多四个原生窗口。实际容量取决于硬件、显示器与 DPI、商品和周期、指标以及可用行情资源；4 × 4 是受支持的工作区模板，不代表所有机器都能稳定承载。实现边界和回滚说明见 [16×4 工作区执行记录](docs/MULTI_CHART_WORKSPACE_16X4_EXECUTION_zh.md)。
+
+## 警报
+
+本地价格和指标规则可通过应用内、浏览器或声音通知。浏览器通知权限由浏览器控制，警报状态和历史默认保留在本地。
+
+Webhook 默认关闭。显式启用后，CandleScope 要求精确的目标主机白名单和高熵签名密钥；投递会写入 SQLite Outbox，对暂时性失败进行有上限重试，并采用至少一次投递语义。接收端必须验证 HMAC，并按 `X-CandleScope-Delivery` 去重。启用前请阅读 [警报投递边界](docs/ALERTS_DELIVERY_zh.md) 和 [`backend/.env.alerts.example`](backend/.env.alerts.example)。
+
+## 回放训练
+
+回放是独立、确定性的本地历史训练工作台。它使用服务端权威虚拟时钟和纸面账户，不会把实时页面的数据源或状态替换为回放数据。一个 TrainingRun 固定起点和账户范围后，可以加入经过权威目录验证且兼容的多个 MarketTrack，以便在多个市场上训练，而不会让每张图拥有独立的时钟或账户。
+
+回放不是实时下单路由，也不声称拥有交易所私有队列、挂单优先级或隐藏流动性的保真度。可用数据与执行保真度会在 Run 中显式披露；缺少必需的历史数据时，对应操作会 fail closed。完整的数据和运行边界请见 [英文回放训练说明](README.md#replay-training) 与 [后端回放文档](backend/README.md#deterministic-replay-runtime)。
 
 ## 架构
 
@@ -206,21 +233,17 @@ DataManager cache + EventBus
 
 | 路径 | 用途 |
 |---|---|
-| `frontend/src/App.jsx` | runtime hooks 和 UI surface 的组合根 |
-| `frontend/src/components/MultiPaneChart.jsx` | 多窗格图表布局 |
-| `frontend/src/components/ChartWidget.jsx` | Lightweight Charts 封装 |
-| `frontend/src/components/DrawingToolbar.jsx` | 绘图工具控制 |
-| `frontend/src/components/IndicatorPanel.jsx` | 懒加载的指标浏览和配置 |
-| `frontend/src/components/IndicatorEditor.jsx` | 通过指标工作流加载的 Pyne/自定义指标编辑器 |
-| `frontend/src/components/SymbolSearch*.jsx` | 交易所感知 symbol search |
-| `frontend/src/components/WatchlistSidebar.jsx` | 自选列表和价格跟踪 |
-| `frontend/src/components/SettingsModal.jsx` | 懒加载的 proxy、数据、图表和维护设置 |
-| `frontend/src/runtime` | 按 chart、streams、exchange、preferences、workflows 分组的 runtime 编排层 |
-| `frontend/src/services/apiConfig.js` | API base 和 HTTP 到 WebSocket URL 配置 |
-| `frontend/src/services/api.js` | 主要后端 API client |
-| `frontend/src/services/indicatorApi.js` | 指标 API client |
-| `frontend/src/hooks/useIndicators.js` | 指标 HTTP/WS 集成 |
-| `frontend/src/hooks/useDrawing.js` | 绘图状态 |
+| `frontend/src/app/App.tsx` | 应用组合根与 live/replay 入口边界 |
+| `frontend/src/app/MarketChartWorkspace.tsx` | 实时图表工作区组合 |
+| `frontend/src/app/LiveChartCell.tsx` | 单个 Cell 的实时图表 runtime |
+| `frontend/src/components/SingleChartPanes.tsx` | Lightweight Charts 图表窗格表面 |
+| `frontend/src/components/DrawingToolbar.tsx` | 绘图工具控制 |
+| `frontend/src/features/chart-workspace/WorkspacePanel.tsx` | 懒加载的工作区、布局、窗口和联动组管理 |
+| `frontend/src/features/replay` | 独立回放训练工作台和纸面交易界面 |
+| `frontend/src/features/alerts` | 警报规则和通知客户端模型 |
+| `frontend/src/features/symbol-search` | 交易所感知 symbol search |
+| `frontend/src/features/watchlist` | 自选列表、价格跟踪和订阅 runtime |
+| `frontend/src/components/settings` | 懒加载的 proxy、数据、图表和维护设置 |
 
 前端命令：
 
@@ -382,20 +405,23 @@ CandleScope/
 │   │   │   └── storage/
 │   │   ├── indicator/
 │   │   │   ├── indicators/
-│   │   │   └── pyne/
+│   │   │   └── runtime routing
+│   │   ├── alerts/
+│   │   ├── replay/
 │   │   └── plugin_runtime/
 │   └── tests/
 ├── packages/
 │   ├── candlescope-plugin-pyne/
+│   ├── candlescope-plugin-pyne-workbench/
 │   ├── candlescope-plugin-sdk/
-│   └── pyne-runtime/
+│   └── plugin-conformance/
 └── frontend/
     ├── package.json
     └── src/
+        ├── app/
         ├── components/
-        ├── hooks/
+        ├── features/
         ├── services/
-        ├── editor/
         └── utils/
 ```
 

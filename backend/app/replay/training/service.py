@@ -227,6 +227,16 @@ class _MarketSetupAdmission:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _OrderedSourceGoal:
+    """One immutable-source boundary planned before an ordered mutation."""
+
+    start_source_sequence: int
+    start_revision: int
+    target_source_sequence: int
+    target_virtual_time_ms: int
+    planned_count: int
+
 
 _SetupAdmissionCacheKey = tuple[str, str, str, str, str]
 
@@ -2312,6 +2322,11 @@ class TrainingRunService:
             actor_clock = actor.playback_snapshot()
             if (
                 actor_clock["state"] == "PLAYING"
+                and _stored_mapping(
+                    selected_snapshot.get("cursor"),
+                    field_name="selected adapter cursor",
+                ).get("at_end")
+                is not True
                 and selected_snapshot.get("controller_client_id")
                 != actor.playback_client_id
             ):
@@ -7272,9 +7287,10 @@ class TrainingRunService:
         control_plan: dict[str, object] | None = None
         advance_job: dict[str, object] | None = None
         advance_key: tuple[str, str] | None = None
+        source_goal: _OrderedSourceGoal | None = None
         if command.type is ReplayV2CommandType.ADVANCE:
             requested_basis = advance_basis(command.payload.get("basis"))
-            if requested_basis is AdvanceBasis.SOURCE_EVENT:
+            if requested_basis is AdvanceBasis.SOURCE_EVENT and len(ordered) != 1:
                 normalized = self._exact_payload(
                     command.payload,
                     {"basis", "count"},
@@ -7299,26 +7315,68 @@ class TrainingRunService:
         if command.type is ReplayV2CommandType.STEP_EVENT:
             step_event_payload = self._exact_payload(command.payload, {"count"})
             count = control_count(step_event_payload["count"])
+            if count > MAX_PLAYBACK_BATCH_UNITS:
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_INVALID",
+                    f"SOURCE_EVENT count must be between 1 and {MAX_PLAYBACK_BATCH_UNITS}",
+                    status_code=422,
+                    details={
+                        "basis": AdvanceBasis.SOURCE_EVENT.value,
+                        "requested_count": count,
+                        "max_count": MAX_PLAYBACK_BATCH_UNITS,
+                    },
+                )
             if str(binding["source_kind"]) != "AGG_TRADE":
                 raise TrainingRunError(
                     "REPLAY_CONTROL_UNSUPPORTED",
                     "STEP_EVENT is available only for AGG_TRADE runs",
                     status_code=409,
                 )
-            total_events: list[StableMarketEvent] = []
-            for _ in range(count):
-                next_time = await self._next_global_event_time(
-                    run_id=command.run_id,
-                    binding=binding,
-                    tracks=ordered,
+            if len(ordered) == 1:
+                source_goal = await self._ordered_source_goal(
+                    ordered,
+                    max_events=count,
+                    expected_snapshot=selected_snapshot,
                 )
-                wave = await self._advance_full_tracks_to(
-                    command=command,
-                    binding=binding,
-                    tracks=ordered,
-                    target_virtual_time_ms=next_time,
+                if source_goal is None:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_UNAVAILABLE",
+                        "all FULL market tracks reached the end of frozen history",
+                        status_code=409,
+                    )
+                total_events = list(
+                    await self._advance_full_tracks_to(
+                        command=command,
+                        binding=binding,
+                        tracks=ordered,
+                        target_virtual_time_ms=source_goal.target_virtual_time_ms,
+                        source_goal=source_goal,
+                    )
                 )
-                total_events.extend(wave)
+            else:
+                total_events = []
+                for _ in range(count):
+                    next_time = await self._next_global_event_time(
+                        run_id=command.run_id,
+                        binding=binding,
+                        tracks=ordered,
+                    )
+                    total_events.extend(
+                        await self._advance_full_tracks_to(
+                            command=command,
+                            binding=binding,
+                            tracks=ordered,
+                            target_virtual_time_ms=next_time,
+                        )
+                    )
+            control_plan = {
+                "contract": ADVANCE_CONTRACT_VERSION,
+                "basis": AdvanceBasis.SOURCE_EVENT.value,
+                "count": count,
+                "grain": "EVENT",
+                "legacy_alias": command.type.value,
+                "mode": "GLOBAL_ORDERED_INPUT_CLOCK",
+            }
         else:
             _v1_type, _v1_payload, plan = await self._translate_control(
                 command=command,
@@ -7352,6 +7410,21 @@ class TrainingRunService:
             control_plan["mode"] = "GLOBAL_ORDERED_INPUT_CLOCK"
             if binding.get("position_mode") == "HEDGE":
                 control_plan["input_clock"] = "PINNED_HEDGE_PUBLIC_SIMULATION"
+            if plan.get("basis") == AdvanceBasis.SOURCE_EVENT.value:
+                requested_count = control_count(plan.get("count"))
+                source_goal = await self._ordered_source_goal(
+                    ordered,
+                    max_events=requested_count,
+                    expected_snapshot=selected_snapshot,
+                )
+                if source_goal is None:
+                    raise TrainingRunError(
+                        "REPLAY_CONTROL_UNAVAILABLE",
+                        "all FULL market tracks reached the end of frozen history",
+                        status_code=409,
+                    )
+                target = source_goal.target_virtual_time_ms
+                control_plan["target_virtual_time_ms"] = target
             if not isinstance(target, int):
                 raise TrainingRunError(
                     "REPLAY_CONTROL_UNSUPPORTED",
@@ -7428,6 +7501,7 @@ class TrainingRunService:
                         tracks=ordered,
                         target_virtual_time_ms=target,
                         job=advance_job,
+                        source_goal=source_goal,
                     )
                 )
             except BaseException:
@@ -7473,6 +7547,10 @@ class TrainingRunService:
             viewer=viewer.to_dict(),
             data={
                 "consumed": (
+                    final["cursor"]["source_sequence"]
+                    - source_goal.start_source_sequence
+                    if source_goal is not None
+                    else
                     int(advance_job["consumed"])
                     if advance_job is not None
                     else len(total_events)
@@ -7482,7 +7560,10 @@ class TrainingRunService:
                 ),
                 "full_track_count": len(ordered),
                 "ordering_version": GLOBAL_ORDERING_VERSION,
-                "stable_order": [event.to_dict() for event in total_events],
+                "stable_order": [
+                    event.to_dict()
+                    for event in stable_market_event_order(total_events)
+                ],
                 **(
                     {
                         "stable_order_truncated": bool(
@@ -7542,6 +7623,19 @@ class TrainingRunService:
                     if len(tracks) < 1:
                         terminal_reason = "ORDERED_PLAYBACK_REQUIRES_A_FULL_TRACK"
                         break
+                    selected_session_id = str(binding["adapter_session_id"])
+                    selected = await self.replay_service.get_session(
+                        selected_session_id
+                    )
+                    selected_snapshot = self._snapshot(selected)
+                    cursor = _stored_mapping(
+                        selected_snapshot.get("cursor"),
+                        field_name="adapter cursor",
+                    )
+                    if cursor.get("at_end") is True:
+                        terminal_state = "ENDED"
+                        terminal_reason = "SOURCE_EXHAUSTED"
+                        break
                     playback_client_id = actor.playback_client_id
                     if playback_client_id is None:
                         terminal_reason = "CONTROLLER_LEASE_LOST"
@@ -7559,11 +7653,6 @@ class TrainingRunService:
                             break
                     if controller_lease_lost:
                         break
-                    selected_session_id = str(binding["adapter_session_id"])
-                    selected = await self.replay_service.get_session(
-                        selected_session_id
-                    )
-                    selected_snapshot = self._snapshot(selected)
                     if (
                         selected_snapshot.get("controller_client_id")
                         != playback_client_id
@@ -7571,14 +7660,6 @@ class TrainingRunService:
                         terminal_reason = "CONTROLLER_LEASE_LOST"
                         break
                     current_time = self._cursor_time(selected_snapshot)
-                    cursor = _stored_mapping(
-                        selected_snapshot.get("cursor"),
-                        field_name="adapter cursor",
-                    )
-                    if cursor.get("at_end") is True:
-                        terminal_state = "ENDED"
-                        terminal_reason = "SOURCE_EXHAUSTED"
-                        break
                     clock = actor.playback_snapshot()
                     profile_revision = _stored_counter(
                         clock["profile_revision"],
@@ -7608,6 +7689,7 @@ class TrainingRunService:
                             },
                         )
                     consumed_wall_seconds = 0.0
+                    source_goal: _OrderedSourceGoal | None = None
                     if basis is AdvanceBasis.VIRTUAL_TIME:
                         try:
                             next_time = await self._next_global_event_time(
@@ -7718,15 +7800,18 @@ class TrainingRunService:
                                     "SOURCE_EVENT playback requires exactly one FULL track",
                                     status_code=409,
                                 )
-                            target = await self._ordered_batch_target(
+                            source_goal = await self._ordered_source_goal(
                                 tracks,
                                 max_events=units,
+                                require_exact_count=False,
+                                expected_snapshot=selected_snapshot,
                             )
-                            if target is None:
+                            if source_goal is None:
                                 terminal_state = "ENDED"
                                 terminal_reason = "SOURCE_EXHAUSTED"
                                 break
-                            consumed_wall_seconds = units / rate
+                            target = source_goal.target_virtual_time_ms
+                            consumed_wall_seconds = source_goal.planned_count / rate
                             timeout = 0.0
                         else:
                             step_interval = (
@@ -7834,6 +7919,11 @@ class TrainingRunService:
                             stop_event=stop,
                             allow_final_state_batch=True,
                             audit_account_at_barrier=False,
+                            source_goal=(
+                                source_goal
+                                if basis is AdvanceBasis.SOURCE_EVENT
+                                else None
+                            ),
                         )
                         if consumed_wall_seconds > 0:
                             last_advance_wall += consumed_wall_seconds
@@ -7881,21 +7971,94 @@ class TrainingRunService:
                         reason=terminal_reason,
                     )
 
-    async def _ordered_batch_target(
+    async def _ordered_source_goal(
         self,
         tracks: tuple[Mapping[str, object], ...],
         *,
         max_events: int,
-    ) -> int | None:
-        targets: list[int] = []
+        require_exact_count: bool = True,
+        expected_snapshot: Mapping[str, object] | None = None,
+    ) -> _OrderedSourceGoal | None:
+        if max_events > MAX_PLAYBACK_BATCH_UNITS:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_INVALID",
+                f"SOURCE_EVENT count must be between 1 and {MAX_PLAYBACK_BATCH_UNITS}",
+                status_code=422,
+                details={
+                    "basis": AdvanceBasis.SOURCE_EVENT.value,
+                    "requested_count": max_events,
+                    "max_count": MAX_PLAYBACK_BATCH_UNITS,
+                },
+            )
+        if len(tracks) != 1:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_UNSUPPORTED",
+                "an exact source-event boundary requires exactly one FULL track",
+                status_code=409,
+            )
         for track in tracks:
-            plan = await self.replay_service.plan_source_chunk(
-                self._track_session_id(track),
-                target_time_ms=MAX_TIMESTAMP_MS,
+            session_id = self._track_session_id(track)
+            plan = await self.replay_service.scan_source_goal(
+                session_id,
                 max_events=max_events,
             )
-            if _stored_counter(plan["event_count"], field_name="event_count") == 0:
+            revision = _stored_counter(plan["revision"], field_name="revision")
+            cursor = _stored_mapping(
+                plan.get("start_cursor"), field_name="source goal start cursor"
+            )
+            start_sequence = _stored_counter(
+                cursor.get("source_sequence"), field_name="source_sequence"
+            )
+            if expected_snapshot is not None:
+                expected_cursor = _stored_mapping(
+                    expected_snapshot.get("cursor"),
+                    field_name="expected source goal cursor",
+                )
+                if (
+                    start_sequence
+                    != _stored_counter(
+                        expected_cursor.get("source_sequence"),
+                        field_name="expected source_sequence",
+                    )
+                    or revision
+                    != _stored_counter(
+                        expected_snapshot.get("revision"),
+                        field_name="expected revision",
+                    )
+                ):
+                    raise TrainingRunError(
+                        "GLOBAL_CLOCK_DIVERGED",
+                        "market source cursor changed before ordered preflight",
+                        status_code=409,
+                    )
+            event_count = _stored_counter(
+                plan["event_count"], field_name="event_count"
+            )
+            exhausted = plan.get("exhausted")
+            if not isinstance(exhausted, bool):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market source goal is missing its exhaustion state",
+                    status_code=503,
+                )
+            if event_count == 0:
                 return None
+            if require_exact_count and event_count != max_events:
+                if not exhausted:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "market source goal stopped before its requested boundary",
+                        status_code=503,
+                    )
+                raise TrainingRunError(
+                    "REPLAY_CONTROL_UNAVAILABLE",
+                    "source history cannot satisfy the requested event count",
+                    status_code=409,
+                    details={
+                        "requested_count": max_events,
+                        "available_count": event_count,
+                    },
+                )
             last_event_time_ms = plan.get("last_event_time_ms")
             if not isinstance(last_event_time_ms, int):
                 raise TrainingRunError(
@@ -7903,8 +8066,14 @@ class TrainingRunService:
                     "market event plan is missing its timestamp",
                     status_code=503,
                 )
-            targets.append(last_event_time_ms)
-        return min(targets) if targets else None
+            return _OrderedSourceGoal(
+                start_source_sequence=start_sequence,
+                start_revision=revision,
+                target_source_sequence=start_sequence + event_count,
+                target_virtual_time_ms=last_event_time_ms,
+                planned_count=event_count,
+            )
+        return None
 
     async def _end_multi_track_run(
         self,
@@ -8038,7 +8207,14 @@ class TrainingRunService:
         stop_event: asyncio.Event | None = None,
         allow_final_state_batch: bool = False,
         audit_account_at_barrier: bool = True,
+        source_goal: _OrderedSourceGoal | None = None,
     ) -> tuple[StableMarketEvent, ...]:
+        if source_goal is not None and len(tracks) != 1:
+            raise TrainingRunError(
+                "REPLAY_CONTROL_UNSUPPORTED",
+                "an exact source-event boundary requires exactly one FULL track",
+                status_code=409,
+            )
         hedge_mode = str(binding.get("position_mode")) == "HEDGE"
         if not hedge_mode:
             await self.account_history.guard_run(
@@ -8080,9 +8256,15 @@ class TrainingRunService:
                 job["status"] = "CANCELLED"
             if audit_account_at_barrier:
                 await self.audit_account(command.run_id)
-            return tuple(all_events)
+            return stable_market_event_order(all_events)
 
-        for _wave_index in range(10_000):
+        wave_budget = (
+            10_000
+            if source_goal is None
+            else max(10_000, (source_goal.planned_count + 1) * 4)
+        )
+        source_start_verified = False
+        for _wave_index in range(wave_budget):
             if (
                 cancel_event is not None
                 and cancel_event.is_set()
@@ -8092,24 +8274,65 @@ class TrainingRunService:
             snapshots: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
             times: set[int] = set()
             next_times: list[int] = []
+            market_sequences: list[int] = []
             for track in tracks:
                 session_id = self._track_session_id(track)
                 session = await self.replay_service.get_session(session_id)
                 snapshot = self._snapshot(session)
+                if source_goal is not None and not source_start_verified:
+                    snapshot_cursor = _stored_mapping(
+                        snapshot.get("cursor"), field_name="adapter cursor"
+                    )
+                    if (
+                        _stored_counter(
+                            snapshot.get("revision"), field_name="revision"
+                        )
+                        != source_goal.start_revision
+                        or _stored_counter(
+                            snapshot_cursor.get("source_sequence"),
+                            field_name="source_sequence",
+                        )
+                        != source_goal.start_source_sequence
+                    ):
+                        raise TrainingRunError(
+                            "GLOBAL_CLOCK_DIVERGED",
+                            "market source cursor changed after ordered preflight",
+                            status_code=409,
+                        )
+                    source_start_verified = True
                 snapshots.append((track, snapshot))
                 times.add(self._cursor_time(snapshot))
+                snapshot_cursor = _stored_mapping(
+                    snapshot.get("cursor"), field_name="adapter cursor"
+                )
+                market_sequences.append(
+                    _stored_counter(
+                        snapshot_cursor.get("source_sequence"),
+                        field_name="source_sequence",
+                    )
+                )
 
             final_state_profile = self._ordered_final_state_batch_profile(
                 binding=binding,
                 tracks=tracks,
                 snapshot=snapshots[0][1],
                 target_virtual_time_ms=target_virtual_time_ms,
-                enabled=allow_final_state_batch,
+                enabled=allow_final_state_batch and source_goal is None,
             )
             source_plan_limit = (
                 1 if final_state_profile is None else final_state_profile[0]
             )
+            if source_goal is not None:
+                remaining = source_goal.target_source_sequence - market_sequences[0]
+                if remaining < 0:
+                    raise TrainingRunError(
+                        "GLOBAL_CLOCK_DIVERGED",
+                        "market track crossed the planned source-event boundary",
+                        status_code=409,
+                    )
+                source_plan_limit = max(1, min(32, remaining))
             planned_event_times: dict[str, tuple[int, ...]] = {}
+            planned_source_boundaries: dict[str, int] = {}
             for track, _snapshot in snapshots:
                 session_id = self._track_session_id(track)
                 try:
@@ -8139,33 +8362,50 @@ class TrainingRunService:
                 event_count = _stored_counter(
                     plan["event_count"], field_name="event_count"
                 )
-                if final_state_profile is not None:
-                    raw_event_times = plan.get("event_times_ms")
-                    if not isinstance(raw_event_times, (list, tuple)):
-                        raise TrainingRunError(
-                            "TRAINING_RUN_STORAGE_DEGRADED",
-                            "batched market event plan is missing timestamps",
-                            status_code=503,
-                        )
-                    event_times = tuple(
-                        _stored_counter(value, field_name="source_event_time_ms")
-                        for value in raw_event_times
+                raw_event_times = plan.get("event_times_ms")
+                if not isinstance(raw_event_times, (list, tuple)):
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "market event plan is missing timestamps",
+                        status_code=503,
                     )
-                    if len(event_times) != event_count:
-                        raise TrainingRunError(
-                            "TRAINING_RUN_STORAGE_DEGRADED",
-                            "batched market event plan has an invalid timestamp count",
-                            status_code=503,
-                        )
-                    planned_event_times[str(track["track_id"])] = event_times
+                event_times = tuple(
+                    _stored_counter(value, field_name="source_event_time_ms")
+                    for value in raw_event_times
+                )
+                if len(event_times) != event_count:
+                    raise TrainingRunError(
+                        "TRAINING_RUN_STORAGE_DEGRADED",
+                        "market event plan has an invalid timestamp count",
+                        status_code=503,
+                    )
                 if event_count > 0:
-                    next_time = plan["last_event_time_ms"]
-                    if not isinstance(next_time, int):
-                        raise TrainingRunError(
-                            "TRAINING_RUN_STORAGE_DEGRADED",
-                            "market event plan is missing its timestamp",
-                            status_code=503,
-                        )
+                    preserve_final_state_batch = (
+                        source_goal is None and final_state_profile is not None
+                    )
+                    next_time = (
+                        event_times[-1]
+                        if preserve_final_state_batch
+                        else event_times[0]
+                    )
+                    cohort_count = 1
+                    if preserve_final_state_batch:
+                        cohort_count = len(event_times)
+                    else:
+                        while (
+                            cohort_count < len(event_times)
+                            and event_times[cohort_count] == next_time
+                        ):
+                            cohort_count += 1
+                    track_key = str(track["track_id"])
+                    planned_event_times[track_key] = event_times[:cohort_count]
+                    plan_cursor = _stored_mapping(
+                        plan.get("cursor"), field_name="source plan cursor"
+                    )
+                    planned_source_boundaries[track_key] = _stored_counter(
+                        plan_cursor.get("source_sequence"),
+                        field_name="source_sequence",
+                    ) + cohort_count
                     next_times.append(next_time)
             if len(times) != 1:
                 raise TrainingRunError(
@@ -8174,6 +8414,7 @@ class TrainingRunService:
                     status_code=409,
                 )
             current = next(iter(times))
+            current_source_sequence = market_sequences[0]
             target_actual_time_ms = self._actual_event_time_ms(
                 binding,
                 target_virtual_time_ms,
@@ -8224,8 +8465,14 @@ class TrainingRunService:
                     status_code=409,
                     details={"fallback_applied": False},
                 )
+            source_goal_reached = (
+                source_goal is None
+                or current_source_sequence == source_goal.target_source_sequence
+            )
             if (
                 current >= target_virtual_time_ms
+                and source_goal_reached
+                and (not next_times or min(next_times) > current)
                 and (next_account_virtual is None or next_account_virtual > current)
                 and (next_hedge_virtual is None or next_hedge_virtual > current)
             ):
@@ -8240,7 +8487,7 @@ class TrainingRunService:
                     job["current_virtual_time_ms"] = current
                 if audit_account_at_barrier:
                     await self.audit_account(command.run_id)
-                return tuple(all_events)
+                return stable_market_event_order(all_events)
             candidate_times = [*next_times, target_virtual_time_ms]
             if next_account_virtual is not None:
                 candidate_times.append(next_account_virtual)
@@ -8299,9 +8546,10 @@ class TrainingRunService:
                 item for item in hedge_events if item.event_phase == 70
             )
             failed_track: Mapping[str, object] = tracks[0]
+            market_cohort_incomplete = False
 
             async def advance_market_barrier() -> None:
-                nonlocal failed_track
+                nonlocal failed_track, market_cohort_incomplete
                 for barrier_track, before in snapshots:
                     failed_track = barrier_track
                     before_cursor = before.get("cursor")
@@ -8314,6 +8562,25 @@ class TrainingRunService:
                     before_sequence = _stored_counter(
                         before_cursor["source_sequence"],
                         field_name="source_sequence",
+                    )
+                    track_key = str(barrier_track["track_id"])
+                    planned_times = planned_event_times.get(track_key, ())
+                    planned_times_reach_wave = bool(planned_times) and (
+                        planned_times[-1] == wave_time
+                        if final_state_profile is not None
+                        else planned_times[0] == wave_time
+                    )
+                    event_times = (
+                        planned_times
+                        if planned_times_reach_wave
+                        else ()
+                    )
+                    adapter_source_boundary = (
+                        None
+                        if final_state_profile is not None
+                        else planned_source_boundaries[track_key]
+                        if event_times
+                        else before_sequence
                     )
                     after = await self._advance_adapter_to(
                         session_id=self._track_session_id(barrier_track),
@@ -8332,6 +8599,7 @@ class TrainingRunService:
                             if final_state_profile is None
                             else final_state_profile[1]
                         ),
+                        target_source_sequence=adapter_source_boundary,
                     )
                     after_cursor = after.get("cursor")
                     if not isinstance(after_cursor, Mapping):
@@ -8344,11 +8612,20 @@ class TrainingRunService:
                         after_cursor["source_sequence"],
                         field_name="source_sequence",
                     )
-                    if final_state_profile is not None:
-                        event_times = planned_event_times.get(
-                            str(barrier_track["track_id"]),
-                            (),
+                    if (
+                        adapter_source_boundary is not None
+                        and after_sequence != adapter_source_boundary
+                    ):
+                        raise TrainingRunError(
+                            "GLOBAL_CHECKPOINT_INCOMPLETE",
+                            "market advance did not reach its exact source boundary",
+                            status_code=503,
+                            details={
+                                "expected_source_sequence": adapter_source_boundary,
+                                "actual_source_sequence": after_sequence,
+                            },
                         )
+                    if event_times:
                         if after_sequence - before_sequence != len(event_times):
                             raise TrainingRunError(
                                 "GLOBAL_CHECKPOINT_INCOMPLETE",
@@ -8389,6 +8666,24 @@ class TrainingRunService:
                                     source_sequence=sequence,
                                 )
                             )
+                    continuation = await self.replay_service.plan_source_chunk(
+                        self._track_session_id(barrier_track),
+                        target_time_ms=wave_time,
+                        max_events=1,
+                    )
+                    market_cohort_incomplete = market_cohort_incomplete or (
+                        _stored_counter(
+                            continuation["event_count"], field_name="event_count"
+                        )
+                        > 0
+                    )
+
+            before_wave_state = tuple(
+                (self._cursor_time(snapshot), sequence)
+                for (_track, snapshot), sequence in zip(
+                    snapshots, market_sequences, strict=True
+                )
+            )
 
             try:
                 wave_events.extend(
@@ -8407,38 +8702,41 @@ class TrainingRunService:
                 )
                 if market_barrier:
                     await advance_market_barrier()
-                wave_events.extend(
-                    await self.store.apply_account_history_events(
-                        command.run_id,
-                        events=post_account_events,
-                        virtual_time_ms=wave_time,
+                if not market_cohort_incomplete:
+                    wave_events.extend(
+                        await self.store.apply_account_history_events(
+                            command.run_id,
+                            events=post_account_events,
+                            virtual_time_ms=wave_time,
+                        )
                     )
-                )
-                wave_events.extend(
-                    await self.store.apply_hedge_input_events(
-                        command.run_id,
-                        events=post_hedge_events,
-                        virtual_time_ms=wave_time,
+                    wave_events.extend(
+                        await self.store.apply_hedge_input_events(
+                            command.run_id,
+                            events=post_hedge_events,
+                            virtual_time_ms=wave_time,
+                        )
                     )
-                )
-                await self.store.finalize_account_history(
-                    command.run_id,
-                    write_audit=False,
-                    risk_virtual_time_ms=wave_time,
-                )
-                await self.store.finalize_hedge_inputs(
-                    command.run_id,
-                    risk_virtual_time_ms=wave_time,
-                )
-                wave_events.extend(
-                    await self.store.apply_hedge_input_events(
+                    await self.store.finalize_account_history(
                         command.run_id,
-                        events=simulation_hedge_events,
-                        virtual_time_ms=wave_time,
+                        write_audit=False,
+                        risk_virtual_time_ms=wave_time,
                     )
-                )
-                pending_liquidations = await self.store.pending_liquidations(
-                    command.run_id
+                    await self.store.finalize_hedge_inputs(
+                        command.run_id,
+                        risk_virtual_time_ms=wave_time,
+                    )
+                    wave_events.extend(
+                        await self.store.apply_hedge_input_events(
+                            command.run_id,
+                            events=simulation_hedge_events,
+                            virtual_time_ms=wave_time,
+                        )
+                    )
+                pending_liquidations = (
+                    ()
+                    if market_cohort_incomplete
+                    else await self.store.pending_liquidations(command.run_id)
                 )
                 if pending_liquidations and not market_barrier:
                     # Exact account marks can trigger liquidation between two
@@ -8477,7 +8775,9 @@ class TrainingRunService:
                 if job is not None and len(all_events) > 512:
                     del all_events[:-512]
                     job["stable_order_truncated"] = True
-            if market_barrier:
+            if market_barrier and (
+                not market_cohort_incomplete or source_goal is not None
+            ):
                 if pending_global_events:
                     await self.store.record_global_events(
                         command.run_id,
@@ -8486,6 +8786,60 @@ class TrainingRunService:
                     pending_global_events.clear()
                 else:
                     await self.store.checkpoint_market_tracks(command.run_id)
+            if market_cohort_incomplete and source_goal is not None:
+                reached = await self.replay_service.get_session(
+                    self._track_session_id(tracks[0])
+                )
+                reached_snapshot = self._snapshot(reached)
+                reached_cursor = _stored_mapping(
+                    reached_snapshot.get("cursor"), field_name="adapter cursor"
+                )
+                reached_sequence = _stored_counter(
+                    reached_cursor.get("source_sequence"),
+                    field_name="source_sequence",
+                )
+                if reached_sequence == source_goal.target_source_sequence:
+                    if job is not None:
+                        job["status"] = "COMPLETED"
+                        job["current_virtual_time_ms"] = wave_time
+                    # This is a durable phase-20 checkpoint inside one source
+                    # timestamp.  Later input phases must wait for the rest of
+                    # that timestamp's market cohort in a subsequent command.
+                    return stable_market_event_order(all_events)
+            after_wave_state: list[tuple[int, int]] = []
+            for track in tracks:
+                after_session = await self.replay_service.get_session(
+                    self._track_session_id(track)
+                )
+                after_snapshot = self._snapshot(after_session)
+                after_cursor = _stored_mapping(
+                    after_snapshot.get("cursor"), field_name="adapter cursor"
+                )
+                after_wave_state.append(
+                    (
+                        self._cursor_time(after_snapshot),
+                        _stored_counter(
+                            after_cursor.get("source_sequence"),
+                            field_name="source_sequence",
+                        ),
+                    )
+                )
+            if tuple(after_wave_state) == before_wave_state and not wave_events:
+                raise TrainingRunError(
+                    "GLOBAL_ADVANCE_STALLED",
+                    "global advance made no progress toward its ordered boundary",
+                    status_code=409,
+                    details={
+                        "current_virtual_time_ms": current,
+                        "target_virtual_time_ms": target_virtual_time_ms,
+                        "current_source_sequence": current_source_sequence,
+                        "target_source_sequence": (
+                            None
+                            if source_goal is None
+                            else source_goal.target_source_sequence
+                        ),
+                    },
+                )
             if job is not None:
                 job["consumed"] = int(job["consumed"]) + len(wave_events)
                 job["chunks"] = int(job["chunks"]) + 1
@@ -8714,6 +9068,7 @@ class TrainingRunService:
         initial_snapshot: Mapping[str, object] | None = None,
         final_state_max_events: int | None = None,
         require_empty_account: bool = False,
+        target_source_sequence: int | None = None,
     ) -> Mapping[str, object]:
         known_snapshot = initial_snapshot
         for _chunk_index in range(100_000):
@@ -8732,19 +9087,63 @@ class TrainingRunService:
                     status_code=503,
                 )
             current = int(cursor["virtual_time_ms"])
-            if current > target_virtual_time_ms:
+            current_source_sequence = _stored_counter(
+                cursor.get("source_sequence"), field_name="source_sequence"
+            )
+            if (
+                target_source_sequence is not None
+                and current_source_sequence > target_source_sequence
+            ):
+                raise TrainingRunError(
+                    "GLOBAL_CLOCK_DIVERGED",
+                    "market track crossed the planned source-event boundary",
+                    status_code=409,
+                )
+            source_boundary_reached = (
+                target_source_sequence is not None
+                and current_source_sequence == target_source_sequence
+            )
+            terminal_final_state = (
+                final_state_max_events is not None and cursor.get("at_end") is True
+            )
+            if current > target_virtual_time_ms and not (
+                source_boundary_reached and cursor.get("at_end") is True
+            ) and not terminal_final_state:
                 raise TrainingRunError(
                     "GLOBAL_CLOCK_DIVERGED",
                     "market track is ahead of the TrainingRun clock",
                     status_code=409,
                 )
-            if current == target_virtual_time_ms:
+            if source_boundary_reached and cursor.get("at_end") is True:
                 return snapshot
+            if terminal_final_state:
+                return snapshot
+            if (
+                current == target_virtual_time_ms
+                and (
+                    target_source_sequence is None
+                    or current_source_sequence == target_source_sequence
+                )
+            ):
+                return snapshot
+            remaining_source_events = (
+                None
+                if target_source_sequence is None
+                else target_source_sequence - current_source_sequence
+            )
             plan = await self.replay_service.plan_source_chunk(
                 session_id,
                 target_time_ms=target_virtual_time_ms,
                 max_events=(
-                    32 if final_state_max_events is None else final_state_max_events
+                    min(
+                        32 if final_state_max_events is None else final_state_max_events,
+                        remaining_source_events,
+                    )
+                    if remaining_source_events is not None
+                    and remaining_source_events > 0
+                    else 32
+                    if final_state_max_events is None
+                    else final_state_max_events
                 ),
             )
             count = _stored_counter(plan["event_count"], field_name="event_count")
@@ -8798,12 +9197,50 @@ class TrainingRunService:
                     details=exc.details,
                 ) from exc
             acknowledged_cursor = acknowledged.get("cursor")
-            if (
-                isinstance(acknowledged_cursor, Mapping)
-                and int(acknowledged_cursor["virtual_time_ms"])
-                == target_virtual_time_ms
-            ):
-                return acknowledged
+            if isinstance(acknowledged_cursor, Mapping):
+                acknowledged_time = int(acknowledged_cursor["virtual_time_ms"])
+                acknowledged_sequence = _stored_counter(
+                    acknowledged_cursor.get("source_sequence"),
+                    field_name="source_sequence",
+                )
+                if acknowledged_sequence < current_source_sequence or (
+                    acknowledged_sequence == current_source_sequence
+                    and acknowledged_time == current
+                ):
+                    raise TrainingRunError(
+                        "GLOBAL_ADVANCE_STALLED",
+                        "market adapter made no progress toward the ordered boundary",
+                        status_code=409,
+                        details={
+                            "current_virtual_time_ms": current,
+                            "target_virtual_time_ms": target_virtual_time_ms,
+                            "current_source_sequence": current_source_sequence,
+                            "target_source_sequence": target_source_sequence,
+                        },
+                    )
+                if (
+                    target_source_sequence is not None
+                    and acknowledged_sequence > target_source_sequence
+                ):
+                    raise TrainingRunError(
+                        "GLOBAL_CLOCK_DIVERGED",
+                        "market adapter crossed the planned source-event boundary",
+                        status_code=409,
+                    )
+                acknowledged_at_end = acknowledged_cursor.get("at_end") is True
+                if (
+                    target_source_sequence is not None
+                    and acknowledged_sequence == target_source_sequence
+                    and acknowledged_at_end
+                ):
+                    return acknowledged
+                if final_state_max_events is not None and acknowledged_at_end:
+                    return acknowledged
+                if acknowledged_time == target_virtual_time_ms and (
+                    target_source_sequence is None
+                    or acknowledged_sequence == target_source_sequence
+                ):
+                    return acknowledged
             known_snapshot = acknowledged
             await asyncio.sleep(0)
         raise TrainingRunError(

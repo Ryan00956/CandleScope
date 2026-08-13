@@ -1492,6 +1492,17 @@ class ReplayService:
                 max_events=max_events,
             )
 
+    async def scan_source_goal(
+        self,
+        session_id: str,
+        *,
+        max_events: int,
+    ) -> dict[str, object]:
+        """Return one actor-serialized, read-only ordered-source goal scan."""
+
+        async with self._lease_handle(session_id) as handle:
+            return await handle.actor.scan_source_goal(max_events=max_events)
+
     async def source_events_page(
         self,
         session_id: str,

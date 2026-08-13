@@ -53,6 +53,7 @@ ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v2"
 MIN_TASK_EXIT_GRACE_SECONDS = 0.05
 MAX_JOURNAL_ENTRIES = 4_096
 COMMAND_EVENT_LOOP_YIELD_INTERVAL = 64
+MAX_SOURCE_GOAL_SCAN_EVENTS = 100_000
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -337,6 +338,12 @@ class _SourceChunkPlanRequest:
 
 
 @dataclass(slots=True)
+class _SourceGoalScanRequest:
+    max_events: int
+    future: asyncio.Future[dict[str, object]]
+
+
+@dataclass(slots=True)
 class _SourceEventsPageRequest:
     after_sequence: int
     limit: int
@@ -374,6 +381,7 @@ _ActorRequest = (
     | _SummaryAuthorityRequest
     | _PeriodSummaryJumpRequest
     | _SourceChunkPlanRequest
+    | _SourceGoalScanRequest
     | _SourceEventsPageRequest
     | _SubscribeRequest
     | _UnsubscribeRequest
@@ -784,6 +792,23 @@ class ReplaySessionActor:
         loop = asyncio.get_running_loop()
         request = _SourceChunkPlanRequest(
             target_time_ms=target,
+            max_events=maximum,
+            future=loop.create_future(),
+        )
+        self._offer_request(request)
+        return await request.future
+
+    async def scan_source_goal(self, *, max_events: int) -> dict[str, object]:
+        """Scan one immutable-source goal without mutating the live cursor."""
+
+        self._ensure_accepting()
+        maximum = self._positive_int(max_events, "max_events")
+        if maximum > MAX_SOURCE_GOAL_SCAN_EVENTS:
+            raise ValueError(
+                f"max_events cannot exceed {MAX_SOURCE_GOAL_SCAN_EVENTS}"
+            )
+        loop = asyncio.get_running_loop()
+        request = _SourceGoalScanRequest(
             max_events=maximum,
             future=loop.create_future(),
         )
@@ -1422,6 +1447,13 @@ class ReplaySessionActor:
                             max_events=request.max_events,
                         )
                     )
+            elif isinstance(request, _SourceGoalScanRequest):
+                result = await self._scan_source_goal(
+                    max_events=request.max_events,
+                    cancelled=request.future.cancelled,
+                )
+                if not request.future.done():
+                    request.future.set_result(result)
             elif isinstance(request, _SourceEventsPageRequest):
                 if not request.future.done():
                     request.future.set_result(
@@ -3136,6 +3168,42 @@ class ReplaySessionActor:
                 next_event is not None
                 and self._event_time_ms(next_event) <= target_time_ms
             ),
+            "max_events": max_events,
+        }
+
+    async def _scan_source_goal(
+        self,
+        *,
+        max_events: int,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Perform one O(N) read-only scan from the current pinned cursor."""
+
+        source = self._fork_current_source()
+        start_cursor = self._cursor_dict()
+        count = 0
+        last_event_time_ms: int | None = None
+        while count < max_events:
+            if cancelled is not None and cancelled():
+                break
+            event = source.next()
+            if event is None:
+                break
+            count += 1
+            last_event_time_ms = self._event_time_ms(event)
+            if count % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
+                await asyncio.sleep(0)
+                if cancelled is not None and cancelled():
+                    break
+        was_cancelled = cancelled is not None and cancelled()
+        exhausted = False if was_cancelled else source.peek() is None
+        return {
+            "revision": self._revision,
+            "start_cursor": start_cursor,
+            "event_count": count,
+            "last_event_time_ms": last_event_time_ms,
+            "exhausted": exhausted,
+            "cancelled": was_cancelled,
             "max_events": max_events,
         }
 

@@ -14,6 +14,7 @@ import {
   replayOrderSizingAvailability,
   replayReduceOnlyUnavailableMessage,
 } from "../replayOrderSizing.js";
+import { replayOrderCtaState } from "../replayOrderCtaState.js";
 import { createReplayOrderAdvisoryScheduler } from "../replayOrderAdvisoryScheduler.js";
 import {
   replayMarkFidelityLabel,
@@ -426,11 +427,12 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
   const viewerReady = viewer.viewerState !== null;
   const config = store.sessionConfig;
   const ownsController = replayOwnsController(store, runtime.clientInstanceId);
-  const commandReady = ownsController
+  const commandAvailable = ownsController
     && store.connectionState === "connected"
-    && runtime.pendingCommand === null
-    && !viewer.viewerPending
     && store.state !== "ENDED";
+  const commandReady = commandAvailable
+    && runtime.pendingCommand === null
+    && !viewer.viewerPending;
   const portfolio = viewer.marketTracks?.portfolio ?? null;
   const contract = contractPortfolio(portfolio);
   const selectedTrackId = viewer.viewerState?.selected_track_id ?? "track-1";
@@ -908,6 +910,7 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
     if (
       !gate.enabled
       || !commandReady
+      || capacityPending
       || tradeValidationControllerRef.current !== null
     ) return;
     if (!quantity.trim() || (orderType !== "MARKET" && !price.trim())) {
@@ -1078,7 +1081,22 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
 
   const buyGate = ctaEnabled("BUY");
   const sellGate = ctaEnabled("SELL");
-  const submitting = viewer.viewerPending || tradeValidationSide !== null;
+  const orderSubmitting = tradeValidationSide !== null;
+  const transientOrderBlock = !commandReady || capacityPending;
+  const commonPermanentOrderBlock = !commandAvailable
+    || quantityExceedsCapacity
+    || !quantity.trim()
+    || (orderType !== "MARKET" && !price.trim());
+  const buyCtaState = replayOrderCtaState({
+    permanentlyUnavailable: commonPermanentOrderBlock || !buyGate.enabled,
+    transientlyBlocked: transientOrderBlock,
+    submitting: orderSubmitting,
+  });
+  const sellCtaState = replayOrderCtaState({
+    permanentlyUnavailable: commonPermanentOrderBlock || !sellGate.enabled,
+    transientlyBlocked: transientOrderBlock,
+    submitting: orderSubmitting,
+  });
   const leverageOptions = useMemo(() => {
     const presets = [1, 2, 3, 5, 10, 20, 25, 50, 75, 100, 125].filter((value) => value <= maxLeverage);
     if (!presets.includes(Math.trunc(maxLeverage)) && maxLeverage >= 1) {
@@ -1311,19 +1329,23 @@ export function ReplayPaperTradingDock({ runtime, viewer }: ReplayRightRailProps
             className="replay-submit-order"
             data-side="BUY"
             data-replay-action="place-order"
+            data-replay-transient-blocked={transientOrderBlock ? "true" : "false"}
             title={buyGate.title || undefined}
-            disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !buyGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
+            disabled={buyCtaState.disabled}
+            aria-disabled={buyCtaState.ariaDisabled}
             onClick={() => void placeOrderWithSide("BUY")}
-          >{submitting && (side === "BUY" || tradeValidationSide === "BUY") ? "提交中…" : ctaLabel("BUY")}</button>
+          >{tradeValidationSide === "BUY" ? "提交中…" : ctaLabel("BUY")}</button>
           <button
             type="button"
             className="replay-submit-order"
             data-side="SELL"
             data-replay-action="place-order"
+            data-replay-transient-blocked={transientOrderBlock ? "true" : "false"}
             title={sellGate.title || undefined}
-            disabled={!commandReady || submitting || capacityPending || quantityExceedsCapacity || !sellGate.enabled || !quantity.trim() || (orderType !== "MARKET" && !price.trim())}
+            disabled={sellCtaState.disabled}
+            aria-disabled={sellCtaState.ariaDisabled}
             onClick={() => void placeOrderWithSide("SELL")}
-          >{submitting && (side === "SELL" || tradeValidationSide === "SELL") ? "提交中…" : ctaLabel("SELL")}</button>
+          >{tradeValidationSide === "SELL" ? "提交中…" : ctaLabel("SELL")}</button>
         </div>
 
         <div id="replay-order-size-feedback" className="replay-trade-notice" role={notice?.tone === "error" || capacityValidationError !== null || reduceOnlyUnavailableMessage !== null ? "alert" : "status"} aria-live="polite" data-tone={notice?.tone ?? (capacityValidationError !== null || capacityError !== null || reduceOnlyUnavailableMessage !== null ? "error" : "idle")}>

@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import ReplayCapabilitySurface from "../components/ReplayCapabilitySurface.js";
 import ReplayControlBar from "../components/ReplayControlBar.js";
+import { boundedReplayAdvanceAmount } from "../replayAdvanceLimits.js";
 import { buildReplayCapabilityModel } from "../replayCapabilityModel.js";
 import {
   clearReplayWorkspacePreferences,
@@ -669,6 +670,24 @@ test("toolbar keeps idle time visible and scopes progress to an active cancelabl
   assert.match(controls, /advanceProgress === null \? "准备中…"/);
   assert.doesNotMatch(controls, /aria-label="回放进度"|持续训练|domainProgress/);
   assert.match(styles, /\.replay-advance-progress \{/);
+});
+
+test("toolbar bounds exact source-event advances to one interruptible batch", () => {
+  const controls = source("src/features/replay/components/ReplayControlBar.tsx");
+  const limits = source("src/features/replay/replayAdvanceLimits.ts");
+
+  assert.match(limits, /SOURCE_EVENT_MAX_MANUAL_COUNT = 128/);
+  assert.match(
+    controls,
+    /advanceBasis === "SOURCE_EVENT"\s*\? Math\.min\(globalMaxAdvanceCount, SOURCE_EVENT_MAX_MANUAL_COUNT\)/,
+  );
+  assert.match(controls, /const boundedAdvanceAmount = boundedReplayAdvanceAmount\(/);
+  assert.match(controls, /value=\{boundedAdvanceAmount\}/);
+  assert.match(controls, /submitCanonicalAdvance\(advanceBasis, boundedAdvanceAmount\)/);
+  assert.doesNotMatch(controls, /value=\{advanceAmount\}/);
+  assert.equal(boundedReplayAdvanceAmount(100_000, "SOURCE_EVENT", 100_000), 128);
+  assert.equal(boundedReplayAdvanceAmount(100_000, "BASE_BAR", 100_000), 100_000);
+  assert.equal(boundedReplayAdvanceAmount(0, "SOURCE_EVENT", 100_000), 1);
 });
 
 function replayControlBarMarkup({

@@ -11,6 +11,10 @@ import type {
 import type { ReplayRuntime } from "../useReplayRuntime.js";
 import type { ReplayPhase3ControlType, ReplayViewerRuntime } from "../useReplayViewerRuntime.js";
 import { replayAdvanceIsCancelable } from "../useReplayViewerRuntime.js";
+import {
+  boundedReplayAdvanceAmount,
+  SOURCE_EVENT_MAX_MANUAL_COUNT,
+} from "../replayAdvanceLimits.js";
 import { parseIntervalSeconds } from "../../../utils/intervals.js";
 
 const PLAYBACK_RATES = [1, 2, 5, 10, 30, 60, 120, 600, 1_000, 10_000] as const;
@@ -112,7 +116,15 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
     ? requestedAdvanceBasis
     : globalClock?.basis ?? "BASE_BAR";
   const playbackRate = requestedPlaybackRate ?? globalClock?.rate ?? 1;
-  const maxAdvanceCount = globalClock?.max_count ?? 100_000;
+  const globalMaxAdvanceCount = globalClock?.max_count ?? 100_000;
+  const maxAdvanceCount = advanceBasis === "SOURCE_EVENT"
+    ? Math.min(globalMaxAdvanceCount, SOURCE_EVENT_MAX_MANUAL_COUNT)
+    : globalMaxAdvanceCount;
+  const boundedAdvanceAmount = boundedReplayAdvanceAmount(
+    advanceAmount,
+    advanceBasis,
+    globalMaxAdvanceCount,
+  );
   const virtualTimeQuantumMs = globalClock?.virtual_time_quantum_ms ?? baseIntervalMs;
   const basisCanPlay = playbackBases.includes(advanceBasis);
   const canonicalAdvancePending = phase3Pending === "advance";
@@ -308,7 +320,7 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
             min={1}
             max={maxAdvanceCount}
             step={1}
-            value={advanceAmount}
+            value={boundedAdvanceAmount}
             disabled={disabled || effectiveState !== "PAUSED"}
             onChange={(event) => setAdvanceAmount(Math.min(
               maxAdvanceCount,
@@ -319,11 +331,11 @@ export default function ReplayControlBar({ runtime, viewer, publicTimeLabel }: R
         <button
           type="button"
           data-replay-action="advance"
-          title={`推进 ${advanceAmount} ${BASIS_LABELS[advanceBasis]}`}
+          title={`推进 ${boundedAdvanceAmount} ${BASIS_LABELS[advanceBasis]}`}
           disabled={disabled || effectiveState !== "PAUSED"}
-          onClick={() => submitCanonicalAdvance(advanceBasis, advanceAmount)}
+          onClick={() => submitCanonicalAdvance(advanceBasis, boundedAdvanceAmount)}
         >
-          {canonicalAdvancePending ? "推进中…" : `推进 ${advanceAmount}`}
+          {canonicalAdvancePending ? "推进中…" : `推进 ${boundedAdvanceAmount}`}
         </button>
         {cancelableAdvancePending && (
           <button

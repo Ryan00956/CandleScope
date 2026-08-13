@@ -8066,11 +8066,20 @@ class TrainingRunService:
                     "market event plan is missing its timestamp",
                     status_code=503,
                 )
+            source_terminal_time_ms = plan.get("source_terminal_time_ms")
+            if not isinstance(source_terminal_time_ms, int):
+                raise TrainingRunError(
+                    "TRAINING_RUN_STORAGE_DEGRADED",
+                    "market event plan is missing its source terminal",
+                    status_code=503,
+                )
             return _OrderedSourceGoal(
                 start_source_sequence=start_sequence,
                 start_revision=revision,
                 target_source_sequence=start_sequence + event_count,
-                target_virtual_time_ms=last_event_time_ms,
+                target_virtual_time_ms=(
+                    source_terminal_time_ms if exhausted else last_event_time_ms
+                ),
                 planned_count=event_count,
             )
         return None
@@ -8485,6 +8494,22 @@ class TrainingRunService:
                 if job is not None:
                     job["status"] = "COMPLETED"
                     job["current_virtual_time_ms"] = current
+                terminal_time_ms = self._training_terminal_time_ms(binding)
+                if (
+                    str(binding.get("source_kind")) == "AGG_TRADE"
+                    and current >= terminal_time_ms
+                    and all(
+                        _stored_mapping(
+                            snapshot.get("cursor"), field_name="adapter cursor"
+                        ).get("at_end")
+                        is True
+                        for _track, snapshot in snapshots
+                    )
+                ):
+                    await self._finalize_deferred_full_tracks(
+                        command=command,
+                        tracks=tracks,
+                    )
                 if audit_account_at_barrier:
                     await self.audit_account(command.run_id)
                 return stable_market_event_order(all_events)
@@ -8600,6 +8625,9 @@ class TrainingRunService:
                             else final_state_profile[1]
                         ),
                         target_source_sequence=adapter_source_boundary,
+                        defer_source_terminal=(
+                            str(binding.get("source_kind")) == "AGG_TRADE"
+                        ),
                     )
                     after_cursor = after.get("cursor")
                     if not isinstance(after_cursor, Mapping):
@@ -8744,6 +8772,25 @@ class TrainingRunService:
                     # account time before cancel/close mutations are issued.
                     await advance_market_barrier()
                     market_barrier = True
+                    # Advancing an adapter refreshes its broker projection and
+                    # therefore replaces any authoritative account/HEDGE mark
+                    # overlay. Reapply the pinned input after alignment so the
+                    # durable risk recheck and close plan use the same mark that
+                    # triggered liquidation.
+                    if hedge_mode:
+                        await self.store.finalize_hedge_inputs(
+                            command.run_id,
+                            risk_virtual_time_ms=wave_time,
+                        )
+                    else:
+                        await self.store.finalize_account_history(
+                            command.run_id,
+                            write_audit=False,
+                            risk_virtual_time_ms=wave_time,
+                        )
+                    pending_liquidations = await self.store.pending_liquidations(
+                        command.run_id
+                    )
             except (ReplayDomainError, TrainingRunError) as exc:
                 await self._fail_closed_multi_track(
                     run_id=command.run_id,
@@ -9049,6 +9096,26 @@ class TrainingRunService:
                 candidates.append(
                     self._virtual_event_time_ms(binding, next_hedge_actual)
                 )
+        if not candidates and str(binding.get("source_kind")) == "AGG_TRADE":
+            terminal_time_ms = self._training_terminal_time_ms(binding)
+            snapshots = [
+                self._snapshot(
+                    await self.replay_service.get_session(
+                        self._track_session_id(track)
+                    )
+                )
+                for track in tracks
+            ]
+            if all(
+                _stored_mapping(
+                    snapshot.get("cursor"), field_name="adapter cursor"
+                ).get("at_end")
+                is True
+                for snapshot in snapshots
+            ):
+                current_times = [self._cursor_time(snapshot) for snapshot in snapshots]
+                if any(current < terminal_time_ms for current in current_times):
+                    candidates.append(terminal_time_ms)
         if not candidates:
             raise TrainingRunError(
                 "REPLAY_CONTROL_UNAVAILABLE",
@@ -9056,6 +9123,88 @@ class TrainingRunService:
                 status_code=409,
             )
         return min(candidates)
+
+    @staticmethod
+    def _training_terminal_time_ms(binding: Mapping[str, object]) -> int:
+        actual_start_ms = _stored_counter(
+            binding.get("actual_replay_start_ms"),
+            field_name="actual_replay_start_ms",
+        )
+        actual_end_ms = _stored_counter(
+            binding.get("actual_replay_end_ms"),
+            field_name="actual_replay_end_ms",
+        )
+        adapter_config = _stored_mapping(
+            binding.get("adapter_config"), field_name="adapter_config"
+        )
+        public_start_ms = (
+            _stored_counter(
+                binding.get("synthetic_origin_ms"),
+                field_name="synthetic_origin_ms",
+            )
+            if adapter_config.get("blind_mode") is True
+            else actual_start_ms
+        )
+        return public_start_ms + actual_end_ms - actual_start_ms
+
+    async def _finalize_deferred_full_tracks(
+        self,
+        *,
+        command: ReplayV2Command,
+        tracks: tuple[Mapping[str, object], ...],
+    ) -> None:
+        """End actors only after the committed global terminal input barrier."""
+
+        for track in tracks:
+            session_id = self._track_session_id(track)
+            session = await self.replay_service.get_session(session_id)
+            snapshot = self._snapshot(session)
+            if snapshot.get("state") == "ENDED":
+                continue
+            cursor = _stored_mapping(
+                snapshot.get("cursor"), field_name="adapter cursor"
+            )
+            if cursor.get("at_end") is not True:
+                raise TrainingRunError(
+                    "GLOBAL_CHECKPOINT_INCOMPLETE",
+                    "market track source is not exhausted at terminal finalize",
+                    status_code=503,
+                    details={"track_id": track["track_id"]},
+                )
+            snapshot = await self._ensure_track_controller(
+                session_id=session_id,
+                client_instance_id=command.client_instance_id,
+                command_id=command.command_id,
+                known_snapshot=snapshot,
+            )
+            finalize = ReplayCommand(
+                protocol=REPLAY_PROTOCOL,
+                command_id=self._multi_command_id(
+                    command.command_id,
+                    str(track["track_id"]),
+                    InternalCommandType.FINALIZE_DEFERRED_TERMINAL.value,
+                    _stored_counter(snapshot["revision"], field_name="revision"),
+                ),
+                client_instance_id=command.client_instance_id,
+                expected_revision=_stored_counter(
+                    snapshot["revision"], field_name="revision"
+                ),
+                type=InternalCommandType.FINALIZE_DEFERRED_TERMINAL,
+                payload={},
+            )
+            try:
+                await self.replay_service.command(
+                    session_id,
+                    finalize,
+                    _training_internal=True,
+                )
+            except ReplayDomainError as exc:
+                raise TrainingRunError(
+                    exc.code.value,
+                    exc.message,
+                    status_code=exc.http_status,
+                    details=exc.details,
+                ) from exc
 
     async def _advance_adapter_to(
         self,
@@ -9069,6 +9218,7 @@ class TrainingRunService:
         final_state_max_events: int | None = None,
         require_empty_account: bool = False,
         target_source_sequence: int | None = None,
+        defer_source_terminal: bool = False,
     ) -> Mapping[str, object]:
         known_snapshot = initial_snapshot
         for _chunk_index in range(100_000):
@@ -9099,23 +9249,15 @@ class TrainingRunService:
                     "market track crossed the planned source-event boundary",
                     status_code=409,
                 )
-            source_boundary_reached = (
-                target_source_sequence is not None
-                and current_source_sequence == target_source_sequence
-            )
             terminal_final_state = (
                 final_state_max_events is not None and cursor.get("at_end") is True
             )
-            if current > target_virtual_time_ms and not (
-                source_boundary_reached and cursor.get("at_end") is True
-            ) and not terminal_final_state:
+            if current > target_virtual_time_ms and not terminal_final_state:
                 raise TrainingRunError(
                     "GLOBAL_CLOCK_DIVERGED",
                     "market track is ahead of the TrainingRun clock",
                     status_code=409,
                 )
-            if source_boundary_reached and cursor.get("at_end") is True:
-                return snapshot
             if terminal_final_state:
                 return snapshot
             if (
@@ -9149,7 +9291,11 @@ class TrainingRunService:
             count = _stored_counter(plan["event_count"], field_name="event_count")
             if count > 0:
                 if final_state_max_events is None:
-                    v1_type: CommandType | InternalCommandType = CommandType.STEP
+                    v1_type: CommandType | InternalCommandType = (
+                        InternalCommandType.STEP_DEFER_TERMINAL
+                        if defer_source_terminal
+                        else CommandType.STEP
+                    )
                     payload: dict[str, object] = {"count": count}
                 else:
                     v1_type = InternalCommandType.FAST_FORWARD_FINAL_STATE
@@ -9228,12 +9374,6 @@ class TrainingRunService:
                         status_code=409,
                     )
                 acknowledged_at_end = acknowledged_cursor.get("at_end") is True
-                if (
-                    target_source_sequence is not None
-                    and acknowledged_sequence == target_source_sequence
-                    and acknowledged_at_end
-                ):
-                    return acknowledged
                 if final_state_max_events is not None and acknowledged_at_end:
                     return acknowledged
                 if acknowledged_time == target_virtual_time_ms and (

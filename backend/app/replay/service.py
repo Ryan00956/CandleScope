@@ -1873,6 +1873,8 @@ class ReplayService:
                 InternalCommandType.REVEAL_HISTORY_AUTHORIZED,
                 InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT,
                 InternalCommandType.FAST_FORWARD_FINAL_STATE,
+                InternalCommandType.STEP_DEFER_TERMINAL,
+                InternalCommandType.FINALIZE_DEFERRED_TERMINAL,
             }
             and not _training_internal
         ):

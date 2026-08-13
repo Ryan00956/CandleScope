@@ -17,6 +17,8 @@ class InternalCommandType(str, Enum):
     REVEAL_HISTORY_AUTHORIZED = "_training_reveal_history"
     FAST_FORWARD_EMPTY_ACCOUNT = "_training_fast_forward_empty_account"
     FAST_FORWARD_FINAL_STATE = "_training_fast_forward_final_state"
+    STEP_DEFER_TERMINAL = "_training_step_defer_terminal"
+    FINALIZE_DEFERRED_TERMINAL = "_training_finalize_deferred_terminal"
 
     def __str__(self) -> str:
         return self.value

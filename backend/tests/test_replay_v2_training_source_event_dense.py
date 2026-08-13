@@ -14,6 +14,7 @@ from app.data_engine.storage.raw_trade_archive import (
 )
 from app.replay.service import ReplayService
 from app.replay.constants import CommandType, REPLAY_PROTOCOL
+from app.replay.internal_commands import InternalCommandType
 from app.replay.models import ReplayCommand
 from app.replay.storage import ReplaySQLiteStore
 from app.replay.training.commands import ReplayV2Command
@@ -43,6 +44,8 @@ pytestmark = pytest.mark.anyio
 
 DENSE_EVENT_TIME_MS = TRADE_REPLAY_START_MS + 1_000
 TAIL_EVENT_TIME_MS = TRADE_REPLAY_START_MS + INTERVAL_MS + 1_000
+TAIL_RISK_EVENT_TIME_MS = TRADE_REPLAY_START_MS + 2 * INTERVAL_MS
+ASYMMETRIC_TAIL_EVENT_TIME_MS = TAIL_EVENT_TIME_MS + 10_000
 
 
 def _dense_trade_sources(
@@ -232,7 +235,7 @@ async def _asymmetric_dense_service(
             "source": "binance_public",
         }
         for index, (price, event_time) in enumerate(
-            ((200, DENSE_EVENT_TIME_MS), (201, TAIL_EVENT_TIME_MS))
+            ((200, DENSE_EVENT_TIME_MS), (201, ASYMMETRIC_TAIL_EVENT_TIME_MS))
         )
     ]
     archive.import_verified_day(
@@ -249,7 +252,7 @@ async def _asymmetric_dense_service(
             first_agg_trade_id=first_agg_trade_id,
             last_agg_trade_id=first_agg_trade_id + len(trades) - 1,
             first_trade_time_ms=DENSE_EVENT_TIME_MS,
-            last_trade_time_ms=TAIL_EVENT_TIME_MS,
+            last_trade_time_ms=ASYMMETRIC_TAIL_EVENT_TIME_MS,
         ),
     )
     settings = replay_settings(database)
@@ -315,6 +318,7 @@ async def _prepare_dense_hedge_request(
     request: TrainingRunCreateRequest,
     *,
     root: Path,
+    tail_mark_price: str | None = None,
 ) -> TrainingRunCreateRequest:
     assert service.training is not None
     start = request.requested_start_ms
@@ -376,12 +380,31 @@ async def _prepare_dense_hedge_request(
             "event_time_ms": start + minute * INTERVAL_MS,
             "event_kind": "MARK_INDEX",
             "payload": {
-                "mark_price": str(101 + minute),
-                "index_price": str(101 + minute),
+                "mark_price": (
+                    tail_mark_price
+                    if tail_mark_price is not None and minute == 2
+                    else str(101 + minute)
+                ),
+                "index_price": (
+                    tail_mark_price
+                    if tail_mark_price is not None and minute == 2
+                    else str(101 + minute)
+                ),
             },
         }
         for minute in range(1, TRADE_REPLAY_MINUTES + 1)
     )
+    if tail_mark_price is not None:
+        public_events.append(
+            {
+                "event_time_ms": TAIL_RISK_EVENT_TIME_MS,
+                "event_kind": "FUNDING",
+                "payload": {
+                    "funding_rate": "0.0001",
+                    "mark_price": tail_mark_price,
+                },
+            }
+        )
     public_events.sort(
         key=lambda item: (
             int(item["event_time_ms"]),
@@ -426,6 +449,17 @@ async def _prepare_dense_hedge_request(
                 "kind": "CREDIT",
                 "amount": "1",
             },
+            *(
+                [
+                    {
+                        "effective_time_ms": TAIL_RISK_EVENT_TIME_MS,
+                        "kind": "CREDIT",
+                        "amount": "1",
+                    }
+                ]
+                if tail_mark_price is not None
+                else []
+            ),
         ],
         adl_snapshots=[
             {
@@ -539,12 +573,14 @@ async def _create_run(
     service: ReplayService,
     *,
     root: Path,
+    tail_mark_price: str | None = None,
 ) -> tuple[str, str]:
     assert service.training is not None
     request = await _prepare_dense_hedge_request(
         service,
         await _base_request(service),
         root=root,
+        tail_mark_price=tail_mark_price,
     )
     return await _create_and_acquire(service, request)
 
@@ -1251,7 +1287,10 @@ async def test_exact_source_event_boundary_accepts_terminal_cursor_overshoot(
         run_id, session_id = await _create_run(
             service,
             root=tmp_path / f"terminal-{command_type.value}-inputs",
+            tail_mark_price="103",
         )
+        terminal_database = tmp_path / f"terminal-{command_type.value}.db"
+        initial_terminal_inputs = _input_cursors(terminal_database, run_id)
         result = await _send(
             service,
             run_id=run_id,
@@ -1272,6 +1311,17 @@ async def test_exact_source_event_boundary_accepts_terminal_cursor_overshoot(
             if event["event_phase"] == 20
         ]
         assert [event["source_sequence"] for event in market] == [1, 2, 3, 4]
+        final_terminal_inputs = _input_cursors(terminal_database, run_id)
+        assert final_terminal_inputs == {
+            "PUBLIC": initial_terminal_inputs["PUBLIC"] + 6,
+            "SIMULATION": initial_terminal_inputs["SIMULATION"] + 3,
+        }
+        terminal_events = await service.training.store.global_events(run_id)  # type: ignore[union-attr]
+        assert {
+            int(event["event_phase"])
+            for event in terminal_events
+            if int(event["actual_event_time_ms"]) > TAIL_EVENT_TIME_MS
+        } >= {30, 40, 70}
     finally:
         await service.shutdown(step_timeout=1.0)
 
@@ -1290,6 +1340,7 @@ async def test_source_event_playback_finishes_as_source_exhausted(
         run_id, session_id = await _create_run(
             service,
             root=tmp_path / "terminal-play-inputs",
+            tail_mark_price="103",
         )
         monkeypatch.setattr(
             "app.replay.training.service.discrete_playback_units",
@@ -1326,6 +1377,12 @@ async def test_source_event_playback_finishes_as_source_exhausted(
         assert terminal["snapshot"]["cursor"]["source_sequence"] == 4
         assert terminal["snapshot"]["cursor"]["at_end"] is True
         assert terminal["snapshot"]["state"] == "ENDED"
+        tail_phases = {
+            int(event["event_phase"])
+            for event in await service.training.store.global_events(run_id)
+            if int(event["actual_event_time_ms"]) > TAIL_EVENT_TIME_MS
+        }
+        assert tail_phases >= {30, 40, 70}
     finally:
         if run_id is not None and service.training is not None:
             actor = service.training._run_actors.get(run_id)
@@ -1333,6 +1390,111 @@ async def test_source_event_playback_finishes_as_source_exhausted(
                 task = actor.request_ordered_pause(reason="TEST_CLEANUP")
                 if task is not None:
                     await asyncio.gather(task, return_exceptions=True)
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_terminal_mark_liquidation_completes_before_deferred_actor_ends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = await _dense_service(
+        tmp_path / "terminal-liquidation.db",
+        tmp_path / "terminal-liquidation-trades",
+        dense_count=3,
+    )
+    try:
+        request = await _prepare_dense_hedge_request(
+            service,
+            await _base_request(service),
+            root=tmp_path / "terminal-liquidation-inputs",
+            tail_mark_price="1",
+        )
+        run_id, session_id = await _create_and_acquire(service, request)
+        liquidation_close_states: list[str] = []
+        replay_command = service.command
+
+        async def observe_liquidation_close(
+            adapter_session_id: str,
+            command: ReplayCommand,
+            *,
+            _training_internal: bool = False,
+        ) -> dict[str, object]:
+            if command.type is InternalCommandType.EXECUTE_REVEALED_REFERENCE_CLOSE:
+                snapshot = (await service.get_session(adapter_session_id))["snapshot"]
+                assert isinstance(snapshot, dict)
+                liquidation_close_states.append(str(snapshot["state"]))
+            return await replay_command(
+                adapter_session_id,
+                command,
+                _training_internal=_training_internal,
+            )
+
+        monkeypatch.setattr(service, "command", observe_liquidation_close)
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="terminal-liquidation-entry",
+            command_type=ReplayV2CommandType.PLACE_ORDER,
+            payload={
+                "client_order_id": "terminal-liquidation-entry",
+                "side": "BUY",
+                "position_side": "LONG",
+                "order_type": "MARKET",
+                "quantity": "290",
+                "reduce_only": False,
+                "limit_price": None,
+                "stop_price": None,
+            },
+        )
+        terminal = await _send(
+            service,
+            run_id=run_id,
+            session_id=session_id,
+            command_id="terminal-liquidation-step",
+            command_type=ReplayV2CommandType.STEP_EVENT,
+            payload={"count": 4},
+        )
+        assert terminal["state"] == "ENDED"
+        assert terminal["cursor"]["at_end"] is True
+        assert service.training is not None
+        projection = await service.training.get_market_tracks(run_id)
+        liquidations = projection["portfolio"]["liquidations"]
+        assert len(liquidations) == 1, {
+            "positions": projection["portfolio"]["positions"],
+            "risk": projection["portfolio"].get("risk"),
+            "hedge_inputs": projection["portfolio"].get("hedge_inputs"),
+            "available_equity": projection["portfolio"].get("available_equity"),
+        }
+        assert liquidations[0]["state"] == "COMPLETED"
+        assert any(
+            step["step_type"] in {"PARTIAL_LIQUIDATION", "FULL_LIQUIDATION"}
+            for step in liquidations[0]["steps"]
+        )
+        assert liquidation_close_states == ["PAUSED"]
+        assert _input_cursors(tmp_path / "terminal-liquidation.db", run_id) == {
+            "PUBLIC": 9,
+            "SIMULATION": 5,
+        }
+        terminal_events = await service.training.store.global_events(run_id)
+        tail_phases = [
+            int(event["event_phase"])
+            for event in terminal_events
+            if int(event["actual_event_time_ms"]) == TAIL_RISK_EVENT_TIME_MS
+        ]
+        assert {30, 40, 70}.issubset(tail_phases)
+        assert tail_phases == sorted(tail_phases)
+        ordering_keys = [
+            (
+                int(event["actual_event_time_ms"]),
+                int(event["event_phase"]),
+                str(event["track_id"]),
+                int(event["source_sequence"]),
+            )
+            for event in terminal_events
+        ]
+        assert len(ordering_keys) == len(set(ordering_keys))
+    finally:
         await service.shutdown(step_timeout=1.0)
 
 
@@ -1428,5 +1590,93 @@ async def test_multitrack_asymmetric_same_time_cohort_is_globally_ordered(
             session = await service.get_session(str(track["adapter_session_id"]))
             assert session["snapshot"]["state"] != "DEGRADED"
             assert session["snapshot"]["degraded_reason"] is None
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_multitrack_different_last_trade_times_drain_to_one_terminal_clock(
+    tmp_path: Path,
+) -> None:
+    service = await _asymmetric_dense_service(
+        tmp_path / "asymmetric-terminal.db",
+        tmp_path / "asymmetric-terminal-trades",
+    )
+    try:
+        assert service.training is not None
+        created = await service.training.create_run(await _base_request(service))
+        run_id = str(created["run"]["run_id"])
+        primary_session_id = str(created["run"]["adapter_session_id"])
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=primary_session_id,
+            command_id="asymmetric-terminal-add-eth",
+            command_type=ReplayV2CommandType.ADD_TRACK,
+            payload={
+                "exchange": "binance",
+                "market_type": "futures",
+                "symbol": "ETHUSDT",
+                "settlement_asset": "USDT",
+                "subscription_tier": "FULL",
+            },
+        )
+        await _send(
+            service,
+            run_id=run_id,
+            session_id=primary_session_id,
+            command_id="asymmetric-terminal-acquire",
+            command_type=ReplayV2CommandType.ACQUIRE_CONTROLLER,
+            payload={"takeover": False},
+        )
+
+        terminal = await _send(
+            service,
+            run_id=run_id,
+            session_id=primary_session_id,
+            command_id="asymmetric-terminal-step",
+            command_type=ReplayV2CommandType.STEP_EVENT,
+            payload={"count": 4},
+        )
+        assert terminal["state"] == "ENDED"
+        assert terminal["cursor"]["at_end"] is True
+
+        expected = [
+            (DENSE_EVENT_TIME_MS, 20, "track-1", 1),
+            (DENSE_EVENT_TIME_MS, 20, "track-1", 2),
+            (DENSE_EVENT_TIME_MS, 20, "track-2", 1),
+            (TAIL_EVENT_TIME_MS, 20, "track-1", 3),
+            (ASYMMETRIC_TAIL_EVENT_TIME_MS, 20, "track-2", 2),
+        ]
+        durable_keys = [
+            (
+                int(event["actual_event_time_ms"]),
+                int(event["event_phase"]),
+                str(event["track_id"]),
+                int(event["source_sequence"]),
+            )
+            for event in await service.training.store.global_events(run_id)
+        ]
+        assert durable_keys == expected
+
+        projection = await service.training.get_market_tracks(run_id)
+        assert projection["global_clock"]["state"] == "ENDED"
+        terminal_time = (
+            TRADE_REPLAY_START_MS + TRADE_REPLAY_MINUTES * INTERVAL_MS - 1
+        )
+        track_cursors: dict[str, tuple[int, int]] = {}
+        for track in projection["tracks"]:
+            session = await service.get_session(str(track["adapter_session_id"]))
+            snapshot = session["snapshot"]
+            assert snapshot["state"] == "ENDED"
+            assert snapshot["cursor"]["at_end"] is True
+            assert int(snapshot["cursor"]["virtual_time_ms"]) == terminal_time
+            track_cursors[str(track["symbol"])] = (
+                int(snapshot["cursor"]["source_sequence"]),
+                int(snapshot["cursor"]["virtual_time_ms"]),
+            )
+        assert track_cursors == {
+            "BTCUSDT": (3, terminal_time),
+            "ETHUSDT": (2, terminal_time),
+        }
     finally:
         await service.shutdown(step_timeout=1.0)

@@ -261,7 +261,10 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 str(exc),
             ) from exc
         return ParsedCommand(command_type, {"speed": speed})
-    if command_type is CommandType.STEP:
+    if command_type in {
+        CommandType.STEP,
+        InternalCommandType.STEP_DEFER_TERMINAL,
+    }:
         _exact_keys(payload, {"count"})
         return ParsedCommand(
             command_type,
@@ -273,6 +276,9 @@ def parse_command(command: ReplayCommand) -> ParsedCommand:
                 )
             },
         )
+    if command_type is InternalCommandType.FINALIZE_DEFERRED_TERMINAL:
+        _exact_keys(payload, set())
+        return ParsedCommand(command_type, {})
     if command_type is CommandType.ADVANCE_BY:
         _exact_keys(payload, {"ms"})
         return ParsedCommand(

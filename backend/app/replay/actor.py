@@ -49,7 +49,8 @@ from .sources.base import ReplayMarketSource, SourceCursor
 
 
 ACTOR_STATE_HASH_SCHEMA_VERSION = "replay-actor-state-hash.v1"
-ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v2"
+ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v3"
+LEGACY_ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION = "replay-actor-checkpoint-state.v2"
 MIN_TASK_EXIT_GRACE_SECONDS = 0.05
 MAX_JOURNAL_ENTRIES = 4_096
 COMMAND_EVENT_LOOP_YIELD_INTERVAL = 64
@@ -199,6 +200,7 @@ class _ActorRollback:
     journal_entries: tuple[Mapping[str, object], ...]
     final_state_anchor_source_sequence: int | None
     final_state_anchor_bar_open_ms: int | None
+    terminal_deferred: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +557,12 @@ class ReplaySessionActor:
         self._journal_entries: list[dict[str, object]] = []
         self._final_state_anchor_source_sequence: int | None = None
         self._final_state_anchor_bar_open_ms: int | None = None
+        # Training's ordered input lane may consume the immutable source tail
+        # before mark/funding/simulation inputs at the dataset horizon have
+        # been applied.  This state is explicit and checkpointed so an actor
+        # can remain tradeable and restartable until the coordinator drains
+        # those later phases and finalizes the session.
+        self._terminal_deferred = False
         self._controller_client_id: str | None = None
         self._controller_deadline_wall: float | None = None
         self._last_checkpoint_source_sequence = 0
@@ -1179,7 +1187,9 @@ class ReplaySessionActor:
                 )
             self._state = SessionState.PAUSED
             self._create_checkpoint(initial=True)
-        if self._state is SessionState.ENDED or self._source.exhausted():
+        if self._state is SessionState.ENDED or (
+            self._source.exhausted() and not self._terminal_deferred
+        ):
             self._state = SessionState.ENDED
         else:
             self._state = SessionState.PAUSED
@@ -1231,7 +1241,9 @@ class ReplaySessionActor:
         self._clock.pause()
         if self._state is not SessionState.ENDED:
             self._state = (
-                SessionState.ENDED if self._source.exhausted() else SessionState.PAUSED
+                SessionState.ENDED
+                if self._source.exhausted() and not self._terminal_deferred
+                else SessionState.PAUSED
             )
         if self._compute_state_hash() != target.state_hash:
             raise ReplayDomainError(
@@ -1944,20 +1956,73 @@ class ReplaySessionActor:
             return self._command_result(
                 command.command_id, {"speed": self._clock.speed}
             )
-        if command_type is CommandType.STEP:
+        if command_type in {
+            CommandType.STEP,
+            InternalCommandType.STEP_DEFER_TERMINAL,
+        }:
             self._require_state(SessionState.PAUSED, command_type)
+            defer_terminal = command_type is InternalCommandType.STEP_DEFER_TERMINAL
+            if defer_terminal and self.config.source_kind is not SourceKind.AGG_TRADE:
+                raise ReplayDomainError(
+                    ReplayErrorCode.UNSUPPORTED_SOURCE,
+                    "deferred terminal stepping requires aggregate-trade history",
+                )
             count = int(parsed.values["count"])
             await self._preflight_event_count(count)
             self._revision += 1
             consumed = 0
             for _ in range(count):
-                await self._process_source_event(publish=True, checkpoint=False)
+                await self._process_source_event(
+                    publish=True,
+                    checkpoint=False,
+                    defer_terminal=defer_terminal,
+                )
                 consumed += 1
                 if consumed % COMMAND_EVENT_LOOP_YIELD_INTERVAL == 0:
                     await asyncio.sleep(0)
-            if self._state is not SessionState.ENDED:
+            if self._terminal_deferred:
+                self._emit_status("terminal_deferred", mandatory=True)
+            elif self._state is not SessionState.ENDED:
                 self._emit_status("step_complete", mandatory=True)
-            return self._command_result(command.command_id, {"consumed": consumed})
+            return self._command_result(
+                command.command_id,
+                {
+                    "consumed": consumed,
+                    **(
+                        {"terminal_deferred": True}
+                        if self._terminal_deferred
+                        else {}
+                    ),
+                },
+            )
+        if command_type is InternalCommandType.FINALIZE_DEFERRED_TERMINAL:
+            self._require_state(SessionState.PAUSED, command_type)
+            if not self._terminal_deferred or not self._source.exhausted():
+                raise ReplayDomainError(
+                    ReplayErrorCode.INVALID_STATE_TRANSITION,
+                    "replay source has no deferred terminal to finalize",
+                )
+            terminal_time = self._source_terminal_time_ms()
+            if terminal_time < self._clock.virtual_time_ms:
+                raise ReplayDomainError(
+                    ReplayErrorCode.DATASET_MISMATCH,
+                    "deferred replay clock passed its immutable terminal",
+                )
+            self._clock.advance_to(terminal_time)
+            self._terminal_deferred = False
+            end_projection = await self._mark_ended(
+                reason="source_exhausted",
+                open_order_disposition="expire",
+                position_disposition="keep",
+                commit_command=True,
+            )
+            return self._command_result(
+                command.command_id,
+                {
+                    "session_end": end_projection,
+                    "terminal_deferred": False,
+                },
+            )
         if command_type is InternalCommandType.FAST_FORWARD_EMPTY_ACCOUNT:
             self._require_state(SessionState.PAUSED, command_type)
             if self._has_active_trading_path():
@@ -2582,6 +2647,7 @@ class ReplaySessionActor:
         publish: bool,
         publish_interactions: bool = False,
         checkpoint: bool = True,
+        defer_terminal: bool = False,
     ) -> bool:
         owns_candidate = self._pending_events is None
         rollback = self._capture_rollback() if owns_candidate else None
@@ -2596,6 +2662,7 @@ class ReplaySessionActor:
                 publish=publish,
                 publish_interactions=publish_interactions,
                 materialize_state=owns_candidate or publish or checkpoint,
+                defer_terminal=defer_terminal,
             )
         except BaseException:
             if rollback is not None:
@@ -2772,6 +2839,7 @@ class ReplaySessionActor:
         publish: bool,
         publish_interactions: bool = False,
         materialize_state: bool,
+        defer_terminal: bool = False,
     ) -> tuple[dict[str, object] | None, str | None, bool]:
         event = self._source.peek()
         if event is None:
@@ -2820,25 +2888,28 @@ class ReplaySessionActor:
             self._pending_source_events.append(self._event_payload(event))
         end_projection: Mapping[str, object] = {}
         if self._source.exhausted():
-            terminal_time = getattr(self._source, "terminal_time_ms", event_time)
-            terminal_time = validate_timestamp_ms(
-                terminal_time,
-                field_name="source_terminal_time_ms",
-            )
+            terminal_time = self._source_terminal_time_ms(fallback=event_time)
             if terminal_time < event_time:
                 raise ReplayDomainError(
                     ReplayErrorCode.DATASET_MISMATCH,
                     "replay source terminal time precedes its last event",
                 )
-            self._clock.advance_to(terminal_time)
-            end_projection = await self._finalize_reducer(
-                open_order_disposition="expire",
-                position_disposition="keep",
-            )
-            self._state = SessionState.ENDED
-            self._pause_clock()
-            self._controller_client_id = None
-            self._controller_deadline_wall = None
+            if defer_terminal:
+                self._terminal_deferred = True
+                self._state = SessionState.PAUSED
+                self._pause_clock()
+                self._status_reason = "terminal_deferred"
+            else:
+                self._clock.advance_to(terminal_time)
+                end_projection = await self._finalize_reducer(
+                    open_order_disposition="expire",
+                    position_disposition="keep",
+                )
+                self._terminal_deferred = False
+                self._state = SessionState.ENDED
+                self._pause_clock()
+                self._controller_client_id = None
+                self._controller_deadline_wall = None
         immediate_delivery = self._projection_requires_immediate_delivery(projection)
         should_publish = publish or (publish_interactions and immediate_delivery)
         if not materialize_state and not should_publish:
@@ -2994,6 +3065,7 @@ class ReplaySessionActor:
     ) -> Mapping[str, object]:
         if self._state is SessionState.ENDED:
             return {}
+        self._terminal_deferred = False
         projection = await self._finalize_reducer(
             open_order_disposition=open_order_disposition,
             position_disposition=position_disposition,
@@ -3004,6 +3076,7 @@ class ReplaySessionActor:
                 self._domain_command_position += 1
         self._pause_clock()
         self._state = SessionState.ENDED
+        self._status_reason = reason
         self._controller_client_id = None
         self._controller_deadline_wall = None
         self._emit(
@@ -3202,6 +3275,9 @@ class ReplaySessionActor:
             "start_cursor": start_cursor,
             "event_count": count,
             "last_event_time_ms": last_event_time_ms,
+            "source_terminal_time_ms": self._source_terminal_time_ms(
+                fallback=last_event_time_ms
+            ),
             "exhausted": exhausted,
             "cancelled": was_cancelled,
             "max_events": max_events,
@@ -3579,6 +3655,7 @@ class ReplaySessionActor:
                 self._final_state_anchor_source_sequence
             ),
             final_state_anchor_bar_open_ms=self._final_state_anchor_bar_open_ms,
+            terminal_deferred=self._terminal_deferred,
         )
 
     def _begin_candidate(
@@ -3644,6 +3721,7 @@ class ReplaySessionActor:
             rollback.final_state_anchor_source_sequence
         )
         self._final_state_anchor_bar_open_ms = rollback.final_state_anchor_bar_open_ms
+        self._terminal_deferred = rollback.terminal_deferred
         self._status_reason = rollback.status_reason
         self._controller_client_id = rollback.controller_client_id
         self._controller_deadline_wall = rollback.controller_deadline_wall
@@ -3964,6 +4042,7 @@ class ReplaySessionActor:
             "snapshot_ref_hash": self._snapshot_ref_hash,
             "session_config_hash": self._session_config_hash,
             "session_state": self._state.value,
+            "terminal_deferred": self._terminal_deferred,
             "virtual_time_ms": cursor.virtual_time_ms,
             "source_sequence": cursor.source_sequence,
             "source_cursor": {
@@ -4013,7 +4092,16 @@ class ReplaySessionActor:
             "component_state",
             "state_hash",
         }
-        if set(payload) != required:
+        payload_fields = set(payload)
+        schema_version = payload.get("schema_version")
+        expected_fields = (
+            required
+            if schema_version == LEGACY_ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION
+            else {*required, "terminal_deferred"}
+            if schema_version == ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION
+            else None
+        )
+        if expected_fields is None or payload_fields != expected_fields:
             raise ValueError("actor checkpoint fields are incompatible")
         if not self._checkpoint_matches_actor(payload):
             raise ReplayDomainError(
@@ -4071,6 +4159,13 @@ class ReplaySessionActor:
             raise ValueError("session_state is invalid") from exc
         if stored_state in {SessionState.INITIALIZING, SessionState.ERROR}:
             raise ValueError("session_state is not checkpoint-restorable")
+        terminal_deferred = (
+            False
+            if schema_version == LEGACY_ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION
+            else payload["terminal_deferred"]
+        )
+        if not isinstance(terminal_deferred, bool):
+            raise TypeError("terminal_deferred must be a boolean")
         expected_chain = self._require_digest(
             payload["event_chain_hash"],
             "event_chain_hash",
@@ -4171,10 +4266,19 @@ class ReplaySessionActor:
                 ReplayErrorCode.DATASET_MISMATCH,
                 "checkpoint virtual clock passed an unconsumed source event",
             )
-        if source.exhausted() and stored_state is not SessionState.ENDED:
+        if source.exhausted() and stored_state is not SessionState.ENDED and not (
+            stored_state is SessionState.PAUSED and terminal_deferred
+        ):
             raise ReplayDomainError(
                 ReplayErrorCode.DATASET_MISMATCH,
                 "exhausted checkpoint source is not marked ENDED",
+            )
+        if terminal_deferred and (
+            stored_state is not SessionState.PAUSED or not source.exhausted()
+        ):
+            raise ReplayDomainError(
+                ReplayErrorCode.DATASET_MISMATCH,
+                "deferred terminal checkpoint is not paused at source exhaustion",
             )
         component_state = payload["component_state"]
         if not isinstance(component_state, Mapping):
@@ -4182,6 +4286,7 @@ class ReplaySessionActor:
         self._invalidate_component_state()
         self._reducer.restore(component_state)
         self._source = source
+        self._terminal_deferred = terminal_deferred
         self._event_chain_hash = expected_chain
         self._clock = VirtualClock(
             initial_time_ms=virtual_time,
@@ -4190,7 +4295,8 @@ class ReplaySessionActor:
         )
         self._state = (
             SessionState.ENDED
-            if stored_state is SessionState.ENDED or source.exhausted()
+            if stored_state is SessionState.ENDED
+            or (source.exhausted() and not terminal_deferred)
             else SessionState.PAUSED
         )
         self._domain_command_position = domain_command_position
@@ -4218,7 +4324,11 @@ class ReplaySessionActor:
 
     def _checkpoint_matches_actor(self, payload: Mapping[str, object]) -> bool:
         return (
-            payload.get("schema_version") == ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION
+            payload.get("schema_version")
+            in {
+                ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION,
+                LEGACY_ACTOR_CHECKPOINT_STATE_SCHEMA_VERSION,
+            }
             and payload.get("core_version") == REPLAY_CORE_VERSION
             and payload.get("execution_version") == self._execution_version
             and payload.get("data_epoch") == self._data_epoch
@@ -4723,6 +4833,13 @@ class ReplaySessionActor:
     @staticmethod
     def _event_payload(event: object) -> dict[str, object]:
         return source_event_payload(event)
+
+    def _source_terminal_time_ms(self, *, fallback: int | None = None) -> int:
+        value = getattr(self._source, "terminal_time_ms", fallback)
+        if value is None:
+            cursor = self._source.cursor()
+            value = cursor.last_event_time_ms
+        return validate_timestamp_ms(value, field_name="source_terminal_time_ms")
 
     @staticmethod
     def _event_time_ms(event: object) -> int:

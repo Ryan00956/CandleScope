@@ -14,8 +14,10 @@ from app.replay.constants import (
     CommandType,
     ReplayEventType,
     SessionState,
+    SourceKind,
 )
 from app.replay.errors import ReplayDomainError, ReplayErrorCode
+from app.replay.internal_commands import InternalCommandType
 from app.replay.models import ReplayCommand, ReplayEvent
 from app.replay.projection import ProjectionBatch
 from tests.fixtures.replay.actor_fakes import (
@@ -39,7 +41,7 @@ def _async_test(function):
 
 def _command(
     command_id: str,
-    command_type: CommandType,
+    command_type: CommandType | InternalCommandType,
     *,
     revision: int,
     client: str = "tab-a",
@@ -53,6 +55,129 @@ def _command(
         type=command_type,
         payload=payload or {},
     )
+
+
+@_async_test
+async def test_training_deferred_terminal_is_restartable_and_public_step_still_ends() -> (
+    None
+):
+    config = replace(session_config(), source_kind=SourceKind.AGG_TRADE)
+    actor = _actor(
+        config=config,
+        reducer=CountingReducer(),
+        events=event_fixture(count=1),
+    )
+    await actor.start()
+    await actor.submit(_command("deferred-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0))
+    deferred = await actor.submit(
+        _command(
+            "deferred-step",
+            InternalCommandType.STEP_DEFER_TERMINAL,
+            revision=1,
+            payload={"count": 1},
+        )
+    )
+    assert deferred.state is SessionState.PAUSED
+    assert deferred.cursor.at_end is True
+    assert deferred.data["terminal_deferred"] is True
+    public = await actor.public_snapshot()
+    assert "terminal_deferred" not in public
+    checkpoint = await actor.checkpoint()
+    payload = CheckpointCodec().decode(checkpoint)
+    assert payload["schema_version"] == "replay-actor-checkpoint-state.v3"
+    assert payload["terminal_deferred"] is True
+    await actor.shutdown()
+
+    recovered = _actor(
+        config=config,
+        reducer=CountingReducer(),
+        events=event_fixture(count=1),
+        restore_checkpoint=checkpoint,
+    )
+    await recovered.start()
+    restored = await recovered.snapshot()
+    assert restored.state is SessionState.PAUSED
+    assert restored.cursor.at_end is True
+    acquired = await recovered.submit(
+        _command(
+            "recovered-acquire",
+            CommandType.ACQUIRE_CONTROLLER,
+            revision=restored.revision,
+        )
+    )
+    finalized = await recovered.submit(
+        _command(
+            "recovered-finalize",
+            InternalCommandType.FINALIZE_DEFERRED_TERMINAL,
+            revision=acquired.revision,
+        )
+    )
+    assert finalized.state is SessionState.ENDED
+    assert finalized.data["terminal_deferred"] is False
+    await recovered.shutdown()
+
+    public_actor = _actor(
+        config=config,
+        reducer=CountingReducer(),
+        events=event_fixture(count=1),
+    )
+    await public_actor.start()
+    await public_actor.submit(
+        _command("public-acquire", CommandType.ACQUIRE_CONTROLLER, revision=0)
+    )
+    public_step = await public_actor.submit(
+        _command(
+            "public-step",
+            CommandType.STEP,
+            revision=1,
+            payload={"count": 1},
+        )
+    )
+    assert public_step.state is SessionState.ENDED
+    await public_actor.shutdown()
+
+
+@pytest.mark.parametrize("tamper", ("v2-extra", "v3-missing"))
+@_async_test
+async def test_deferred_terminal_checkpoint_schema_is_version_bound(tamper: str) -> None:
+    actor = _actor(reducer=CountingReducer())
+    await actor.start()
+    checkpoint = await actor.checkpoint()
+    payload = CheckpointCodec().decode(checkpoint)
+    if tamper == "v2-extra":
+        payload["schema_version"] = "replay-actor-checkpoint-state.v2"
+    else:
+        payload.pop("terminal_deferred")
+    restored = _actor(
+        reducer=CountingReducer(),
+        restore_checkpoint=CheckpointCodec().encode(payload),
+    )
+    with pytest.raises(ReplayDomainError) as mismatch:
+        await restored.start()
+    assert mismatch.value.code is ReplayErrorCode.DATASET_MISMATCH
+    assert "fields are incompatible" in str(mismatch.value.details["reason"])
+    await actor.shutdown()
+
+
+@_async_test
+async def test_legacy_v2_checkpoint_restores_with_terminal_deferral_disabled() -> None:
+    actor = _actor(reducer=CountingReducer())
+    await actor.start()
+    codec = CheckpointCodec()
+    payload = codec.decode(await actor.checkpoint())
+    payload["schema_version"] = "replay-actor-checkpoint-state.v2"
+    payload.pop("terminal_deferred")
+    restored = _actor(
+        reducer=CountingReducer(),
+        restore_checkpoint=codec.encode(payload),
+    )
+    await restored.start()
+    snapshot = await restored.snapshot()
+    assert snapshot.state is SessionState.PAUSED
+    assert snapshot.cursor.at_end is False
+    assert "terminal_deferred" not in await restored.public_snapshot()
+    await restored.shutdown()
+    await actor.shutdown()
 
 
 async def _wait_for_state(

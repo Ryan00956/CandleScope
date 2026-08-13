@@ -612,6 +612,22 @@ test("workspace preferences preserve an intentional empty rail in schema v2", ()
   );
 });
 
+test("replay preserves whole-panel collapse after every accordion body is closed", () => {
+  const storage = new MemoryStorage();
+  saveReplayWorkspacePreferences("collapsed-empty", {
+    railWidth: 372,
+    openViewIds: [],
+    panelCollapsed: true,
+    viewHeights: { "replay-watchlist": 286 },
+  }, storage);
+
+  const restored = loadReplayWorkspacePreferences("collapsed-empty", storage);
+
+  assert.deepEqual(restored.openViewIds, []);
+  assert.equal(restored.panelCollapsed, true);
+  assert.equal(restored.viewHeights["replay-watchlist"], 286);
+});
+
 test("replay modular rail panels fill their host instead of overflowing stored heights", () => {
   const marketRail = source("src/features/replay/components/ReplayRightMarketRail.tsx");
   const styles = source("src/index.css");

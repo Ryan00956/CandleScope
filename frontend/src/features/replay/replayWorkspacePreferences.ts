@@ -200,10 +200,8 @@ function normalize(
     && openViewIds.length === 0;
   if (migrateCollapsedEmpty) openViewIds = [...fallback.openViewIds];
   const panelCollapsed = migrateCollapsedEmpty
-    ? openViewIds.length > 0
-    : openViewIds.length === 0
-      ? false
-      : bool(source.panelCollapsed, fallback.panelCollapsed);
+    ? true
+    : bool(source.panelCollapsed, fallback.panelCollapsed);
   return {
     railWidth: clamp(source.railWidth, fallback.railWidth, MARKET_RAIL_MIN_WIDTH, MARKET_RAIL_MAX_WIDTH),
     openViewIds,
@@ -304,7 +302,6 @@ export function useReplayWorkspacePreferences(sessionId: string): {
       const next = normalize({
         ...current,
         openViewIds,
-        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       }, current);
       saveReplayWorkspacePreferences(sessionId, next, storage);
       return next;
@@ -315,25 +312,17 @@ export function useReplayWorkspacePreferences(sessionId: string): {
       const next = normalize({
         ...current,
         openViewIds,
-        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       }, current);
       saveReplayWorkspacePreferences(sessionId, next, storage);
       return next;
     }),
     setPanelCollapsed: (collapsed) => setPreferences((current) => {
-      const panelCollapsed = collapsed && current.openViewIds.length > 0;
-      if (panelCollapsed === current.panelCollapsed) return current;
-      const next = normalize({ ...current, panelCollapsed }, current);
+      if (collapsed === current.panelCollapsed) return current;
+      const next = normalize({ ...current, panelCollapsed: collapsed }, current);
       saveReplayWorkspacePreferences(sessionId, next, storage);
       return next;
     }),
     togglePanelCollapsed: () => setPreferences((current) => {
-      if (current.openViewIds.length === 0) {
-        if (!current.panelCollapsed) return current;
-        const next = normalize({ ...current, panelCollapsed: false }, current);
-        saveReplayWorkspacePreferences(sessionId, next, storage);
-        return next;
-      }
       const next = normalize({ ...current, panelCollapsed: !current.panelCollapsed }, current);
       saveReplayWorkspacePreferences(sessionId, next, storage);
       return next;

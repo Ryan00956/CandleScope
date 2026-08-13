@@ -71,7 +71,9 @@ function ReplayRightMarketRail({
       icon: <WatchlistRailIcon />,
       order: 10,
       sizing: "flex",
+      defaultHeight: 260,
       minHeight: MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
+      collapsedSummary: "回放标的",
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.paper,
@@ -82,6 +84,7 @@ function ReplayRightMarketRail({
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: MARKET_DOCK_MIN_HEIGHT,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: "纸面委托",
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.account,
@@ -92,6 +95,7 @@ function ReplayRightMarketRail({
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: 180,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: "仓位与账户",
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.activity,
@@ -102,6 +106,7 @@ function ReplayRightMarketRail({
       defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
       minHeight: MARKET_DOCK_MIN_HEIGHT,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: "回放市场数据",
     },
     {
       id: REPLAY_RAIL_VIEW_IDS.capabilities,
@@ -112,6 +117,7 @@ function ReplayRightMarketRail({
       defaultHeight: 280,
       minHeight: 160,
       maxHeight: MARKET_DOCK_MAX_HEIGHT,
+      collapsedSummary: "数据能力",
     },
   ], []);
 
@@ -174,7 +180,7 @@ function ReplayRightMarketRail({
             type="button"
             className="replay-market-dock-collapse"
             onClick={() => closeView(viewId)}
-            aria-label={`关闭${title}面板`}
+            aria-label={`折叠${title}面板`}
           >×</button>
         </header>
         <div className="replay-market-dock-body">

@@ -31,7 +31,7 @@ import {
 export interface OrderBookDockProps {
   runtime: OrderBookRuntime;
   height: number;
-  /** Closes this rail view (activity-bar style). */
+  /** Collapses this rail accordion view. */
   onRequestClose?(): void;
 }
 
@@ -264,8 +264,8 @@ function OrderBookDock({ runtime, height, onRequestClose }: OrderBookDockProps) 
             type="button"
             className="ob-collapse-button"
             onClick={onRequestClose}
-            title="关闭盘口"
-            aria-label="关闭盘口"
+            title="折叠盘口"
+            aria-label="折叠盘口"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
               <polyline points="9 18 15 12 9 6" />

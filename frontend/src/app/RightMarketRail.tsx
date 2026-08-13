@@ -8,7 +8,6 @@ import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSideb
 import { DEFAULT_WATCHLIST_WIDTH } from "../features/watchlist/watchlistStore.js";
 import {
   LIVE_RAIL_VIEW_IDS,
-  MARKET_DOCK_DEFAULT_HEIGHT,
   MARKET_DOCK_MAX_HEIGHT,
   MARKET_DOCK_MIN_HEIGHT,
   MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
@@ -50,7 +49,9 @@ const BUILT_IN_VIEWS: MarketRailViewDescriptor[] = [
     icon: <WatchlistRailIcon />,
     order: 10,
     sizing: "flex",
+    defaultHeight: 260,
     minHeight: MARKET_RAIL_MIN_SIDEBAR_HEIGHT,
+    collapsedSummary: "列表与行情",
   },
   {
     id: LIVE_RAIL_VIEW_IDS.orderBook,
@@ -58,9 +59,10 @@ const BUILT_IN_VIEWS: MarketRailViewDescriptor[] = [
     icon: <OrderBookRailIcon />,
     order: 20,
     sizing: "fixed",
-    defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
+    defaultHeight: MARKET_DOCK_MIN_HEIGHT,
     minHeight: MARKET_DOCK_MIN_HEIGHT,
     maxHeight: MARKET_DOCK_MAX_HEIGHT,
+    collapsedSummary: "市场深度",
   },
   {
     id: LIVE_RAIL_VIEW_IDS.tape,
@@ -68,9 +70,10 @@ const BUILT_IN_VIEWS: MarketRailViewDescriptor[] = [
     icon: <TapeRailIcon />,
     order: 30,
     sizing: "fixed",
-    defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
+    defaultHeight: MARKET_DOCK_MIN_HEIGHT,
     minHeight: MARKET_DOCK_MIN_HEIGHT,
     maxHeight: MARKET_DOCK_MAX_HEIGHT,
+    collapsedSummary: "实时逐笔",
   },
   {
     id: LIVE_RAIL_VIEW_IDS.profile,
@@ -78,9 +81,10 @@ const BUILT_IN_VIEWS: MarketRailViewDescriptor[] = [
     icon: <ProfileRailIcon />,
     order: 40,
     sizing: "fixed",
-    defaultHeight: MARKET_DOCK_DEFAULT_HEIGHT,
+    defaultHeight: 300,
     minHeight: MARKET_DOCK_MIN_HEIGHT,
     maxHeight: MARKET_DOCK_MAX_HEIGHT,
+    collapsedSummary: "成交分布",
   },
 ];
 

@@ -14,10 +14,6 @@ import {
   MARKET_RAIL_MIN_WIDTH,
   MARKET_RAIL_SPLITTER_HEIGHT,
 } from "../shared/marketRailLayout.js";
-import {
-  allocateRailViewHeights,
-  orderedOpenViews,
-} from "./marketRailOpenState.js";
 import type { MarketRailViewDescriptor } from "./marketRailTypes.js";
 
 type RailCssVars = CSSProperties & Record<`--${string}`, string | number>;
@@ -30,8 +26,9 @@ export interface MarketRightRailLayout {
 export interface MarketRightRailFrameProps {
   readonly source?: "live" | "replay";
   readonly views: readonly MarketRailViewDescriptor[];
+  /** Independently expanded accordion views. */
   readonly openViewIds: readonly string[];
-  /** Hide content panel without clearing openViewIds (full restore on expand). */
+  /** Hide the complete accordion without clearing expanded views. */
   readonly panelCollapsed?: boolean;
   readonly onToggleView: (viewId: string) => void;
   readonly onTogglePanelCollapsed?: () => void;
@@ -48,9 +45,25 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** VS Code-style right rail: activity bar + optional stacked multi-view panel. */
+function minViewHeight(view: MarketRailViewDescriptor): number {
+  return view.minHeight ?? (view.sizing === "flex" ? 120 : MARKET_DOCK_MIN_HEIGHT);
+}
+
+function maxViewHeight(view: MarketRailViewDescriptor): number {
+  return view.maxHeight ?? MARKET_DOCK_MAX_HEIGHT;
+}
+
+function preferredViewHeight(
+  view: MarketRailViewDescriptor,
+  heights: Readonly<Record<string, number>>,
+): number {
+  const preferred = heights[view.id]
+    ?? view.defaultHeight
+    ?? (view.sizing === "flex" ? 260 : MARKET_DOCK_DEFAULT_HEIGHT);
+  return clamp(Math.round(preferred), minViewHeight(view), maxViewHeight(view));
+}
+
 function PanelCollapseIcon({ collapsed }: { collapsed: boolean }) {
-  // Chevron: point outward (right) when collapsed to show expand; inward when open to hide.
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       {collapsed ? (
@@ -74,6 +87,7 @@ function PanelCollapseIcon({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+/** One shared free multi-open scroll accordion for live and replay runtimes. */
 export default function MarketRightRailFrame({
   source = "live",
   views,
@@ -89,38 +103,24 @@ export default function MarketRightRailFrame({
   downColor = "#ef4444",
   ariaLabel = "市场侧栏",
 }: MarketRightRailFrameProps) {
-  const railRef = useRef<HTMLElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const sectionRefs = useRef(new Map<string, HTMLElement>());
+  const pendingRevealRef = useRef<string | null>(null);
   const widthStartRef = useRef<{ x: number; width: number } | null>(null);
-  const heightStartRef = useRef<{
-    y: number;
-    aboveId: string;
-    belowId: string;
-    aboveHeight: number;
-    belowHeight: number;
-  } | null>(null);
+  const heightStartRef = useRef<{ y: number; viewId: string; height: number } | null>(null);
   const transientWidthRef = useRef<number | null>(null);
-  const [panelHeight, setPanelHeight] = useState(0);
   const [widthResizing, setWidthResizing] = useState(false);
-  const [heightResizing, setHeightResizing] = useState(false);
+  const [heightResizingViewId, setHeightResizingViewId] = useState<string | null>(null);
   const [transientWidth, setTransientWidth] = useState<number | null>(null);
   const [transientHeights, setTransientHeights] = useState<Record<string, number> | null>(null);
 
-  const openViews = useMemo(
-    () => orderedOpenViews(views, openViewIds),
-    [openViewIds, views],
+  const sortedViews = useMemo(
+    () => views.slice().sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)),
+    [views],
   );
-  // hasOpenViews = content selected; panelOpen = content actually shown.
-  // panelCollapsed hides the panel without clearing openViewIds (full restore).
-  const hasOpenViews = openViews.length > 0;
-  const panelOpen = hasOpenViews && !panelCollapsed;
+  const panelOpen = sortedViews.length > 0 && !panelCollapsed;
   const width = transientWidth ?? layout.width;
   const effectiveHeights = transientHeights ?? viewHeights;
-
-  const allocatedHeights = useMemo(
-    () => allocateRailViewHeights(openViews, panelHeight, effectiveHeights),
-    [effectiveHeights, openViews, panelHeight],
-  );
 
   const colorVars = useMemo<RailCssVars>(() => ({
     "--wl-up-color": upColor,
@@ -129,15 +129,22 @@ export default function MarketRightRailFrame({
   }), [downColor, upColor]);
 
   useEffect(() => {
-    const element = panelRef.current;
-    if (!element || !panelOpen) return undefined;
-    const update = () => setPanelHeight(element.getBoundingClientRect().height);
-    update();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [panelOpen, openViews.length]);
+    if (panelCollapsed || pendingRevealRef.current === null) return undefined;
+    const viewId = pendingRevealRef.current;
+    if (!openViewIds.includes(viewId)) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      const section = sectionRefs.current.get(viewId);
+      if (!panel || !section) return;
+      const top = Math.max(0, section.offsetTop - 6);
+      const bottom = section.offsetTop + section.offsetHeight;
+      if (top < panel.scrollTop || bottom > panel.scrollTop + panel.clientHeight) {
+        panel.scrollTo({ top, behavior: "smooth" });
+      }
+      pendingRevealRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [openViewIds, panelCollapsed]);
 
   useEffect(() => {
     if (!widthResizing) return undefined;
@@ -175,49 +182,33 @@ export default function MarketRightRailFrame({
   }, [layout, widthResizing]);
 
   useEffect(() => {
-    if (!heightResizing) return undefined;
+    if (heightResizingViewId === null) return undefined;
     const onMove = (event: PointerEvent) => {
       const start = heightStartRef.current;
       if (!start) return;
-      const delta = event.clientY - start.y;
-      const aboveView = openViews.find((view) => view.id === start.aboveId);
-      const belowView = openViews.find((view) => view.id === start.belowId);
-      const aboveMin = aboveView?.minHeight
-        ?? (aboveView?.sizing === "flex" ? 120 : MARKET_DOCK_MIN_HEIGHT);
-      const belowMin = belowView?.minHeight
-        ?? (belowView?.sizing === "flex" ? 120 : MARKET_DOCK_MIN_HEIGHT);
-      const aboveMax = aboveView?.maxHeight ?? MARKET_DOCK_MAX_HEIGHT;
-      const belowMax = belowView?.maxHeight ?? MARKET_DOCK_MAX_HEIGHT;
-      const pairTotal = start.aboveHeight + start.belowHeight;
-      let nextAbove = clamp(start.aboveHeight + delta, aboveMin, Math.min(aboveMax, pairTotal - belowMin));
-      let nextBelow = pairTotal - nextAbove;
-      if (nextBelow > belowMax) {
-        nextBelow = belowMax;
-        nextAbove = pairTotal - nextBelow;
-      }
+      const view = sortedViews.find((candidate) => candidate.id === start.viewId);
+      if (!view) return;
+      const next = clamp(
+        start.height + event.clientY - start.y,
+        minViewHeight(view),
+        maxViewHeight(view),
+      );
       setTransientHeights({
         ...viewHeights,
-        [start.aboveId]: Math.round(nextAbove),
-        [start.belowId]: Math.round(nextBelow),
+        [start.viewId]: Math.round(next),
       });
     };
     const onUp = () => {
-      setHeightResizing(false);
+      const start = heightStartRef.current;
+      setHeightResizingViewId(null);
       setTransientHeights((current) => {
-        if (current && onViewHeightChange) {
-          const start = heightStartRef.current;
-          if (start) {
-            if (current[start.aboveId] !== undefined) {
-              onViewHeightChange(start.aboveId, current[start.aboveId]!);
-            }
-            if (current[start.belowId] !== undefined) {
-              onViewHeightChange(start.belowId, current[start.belowId]!);
-            }
-          }
+        if (current && onViewHeightChange && start) {
+          const next = current[start.viewId];
+          if (next !== undefined) onViewHeightChange(start.viewId, next);
         }
-        heightStartRef.current = null;
         return null;
       });
+      heightStartRef.current = null;
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp, { once: true });
@@ -233,7 +224,7 @@ export default function MarketRightRailFrame({
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, [heightResizing, onViewHeightChange, openViews, viewHeights]);
+  }, [heightResizingViewId, onViewHeightChange, sortedViews, viewHeights]);
 
   const startWidthResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -243,62 +234,52 @@ export default function MarketRightRailFrame({
 
   const startHeightResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
-    aboveId: string,
-    belowId: string,
+    view: MarketRailViewDescriptor,
+    height: number,
   ) => {
     event.preventDefault();
-    heightStartRef.current = {
-      y: event.clientY,
-      aboveId,
-      belowId,
-      aboveHeight: allocatedHeights[aboveId] ?? MARKET_DOCK_DEFAULT_HEIGHT,
-      belowHeight: allocatedHeights[belowId] ?? MARKET_DOCK_DEFAULT_HEIGHT,
-    };
-    setHeightResizing(true);
-  }, [allocatedHeights]);
+    heightStartRef.current = { y: event.clientY, viewId: view.id, height };
+    setHeightResizingViewId(view.id);
+  }, []);
 
-  const handleSplitterKeyDown = useCallback((
+  const handleResizeKeyDown = useCallback((
     event: ReactKeyboardEvent<HTMLDivElement>,
-    aboveId: string,
-    belowId: string,
+    view: MarketRailViewDescriptor,
+    height: number,
   ) => {
-    const above = allocatedHeights[aboveId] ?? MARKET_DOCK_DEFAULT_HEIGHT;
-    const below = allocatedHeights[belowId] ?? MARKET_DOCK_DEFAULT_HEIGHT;
-    let delta = 0;
-    if (event.key === "ArrowUp") delta = -20;
-    if (event.key === "ArrowDown") delta = 20;
-    if (event.key === "Home") delta = MARKET_DOCK_MIN_HEIGHT - above;
-    if (event.key === "End") delta = above - MARKET_DOCK_MIN_HEIGHT;
-    if (delta === 0) return;
+    const min = minViewHeight(view);
+    const max = maxViewHeight(view);
+    let next: number | null = null;
+    if (event.key === "ArrowUp") next = height - 20;
+    if (event.key === "ArrowDown") next = height + 20;
+    if (event.key === "Home") next = min;
+    if (event.key === "End") next = max;
+    if (next === null) return;
     event.preventDefault();
-    const pairTotal = above + below;
-    const nextAbove = clamp(above + delta, MARKET_DOCK_MIN_HEIGHT, pairTotal - MARKET_DOCK_MIN_HEIGHT);
-    const nextBelow = pairTotal - nextAbove;
-    onViewHeightChange?.(aboveId, nextAbove);
-    onViewHeightChange?.(belowId, nextBelow);
-  }, [allocatedHeights, onViewHeightChange]);
+    onViewHeightChange?.(view.id, clamp(next, min, max));
+  }, [onViewHeightChange]);
 
-  const sortedViews = useMemo(
-    () => views.slice().sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)),
-    [views],
-  );
+  const toggleView = useCallback((viewId: string) => {
+    if (!openViewIds.includes(viewId) || panelCollapsed) {
+      pendingRevealRef.current = viewId;
+    }
+    onToggleView(viewId);
+  }, [onToggleView, openViewIds, panelCollapsed]);
 
-  const canTogglePanel = hasOpenViews || panelCollapsed;
   const collapseLabel = panelCollapsed ? "显示侧栏" : "隐藏侧栏";
 
   return (
     <aside
-      ref={railRef}
       className={`right-market-rail ${panelOpen ? "" : "panel-collapsed"} ${widthResizing ? "resizing" : ""}`}
       style={colorVars}
       aria-label={ariaLabel}
       data-runtime-source={source}
+      data-layout-mode="scroll-accordion"
       data-market-shell-owner="right-rail"
       data-panel-open={panelOpen ? "true" : "false"}
       data-panel-collapsed={panelCollapsed ? "true" : "false"}
     >
-      {/* Keep open views mounted while collapsed so expand fully restores local UI state. */}
-      {hasOpenViews && (
+      {sortedViews.length > 0 && (
         <>
           {panelOpen && (
             <div
@@ -316,39 +297,71 @@ export default function MarketRightRailFrame({
             data-market-shell-owner="right-rail-panel"
             aria-hidden={panelOpen ? undefined : true}
           >
-            {openViews.map((view, index) => {
-              const height = allocatedHeights[view.id] ?? 0;
-              const next = openViews[index + 1];
+            {sortedViews.map((view, index) => {
+              const expanded = openViewIds.includes(view.id);
+              const height = preferredViewHeight(view, effectiveHeights);
               return (
-                <div key={view.id} className="market-rail-stack-slot" data-rail-view={view.id}>
-                  <div
-                    className="market-rail-view-host"
-                    style={{ height: height > 0 ? height : undefined, flex: height > 0 ? undefined : 1 }}
-                    data-slot={index === 0 ? "sidebar" : index === openViews.length - 1 ? "dock" : `view-${view.id}`}
-                  >
-                    {renderView(view.id, height)}
-                  </div>
-                  {next && (
-                    <div
-                      className={`market-rail-splitter ${heightResizing ? "active" : ""}`}
-                      style={{ height: MARKET_RAIL_SPLITTER_HEIGHT }}
-                      onPointerDown={(event) => startHeightResize(event, view.id, next.id)}
-                      onDoubleClick={() => {
-                        onViewHeightChange?.(
-                          next.sizing === "fixed" ? next.id : view.id,
-                          next.defaultHeight ?? view.defaultHeight ?? MARKET_DOCK_DEFAULT_HEIGHT,
-                        );
-                      }}
-                      onKeyDown={(event) => handleSplitterKeyDown(event, view.id, next.id)}
-                      role="separator"
-                      tabIndex={0}
-                      aria-label={`调整 ${view.title} 与 ${next.title} 高度`}
-                      aria-orientation="horizontal"
+                <section
+                  key={view.id}
+                  ref={(element) => {
+                    if (element) sectionRefs.current.set(view.id, element);
+                    else sectionRefs.current.delete(view.id);
+                  }}
+                  className={`market-rail-accordion-section ${expanded ? "expanded" : "collapsed"}`}
+                  data-rail-view={view.id}
+                  data-expanded={expanded ? "true" : "false"}
+                >
+                  {expanded ? (
+                    <>
+                      <div
+                        id={`market-rail-view-${source}-${view.id}`}
+                        className="market-rail-view-host"
+                        style={{ height }}
+                        data-slot={index === 0 ? "sidebar" : `view-${view.id}`}
+                      >
+                        {renderView(view.id, height)}
+                      </div>
+                      <div
+                        className={`market-rail-splitter market-rail-view-resizer ${heightResizingViewId === view.id ? "active" : ""}`}
+                        style={{ height: MARKET_RAIL_SPLITTER_HEIGHT }}
+                        onPointerDown={(event) => startHeightResize(event, view, height)}
+                        onDoubleClick={() => onViewHeightChange?.(
+                          view.id,
+                          view.defaultHeight ?? (view.sizing === "flex" ? 260 : MARKET_DOCK_DEFAULT_HEIGHT),
+                        )}
+                        onKeyDown={(event) => handleResizeKeyDown(event, view, height)}
+                        role="separator"
+                        tabIndex={0}
+                        aria-label={`调整${view.title}面板高度`}
+                        aria-orientation="horizontal"
+                        aria-valuemin={minViewHeight(view)}
+                        aria-valuemax={maxViewHeight(view)}
+                        aria-valuenow={height}
+                      >
+                        <span aria-hidden="true" />
+                      </div>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="market-rail-accordion-trigger"
+                      aria-expanded="false"
+                      aria-label={`展开${view.title}面板`}
+                      onClick={() => toggleView(view.id)}
                     >
-                      <span aria-hidden="true" />
-                    </div>
+                      <span className="market-rail-accordion-chevron" aria-hidden="true">
+                        <PanelCollapseIcon collapsed />
+                      </span>
+                      <strong>{view.title}</strong>
+                      {view.collapsedSummary != null && (
+                        <span className="market-rail-accordion-summary">{view.collapsedSummary}</span>
+                      )}
+                      {view.badge != null && view.badge !== "" && (
+                        <span className="market-rail-accordion-badge">{view.badge}</span>
+                      )}
+                    </button>
                   )}
-                </div>
+                </section>
               );
             })}
           </div>
@@ -370,10 +383,12 @@ export default function MarketRightRailFrame({
               title={view.title}
               aria-label={view.ariaLabel ?? view.title}
               aria-pressed={active}
+              aria-expanded={active && !panelCollapsed}
               data-rail-view={view.id}
-              onClick={() => onToggleView(view.id)}
+              onClick={() => toggleView(view.id)}
             >
               <span className="market-activity-icon" aria-hidden="true">{view.icon}</span>
+              <span className="market-activity-label" aria-hidden="true">{view.title}</span>
               {view.badge != null && view.badge !== "" && (
                 <span className="market-activity-badge">{view.badge}</span>
               )}
@@ -388,11 +403,14 @@ export default function MarketRightRailFrame({
             aria-label={collapseLabel}
             aria-pressed={panelCollapsed}
             data-rail-action="toggle-panel"
-            disabled={!canTogglePanel}
+            disabled={sortedViews.length === 0}
             onClick={onTogglePanelCollapsed}
           >
             <span className="market-activity-icon" aria-hidden="true">
               <PanelCollapseIcon collapsed={panelCollapsed} />
+            </span>
+            <span className="market-activity-label" aria-hidden="true">
+              {panelCollapsed ? "显示" : "收起"}
             </span>
           </button>
         )}

@@ -21,8 +21,6 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
       const next = {
         ...current,
         openViewIds,
-        // Empty selection has nothing to restore; clear hide-only flag.
-        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       };
       saveMarketRailLayout(next, storage);
       return next;
@@ -78,7 +76,6 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
       const next = {
         ...current,
         openViewIds,
-        panelCollapsed: openViewIds.length === 0 ? false : current.panelCollapsed,
       };
       saveMarketRailLayout(next, storage);
       return next;
@@ -87,10 +84,8 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
 
   const setPanelCollapsed = useCallback((collapsed: boolean) => {
     setState((current) => {
-      // Hiding with no open content is a no-op (nothing to restore later).
-      const panelCollapsed = collapsed && current.openViewIds.length > 0;
-      if (panelCollapsed === current.panelCollapsed) return current;
-      const next = { ...current, panelCollapsed };
+      if (collapsed === current.panelCollapsed) return current;
+      const next = { ...current, panelCollapsed: collapsed };
       saveMarketRailLayout(next, storage);
       return next;
     });
@@ -98,12 +93,6 @@ export function useMarketRailLayout(): MarketRailLayoutState & {
 
   const togglePanelCollapsed = useCallback(() => {
     setState((current) => {
-      if (current.openViewIds.length === 0) {
-        if (!current.panelCollapsed) return current;
-        const next = { ...current, panelCollapsed: false };
-        saveMarketRailLayout(next, storage);
-        return next;
-      }
       const next = { ...current, panelCollapsed: !current.panelCollapsed };
       saveMarketRailLayout(next, storage);
       return next;

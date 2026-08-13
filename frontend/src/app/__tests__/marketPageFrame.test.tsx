@@ -94,7 +94,7 @@ test("live and replay top/status adapters share exact source-neutral DOM owners"
   }
 });
 
-test("right rail keeps activity bar and stacked open views for live and replay", () => {
+test("live and replay use the same free multi-open scroll accordion", () => {
   for (const source of ["live", "replay"] as const) {
     const html = renderToStaticMarkup(
       <MarketRightRailFrame
@@ -108,23 +108,28 @@ test("right rail keeps activity bar and stacked open views for live and replay",
           </div>
         )}
         layout={{ width: 360, onWidthChange: () => undefined }}
-        viewHeights={{ "order-book": 320 }}
+        viewHeights={{ watchlist: 240, "order-book": 410 }}
         onViewHeightChange={() => undefined}
       />,
     );
     assert.match(html, /data-market-shell-owner="right-rail"/);
+    assert.match(html, /data-layout-mode="scroll-accordion"/);
     assert.match(html, /data-market-shell-owner="activity-bar"/);
     assert.match(html, /data-market-shell-owner="right-rail-panel"/);
     assert.match(html, /class="wl-resize-handle/);
-    assert.match(html, /class="market-rail-splitter/);
-    assert.match(html, /data-rail-view="watchlist"/);
-    assert.match(html, /data-rail-view="order-book"/);
+    assert.equal((html.match(/market-rail-view-resizer/g) ?? []).length, 2);
+    assert.match(html, /data-height="240"/);
+    assert.match(html, /data-height="410"/);
+    assert.match(html, /aria-valuenow="240"/);
+    assert.match(html, /aria-valuenow="410"/);
+    assert.match(html, /data-rail-view="watchlist"[^>]*data-expanded="true"/);
+    assert.match(html, /data-rail-view="order-book"[^>]*data-expanded="true"/);
     assert.ok(html.indexOf("data-slot=\"sidebar\"") < html.indexOf("data-slot=\"dock\""));
     assert.ok(html.indexOf("data-slot=\"dock\"") < html.indexOf("data-market-shell-owner=\"activity-bar\""));
   }
 });
 
-test("right rail can collapse content to activity-bar-only mode", () => {
+test("all accordion bodies can close while useful headers and the outer panel remain", () => {
   const html = renderToStaticMarkup(
     <MarketRightRailFrame
       source="live"
@@ -135,11 +140,35 @@ test("right rail can collapse content to activity-bar-only mode", () => {
       layout={{ width: 360 }}
     />,
   );
-  assert.match(html, /panel-collapsed/);
-  assert.match(html, /data-panel-open="false"/);
+  assert.match(html, /data-panel-open="true"/);
   assert.match(html, /data-market-shell-owner="activity-bar"/);
-  assert.doesNotMatch(html, /data-market-shell-owner="right-rail-panel"/);
-  assert.doesNotMatch(html, /class="wl-resize-handle/);
+  assert.match(html, /data-market-shell-owner="right-rail-panel"/);
+  assert.match(html, /aria-label="展开自选面板"/);
+  assert.match(html, /aria-label="展开盘口面板"/);
+  assert.equal((html.match(/market-rail-accordion-trigger/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /market-rail-view-resizer/);
+  assert.match(html, /class="wl-resize-handle/);
+});
+
+test("one collapsed accordion view stays visible while another remains expanded", () => {
+  const html = renderToStaticMarkup(
+    <MarketRightRailFrame
+      source="replay"
+      views={sampleViews}
+      openViewIds={["watchlist"]}
+      onToggleView={() => undefined}
+      renderView={(viewId) => <div data-kept={viewId}>{viewId}</div>}
+      layout={{ width: 360 }}
+      viewHeights={{ watchlist: 280, "order-book": 460 }}
+      onViewHeightChange={() => undefined}
+    />,
+  );
+  assert.match(html, /data-rail-view="watchlist"[^>]*data-expanded="true"/);
+  assert.match(html, /data-kept="watchlist"/);
+  assert.match(html, /data-rail-view="order-book"[^>]*data-expanded="false"/);
+  assert.match(html, /aria-label="展开盘口面板"/);
+  assert.doesNotMatch(html, /data-kept="order-book"/);
+  assert.equal((html.match(/market-rail-view-resizer/g) ?? []).length, 1);
 });
 
 test("right rail can hide panel while keeping open views selected for full restore", () => {
@@ -165,7 +194,7 @@ test("right rail can hide panel while keeping open views selected for full resto
   assert.match(html, /display:\s*none/);
   assert.doesNotMatch(html, /class="wl-resize-handle/);
   // Active icons remain lit while panel is only hidden.
-  assert.match(html, /aria-pressed="true"[^>]*data-rail-view="watchlist"/);
+  assert.match(html, /aria-pressed="true"[^>]*aria-expanded="false"[^>]*data-rail-view="watchlist"/);
   assert.match(html, /data-rail-action="toggle-panel"/);
   assert.match(html, /显示侧栏/);
 });
@@ -184,11 +213,15 @@ test("multi-chart rail portal forwards independent card-close and panel-collapse
   assert.match(portalSource, /onTogglePanelCollapsed: marketRail\.onTogglePanelCollapsed/);
 });
 
-test("right rail keeps undersized stacked views scrollable instead of shrinking them into overlap", () => {
+test("right rail grows independent accordion cards inside one outer scrolling surface", () => {
   const styles = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
   assert.match(styles, /\.market-rail-panel \{[\s\S]*?overflow-y: auto;/);
-  assert.match(styles, /\.market-rail-stack-slot \{[\s\S]*?flex: 0 0 auto;/);
+  assert.match(styles, /\.market-rail-panel \{[\s\S]*?overscroll-behavior-y: contain;/);
+  assert.match(styles, /\.market-rail-accordion-section \{[\s\S]*?flex: 0 0 auto;/);
+  assert.match(styles, /\.market-rail-accordion-trigger \{[\s\S]*?min-height: 36px;/);
   assert.match(styles, /\.market-rail-view-host \{[\s\S]*?flex: 0 0 auto;/);
+  assert.match(styles, /\.market-rail-view-resizer \{[\s\S]*?flex-basis: 7px;/);
+  assert.match(styles, /\.right-market-rail :is\([\s\S]*?overscroll-behavior-y: auto;/);
   assert.match(styles, /\.replay-market-dock-body \{ flex: 1 1 0; min-height: 0; overflow: auto; \}/);
 });
 

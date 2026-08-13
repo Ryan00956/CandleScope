@@ -193,7 +193,7 @@ export interface WatchlistSidebarProps {
   onTierChange?: (symbol: string, tier: SubscriptionTier) => void;
   upColor?: string;
   downColor?: string;
-  /** Activity-bar style: close this view instead of collapsing the whole rail. */
+  /** Accordion style: collapse this view without affecting sibling views. */
   onRequestClose?: () => void;
 }
 
@@ -218,7 +218,7 @@ export default function WatchlistSidebar({
     }
   }, [actions, onWatchlistsChange, watchlists]);
 
-  // When managed by the activity bar, this panel is only mounted while open.
+  // When managed by the rail accordion, this panel is only mounted while expanded.
   const managedByActivityBar = typeof onRequestClose === "function";
   const sidebarCollapsed = managedByActivityBar ? false : (layout?.sidebarCollapsed ?? false);
   const collapsedLists = layout?.collapsedLists ?? EMPTY_COLLAPSED_LISTS;
@@ -608,8 +608,8 @@ export default function WatchlistSidebar({
         {/* ── Header ── */}
         <div className="wl-header">
           <button className="wl-collapse-btn" onClick={toggleSidebarCollapse}
-            title={managedByActivityBar ? "关闭自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}
-            aria-label={managedByActivityBar ? "关闭自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}>
+            title={managedByActivityBar ? "折叠自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}
+            aria-label={managedByActivityBar ? "折叠自选" : (sidebarCollapsed ? "展开自选" : "收起自选")}>
             {sidebarCollapsed ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
             ) : (

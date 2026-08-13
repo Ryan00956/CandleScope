@@ -126,7 +126,7 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   Right market rail — VS Code-style activity bar + stacked panels
+   Right market rail — activity bar + free multi-open scroll accordion
    ═══════════════════════════════════════════════════════════════ */
 
 .right-market-rail {
@@ -164,15 +164,95 @@ body {
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 55%, transparent) transparent;
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+  box-shadow:
+    inset 0 10px 12px -14px rgba(15, 23, 42, 0.7),
+    inset 0 -10px 12px -14px rgba(15, 23, 42, 0.7);
   background: var(--bg-secondary);
 }
 
-.market-rail-stack-slot {
+.market-rail-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.market-rail-panel::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  background-clip: padding-box;
+}
+
+.market-rail-accordion-section {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  min-height: 0;
   min-width: 0;
+  min-height: 0;
+  background: var(--bg-secondary);
+}
+
+.market-rail-accordion-section + .market-rail-accordion-section {
+  border-top: 1px solid var(--border-color);
+}
+
+.market-rail-accordion-trigger {
+  display: grid;
+  grid-template-columns: 20px auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 8px 0 6px;
+  gap: 6px;
+  border: 0;
+  background: color-mix(in srgb, var(--bg-secondary) 94%, var(--text-primary) 6%);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.market-rail-accordion-trigger:hover,
+.market-rail-accordion-trigger:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.market-rail-accordion-trigger:focus-visible {
+  box-shadow: inset 3px 0 var(--accent-blue);
+}
+
+.market-rail-accordion-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.market-rail-accordion-trigger strong {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.market-rail-accordion-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-rail-accordion-badge {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+  color: var(--accent-blue);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .market-rail-view-host {
@@ -212,11 +292,13 @@ body {
 .market-activity-item {
   position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 36px;
-  height: 36px;
-  padding: 0;
+  min-height: 46px;
+  padding: 4px 0 3px;
+  gap: 3px;
   border: 0;
   border-radius: var(--radius-sm, 6px);
   background: transparent;
@@ -255,6 +337,16 @@ body {
   align-items: center;
   justify-content: center;
   line-height: 0;
+}
+.market-activity-label {
+  display: block;
+  max-width: 34px;
+  overflow: hidden;
+  font-size: 8.5px;
+  font-weight: 650;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .market-activity-badge {
   position: absolute;
@@ -764,7 +856,7 @@ body {
   background: var(--accent-blue);
 }
 
-/* ── Right market rail: resizable stacked view splitters ── */
+/* ── Right market rail: independent accordion height handles ── */
 .market-rail-splitter {
   position: relative;
   display: flex;
@@ -778,6 +870,31 @@ body {
   border-bottom: 1px solid var(--border-color);
   outline: none;
   z-index: 2;
+}
+
+.market-rail-view-resizer {
+  flex-basis: 7px;
+  height: 7px !important;
+  border-top-color: color-mix(in srgb, var(--border-color) 75%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--border-color) 75%, transparent);
+}
+
+.market-rail-view-resizer::before {
+  inset: -4px 0;
+}
+
+.market-rail-view-resizer > span {
+  width: 42px;
+}
+
+.right-market-rail :is(
+  .wl-accordion-scroll,
+  .ob-levels,
+  .tf-tape-list,
+  .tf-profile-list,
+  .replay-market-dock-body
+) {
+  overscroll-behavior-y: auto;
 }
 
 .market-rail-splitter::before {

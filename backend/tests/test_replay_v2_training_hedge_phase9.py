@@ -11,6 +11,7 @@ import pytest
 
 from app.replay.service import ReplayService
 from app.replay.training.errors import TrainingRunError
+from app.replay.training.hedge_inputs import build_hedge_public_history_archive
 from app.replay.training.models import (
     ReplayV2CommandType,
     TrainingRunCreateRequest,
@@ -18,6 +19,7 @@ from app.replay.training.models import (
     TrainingRunSetupRequest,
 )
 from tests.fixtures.replay.hedge_input_fakes import (
+    build_book_archive,
     import_hedge_track_public_inputs,
     prepare_hedge_request,
 )
@@ -550,6 +552,118 @@ async def test_segment_plan_resolves_cross_verified_explicit_hedge_refs(
             assert persisted[1] == "SERVER"
             assert persisted[2] == commitment["random_seed"]
             assert persisted[3] == commitment["committed_start_ms"]
+    finally:
+        await service.shutdown(step_timeout=1.0)
+
+
+async def test_setup_admission_never_cross_pairs_public_ref_with_another_book(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "phase9-cross-pair.db"
+    service = await _risk_service(database)
+    try:
+        base = replace(
+            _sandbox_request(await _request(service), initial_equity="1000"),
+            market_type="futures",
+        )
+        pinned = await prepare_hedge_request(
+            service,
+            base,
+            root=tmp_path,
+            prefix="phase9-cross-pair",
+            mark_prices=["100"] * 13,
+            book_level_quantities=["1"] * 50,
+        )
+        assert pinned.requested_start_ms is not None
+        assert pinned.hedge_public_history_ref is not None
+        assert service.training is not None
+
+        start = pinned.requested_start_ms
+        short_book_path = build_book_archive(
+            tmp_path / "phase9-cross-pair-short-book.sqlite3",
+            exchange=pinned.exchange,
+            market_type=pinned.market_type,
+            symbol=pinned.symbol,
+            range_start_ms=start,
+            range_end_ms=start + pinned.forward_cache_ms,
+        )
+        short_book = await service.training.historical_books.import_archive(
+            short_book_path,
+            trusted_origin="TEST_CAPTURE",
+        )
+
+        original_public_path = tmp_path / "phase9-cross-pair-public.json"
+        original_public = json.loads(original_public_path.read_text(encoding="utf-8"))
+        short_public_path = tmp_path / "phase9-cross-pair-short-public.json"
+        short_public_ref = build_hedge_public_history_archive(
+            short_public_path,
+            archive_id="phase9-cross-pair-short-public",
+            exchange=pinned.exchange,
+            market_type=pinned.market_type,
+            symbol=pinned.symbol,
+            settlement_asset=pinned.settlement_asset,
+            range_start_ms=start,
+            range_end_ms=start + pinned.forward_cache_ms,
+            max_mark_gap_ms=60_000,
+            source_identity="TEST_PINNED_PUBLIC_CAPTURE",
+            capture_receipt="receipt:phase9-cross-pair-short",
+            historical_l2_ref={
+                "archive_id": short_book["archive_id"],
+                "dataset_epoch": short_book["dataset_epoch"],
+                "checksum_sha256": short_book["checksum_sha256"],
+            },
+            events=[
+                {
+                    "event_time_ms": event["event_time_ms"],
+                    "event_kind": event["event_kind"],
+                    "payload": event["payload"],
+                }
+                for event in original_public["events"]
+            ],
+        )
+        await service.training.hedge_inputs.import_public(short_public_path)
+        await service.training.store.base_store.run_extension_write(
+            lambda connection: connection.execute(
+                """
+                UPDATE replay_hedge_public_archive
+                SET health = 'QUARANTINED',
+                    local_path = NULL,
+                    quarantine_reason = 'TEST_REPLACED_BY_SHORT_REF'
+                WHERE archive_id = ?
+                """,
+                (pinned.hedge_public_history_ref.archive_id,),
+            )
+        )
+
+        planning_payload = pinned.to_dict()
+        planning_payload["hedge_public_history_ref"] = None
+        planning_payload["simulation_manifest_ref"] = None
+        planning = TrainingRunCreateRequest.from_dict(planning_payload)
+        plan = await service.training.segment_plan(planning)
+        assert plan["historical_book"]["capability_state"] == "AVAILABLE_EXACT"
+        assert plan["hedge_inputs"]["capability_state"] == "AVAILABLE_EXACT"
+        assert plan["hedge_inputs"]["historical_l2_ref"] == {
+            "archive_id": short_book["archive_id"],
+            "dataset_epoch": short_book["dataset_epoch"],
+            "checksum_sha256": short_book["checksum_sha256"],
+        }
+        assert plan["hedge_inputs"]["hedge_public_history_ref"] == {
+            "schema_version": "replay.hedge-public-history-ref.v1",
+            **short_public_ref,
+        }
+
+        setup = TrainingRunSetupRequest.from_market_request(planning)
+        with pytest.raises(TrainingRunError) as exc_info:
+            await service.training.create_empty_run(setup)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.code == "NO_ELIGIBLE_SOURCE_MARKET_AT_START"
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_run"
+            ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM replay_training_time_commitment"
+            ).fetchone() == (0,)
     finally:
         await service.shutdown(step_timeout=1.0)
 

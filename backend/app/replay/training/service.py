@@ -142,19 +142,90 @@ class _MarketSetupAdmission:
     windows: tuple[tuple[int, int], ...]
     code: str
     message: str
+    book_windows: tuple[tuple[int, int], ...] = ()
+    account_windows: tuple[tuple[int, int], ...] = ()
+    hedge_book_pairs: tuple[tuple[int, int, int, int], ...] = ()
 
-    def eligible_start_windows(self, required_span_ms: int) -> tuple[tuple[int, int], ...]:
+    @staticmethod
+    def _merged(
+        windows: Sequence[tuple[int, int]],
+    ) -> tuple[tuple[int, int], ...]:
         merged: list[list[int]] = []
-        for first, last in sorted(self.windows):
+        for first, last in sorted(windows):
             if not merged or first > merged[-1][1]:
                 merged.append([first, last])
             else:
                 merged[-1][1] = max(merged[-1][1], last)
+        return tuple((first, last) for first, last in merged)
+
+    @classmethod
+    def _start_windows(
+        cls,
+        windows: Sequence[tuple[int, int]],
+        *,
+        required_span_ms: int,
+    ) -> tuple[tuple[int, int], ...]:
         return tuple(
             (first, last - required_span_ms)
-            for first, last in merged
+            for first, last in cls._merged(windows)
             if last - required_span_ms >= first
         )
+
+    @classmethod
+    def _intersection(
+        cls,
+        left: Sequence[tuple[int, int]],
+        right: Sequence[tuple[int, int]],
+    ) -> tuple[tuple[int, int], ...]:
+        return cls._merged(
+            tuple(
+                (max(left_start, right_start), min(left_end, right_end))
+                for left_start, left_end in left
+                for right_start, right_end in right
+                if max(left_start, right_start) <= min(left_end, right_end)
+            )
+        )
+
+    def eligible_start_windows(
+        self,
+        required_span_ms: int,
+        *,
+        book_interval_ms: int = 0,
+    ) -> tuple[tuple[int, int], ...]:
+        account_starts = self._start_windows(
+            self.account_windows,
+            required_span_ms=required_span_ms,
+        )
+        if self.hedge_book_pairs:
+            candidates: list[tuple[int, int]] = []
+            for book_start, book_end, hedge_start, hedge_end in self.hedge_book_pairs:
+                paired = self._intersection(
+                    self._start_windows(
+                        ((book_start, book_end),),
+                        required_span_ms=required_span_ms + book_interval_ms,
+                    ),
+                    self._start_windows(
+                        ((hedge_start, hedge_end),),
+                        required_span_ms=required_span_ms,
+                    ),
+                )
+                if self.account_windows:
+                    paired = self._intersection(paired, account_starts)
+                candidates.extend(paired)
+            return self._merged(candidates)
+        if self.book_windows:
+            candidates = self._start_windows(
+                self.book_windows,
+                required_span_ms=required_span_ms + book_interval_ms,
+            )
+            if self.account_windows:
+                candidates = self._intersection(candidates, account_starts)
+            return candidates
+        return self._start_windows(
+            self.windows,
+            required_span_ms=required_span_ms,
+        )
+
 
 
 _SetupAdmissionCacheKey = tuple[str, str, str, str, str]
@@ -11363,7 +11434,8 @@ class TrainingRunService:
                 ),
             }
         interval_ms = parse_interval_ms(str(entry.get("selected_base_interval", "")))
-        required_span_ms = int(settings.get("forward_cache_ms", 0)) + (
+        required_span_ms = int(settings.get("forward_cache_ms", 0))
+        book_interval_ms = (
             interval_ms
             if settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
             and interval_ms is not None
@@ -11371,7 +11443,10 @@ class TrainingRunService:
         )
         if admission is not None and committed_start_ms is not None and not any(
             first <= committed_start_ms <= last
-            for first, last in admission.eligible_start_windows(required_span_ms)
+            for first, last in admission.eligible_start_windows(
+                required_span_ms,
+                book_interval_ms=book_interval_ms,
+            )
         ):
             return {
                 "state": "UNSUPPORTED",
@@ -11399,10 +11474,15 @@ class TrainingRunService:
             connection: sqlite3.Connection,
         ) -> dict[tuple[str, str, str], _MarketSetupAdmission]:
             book_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+            books_by_ref: dict[
+                tuple[str, str, str],
+                tuple[tuple[str, str, str], int, int],
+            ] = {}
             if require_book and self.historical_books.enabled:
                 for row in connection.execute(
                     """
-            SELECT exchange, market_type, symbol,
+                    SELECT archive_id, dataset_epoch, checksum_sha256,
+                           exchange, market_type, symbol,
                            range_start_ms, range_end_ms, local_path
                     FROM replay_historical_book_archive
                     WHERE health = 'READY' AND coverage_state = 'EXACT'
@@ -11412,9 +11492,15 @@ class TrainingRunService:
                     key = (str(row["exchange"]), str(row["market_type"]), str(row["symbol"]))
                     if not isinstance(row["local_path"], str) or not row["local_path"]:
                         continue
-                    book_windows.setdefault(key, []).append(
-                        (int(row["range_start_ms"]), int(row["range_end_ms"]))
-                    )
+                    window = (int(row["range_start_ms"]), int(row["range_end_ms"]))
+                    book_windows.setdefault(key, []).append(window)
+                    books_by_ref[
+                        (
+                            str(row["archive_id"]),
+                            str(row["dataset_epoch"]),
+                            str(row["checksum_sha256"]),
+                        )
+                    ] = (key, *window)
 
             account_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
             if require_account and self.account_history.enabled:
@@ -11439,11 +11525,36 @@ class TrainingRunService:
                         (int(row["range_start_ms"]), int(row["range_end_ms"]))
                     )
 
-            hedge_windows: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
+            hedge_book_pairs: dict[
+                tuple[str, str, str],
+                list[tuple[int, int, int, int]],
+            ] = {}
             require_exact_hedge = (
                 settings.get("position_mode") == "HEDGE" and require_book
             )
             if require_exact_hedge:
+                simulations: list[tuple[sqlite3.Row, set[str]]] = []
+                for simulation in connection.execute(
+                    """
+                    SELECT range_start_ms, range_end_ms, required_symbols_json,
+                           local_path
+                    FROM replay_hedge_simulation_manifest
+                    WHERE health = 'READY' AND settlement_asset = ?
+                    """,
+                    (settlement_asset,),
+                ).fetchall():
+                    if not isinstance(simulation["local_path"], str) or not simulation["local_path"]:
+                        continue
+                    try:
+                        required_symbols = json.loads(
+                            str(simulation["required_symbols_json"])
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if isinstance(required_symbols, list):
+                        simulations.append(
+                            (simulation, {str(item) for item in required_symbols})
+                        )
                 for public in connection.execute(
                     """
                     SELECT exchange, market_type, symbol, settlement_asset,
@@ -11459,50 +11570,24 @@ class TrainingRunService:
                     if not isinstance(public["local_path"], str) or not public["local_path"]:
                         continue
                     symbol = str(public["symbol"])
-                    matching_simulations = []
-                    for simulation in connection.execute(
-                        """
-                        SELECT range_start_ms, range_end_ms, required_symbols_json,
-                               local_path
-                        FROM replay_hedge_simulation_manifest
-                        WHERE health = 'READY' AND settlement_asset = ?
-                        """,
-                        (settlement_asset,),
-                    ).fetchall():
-                        if not isinstance(simulation["local_path"], str) or not simulation["local_path"]:
-                            continue
-                        try:
-                            required_symbols = json.loads(
-                                str(simulation["required_symbols_json"])
-                            )
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            continue
-                        if isinstance(required_symbols, list) and symbol in {
-                            str(item) for item in required_symbols
-                        }:
-                            matching_simulations.append(simulation)
-                    if require_book and connection.execute(
-                        """
-                        SELECT 1 FROM replay_historical_book_archive
-                        WHERE archive_id = ? AND dataset_epoch = ?
-                          AND checksum_sha256 = ? AND health = 'READY'
-                          AND coverage_state = 'EXACT'
-                          AND continuity_state = 'CONTIGUOUS'
-                          AND local_path IS NOT NULL
-                        """,
-                        (
-                            public["l2_archive_id"],
-                            public["l2_dataset_epoch"],
-                            public["l2_checksum_sha256"],
-                        ),
-                    ).fetchone() is None:
-                        continue
                     key = (
                         str(public["exchange"]),
                         str(public["market_type"]),
                         symbol,
                     )
-                    for simulation in matching_simulations:
+                    referenced_book = books_by_ref.get(
+                        (
+                            public["l2_archive_id"],
+                            public["l2_dataset_epoch"],
+                            public["l2_checksum_sha256"],
+                        )
+                    )
+                    if referenced_book is None or referenced_book[0] != key:
+                        continue
+                    _book_key, book_start, book_end = referenced_book
+                    for simulation, required_symbols in simulations:
+                        if symbol not in required_symbols:
+                            continue
                         start = max(
                             int(public["range_start_ms"]),
                             int(simulation["range_start_ms"]),
@@ -11512,44 +11597,44 @@ class TrainingRunService:
                             int(simulation["range_end_ms"]),
                         )
                         if start <= end:
-                            hedge_windows.setdefault(key, []).append((start, end))
+                            hedge_book_pairs.setdefault(key, []).append(
+                                (book_start, book_end, start, end)
+                            )
 
-            keys = (
-                set(book_windows) & set(account_windows)
-                if require_book and require_account
-                else set(book_windows if require_book else account_windows)
-            )
             if require_exact_hedge:
-                keys &= set(hedge_windows)
+                keys = set(hedge_book_pairs)
+                if require_account:
+                    keys &= set(account_windows)
+            elif require_book:
+                keys = set(book_windows)
+                if require_account:
+                    keys &= set(account_windows)
+            else:
+                keys = set(account_windows)
             result: dict[tuple[str, str, str], _MarketSetupAdmission] = {}
             for key in keys:
-                windows = (
-                    [
-                        (max(book_start, account_start), min(book_end, account_end))
-                        for book_start, book_end in book_windows[key]
-                        for account_start, account_end in account_windows[key]
-                        if max(book_start, account_start) <= min(book_end, account_end)
-                    ]
-                    if require_book and require_account
-                    else list(
-                        (book_windows if require_book else account_windows)[key]
-                        if require_book or require_account
-                        else hedge_windows[key]
-                    )
+                result[key] = _MarketSetupAdmission(
+                    windows=(
+                        tuple(account_windows[key])
+                        if require_account and not require_book
+                        else ()
+                    ),
+                    code="REQUIRED_HISTORY_COVERAGE_UNAVAILABLE",
+                    message="本局固定开始时间不在精确账户历史或连续盘口覆盖内。",
+                    book_windows=(
+                        tuple(book_windows[key])
+                        if require_book and not require_exact_hedge
+                        else ()
+                    ),
+                    account_windows=(
+                        tuple(account_windows[key])
+                        if require_account and require_book
+                        else ()
+                    ),
+                    hedge_book_pairs=(
+                        tuple(hedge_book_pairs[key]) if require_exact_hedge else ()
+                    ),
                 )
-                if windows:
-                    if require_exact_hedge:
-                        windows = [
-                            (max(start, hedge_start), min(end, hedge_end))
-                            for start, end in windows
-                            for hedge_start, hedge_end in hedge_windows[key]
-                            if max(start, hedge_start) <= min(end, hedge_end)
-                        ]
-                    result[key] = _MarketSetupAdmission(
-                        windows=tuple(windows),
-                        code="REQUIRED_HISTORY_COVERAGE_UNAVAILABLE",
-                        message="本局固定开始时间不在精确账户历史或连续盘口覆盖内。",
-                    )
             return result
 
         return await self.store.base_store.run_extension_read(read)
@@ -11585,7 +11670,8 @@ class TrainingRunService:
             ) if isinstance(identity, Mapping) else ("", "", "")
             admission = capability_admission.get(identity_key)
             interval_ms = parse_interval_ms(str(entry.get("selected_base_interval", "")))
-            required_span_ms = int(settings.get("forward_cache_ms", 0)) + (
+            required_span_ms = int(settings.get("forward_cache_ms", 0))
+            book_interval_ms = (
                 interval_ms
                 if settings.get("book_mode") == "BOOK_ASSISTED_REQUIRED"
                 and interval_ms is not None
@@ -11594,7 +11680,10 @@ class TrainingRunService:
             capability_windows = (
                 ((range_start_ms, range_end_ms),)
                 if admission is None
-                else admission.eligible_start_windows(required_span_ms)
+                else admission.eligible_start_windows(
+                    required_span_ms,
+                    book_interval_ms=book_interval_ms,
+                )
             )
             for eligible_range in cast(
                 list[Mapping[str, object]], entry.get("eligible_ranges", [])

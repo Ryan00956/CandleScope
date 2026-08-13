@@ -736,7 +736,14 @@ function LiveChartCell({
             orderBook={model.chartWorkspace.orderBook}
             tradeFlow={model.chartWorkspace.tradeFlow}
             openViewIds={marketRail.openViewIds}
+            panelCollapsed={marketRail.panelCollapsed ?? false}
             onToggleView={marketRail.onToggleView}
+            {...(marketRail.onCloseView === undefined
+              ? {}
+              : { onCloseView: marketRail.onCloseView })}
+            {...(marketRail.onTogglePanelCollapsed === undefined
+              ? {}
+              : { onTogglePanelCollapsed: marketRail.onTogglePanelCollapsed })}
             viewHeights={marketRail.viewHeights}
             onViewHeightChange={marketRail.onViewHeightChange}
           />

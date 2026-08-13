@@ -170,6 +170,20 @@ test("right rail can hide panel while keeping open views selected for full resto
   assert.match(html, /显示侧栏/);
 });
 
+test("multi-chart rail portal forwards independent card-close and panel-collapse controls", () => {
+  const source = readFileSync(resolve(process.cwd(), "src/app/LiveChartCell.tsx"), "utf8");
+  const portalStart = source.indexOf("{active && portalHosts.rightRail");
+  const portalEnd = source.indexOf("{active && portalHosts.featureSurfaces", portalStart);
+
+  assert.ok(portalStart >= 0, "right-rail portal must exist");
+  assert.ok(portalEnd > portalStart, "right-rail portal must stay isolated from feature surfaces");
+
+  const portalSource = source.slice(portalStart, portalEnd);
+  assert.match(portalSource, /panelCollapsed=\{marketRail\.panelCollapsed \?\? false\}/);
+  assert.match(portalSource, /onCloseView: marketRail\.onCloseView/);
+  assert.match(portalSource, /onTogglePanelCollapsed: marketRail\.onTogglePanelCollapsed/);
+});
+
 test("right rail keeps undersized stacked views scrollable instead of shrinking them into overlap", () => {
   const styles = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
   assert.match(styles, /\.market-rail-panel \{[\s\S]*?overflow-y: auto;/);

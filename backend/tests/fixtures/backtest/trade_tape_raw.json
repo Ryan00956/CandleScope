@@ -1,0 +1,9 @@
+{
+  "meta": {"kind": "RAW_TRADE", "symbol": "BTC-USDT"},
+  "trades": [
+    {"source_event_kind": "RAW_TRADE", "event_time_ms": 1000, "source_sequence": 1, "tie_break": "a", "price": "100", "qty": "1", "is_buyer_maker": false},
+    {"source_event_kind": "RAW_TRADE", "event_time_ms": 1000, "source_sequence": 2, "tie_break": "b", "price": "101", "qty": "1", "is_buyer_maker": true},
+    {"source_event_kind": "RAW_TRADE", "event_time_ms": 1100, "source_sequence": 3, "tie_break": "c", "price": "99", "qty": "2", "is_buyer_maker": false},
+    {"source_event_kind": "RAW_TRADE", "event_time_ms": 1200, "source_sequence": 4, "tie_break": "d", "price": "102", "qty": "1", "is_buyer_maker": false}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {"kind": "AGG_TRADE", "symbol": "BTC-USDT"},
+  "trades": [
+    {"source_event_kind": "AGG_TRADE", "event_time_ms": 1000, "source_sequence": 10, "tie_break": "agg:10", "price": "100", "qty": "3", "agg_trade_id": 10, "first_trade_id": 1, "last_trade_id": 3, "is_buyer_maker": false},
+    {"source_event_kind": "AGG_TRADE", "event_time_ms": 1100, "source_sequence": 11, "tie_break": "agg:11", "price": "101", "qty": "2", "agg_trade_id": 11, "first_trade_id": 4, "last_trade_id": 5, "is_buyer_maker": true}
+  ]
+}

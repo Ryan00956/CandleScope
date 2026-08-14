@@ -9,7 +9,7 @@ from app.core.config import BacktestSettings
 
 from app.backtest.reports import REPORT_SCHEMA, build_report
 from app.market_dataset.snapshot import MarketEvent
-from app.simulation import SimulationKernel
+from app.simulation import SimulationKernel, TradeSimulationKernel
 
 from .errors import BacktestError
 from .identity import canonical_json, config_hash, parse_parameters, sha256_hex
@@ -261,6 +261,89 @@ class BacktestService:
             "report_hash": result.report_hash,
             "ambiguity_count": result.ambiguity_count,
             "fills": result.fills,
+        }
+        report = build_report(completed, completed["result"])
+        self.repository.save_report(
+            run_id,
+            REPORT_SCHEMA,
+            canonical_json(report),
+            result.report_hash,
+            stamp,
+        )
+        completed["report"] = report
+        return completed
+
+    def execute_trade_run(
+        self,
+        run_id: str,
+        *,
+        events: tuple[MarketEvent, ...],
+        provider: object,
+        now_ms: int | None = None,
+        warmup_events: int = 0,
+    ) -> dict[str, object]:
+        if not self.settings.trade_tape_effective:
+            raise BacktestError("FLAG_DISABLED", "TRADE_TAPE backtests are disabled")
+        record = self.get_run(run_id)
+        current = RunState(record["state"])
+        if record["fidelity_mode"] not in {"TRADE_TAPE", "AGG_TRADE_TAPE"}:
+            raise BacktestError(
+                "FIDELITY_UNSUPPORTED",
+                "execute_trade_run only supports TRADE_TAPE or AGG_TRADE_TAPE",
+            )
+        stamp = now_ms or _now_ms()
+        for next_state in (RunState.PREPARING, RunState.RUNNING):
+            current = transition(current, next_state)
+            self.repository.update_run_state(run_id, state=current.value, updated_at_ms=stamp)
+        session = StrategyProviderSession(provider, run_id=run_id)  # type: ignore[arg-type]
+        adapter = StrategyHostAdapter(session)
+        planner = PyneHostPlanner()
+        try:
+            config = json.loads(str(record["config_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            config = {}
+        adapter.start(
+            {
+                "roles": ["TRADES"],
+                "source": config.get("source"),
+                "parameters": config.get("parameters") or {},
+                "seed": config.get("seed"),
+                "outputMode": config.get("outputMode") or "TARGET_POSITION",
+            }
+        )
+
+        def strategy(visible: tuple[MarketEvent, ...], event: MarketEvent) -> list[dict]:
+            phase = "WARMUP" if event.sequence <= warmup_events else "EVALUATION"
+            wire = adapter.observe(
+                sequence=event.sequence,
+                event_time_ms=event.event_time_ms,
+                watermark_ms=event.event_time_ms,
+                phase=phase,
+                market={"venue": "local", "symbol": str(record["dataset_id"])},
+                bar=None,
+            )
+            if wire is None:
+                return []
+            return planner.plan(wire)
+
+        kernel = TradeSimulationKernel(max_events=self.settings.max_trade_events)
+        result = kernel.run(events, strategy, warmup_events=warmup_events)
+        current = transition(RunState.RUNNING, RunState.COMPLETING)
+        current = transition(current, RunState.COMPLETED)
+        self.repository.update_run_state(run_id, state=current.value, updated_at_ms=stamp)
+        completed = self.get_run(run_id)
+        completed["result"] = {
+            "decision_hash": result.decision_hash,
+            "fill_hash": result.fill_hash,
+            "ledger_hash": result.ledger_hash,
+            "report_hash": result.report_hash,
+            "ambiguity_count": result.ambiguity_count,
+            "fills": result.fills,
+            "report_label": (
+                "TRADE_SEQUENCE"
+                if record["fidelity_mode"] == "TRADE_TAPE"
+                else "AGGREGATED_TRADE_SEQUENCE"
+            ),
         }
         report = build_report(completed, completed["result"])
         self.repository.save_report(

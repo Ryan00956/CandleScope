@@ -13,6 +13,20 @@ UNMODELED = (
     "funding",
     "volume participation",
 )
+TRADE_UNMODELED = (
+    "queue position",
+    "book depth",
+    "hidden liquidity",
+    "liquidation",
+    "funding",
+)
+LABELS = {
+    "BAR_APPROX": "APPROXIMATE",
+    "TRADE_TAPE": "TRADE_SEQUENCE",
+    "AGG_TRADE_TAPE": "AGGREGATED_TRADE_SEQUENCE",
+    "BOOK_ASSISTED": "BOOK_ASSISTED",
+    "QUEUE_EXACT": "ORDER_LEVEL_REQUIRED",
+}
 
 
 def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -20,13 +34,14 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
     source_kind = str(run.get("source_event_kind") or "BAR")
     payload = result or run.get("result") or {}
     fills = list(payload.get("fills") or [])
+    label = LABELS.get(fidelity) or str(payload.get("report_label") or "")
     return {
         "schemaVersion": REPORT_SCHEMA,
         "runId": run.get("run_id"),
         "state": run.get("state"),
         "fidelity_mode": fidelity,
         "source_event_kind": source_kind,
-        "report_label": "APPROXIMATE" if fidelity == "BAR_APPROX" else str(payload.get("report_label") or ""),
+        "report_label": label,
         "identity": {
             "strategy_revision_id": run.get("strategy_revision_id"),
             "dataset_id": run.get("dataset_id"),
@@ -45,11 +60,18 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
             "fill_count": len(fills),
             "ambiguity_count": int(payload.get("ambiguity_count") or 0),
         },
-        "unmodeled": list(UNMODELED) if fidelity == "BAR_APPROX" else [],
-        "suitable_for": ["bar-close strategy comparison", "parameter smoke tests"],
+        "unmodeled": list(
+            UNMODELED if fidelity == "BAR_APPROX" else TRADE_UNMODELED
+        ),
+        "suitable_for": (
+            ["bar-close strategy comparison", "parameter smoke tests"]
+            if fidelity == "BAR_APPROX"
+            else ["print-sequence execution", "next-print market fills"]
+        ),
         "not_suitable_for": [
             "claiming unique intrabar order",
             "queue-exact fills",
+            "perfect market replay",
             "live trading approval",
         ],
         "fills": fills,

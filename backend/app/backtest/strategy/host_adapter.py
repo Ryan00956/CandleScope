@@ -39,6 +39,7 @@ class StrategyHostAdapter:
         phase: str,
         market: dict[str, str],
         bar: dict[str, Any] | None,
+        features: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if event_time_ms > watermark_ms:
             raise StrategyProviderError("LOOKAHEAD_VIOLATION", "host refused future bar")
@@ -50,9 +51,10 @@ class StrategyHostAdapter:
             phase=phase,
             market=market,
             input_hash=canonical_hash(
-                {"sequence": sequence, "watermark": watermark_ms, "bar": bar}
+                {"sequence": sequence, "watermark": watermark_ms, "bar": bar, "features": features}
             ),
             bar=bar,
+            features=features or {},
         )
         started = time.monotonic()
         if phase == "WARMUP":

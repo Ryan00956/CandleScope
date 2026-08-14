@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "candlescope.backtest-m6-product-benchmark/1",
+  "kind": "ONE_MILLION_AGG_TRADE_PRODUCT_PATH",
+  "gitSha": "461ed7bf59eb082a83b96ce0b4fbc815dbb845c5",
+  "gitDirty": true,
+  "branch": "codex/backtest-foundation",
+  "runtimeProfile": {
+    "python": "3.12.7",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu_count": 32
+  },
+  "effectiveFlags": {
+    "BACKTEST_ENABLED": 1,
+    "BACKTEST_TRADE_TAPE_ENABLED": 1,
+    "all_other_backtest_production_flags": 0
+  },
+  "datasetSnapshotHashes": {
+    "source": "SYNTHETIC_DETERMINISTIC_M6_PERFORMANCE_FIXTURE",
+    "generator": "sha256:4393cc8133177edd92af9ca08b7034725bd231b8f0b131b24d7ef6ac20d00ea0"
+  },
+  "strategyRevision": "benchmark-scheduled-orders-v1",
+  "accountModel": "LINEAR_PERP_ONE_WAY_V1",
+  "fillModel": "AGG_TRADE_LATENCY_PARTICIPATION_V2",
+  "reportSchema": "candlescope.backtest-report/1",
+  "eventCount": 1000000,
+  "measurements": {
+    "duration_seconds": 267.823335,
+    "events_per_second": 3733.805,
+    "peak_rss_bytes": 481091584,
+    "fill_count": 2000,
+    "order_event_count": 2030,
+    "decision_count": 1000000,
+    "equity_curve_points": 10001,
+    "report_bytes": 3037010,
+    "report_rows": 1,
+    "audit_rows": 2,
+    "sensitivity_scenarios": 5
+  },
+  "thresholds": {
+    "min_events_per_second": 2300,
+    "max_duration_seconds": 430,
+    "max_peak_rss_bytes": 805306368
+  },
+  "hashes": {
+    "decision": "sha256:360051df0eaf552068f26de08e5ebf9349650a4acf7f06af32f579946d1418a1",
+    "fill": "818288c597b9a3d800e5f0784c81678c7e9a533e491503183fcfffb670c992d0",
+    "ledger": "910a914b95e4e4cf6d291fc13b8ac1fa20fb9a0e18e3b606a078a40c4261af26",
+    "report": "sha256:054acf3e620105eb1d8ed76bb94877d1473b438082951e0208620ebf5baf1738",
+    "matrix": "sha256:28e69092368ea279f4dd92d68bd42ee16352212ac39cf660a90ad7e8956a84da"
+  },
+  "checks": {
+    "completed": true,
+    "exact_event_count": true,
+    "real_orders": true,
+    "partial_fills": true,
+    "decimal_ledger": true,
+    "authoritative_fill_trace": true,
+    "sqlite_report_write": true,
+    "report_hash_valid": true,
+    "report_within_ceiling": true,
+    "five_sensitivity_scenarios": true,
+    "primary_hash_excludes_matrix": true,
+    "throughput_threshold": true,
+    "duration_threshold": true,
+    "rss_threshold": true
+  },
+  "ok": true,
+  "scope": "M6_PRODUCT_PATH_PERFORMANCE_NOT_RELEASE_OR_REAL_MARKET_EVIDENCE",
+  "sha256": "df5b674fd2a0e36508d15e4a4917b59b4e4546a7189aad2ce9d81feb1d92d004"
+}

@@ -12,6 +12,11 @@ from app.simulation.linear_perp_account_v2 import (
     ACCOUNT_MODEL as ACCOUNT_MODEL_V2,
     LinearPerpetualAccountV2,
 )
+from app.simulation.execution_realism import (
+    BAR_PATH_SCENARIO,
+    EXECUTION_REALISM_V2,
+    source_event_trace,
+)
 
 ALLOWED_ORDER_TYPES = frozenset({"MARKET", "LIMIT", "STOP", "STOP_LIMIT"})
 ALLOWED_SIDES = frozenset({"BUY", "SELL"})
@@ -84,6 +89,12 @@ class SimulationKernel:
     min_notional: Decimal | None = None
     gap_policy: str = "REJECT"
     fill_policy: str = "BAR_NEXT_BAR_WORST_CASE_V1"
+    execution_model_revision: str | None = None
+    participation_rate: Decimal | None = None
+    latency_ms: int = 0
+    latency_events: int = 0
+    order_end_policy: str = "CANCEL_AT_END"
+    bar_path_scenario: str | None = None
     ambiguity_count: int = 0
     paused: bool = False
     fee_total: Decimal = Decimal("0")
@@ -92,6 +103,7 @@ class SimulationKernel:
     decisions: list[dict] = field(default_factory=list)
     rejected: list[dict] = field(default_factory=list)
     equity_curve: list[dict] = field(default_factory=list)
+    equity_curve_event_interval: int = 1
     execution_reporter: Callable[[dict], None] | None = field(
         default=None,
         repr=False,
@@ -101,8 +113,28 @@ class SimulationKernel:
     _last_event: MarketEvent | None = None
     _next_funding_time_ms: int | None = None
     _market_event_count: int = 0
+    _order_tif: dict[str, str] = field(default_factory=dict)
+    _order_events: list[dict] = field(default_factory=list)
+    frozen_intents: list[dict] = field(default_factory=list)
+    _decision_chain_hash: str = "sha256:GENESIS"
+    _decision_count: int = 0
 
     def __post_init__(self) -> None:
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            if (
+                self.participation_rate is None
+                or self.participation_rate <= 0
+                or self.participation_rate > 1
+            ):
+                raise MarketDatasetError(
+                    "V2 participation rate must be in (0, 1]",
+                    code="SCHEMA_UNKNOWN_FIELD",
+                )
+            if self.bar_path_scenario != BAR_PATH_SCENARIO:
+                raise MarketDatasetError(
+                    "V2 bar path scenario is not frozen",
+                    code="FIDELITY_UNSUPPORTED",
+                )
         if self.account_model == ACCOUNT_MODEL_V2:
             self.account = LinearPerpetualAccountV2(
                 initial_balance=self.initial_balance,
@@ -136,6 +168,31 @@ class SimulationKernel:
 
     def snapshot(self) -> dict:
         return {
+            **(
+                {
+                    "execution_model_revision": self.execution_model_revision,
+                    "participation_rate": str(self.participation_rate),
+                    "order_end_policy": self.order_end_policy,
+                    "bar_path_scenario": self.bar_path_scenario,
+                    "order_tif": dict(self._order_tif),
+                    "order_events": list(self._order_events),
+                    "frozen_intents": list(self.frozen_intents),
+                    "decision_chain_hash": self._decision_chain_hash,
+                    "decision_count": self._decision_count,
+                    "equity_curve_event_interval": self.equity_curve_event_interval,
+                    "fill_source_events": [
+                        {
+                            "sequence": event.sequence,
+                            "event_time_ms": event.event_time_ms,
+                            "role": event.role,
+                            "payload": dict(event.payload),
+                        }
+                        for event in self._fill_source_events
+                    ],
+                }
+                if self.execution_model_revision == EXECUTION_REALISM_V2
+                else {}
+            ),
             **(
                 {"host_policy_revision": self.host_policy_revision}
                 if self.host_policy_revision is not None
@@ -181,6 +238,11 @@ class SimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, object]) -> None:
+        if payload.get("execution_model_revision") != self.execution_model_revision:
+            raise MarketDatasetError(
+                "execution model checkpoint identity changed",
+                code="CHECKPOINT_CORRUPT",
+            )
         if payload.get("host_policy_revision") != self.host_policy_revision:
             raise MarketDatasetError(
                 "Host policy checkpoint identity changed", code="CHECKPOINT_CORRUPT"
@@ -241,6 +303,26 @@ class SimulationKernel:
         ]
         self.decisions = list(payload["decisions"])  # type: ignore[arg-type]
         self.rejected = list(payload.get("rejected") or [])  # type: ignore[arg-type]
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            self._order_tif = {
+                str(key): str(value)
+                for key, value in dict(payload.get("order_tif") or {}).items()
+            }
+            self._order_events = list(payload.get("order_events") or [])  # type: ignore[arg-type]
+            self.frozen_intents = list(payload.get("frozen_intents") or [])  # type: ignore[arg-type]
+            self._decision_chain_hash = str(
+                payload.get("decision_chain_hash") or "sha256:GENESIS"
+            )
+            self._decision_count = int(payload.get("decision_count") or 0)
+            self._fill_source_events = [
+                MarketEvent(
+                    sequence=int(item["sequence"]),
+                    event_time_ms=int(item["event_time_ms"]),
+                    role=str(item["role"]),
+                    payload=dict(item["payload"]),  # type: ignore[arg-type]
+                )
+                for item in payload.get("fill_source_events") or []  # type: ignore[union-attr]
+            ]
         self.equity_curve = list(payload.get("equity_curve") or [])  # type: ignore[arg-type]
         account = payload.get("account")
         if isinstance(account, Mapping):
@@ -302,13 +384,25 @@ class SimulationKernel:
             intents = strategy((market_event,), market_event)
             if self._market_event_count <= warmup_events:
                 intents = []
-            self.decisions.append(
-                _decision_record(
-                    intents,
-                    sequence=market_event.sequence,
-                    watermark_ms=market_event.event_time_ms,
-                )
+            decision = _decision_record(
+                intents,
+                sequence=market_event.sequence,
+                watermark_ms=market_event.event_time_ms,
             )
+            if self.execution_model_revision == EXECUTION_REALISM_V2:
+                self._decision_chain_hash = "sha256:" + sha256_hex(
+                    {"previous": self._decision_chain_hash, "decision": decision}
+                )
+                self._decision_count += 1
+            else:
+                self.decisions.append(decision)
+            if self.execution_model_revision == EXECUTION_REALISM_V2 and intents:
+                self.frozen_intents.append(
+                    {
+                        "sequence": market_event.sequence,
+                        "intents": [dict(intent) for intent in intents],
+                    }
+                )
             self._enqueue_many(intents, current_sequence=market_event.sequence)
             curve_point = {
                 "sequence": market_event.sequence,
@@ -323,22 +417,67 @@ class SimulationKernel:
                         "available_balance": str(self.account.available_balance()),
                     }
                 )
-            self.equity_curve.append(curve_point)
+            if (
+                self.execution_model_revision != EXECUTION_REALISM_V2
+                or self._market_event_count == 1
+                or self._market_event_count % self.equity_curve_event_interval == 0
+            ):
+                self.equity_curve.append(curve_point)
             if checkpoint_callback is not None:
                 checkpoint_callback(event)
+        self._append_terminal_curve_point()
         if finalize:
             self.finalize_orders()
         return self.result()
 
+    def _append_terminal_curve_point(self) -> None:
+        if (
+            self.execution_model_revision != EXECUTION_REALISM_V2
+            or self._last_event is None
+            or self._last_event.role != "BARS"
+            or (
+                self.equity_curve
+                and self.equity_curve[-1]["sequence"] == self._last_event.sequence
+            )
+        ):
+            return
+        point = {
+            "sequence": self._last_event.sequence,
+            "event_time_ms": self._last_event.event_time_ms,
+            "equity": str(self.account.equity()),
+            "position_qty": str(self.account.position_qty),
+        }
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            point.update(
+                {
+                    "wallet_balance": str(self.account.quote_balance),
+                    "available_balance": str(self.account.available_balance()),
+                }
+            )
+        self.equity_curve.append(point)
+
     def finalize_orders(self) -> None:
         for order in self.orders:
             if order.status in {"OPEN", "PARTIAL"}:
-                order.status = "CANCELLED_EOF"
+                if (
+                    self.execution_model_revision == EXECUTION_REALISM_V2
+                    and self.order_end_policy == "KEEP_OPEN"
+                ):
+                    continue
+                order.status = (
+                    "CANCELLED"
+                    if self.execution_model_revision == EXECUTION_REALISM_V2
+                    else "CANCELLED_EOF"
+                )
+                self._lifecycle(order, order.status, reason="END_OF_RANGE")
                 if isinstance(self.account, LinearPerpetualAccountV2):
                     self.account.release_order_margin(order.order_id)
 
     def result(self) -> SimulationResult:
         fills = [asdict(fill) for fill in self.fills]
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            for fill, event in zip(fills, self._fill_source_events, strict=True):
+                fill.update(source_event_trace(event, source_kind="BAR"))
         orders = [_wire_order(order) for order in self.orders]
         account = self.account.snapshot()
         account["equity"] = str(self.account.equity())
@@ -356,8 +495,15 @@ class SimulationKernel:
                 order.status in {"OPEN", "PARTIAL"} for order in self.orders
             ),
         }
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            ledger["order_events"] = list(self._order_events)
+            ledger["decision_count"] = self._decision_count
         return SimulationResult(
-            decision_hash=sha256_hex(self.decisions),
+            decision_hash=(
+                self._decision_chain_hash
+                if self.execution_model_revision == EXECUTION_REALISM_V2
+                else sha256_hex(self.decisions)
+            ),
             fill_hash=sha256_hex(fills),
             ledger_hash=sha256_hex(ledger),
             report_hash=sha256_hex(
@@ -449,6 +595,7 @@ class SimulationKernel:
             allow_reduce_only_below_min_notional=(
                 self.host_policy_revision is not None
             ),
+            allow_ioc=self.execution_model_revision == EXECUTION_REALISM_V2,
         )
         if reason is not None:
             rejected = {
@@ -458,6 +605,7 @@ class SimulationKernel:
                 "intent": dict(intent),
             }
             self.rejected.append(rejected)
+            self._rejected_lifecycle(rejected)
             if self.execution_reporter is not None:
                 self.execution_reporter(rejected)
             return
@@ -477,6 +625,8 @@ class SimulationKernel:
             reduce_only=bool(intent.get("reduce_only") or False),
         )
         self.orders.append(order)
+        self._order_tif[order.order_id] = str(intent.get("tif") or "GTC").upper()
+        self._lifecycle(order, "NEW")
         if isinstance(self.account, LinearPerpetualAccountV2):
             reference = (
                 current_price if current_price is not None else self.account.mark
@@ -504,6 +654,7 @@ class SimulationKernel:
                 )
             except MarketDatasetError as exc:
                 self.orders.pop()
+                self._order_tif.pop(order.order_id, None)
                 rejected = {
                     "accepted": False,
                     "reason": exc.code,
@@ -511,6 +662,7 @@ class SimulationKernel:
                     "intent": dict(intent),
                 }
                 self.rejected.append(rejected)
+                self._rejected_lifecycle(rejected, order_id=order.order_id)
                 if self.execution_reporter is not None:
                     self.execution_reporter(rejected)
                 return
@@ -522,6 +674,8 @@ class SimulationKernel:
                     "order": _wire_order(order),
                 }
             )
+        self._lifecycle(order, "ACCEPTED")
+        self._lifecycle(order, "OPEN")
         self._next_order_id += 1
 
     def _match(self, event: MarketEvent) -> None:
@@ -529,11 +683,16 @@ class SimulationKernel:
         open_orders = [
             order
             for order in self.orders
-            if order.status == "OPEN"
+            if order.status in {"OPEN", "PARTIAL"}
             and order.eligible_after_sequence <= event.sequence
         ]
         if not open_orders:
             return
+        remaining_capacity = (
+            Decimal(str(bar.get("volume") or "0")) * self.participation_rate
+            if self.execution_model_revision == EXECUTION_REALISM_V2
+            else None
+        )
         high = Decimal(str(bar["high"]))
         low = Decimal(str(bar["low"]))
         open_ = Decimal(str(bar["open"]))
@@ -553,35 +712,81 @@ class SimulationKernel:
         for group in sorted(ambiguous_groups):
             self.ambiguity_count += 1
             for order in stop_hits:
-                if order.oco_group == group and order.status == "OPEN":
-                    self._fill(
-                        order, event.sequence, _stop_price(order), "WORST_CASE_STOP"
+                if order.oco_group == group and order.status in {"OPEN", "PARTIAL"}:
+                    used = self._fill(
+                        order,
+                        event.sequence,
+                        _stop_price(order),
+                        "WORST_CASE_STOP",
+                        remaining_capacity,
                     )
+                    if remaining_capacity is not None:
+                        remaining_capacity -= used
         for order in open_orders:
-            if order.status != "OPEN":
+            if order.status not in {"OPEN", "PARTIAL"}:
                 continue
+            if remaining_capacity is not None and remaining_capacity <= 0:
+                break
+            used = Decimal("0")
             if order.type == "MARKET":
                 slip = open_ * self.slippage_bps / Decimal("10000")
                 price = open_ + slip if order.side == "BUY" else open_ - slip
-                self._fill(order, event.sequence, price, "NEXT_BAR_OPEN")
+                used = self._fill(
+                    order, event.sequence, price, "NEXT_BAR_OPEN", remaining_capacity
+                )
             elif order.type == "LIMIT" and _limit_hit(order, high, low):
                 assert order.limit_price is not None
-                self._fill(order, event.sequence, order.limit_price, "LIMIT_THROUGH")
+                used = self._fill(
+                    order,
+                    event.sequence,
+                    order.limit_price,
+                    "LIMIT_THROUGH",
+                    remaining_capacity,
+                )
             elif order.type == "STOP_LIMIT":
                 if not order.activated and _stop_hit(order, high, low):
                     order.activated = True
                 if order.activated and _limit_hit(order, high, low):
                     assert order.limit_price is not None
-                    self._fill(
-                        order, event.sequence, order.limit_price, "LIMIT_THROUGH"
+                    used = self._fill(
+                        order,
+                        event.sequence,
+                        order.limit_price,
+                        "LIMIT_THROUGH",
+                        remaining_capacity,
                     )
             elif order.type == "STOP" and _stop_hit(order, high, low):
-                self._fill(order, event.sequence, _stop_price(order), "STOP_TRIGGER")
+                used = self._fill(
+                    order,
+                    event.sequence,
+                    _stop_price(order),
+                    "STOP_TRIGGER",
+                    remaining_capacity,
+                )
+            if remaining_capacity is not None:
+                remaining_capacity -= used
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            for order in open_orders:
+                if self._order_tif.get(order.order_id) == "IOC" and order.status in {
+                    "OPEN",
+                    "PARTIAL",
+                }:
+                    order.status = "EXPIRED"
+                    self._lifecycle(order, "EXPIRED", reason="IOC_REMAINDER")
+                    if isinstance(self.account, LinearPerpetualAccountV2):
+                        self.account.release_order_margin(order.order_id)
 
     def _fill(
-        self, order: SimulatedOrder, sequence: int, price: Decimal, reason: str
-    ) -> None:
-        fill_qty = order.qty
+        self,
+        order: SimulatedOrder,
+        sequence: int,
+        price: Decimal,
+        reason: str,
+        capacity: Decimal | None = None,
+    ) -> Decimal:
+        fill_qty = order.qty if capacity is None else min(order.qty, capacity)
+        if fill_qty <= 0:
+            return Decimal("0")
         if order.reduce_only:
             reducible = (
                 max(self.account.position_qty, Decimal("0"))
@@ -590,11 +795,21 @@ class SimulationKernel:
             )
             fill_qty = min(fill_qty, reducible)
             if fill_qty <= 0:
-                order.status = "CANCELLED_REDUCE_ONLY"
+                order.status = (
+                    "CANCELLED"
+                    if self.execution_model_revision == EXECUTION_REALISM_V2
+                    else "CANCELLED_REDUCE_ONLY"
+                )
+                self._lifecycle(order, order.status, reason="REDUCE_ONLY_ZERO")
                 if isinstance(self.account, LinearPerpetualAccountV2):
                     self.account.release_order_margin(order.order_id)
-                return
-        order.status = "FILLED"
+                return Decimal("0")
+        order_qty_before = order.qty
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            order.qty -= fill_qty
+            order.status = "FILLED" if order.qty <= 0 else "PARTIAL"
+        else:
+            order.status = "FILLED"
         order.fill_price = price
         order.fill_sequence = sequence
         fee_bps = (
@@ -617,6 +832,11 @@ class SimulationKernel:
                     0 if self._last_event is None else self._last_event.event_time_ms
                 ),
                 order_id=order.order_id,
+                order_margin_fraction=(
+                    fill_qty / order_qty_before
+                    if self.execution_model_revision == EXECUTION_REALISM_V2
+                    else Decimal("1")
+                ),
             )
         else:
             self.account.apply_fill(side=order.side, price=price, qty=fill_qty, fee=fee)
@@ -637,14 +857,25 @@ class SimulationKernel:
             position_after=position_after,
         )
         self.fills.append(fill)
-        if order.oco_group is not None:
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            assert self._last_event is not None
+            self._fill_source_events.append(self._last_event)
+            self._lifecycle(order, order.status, fill_qty=fill_qty)
+        if order.oco_group is not None and order.status == "FILLED":
             for sibling in self.orders:
                 if (
                     sibling.order_id != order.order_id
                     and sibling.oco_group == order.oco_group
                     and sibling.status in {"OPEN", "PARTIAL"}
                 ):
-                    sibling.status = "CANCELLED_OCO"
+                    sibling.status = (
+                        "CANCELLED"
+                        if self.execution_model_revision == EXECUTION_REALISM_V2
+                        else "CANCELLED_OCO"
+                    )
+                    self._lifecycle(
+                        sibling, sibling.status, reason="OCO_SIBLING_FILLED"
+                    )
                     if isinstance(self.account, LinearPerpetualAccountV2):
                         self.account.release_order_margin(sibling.order_id)
         if self.execution_reporter is not None:
@@ -655,6 +886,54 @@ class SimulationKernel:
                     "order_id": order.order_id,
                 }
             )
+        return fill_qty
+
+    _fill_source_events: list[MarketEvent] = field(default_factory=list)
+
+    def _lifecycle(
+        self,
+        order: SimulatedOrder,
+        state: str,
+        *,
+        reason: str | None = None,
+        fill_qty: Decimal | None = None,
+    ) -> None:
+        if self.execution_model_revision != EXECUTION_REALISM_V2:
+            return
+        self._order_events.append(
+            {
+                "ordinal": len(self._order_events) + 1,
+                "order_id": order.order_id,
+                "state": state,
+                "sequence": 0
+                if self._last_event is None
+                else self._last_event.sequence,
+                "event_time_ms": 0
+                if self._last_event is None
+                else self._last_event.event_time_ms,
+                "remaining_qty": str(order.qty),
+                **({"fill_qty": str(fill_qty)} if fill_qty is not None else {}),
+                **({"reason": reason} if reason is not None else {}),
+            }
+        )
+
+    def _rejected_lifecycle(
+        self, rejected: Mapping[str, object], *, order_id: str | None = None
+    ) -> None:
+        if self.execution_model_revision != EXECUTION_REALISM_V2:
+            return
+        self._order_events.append(
+            {
+                "ordinal": len(self._order_events) + 1,
+                "order_id": order_id,
+                "state": "REJECTED",
+                "sequence": int(rejected.get("sequence") or 0),
+                "event_time_ms": 0
+                if self._last_event is None
+                else self._last_event.event_time_ms,
+                "reason": str(rejected.get("reason") or "REJECTED"),
+            }
+        )
 
     def _apply_funding(self, event: MarketEvent) -> None:
         if isinstance(self.account, LinearPerpetualAccountV2):
@@ -706,6 +985,7 @@ def reject_intent(
     qty_step: Decimal | None = None,
     min_notional: Decimal | None = None,
     allow_reduce_only_below_min_notional: bool = False,
+    allow_ioc: bool = False,
 ) -> str | None:
     side = str(intent.get("side") or "")
     order_type = str(intent.get("type") or "")
@@ -720,7 +1000,7 @@ def reject_intent(
         return "UNSUPPORTED_TYPE"
     if not qty.is_finite() or qty <= 0:
         return "NON_POSITIVE_QTY"
-    if tif != "GTC":
+    if tif not in ({"GTC", "IOC"} if allow_ioc else {"GTC"}):
         return "UNSUPPORTED_TIF"
     limit_price, limit_error = _validated_price(intent.get("limit_price"))
     stop_price, stop_error = _validated_price(intent.get("stop_price"))

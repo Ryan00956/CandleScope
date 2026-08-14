@@ -137,6 +137,40 @@ def build_report(
             item.get("reason") == "ORDER_REJECTED_RISK"
             for item in payload.get("rejected") or []
         )
+    if config.get("execution_model_revision"):
+        report["order_events"] = list(
+            (payload.get("ledger") or {}).get("order_events") or []
+        )
+        report["cost_sensitivity"] = copy.deepcopy(
+            payload.get("cost_sensitivity") or {}
+        )
+        report["identity"].update(
+            {
+                "execution_model_revision": config.get("execution_model_revision"),
+                "fill_policy": config.get("fill_policy"),
+                "bar_path_scenario": config.get("bar_path_scenario"),
+                "order_end_policy": config.get("order_end_policy"),
+            }
+        )
+        report["execution_assumptions"] = {
+            "participation_rate": config.get("participation_rate"),
+            "latency_ms": int(config.get("latency_ms") or 0),
+            "latency_events": int(config.get("latency_events") or 0),
+            "bar_path_scenario": config.get("bar_path_scenario"),
+            "ohlc_path_is_historical_fact": False,
+            "agg_trade_is_raw_trade": False,
+            "queue_exact": False,
+        }
+        if fidelity == "BAR_APPROX":
+            report["unmodeled"] = [
+                item for item in report["unmodeled"] if item != "volume participation"
+            ]
+        traced = sum(bool(item.get("source_event_hash")) for item in fills)
+        report["fill_trace"] = {
+            "fill_count": len(fills),
+            "authoritative_event_trace_count": traced,
+            "complete": traced == len(fills),
+        }
     strategy_metadata = payload.get("strategy_metadata")
     if fidelity == "AGG_TRADE_EXECUTION":
         report["identity"].update(
@@ -203,9 +237,35 @@ def export_bundle(
 
 
 def _fills_csv(fills: list[Mapping[str, Any]]) -> str:
+    traced = any(fill.get("source_event_hash") for fill in fills)
+    if not traced:
+        lines = [
+            "order_id,sequence,event_time_ms,side,action,position_before,"
+            "position_after,price,qty,fee,reason"
+        ]
+        for fill in fills:
+            lines.append(
+                ",".join(
+                    [
+                        str(fill.get("order_id") or ""),
+                        str(fill.get("sequence") or ""),
+                        str(fill.get("event_time_ms") or ""),
+                        str(fill.get("side") or ""),
+                        str(fill.get("action") or ""),
+                        str(fill.get("position_before") or "0"),
+                        str(fill.get("position_after") or "0"),
+                        str(fill.get("price") or ""),
+                        str(fill.get("qty") or ""),
+                        str(fill.get("fee") or "0"),
+                        str(fill.get("reason") or ""),
+                    ]
+                )
+            )
+        return "\n".join(lines) + "\n"
     lines = [
         "order_id,sequence,event_time_ms,side,action,position_before,"
-        "position_after,price,qty,fee,reason"
+        "position_after,price,qty,fee,reason,source_event_kind,source_sequence,"
+        "source_event_time_ms,source_event_hash"
     ]
     for fill in fills:
         lines.append(
@@ -222,6 +282,10 @@ def _fills_csv(fills: list[Mapping[str, Any]]) -> str:
                     str(fill.get("qty") or ""),
                     str(fill.get("fee") or "0"),
                     str(fill.get("reason") or ""),
+                    str(fill.get("source_event_kind") or ""),
+                    str(fill.get("source_sequence") or ""),
+                    str(fill.get("source_event_time_ms") or ""),
+                    str(fill.get("source_event_hash") or ""),
                 ]
             )
         )

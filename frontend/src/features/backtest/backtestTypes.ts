@@ -44,6 +44,26 @@ export interface BacktestReport {
   fills: Array<Record<string, string>>;
   trades: Array<Record<string, string>>;
   rejected_orders?: Array<Record<string, unknown>>;
+  order_events?: Array<Record<string, unknown>>;
+  execution_assumptions?: Record<string, unknown>;
+  fill_trace?: {
+    fill_count: number;
+    authoritative_event_trace_count: number;
+    complete: boolean;
+  };
+  cost_sensitivity?: {
+    schemaVersion?: string;
+    purpose?: string;
+    included_in_primary_config_hash?: boolean;
+    matrix_hash?: string;
+    scenarios?: Array<{
+      name: string;
+      status: string;
+      assumptions: Record<string, unknown>;
+      metrics: Record<string, string | number>;
+      hashes: Record<string, string>;
+    }>;
+  };
   strategy?: {
     revision?: string;
     indicatorRevision?: string;
@@ -66,6 +86,10 @@ export interface BacktestReport {
     host_policy_revision?: string | null;
     sizing_policy?: string | null;
     risk_policy?: string | null;
+    execution_model_revision?: string | null;
+    fill_policy?: string | null;
+    bar_path_scenario?: string | null;
+    order_end_policy?: string | null;
   };
   account_model?: string;
   funding_mode?: string;

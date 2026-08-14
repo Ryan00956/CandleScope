@@ -21,6 +21,10 @@ from app.simulation.kernel import (
     _fill_action,
     reject_intent,
 )
+from app.simulation.execution_realism import (
+    EXECUTION_REALISM_V2,
+    source_event_trace,
+)
 
 TRADE_FILL_POLICY = "TRADE_NEXT_PRINT_CONSERVATIVE_V1"
 StrategyFn = Callable[[tuple[MarketEvent, ...], MarketEvent], list[dict]]
@@ -50,6 +54,11 @@ class TradeSimulationKernel:
     leverage: Decimal = Decimal("1")
     host_policy_revision: str | None = None
     fill_policy: str = TRADE_FILL_POLICY
+    execution_model_revision: str | None = None
+    participation_rate: Decimal | None = None
+    latency_ms: int = 0
+    latency_events: int = 0
+    order_end_policy: str = "CANCEL_AT_END"
     max_events: int = 2_000_000
     checkpoint_event_interval: int = 10_000
     slippage_bps: Decimal = Decimal("0")
@@ -68,6 +77,7 @@ class TradeSimulationKernel:
     rejected: list[dict] = field(default_factory=list)
     fee_total: Decimal = Decimal("0")
     equity_curve: list[dict] = field(default_factory=list)
+    equity_curve_event_interval: int = 1
     execution_reporter: Callable[[dict], None] | None = field(
         default=None,
         repr=False,
@@ -76,8 +86,27 @@ class TradeSimulationKernel:
     _last_event: MarketEvent | None = None
     _next_funding_time_ms: int | None = None
     _market_event_count: int = 0
+    _order_tif: dict[str, str] = field(default_factory=dict)
+    _order_eligible_time_ms: dict[str, int] = field(default_factory=dict)
+    _order_events: list[dict] = field(default_factory=list)
+    _fill_source_events: list[MarketEvent] = field(default_factory=list)
+    frozen_intents: list[dict] = field(default_factory=list)
+    _decision_chain_hash: str = "sha256:GENESIS"
+    _decision_count: int = 0
 
     def __post_init__(self) -> None:
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            if (
+                self.participation_rate is None
+                or self.participation_rate <= 0
+                or self.participation_rate > 1
+                or self.latency_ms < 0
+                or self.latency_events < 0
+            ):
+                raise MarketDatasetError(
+                    "invalid execution realism V2 configuration",
+                    code="SCHEMA_UNKNOWN_FIELD",
+                )
         if self.account_model == ACCOUNT_MODEL_V2:
             self.account = LinearPerpetualAccountV2(
                 initial_balance=self.initial_balance,
@@ -113,6 +142,33 @@ class TradeSimulationKernel:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            **(
+                {
+                    "execution_model_revision": self.execution_model_revision,
+                    "participation_rate": str(self.participation_rate),
+                    "latency_ms": self.latency_ms,
+                    "latency_events": self.latency_events,
+                    "order_end_policy": self.order_end_policy,
+                    "order_tif": dict(self._order_tif),
+                    "order_eligible_time_ms": dict(self._order_eligible_time_ms),
+                    "order_events": list(self._order_events),
+                    "fill_source_events": [
+                        {
+                            "sequence": event.sequence,
+                            "event_time_ms": event.event_time_ms,
+                            "role": event.role,
+                            "payload": dict(event.payload),
+                        }
+                        for event in self._fill_source_events
+                    ],
+                    "frozen_intents": list(self.frozen_intents),
+                    "decision_chain_hash": self._decision_chain_hash,
+                    "decision_count": self._decision_count,
+                    "equity_curve_event_interval": self.equity_curve_event_interval,
+                }
+                if self.execution_model_revision == EXECUTION_REALISM_V2
+                else {}
+            ),
             **(
                 {"host_policy_revision": self.host_policy_revision}
                 if self.host_policy_revision is not None
@@ -158,6 +214,11 @@ class TradeSimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("execution_model_revision") != self.execution_model_revision:
+            raise MarketDatasetError(
+                "execution model checkpoint identity changed",
+                code="CHECKPOINT_CORRUPT",
+            )
         if payload.get("host_policy_revision") != self.host_policy_revision:
             raise MarketDatasetError(
                 "Host policy checkpoint identity changed", code="CHECKPOINT_CORRUPT"
@@ -248,6 +309,32 @@ class TradeSimulationKernel:
         ]
         self.decisions = list(payload["decisions"])  # type: ignore[arg-type]
         self.rejected = list(payload.get("rejected") or [])  # type: ignore[arg-type]
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            self._order_tif = {
+                str(key): str(value)
+                for key, value in dict(payload.get("order_tif") or {}).items()
+            }
+            self._order_eligible_time_ms = {
+                str(key): int(value)
+                for key, value in dict(
+                    payload.get("order_eligible_time_ms") or {}
+                ).items()
+            }
+            self._order_events = list(payload.get("order_events") or [])  # type: ignore[arg-type]
+            self._fill_source_events = [
+                MarketEvent(
+                    sequence=int(item["sequence"]),
+                    event_time_ms=int(item["event_time_ms"]),
+                    role=str(item["role"]),
+                    payload=dict(item["payload"]),  # type: ignore[arg-type]
+                )
+                for item in payload.get("fill_source_events") or []  # type: ignore[union-attr]
+            ]
+            self.frozen_intents = list(payload.get("frozen_intents") or [])  # type: ignore[arg-type]
+            self._decision_chain_hash = str(
+                payload.get("decision_chain_hash") or "sha256:GENESIS"
+            )
+            self._decision_count = int(payload.get("decision_count") or 0)
         last_event = payload.get("last_event")
         self._last_event = (
             None
@@ -309,7 +396,20 @@ class TradeSimulationKernel:
                 watermark_ms=market_event.event_time_ms,
             )
             decision["derived_bar"] = derived_bar_feature((market_event,))
-            self.decisions.append(decision)
+            if self.execution_model_revision == EXECUTION_REALISM_V2:
+                self._decision_chain_hash = "sha256:" + sha256_hex(
+                    {"previous": self._decision_chain_hash, "decision": decision}
+                )
+                self._decision_count += 1
+            else:
+                self.decisions.append(decision)
+            if self.execution_model_revision == EXECUTION_REALISM_V2 and intents:
+                self.frozen_intents.append(
+                    {
+                        "sequence": market_event.sequence,
+                        "intents": [dict(intent) for intent in intents],
+                    }
+                )
             self._enqueue_many(intents, current_sequence=market_event.sequence)
             curve_point = {
                 "sequence": market_event.sequence,
@@ -324,25 +424,70 @@ class TradeSimulationKernel:
                         "available_balance": str(self.account.available_balance()),
                     }
                 )
-            self.equity_curve.append(curve_point)
+            if (
+                self.execution_model_revision != EXECUTION_REALISM_V2
+                or self._market_event_count == 1
+                or self._market_event_count % self.equity_curve_event_interval == 0
+            ):
+                self.equity_curve.append(curve_point)
             if (
                 self.checkpoint_event_interval
                 and self._market_event_count % self.checkpoint_event_interval == 0
             ):
                 self.checkpoints.append(self.snapshot())
+        self._append_terminal_curve_point()
         if finalize:
             self.finalize_orders()
         return self.result()
 
+    def _append_terminal_curve_point(self) -> None:
+        if (
+            self.execution_model_revision != EXECUTION_REALISM_V2
+            or self._last_event is None
+            or self._last_event.role != "TRADES"
+            or (
+                self.equity_curve
+                and self.equity_curve[-1]["sequence"] == self._last_event.sequence
+            )
+        ):
+            return
+        point = {
+            "sequence": self._last_event.sequence,
+            "event_time_ms": self._last_event.event_time_ms,
+            "equity": str(self.account.equity()),
+            "position_qty": str(self.account.position_qty),
+        }
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            point.update(
+                {
+                    "wallet_balance": str(self.account.quote_balance),
+                    "available_balance": str(self.account.available_balance()),
+                }
+            )
+        self.equity_curve.append(point)
+
     def finalize_orders(self) -> None:
         for order in self.orders:
             if order.status in {"OPEN", "PARTIAL"}:
-                order.status = "CANCELLED_EOF"
+                if (
+                    self.execution_model_revision == EXECUTION_REALISM_V2
+                    and self.order_end_policy == "KEEP_OPEN"
+                ):
+                    continue
+                order.status = (
+                    "CANCELLED"
+                    if self.execution_model_revision == EXECUTION_REALISM_V2
+                    else "CANCELLED_EOF"
+                )
+                self._lifecycle(order, order.status, reason="END_OF_RANGE")
                 if isinstance(self.account, LinearPerpetualAccountV2):
                     self.account.release_order_margin(order.order_id)
 
     def result(self) -> SimulationResult:
         fills = [asdict(fill) for fill in self.fills]
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            for fill, event in zip(fills, self._fill_source_events, strict=True):
+                fill.update(source_event_trace(event, source_kind=self.source_kind))
         label = (
             "TRADE_SEQUENCE"
             if self.source_kind == "RAW_TRADE"
@@ -366,8 +511,15 @@ class TradeSimulationKernel:
             "account": account,
             "account_hash": self.account.ledger_hash(),
         }
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            ledger["order_events"] = list(self._order_events)
+            ledger["decision_count"] = self._decision_count
         return SimulationResult(
-            decision_hash=sha256_hex(self.decisions),
+            decision_hash=(
+                self._decision_chain_hash
+                if self.execution_model_revision == EXECUTION_REALISM_V2
+                else sha256_hex(self.decisions)
+            ),
             fill_hash=sha256_hex(fills),
             ledger_hash=sha256_hex(ledger),
             report_hash=sha256_hex(
@@ -442,6 +594,7 @@ class TradeSimulationKernel:
             allow_reduce_only_below_min_notional=(
                 self.host_policy_revision is not None
             ),
+            allow_ioc=self.execution_model_revision == EXECUTION_REALISM_V2,
         )
         if reason is not None:
             rejected = {
@@ -451,6 +604,7 @@ class TradeSimulationKernel:
                 "intent": dict(intent),
             }
             self.rejected.append(rejected)
+            self._rejected_lifecycle(rejected)
             if self.execution_reporter is not None:
                 self.execution_reporter(rejected)
             return
@@ -461,7 +615,13 @@ class TradeSimulationKernel:
             qty=Decimal(str(intent["qty"])),
             limit_price=_optional_decimal(intent.get("limit_price")),
             stop_price=_optional_decimal(intent.get("stop_price")),
-            eligible_after_sequence=current_sequence + 1,
+            eligible_after_sequence=current_sequence
+            + 1
+            + (
+                self.latency_events
+                if self.execution_model_revision == EXECUTION_REALISM_V2
+                else 0
+            ),
             oco_group=(
                 None
                 if not str(intent.get("oco_group") or "").strip()
@@ -470,6 +630,15 @@ class TradeSimulationKernel:
             reduce_only=bool(intent.get("reduce_only") or False),
         )
         self.orders.append(order)
+        self._order_tif[order.order_id] = str(intent.get("tif") or "GTC").upper()
+        self._order_eligible_time_ms[order.order_id] = (
+            0 if self._last_event is None else self._last_event.event_time_ms
+        ) + (
+            self.latency_ms
+            if self.execution_model_revision == EXECUTION_REALISM_V2
+            else 0
+        )
+        self._lifecycle(order, "NEW")
         if isinstance(self.account, LinearPerpetualAccountV2):
             assert self.account.mark is not None
             fee_bps = (
@@ -497,6 +666,8 @@ class TradeSimulationKernel:
                 )
             except MarketDatasetError as exc:
                 self.orders.pop()
+                self._order_tif.pop(order.order_id, None)
+                self._order_eligible_time_ms.pop(order.order_id, None)
                 rejected = {
                     "accepted": False,
                     "reason": exc.code,
@@ -504,6 +675,7 @@ class TradeSimulationKernel:
                     "intent": dict(intent),
                 }
                 self.rejected.append(rejected)
+                self._rejected_lifecycle(rejected, order_id=order.order_id)
                 if self.execution_reporter is not None:
                     self.execution_reporter(rejected)
                 return
@@ -515,6 +687,8 @@ class TradeSimulationKernel:
                     "order": _wire_order(order),
                 }
             )
+        self._lifecycle(order, "ACCEPTED")
+        self._lifecycle(order, "OPEN")
         self._next_order_id += 1
 
     def _match(self, event: MarketEvent) -> None:
@@ -525,8 +699,14 @@ class TradeSimulationKernel:
             for order in self.orders
             if order.status in {"OPEN", "PARTIAL"}
             and order.eligible_after_sequence <= event.sequence
+            and self._order_eligible_time_ms.get(order.order_id, 0)
+            <= event.event_time_ms
         ]
-        remaining = qty
+        remaining = (
+            qty * self.participation_rate
+            if self.execution_model_revision == EXECUTION_REALISM_V2
+            else qty
+        )
         for order in open_orders:
             if remaining <= 0:
                 break
@@ -565,6 +745,16 @@ class TradeSimulationKernel:
                         "PRINT_THROUGH",
                     )
                     remaining -= fill_qty
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            for order in open_orders:
+                if self._order_tif.get(order.order_id) == "IOC" and order.status in {
+                    "OPEN",
+                    "PARTIAL",
+                }:
+                    order.status = "EXPIRED"
+                    self._lifecycle(order, "EXPIRED", reason="IOC_REMAINDER")
+                    if isinstance(self.account, LinearPerpetualAccountV2):
+                        self.account.release_order_margin(order.order_id)
 
     def _fill(
         self,
@@ -584,7 +774,12 @@ class TradeSimulationKernel:
             )
             fill_qty = min(fill_qty, reducible)
             if fill_qty <= 0:
-                order.status = "CANCELLED_REDUCE_ONLY"
+                order.status = (
+                    "CANCELLED"
+                    if self.execution_model_revision == EXECUTION_REALISM_V2
+                    else "CANCELLED_REDUCE_ONLY"
+                )
+                self._lifecycle(order, order.status, reason="REDUCE_ONLY_ZERO")
                 if isinstance(self.account, LinearPerpetualAccountV2):
                     self.account.release_order_margin(order.order_id)
                 return
@@ -639,6 +834,10 @@ class TradeSimulationKernel:
             position_after=position_after,
         )
         self.fills.append(fill)
+        if self.execution_model_revision == EXECUTION_REALISM_V2:
+            assert self._last_event is not None
+            self._fill_source_events.append(self._last_event)
+            self._lifecycle(order, order.status, fill_qty=fill_qty)
         if order.oco_group is not None and order.status == "FILLED":
             for sibling in self.orders:
                 if (
@@ -646,7 +845,14 @@ class TradeSimulationKernel:
                     and sibling.oco_group == order.oco_group
                     and sibling.status in {"OPEN", "PARTIAL"}
                 ):
-                    sibling.status = "CANCELLED_OCO"
+                    sibling.status = (
+                        "CANCELLED"
+                        if self.execution_model_revision == EXECUTION_REALISM_V2
+                        else "CANCELLED_OCO"
+                    )
+                    self._lifecycle(
+                        sibling, sibling.status, reason="OCO_SIBLING_FILLED"
+                    )
                     if isinstance(self.account, LinearPerpetualAccountV2):
                         self.account.release_order_margin(sibling.order_id)
         if self.execution_reporter is not None:
@@ -657,6 +863,51 @@ class TradeSimulationKernel:
                     "order_id": order.order_id,
                 }
             )
+
+    def _lifecycle(
+        self,
+        order: SimulatedOrder,
+        state: str,
+        *,
+        reason: str | None = None,
+        fill_qty: Decimal | None = None,
+    ) -> None:
+        if self.execution_model_revision != EXECUTION_REALISM_V2:
+            return
+        self._order_events.append(
+            {
+                "ordinal": len(self._order_events) + 1,
+                "order_id": order.order_id,
+                "state": state,
+                "sequence": 0
+                if self._last_event is None
+                else self._last_event.sequence,
+                "event_time_ms": 0
+                if self._last_event is None
+                else self._last_event.event_time_ms,
+                "remaining_qty": str(order.qty),
+                **({"fill_qty": str(fill_qty)} if fill_qty is not None else {}),
+                **({"reason": reason} if reason is not None else {}),
+            }
+        )
+
+    def _rejected_lifecycle(
+        self, rejected: Mapping[str, object], *, order_id: str | None = None
+    ) -> None:
+        if self.execution_model_revision != EXECUTION_REALISM_V2:
+            return
+        self._order_events.append(
+            {
+                "ordinal": len(self._order_events) + 1,
+                "order_id": order_id,
+                "state": "REJECTED",
+                "sequence": int(rejected.get("sequence") or 0),
+                "event_time_ms": 0
+                if self._last_event is None
+                else self._last_event.event_time_ms,
+                "reason": str(rejected.get("reason") or "REJECTED"),
+            }
+        )
 
     def _apply_funding(self, event: MarketEvent) -> None:
         if isinstance(self.account, LinearPerpetualAccountV2):

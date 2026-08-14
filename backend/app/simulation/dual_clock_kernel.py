@@ -33,12 +33,19 @@ class DualClockSimulationKernel:
     funding_mode: str = "OFF"
     leverage: Decimal = Decimal("1")
     host_policy_revision: str | None = None
+    execution_model_revision: str | None = None
+    participation_rate: Decimal | None = None
+    latency_ms: int = 0
+    latency_events: int = 0
+    order_end_policy: str = "CANCEL_AT_END"
+    equity_curve_event_interval: int = 1
     execution_reporter: Callable[[dict], None] | None = field(default=None, repr=False)
     execution: TradeSimulationKernel = field(init=False)
     builder: TradeBarBuilder = field(init=False)
     decisions: list[dict[str, Any]] = field(default_factory=list)
     execution_event_count: int = 0
     _last_source_sequence: int | None = None
+    frozen_intents: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.builder = TradeBarBuilder(self.signal_interval, gap_policy=self.gap_policy)
@@ -56,6 +63,12 @@ class DualClockSimulationKernel:
             funding_mode=self.funding_mode,
             leverage=self.leverage,
             host_policy_revision=self.host_policy_revision,
+            execution_model_revision=self.execution_model_revision,
+            participation_rate=self.participation_rate,
+            latency_ms=self.latency_ms,
+            latency_events=self.latency_events,
+            order_end_policy=self.order_end_policy,
+            equity_curve_event_interval=self.equity_curve_event_interval,
             execution_reporter=self.execution_reporter,
         )
 
@@ -77,6 +90,11 @@ class DualClockSimulationKernel:
             "decisions": list(self.decisions),
             "execution_event_count": self.execution_event_count,
             "last_source_sequence": self._last_source_sequence,
+            **(
+                {"frozen_intents": list(self.frozen_intents)}
+                if self.execution_model_revision is not None
+                else {}
+            ),
         }
 
     def restore(self, payload: Mapping[str, Any]) -> None:
@@ -97,6 +115,7 @@ class DualClockSimulationKernel:
             if payload.get("last_source_sequence") is None
             else int(payload["last_source_sequence"])
         )
+        self.frozen_intents = list(payload.get("frozen_intents") or [])
 
     def run(
         self,
@@ -155,6 +174,13 @@ class DualClockSimulationKernel:
                         watermark_ms=bar.event_time_ms,
                     )
                 )
+                if self.execution_model_revision is not None and intents:
+                    self.frozen_intents.append(
+                        {
+                            "sequence": bar.sequence,
+                            "intents": [dict(intent) for intent in intents],
+                        }
+                    )
                 # The signal exists immediately before this boundary trade, so
                 # its first eligible print is the current authoritative event.
                 self.execution._enqueue_many(
@@ -168,20 +194,25 @@ class DualClockSimulationKernel:
                 self.execution.account.mark = Decimal(str(trade.payload["price"]))
             self.execution._apply_funding(trade)
             self.execution._match(trade)
-            self.execution.equity_curve.append(
-                {
-                    "sequence": trade.sequence,
-                    "event_time_ms": trade.event_time_ms,
-                    "equity": str(self.execution.account.equity()),
-                    "position_qty": str(self.execution.account.position_qty),
-                    "wallet_balance": str(self.execution.account.quote_balance),
-                    "available_balance": str(
-                        self.execution.account.available_balance()
-                        if isinstance(self.execution.account, LinearPerpetualAccountV2)
-                        else self.execution.account.equity()
-                    ),
-                }
-            )
+            curve_point = {
+                "sequence": trade.sequence,
+                "event_time_ms": trade.event_time_ms,
+                "equity": str(self.execution.account.equity()),
+                "position_qty": str(self.execution.account.position_qty),
+                "wallet_balance": str(self.execution.account.quote_balance),
+                "available_balance": str(
+                    self.execution.account.available_balance()
+                    if isinstance(self.execution.account, LinearPerpetualAccountV2)
+                    else self.execution.account.equity()
+                ),
+            }
+            if (
+                self.execution_model_revision is None
+                or self.execution_event_count == 0
+                or (self.execution_event_count + 1) % self.equity_curve_event_interval
+                == 0
+            ):
+                self.execution.equity_curve.append(curve_point)
             self.execution_event_count += 1
             self._last_source_sequence = source_sequence
             if (
@@ -190,6 +221,7 @@ class DualClockSimulationKernel:
                 and self.execution_event_count % self.checkpoint_event_interval == 0
             ):
                 checkpoint_callback(trade)
+        self.execution._append_terminal_curve_point()
         if finalize:
             self.execution.finalize_orders()
         return self.result()

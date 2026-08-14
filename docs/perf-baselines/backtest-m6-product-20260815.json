@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "candlescope.backtest-m6-performance-baseline/1",
+  "frozenAt": "2026-08-15",
+  "workload": "ONE_MILLION_AGG_TRADE_PRODUCT_PATH",
+  "candidateArtifact": "output/backtest-m6-candidate-20260815.json",
+  "candidateMeasurements": {
+    "duration_seconds": 257.934662,
+    "events_per_second": 3876.951,
+    "peak_rss_bytes": 482902016,
+    "fill_count": 2000,
+    "decision_count": 1000000,
+    "report_bytes": 3036978,
+    "sensitivity_scenarios": 5
+  },
+  "acceptance_thresholds": {
+    "min_events_per_second": 2300,
+    "max_duration_seconds": 430,
+    "max_peak_rss_bytes": 805306368
+  },
+  "selectionPolicy": {
+    "firstControlledCandidate": true,
+    "throughputHeadroomPercent": 40.67,
+    "durationHeadroomPercent": 66.71,
+    "rssCeiling": "768_MiB",
+    "thresholdsSelectedAfterFirstCandidate": true,
+    "thresholdsMustNotBeRelaxedToMakeAFailedRunPass": true
+  },
+  "scope": "M6 synthetic deterministic product-path threshold; not real-market or release evidence"
+}

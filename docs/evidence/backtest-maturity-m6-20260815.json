@@ -1,0 +1,128 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M6",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T06:36:31+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "461ed7bf59eb082a83b96ce0b4fbc815dbb845c5",
+  "plannedCommitMessage": "backtest: complete M6 execution realism v2",
+  "contract": {
+    "executionModelRevision": "EXECUTION_REALISM_V2",
+    "barFillPolicy": "BAR_VOLUME_PARTICIPATION_WORST_CASE_V2",
+    "barPathScenario": "OHLC_WORST_CASE_STOP_FIRST_V1",
+    "tradeFillPolicy": "AGG_TRADE_LATENCY_PARTICIPATION_V2",
+    "tif": ["GTC", "IOC"],
+    "endPolicies": ["CANCEL_AT_END", "KEEP_OPEN"],
+    "executionAuthority": "HOST",
+    "accountingAuthority": "DECIMAL_APPEND_ONLY_HOST_LEDGER",
+    "sourceHonesty": "BAR_IS_NOT_INTRABAR_HISTORY_AND_AGG_TRADE_IS_NOT_RAW_OR_QUEUE_EXACT",
+    "networkCompletion": "FORBIDDEN"
+  },
+  "executionGates": {
+    "barLargeOrderPartialAcrossBars": "PASS",
+    "barCapacitySharedByAcceptanceOrder": "PASS",
+    "latencyMillisecondsAndEventsBothRequired": "PASS",
+    "marketUsesFirstPostLatencyEligiblePrint": "PASS",
+    "limitRequiresSubsequentCrossingPrint": "PASS",
+    "tradeQuantityParticipationCap": "PASS",
+    "iocExpiresRemainder": "PASS",
+    "keepOpenAndCancelAtEndFrozen": "PASS",
+    "standardLifecycleTrace": "PASS",
+    "authoritativeFillSourceHash": "PASS",
+    "checkpointIdentityExact": "PASS",
+    "fiveScenarioFrozenIntentReplay": "PASS",
+    "primaryConfigHashExcludesSensitivity": "PASS"
+  },
+  "performance": {
+    "artifact": "docs/evidence/backtest-m6-product-performance-20260815.json",
+    "artifactFileSha256": "9af566f587a2e9b7adc934e03b3ec611039547cc2d84801c41106eb88493aede",
+    "baseline": "docs/perf-baselines/backtest-m6-product-20260815.json",
+    "events": 1000000,
+    "durationSeconds": 267.823335,
+    "eventsPerSecond": 3733.805,
+    "peakRssBytes": 481091584,
+    "fillCount": 2000,
+    "decisionCount": 1000000,
+    "equityCurvePoints": 10001,
+    "reportBytes": 3037010,
+    "sensitivityScenarios": 5,
+    "thresholds": {
+      "minEventsPerSecond": 2300,
+      "maxDurationSeconds": 430,
+      "maxPeakRssBytes": 805306368
+    },
+    "result": "PASS",
+    "scope": "SYNTHETIC_DETERMINISTIC_PRODUCT_PATH_NOT_REAL_MARKET_OR_RELEASE_EVIDENCE"
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15191/backtest.html",
+    "apiBase": "http://127.0.0.1:18098/api/v1/backtests",
+    "runId": "bt_4627811b1aeb4b5bbbfb0b216304e693",
+    "configHash": "sha256:8f03530f5b58c25fb6bb9f08cecfcf35c4d6c8d813bf5196ff83d2f60741a4d0",
+    "decisionHash": "sha256:f24be82a0ac286764cb8283aa402a49a36fd4afc19a019dc9a93777721d0a101",
+    "fillHash": "5352700680579a6ed18515a98ce35ee6c8e72a695439d71586163daca5d2f824",
+    "ledgerHash": "ed11f4d9fc19c1fa963a681535ea5e52316057e862928e778a5f7afff84c4de0",
+    "reportHash": "sha256:7a2be7695526775090eefe2360eb2b2f7373f6dd1331caee1e151876369dbfaa",
+    "fillCount": 7,
+    "sourceSequences": [6, 7, 8, 9, 10, 11, 12],
+    "lifecycle": ["NEW", "ACCEPTED", "OPEN", "PARTIAL", "PARTIAL", "PARTIAL", "PARTIAL", "PARTIAL", "PARTIAL", "FILLED"],
+    "authoritativeTrace": "7/7",
+    "costSensitivityScenarios": 5,
+    "klineAndEquityVisible": true,
+    "finalConsoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshot": {
+      "path": "output/backtest-m6-runtime-20260815/browser/execution-realism-partial-fills.png",
+      "sha256": "c0b266a39430f38a083c3c0c21607c659e3d9636e318adb675f043111ae17c11"
+    },
+    "database": {
+      "path": "output/backtest-m6-runtime-20260815/backtest2.db",
+      "sha256": "ea3e8c87f46c7793939ec50df55a1d75da8261f75630a09ce46770004da8b125",
+      "quickCheck": "ok",
+      "foreignKeyViolations": 0
+    }
+  },
+  "validation": {
+    "m6FocusedAndPublicRuntime": {"result": "PASS", "tests": 8},
+    "legacyGoldenCompatibilityFocused": {"result": "PASS", "tests": 11},
+    "backendRelevantRegression": {"result": "PASS", "tests": 180, "deselected": 3576, "warnings": 6},
+    "contractReleaseRollback": {"result": "PASS", "tests": 34, "warnings": 6},
+    "pythonRuffTouchedFiles": "PASS",
+    "pythonFormatTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendBacktestTests": {"result": "PASS", "tests": 8},
+    "frontendFullTests": {"result": "PASS", "tests": 3249},
+    "frontendBuild": "PASS_WITH_EXISTING_500KB_CHUNK_WARNING",
+    "gitDiffCheck": "PASS"
+  },
+  "compatibility": {
+    "databaseSchemaChanged": false,
+    "databaseMigrationRequired": false,
+    "legacyFillPoliciesRemainDefault": true,
+    "legacyRsiGoldenReportHashUnchanged": true,
+    "legacyCsvColumnsUnchanged": true,
+    "legacyStoredReportsRemainReadable": true,
+    "newSemanticsUseNewIdentity": true,
+    "reportSchema": "candlescope.backtest-report/1 additive V2 fields only"
+  },
+  "defectsCaught": [
+    "Empty M6 report fields initially changed a legacy RSI golden report hash. M6 fields and trace CSV columns are now emitted only for V2, restoring exact legacy compatibility.",
+    "The V2 fill policy and equity sampling identity were hashed but initially absent from stored config_json. Normalized V2 execution identity is now copied into durable config and displayed by the report.",
+    "The first browser order was correctly rejected by the existing M5 max-order-risk gate. The acceptance fixture raised only its test-local limit and then proved seven real partial fills without bypassing Host risk."
+  ],
+  "soakGate": "NOT_REQUIRED_IN_M6_BEYOND_FROZEN_MILLION_EVENT_PRODUCT_GATE",
+  "migration": "No database migration. V2 is selected only by additive immutable Run identity fields.",
+  "rollback": "Revert the independent M6 local commit. Legacy runs remain readable and all production and frontend flags remain default off.",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M6_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "BAR supports only the frozen worst-case scenario; it does not reconstruct an intrabar path.",
+    "BAR latency sensitivity is explicitly not applicable.",
+    "Aggressor/maker markers are not consumed; aggTrade is not raw trade, L2, spread, depth or queue truth.",
+    "The M6 million-event performance fixture is synthetic. Real archive performance, recovery, soak and clean-SHA release evidence remain M10 gates."
+  ]
+}

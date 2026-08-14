@@ -23,6 +23,13 @@ from app.simulation.trade_bar_builder import (
     EXECUTION_CLOCK,
     SIGNAL_CLOCK,
 )
+from app.simulation.execution_realism import (
+    BAR_FILL_POLICY_V2,
+    EXECUTION_REALISM_V2,
+    TRADE_FILL_POLICY_V2,
+    parse_execution_realism,
+)
+from app.simulation.cost_sensitivity import build_cost_sensitivity_matrix
 
 from .errors import BacktestError
 from .identity import canonical_json, config_hash, parse_parameters, sha256_hex
@@ -199,6 +206,23 @@ class BacktestService:
                         "max_drawdown_percent",
                         "daily_loss_limit",
                         "cooldown_events",
+                    )
+                }
+            )
+        if normalized_execution.get("execution_model_revision"):
+            stored_payload.update(
+                {
+                    name: normalized_execution.get(name)
+                    for name in (
+                        "execution_model_revision",
+                        "fill_policy",
+                        "participation_rate",
+                        "latency_ms",
+                        "latency_events",
+                        "order_end_policy",
+                        "bar_path_scenario",
+                        "tif_supported",
+                        "equity_curve_event_interval",
                     )
                 }
             )
@@ -769,6 +793,7 @@ class BacktestService:
                 qty_step=_config_optional_decimal(config, "qty_step"),
                 min_notional=_config_optional_decimal(config, "min_notional"),
                 gap_policy=str(config.get("gap_policy") or "REJECT"),
+                **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
             checkpoint = self.repository.latest_checkpoint(run_id)
@@ -833,6 +858,7 @@ class BacktestService:
                 finalize=True,
                 checkpoint_callback=checkpoint_after,
             )
+            cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -869,7 +895,11 @@ class BacktestService:
                 )
                 | kernel.account.coverage(),
                 "fill_model": {
-                    "name": "BAR_NEXT_BAR_WORST_CASE_V1",
+                    "name": (
+                        BAR_FILL_POLICY_V2
+                        if kernel.execution_model_revision == EXECUTION_REALISM_V2
+                        else "BAR_NEXT_BAR_WORST_CASE_V1"
+                    ),
                     "slippage_bps": str(kernel.slippage_bps),
                     "taker_fee_bps": str(kernel.taker_fee_bps),
                     "maker_fee_bps": str(kernel.maker_fee_bps),
@@ -884,7 +914,9 @@ class BacktestService:
                     ),
                     "gap_policy": kernel.gap_policy,
                     "order_closeout": "CANCEL_OPEN_AT_END",
+                    **_execution_fill_model(config),
                 },
+                "cost_sensitivity": cost_sensitivity,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -982,6 +1014,7 @@ class BacktestService:
                 funding_mode=str(config.get("funding_mode") or "OFF"),
                 leverage=_config_decimal(config, "leverage", "1"),
                 host_policy_revision=config.get("host_policy_revision"),
+                **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
             resume_sequence = 0
@@ -1043,6 +1076,7 @@ class BacktestService:
                 finalize=True,
                 checkpoint_callback=checkpoint_after,
             )
+            cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -1079,13 +1113,19 @@ class BacktestService:
                 "data_quality": dict((snapshot_evidence or {}).get("quality") or {}),
                 "contract_coverage": kernel.account.coverage(),
                 "fill_model": {
-                    "name": "TRADE_NEXT_PRINT_CONSERVATIVE_V1",
+                    "name": (
+                        TRADE_FILL_POLICY_V2
+                        if kernel.execution.execution_model_revision
+                        == EXECUTION_REALISM_V2
+                        else "TRADE_NEXT_PRINT_CONSERVATIVE_V1"
+                    ),
                     "signal_clock": SIGNAL_CLOCK,
                     "execution_clock": EXECUTION_CLOCK,
                     "bar_builder": BAR_BUILDER_REVISION,
                     "signal_interval": kernel.signal_interval,
                     "timezone": BAR_TIMEZONE,
                     "source_honesty": "aggTrade is aggregated; raw trades and queue position are unmodeled",
+                    **_execution_fill_model(config),
                     "slippage_bps": str(kernel.execution.slippage_bps),
                     "taker_fee_bps": str(kernel.execution.taker_fee_bps),
                     "maker_fee_bps": str(kernel.execution.maker_fee_bps),
@@ -1102,6 +1142,7 @@ class BacktestService:
                         )
                     ),
                 },
+                "cost_sensitivity": cost_sensitivity,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -1224,6 +1265,11 @@ class BacktestService:
                 leverage=_config_decimal(config, "leverage", "1"),
                 host_policy_revision=config.get("host_policy_revision"),
                 max_events=self.settings.max_trade_events,
+                checkpoint_event_interval=(
+                    0
+                    if config.get("execution_model_revision") == EXECUTION_REALISM_V2
+                    else self.settings.checkpoint_event_interval
+                ),
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
@@ -1231,6 +1277,7 @@ class BacktestService:
                 funding_interval_ms=int(config.get("funding_interval_hours") or 8)
                 * 3_600_000,
                 initial_balance=_config_decimal(config, "initial_balance", "10000"),
+                **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
             result = kernel.run(
@@ -1239,6 +1286,7 @@ class BacktestService:
                 warmup_events=warmup_events,
                 finalize=True,
             )
+            cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -1278,7 +1326,11 @@ class BacktestService:
                 "data_quality": dict((snapshot_evidence or {}).get("quality") or {}),
                 "contract_coverage": kernel.account.coverage(),
                 "fill_model": {
-                    "name": "TRADE_NEXT_PRINT_CONSERVATIVE_V1",
+                    "name": (
+                        TRADE_FILL_POLICY_V2
+                        if kernel.execution_model_revision == EXECUTION_REALISM_V2
+                        else "TRADE_NEXT_PRINT_CONSERVATIVE_V1"
+                    ),
                     "slippage_bps": str(kernel.slippage_bps),
                     "taker_fee_bps": str(kernel.taker_fee_bps),
                     "maker_fee_bps": str(kernel.maker_fee_bps),
@@ -1291,7 +1343,9 @@ class BacktestService:
                             "OFF" if kernel.funding_rate == 0 else "FIXED_INTERVAL_V1"
                         )
                     ),
+                    **_execution_fill_model(config),
                 },
+                "cost_sensitivity": cost_sensitivity,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -1610,6 +1664,10 @@ class BacktestService:
                     "FIDELITY_UNSUPPORTED",
                     "AGG_TRADE_EXECUTION M2 requires gap_policy=REJECT",
                 )
+        try:
+            execution_realism = parse_execution_realism(payload, fidelity_mode=fidelity)
+        except MarketDatasetError as exc:
+            raise BacktestError(exc.code, str(exc)) from exc
         execution_config = {
             "strategy_source": strategy_source,
             "output_mode": output_mode,
@@ -1641,6 +1699,7 @@ class BacktestService:
             execution_config.update(signal_identity)
         if contract_data_mode == "HISTORICAL_CONTRACT_V1":
             execution_config["contract_data_mode"] = contract_data_mode
+        execution_config.update(execution_realism.identity(fidelity_mode=fidelity))
         return RunIdentity(
             strategy_revision_id=str(payload["strategy_revision_id"]),
             dataset_id=str(payload["dataset_id"]),
@@ -2077,6 +2136,43 @@ def _provider_report_metadata(provider: object) -> dict[str, object]:
         return {}
     value = report_metadata()
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _execution_kernel_kwargs(config: Mapping[str, object]) -> dict[str, object]:
+    if config.get("execution_model_revision") != EXECUTION_REALISM_V2:
+        return {}
+    return {
+        "execution_model_revision": EXECUTION_REALISM_V2,
+        "participation_rate": _config_decimal(config, "participation_rate", "0.1"),
+        "latency_ms": int(config.get("latency_ms") or 0),
+        "latency_events": int(config.get("latency_events") or 0),
+        "order_end_policy": str(config.get("order_end_policy") or "CANCEL_AT_END"),
+        "equity_curve_event_interval": int(
+            config.get("equity_curve_event_interval") or 100
+        ),
+        **(
+            {"bar_path_scenario": str(config["bar_path_scenario"])}
+            if config.get("bar_path_scenario") is not None
+            else {}
+        ),
+    }
+
+
+def _execution_fill_model(config: Mapping[str, object]) -> dict[str, object]:
+    if config.get("execution_model_revision") != EXECUTION_REALISM_V2:
+        return {}
+    return {
+        "execution_model_revision": EXECUTION_REALISM_V2,
+        "participation_rate": str(config.get("participation_rate")),
+        "latency_ms": int(config.get("latency_ms") or 0),
+        "latency_events": int(config.get("latency_events") or 0),
+        "order_end_policy": str(config.get("order_end_policy")),
+        "bar_path_scenario": config.get("bar_path_scenario"),
+        "tif_supported": ["GTC", "IOC"],
+        "equity_curve_event_interval": int(
+            config.get("equity_curve_event_interval") or 100
+        ),
+    }
 
 
 def _planning_context(kernel: Any, event: MarketEvent) -> PlanningContext:

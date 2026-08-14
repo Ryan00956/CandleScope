@@ -265,6 +265,18 @@ Run identity。`SIGNAL` 经 Host sizing 生成绝对目标数量；`TARGET_POSIT
 包含细分 reason、输入快照、policy/rule revision 和事件时间。`reduce_only` 可减少风险但不得越零。
 报告和图表必须展示拒单、停止原因与最大实际暴露。
 
+### 8.5 成交真实性 V2 身份
+
+M6 新增 `EXECUTION_REALISM_V2`，冻结语义见
+`docs/adr/ADR-BACKTEST-009-execution-realism-v2.md`。只有显式声明该 revision 的新 Run 才启用
+bar/aggTrade participation、aggTrade 双维 latency、IOC、标准生命周期、结束残单策略、权威
+fill source hash 与成本敏感性矩阵。旧 Run 继续走原 fill policy，不得静默重算。
+
+BAR 的 `OHLC_WORST_CASE_STOP_FIRST_V1` 是保守假设而不是历史事实；aggTrade 是聚合成交而
+不是 raw trade，也不提供 spread、depth 或 queue position。五档敏感性使用主 Run 冻结 intents
+重放、拥有独立 matrix hash，且不进入主 Run config hash。V2 决策链和每 100 事件权益采样属于
+该版本身份。所有生产 flags 继续默认关闭。
+
 ---
 
 ## 9. Phase 1 数据接口

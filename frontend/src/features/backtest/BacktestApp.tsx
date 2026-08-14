@@ -26,6 +26,8 @@ const DUAL_CLOCK_MODE = "AGG_TRADE_EXECUTION";
 const HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1";
 const ACCOUNT_V2 = "LINEAR_PERP_ONE_WAY_V2";
 const HOST_POLICY_REVISION = "HOST_SIZING_RISK_V1";
+const EXECUTION_REALISM_V2 = "EXECUTION_REALISM_V2";
+const BAR_PATH_SCENARIO = "OHLC_WORST_CASE_STOP_FIRST_V1";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -93,6 +95,11 @@ export default function BacktestApp() {
   const [maxDrawdownPercent, setMaxDrawdownPercent] = useState("50");
   const [dailyLossLimit, setDailyLossLimit] = useState("");
   const [cooldownEvents, setCooldownEvents] = useState(0);
+  const [executionRealismV2, setExecutionRealismV2] = useState(false);
+  const [participationRate, setParticipationRate] = useState("0.1");
+  const [latencyMs, setLatencyMs] = useState(0);
+  const [latencyEvents, setLatencyEvents] = useState(0);
+  const [orderEndPolicy, setOrderEndPolicy] = useState("CANCEL_AT_END");
   const [snapshot, setSnapshot] = useState<BacktestSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
@@ -331,6 +338,13 @@ export default function BacktestApp() {
       max_drawdown_percent: maxDrawdownPercent,
       daily_loss_limit: dailyLossLimit || null,
       cooldown_events: cooldownEvents,
+      execution_model_revision: executionRealismV2 ? EXECUTION_REALISM_V2 : null,
+      participation_rate: executionRealismV2 ? participationRate : null,
+      latency_ms: executionRealismV2 && fidelityMode !== "BAR_APPROX" ? latencyMs : 0,
+      latency_events: executionRealismV2 && fidelityMode !== "BAR_APPROX" ? latencyEvents : 0,
+      order_end_policy: executionRealismV2 ? orderEndPolicy : "CANCEL_AT_END",
+      bar_path_scenario: executionRealismV2 && fidelityMode === "BAR_APPROX"
+        ? BAR_PATH_SCENARIO : null,
       exchange,
       market_type: marketType,
       gap_policy: "REJECT",
@@ -357,6 +371,7 @@ export default function BacktestApp() {
     dailyLossLimit,
     endTimeMs,
     equityPercent,
+    executionRealismV2,
     exchange,
     fast,
     fidelityMode,
@@ -366,6 +381,8 @@ export default function BacktestApp() {
     fixedNotional,
     fixedQty,
     initialBalance,
+    latencyEvents,
+    latencyMs,
     leverage,
     maxAbsPositionQty,
     maxActiveOrders,
@@ -376,6 +393,8 @@ export default function BacktestApp() {
     maxOrderRisk,
     makerFeeBps,
     marketType,
+    orderEndPolicy,
+    participationRate,
     refreshRuns,
     rsiLength,
     rsiOverbought,
@@ -677,6 +696,35 @@ export default function BacktestApp() {
             <label>资金费率/周期<input value={fundingRate} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingRate(event.target.value)} /></label>
             <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
           </div>
+          <label className="backtest-checkbox" data-testid="execution-realism-toggle">
+            <input type="checkbox" checked={executionRealismV2} onChange={(event) => setExecutionRealismV2(event.target.checked)} />
+            启用成交真实性 V2（默认关闭，形成新的 Run 身份）
+          </label>
+          <div className="backtest-form-row three" data-testid="execution-realism-config">
+            <label>市场成交参与率
+              <input value={participationRate} disabled={!executionRealismV2} onChange={(event) => setParticipationRate(event.target.value)} />
+            </label>
+            <label>延迟毫秒
+              <input type="number" min="0" max="60000" value={latencyMs} disabled={!executionRealismV2 || fidelityMode === "BAR_APPROX"} onChange={(event) => setLatencyMs(Number(event.target.value))} />
+            </label>
+            <label>延迟事件数
+              <input type="number" min="0" max="100000" value={latencyEvents} disabled={!executionRealismV2 || fidelityMode === "BAR_APPROX"} onChange={(event) => setLatencyEvents(Number(event.target.value))} />
+            </label>
+          </div>
+          <div className="backtest-form-row">
+            <label>区间结束残单
+              <select value={orderEndPolicy} disabled={!executionRealismV2} onChange={(event) => setOrderEndPolicy(event.target.value)}>
+                <option value="CANCEL_AT_END">结束时取消</option>
+                <option value="KEEP_OPEN">保留 OPEN</option>
+              </select>
+            </label>
+            <div className="backtest-strategy-evidence">
+              <strong>{fidelityMode === "BAR_APPROX" ? BAR_PATH_SCENARIO : "AGG_TRADE_LATENCY_PARTICIPATION_V2"}</strong>
+              <small>{fidelityMode === "BAR_APPROX"
+                ? "OHLC 最坏情形是冻结假设，不是 K 线内部历史事实。"
+                : "aggTrade 是聚合成交；不声称 raw trade、盘口深度或 queue exact。"}</small>
+            </div>
+          </div>
           <div className="backtest-strategy-evidence" data-testid="host-policy-config">
             <strong>{HOST_POLICY_REVISION} · Host 拥有数量与风控真相</strong>
             <small>SIGNAL 经 sizing 变为绝对目标数量；TARGET_POSITION 与 ORDER_INTENT 保留原有绝对数量语义，但同样不能绕过风控。</small>
@@ -797,6 +845,28 @@ export default function BacktestApp() {
                 <span>信号事件 {report.metrics.signal_event_count} · 执行事件 {report.metrics.execution_event_count}</span>
                 <span>{report.identity?.bar_builder} · aggTrade 非 raw trade / queue exact</span>
               </div>}
+              {report.identity?.execution_model_revision === EXECUTION_REALISM_V2 && <div className="backtest-strategy-evidence" data-testid="execution-realism-report">
+                <strong>{report.identity.execution_model_revision} · {report.identity.fill_policy}</strong>
+                <span>参与率 {String(report.execution_assumptions?.participation_rate ?? "—")} · 延迟 {String(report.execution_assumptions?.latency_ms ?? 0)} ms / {String(report.execution_assumptions?.latency_events ?? 0)} events</span>
+                <span>结束策略 {report.identity.order_end_policy} · 场景 {report.identity.bar_path_scenario ?? "AGG_TRADE_PRINT_SEQUENCE"}</span>
+                <span>权威事件追踪 {report.fill_trace?.authoritative_event_trace_count ?? 0}/{report.fill_trace?.fill_count ?? 0} · {report.fill_trace?.complete ? "完整" : "不完整"}</span>
+                <small>OHLC 路径不是历史事实；aggTrade 不是 raw trade，且不提供 spread、depth 或 queue position 真相。</small>
+              </div>}
+              {(report.cost_sensitivity?.scenarios?.length ?? 0) > 0 && <>
+                <h3 className="backtest-table-title">成本敏感性（稳健性检查，不参与主 Run hash）</h3>
+                <div className="backtest-table-wrap" data-testid="cost-sensitivity-table">
+                  <table>
+                    <thead><tr><th>场景</th><th>状态</th><th>成交</th><th>费用</th><th>最终权益</th><th>残单</th></tr></thead>
+                    <tbody>{report.cost_sensitivity?.scenarios?.map((scenario) => <tr key={scenario.name}>
+                      <td>{scenario.name}</td><td>{scenario.status}</td>
+                      <td>{String(scenario.metrics.fill_count ?? "—")}</td>
+                      <td>{String(scenario.metrics.fee_total ?? "—")}</td>
+                      <td>{String(scenario.metrics.ending_equity ?? "—")}</td>
+                      <td>{String(scenario.metrics.open_order_count ?? "—")}</td>
+                    </tr>)}</tbody>
+                  </table>
+                </div>
+              </>}
               <div className="backtest-proof">
                 <span>Report hash</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
               </div>
@@ -814,7 +884,7 @@ export default function BacktestApp() {
               <h3 className="backtest-table-title">逐笔成交</h3>
               <div className="backtest-table-wrap">
                 <table>
-                  <thead><tr><th>订单</th><th>时间</th><th>动作</th><th>方向</th><th>价格</th><th>数量</th><th>费用</th><th>原因</th></tr></thead>
+                  <thead><tr><th>订单</th><th>时间</th><th>动作</th><th>方向</th><th>价格</th><th>数量</th><th>费用</th><th>原因</th><th>权威源事件</th></tr></thead>
                   <tbody>
                     {report.fills.map((fill, index) => (
                       <tr key={`${String(fill.order_id)}-${index}`}>
@@ -824,11 +894,25 @@ export default function BacktestApp() {
                         <td>{String(fill.price ?? "")}</td><td>{String(fill.qty ?? "")}</td>
                         <td>{String(fill.fee ?? "0")}</td>
                         <td>{String(fill.reason ?? "")}</td>
+                        <td title={String(fill.source_event_hash ?? "")}>{String(fill.source_event_kind ?? "—")} #{String(fill.source_sequence ?? "—")}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+              {(report.order_events?.length ?? 0) > 0 && <>
+                <h3 className="backtest-table-title">订单生命周期</h3>
+                <div className="backtest-table-wrap" data-testid="order-lifecycle-table">
+                  <table>
+                    <thead><tr><th>序号</th><th>订单</th><th>状态</th><th>事件</th><th>剩余数量</th><th>原因</th></tr></thead>
+                    <tbody>{report.order_events?.map((item, index) => <tr key={`${String(item.order_id ?? "rejected")}-${index}`}>
+                      <td>{String(item.ordinal ?? index + 1)}</td><td>{String(item.order_id ?? "—")}</td>
+                      <td>{String(item.state ?? "")}</td><td>{String(item.sequence ?? "")}</td>
+                      <td>{String(item.remaining_qty ?? "—")}</td><td>{String(item.reason ?? "")}</td>
+                    </tr>)}</tbody>
+                  </table>
+                </div>
+              </>}
               {(report.rejected_orders?.length ?? 0) > 0 && <>
                 <h3 className="backtest-table-title">Host 风控 / 规则拒单</h3>
                 <div className="backtest-table-wrap" data-testid="risk-rejection-table">

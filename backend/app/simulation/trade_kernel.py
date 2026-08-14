@@ -17,6 +17,7 @@ from app.simulation.kernel import (
     SimulatedFill,
     SimulatedOrder,
     SimulationResult,
+    _decision_record,
     _fill_action,
     reject_intent,
 )
@@ -47,6 +48,7 @@ class TradeSimulationKernel:
     account_model: str = "LINEAR_PERP_ONE_WAY_V1"
     funding_mode: str = "OFF"
     leverage: Decimal = Decimal("1")
+    host_policy_revision: str | None = None
     fill_policy: str = TRADE_FILL_POLICY
     max_events: int = 2_000_000
     checkpoint_event_interval: int = 10_000
@@ -112,6 +114,11 @@ class TradeSimulationKernel:
     def snapshot(self) -> dict[str, Any]:
         return {
             **(
+                {"host_policy_revision": self.host_policy_revision}
+                if self.host_policy_revision is not None
+                else {}
+            ),
+            **(
                 {
                     "account_model": self.account_model,
                     "funding_mode": self.funding_mode,
@@ -151,6 +158,10 @@ class TradeSimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("host_policy_revision") != self.host_policy_revision:
+            raise MarketDatasetError(
+                "Host policy checkpoint identity changed", code="CHECKPOINT_CORRUPT"
+            )
         if (
             str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1")
             != self.account_model
@@ -292,14 +303,13 @@ class TradeSimulationKernel:
             intents = strategy((market_event,), market_event)
             if self._market_event_count <= warmup_events:
                 intents = []
-            self.decisions.append(
-                {
-                    "sequence": market_event.sequence,
-                    "watermark_ms": market_event.event_time_ms,
-                    "intents": intents,
-                    "derived_bar": derived_bar_feature((market_event,)),
-                }
+            decision = _decision_record(
+                intents,
+                sequence=market_event.sequence,
+                watermark_ms=market_event.event_time_ms,
             )
+            decision["derived_bar"] = derived_bar_feature((market_event,))
+            self.decisions.append(decision)
             self._enqueue_many(intents, current_sequence=market_event.sequence)
             curve_point = {
                 "sequence": market_event.sequence,
@@ -407,7 +417,32 @@ class TradeSimulationKernel:
             self._enqueue(intent, current_sequence=current_sequence)
 
     def _enqueue(self, intent: Mapping[str, object], *, current_sequence: int) -> None:
-        reason = reject_intent(intent)
+        reason = reject_intent(
+            intent,
+            current_price=(
+                self.account.mark
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else None
+            ),
+            price_tick=(
+                self.account.tick
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else None
+            ),
+            qty_step=(
+                self.account.step
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else None
+            ),
+            min_notional=(
+                self.account.min_notional
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else None
+            ),
+            allow_reduce_only_below_min_notional=(
+                self.host_policy_revision is not None
+            ),
+        )
         if reason is not None:
             rejected = {
                 "accepted": False,
@@ -448,8 +483,10 @@ class TradeSimulationKernel:
                     qty=(
                         Decimal("0")
                         if order.reduce_only
-                        else self.account.opening_quantity(
-                            side=order.side, qty=order.qty
+                        else max(
+                            Decimal("0"),
+                            abs(self.projected_position_qty)
+                            - abs(self.account.position_qty),
                         )
                     ),
                     reference_price=self.account.mark,

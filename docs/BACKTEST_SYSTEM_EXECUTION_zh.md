@@ -605,7 +605,7 @@ Host 到 Provider 的方法：
 ```
 
 - `SIGNAL`：方向/分数/置信度/预测期；由 Host pipeline 转换；
-- `TARGET_POSITION`：目标仓位或风险暴露；由 Host 规划差量订单；
+- `TARGET_POSITION`：绝对目标仓位数量；由 Host 规划差量订单，不得在该名字下解释成百分比暴露；
 - `ORDER_INTENT`：side/type/qty/limit/stop/TIF/client tag；Host 可拒绝或改为规范化数量。
 
 Host 返回 `ExecutionReport`，包含 intent 关联、接受/拒绝原因、规范化订单、fills、fees、

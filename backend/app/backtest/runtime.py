@@ -365,6 +365,7 @@ class BacktestRuntime:
             "interval": interval,
             "bars": bars,
             "fills": report.get("fills") or [],
+            "rejected_orders": report.get("rejected_orders") or [],
             "equity_curve": report.get("equity_curve") or [],
             "truncated": truncated,
         }

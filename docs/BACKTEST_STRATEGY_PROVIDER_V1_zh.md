@@ -17,6 +17,8 @@
 ## 输出
 
 只允许 `SIGNAL`、`TARGET_POSITION`、`ORDER_INTENT`。warmup 不得产生可成交输出。
+`SIGNAL` 的数量由冻结 Host sizing policy 决定；`TARGET_POSITION` 是绝对目标数量，
+`ORDER_INTENT` 是显式订单数量。三者都必须经过 Host rules/risk，Provider 不得绕过。
 
 ## 可执行能力描述
 

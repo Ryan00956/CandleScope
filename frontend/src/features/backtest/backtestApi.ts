@@ -26,6 +26,8 @@ export interface BacktestCapabilities {
   strategies: BacktestStrategyDescriptor[];
   account_models?: string[];
   funding_modes_v2?: string[];
+  host_policy_revision?: string;
+  sizing_policies?: string[];
 }
 
 export interface BacktestApiClient {

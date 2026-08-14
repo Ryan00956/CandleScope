@@ -124,6 +124,19 @@ def build_report(
         report["account_model"] = "LINEAR_PERP_ONE_WAY_V2"
         report["funding_mode"] = config.get("funding_mode", "OFF")
         report["liquidation_model"] = "MARK_IMMEDIATE_NO_LIQUIDATION_FEE_V1"
+    if config.get("host_policy_revision"):
+        report["identity"].update(
+            {
+                "host_policy_revision": config.get("host_policy_revision"),
+                "sizing_policy": config.get("sizing_policy"),
+                "risk_policy": config.get("risk_policy"),
+            }
+        )
+        report["risk_policy"] = copy.deepcopy(payload.get("risk_policy") or {})
+        report["metrics"]["risk_rejection_count"] = sum(
+            item.get("reason") == "ORDER_REJECTED_RISK"
+            for item in payload.get("rejected") or []
+        )
     strategy_metadata = payload.get("strategy_metadata")
     if fidelity == "AGG_TRADE_EXECUTION":
         report["identity"].update(

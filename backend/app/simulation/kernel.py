@@ -72,6 +72,7 @@ class SimulationKernel:
     account_model: str = "LINEAR_PERP_ONE_WAY_V1"
     funding_mode: str = "OFF"
     leverage: Decimal = Decimal("1")
+    host_policy_revision: str | None = None
     slippage_bps: Decimal = Decimal("1")
     taker_fee_bps: Decimal = Decimal("0")
     maker_fee_bps: Decimal = Decimal("0")
@@ -121,8 +122,25 @@ class SimulationKernel:
             liquidation_enabled=False,
         )
 
+    @property
+    def projected_position_qty(self) -> Decimal:
+        pending = sum(
+            (
+                order.qty if order.side == "BUY" else -order.qty
+                for order in self.orders
+                if order.type == "MARKET" and order.status in {"OPEN", "PARTIAL"}
+            ),
+            Decimal("0"),
+        )
+        return self.account.position_qty + pending
+
     def snapshot(self) -> dict:
         return {
+            **(
+                {"host_policy_revision": self.host_policy_revision}
+                if self.host_policy_revision is not None
+                else {}
+            ),
             **(
                 {
                     "account_model": self.account_model,
@@ -163,6 +181,10 @@ class SimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, object]) -> None:
+        if payload.get("host_policy_revision") != self.host_policy_revision:
+            raise MarketDatasetError(
+                "Host policy checkpoint identity changed", code="CHECKPOINT_CORRUPT"
+            )
         if (
             str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1")
             != self.account_model
@@ -281,11 +303,11 @@ class SimulationKernel:
             if self._market_event_count <= warmup_events:
                 intents = []
             self.decisions.append(
-                {
-                    "sequence": market_event.sequence,
-                    "watermark_ms": market_event.event_time_ms,
-                    "intents": intents,
-                }
+                _decision_record(
+                    intents,
+                    sequence=market_event.sequence,
+                    watermark_ms=market_event.event_time_ms,
+                )
             )
             self._enqueue_many(intents, current_sequence=market_event.sequence)
             curve_point = {
@@ -411,12 +433,22 @@ class SimulationKernel:
             if self._last_event is None
             else _bar_decimal(self._last_event, "close")
         )
+        price_tick = self.price_tick
+        qty_step = self.qty_step
+        min_notional = self.min_notional
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            price_tick = self.account.tick
+            qty_step = self.account.step
+            min_notional = self.account.min_notional
         reason = reject_intent(
             intent,
             current_price=current_price,
-            price_tick=self.price_tick,
-            qty_step=self.qty_step,
-            min_notional=self.min_notional,
+            price_tick=price_tick,
+            qty_step=qty_step,
+            min_notional=min_notional,
+            allow_reduce_only_below_min_notional=(
+                self.host_policy_revision is not None
+            ),
         )
         if reason is not None:
             rejected = {
@@ -461,8 +493,10 @@ class SimulationKernel:
                     qty=(
                         Decimal("0")
                         if order.reduce_only
-                        else self.account.opening_quantity(
-                            side=order.side, qty=order.qty
+                        else max(
+                            Decimal("0"),
+                            abs(self.projected_position_qty)
+                            - abs(self.account.position_qty),
                         )
                     ),
                     reference_price=reference,
@@ -671,6 +705,7 @@ def reject_intent(
     price_tick: Decimal | None = None,
     qty_step: Decimal | None = None,
     min_notional: Decimal | None = None,
+    allow_reduce_only_below_min_notional: bool = False,
 ) -> str | None:
     side = str(intent.get("side") or "")
     order_type = str(intent.get("type") or "")
@@ -703,9 +738,30 @@ def reject_intent(
         min_notional is not None
         and reference_price is not None
         and reference_price * qty < min_notional
+        and not (
+            allow_reduce_only_below_min_notional
+            and bool(intent.get("reduce_only") or False)
+        )
     ):
         return "MIN_NOTIONAL"
     return None
+
+
+def _decision_record(
+    intents: list[dict], *, sequence: int, watermark_ms: int
+) -> dict[str, object]:
+    provider_decision = getattr(intents, "decision", None)
+    if provider_decision is not None:
+        return {
+            "sequence": sequence,
+            "watermark_ms": watermark_ms,
+            "provider_decision": provider_decision,
+        }
+    return {
+        "sequence": sequence,
+        "watermark_ms": watermark_ms,
+        "intents": intents,
+    }
 
 
 def _optional_decimal(value: object) -> Decimal | None:

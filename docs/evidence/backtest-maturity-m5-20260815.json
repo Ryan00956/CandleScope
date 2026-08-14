@@ -1,0 +1,219 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M5",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T05:29:31+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "48a67c3a4dd617781d427abf31a86a07da8648a3",
+  "plannedCommitMessage": "backtest: complete M5 host sizing and risk",
+  "contract": {
+    "hostPolicyRevision": "HOST_SIZING_RISK_V1",
+    "riskPolicyRevision": "HOST_RISK_LIMITS_V1",
+    "sizingPolicies": [
+      "FIXED_QTY_V1",
+      "FIXED_NOTIONAL_V1",
+      "EQUITY_PERCENT_V1",
+      "RISK_PER_STOP_V1"
+    ],
+    "signalSemantics": "HOST_SIZED_ABSOLUTE_TARGET",
+    "targetPositionSemantics": "ABSOLUTE_TARGET_QUANTITY_UNCHANGED",
+    "orderIntentSemantics": "EXPLICIT_ORDER_QUANTITY_UNCHANGED",
+    "executionAuthority": "HOST",
+    "accountingAuthority": "DECIMAL_APPEND_ONLY_HOST_LEDGER",
+    "networkCompletion": "FORBIDDEN"
+  },
+  "policyGates": {
+    "sameProviderDecisionDifferentSizing": "PASS",
+    "fixedNotionalStepFloor": "PASS",
+    "equityPercentUsesVisibleEquity": "PASS",
+    "riskPerStopMissingDistanceFailsClosed": "PASS",
+    "allFrozenRiskLimitsStructured": "PASS",
+    "dailyLossCooldownCheckpointed": "PASS",
+    "minNotionalConflictExplicit": "PASS",
+    "reversalCountsOnlyNewExposure": "PASS",
+    "reduceOnlyCannotCrossZero": "PASS",
+    "projectedPositionCheckpointStable": "PASS",
+    "providerCannotMutateBalance": "PASS",
+    "providerCannotBypassRisk": "PASS"
+  },
+  "realSevenDayRuns": {
+    "runtimeMode": "LOCAL_OFFLINE",
+    "exchange": "binance",
+    "marketType": "usdm",
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "startTimeMs": 1784851200000,
+    "endTimeMs": 1785455999999,
+    "bars": 10080,
+    "datasetId": "local-d72350505a6f4f88bac35f318d846a51",
+    "dataEpoch": "sha256:876a0d20885c2f454bd3483079ba2c4dd18d210d002a066ced23e8a2b8d4a272",
+    "snapshotHash": "sha256:570e9c118305c18ba3e978e6bc09742c110cad6ca1ea96f48f0006c9c5ffb7a4",
+    "strategyRevisionId": "builtin-rsi-wilder-long-short-v1",
+    "accountModel": "LINEAR_PERP_ONE_WAY_V2",
+    "fundingMode": "HISTORICAL_REQUIRED",
+    "decisionHashSharedByAllRuns": "ec0649fef326854ad7519232bb2f1fe46171196d66a8b949e688cc19729bba9e",
+    "runs": [
+      {
+        "runId": "bt_229977595fce4238a004bffbe8c44e52",
+        "sizingPolicy": "FIXED_QTY_V1",
+        "configHash": "sha256:7c9d458b0c82748f40a4878885f83934dff33c59c6ffbd61c8b9a3b969791611",
+        "fillHash": "2fe4c2892d49d31f05e5a4f20e0ec21c5048e387fe86c976c2727328d44cbc80",
+        "reportHash": "sha256:89ce9f5cbe16761c502a013dbcc5ecc73f930d87d5660be1298ebd7c3fad06b9",
+        "fillCount": 22,
+        "tradeCount": 21,
+        "riskRejectionCount": 0,
+        "maxActualAbsPosition": "1",
+        "endingEquity": "12055.0755004899459059"
+      },
+      {
+        "runId": "bt_5d4e6550bb404a47a3aaefd07d797c1e",
+        "sizingPolicy": "FIXED_NOTIONAL_V1",
+        "configHash": "sha256:e7ee80758267d0ad021e1f06c340b5bc9bda9f4bbeb9ed864e3d7359c181d999",
+        "fillHash": "a50dab9b3ced9e8d097fd8606d67b2fd3a13e6775ac755401e96510fcfa290fc",
+        "reportHash": "sha256:68a622f2af5b236306967dd3357e606231276e6089e41ba4851ec94c2095cbbd",
+        "fillCount": 146,
+        "tradeCount": 143,
+        "riskRejectionCount": 0,
+        "maxActualAbsPosition": "0.955",
+        "endingEquity": "11931.33182383775473536530000"
+      },
+      {
+        "runId": "bt_b860d8251d3147feb4a1da4752e9ee4d",
+        "sizingPolicy": "EQUITY_PERCENT_V1",
+        "configHash": "sha256:e2e703673ffc276bd59bc3fd13102f0f101550aa74d9145429d0331d3d60d64a",
+        "fillHash": "2d28db90a21893ed9b784d319d849023faf2f3fe36db2759638dfc6e1fbff59f",
+        "reportHash": "sha256:368d9ec6696891339c522dbaf0ca1bab3c3dc1bcb5fe06909c4cf6f746b37505",
+        "fillCount": 30,
+        "tradeCount": 29,
+        "riskRejectionCount": 0,
+        "maxActualAbsPosition": "0.031",
+        "endingEquity": "10062.5975243840512936762"
+      },
+      {
+        "runId": "bt_d7c5a02298a442ebb55eb0bac8e80f48",
+        "sizingPolicy": "FIXED_QTY_V1",
+        "configHash": "sha256:966e24e945e4d08998836acf6e689392d95a22f105c10d36e70f8c0f261240cf",
+        "fillHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "reportHash": "sha256:2d3556bbcb7953269279e88c9820631312ba64256d7b6cb77ee80926307a67c0",
+        "fillCount": 0,
+        "tradeCount": 0,
+        "riskRejectionCount": 364,
+        "riskRejectionReason": "RISK_MAX_NOTIONAL",
+        "maxActualAbsPosition": "0",
+        "endingEquity": "10000.0000000000000000"
+      }
+    ]
+  },
+  "validation": {
+    "m5AndM4Focused": {
+      "result": "PASS",
+      "tests": 37
+    },
+    "backendRelevantRegression": {
+      "result": "PASS",
+      "tests": 220,
+      "deselected": 3526,
+      "warnings": 6
+    },
+    "legacyRsiReportAndDeterminismCompatibility": {
+      "result": "PASS",
+      "tests": 23
+    },
+    "defaultFlagsReleaseAndRollback": {
+      "result": "PASS",
+      "tests": 10,
+      "warnings": 6
+    },
+    "fullBackendSuite": {
+      "result": "NOT_A_PHASE_GATE_TIMEOUT",
+      "timeoutSeconds": 1200,
+      "failureAssertionObserved": false,
+      "lastObservedPath": "existing plugin installer receipt isolation tests"
+    },
+    "pythonRuffTouchedFiles": "PASS",
+    "pythonFormatTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendFullTests": {
+      "result": "PASS",
+      "tests": 3249
+    },
+    "frontendBuild": "PASS_WITH_EXISTING_500KB_CHUNK_WARNING",
+    "gitDiffCheck": "PASS",
+    "backtestDatabaseQuickCheck": "ok",
+    "foreignKeyViolations": 0
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15190/backtest.html",
+    "apiBase": "http://127.0.0.1:18097/api/v1/backtests",
+    "conditionalSizingFieldsVerified": true,
+    "riskPolicyAndMaximumExposureShown": true,
+    "structuredRejectionTableShown": true,
+    "rejectionMarkersVisibleOnKline": true,
+    "fixedQuantityFillsAndTradesShown": true,
+    "equityCurveVisible": true,
+    "finalConsoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshots": [
+      {
+        "path": "output/backtest-m5-runtime-20260815/browser/policy-controls.png",
+        "sha256": "db80bbc95cebeae0d4d492d49b2bccd4aa558c0ea5e6e0919e9eb1653105de27"
+      },
+      {
+        "path": "output/backtest-m5-runtime-20260815/browser/risk-report-and-rejections.png",
+        "sha256": "1967e708b8a7c8b99a6c9d66c09b92873dbc1781ceb08d33ee003f12d7594810"
+      },
+      {
+        "path": "output/backtest-m5-runtime-20260815/browser/rejected-order-chart-marker.png",
+        "sha256": "f69bbbddcc71f1854ccc9f2b23cbd34969e27c03e5e0cc866bc755e7cd314656"
+      },
+      {
+        "path": "output/backtest-m5-runtime-20260815/browser/fixed-qty-report.png",
+        "sha256": "066ddf8ab8ea6bc14f5b82b379472d88c60dff3c7c8ccc21fe13e78b7ebce28a"
+      }
+    ],
+    "runtimeArtifacts": [
+      {
+        "path": "output/backtest-m5-runtime-20260815/backtest.db",
+        "sha256": "30a332d187c37996b1d09dd64fc6fa05e022f4d34106e0b06a6ec39e7241bb9e"
+      },
+      {
+        "path": "output/backtest-m5-runtime-20260815/backend2.stdout.log",
+        "sha256": "3cc864ee63da2b20e051350f2a35998e14e60967f3f233b029ccaa9bc16b9254"
+      },
+      {
+        "path": "output/backtest-m5-runtime-20260815/backend2.stderr.log",
+        "sha256": "305d98114b5bf3400ee39349e4f91b99b81e7027e9fcd5310c5937a089d057f9"
+      }
+    ]
+  },
+  "compatibility": {
+    "databaseSchemaChanged": false,
+    "databaseMigrationRequired": false,
+    "legacyConfigWithoutPolicyRemainsLegacy": true,
+    "legacyDecisionHashShapeChanged": false,
+    "legacyStoredReportsRemainReadable": true,
+    "newSizingAndRiskSemanticsUseNewIdentity": true,
+    "reportSchema": "candlescope.backtest-report/1 additive fields only"
+  },
+  "defectsCaught": [
+    "A same-size reversal originally reserved margin for both the old and new exposure. BAR and trade kernels now reserve only net exposure beyond the actual position, while the Host risk planner still checks the full projected target.",
+    "Daily loss was checked before an active cooldown and would repeatedly emit daily-loss reasons. Active cooldown is now checked first and survives planner checkpoint restore.",
+    "Dense rejection reason labels obscured the K-line. Chart markers now use a compact orange rejection glyph while the adjacent table retains the full reason, rule revision and input snapshot."
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M5",
+  "soakGate": "NOT_REQUIRED_IN_M5",
+  "migration": "No database migration. Host sizing and risk are additive immutable Run identity fields; legacy runs omit the policy revision and retain their old path.",
+  "rollback": "Revert the single M5 local commit. Existing legacy and M4 runs require no rewrite; the new policy path remains unreachable in production while all backtest flags and the frontend entry flag default off.",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M5_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "BAR execution remains approximate and does not claim an authoritative intrabar path.",
+    "aggTrade remains aggregated trade data and is not raw trade, order-book or queue truth.",
+    "The full repository backend suite exceeded the bounded 20-minute audit run in pre-existing plugin installation tests; all 220 phase-relevant backend regressions passed.",
+    "Execution realism, report metrics v2, Study v2, performance/recovery and release rollback remain scheduled for later mandatory stages."
+  ]
+}

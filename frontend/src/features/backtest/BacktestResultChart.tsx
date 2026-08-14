@@ -22,7 +22,7 @@ function markerSource(
       const axisRevision = Number(store.axisRevision);
       if (axisRevision !== cachedAxisRevision) {
         cachedAxisRevision = axisRevision;
-        cached = chart.fills.flatMap((fill, index) => {
+        const fillMarkers = chart.fills.flatMap((fill, index) => {
           const eventTimeMs = Number(fill.event_time_ms);
           const displayTime = floorIntervalTime(chart.interval, eventTimeMs / 1000);
           if (displayTime === null || !store.hasTime(displayTime)) return [];
@@ -50,6 +50,23 @@ function markerSource(
             size: 1.2,
           } satisfies ExternalSeriesMarker];
         });
+        const rejectionMarkers = (chart.rejected_orders ?? []).flatMap((rejection, index) => {
+          const eventTimeMs = Number(rejection.event_time_ms);
+          const displayTime = floorIntervalTime(chart.interval, eventTimeMs / 1000);
+          if (displayTime === null || !store.hasTime(displayTime)) return [];
+          return [{
+            id: `backtest:rejected:${String(rejection.sequence ?? index)}:${index}`,
+            time: displayTime,
+            position: "aboveBar",
+            color: "#f59e0b",
+            shape: "square",
+            // Keep dense rejection periods legible on the K-line. The adjacent
+            // rejection table owns the full reason code and input snapshot.
+            text: "拒",
+            size: 1,
+          } satisfies ExternalSeriesMarker];
+        });
+        cached = [...fillMarkers, ...rejectionMarkers];
         revision += 1;
       }
       return { markers: cached, revision };

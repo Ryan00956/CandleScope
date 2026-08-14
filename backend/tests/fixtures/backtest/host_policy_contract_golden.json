@@ -1,0 +1,21 @@
+{
+  "host_policy_revision": "HOST_SIZING_RISK_V1",
+  "sizing_policies": [
+    "FIXED_QTY_V1",
+    "FIXED_NOTIONAL_V1",
+    "EQUITY_PERCENT_V1",
+    "RISK_PER_STOP_V1"
+  ],
+  "risk_policy_revision": "HOST_RISK_LIMITS_V1",
+  "output_semantics": {
+    "SIGNAL": "HOST_SIZED_ABSOLUTE_TARGET",
+    "TARGET_POSITION": "ABSOLUTE_TARGET_QUANTITY",
+    "ORDER_INTENT": "EXPLICIT_ORDER_QUANTITY"
+  },
+  "rejection_categories": [
+    "ORDER_REJECTED_RULES",
+    "ORDER_REJECTED_RISK"
+  ],
+  "decision_identity_excludes_sizing": true,
+  "reduce_only_crosses_zero": false
+}

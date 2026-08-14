@@ -25,6 +25,7 @@ const COMMAND_REVISION = "builtin-order-command-v1";
 const DUAL_CLOCK_MODE = "AGG_TRADE_EXECUTION";
 const HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1";
 const ACCOUNT_V2 = "LINEAR_PERP_ONE_WAY_V2";
+const HOST_POLICY_REVISION = "HOST_SIZING_RISK_V1";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -77,6 +78,21 @@ export default function BacktestApp() {
   const [accountModel, setAccountModel] = useState("LINEAR_PERP_ONE_WAY_V1");
   const [fundingMode, setFundingMode] = useState("OFF");
   const [leverage, setLeverage] = useState("1");
+  const [sizingPolicy, setSizingPolicy] = useState("FIXED_QTY_V1");
+  const [fixedQty, setFixedQty] = useState("1");
+  const [fixedNotional, setFixedNotional] = useState("1000");
+  const [equityPercent, setEquityPercent] = useState("10");
+  const [riskPerStopPercent, setRiskPerStopPercent] = useState("1");
+  const [stopDistance, setStopDistance] = useState("500");
+  const [maxAbsPositionQty, setMaxAbsPositionQty] = useState("100");
+  const [maxNotional, setMaxNotional] = useState("1000000");
+  const [maxLeverage, setMaxLeverage] = useState("20");
+  const [maxOrderRisk, setMaxOrderRisk] = useState("10000");
+  const [maxActiveOrders, setMaxActiveOrders] = useState(20);
+  const [maxCumulativeFees, setMaxCumulativeFees] = useState("10000");
+  const [maxDrawdownPercent, setMaxDrawdownPercent] = useState("50");
+  const [dailyLossLimit, setDailyLossLimit] = useState("");
+  const [cooldownEvents, setCooldownEvents] = useState(0);
   const [snapshot, setSnapshot] = useState<BacktestSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
@@ -300,6 +316,21 @@ export default function BacktestApp() {
       funding_interval_hours: fundingIntervalHours,
       funding_mode: accountModel === ACCOUNT_V2 ? fundingMode : "OFF",
       leverage,
+      sizing_policy: sizingPolicy,
+      fixed_qty: fixedQty,
+      fixed_notional: fixedNotional,
+      equity_percent: equityPercent,
+      risk_per_stop_percent: riskPerStopPercent,
+      stop_distance: sizingPolicy === "RISK_PER_STOP_V1" ? stopDistance : null,
+      max_abs_position_qty: maxAbsPositionQty,
+      max_notional: maxNotional,
+      max_leverage: maxLeverage,
+      max_order_risk: maxOrderRisk,
+      max_active_orders: maxActiveOrders,
+      max_cumulative_fees: maxCumulativeFees,
+      max_drawdown_percent: maxDrawdownPercent,
+      daily_loss_limit: dailyLossLimit || null,
+      cooldown_events: cooldownEvents,
       exchange,
       market_type: marketType,
       gap_policy: "REJECT",
@@ -322,30 +353,45 @@ export default function BacktestApp() {
     accountModel,
     commandSource,
     contractModeEnabled,
+    cooldownEvents,
+    dailyLossLimit,
     endTimeMs,
+    equityPercent,
     exchange,
     fast,
     fidelityMode,
     fundingIntervalHours,
     fundingRate,
     fundingMode,
+    fixedNotional,
+    fixedQty,
     initialBalance,
     leverage,
+    maxAbsPositionQty,
+    maxActiveOrders,
+    maxCumulativeFees,
+    maxDrawdownPercent,
+    maxLeverage,
+    maxNotional,
+    maxOrderRisk,
     makerFeeBps,
     marketType,
     refreshRuns,
     rsiLength,
     rsiOverbought,
     rsiOversold,
+    riskPerStopPercent,
     schemaParameters,
     selectedDataset,
     selectedStrategy,
     slow,
     slippageBps,
+    sizingPolicy,
     snapshot,
     startTimeMs,
     strategyRevisionId,
     strategySource,
+    stopDistance,
     takerFeeBps,
   ]);
 
@@ -631,6 +677,39 @@ export default function BacktestApp() {
             <label>资金费率/周期<input value={fundingRate} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingRate(event.target.value)} /></label>
             <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
           </div>
+          <div className="backtest-strategy-evidence" data-testid="host-policy-config">
+            <strong>{HOST_POLICY_REVISION} · Host 拥有数量与风控真相</strong>
+            <small>SIGNAL 经 sizing 变为绝对目标数量；TARGET_POSITION 与 ORDER_INTENT 保留原有绝对数量语义，但同样不能绕过风控。</small>
+          </div>
+          <div className="backtest-form-row three">
+            <label>仓位计算策略
+              <select value={sizingPolicy} onChange={(event) => setSizingPolicy(event.target.value)}>
+                {(capabilities?.sizing_policies ?? ["FIXED_QTY_V1", "FIXED_NOTIONAL_V1", "EQUITY_PERCENT_V1", "RISK_PER_STOP_V1"]).map((item) => <option key={item} value={item}>{item}</option>)}
+              </select>
+            </label>
+            <label>固定数量<input value={fixedQty} disabled={sizingPolicy !== "FIXED_QTY_V1"} onChange={(event) => setFixedQty(event.target.value)} /></label>
+            <label>固定 USDT 名义<input value={fixedNotional} disabled={sizingPolicy !== "FIXED_NOTIONAL_V1"} onChange={(event) => setFixedNotional(event.target.value)} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>权益百分比 %<input value={equityPercent} disabled={sizingPolicy !== "EQUITY_PERCENT_V1"} onChange={(event) => setEquityPercent(event.target.value)} /></label>
+            <label>每次止损风险 %<input value={riskPerStopPercent} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setRiskPerStopPercent(event.target.value)} /></label>
+            <label>止损距离（价格）<input value={stopDistance} disabled={sizingPolicy !== "RISK_PER_STOP_V1"} onChange={(event) => setStopDistance(event.target.value)} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>最大绝对仓位<input value={maxAbsPositionQty} onChange={(event) => setMaxAbsPositionQty(event.target.value)} /></label>
+            <label>最大名义价值<input value={maxNotional} onChange={(event) => setMaxNotional(event.target.value)} /></label>
+            <label>最大杠杆<input value={maxLeverage} onChange={(event) => setMaxLeverage(event.target.value)} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>单笔最大风险<input value={maxOrderRisk} onChange={(event) => setMaxOrderRisk(event.target.value)} /></label>
+            <label>最大活动订单<input type="number" min="1" value={maxActiveOrders} onChange={(event) => setMaxActiveOrders(Number(event.target.value))} /></label>
+            <label>最大累计手续费<input value={maxCumulativeFees} onChange={(event) => setMaxCumulativeFees(event.target.value)} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>最大回撤停止开仓 %<input value={maxDrawdownPercent} onChange={(event) => setMaxDrawdownPercent(event.target.value)} /></label>
+            <label>日内损失上限（可选）<input value={dailyLossLimit} placeholder="留空关闭" onChange={(event) => setDailyLossLimit(event.target.value)} /></label>
+            <label>冷却事件数<input type="number" min="0" value={cooldownEvents} disabled={!dailyLossLimit} onChange={(event) => setCooldownEvents(Number(event.target.value))} /></label>
+          </div>
           <div className="backtest-snapshot">
             <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
               {snapshot ? (historicalContractComplete ? "已验证" : "合约数据未完整") : "验证中"}
@@ -706,6 +785,12 @@ export default function BacktestApp() {
                 <span>强平 {String(report.account?.liquidation_state ?? "—")} · 破产 {String(report.account?.insolvency_state ?? "—")} · {report.liquidation_model}</span>
                 <small>保险基金与 ADL 未建模；成交价不代替历史 mark。</small>
               </div>}
+              {report.risk_policy && <div className="backtest-strategy-evidence" data-testid="host-policy-report">
+                <strong>{report.risk_policy.policy_revision} · {report.risk_policy.sizing_policy}</strong>
+                <span>最大实际仓位 {report.risk_policy.max_actual_abs_position ?? "—"} · 最大实际名义 {report.risk_policy.max_actual_notional ?? "—"}</span>
+                <span>峰值权益 {report.risk_policy.peak_equity ?? "—"} · 风险拒单 {report.metrics.risk_rejection_count ?? 0}</span>
+                <span>停止原因 {JSON.stringify(report.risk_policy.stop_reasons ?? {})}</span>
+              </div>}
               {report.fidelity_mode === DUAL_CLOCK_MODE && <div className="backtest-strategy-evidence" data-testid="dual-clock-report">
                 <strong>信号周期 {report.identity?.signal_interval} · {report.identity?.timezone}</strong>
                 <span>{report.identity?.signal_clock} → {report.identity?.execution_clock}</span>
@@ -744,6 +829,23 @@ export default function BacktestApp() {
                   </tbody>
                 </table>
               </div>
+              {(report.rejected_orders?.length ?? 0) > 0 && <>
+                <h3 className="backtest-table-title">Host 风控 / 规则拒单</h3>
+                <div className="backtest-table-wrap" data-testid="risk-rejection-table">
+                  <table>
+                    <thead><tr><th>时间</th><th>类别</th><th>原因</th><th>规则</th><th>输入快照</th></tr></thead>
+                    <tbody>{report.rejected_orders?.map((rejection, index) => (
+                      <tr key={`${String(rejection.sequence ?? "rejected")}-${index}`}>
+                        <td>{timestampLabel(Number(rejection.event_time_ms))}</td>
+                        <td>{String(rejection.reason ?? "")}</td>
+                        <td>{String(rejection.reason_code ?? rejection.reason ?? "")}</td>
+                        <td>{String(rejection.rule_revision ?? "—")}</td>
+                        <td>{JSON.stringify(rejection.input_snapshot ?? rejection.intent ?? {})}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </>}
               <h3 className="backtest-table-title">每一笔完整交易（FIFO 配对）</h3>
               <div className="backtest-table-wrap">
                 <table>

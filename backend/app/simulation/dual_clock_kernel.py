@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent, sha256_hex
 from app.market_dataset.trades import assert_trade_stream
 
-from .kernel import SimulationResult
+from .kernel import SimulationResult, _decision_record
 from .trade_bar_builder import TradeBarBuilder
 from .trade_kernel import TradeSimulationKernel
 from .linear_perp_account_v2 import LinearPerpetualAccountV2
@@ -32,6 +32,7 @@ class DualClockSimulationKernel:
     account_model: str = "LINEAR_PERP_ONE_WAY_V1"
     funding_mode: str = "OFF"
     leverage: Decimal = Decimal("1")
+    host_policy_revision: str | None = None
     execution_reporter: Callable[[dict], None] | None = field(default=None, repr=False)
     execution: TradeSimulationKernel = field(init=False)
     builder: TradeBarBuilder = field(init=False)
@@ -54,6 +55,7 @@ class DualClockSimulationKernel:
             account_model=self.account_model,
             funding_mode=self.funding_mode,
             leverage=self.leverage,
+            host_policy_revision=self.host_policy_revision,
             execution_reporter=self.execution_reporter,
         )
 
@@ -147,11 +149,11 @@ class DualClockSimulationKernel:
                 if bar.sequence <= warmup_events:
                     intents = []
                 self.decisions.append(
-                    {
-                        "sequence": bar.sequence,
-                        "watermark_ms": bar.event_time_ms,
-                        "intents": intents,
-                    }
+                    _decision_record(
+                        intents,
+                        sequence=bar.sequence,
+                        watermark_ms=bar.event_time_ms,
+                    )
                 )
                 # The signal exists immediately before this boundary trade, so
                 # its first eligible print is the current authoritative event.

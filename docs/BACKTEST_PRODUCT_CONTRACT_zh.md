@@ -252,6 +252,19 @@ DRAFT -> VALIDATING -> QUEUED -> PREPARING -> RUNNING
 `24/30/70/LEVEL_TARGET_V1/false`；单选 trigger 字段用于让 UI/API/报告显式展示冻结语义，
 不能借此静默切换算法。
 
+### 8.4 Host Sizing 与风险身份
+
+M5 新增 `HOST_SIZING_RISK_V1`，冻结语义见
+`docs/adr/ADR-BACKTEST-008-host-sizing-risk-v1.md`。显式启用时，sizing 只允许
+`FIXED_QTY_V1`、`FIXED_NOTIONAL_V1`、`EQUITY_PERCENT_V1`、`RISK_PER_STOP_V1`，并写入
+Run identity。`SIGNAL` 经 Host sizing 生成绝对目标数量；`TARGET_POSITION` 始终表示绝对目标
+数量，`ORDER_INTENT` 始终表示显式订单数量。三者都必须经过 Host rules/risk，Provider 不能
+写账户或绕过拒单。旧 Run 未声明该身份时继续使用 legacy planner，原 hash 不变。
+
+风险拒单固定为 `ORDER_REJECTED_RISK`，规则拒单固定为 `ORDER_REJECTED_RULES`；结构化记录必须
+包含细分 reason、输入快照、policy/rule revision 和事件时间。`reduce_only` 可减少风险但不得越零。
+报告和图表必须展示拒单、停止原因与最大实际暴露。
+
 ---
 
 ## 9. Phase 1 数据接口

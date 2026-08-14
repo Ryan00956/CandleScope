@@ -30,6 +30,7 @@ export interface BacktestReport {
     realized_net_pnl: string;
     signal_event_count?: number;
     execution_event_count?: number;
+    risk_rejection_count?: number;
   };
   account?: Record<string, unknown>;
   ledger?: Record<string, unknown>;
@@ -62,10 +63,23 @@ export interface BacktestReport {
     bar_builder?: string | null;
     timezone?: string | null;
     account_model?: string | null;
+    host_policy_revision?: string | null;
+    sizing_policy?: string | null;
+    risk_policy?: string | null;
   };
   account_model?: string;
   funding_mode?: string;
   liquidation_model?: string;
+  risk_policy?: {
+    policy_revision?: string;
+    sizing_policy?: string;
+    risk_policy?: string;
+    max_actual_abs_position?: string;
+    max_actual_notional?: string;
+    peak_equity?: string | null;
+    stop_reasons?: Record<string, number>;
+    cooldown_until_sequence?: number;
+  };
 }
 
 export interface BacktestChartBar {
@@ -83,6 +97,7 @@ export interface BacktestChartData {
   interval: string;
   bars: BacktestChartBar[];
   fills: Array<Record<string, string>>;
+  rejected_orders?: Array<Record<string, unknown>>;
   equity_curve: Array<Record<string, string | number>>;
   truncated: boolean;
 }

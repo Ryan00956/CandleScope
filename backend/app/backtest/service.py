@@ -44,6 +44,11 @@ from .study import (
     walk_forward_splits,
 )
 from .strategy.host_adapter import StrategyHostAdapter
+from .strategy.host_policy import (
+    HOST_POLICY_REVISION,
+    HostPolicyConfig,
+    PlanningContext,
+)
 from .strategy.protocol import StrategyProviderSession
 from .strategy.pyne_adapter import PyneHostPlanner
 from .strategy.registry import StrategyRevisionRegistry, build_default_strategy_registry
@@ -110,6 +115,13 @@ class BacktestService:
             "account_model": "LINEAR_PERP_ONE_WAY_V1",
             "account_models": ["LINEAR_PERP_ONE_WAY_V1", "LINEAR_PERP_ONE_WAY_V2"],
             "funding_modes_v2": ["OFF", "FIXED_SCENARIO", "HISTORICAL_REQUIRED"],
+            "host_policy_revision": HOST_POLICY_REVISION,
+            "sizing_policies": [
+                "FIXED_QTY_V1",
+                "FIXED_NOTIONAL_V1",
+                "EQUITY_PERCENT_V1",
+                "RISK_PER_STOP_V1",
+            ],
             "provider_protocol": "strategy-provider/1",
             "flags": {
                 "BACKTEST_ENABLED": self.settings.enabled,
@@ -164,6 +176,32 @@ class BacktestService:
         digest = config_hash(identity)
         run_id = f"bt_{uuid.uuid4().hex}"
         stored_payload = dict(payload)
+        normalized_execution = json.loads(identity.execution_json)
+        if normalized_execution.get("host_policy_revision"):
+            stored_payload.update(
+                {
+                    name: normalized_execution.get(name)
+                    for name in (
+                        "host_policy_revision",
+                        "sizing_policy",
+                        "risk_policy",
+                        "fixed_qty",
+                        "fixed_notional",
+                        "equity_percent",
+                        "risk_per_stop_percent",
+                        "stop_distance",
+                        "max_abs_position_qty",
+                        "max_notional",
+                        "max_leverage",
+                        "max_order_risk",
+                        "max_active_orders",
+                        "max_cumulative_fees",
+                        "max_drawdown_percent",
+                        "daily_loss_limit",
+                        "cooldown_events",
+                    )
+                }
+            )
         if identity.fidelity_mode == "AGG_TRADE_EXECUTION":
             stored_payload.update(
                 {
@@ -668,11 +706,13 @@ class BacktestService:
                 session,
                 step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
             )
-            planner = PyneHostPlanner()
             try:
                 config = json.loads(str(record["config_json"]))
             except (TypeError, ValueError, json.JSONDecodeError):
                 config = {}
+            planner = PyneHostPlanner(
+                config, execution_reporter=self._execution_reporter(session)
+            )
             adapter.start(
                 {
                     "roles": ["BARS"],
@@ -717,6 +757,7 @@ class BacktestService:
                 ),
                 funding_mode=str(config.get("funding_mode") or "OFF"),
                 leverage=_config_decimal(config, "leverage", "1"),
+                host_policy_revision=config.get("host_policy_revision"),
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
@@ -763,11 +804,9 @@ class BacktestService:
                     bar=bar,
                     features=self._observation_features(provider, bar=bar, trade=None),
                 )
-                if wire is None:
-                    return []
                 return planner.plan(
                     wire,
-                    current_position=kernel.account.position_qty,
+                    context=_planning_context(kernel, event),
                 )
 
             remaining_events = tuple(
@@ -846,7 +885,8 @@ class BacktestService:
                     "gap_policy": kernel.gap_policy,
                     "order_closeout": "CANCEL_OPEN_AT_END",
                 },
-            },
+            }
+            | _policy_result_overrides(planner, result),
         )
 
     def execute_dual_clock_run(
@@ -888,11 +928,13 @@ class BacktestService:
                 session,
                 step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
             )
-            planner = PyneHostPlanner()
             try:
                 config = json.loads(str(record["config_json"]))
             except (TypeError, ValueError, json.JSONDecodeError):
                 config = {}
+            planner = PyneHostPlanner(
+                config, execution_reporter=self._execution_reporter(session)
+            )
             adapter.start(
                 {
                     "roles": ["BARS"],
@@ -939,6 +981,7 @@ class BacktestService:
                 ),
                 funding_mode=str(config.get("funding_mode") or "OFF"),
                 leverage=_config_decimal(config, "leverage", "1"),
+                host_policy_revision=config.get("host_policy_revision"),
                 execution_reporter=self._execution_reporter(session),
             )
             resume_sequence = 0
@@ -974,10 +1017,9 @@ class BacktestService:
                         provider, bar=bar_payload, trade=None
                     ),
                 )
-                if wire is None:
-                    return []
                 return planner.plan(
-                    wire, current_position=kernel.projected_position_qty
+                    wire,
+                    context=_planning_context(kernel.execution, bar),
                 )
 
             remaining_events = tuple(
@@ -1060,7 +1102,8 @@ class BacktestService:
                         )
                     ),
                 },
-            },
+            }
+            | _policy_result_overrides(planner, result),
         )
 
     def execute_trade_run(
@@ -1101,11 +1144,13 @@ class BacktestService:
                 session,
                 step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
             )
-            planner = PyneHostPlanner()
             try:
                 config = json.loads(str(record["config_json"]))
             except (TypeError, ValueError, json.JSONDecodeError):
                 config = {}
+            planner = PyneHostPlanner(
+                config, execution_reporter=self._execution_reporter(session)
+            )
             adapter.start(
                 {
                     "roles": ["TRADES"],
@@ -1166,11 +1211,9 @@ class BacktestService:
                     trade=trade,
                     features=self._observation_features(provider, bar=bar, trade=trade),
                 )
-                if wire is None:
-                    return []
                 return planner.plan(
                     wire,
-                    current_position=kernel.projected_position_qty,
+                    context=_planning_context(kernel, event),
                 )
 
             kernel = TradeSimulationKernel(
@@ -1179,6 +1222,7 @@ class BacktestService:
                 ),
                 funding_mode=str(config.get("funding_mode") or "OFF"),
                 leverage=_config_decimal(config, "leverage", "1"),
+                host_policy_revision=config.get("host_policy_revision"),
                 max_events=self.settings.max_trade_events,
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
@@ -1248,7 +1292,8 @@ class BacktestService:
                         )
                     ),
                 },
-            },
+            }
+            | _policy_result_overrides(planner, result),
         )
 
     def get_report(self, run_id: str) -> dict[str, object]:
@@ -1489,6 +1534,10 @@ class BacktestService:
         output_mode = str(payload.get("output_mode") or "TARGET_POSITION")
         if output_mode not in {"SIGNAL", "TARGET_POSITION", "ORDER_INTENT"}:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", "unsupported output_mode")
+        try:
+            host_policy = HostPolicyConfig.from_mapping(payload)
+        except StrategyProviderError as exc:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", str(exc)) from exc
         strategy_source = payload.get("strategy_source")
         if strategy_source is not None and len(str(strategy_source)) > 2_000:
             raise BacktestError(
@@ -1586,6 +1635,8 @@ class BacktestService:
                     "leverage": str(leverage),
                 }
             )
+        if host_policy is not None:
+            execution_config.update(host_policy.identity())
         if fidelity == "AGG_TRADE_EXECUTION":
             execution_config.update(signal_identity)
         if contract_data_mode == "HISTORICAL_CONTRACT_V1":
@@ -2026,6 +2077,56 @@ def _provider_report_metadata(provider: object) -> dict[str, object]:
         return {}
     value = report_metadata()
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _planning_context(kernel: Any, event: MarketEvent) -> PlanningContext:
+    account = kernel.account
+    reference = getattr(account, "mark", None)
+    if reference is None:
+        reference = event.payload.get("close", event.payload.get("price"))
+    if reference is None:
+        raise BacktestError(
+            "DATA_ROLE_COVERAGE_MISSING", "Host policy requires a visible price"
+        )
+    quantity_step = getattr(account, "step", None) or getattr(kernel, "qty_step", None)
+    min_notional = getattr(account, "min_notional", None) or getattr(
+        kernel, "min_notional", None
+    )
+    contract_multiplier = getattr(account, "multiplier", None) or Decimal("1")
+    active_orders = sum(order.status in {"OPEN", "PARTIAL"} for order in kernel.orders)
+    cumulative_fees = getattr(account, "cumulative_fees", None)
+    if cumulative_fees is None:
+        cumulative_fees = getattr(kernel, "fee_total", Decimal("0"))
+    return PlanningContext(
+        sequence=event.sequence,
+        event_time_ms=event.event_time_ms,
+        actual_position=account.position_qty,
+        projected_position=kernel.projected_position_qty,
+        reference_price=Decimal(str(reference)),
+        equity=account.equity(),
+        initial_balance=kernel.initial_balance,
+        cumulative_fees=Decimal(str(cumulative_fees)),
+        leverage=Decimal(str(getattr(account, "leverage", kernel.leverage))),
+        active_order_count=active_orders,
+        quantity_step=quantity_step,
+        min_notional=min_notional,
+        contract_multiplier=Decimal(str(contract_multiplier)),
+        rule_revision=str(getattr(account, "rule_version", None) or "LEGACY_CONFIG"),
+        taker_fee_bps=kernel.taker_fee_bps,
+        maker_fee_bps=kernel.maker_fee_bps,
+    )
+
+
+def _policy_result_overrides(
+    planner: PyneHostPlanner, result: Any
+) -> dict[str, object]:
+    policy = planner.report()
+    if not policy:
+        return {}
+    return {
+        "rejected": [*result.rejected, *planner.rejections],
+        "risk_policy": policy,
+    }
 
 
 def _config_decimal(config: Mapping[str, object], name: str, default: str) -> Decimal:

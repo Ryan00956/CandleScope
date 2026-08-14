@@ -23,8 +23,6 @@ def test_host_backtest_modules_are_still_absent() -> None:
 @pytest.mark.parametrize(
     "module_name",
     [
-        "app.simulation",
-        "app.simulation.clock",
         "app.api.v1.stream_backtests",
     ],
 )

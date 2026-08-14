@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { isBacktestEntryEnabled } from "../backtestFlags.js";
+import { createBacktestStore, reportHidesApproximate } from "../backtestStore.js";
+
+const featureRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function walk(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? walk(path) : [path];
+  });
+}
+
+test("backtest entry is closed unless the frontend flag is explicitly on", () => {
+  assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "0" }), false);
+  assert.equal(isBacktestEntryEnabled({}), false);
+  assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "1" }), true);
+});
+
+test("backtest feature does not import replay stores or controllers", () => {
+  const files = walk(featureRoot).filter((path) => /\.(ts|tsx)$/.test(path));
+  const hits = files.filter((path) => {
+    if (path.includes(`${sep}__tests__${sep}`)) return false;
+    const text = readFileSync(path, "utf8");
+    return /features\/replay|replayStore|TrainingRun/.test(text);
+  });
+  assert.deepEqual(hits, []);
+});
+
+test("BAR reports cannot hide the approximate label", () => {
+  assert.equal(
+    reportHidesApproximate({
+      schemaVersion: "candlescope.backtest-report/1",
+      runId: "bt_1",
+      fidelity_mode: "BAR_APPROX",
+      source_event_kind: "BAR",
+      report_label: "TRADE_SEQUENCE",
+      hashes: {},
+      metrics: { fill_count: 0, ambiguity_count: 0 },
+      unmodeled: [],
+      suitable_for: [],
+      not_suitable_for: [],
+      fills: [],
+    }),
+    true,
+  );
+});
+
+test("stream gap marks RESYNC_REQUIRED without cancelling the run", () => {
+  const store = createBacktestStore();
+  store.applyStream({ type: "PROGRESS", sequence: 4 });
+  store.applyStream({ type: "RESYNC_REQUIRED" });
+  assert.equal(store.getState().resyncRequired, true);
+  assert.equal(store.getState().lastSequence, 4);
+});

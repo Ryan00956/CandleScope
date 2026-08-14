@@ -43,14 +43,16 @@ def test_main_registers_backtest_routes_only_behind_the_master_flag() -> None:
     )
 
 
-def test_frontend_has_no_backtest_store_or_entry() -> None:
-    frontend_root = REPO_ROOT / "frontend" / "src"
-    assert not (frontend_root / "features" / "backtest").exists()
+def test_frontend_backtest_feature_stays_isolated_from_replay() -> None:
+    feature_root = REPO_ROOT / "frontend" / "src" / "features" / "backtest"
+    assert feature_root.is_dir()
     hits: list[str] = []
-    for path in frontend_root.rglob("*"):
+    for path in feature_root.rglob("*"):
         if path.suffix not in {".ts", ".tsx"}:
             continue
+        if "__tests__" in path.parts:
+            continue
         text = path.read_text(encoding="utf-8")
-        if "VITE_BACKTEST_ENTRY_ENABLED" in text or "features/backtest" in text:
+        if "features/replay" in text or "replayStore" in text or "TrainingRun" in text:
             hits.append(str(path.relative_to(REPO_ROOT)))
     assert hits == []

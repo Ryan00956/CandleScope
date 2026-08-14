@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS backtest_job_leases (
     expires_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS backtest_reports (
+    run_id TEXT PRIMARY KEY,
+    report_schema TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    report_hash TEXT,
+    generated_at_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS backtest_audit (
     run_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,

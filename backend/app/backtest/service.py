@@ -7,6 +7,7 @@ from typing import Mapping
 
 from app.core.config import BacktestSettings
 
+from app.backtest.reports import REPORT_SCHEMA, build_report
 from app.market_dataset.snapshot import MarketEvent
 from app.simulation import SimulationKernel
 
@@ -261,7 +262,23 @@ class BacktestService:
             "ambiguity_count": result.ambiguity_count,
             "fills": result.fills,
         }
+        report = build_report(completed, completed["result"])
+        self.repository.save_report(
+            run_id,
+            REPORT_SCHEMA,
+            canonical_json(report),
+            result.report_hash,
+            stamp,
+        )
+        completed["report"] = report
         return completed
+
+    def get_report(self, run_id: str) -> dict[str, object]:
+        record = self.get_run(run_id)
+        stored = self.repository.get_report(run_id)
+        if stored is None:
+            return build_report(record)
+        return json.loads(str(stored["report_json"]))
 
     def get_study(self, study_id: str) -> dict[str, object]:
         record = self.repository.get_study(study_id)

@@ -153,6 +153,36 @@ class BacktestRepository:
             self.connection.commit()
         return expired
 
+    def save_report(
+        self,
+        run_id: str,
+        report_schema: str,
+        report_json: str,
+        report_hash: str | None,
+        generated_at_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO backtest_reports(
+                run_id, report_schema, report_json, report_hash, generated_at_ms
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                report_schema = excluded.report_schema,
+                report_json = excluded.report_json,
+                report_hash = excluded.report_hash,
+                generated_at_ms = excluded.generated_at_ms
+            """,
+            (run_id, report_schema, report_json, report_hash, generated_at_ms),
+        )
+        self.connection.commit()
+
+    def get_report(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_reports WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def append_audit(
         self,
         run_id: str,

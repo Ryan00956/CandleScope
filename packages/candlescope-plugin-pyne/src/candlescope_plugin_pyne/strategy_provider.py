@@ -7,18 +7,22 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
-from candlescope_plugin_sdk.strategy_provider_v1.models import (
+from .strategy_types import (
     CONTRIBUTION_KIND,
-    ObservationFrame,
     ProviderCapabilities,
     StrategyOutput,
-)
-from candlescope_plugin_sdk.strategy_provider_v1.session import (
     StrategyProviderError,
     canonical_hash,
 )
+
+
+class ObservationFrame(Protocol):
+    event_time_ms: int
+    watermark_ms: int
+    sequence: int
+    bar: Mapping[str, Any] | None
 
 EXPECTED_PYNE_VERSION = "0.3.0rc2"
 PLUGIN_VERSION = "0.3.0.dev0"

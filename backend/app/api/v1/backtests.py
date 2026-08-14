@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.backtest.errors import BacktestError
+from app.backtest.reports import build_report, export_bundle
 from app.backtest.service import BacktestService
 
 
@@ -104,6 +105,23 @@ def get_run(request: Request, run_id: str) -> dict[str, Any]:
 def cancel_run(request: Request, run_id: str) -> dict[str, Any]:
     try:
         return _service(request).cancel_run(run_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/runs/{run_id}/report")
+def get_report(request: Request, run_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).get_report(run_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/runs/{run_id}/export")
+def export_run(request: Request, run_id: str) -> dict[str, Any]:
+    try:
+        service = _service(request)
+        return export_bundle(service.get_run(run_id), service.get_report(run_id))
     except BacktestError as exc:
         return _error(exc)
 

@@ -1,0 +1,188 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M4",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T04:16:45+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "60df761ff9827add0a1a99b9ad7dc730cbb4f17b",
+  "plannedCommitMessage": "backtest: complete M4 linear perpetual account v2",
+  "contract": {
+    "accountModel": "LINEAR_PERP_ONE_WAY_V2",
+    "legacyAccountModel": "LINEAR_PERP_ONE_WAY_V1_UNCHANGED",
+    "fundingModes": [
+      "OFF",
+      "FIXED_SCENARIO",
+      "HISTORICAL_REQUIRED"
+    ],
+    "markAuthority": "HISTORICAL_MARK_INDEX_ONLY",
+    "accountingAuthority": "DECIMAL_APPEND_ONLY_HOST_LEDGER",
+    "liquidationModel": "MARK_IMMEDIATE_NO_LIQUIDATION_FEE_V1",
+    "insuranceFundModeled": false,
+    "adlModeled": false,
+    "networkCompletion": "FORBIDDEN"
+  },
+  "accountingGates": {
+    "walletIdentityCheckedAfterEveryMutation": true,
+    "equityIdentityCheckedAfterEveryMutation": true,
+    "availableBalanceIdentityCheckedAfterEveryMutation": true,
+    "longShortAddReduceCloseFlip": "PASS",
+    "fifoAndAverageEntry": "PASS",
+    "positiveNegativeFundingSigns": "PASS",
+    "zeroPositionFundingAudited": "PASS",
+    "rulesAndMaintenanceTierTransitions": "PASS",
+    "markDrivenLiquidationAndInsolvencySeparated": "PASS",
+    "feeDrivenInsufficientMargin": "PASS",
+    "checkpointLedgerHashStable": "PASS",
+    "compensatingEntriesOnly": "PASS",
+    "v1GoldenHashesUnchanged": true
+  },
+  "realSevenDayRun": {
+    "result": "PASS",
+    "runtimeMode": "LOCAL_OFFLINE",
+    "exchange": "binance",
+    "marketType": "usdm",
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "startTimeMs": 1784851200000,
+    "endTimeMs": 1785455999999,
+    "datasetId": "local-d72350505a6f4f88bac35f318d846a51",
+    "dataEpoch": "sha256:876a0d20885c2f454bd3483079ba2c4dd18d210d002a066ced23e8a2b8d4a272",
+    "runId": "bt_ccd966157a5b46cf9d6b2d925b2e8801",
+    "runState": "COMPLETED",
+    "accountModel": "LINEAR_PERP_ONE_WAY_V2",
+    "fundingMode": "HISTORICAL_REQUIRED",
+    "leverage": "10",
+    "configHash": "sha256:e15d8ad43eff416d1b0b4b424f582ba8c10856ad2b2f917f905eabb2218b91f7",
+    "snapshotHash": "sha256:570e9c118305c18ba3e978e6bc09742c110cad6ca1ea96f48f0006c9c5ffb7a4",
+    "reportHash": "sha256:55a57991660f2cd7f9ee4ec0068c64be9a34c346300dd062850b1bd2f082ae8a",
+    "reportHashVerified": true,
+    "ledgerTailHash": "sha256:63d202ef2532dfc109fb5e3a342e3e05fff709468106128991ea49a8823584cd",
+    "fillCount": 2,
+    "roundTripTradeCount": 1,
+    "orderCount": 2,
+    "rejectedOrderCount": 0,
+    "fundingEventCount": 21,
+    "cumulativeRealizedPnl": "-131.38814",
+    "cumulativeFees": "0",
+    "cumulativeFunding": "-74.6391701502688541",
+    "walletBalance": "9793.9726898497311459",
+    "unrealizedPnl": "0",
+    "equity": "9793.9726898497311459",
+    "finalPositionQty": "0"
+  },
+  "dataRoleGates": {
+    "historicalRequiredRoles": [
+      "MARK_INDEX",
+      "FUNDING",
+      "INSTRUMENT_RULES"
+    ],
+    "offRequiredRoles": [
+      "MARK_INDEX",
+      "INSTRUMENT_RULES"
+    ],
+    "offPreviewStatus": "complete",
+    "missingContractDatasetId": "local-5920ad01b6124936920c8bff9de916a8",
+    "missingContractDataEpoch": "sha256:d311944ff73f405601e7a0dd4da839febd029ab1e838ed0dd25ff89de8f45167",
+    "missingRoleValidateHttpStatus": 400,
+    "missingRoleError": "DATA_ROLE_COVERAGE_MISSING",
+    "silentNetworkCompletion": false
+  },
+  "validation": {
+    "m4Focused": {
+      "result": "PASS",
+      "tests": 15
+    },
+    "v1GoldenM4AndTradeFocused": {
+      "result": "PASS",
+      "tests": 31
+    },
+    "backendBacktestContractTradeAndLocalDataRegression": {
+      "result": "PASS",
+      "tests": 175,
+      "warnings": 6
+    },
+    "defaultFlagsContractReleaseAndRollback": {
+      "result": "PASS",
+      "tests": 16,
+      "warnings": 6
+    },
+    "pythonRuffTouchedFiles": "PASS",
+    "pythonFormatTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendFullTests": {
+      "result": "PASS",
+      "tests": 3249
+    },
+    "frontendBuild": "PASS_WITH_EXISTING_500KB_CHUNK_WARNING",
+    "gitDiffCheck": "PASS",
+    "backtestDatabaseQuickCheck": "ok",
+    "foreignKeyViolations": 0
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15189/backtest.html",
+    "apiBase": "http://127.0.0.1:18096/api/v1/backtests",
+    "runId": "bt_ccd966157a5b46cf9d6b2d925b2e8801",
+    "accountIdentityShown": true,
+    "walletEquityAndMarginsShown": true,
+    "realizedFeesFundingAndPeriodCountShown": true,
+    "fillsAndFifoTradesShown": true,
+    "chartOpenCloseMarkersVisible": true,
+    "equityCurveVisible": true,
+    "insuranceAndAdlLimitationShown": true,
+    "fillPriceNotMarkDisclosureShown": true,
+    "finalConsoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshot": {
+      "path": "output/backtest-m4-runtime-20260815/browser/v2-historical-report-final.png",
+      "sha256": "907bde40e57bf83f3efad092ee1f384561bf0e23cb858610c99f45fcfa3ee7a1"
+    },
+    "logs": [
+      {
+        "path": "output/backtest-m4-runtime-20260815/backend5.stdout.log",
+        "sha256": "0475892b194095c2c0e21136d8940a4360ea491a1e5098b1d01609cdc5db8cf4"
+      },
+      {
+        "path": "output/backtest-m4-runtime-20260815/backend5.stderr.log",
+        "sha256": "17d2837fde93efda242903ffc653f6f9db4cf297e4d1b881bd576a3626a9f45e"
+      }
+    ]
+  },
+  "compatibility": {
+    "databaseSchemaChanged": false,
+    "databaseMigrationRequired": false,
+    "legacyAccountIdentityChanged": false,
+    "legacyConfigHashShapeChanged": false,
+    "legacyDecisionHashChanged": false,
+    "legacyFillHashChanged": false,
+    "legacyLedgerHashChanged": false,
+    "legacyReportHashChanged": false,
+    "legacyStoredReportsRemainReadable": true,
+    "newSemanticsUseNewIdentity": true
+  },
+  "defectsCaught": [
+    "Run records do not have an account_model column; account identity is read from frozen config_json instead of inventing a schema migration.",
+    "Historical funding payloads use funding_rate while fixed scenarios use rate; V2 accepts the frozen source-specific field without relabeling fixed funding as historical.",
+    "The chart endpoint originally reopened a V2 Run without its account and funding role identity; those fields now propagate into the exact snapshot preview.",
+    "Auxiliary events originally changed script-visible BAR sequence numbers; V2 now keeps a separate market-event strategy clock while retaining global source sequence for resume.",
+    "Closing orders originally reserved opening margin; reservations now cover only the exposure that can open beyond the current position.",
+    "OFF preview originally reported FUNDING as required despite omitting it from role status; required_roles now comes from the requested role set.",
+    "Auxiliary events originally triggered duplicate interval checkpoints; checkpoints now occur only after authoritative market events.",
+    "BAR row budgets originally counted auxiliary events; the frozen bar ceiling now counts only BARS while memory accounting still includes the full event payload."
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M4",
+  "soakGate": "NOT_REQUIRED_IN_M4",
+  "migration": "No database migration. V2 is an additive immutable Run identity and V1 artifacts retain their exact hashes.",
+  "rollback": "Revert the single M4 local commit. Existing V1 runs and reports require no rewrite; V2 remains unreachable in production while backtest flags are default off.",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M4_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "Insurance fund, liquidation fee and auto-deleveraging are not modeled and are disclosed in the report.",
+    "BAR execution remains approximate and does not claim an authoritative intrabar path.",
+    "aggTrade remains aggregated trade data and is not raw trade, order-book or queue truth.",
+    "Performance, soak, recovery and release rollback gates remain scheduled for later mandatory stages."
+  ]
+}

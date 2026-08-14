@@ -24,6 +24,7 @@ const EXPRESSION_REVISION = "builtin-expression-model-v1";
 const COMMAND_REVISION = "builtin-order-command-v1";
 const DUAL_CLOCK_MODE = "AGG_TRADE_EXECUTION";
 const HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1";
+const ACCOUNT_V2 = "LINEAR_PERP_ONE_WAY_V2";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -73,6 +74,9 @@ export default function BacktestApp() {
   const [fundingRate, setFundingRate] = useState("0");
   const [fundingIntervalHours, setFundingIntervalHours] = useState(8);
   const [historicalContractData, setHistoricalContractData] = useState(false);
+  const [accountModel, setAccountModel] = useState("LINEAR_PERP_ONE_WAY_V1");
+  const [fundingMode, setFundingMode] = useState("OFF");
+  const [leverage, setLeverage] = useState("1");
   const [snapshot, setSnapshot] = useState<BacktestSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
@@ -109,9 +113,11 @@ export default function BacktestApp() {
   );
   const contractData = snapshot?.quality.contract_data as {
     status?: string;
+    required_roles?: string[];
     role_status?: Record<string, { status?: string; row_count?: number }>;
   } | undefined;
-  const historicalContractComplete = !historicalContractData
+  const contractModeEnabled = historicalContractData || accountModel === ACCOUNT_V2;
+  const historicalContractComplete = !contractModeEnabled
     || contractData?.status === "complete";
 
   useEffect(() => {
@@ -195,7 +201,9 @@ export default function BacktestApp() {
         exchange,
         market_type: marketType,
         contract_data_mode: historicalContractData
-          ? HISTORICAL_CONTRACT_MODE : "LEGACY_FIXED_V1",
+          || accountModel === ACCOUNT_V2 ? HISTORICAL_CONTRACT_MODE : "LEGACY_FIXED_V1",
+        account_model: accountModel,
+        funding_mode: fundingMode,
       }, controller.signal).then(setSnapshot).catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(errorMessage(reason));
       });
@@ -204,7 +212,7 @@ export default function BacktestApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [endTimeMs, exchange, fidelityMode, historicalContractData, marketType, selectedDataset, startTimeMs]);
+  }, [accountModel, endTimeMs, exchange, fidelityMode, fundingMode, historicalContractData, marketType, selectedDataset, startTimeMs]);
 
   useEffect(() => {
     setReport(null);
@@ -281,8 +289,8 @@ export default function BacktestApp() {
         : strategyRevisionId === EXPRESSION_REVISION ? strategySource : null,
       output_mode: selectedStrategy?.output_modes[0]
         ?? (strategyRevisionId === COMMAND_REVISION ? "ORDER_INTENT" : "TARGET_POSITION"),
-      account_model: "LINEAR_PERP_ONE_WAY_V1",
-      contract_data_mode: historicalContractData
+      account_model: accountModel,
+      contract_data_mode: contractModeEnabled
         ? HISTORICAL_CONTRACT_MODE : "LEGACY_FIXED_V1",
       initial_balance: initialBalance,
       slippage_bps: slippageBps,
@@ -290,6 +298,8 @@ export default function BacktestApp() {
       maker_fee_bps: makerFeeBps,
       funding_rate: fundingRate,
       funding_interval_hours: fundingIntervalHours,
+      funding_mode: accountModel === ACCOUNT_V2 ? fundingMode : "OFF",
+      leverage,
       exchange,
       market_type: marketType,
       gap_policy: "REJECT",
@@ -309,15 +319,18 @@ export default function BacktestApp() {
       setLoading(false);
     }
   }, [
+    accountModel,
     commandSource,
+    contractModeEnabled,
     endTimeMs,
     exchange,
     fast,
     fidelityMode,
     fundingIntervalHours,
     fundingRate,
-    historicalContractData,
+    fundingMode,
     initialBalance,
+    leverage,
     makerFeeBps,
     marketType,
     refreshRuns,
@@ -522,11 +535,28 @@ export default function BacktestApp() {
           <label className="backtest-checkbox">
             <input
               type="checkbox"
-              checked={historicalContractData}
+              checked={contractModeEnabled}
+              disabled={accountModel === ACCOUNT_V2}
               onChange={(event) => setHistoricalContractData(event.target.checked)}
             />
-            要求历史 mark / index / funding / rules 完整覆盖（M3）
+            {accountModel === ACCOUNT_V2
+              ? "V2 强制使用历史 mark / rules（不会联网补取）"
+              : "要求历史 mark / index / funding / rules 完整覆盖（M3）"}
           </label>
+          <div className="backtest-form-row three" data-testid="account-v2-config">
+            <label>账户模型<select value={accountModel} onChange={(event) => {
+              setAccountModel(event.target.value);
+              if (event.target.value !== ACCOUNT_V2) setFundingMode("OFF");
+            }}>
+              {(capabilities?.account_models ?? ["LINEAR_PERP_ONE_WAY_V1"]).map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select></label>
+            <label>资金费模式<select value={fundingMode} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setFundingMode(event.target.value)}>
+              {(capabilities?.funding_modes_v2 ?? ["OFF"]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select></label>
+            <label>杠杆<input value={leverage} disabled={accountModel !== ACCOUNT_V2} onChange={(event) => setLeverage(event.target.value)} /></label>
+          </div>
           {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
             <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
               <strong>信号周期 {selectedDataset.interval} · UTC</strong>
@@ -598,8 +628,8 @@ export default function BacktestApp() {
           </div>
           <div className="backtest-form-row three">
             <label>Maker 费 bps<input value={makerFeeBps} onChange={(event) => setMakerFeeBps(event.target.value)} /></label>
-            <label>资金费率/周期<input value={fundingRate} onChange={(event) => setFundingRate(event.target.value)} /></label>
-            <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
+            <label>资金费率/周期<input value={fundingRate} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingRate(event.target.value)} /></label>
+            <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} disabled={accountModel === ACCOUNT_V2 && fundingMode !== "FIXED_SCENARIO"} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-snapshot">
             <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
@@ -610,9 +640,9 @@ export default function BacktestApp() {
               <small>{hashLabel(snapshot?.snapshot_hash)}</small>
             </div>
           </div>
-          {historicalContractData && (
+          {contractModeEnabled && (
             <div className="backtest-strategy-evidence" data-testid="contract-role-status">
-              {(["MARK_INDEX", "FUNDING", "INSTRUMENT_RULES"] as const).map((role) => (
+              {(contractData?.required_roles ?? ["MARK_INDEX", "FUNDING", "INSTRUMENT_RULES"]).map((role) => (
                 <span key={role}>
                   {role}: {contractData?.role_status?.[role]?.status ?? "missing"}
                   {contractData?.role_status?.[role]?.row_count !== undefined
@@ -665,8 +695,17 @@ export default function BacktestApp() {
                 <div><span>报告标签</span><strong>{report.report_label}</strong></div>
                 <div><span>成交</span><strong>{report.metrics.fill_count}</strong></div>
                 <div><span>完整交易</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
-                <div><span>最终权益</span><strong>{report.account?.equity ?? "—"}</strong></div>
+                <div><span>最终权益</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
               </div>
+              {report.account_model === ACCOUNT_V2 && <div className="backtest-strategy-evidence" data-testid="account-v2-report">
+                <strong>{report.account_model} · {report.funding_mode}</strong>
+                <span>钱包 {String(report.account?.wallet_balance ?? "—")} · 未实现 {String(report.account?.unrealized_pnl ?? "—")} · 权益 {String(report.account?.equity ?? "—")}</span>
+                <span>初始保证金 {String(report.account?.initial_margin ?? "—")} · 维持保证金 {String(report.account?.maintenance_margin ?? "—")} · 挂单冻结 {String(report.account?.frozen_order_margin ?? "—")}</span>
+                <span>可用 {String(report.account?.available_balance ?? "—")} · 杠杆 {String(report.account?.leverage ?? "—")} · 档位 {JSON.stringify(report.account?.maintenance_tier ?? null)}</span>
+                <span>已实现 {String(report.account?.cumulative_realized_pnl ?? "—")} · 手续费 {String(report.account?.cumulative_fees ?? "—")} · 资金费 {String(report.account?.cumulative_funding ?? "—")} / {String(report.account?.funding_event_count ?? "0")} periods</span>
+                <span>强平 {String(report.account?.liquidation_state ?? "—")} · 破产 {String(report.account?.insolvency_state ?? "—")} · {report.liquidation_model}</span>
+                <small>保险基金与 ADL 未建模；成交价不代替历史 mark。</small>
+              </div>}
               {report.fidelity_mode === DUAL_CLOCK_MODE && <div className="backtest-strategy-evidence" data-testid="dual-clock-report">
                 <strong>信号周期 {report.identity?.signal_interval} · {report.identity?.timezone}</strong>
                 <span>{report.identity?.signal_clock} → {report.identity?.execution_clock}</span>

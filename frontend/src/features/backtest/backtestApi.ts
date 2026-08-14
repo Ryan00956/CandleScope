@@ -24,6 +24,8 @@ export interface BacktestCapabilities {
   flags: Record<string, boolean>;
   fidelity_modes: string[];
   strategies: BacktestStrategyDescriptor[];
+  account_models?: string[];
+  funding_modes_v2?: string[];
 }
 
 export interface BacktestApiClient {
@@ -78,6 +80,8 @@ export interface SnapshotPreviewRequest {
   exchange?: string;
   market_type?: string;
   contract_data_mode?: string;
+  account_model?: string;
+  funding_mode?: string;
 }
 
 export interface BacktestSnapshot {

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "candlescope.backtest-account-contract/2",
+  "account_model": "LINEAR_PERP_ONE_WAY_V2",
+  "funding_modes": ["OFF", "FIXED_SCENARIO", "HISTORICAL_REQUIRED"],
+  "required_roles": {
+    "OFF": ["MARK_INDEX", "INSTRUMENT_RULES"],
+    "FIXED_SCENARIO": ["MARK_INDEX", "INSTRUMENT_RULES"],
+    "HISTORICAL_REQUIRED": ["MARK_INDEX", "INSTRUMENT_RULES", "FUNDING"]
+  },
+  "maintenance_tier_interval": "[notional_floor,notional_cap)",
+  "unrealized_price_source": "HISTORICAL_MARK",
+  "liquidation_model": "MARK_IMMEDIATE_NO_LIQUIDATION_FEE_V1",
+  "insurance_fund_modeled": false,
+  "adl_modeled": false,
+  "ledger_correction": "APPEND_ONLY_COMPENSATING_ENTRY",
+  "equations": [
+    "wallet=initial+realized-fees+funding+compensation",
+    "equity=wallet+unrealized(mark)",
+    "available=equity-initial_margin-frozen_order_margin"
+  ]
+}

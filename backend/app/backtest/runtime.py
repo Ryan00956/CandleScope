@@ -32,6 +32,7 @@ from app.market_dataset.snapshot import (
     sha256_hex,
 )
 from app.simulation.trade_bar_builder import derive_complete_trade_bars
+from app.simulation.contract_accounting import merge_contract_timeline
 
 from .errors import BacktestError
 from .service import BacktestService
@@ -46,6 +47,27 @@ HISTORICAL_CONTRACT_ROLES = (
     "FUNDING",
     "INSTRUMENT_RULES",
 )
+
+
+def _required_contract_roles(account_model: str, funding_mode: str) -> tuple[str, ...]:
+    if account_model != "LINEAR_PERP_ONE_WAY_V2":
+        return AUX_ROLES
+    roles = ["MARK_INDEX", "INSTRUMENT_RULES"]
+    if funding_mode == "HISTORICAL_REQUIRED":
+        roles.append("FUNDING")
+    return tuple(roles)
+
+
+def _renumber_timeline(events: tuple[MarketEvent, ...]) -> tuple[MarketEvent, ...]:
+    return tuple(
+        MarketEvent(
+            sequence=index,
+            event_time_ms=event.event_time_ms,
+            role=event.role,
+            payload=dict(event.payload),
+        )
+        for index, event in enumerate(events, start=1)
+    )
 
 
 class BacktestRuntime:
@@ -147,6 +169,8 @@ class BacktestRuntime:
         exchange: str = "binance",
         market_type: str = "usdm",
         contract_data_mode: str = "LEGACY_FIXED_V1",
+        account_model: str = "LINEAR_PERP_ONE_WAY_V1",
+        funding_mode: str = "OFF",
     ) -> dict[str, Any]:
         if fidelity_mode in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
             manifest = self._manifest(dataset_id)
@@ -174,22 +198,32 @@ class BacktestRuntime:
                         start_time_ms=start_time_ms,
                         end_time_ms=end_time_ms,
                         allow_incomplete=True,
+                        required_roles=_required_contract_roles(
+                            account_model, funding_mode
+                        ),
                     )
                 except MarketDatasetError as exc:
                     preview["quality"]["contract_data"] = {
                         "status": "missing"
                         if exc.code == "DATA_ROLE_MISSING"
                         else "partial",
-                        "required_roles": list(AUX_ROLES),
+                        "required_roles": list(
+                            _required_contract_roles(account_model, funding_mode)
+                        ),
                         "role_status": {
-                            role: {"status": "missing"} for role in AUX_ROLES
+                            role: {"status": "missing"}
+                            for role in _required_contract_roles(
+                                account_model, funding_mode
+                            )
                         },
                         "error_code": exc.code,
                     }
                 else:
                     preview["quality"]["contract_data"] = {
                         "status": aux.quality["status"],
-                        "required_roles": list(AUX_ROLES),
+                        "required_roles": list(
+                            _required_contract_roles(account_model, funding_mode)
+                        ),
                         "role_status": aux.quality["roles"],
                         "bundle_hash": aux.snapshot_hash,
                     }
@@ -214,6 +248,8 @@ class BacktestRuntime:
             exchange=exchange,
             market_type=market_type,
             contract_data_mode=contract_data_mode,
+            account_model=account_model,
+            funding_mode=funding_mode,
         )
         try:
             snapshot = self.snapshots.open(
@@ -249,6 +285,8 @@ class BacktestRuntime:
                 end_time_ms=config["end_time_ms"],
                 interval=interval,
                 contract_data_mode=config.get("contract_data_mode"),
+                account_model=config.get("account_model"),
+                funding_mode=config.get("funding_mode"),
                 exchange=str(config.get("exchange") or "binance"),
                 market_type=str(config.get("market_type") or "usdm"),
             )
@@ -285,6 +323,12 @@ class BacktestRuntime:
                         symbol=str(manifest["symbol"]),
                         start_time_ms=int(config["start_time_ms"]),
                         end_time_ms=int(config["end_time_ms"]),
+                        required_roles=_required_contract_roles(
+                            str(
+                                config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                            ),
+                            str(config.get("funding_mode") or "OFF"),
+                        ),
                     )
                     contract_bundle_hash = contract_snapshot.snapshot_hash
                 _assert_trade_identity(
@@ -362,7 +406,11 @@ class BacktestRuntime:
             start_time_ms=int(values["start_time_ms"]),
             end_time_ms=int(values["end_time_ms"]),
             roles=(
-                HISTORICAL_CONTRACT_ROLES
+                ("BARS",)
+                + _required_contract_roles(
+                    str(values.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
+                    str(values.get("funding_mode") or "OFF"),
+                )
                 if values.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
                 else ("BARS",)
             ),
@@ -383,6 +431,7 @@ class BacktestRuntime:
         start_time_ms: int,
         end_time_ms: int,
         allow_incomplete: bool = False,
+        required_roles: tuple[str, ...] = AUX_ROLES,
     ) -> MarketDatasetSnapshot:
         path = (
             Path(self.local_data.root)
@@ -404,7 +453,7 @@ class BacktestRuntime:
                 symbol=symbol,
                 start_time_ms=start_time_ms,
                 end_time_ms=end_time_ms,
-                roles=AUX_ROLES,
+                roles=required_roles,
                 interval=None,
                 calendar_id="UTC_FIXED",
                 source="local_immutable",
@@ -592,7 +641,13 @@ class BacktestWorker:
                     start_time_ms=int(config["start_time_ms"]),
                     end_time_ms=int(config["end_time_ms"]),
                     roles=(
-                        HISTORICAL_CONTRACT_ROLES
+                        ("BARS",)
+                        + _required_contract_roles(
+                            str(
+                                config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                            ),
+                            str(config.get("funding_mode") or "OFF"),
+                        )
                         if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
                         else ("BARS",)
                     ),
@@ -602,9 +657,15 @@ class BacktestWorker:
                     retention_policy="user_local",
                 )
                 snapshot = self.snapshots.open(ref)
-                market_events = _bar_execution_events(
-                    snapshot.events,
-                    interval_name=str(config.get("interval") or manifest["interval"]),
+                market_events = (
+                    tuple(snapshot.events)
+                    if str(config.get("account_model")) == "LINEAR_PERP_ONE_WAY_V2"
+                    else _bar_execution_events(
+                        snapshot.events,
+                        interval_name=str(
+                            config.get("interval") or manifest["interval"]
+                        ),
+                    )
                 )
                 if not market_events:
                     raise MarketDatasetError(
@@ -649,6 +710,12 @@ class BacktestWorker:
                         symbol=str(manifest["symbol"]),
                         start_time_ms=int(config["start_time_ms"]),
                         end_time_ms=int(config["end_time_ms"]),
+                        required_roles=_required_contract_roles(
+                            str(
+                                config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                            ),
+                            str(config.get("funding_mode") or "OFF"),
+                        ),
                     )
                     contract_bundle_hash = contract_snapshot.snapshot_hash
                 _assert_trade_identity(
@@ -661,6 +728,13 @@ class BacktestWorker:
                     dataset,
                     max_events=self.settings.max_trade_events,
                 )
+                if (
+                    contract_snapshot is not None
+                    and str(config.get("account_model")) == "LINEAR_PERP_ONE_WAY_V2"
+                ):
+                    events = _renumber_timeline(
+                        merge_contract_timeline(contract_snapshot.events, events)
+                    )
                 evidence = {
                     "quality": {
                         "status": "accepted",

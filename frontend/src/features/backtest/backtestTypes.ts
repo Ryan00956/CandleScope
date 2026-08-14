@@ -31,7 +31,7 @@ export interface BacktestReport {
     signal_event_count?: number;
     execution_event_count?: number;
   };
-  account?: Record<string, string | boolean | null>;
+  account?: Record<string, unknown>;
   ledger?: Record<string, unknown>;
   equity_curve?: Array<Record<string, string | number>>;
   orders?: Array<Record<string, unknown>>;
@@ -61,7 +61,11 @@ export interface BacktestReport {
     execution_clock?: string | null;
     bar_builder?: string | null;
     timezone?: string | null;
+    account_model?: string | null;
   };
+  account_model?: string;
+  funding_mode?: string;
+  liquidation_model?: string;
 }
 
 export interface BacktestChartBar {

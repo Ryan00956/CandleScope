@@ -8,6 +8,10 @@ from typing import Callable, Mapping
 
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent, sha256_hex
 from app.simulation.contract_accounting import ContractAccount
+from app.simulation.linear_perp_account_v2 import (
+    ACCOUNT_MODEL as ACCOUNT_MODEL_V2,
+    LinearPerpetualAccountV2,
+)
 
 ALLOWED_ORDER_TYPES = frozenset({"MARKET", "LIMIT", "STOP", "STOP_LIMIT"})
 ALLOWED_SIDES = frozenset({"BUY", "SELL"})
@@ -65,6 +69,9 @@ StrategyFn = Callable[[tuple[MarketEvent, ...], MarketEvent], list[dict]]
 
 @dataclass(slots=True)
 class SimulationKernel:
+    account_model: str = "LINEAR_PERP_ONE_WAY_V1"
+    funding_mode: str = "OFF"
+    leverage: Decimal = Decimal("1")
     slippage_bps: Decimal = Decimal("1")
     taker_fee_bps: Decimal = Decimal("0")
     maker_fee_bps: Decimal = Decimal("0")
@@ -88,12 +95,21 @@ class SimulationKernel:
         default=None,
         repr=False,
     )
-    account: ContractAccount = field(init=False)
+    account: ContractAccount | LinearPerpetualAccountV2 = field(init=False)
     _next_order_id: int = 1
     _last_event: MarketEvent | None = None
     _next_funding_time_ms: int | None = None
+    _market_event_count: int = 0
 
     def __post_init__(self) -> None:
+        if self.account_model == ACCOUNT_MODEL_V2:
+            self.account = LinearPerpetualAccountV2(
+                initial_balance=self.initial_balance,
+                leverage=self.leverage,
+                funding_mode=self.funding_mode,
+                taker_fee_bps=self.taker_fee_bps,
+            )
+            return
         self.account = ContractAccount(
             quote_balance=self.initial_balance,
             taker_fee_bps=self.taker_fee_bps,
@@ -107,6 +123,16 @@ class SimulationKernel:
 
     def snapshot(self) -> dict:
         return {
+            **(
+                {
+                    "account_model": self.account_model,
+                    "funding_mode": self.funding_mode,
+                    "leverage": str(self.leverage),
+                    "market_event_count": self._market_event_count,
+                }
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else {}
+            ),
             "slippage_bps": str(self.slippage_bps),
             "taker_fee_bps": str(self.taker_fee_bps),
             "maker_fee_bps": str(self.maker_fee_bps),
@@ -137,7 +163,16 @@ class SimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, object]) -> None:
-        self.slippage_bps = Decimal(str(payload.get("slippage_bps") or self.slippage_bps))
+        if (
+            str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1")
+            != self.account_model
+        ):
+            raise MarketDatasetError(
+                "account model checkpoint identity changed", code="CHECKPOINT_CORRUPT"
+            )
+        self.slippage_bps = Decimal(
+            str(payload.get("slippage_bps") or self.slippage_bps)
+        )
         self.taker_fee_bps = Decimal(str(payload.get("taker_fee_bps") or "0"))
         self.maker_fee_bps = Decimal(str(payload.get("maker_fee_bps") or "0"))
         self.funding_rate = Decimal(str(payload.get("funding_rate") or "0"))
@@ -157,17 +192,27 @@ class SimulationKernel:
                 order_id=str(item["order_id"]),
                 sequence=int(item["sequence"]),
                 event_time_ms=int(item.get("event_time_ms") or 0),
-                side=str(item.get("side") or _order_side(self.orders, str(item["order_id"]))),
+                side=str(
+                    item.get("side") or _order_side(self.orders, str(item["order_id"]))
+                ),
                 price=Decimal(str(item["price"])),
                 qty=Decimal(str(item["qty"])),
                 fee=Decimal(str("0" if item.get("fee") is None else item["fee"])),
                 reason=str(item["reason"]),
                 action=str(item.get("action") or ""),
                 position_before=Decimal(
-                    str("0" if item.get("position_before") is None else item["position_before"])
+                    str(
+                        "0"
+                        if item.get("position_before") is None
+                        else item["position_before"]
+                    )
                 ),
                 position_after=Decimal(
-                    str("0" if item.get("position_after") is None else item["position_after"])
+                    str(
+                        "0"
+                        if item.get("position_after") is None
+                        else item["position_after"]
+                    )
                 ),
             )
             for item in payload["fills"]  # type: ignore[union-attr]
@@ -179,6 +224,7 @@ class SimulationKernel:
         if isinstance(account, Mapping):
             self.account.restore(account)
         self._next_order_id = int(payload["next_order_id"])
+        self._market_event_count = int(payload.get("market_event_count") or 0)
         last_event = payload.get("last_event")
         self._last_event = (
             None
@@ -201,34 +247,61 @@ class SimulationKernel:
         checkpoint_callback: Callable[[MarketEvent], None] | None = None,
     ) -> SimulationResult:
         visible: list[MarketEvent] = []
-        for index, event in enumerate(events):
+        for event in events:
             if self.paused:
                 break
             if not self._accept_event(event):
                 continue
-            self.account.mark = _bar_decimal(event, "close")
-            self._apply_funding(event)
-            self._match(event)
-            visible.append(event)
-            intents = strategy((event,), event)
-            if index < warmup_events:
+            if event.role in {"INSTRUMENT_RULES", "MARK_INDEX", "FUNDING"}:
+                self.account.apply(event)
+                continue
+            if event.role != "BARS":
+                raise MarketDatasetError(
+                    "BAR kernel received unsupported role", code="FIDELITY_MISLABEL"
+                )
+            self._market_event_count += 1
+            market_event = (
+                MarketEvent(
+                    sequence=self._market_event_count,
+                    event_time_ms=event.event_time_ms,
+                    role=event.role,
+                    payload=event.payload,
+                )
+                if isinstance(self.account, LinearPerpetualAccountV2)
+                else event
+            )
+            if isinstance(self.account, LinearPerpetualAccountV2):
+                self.account.validate_ready()
+            else:
+                self.account.mark = _bar_decimal(event, "close")
+            self._apply_funding(market_event)
+            self._match(market_event)
+            visible.append(market_event)
+            intents = strategy((market_event,), market_event)
+            if self._market_event_count <= warmup_events:
                 intents = []
             self.decisions.append(
                 {
-                    "sequence": event.sequence,
-                    "watermark_ms": event.event_time_ms,
+                    "sequence": market_event.sequence,
+                    "watermark_ms": market_event.event_time_ms,
                     "intents": intents,
                 }
             )
-            self._enqueue_many(intents, current_sequence=event.sequence)
-            self.equity_curve.append(
-                {
-                    "sequence": event.sequence,
-                    "event_time_ms": event.event_time_ms,
-                    "equity": str(self.account.equity()),
-                    "position_qty": str(self.account.position_qty),
-                }
-            )
+            self._enqueue_many(intents, current_sequence=market_event.sequence)
+            curve_point = {
+                "sequence": market_event.sequence,
+                "event_time_ms": market_event.event_time_ms,
+                "equity": str(self.account.equity()),
+                "position_qty": str(self.account.position_qty),
+            }
+            if isinstance(self.account, LinearPerpetualAccountV2):
+                curve_point.update(
+                    {
+                        "wallet_balance": str(self.account.quote_balance),
+                        "available_balance": str(self.account.available_balance()),
+                    }
+                )
+            self.equity_curve.append(curve_point)
             if checkpoint_callback is not None:
                 checkpoint_callback(event)
         if finalize:
@@ -239,6 +312,8 @@ class SimulationKernel:
         for order in self.orders:
             if order.status in {"OPEN", "PARTIAL"}:
                 order.status = "CANCELLED_EOF"
+                if isinstance(self.account, LinearPerpetualAccountV2):
+                    self.account.release_order_margin(order.order_id)
 
     def result(self) -> SimulationResult:
         fills = [asdict(fill) for fill in self.fills]
@@ -248,7 +323,9 @@ class SimulationKernel:
         account["initial_balance"] = str(self.initial_balance)
         ledger = {
             "fill_count": len(self.fills),
-            "notional": str(sum((fill.price * fill.qty for fill in self.fills), Decimal("0"))),
+            "notional": str(
+                sum((fill.price * fill.qty for fill in self.fills), Decimal("0"))
+            ),
             "fee_total": str(self.fee_total),
             "ambiguity_count": self.ambiguity_count,
             "account": account,
@@ -283,7 +360,9 @@ class SimulationKernel:
         if previous is None:
             return True
         if int(event.event_time_ms) < int(previous.event_time_ms):
-            raise MarketDatasetError("bar time went backwards", code="DATA_GAP_REJECTED")
+            raise MarketDatasetError(
+                "bar time went backwards", code="DATA_GAP_REJECTED"
+            )
         if int(event.sequence) == int(previous.sequence) + 1:
             return True
         if self.gap_policy not in GAP_POLICIES:
@@ -305,17 +384,21 @@ class SimulationKernel:
     ) -> None:
         normalized = [dict(intent) for intent in intents]
         limits = [
-            item for item in normalized
+            item
+            for item in normalized
             if item.get("type") == "LIMIT" and not item.get("oco_group")
         ]
         stops = [
-            item for item in normalized
+            item
+            for item in normalized
             if item.get("type") == "STOP" and not item.get("oco_group")
         ]
         if len(limits) == 1 and len(stops) == 1:
             limit = limits[0]
             stop = stops[0]
-            if limit.get("side") == stop.get("side") and str(limit.get("qty")) == str(stop.get("qty")):
+            if limit.get("side") == stop.get("side") and str(limit.get("qty")) == str(
+                stop.get("qty")
+            ):
                 group = f"oco-{current_sequence}-{self._next_order_id}"
                 limit["oco_group"] = group
                 stop["oco_group"] = group
@@ -347,21 +430,56 @@ class SimulationKernel:
                 self.execution_reporter(rejected)
             return
         order = SimulatedOrder(
-                order_id=f"ord-{self._next_order_id}",
-                side=str(intent["side"]),
-                type=str(intent["type"]),
-                qty=Decimal(str(intent["qty"])),
-                limit_price=_optional_decimal(intent.get("limit_price")),
-                stop_price=_optional_decimal(intent.get("stop_price")),
-                eligible_after_sequence=current_sequence + 1,
-                oco_group=(
-                    None
-                    if not str(intent.get("oco_group") or "").strip()
-                    else str(intent["oco_group"])
-                ),
-                reduce_only=bool(intent.get("reduce_only") or False),
-            )
+            order_id=f"ord-{self._next_order_id}",
+            side=str(intent["side"]),
+            type=str(intent["type"]),
+            qty=Decimal(str(intent["qty"])),
+            limit_price=_optional_decimal(intent.get("limit_price")),
+            stop_price=_optional_decimal(intent.get("stop_price")),
+            eligible_after_sequence=current_sequence + 1,
+            oco_group=(
+                None
+                if not str(intent.get("oco_group") or "").strip()
+                else str(intent["oco_group"])
+            ),
+            reduce_only=bool(intent.get("reduce_only") or False),
+        )
         self.orders.append(order)
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            reference = (
+                current_price if current_price is not None else self.account.mark
+            )
+            assert reference is not None
+            fee_bps = (
+                self.maker_fee_bps
+                if order.type in {"LIMIT", "STOP_LIMIT"}
+                else self.taker_fee_bps
+            )
+            try:
+                self.account.reserve_order_margin(
+                    order_id=order.order_id,
+                    qty=(
+                        Decimal("0")
+                        if order.reduce_only
+                        else self.account.opening_quantity(
+                            side=order.side, qty=order.qty
+                        )
+                    ),
+                    reference_price=reference,
+                    estimated_fee=reference * order.qty * fee_bps / Decimal("10000"),
+                )
+            except MarketDatasetError as exc:
+                self.orders.pop()
+                rejected = {
+                    "accepted": False,
+                    "reason": exc.code,
+                    "sequence": current_sequence,
+                    "intent": dict(intent),
+                }
+                self.rejected.append(rejected)
+                if self.execution_reporter is not None:
+                    self.execution_reporter(rejected)
+                return
         if self.execution_reporter is not None:
             self.execution_reporter(
                 {
@@ -377,7 +495,8 @@ class SimulationKernel:
         open_orders = [
             order
             for order in self.orders
-            if order.status == "OPEN" and order.eligible_after_sequence <= event.sequence
+            if order.status == "OPEN"
+            and order.eligible_after_sequence <= event.sequence
         ]
         if not open_orders:
             return
@@ -396,14 +515,14 @@ class SimulationKernel:
         ]
         ambiguous_groups = {
             order.oco_group for order in stop_hits if order.oco_group is not None
-        } & {
-            order.oco_group for order in target_hits if order.oco_group is not None
-        }
+        } & {order.oco_group for order in target_hits if order.oco_group is not None}
         for group in sorted(ambiguous_groups):
             self.ambiguity_count += 1
             for order in stop_hits:
                 if order.oco_group == group and order.status == "OPEN":
-                    self._fill(order, event.sequence, _stop_price(order), "WORST_CASE_STOP")
+                    self._fill(
+                        order, event.sequence, _stop_price(order), "WORST_CASE_STOP"
+                    )
         for order in open_orders:
             if order.status != "OPEN":
                 continue
@@ -419,11 +538,15 @@ class SimulationKernel:
                     order.activated = True
                 if order.activated and _limit_hit(order, high, low):
                     assert order.limit_price is not None
-                    self._fill(order, event.sequence, order.limit_price, "LIMIT_THROUGH")
+                    self._fill(
+                        order, event.sequence, order.limit_price, "LIMIT_THROUGH"
+                    )
             elif order.type == "STOP" and _stop_hit(order, high, low):
                 self._fill(order, event.sequence, _stop_price(order), "STOP_TRIGGER")
 
-    def _fill(self, order: SimulatedOrder, sequence: int, price: Decimal, reason: str) -> None:
+    def _fill(
+        self, order: SimulatedOrder, sequence: int, price: Decimal, reason: str
+    ) -> None:
         fill_qty = order.qty
         if order.reduce_only:
             reducible = (
@@ -434,6 +557,8 @@ class SimulationKernel:
             fill_qty = min(fill_qty, reducible)
             if fill_qty <= 0:
                 order.status = "CANCELLED_REDUCE_ONLY"
+                if isinstance(self.account, LinearPerpetualAccountV2):
+                    self.account.release_order_margin(order.order_id)
                 return
         order.status = "FILLED"
         order.fill_price = price
@@ -445,14 +570,29 @@ class SimulationKernel:
         )
         fee = price * fill_qty * fee_bps / Decimal("10000")
         self.fee_total += fee
-        self.account.mark = price
+        if not isinstance(self.account, LinearPerpetualAccountV2):
+            self.account.mark = price
         position_before = self.account.position_qty
-        self.account.apply_fill(side=order.side, price=price, qty=fill_qty, fee=fee)
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            self.account.apply_fill(
+                side=order.side,
+                price=price,
+                qty=fill_qty,
+                fee=fee,
+                event_time_ms=(
+                    0 if self._last_event is None else self._last_event.event_time_ms
+                ),
+                order_id=order.order_id,
+            )
+        else:
+            self.account.apply_fill(side=order.side, price=price, qty=fill_qty, fee=fee)
         position_after = self.account.position_qty
         fill = SimulatedFill(
             order_id=order.order_id,
             sequence=sequence,
-            event_time_ms=(0 if self._last_event is None else self._last_event.event_time_ms),
+            event_time_ms=(
+                0 if self._last_event is None else self._last_event.event_time_ms
+            ),
             side=order.side,
             price=price,
             qty=fill_qty,
@@ -471,6 +611,8 @@ class SimulationKernel:
                     and sibling.status in {"OPEN", "PARTIAL"}
                 ):
                     sibling.status = "CANCELLED_OCO"
+                    if isinstance(self.account, LinearPerpetualAccountV2):
+                        self.account.release_order_margin(sibling.order_id)
         if self.execution_reporter is not None:
             self.execution_reporter(
                 {
@@ -481,6 +623,26 @@ class SimulationKernel:
             )
 
     def _apply_funding(self, event: MarketEvent) -> None:
+        if isinstance(self.account, LinearPerpetualAccountV2):
+            if (
+                self.funding_mode != "FIXED_SCENARIO"
+                or self.funding_rate == 0
+                or self.funding_interval_ms <= 0
+            ):
+                return
+            if self._next_funding_time_ms is None:
+                self._next_funding_time_ms = (
+                    event.event_time_ms + self.funding_interval_ms
+                )
+                return
+            while event.event_time_ms >= self._next_funding_time_ms:
+                self.account.apply_fixed_funding(
+                    event_time_ms=self._next_funding_time_ms,
+                    rate=self.funding_rate,
+                    period_id=f"fixed:{self._next_funding_time_ms}",
+                )
+                self._next_funding_time_ms += self.funding_interval_ms
+            return
         if self.funding_rate == 0 or self.funding_interval_ms <= 0:
             return
         if self._next_funding_time_ms is None:

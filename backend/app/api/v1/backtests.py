@@ -43,6 +43,8 @@ class RunCreateRequest(BaseModel):
     maker_fee_bps: str = Field(default="0", max_length=64)
     funding_rate: str = Field(default="0", max_length=64)
     funding_interval_hours: int = Field(default=8, ge=1, le=168)
+    funding_mode: str = Field(default="OFF", max_length=32)
+    leverage: str = Field(default="1", max_length=64)
     exchange: str = Field(default="binance", min_length=1, max_length=40)
     market_type: str = Field(default="usdm", min_length=1, max_length=40)
     price_tick: str | None = Field(default=None, max_length=64)
@@ -91,6 +93,8 @@ class SnapshotPreviewRequest(BaseModel):
     exchange: str = Field(default="binance", min_length=1, max_length=40)
     market_type: str = Field(default="usdm", min_length=1, max_length=40)
     contract_data_mode: str = Field(default="LEGACY_FIXED_V1", max_length=40)
+    account_model: str = Field(default="LINEAR_PERP_ONE_WAY_V1", max_length=40)
+    funding_mode: str = Field(default="OFF", max_length=32)
 
 
 def _require_contract_snapshot(
@@ -178,6 +182,8 @@ def validate_run(request: Request, payload: RunCreateRequest) -> dict[str, Any]:
                 exchange=payload.exchange,
                 market_type=payload.market_type,
                 contract_data_mode=payload.contract_data_mode,
+                account_model=payload.account_model,
+                funding_mode=payload.funding_mode,
             )
             _require_contract_snapshot(preview, payload.contract_data_mode)
             if (
@@ -213,6 +219,8 @@ def create_run(
                 exchange=payload.exchange,
                 market_type=payload.market_type,
                 contract_data_mode=payload.contract_data_mode,
+                account_model=payload.account_model,
+                funding_mode=payload.funding_mode,
             )
             _require_contract_snapshot(preview, payload.contract_data_mode)
             if (

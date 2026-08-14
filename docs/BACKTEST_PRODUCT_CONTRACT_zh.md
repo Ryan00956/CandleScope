@@ -112,6 +112,16 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 
 现货 long-only **必须** 作为后续独立账户模型引入，不得在本模型上叠加模糊字段。
 
+### 5.1 成熟化新增账户身份
+
+M4 新增 `LINEAR_PERP_ONE_WAY_V2`，它是独立版本身份，绝不静默改变上述 V1 Run。
+冻结语义见 `docs/adr/ADR-BACKTEST-007-account-model-v2.md`，协议 golden 为
+`backend/tests/fixtures/backtest/account_v2_contract_golden.json`。V2 的资金费模式只允许
+`OFF`、`FIXED_SCENARIO`、`HISTORICAL_REQUIRED`；历史 mark/rules 始终必需，只有
+`HISTORICAL_REQUIRED` 强制 funding role。报告必须同时给出 wallet、unrealized、equity、
+initial/maintenance/frozen-order margin、available balance、funding 来源、强平状态及未建模的
+保险基金/ADL。
+
 ---
 
 ## 6. 精度等级与报告用语

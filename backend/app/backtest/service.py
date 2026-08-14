@@ -108,6 +108,8 @@ class BacktestService:
             "engine_version": ENGINE_VERSION,
             "schema_version": SCHEMA_VERSION,
             "account_model": "LINEAR_PERP_ONE_WAY_V1",
+            "account_models": ["LINEAR_PERP_ONE_WAY_V1", "LINEAR_PERP_ONE_WAY_V2"],
+            "funding_modes_v2": ["OFF", "FIXED_SCENARIO", "HISTORICAL_REQUIRED"],
             "provider_protocol": "strategy-provider/1",
             "flags": {
                 "BACKTEST_ENABLED": self.settings.enabled,
@@ -681,7 +683,8 @@ class BacktestService:
                 }
             )
 
-            if len(events) > self.settings.max_bar_rows:
+            bar_event_count = sum(event.role == "BARS" for event in events)
+            if bar_event_count > self.settings.max_bar_rows:
                 raise BacktestError(
                     "BUDGET_EXCEEDED",
                     "BAR event count exceeds frozen row ceiling",
@@ -709,6 +712,11 @@ class BacktestService:
             resume_sequence = 0
 
             kernel = SimulationKernel(
+                account_model=str(
+                    config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                ),
+                funding_mode=str(config.get("funding_mode") or "OFF"),
+                leverage=_config_decimal(config, "leverage", "1"),
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
@@ -828,9 +836,13 @@ class BacktestService:
                     "maker_fee_bps": str(kernel.maker_fee_bps),
                     "funding_rate": str(kernel.funding_rate),
                     "funding_interval_hours": kernel.funding_interval_ms // 3_600_000,
-                    "funding_model": "OFF"
-                    if kernel.funding_rate == 0
-                    else "FIXED_INTERVAL_V1",
+                    "funding_model": (
+                        str(config.get("funding_mode") or "OFF")
+                        if str(config.get("account_model")) == "LINEAR_PERP_ONE_WAY_V2"
+                        else (
+                            "OFF" if kernel.funding_rate == 0 else "FIXED_INTERVAL_V1"
+                        )
+                    ),
                     "gap_policy": kernel.gap_policy,
                     "order_closeout": "CANCEL_OPEN_AT_END",
                 },
@@ -922,6 +934,11 @@ class BacktestService:
                 funding_interval_ms=int(config.get("funding_interval_hours") or 8)
                 * 3_600_000,
                 initial_balance=_config_decimal(config, "initial_balance", "10000"),
+                account_model=str(
+                    config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                ),
+                funding_mode=str(config.get("funding_mode") or "OFF"),
+                leverage=_config_decimal(config, "leverage", "1"),
                 execution_reporter=self._execution_reporter(session),
             )
             resume_sequence = 0
@@ -1034,9 +1051,13 @@ class BacktestService:
                     "funding_interval_hours": kernel.execution.funding_interval_ms
                     // 3_600_000,
                     "funding_model": (
-                        "OFF"
-                        if kernel.execution.funding_rate == 0
-                        else "FIXED_INTERVAL_V1"
+                        str(config.get("funding_mode") or "OFF")
+                        if str(config.get("account_model")) == "LINEAR_PERP_ONE_WAY_V2"
+                        else (
+                            "OFF"
+                            if kernel.execution.funding_rate == 0
+                            else "FIXED_INTERVAL_V1"
+                        )
                     ),
                 },
             },
@@ -1153,6 +1174,11 @@ class BacktestService:
                 )
 
             kernel = TradeSimulationKernel(
+                account_model=str(
+                    config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
+                ),
+                funding_mode=str(config.get("funding_mode") or "OFF"),
+                leverage=_config_decimal(config, "leverage", "1"),
                 max_events=self.settings.max_trade_events,
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
@@ -1214,9 +1240,13 @@ class BacktestService:
                     "maker_fee_bps": str(kernel.maker_fee_bps),
                     "funding_rate": str(kernel.funding_rate),
                     "funding_interval_hours": kernel.funding_interval_ms // 3_600_000,
-                    "funding_model": "OFF"
-                    if kernel.funding_rate == 0
-                    else "FIXED_INTERVAL_V1",
+                    "funding_model": (
+                        str(config.get("funding_mode") or "OFF")
+                        if str(config.get("account_model")) == "LINEAR_PERP_ONE_WAY_V2"
+                        else (
+                            "OFF" if kernel.funding_rate == 0 else "FIXED_INTERVAL_V1"
+                        )
+                    ),
                 },
             },
         )
@@ -1393,9 +1423,8 @@ class BacktestService:
         ]
         if missing:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"missing {missing}")
-        if str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1") != (
-            "LINEAR_PERP_ONE_WAY_V1"
-        ):
+        account_model = str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1")
+        if account_model not in {"LINEAR_PERP_ONE_WAY_V1", "LINEAR_PERP_ONE_WAY_V2"}:
             raise BacktestError("FIDELITY_UNSUPPORTED", "unsupported account model")
         if str(payload.get("gap_policy") or "REJECT") not in {
             "REJECT",
@@ -1409,6 +1438,20 @@ class BacktestService:
             "HISTORICAL_CONTRACT_V1",
         }:
             raise BacktestError("FIDELITY_UNSUPPORTED", "unknown contract_data_mode")
+        funding_mode = str(payload.get("funding_mode") or "OFF")
+        if funding_mode not in {"OFF", "FIXED_SCENARIO", "HISTORICAL_REQUIRED"}:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "unknown funding_mode")
+        leverage = _config_decimal(payload, "leverage", "1")
+        if leverage < 1 or leverage > 125:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "leverage must be 1..125")
+        if (
+            account_model == "LINEAR_PERP_ONE_WAY_V2"
+            and contract_data_mode != "HISTORICAL_CONTRACT_V1"
+        ):
+            raise BacktestError(
+                "DATA_ROLE_COVERAGE_MISSING",
+                "LINEAR_PERP_ONE_WAY_V2 requires historical mark and instrument rules",
+            )
         for name, default, strictly_positive in (
             ("initial_balance", "10000", True),
             ("slippage_bps", "1", False),
@@ -1427,6 +1470,12 @@ class BacktestService:
             raise BacktestError(
                 "SCHEMA_UNKNOWN_FIELD", "funding_rate must be between -1 and 1"
             )
+        if account_model == "LINEAR_PERP_ONE_WAY_V2":
+            if funding_mode in {"OFF", "HISTORICAL_REQUIRED"} and funding_rate != 0:
+                raise BacktestError(
+                    "SCHEMA_UNKNOWN_FIELD",
+                    f"{funding_mode} requires funding_rate=0",
+                )
         try:
             funding_interval_hours = int(payload.get("funding_interval_hours") or 8)
         except (TypeError, ValueError) as exc:
@@ -1530,6 +1579,13 @@ class BacktestService:
             "exchange": str(payload.get("exchange") or "binance"),
             "market_type": str(payload.get("market_type") or "usdm"),
         }
+        if account_model == "LINEAR_PERP_ONE_WAY_V2":
+            execution_config.update(
+                {
+                    "funding_mode": funding_mode,
+                    "leverage": str(leverage),
+                }
+            )
         if fidelity == "AGG_TRADE_EXECUTION":
             execution_config.update(signal_identity)
         if contract_data_mode == "HISTORICAL_CONTRACT_V1":
@@ -1545,7 +1601,7 @@ class BacktestService:
             end_time_ms=end_time_ms,
             warmup_bars=warmup_bars,
             parameters_json=parameters_json,
-            account_model=str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
+            account_model=account_model,
             execution_json=canonical_json(execution_config),
             **signal_identity,
         )

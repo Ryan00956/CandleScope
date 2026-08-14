@@ -12,6 +12,7 @@ from app.market_dataset.trades import assert_trade_stream
 from .kernel import SimulationResult
 from .trade_bar_builder import TradeBarBuilder
 from .trade_kernel import TradeSimulationKernel
+from .linear_perp_account_v2 import LinearPerpetualAccountV2
 
 DualClockStrategyFn = Callable[[tuple[MarketEvent, ...], MarketEvent], list[dict]]
 
@@ -28,6 +29,9 @@ class DualClockSimulationKernel:
     funding_rate: Decimal = Decimal("0")
     funding_interval_ms: int = 28_800_000
     initial_balance: Decimal = Decimal("10000")
+    account_model: str = "LINEAR_PERP_ONE_WAY_V1"
+    funding_mode: str = "OFF"
+    leverage: Decimal = Decimal("1")
     execution_reporter: Callable[[dict], None] | None = field(default=None, repr=False)
     execution: TradeSimulationKernel = field(init=False)
     builder: TradeBarBuilder = field(init=False)
@@ -47,6 +51,9 @@ class DualClockSimulationKernel:
             funding_rate=self.funding_rate,
             funding_interval_ms=self.funding_interval_ms,
             initial_balance=self.initial_balance,
+            account_model=self.account_model,
+            funding_mode=self.funding_mode,
+            leverage=self.leverage,
             execution_reporter=self.execution_reporter,
         )
 
@@ -76,13 +83,16 @@ class DualClockSimulationKernel:
             or payload.get("signal_interval") != self.signal_interval
             or payload.get("gap_policy") != self.gap_policy
         ):
-            raise MarketDatasetError("dual-clock checkpoint identity changed", code="CHECKPOINT_CORRUPT")
+            raise MarketDatasetError(
+                "dual-clock checkpoint identity changed", code="CHECKPOINT_CORRUPT"
+            )
         self.execution.restore(payload["execution"])
         self.builder.restore(payload["bar_builder"])
         self.decisions = [dict(item) for item in payload.get("decisions") or []]
         self.execution_event_count = int(payload.get("execution_event_count") or 0)
         self._last_source_sequence = (
-            None if payload.get("last_source_sequence") is None
+            None
+            if payload.get("last_source_sequence") is None
             else int(payload["last_source_sequence"])
         )
 
@@ -95,14 +105,30 @@ class DualClockSimulationKernel:
         finalize: bool = False,
         checkpoint_callback: Callable[[MarketEvent], None] | None = None,
     ) -> SimulationResult:
-        if len(events) > self.max_events:
-            raise MarketDatasetError("trade event budget exceeded", code="BUDGET_EXCEEDED")
-        if events:
-            source_kind = assert_trade_stream(events)
+        trades = tuple(event for event in events if event.role == "TRADES")
+        if len(trades) > self.max_events:
+            raise MarketDatasetError(
+                "trade event budget exceeded", code="BUDGET_EXCEEDED"
+            )
+        if trades:
+            source_kind = assert_trade_stream(trades)
             if source_kind != "AGG_TRADE":
-                raise MarketDatasetError("dual-clock execution requires AGG_TRADE", code="FIDELITY_MISLABEL")
+                raise MarketDatasetError(
+                    "dual-clock execution requires AGG_TRADE", code="FIDELITY_MISLABEL"
+                )
         for trade in events:
-            source_sequence = int(trade.payload.get("source_sequence") or trade.sequence)
+            if trade.role in {"INSTRUMENT_RULES", "MARK_INDEX", "FUNDING"}:
+                self.execution._last_event = trade
+                self.execution.account.apply(trade)
+                continue
+            if trade.role != "TRADES":
+                raise MarketDatasetError(
+                    "dual-clock kernel received unsupported role",
+                    code="FIDELITY_MISLABEL",
+                )
+            source_sequence = int(
+                trade.payload.get("source_sequence") or trade.sequence
+            )
             if self._last_source_sequence is not None:
                 if source_sequence <= self._last_source_sequence:
                     raise MarketDatasetError(
@@ -129,10 +155,15 @@ class DualClockSimulationKernel:
                 )
                 # The signal exists immediately before this boundary trade, so
                 # its first eligible print is the current authoritative event.
-                self.execution._enqueue_many(intents, current_sequence=trade.sequence - 1)
+                self.execution._enqueue_many(
+                    intents, current_sequence=trade.sequence - 1
+                )
 
             self.execution._last_event = trade
-            self.execution.account.mark = Decimal(str(trade.payload["price"]))
+            if isinstance(self.execution.account, LinearPerpetualAccountV2):
+                self.execution.account.validate_ready()
+            else:
+                self.execution.account.mark = Decimal(str(trade.payload["price"]))
             self.execution._apply_funding(trade)
             self.execution._match(trade)
             self.execution.equity_curve.append(
@@ -141,6 +172,12 @@ class DualClockSimulationKernel:
                     "event_time_ms": trade.event_time_ms,
                     "equity": str(self.execution.account.equity()),
                     "position_qty": str(self.execution.account.position_qty),
+                    "wallet_balance": str(self.execution.account.quote_balance),
+                    "available_balance": str(
+                        self.execution.account.available_balance()
+                        if isinstance(self.execution.account, LinearPerpetualAccountV2)
+                        else self.execution.account.equity()
+                    ),
                 }
             )
             self.execution_event_count += 1

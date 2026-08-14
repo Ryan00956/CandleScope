@@ -35,7 +35,9 @@ LABELS = {
 }
 
 
-def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def build_report(
+    run: Mapping[str, Any], result: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     fidelity = str(run.get("fidelity_mode") or "BAR_APPROX")
     source_kind = str(run.get("source_event_kind") or "BAR")
     payload = result or run.get("result") or {}
@@ -48,6 +50,11 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         config = json.loads(str(run.get("config_json") or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         config = {}
+    account_model = str(
+        run.get("account_model")
+        or config.get("account_model")
+        or "LINEAR_PERP_ONE_WAY_V1"
+    )
     report = {
         "schemaVersion": REPORT_SCHEMA,
         "runId": run.get("run_id"),
@@ -75,7 +82,9 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
             "rejected_order_count": len(payload.get("rejected") or []),
             "trade_count": len(trades),
             "winning_trade_count": winning,
-            "win_rate": ("0" if not trades else str(Decimal(winning) / Decimal(len(trades)))),
+            "win_rate": (
+                "0" if not trades else str(Decimal(winning) / Decimal(len(trades)))
+            ),
             "realized_net_pnl": str(net_pnl),
         },
         "data_quality": payload.get("data_quality") or {},
@@ -85,9 +94,7 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         "equity_curve": list(payload.get("equity_curve") or []),
         "orders": list(payload.get("orders") or []),
         "rejected_orders": list(payload.get("rejected") or []),
-        "unmodeled": list(
-            UNMODELED if fidelity == "BAR_APPROX" else TRADE_UNMODELED
-        ),
+        "unmodeled": list(UNMODELED if fidelity == "BAR_APPROX" else TRADE_UNMODELED),
         "suitable_for": (
             ["bar-close strategy comparison", "parameter smoke tests"]
             if fidelity == "BAR_APPROX"
@@ -107,6 +114,16 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         "trades": trades,
         "contract_coverage": payload.get("contract_coverage") or {},
     }
+    if account_model == "LINEAR_PERP_ONE_WAY_V2":
+        report["identity"]["account_model"] = account_model
+        report["unmodeled"] = [
+            item
+            for item in report["unmodeled"]
+            if item not in {"liquidation", "funding"}
+        ] + ["insurance fund", "auto-deleveraging"]
+        report["account_model"] = "LINEAR_PERP_ONE_WAY_V2"
+        report["funding_mode"] = config.get("funding_mode", "OFF")
+        report["liquidation_model"] = "MARK_IMMEDIATE_NO_LIQUIDATION_FEE_V1"
     strategy_metadata = payload.get("strategy_metadata")
     if fidelity == "AGG_TRADE_EXECUTION":
         report["identity"].update(
@@ -148,7 +165,9 @@ def verify_report_hash(report: Mapping[str, Any]) -> bool:
     return bool(expected) and seal_report(report)["hashes"]["report"] == expected
 
 
-def export_bundle(run: Mapping[str, Any], result: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def export_bundle(
+    run: Mapping[str, Any], result: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     if result is not None and result.get("schemaVersion") == REPORT_SCHEMA:
         report = copy.deepcopy(dict(result))
         if not verify_report_hash(report):
@@ -203,7 +222,10 @@ def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, st
     trades: list[dict[str, str]] = []
     ordered = sorted(
         fills,
-        key=lambda item: (int(item.get("sequence") or 0), str(item.get("order_id") or "")),
+        key=lambda item: (
+            int(item.get("sequence") or 0),
+            str(item.get("order_id") or ""),
+        ),
     )
     for fill in ordered:
         side = str(fill.get("side") or "").upper()
@@ -222,7 +244,11 @@ def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, st
             closed = min(qty, lot_qty)
             entry_fee = Decimal(str(lot["fee"])) * closed / lot_qty
             exit_fee = fee * closed / original_qty
-            gross = (price - Decimal(str(lot["price"]))) * closed * Decimal(str(lot["sign"]))
+            gross = (
+                (price - Decimal(str(lot["price"])))
+                * closed
+                * Decimal(str(lot["sign"]))
+            )
             total_fee = entry_fee + exit_fee
             trades.append(
                 {
@@ -241,7 +267,11 @@ def build_round_trip_trades(fills: list[Mapping[str, Any]]) -> list[dict[str, st
                     "fees": str(total_fee),
                     "net_pnl": str(gross - total_fee),
                     "duration_ms": str(
-                        max(0, int(fill.get("event_time_ms") or 0) - int(lot["event_time_ms"]))
+                        max(
+                            0,
+                            int(fill.get("event_time_ms") or 0)
+                            - int(lot["event_time_ms"]),
+                        )
                     ),
                 }
             )

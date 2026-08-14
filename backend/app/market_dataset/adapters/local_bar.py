@@ -146,15 +146,17 @@ class LocalBarSnapshotProvider:
                     raise
                 quality["contract_data"] = {
                     "status": "partial",
-                    "required_roles": list(AUX_ROLES),
-                    "role_status": {role: {"status": "partial"} for role in AUX_ROLES},
+                    "required_roles": list(contract_roles),
+                    "role_status": {
+                        role: {"status": "partial"} for role in contract_roles
+                    },
                 }
             else:
                 contract_events = aux.events
                 role_hashes.update(aux.role_hashes)
                 quality["contract_data"] = {
                     "status": aux.quality["status"],
-                    "required_roles": list(AUX_ROLES),
+                    "required_roles": list(contract_roles),
                     "role_status": aux.quality["roles"],
                     "missing_intervals": aux.quality["missing_intervals"],
                     "bundle_hash": aux.snapshot_hash,
@@ -162,7 +164,7 @@ class LocalBarSnapshotProvider:
         elif contract_roles:
             quality["contract_data"] = {
                 "status": "missing",
-                "required_roles": list(AUX_ROLES),
+                "required_roles": list(contract_roles),
                 "role_status": {
                     role: {
                         "status": "missing",
@@ -170,7 +172,7 @@ class LocalBarSnapshotProvider:
                             {"start_ms": ref.start_time_ms, "end_ms": ref.end_time_ms}
                         ],
                     }
-                    for role in AUX_ROLES
+                    for role in contract_roles
                 },
             }
             if not allow_incomplete_contract:

@@ -1,0 +1,46 @@
+{
+  "kind": "phase0_baseline",
+  "createdAt": "2026-08-14T00:00:00Z",
+  "main": {
+    "path": "H:/program/CandleScope",
+    "branch": "main",
+    "head": "5df19ae76686977f324644e9e62a63b73cf6a743",
+    "dirty": true,
+    "excluded_from_this_branch": [
+      "README.md",
+      "README_zh.md",
+      "backend/app/exchanges/ccxt_ext/runtime.py",
+      "backend/app/exchanges/ccxt_ext/session.py",
+      "backend/app/official-plugin-releases.json",
+      "packages/candlescope-plugin-pyne/pyproject.toml",
+      "packages/candlescope-plugin-pine-compat/pyproject.toml",
+      "packages/candlescope-plugin-sdk/pyproject.toml"
+    ]
+  },
+  "localOffline": {
+    "path": "H:/program/CandleScope-local-offline",
+    "branch": "codex/local-offline-mode",
+    "head": "d3c2fe37d1deacba8951b5725353ca967eca2d79",
+    "aheadOfMain": 9,
+    "behindMain": 189,
+    "dirty": true,
+    "uniqueCommits": [
+      "761ddf12 Add isolated local offline mode",
+      "a22740af Support TradingView CSV alignment",
+      "b5c580fc Support OHLC-only local datasets",
+      "e403ac79 Add local chart analysis markers",
+      "b34ef7f3 Add mapped event CSV imports",
+      "e13696f4 Add static indicators to local analysis",
+      "d8ca67bc Reuse shared analysis panels in local mode",
+      "6107bcd5 Reuse shared chart experience in local mode",
+      "d3c2fe37 feat(local): add offline data management P0"
+    ],
+    "mustNotMergeWholeBranch": true,
+    "mustExcludePluginReleaseNoise": true
+  },
+  "thisWorktree": {
+    "path": "H:/program/CandleScope-backtest-foundation",
+    "branch": "codex/backtest-foundation",
+    "parent": "5df19ae76686977f324644e9e62a63b73cf6a743"
+  }
+}

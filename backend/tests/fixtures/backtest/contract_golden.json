@@ -1,0 +1,196 @@
+{
+  "protocol": "backtest.v1",
+  "schema_version": "backtest.product.v1.phase0",
+  "parent_commit": "5df19ae76686977f324644e9e62a63b73cf6a743",
+  "account_model": "LINEAR_PERP_ONE_WAY_V1",
+  "bar_fill_policy": "BAR_NEXT_BAR_WORST_CASE_V1",
+  "provider_protocol": "strategy-provider/1",
+  "script_runtime_unchanged": "candlescope.script-runtime/1",
+  "observation_schema": "candlescope.observation/1",
+  "strategy_output_schema": "candlescope.strategy-output/1",
+  "release_manifest_schema": "candlescope.backtest-release/1",
+  "enums": {
+    "product_object": ["TrainingRun", "BacktestStudy", "BacktestRun"],
+    "run_state": [
+      "DRAFT",
+      "VALIDATING",
+      "QUEUED",
+      "PREPARING",
+      "RUNNING",
+      "PAUSING",
+      "PAUSED",
+      "COMPLETING",
+      "COMPLETED",
+      "CANCELLING",
+      "CANCELLED",
+      "FAILED"
+    ],
+    "fidelity_mode": [
+      "BAR_APPROX",
+      "TRADE_TAPE",
+      "AGG_TRADE_TAPE",
+      "BOOK_ASSISTED",
+      "QUEUE_EXACT"
+    ],
+    "source_event_kind": [
+      "BAR",
+      "RAW_TRADE",
+      "AGG_TRADE",
+      "TRADE_AND_L2",
+      "ORDER_LEVEL"
+    ],
+    "report_label": [
+      "APPROXIMATE",
+      "TRADE_SEQUENCE",
+      "AGGREGATED_TRADE_SEQUENCE",
+      "BOOK_ASSISTED",
+      "ORDER_LEVEL_REQUIRED"
+    ],
+    "dataset_role": [
+      "BARS",
+      "TRADES",
+      "MARK_INDEX",
+      "FUNDING",
+      "INSTRUMENT_RULES",
+      "ORDER_BOOK",
+      "ORDER_EVENTS",
+      "CUSTOM_FEATURES"
+    ],
+    "order_type": ["MARKET", "LIMIT", "STOP", "STOP_LIMIT"],
+    "order_side": ["BUY", "SELL"],
+    "time_in_force": ["GTC"],
+    "position_mode": ["ONE_WAY"],
+    "margin_mode": ["CROSS"],
+    "funding_mode": ["OFF"],
+    "gap_policy": ["REJECT", "PAUSE", "SKIP_WITH_WARNING"],
+    "bar_path_scenario": ["O-H-L-C", "O-L-H-C", "WORST_CASE"],
+    "provider_input_mode": ["BAR_CLOSE", "TRADE_EVENT", "BOOK_EVENT"],
+    "provider_output_mode": ["SIGNAL", "TARGET_POSITION", "ORDER_INTENT"],
+    "provider_state_mode": ["STATELESS", "SESSION_STATEFUL", "ONLINE_LEARNING"],
+    "reproducibility_class": ["DETERMINISTIC", "SEEDED", "RECORDED_OUTPUT_ONLY"],
+    "provider_lifecycle": [
+      "describe",
+      "prepare",
+      "warmup",
+      "step",
+      "onExecutionReport",
+      "snapshot",
+      "restore",
+      "close"
+    ],
+    "error_code": [
+      "DATA_SNAPSHOT_MISMATCH",
+      "DATA_GAP_REJECTED",
+      "DATA_QUALITY_FAILED",
+      "LOOKAHEAD_VIOLATION",
+      "FIDELITY_UNSUPPORTED",
+      "FIDELITY_MISLABEL",
+      "IDENTITY_MUTATION",
+      "PROVIDER_PROTOCOL_VIOLATION",
+      "PROVIDER_TIMEOUT",
+      "PROVIDER_CRASH_UNRECOVERABLE",
+      "PROVIDER_UNAUTHORIZED_WRITE",
+      "ORDER_REJECTED_RULES",
+      "ORDER_REJECTED_RISK",
+      "ACCOUNT_INSOLVENT",
+      "LEDGER_IMBALANCE",
+      "HASH_MISMATCH",
+      "CHECKPOINT_CORRUPT",
+      "FLAG_DISABLED",
+      "BUDGET_EXCEEDED",
+      "SCHEMA_UNKNOWN_FIELD",
+      "STUDY_SPLIT_LEAK",
+      "ONLINE_LEARNING_FORBIDDEN"
+    ]
+  },
+  "fidelity_matrix": {
+    "BAR_APPROX": {
+      "source_event_kind": "BAR",
+      "report_label": "APPROXIMATE",
+      "required_roles": ["BARS", "INSTRUMENT_RULES"]
+    },
+    "TRADE_TAPE": {
+      "source_event_kind": "RAW_TRADE",
+      "report_label": "TRADE_SEQUENCE",
+      "required_roles": ["TRADES", "INSTRUMENT_RULES"]
+    },
+    "AGG_TRADE_TAPE": {
+      "source_event_kind": "AGG_TRADE",
+      "report_label": "AGGREGATED_TRADE_SEQUENCE",
+      "required_roles": ["TRADES", "INSTRUMENT_RULES"]
+    },
+    "BOOK_ASSISTED": {
+      "source_event_kind": "TRADE_AND_L2",
+      "report_label": "BOOK_ASSISTED",
+      "required_roles": ["TRADES", "ORDER_BOOK", "INSTRUMENT_RULES"]
+    },
+    "QUEUE_EXACT": {
+      "source_event_kind": "ORDER_LEVEL",
+      "report_label": "ORDER_LEVEL_REQUIRED",
+      "required_roles": ["ORDER_EVENTS", "TRADES", "INSTRUMENT_RULES"]
+    }
+  },
+  "dataset_ref_fields": [
+    "dataset_id",
+    "data_epoch",
+    "snapshot_hash",
+    "venue",
+    "market_type",
+    "symbol",
+    "start_time_ms",
+    "end_time_ms",
+    "roles",
+    "interval",
+    "calendar_id",
+    "source",
+    "retention_policy"
+  ],
+  "snapshot_required_fields": [
+    "schema_version",
+    "coverage_start_ms",
+    "coverage_end_ms",
+    "row_count",
+    "first_sequence",
+    "last_sequence",
+    "role_hashes",
+    "quality",
+    "provenance",
+    "fidelity_capabilities",
+    "cursor"
+  ],
+  "flags": {
+    "BACKTEST_ENABLED": "0",
+    "VITE_BACKTEST_ENTRY_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0",
+    "BACKTEST_ONLINE_LEARNING_ENABLED": "0",
+    "BACKTEST_MULTI_MARKET_ENABLED": "0",
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": "0"
+  },
+  "resource_ceilings": {
+    "BACKTEST_MAX_ACTIVE_RUNS": 4,
+    "BACKTEST_MAX_CONCURRENT_STUDIES": 1,
+    "BACKTEST_MAX_TRIALS_PER_STUDY": 64,
+    "BACKTEST_MAX_BAR_ROWS": 200000,
+    "BACKTEST_MAX_TRADE_EVENTS": 2000000,
+    "BACKTEST_MAX_WARMUP_BARS": 5000,
+    "BACKTEST_MAX_HORIZON_DAYS": 365,
+    "BACKTEST_CHECKPOINT_EVENT_INTERVAL": 10000,
+    "BACKTEST_PROVIDER_STEP_TIMEOUT_MS": 2000,
+    "BACKTEST_MAX_PROVIDER_STATE_BYTES": 8388608,
+    "BACKTEST_MAX_REPORT_BYTES": 16777216,
+    "BACKTEST_WORKER_MEMORY_MB": 2048,
+    "BACKTEST_MAX_RUN_SECONDS": 14400
+  },
+  "forbidden_implementation_paths": [
+    "backend/app/backtest",
+    "backend/app/market_dataset",
+    "backend/app/simulation",
+    "backend/app/api/v1/backtests.py",
+    "backend/app/api/v1/stream_backtests.py",
+    "frontend/src/features/backtest"
+  ]
+}

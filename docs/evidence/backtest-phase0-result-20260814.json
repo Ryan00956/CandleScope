@@ -1,0 +1,14 @@
+{
+  "phase": 0,
+  "status": "VALIDATED",
+  "branch": "codex/backtest-foundation",
+  "parent": "5df19ae76686977f324644e9e62a63b73cf6a743",
+  "tests": {
+    "command": "python -m pytest tests/backtest_contract tests/test_replay_v2_contracts.py::test_replay_has_one_strict_core_gate_and_optional_capabilities tests/test_replay_contracts.py::test_replay_settings_defaults_match_frozen_resource_budget -q",
+    "result": "35 passed",
+    "notes": "ruff is not installed in backend/.venv; Phase 0 skipped that extra lint command"
+  },
+  "flagsDefaultOff": true,
+  "hostImplementationAbsent": true,
+  "cleanOfLocalOfflineNoise": true
+}

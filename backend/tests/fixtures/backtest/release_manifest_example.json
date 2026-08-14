@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "candlescope.backtest-release/1",
+  "commit": "5df19ae76686977f324644e9e62a63b73cf6a743",
+  "parent": "4216a1e2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "createdAt": "2026-08-14T00:00:00Z",
+  "flags": {
+    "BACKTEST_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0"
+  },
+  "databaseSchema": "backtest.schema.v0-absent",
+  "engineVersion": "backtest.engine.absent",
+  "providerProtocol": "strategy-provider/1",
+  "reportSchema": "backtest.report.v0-absent",
+  "evidence": [
+    {
+      "kind": "tests",
+      "path": "docs/evidence/backtest-phase0-baseline-20260814.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

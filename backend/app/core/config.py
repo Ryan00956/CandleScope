@@ -38,6 +38,21 @@ _REPLAY_BUDGETS: dict[str, int] = {
     "REPLAY_HISTORICAL_BOOK_MAX_ARCHIVE_BYTES": 1_099_511_627_776,
     "REPLAY_ACCOUNT_HISTORY_MAX_ARCHIVE_BYTES": 137_438_953_472,
 }
+_BACKTEST_BUDGETS: dict[str, int] = {
+    "BACKTEST_MAX_ACTIVE_RUNS": 4,
+    "BACKTEST_MAX_CONCURRENT_STUDIES": 1,
+    "BACKTEST_MAX_TRIALS_PER_STUDY": 64,
+    "BACKTEST_MAX_BAR_ROWS": 200_000,
+    "BACKTEST_MAX_TRADE_EVENTS": 2_000_000,
+    "BACKTEST_MAX_WARMUP_BARS": 5_000,
+    "BACKTEST_MAX_HORIZON_DAYS": 365,
+    "BACKTEST_CHECKPOINT_EVENT_INTERVAL": 10_000,
+    "BACKTEST_PROVIDER_STEP_TIMEOUT_MS": 2_000,
+    "BACKTEST_MAX_PROVIDER_STATE_BYTES": 8_388_608,
+    "BACKTEST_MAX_REPORT_BYTES": 16_777_216,
+    "BACKTEST_WORKER_MEMORY_MB": 2_048,
+    "BACKTEST_MAX_RUN_SECONDS": 14_400,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +298,109 @@ def load_replay_settings(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class BacktestSettings:
+    enabled: bool
+    bar_enabled: bool
+    trade_tape_enabled: bool
+    book_assisted_enabled: bool
+    study_enabled: bool
+    external_provider_enabled: bool
+    online_learning_enabled: bool
+    multi_market_enabled: bool
+    replay_review_bridge_enabled: bool
+    db_path: Path
+    max_active_runs: int
+    max_concurrent_studies: int
+    max_trials_per_study: int
+    max_bar_rows: int
+    max_trade_events: int
+    max_warmup_bars: int
+    max_horizon_days: int
+    checkpoint_event_interval: int
+    provider_step_timeout_ms: int
+    max_provider_state_bytes: int
+    max_report_bytes: int
+    worker_memory_mb: int
+    max_run_seconds: int
+
+    @property
+    def bar_effective(self) -> bool:
+        return self.enabled and self.bar_enabled
+
+
+def _bounded_backtest_int(environment: Mapping[str, str], name: str) -> int:
+    safe_upper_bound = _BACKTEST_BUDGETS[name]
+    raw_value = environment.get(name, str(safe_upper_bound))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1 or value > safe_upper_bound:
+        raise ValueError(
+            f"{name} must be between 1 and the frozen safety limit {safe_upper_bound}"
+        )
+    return value
+
+
+def load_backtest_settings(
+    environment: Mapping[str, str],
+    *,
+    data_dir: Path,
+    klines_db_path: Path,
+    replay_db_path: Path,
+) -> BacktestSettings:
+    """Load fail-closed backtest flags and ceilings. All gates default off."""
+
+    backtest_db_path = Path(
+        environment.get("BACKTEST_DB_PATH", str(data_dir / "backtest.db"))
+    )
+    if _paths_refer_to_same_file(backtest_db_path, klines_db_path):
+        raise ValueError("BACKTEST_DB_PATH must not identify KLINES_DB_PATH")
+    if _paths_refer_to_same_file(backtest_db_path, replay_db_path):
+        raise ValueError("BACKTEST_DB_PATH must not identify REPLAY_DB_PATH")
+    values = {
+        name: _bounded_backtest_int(environment, name) for name in _BACKTEST_BUDGETS
+    }
+    return BacktestSettings(
+        enabled=_strict_replay_bool(environment, "BACKTEST_ENABLED", "0"),
+        bar_enabled=_strict_replay_bool(environment, "BACKTEST_BAR_ENABLED", "0"),
+        trade_tape_enabled=_strict_replay_bool(
+            environment, "BACKTEST_TRADE_TAPE_ENABLED", "0"
+        ),
+        book_assisted_enabled=_strict_replay_bool(
+            environment, "BACKTEST_BOOK_ASSISTED_ENABLED", "0"
+        ),
+        study_enabled=_strict_replay_bool(environment, "BACKTEST_STUDY_ENABLED", "0"),
+        external_provider_enabled=_strict_replay_bool(
+            environment, "BACKTEST_EXTERNAL_PROVIDER_ENABLED", "0"
+        ),
+        online_learning_enabled=_strict_replay_bool(
+            environment, "BACKTEST_ONLINE_LEARNING_ENABLED", "0"
+        ),
+        multi_market_enabled=_strict_replay_bool(
+            environment, "BACKTEST_MULTI_MARKET_ENABLED", "0"
+        ),
+        replay_review_bridge_enabled=_strict_replay_bool(
+            environment, "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED", "0"
+        ),
+        db_path=backtest_db_path,
+        max_active_runs=values["BACKTEST_MAX_ACTIVE_RUNS"],
+        max_concurrent_studies=values["BACKTEST_MAX_CONCURRENT_STUDIES"],
+        max_trials_per_study=values["BACKTEST_MAX_TRIALS_PER_STUDY"],
+        max_bar_rows=values["BACKTEST_MAX_BAR_ROWS"],
+        max_trade_events=values["BACKTEST_MAX_TRADE_EVENTS"],
+        max_warmup_bars=values["BACKTEST_MAX_WARMUP_BARS"],
+        max_horizon_days=values["BACKTEST_MAX_HORIZON_DAYS"],
+        checkpoint_event_interval=values["BACKTEST_CHECKPOINT_EVENT_INTERVAL"],
+        provider_step_timeout_ms=values["BACKTEST_PROVIDER_STEP_TIMEOUT_MS"],
+        max_provider_state_bytes=values["BACKTEST_MAX_PROVIDER_STATE_BYTES"],
+        max_report_bytes=values["BACKTEST_MAX_REPORT_BYTES"],
+        worker_memory_mb=values["BACKTEST_WORKER_MEMORY_MB"],
+        max_run_seconds=values["BACKTEST_MAX_RUN_SECONDS"],
+    )
+
+
 # Server
 HOST = os.getenv("CANDLE_HOST", "0.0.0.0")
 PORT = int(os.getenv("CANDLE_PORT", "8000"))
@@ -349,6 +467,18 @@ REPLAY_CHECKPOINT_VIRTUAL_MS = REPLAY_SETTINGS.checkpoint_virtual_ms
 REPLAY_EVENT_SUBSCRIBER_QUEUE = REPLAY_SETTINGS.event_subscriber_queue
 REPLAY_CONTROLLER_TTL_SECONDS = REPLAY_SETTINGS.controller_ttl_seconds
 REPLAY_IDLE_TTL_SECONDS = REPLAY_SETTINGS.idle_ttl_seconds
+
+# Backtest is a default-off research product and owns a database separate from
+# K-lines and replay. Flags stay closed until a later Phase explicitly enables
+# them; environment overrides may only tighten the frozen ceilings.
+BACKTEST_SETTINGS = load_backtest_settings(
+    os.environ,
+    data_dir=DATA_DIR,
+    klines_db_path=KLINES_DB_PATH,
+    replay_db_path=REPLAY_DB_PATH,
+)
+BACKTEST_ENABLED = BACKTEST_SETTINGS.enabled
+BACKTEST_DB_PATH = BACKTEST_SETTINGS.db_path
 
 # TradeFlow is storage-backend neutral at the service boundary.  SQLite is the
 # first rollup implementation; raw aggregate-trade Parquet is opt-in because it

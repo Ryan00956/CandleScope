@@ -140,3 +140,19 @@ def get_study(request: Request, study_id: str) -> dict[str, Any]:
         return _service(request).get_study(study_id)
     except BacktestError as exc:
         return _error(exc)
+
+
+@router.post("/studies/{study_id}/start")
+def start_study(request: Request, study_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).start_study(study_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/studies/{study_id}/cancel")
+def cancel_study(request: Request, study_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).cancel_study(study_id)
+    except BacktestError as exc:
+        return _error(exc)

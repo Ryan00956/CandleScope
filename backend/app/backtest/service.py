@@ -21,6 +21,15 @@ from .models import (
     transition,
 )
 from .repository import BacktestRepository
+from .study import (
+    compare_runs,
+    grid_sampler,
+    plan_trials,
+    random_sampler,
+    rank_oos,
+    split_wire,
+    walk_forward_splits,
+)
 from .strategy.host_adapter import StrategyHostAdapter
 from .strategy.protocol import StrategyProviderSession
 from .strategy.pyne_adapter import PyneHostPlanner
@@ -185,6 +194,75 @@ class BacktestService:
         }
         self.repository.insert_study(record)
         return record
+
+    def start_study(self, study_id: str) -> dict[str, object]:
+        record = self.get_study(study_id)
+        if record["state"] == "CANCELLED":
+            raise BacktestError("IDENTITY_MUTATION", "cancelled study cannot start")
+        config = json.loads(str(record["config_json"]))
+        splits = walk_forward_splits(
+            start_ms=int(config["start_ms"]),
+            end_ms=int(config["end_ms"]),
+            train_ms=int(config["train_ms"]),
+            test_ms=int(config["test_ms"]),
+            step_ms=int(config.get("step_ms") or config["test_ms"]),
+        )
+        space = config.get("parameter_space") or {}
+        sampler = str(config.get("sampler") or "grid")
+        if sampler == "random":
+            params = random_sampler(
+                space,
+                count=int(config.get("random_count") or 1),
+                seed=int(config.get("seed") or 1),
+            )
+        else:
+            params = grid_sampler(space)
+        max_trials = int(config.get("max_trials") or self.settings.max_trials_per_study)
+        if max_trials > self.settings.max_trials_per_study:
+            raise BacktestError("BUDGET_EXCEEDED", "study exceeds frozen trial ceiling")
+        planned = plan_trials(splits, params, max_trials=max_trials)
+        existing = self.repository.list_trials(study_id)
+        if existing:
+            return {
+                "study": record,
+                "trials": existing,
+                "splits": [split_wire(split) for split in splits],
+            }
+        for spec in planned:
+            self.repository.insert_trial(
+                {
+                    "trial_id": f"tr_{uuid.uuid4().hex}",
+                    "study_id": study_id,
+                    "ordinal": spec.ordinal,
+                    "split_id": spec.split_id,
+                    "params_json": canonical_json(spec.params),
+                    "params_hash": spec.params_hash,
+                    "run_id": None,
+                    "state": "PLANNED",
+                }
+            )
+        self.repository.update_study_state(study_id, "RUNNING")
+        record = self.get_study(study_id)
+        return {
+            "study": record,
+            "trials": self.repository.list_trials(study_id),
+            "splits": [split_wire(split) for split in splits],
+            "trial_count": len(planned),
+            "selection_warning": "in-sample best is not an OOS claim",
+        }
+
+    def cancel_study(self, study_id: str) -> dict[str, object]:
+        record = self.get_study(study_id)
+        self.repository.update_study_state(study_id, "CANCELLED")
+        record["state"] = "CANCELLED"
+        record["trials"] = self.repository.list_trials(study_id)
+        return record
+
+    def compare_study_runs(self, runs: list[Mapping[str, object]]) -> dict[str, object]:
+        return compare_runs(runs)
+
+    def rank_study_oos(self, trials: list[Mapping[str, object]]) -> list[dict[str, object]]:
+        return rank_oos(trials)
 
     def execute_bar_run(
         self,

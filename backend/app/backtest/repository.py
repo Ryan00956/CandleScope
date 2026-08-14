@@ -153,6 +153,35 @@ class BacktestRepository:
             self.connection.commit()
         return expired
 
+    def insert_trial(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO backtest_trials(
+                trial_id, study_id, ordinal, split_id, params_json,
+                params_hash, run_id, state
+            ) VALUES (
+                :trial_id, :study_id, :ordinal, :split_id, :params_json,
+                :params_hash, :run_id, :state
+            )
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    def list_trials(self, study_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM backtest_trials WHERE study_id = ? ORDER BY ordinal ASC",
+            (study_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_study_state(self, study_id: str, state: str) -> None:
+        self.connection.execute(
+            "UPDATE backtest_studies SET state = ? WHERE study_id = ?",
+            (state, study_id),
+        )
+        self.connection.commit()
+
     def save_report(
         self,
         run_id: str,

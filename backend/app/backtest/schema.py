@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS backtest_job_leases (
     expires_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS backtest_trials (
+    trial_id TEXT PRIMARY KEY,
+    study_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    split_id TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    run_id TEXT,
+    state TEXT NOT NULL,
+    UNIQUE (study_id, ordinal)
+);
+
 CREATE TABLE IF NOT EXISTS backtest_reports (
     run_id TEXT PRIMARY KEY,
     report_schema TEXT NOT NULL,

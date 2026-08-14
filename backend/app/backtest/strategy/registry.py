@@ -9,10 +9,12 @@ from app.backtest.strategy.builtin import (
     BUILTIN_EXPRESSION_REVISION,
     BUILTIN_ORDER_COMMAND_REVISION,
     BUILTIN_RSI_REVISION,
+    BUILTIN_RSI_WILDER_LONG_SHORT_REVISION,
     BUILTIN_SMA_REVISION,
     BuiltinExpressionModelProvider,
     BuiltinOrderCommandProvider,
     BuiltinRsiReversionProvider,
+    BuiltinRsiWilderLongShortProvider,
     BuiltinSmaCrossProvider,
 )
 from app.backtest.strategy.protocol import StrategyProvider, StrategyProviderError
@@ -37,6 +39,9 @@ class StrategyRevisionDescriptor:
             "description": self.description,
             "input_modes": list(capabilities.input_modes),
             "output_modes": list(capabilities.output_modes),
+            "signal_clock": capabilities.signal_clock,
+            "required_features": list(capabilities.required_features),
+            "warmup_requirement": dict(capabilities.warmup_requirement),
             "parameter_schema": [dict(item) for item in self.parameter_schema],
             "accepts_source": self.accepts_source,
         }
@@ -75,6 +80,22 @@ class StrategyRevisionRegistry:
 
 def build_default_strategy_registry() -> StrategyRevisionRegistry:
     registry = StrategyRevisionRegistry()
+    registry.register(
+        StrategyRevisionDescriptor(
+            revision_id=BUILTIN_RSI_WILDER_LONG_SHORT_REVISION,
+            provider_kind="INDICATOR",
+            factory=BuiltinRsiWilderLongShortProvider,
+            label="Wilder RSI 多空",
+            description="完结 BAR close 的 Wilder RSI；超卖做多、超买反手做空。",
+            parameter_schema=(
+                {"name": "length", "label": "RSI 长度", "type": "integer", "default": 24, "minimum": 2, "maximum": 5000},
+                {"name": "oversold", "label": "超卖", "type": "number", "default": 30, "exclusiveMinimum": 0, "exclusiveMaximumParameter": "overbought"},
+                {"name": "overbought", "label": "超买", "type": "number", "default": 70, "exclusiveMinimumParameter": "oversold", "exclusiveMaximum": 100},
+                {"name": "trigger_mode", "label": "触发模式", "type": "enum", "default": "LEVEL_TARGET_V1", "options": ["LEVEL_TARGET_V1"]},
+                {"name": "debug_trace", "label": "决策 Debug Trace", "type": "boolean", "default": False},
+            ),
+        )
+    )
     registry.register(
         StrategyRevisionDescriptor(
             revision_id=BUILTIN_SMA_REVISION,

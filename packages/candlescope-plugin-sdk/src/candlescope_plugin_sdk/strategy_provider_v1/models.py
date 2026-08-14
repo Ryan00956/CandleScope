@@ -27,6 +27,9 @@ class ProviderCapabilities:
     state_modes: tuple[str, ...] = ("SESSION_STATEFUL",)
     reproducibility: tuple[str, ...] = ("DETERMINISTIC",)
     snapshot_restore: bool = True
+    signal_clock: str = "EVENT"
+    required_features: tuple[str, ...] = ()
+    warmup_requirement: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

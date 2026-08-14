@@ -56,6 +56,9 @@ class IsolatedStrategyProvider:
     def identity(self) -> dict[str, Any]:
         return dict(self._identity)
 
+    def report_metadata(self) -> dict[str, Any]:
+        return dict(self._call("report_metadata", timeout_s=5.0) or {})
+
     def _ensure_started(self) -> None:
         if self._process is not None:
             if self._process.is_alive():
@@ -128,6 +131,9 @@ def _provider_process_main(connection: Any, revision_id: str) -> None:
                 if operation == "identity":
                     identity = getattr(provider, "identity", None)
                     result = identity() if callable(identity) else {}
+                elif operation == "report_metadata":
+                    report_metadata = getattr(provider, "report_metadata", None)
+                    result = report_metadata() if callable(report_metadata) else {}
                 else:
                     method = getattr(provider, operation)
                     result = method() if payload is None else method(payload)

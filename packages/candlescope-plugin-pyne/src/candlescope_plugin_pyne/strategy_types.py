@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
@@ -30,6 +30,9 @@ class ProviderCapabilities:
     state_modes: tuple[str, ...] = ("SESSION_STATEFUL",)
     reproducibility: tuple[str, ...] = ("DETERMINISTIC", "SEEDED")
     snapshot_restore: bool = True
+    signal_clock: str = "EVENT"
+    required_features: tuple[str, ...] = ()
+    warmup_requirement: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

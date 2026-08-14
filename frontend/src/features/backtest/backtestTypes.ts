@@ -41,6 +41,18 @@ export interface BacktestReport {
   fills: Array<Record<string, string>>;
   trades: Array<Record<string, string>>;
   rejected_orders?: Array<Record<string, unknown>>;
+  strategy?: {
+    revision?: string;
+    indicatorRevision?: string;
+    length?: number;
+    oversold?: string;
+    overbought?: string;
+    triggerMode?: string;
+    warmupRequirementRows?: number;
+    warmupRowsObserved?: number;
+    reasonCodes?: Record<string, number>;
+    decisionDebugTrace?: Array<Record<string, unknown>>;
+  };
 }
 
 export interface BacktestChartBar {

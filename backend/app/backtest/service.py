@@ -749,6 +749,7 @@ class BacktestService:
                 expected_generation=expected_generation,
             )
             self._assert_provider_state_budget(session.snapshot())
+            strategy_metadata = _provider_report_metadata(provider)
             provider_close_hash = session.close()
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -772,6 +773,7 @@ class BacktestService:
             expected_generation=expected_generation,
             result_overrides={
                 "data_quality": dict((snapshot_evidence or {}).get("quality") or {}),
+                "strategy_metadata": strategy_metadata,
                 "contract_coverage": dict(
                     (snapshot_evidence or {}).get("contract_coverage") or {}
                 ) | kernel.account.coverage(),
@@ -921,6 +923,7 @@ class BacktestService:
                 expected_generation=expected_generation,
             )
             self._assert_provider_state_budget(session.snapshot())
+            strategy_metadata = _provider_report_metadata(provider)
             provider_close_hash = session.close()
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -949,6 +952,7 @@ class BacktestService:
             expected_generation=expected_generation,
             result_overrides={
                 "report_label": report_label,
+                "strategy_metadata": strategy_metadata,
                 "data_quality": dict((snapshot_evidence or {}).get("quality") or {}),
                 "contract_coverage": kernel.account.coverage(),
                 "fill_model": {
@@ -1402,6 +1406,9 @@ class BacktestService:
             identity = getattr(provider, "identity", None)
             if callable(identity):
                 result_payload["provider_identity"] = identity()
+            report_metadata = getattr(provider, "report_metadata", None)
+            if "strategy_metadata" not in result_payload and callable(report_metadata):
+                result_payload["strategy_metadata"] = report_metadata()
 
             report_record = dict(completing)
             report_record["state"] = RunState.COMPLETED.value
@@ -1587,8 +1594,20 @@ def _declared_feature_names(provider: object) -> tuple[str, ...] | None:
         schema = getattr(provider, "feature_schema", None)
     names = getattr(schema, "names", None)
     if not names:
+        describe = getattr(provider, "describe", None)
+        capabilities = describe() if callable(describe) else None
+        names = getattr(capabilities, "required_features", None)
+    if not names:
         return None
     return tuple(str(name) for name in names)
+
+
+def _provider_report_metadata(provider: object) -> dict[str, object]:
+    report_metadata = getattr(provider, "report_metadata", None)
+    if not callable(report_metadata):
+        return {}
+    value = report_metadata()
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _config_decimal(config: Mapping[str, object], name: str, default: str) -> Decimal:

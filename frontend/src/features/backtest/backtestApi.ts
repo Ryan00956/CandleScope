@@ -13,6 +13,9 @@ export interface BacktestStrategyDescriptor {
   description: string;
   input_modes: string[];
   output_modes: string[];
+  signal_clock: string;
+  required_features: string[];
+  warmup_requirement: Record<string, unknown>;
   parameter_schema: Array<Record<string, unknown>>;
   accepts_source: boolean;
 }

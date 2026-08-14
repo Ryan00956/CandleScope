@@ -19,6 +19,7 @@ import type {
 const TERMINAL_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const SMA_REVISION = "builtin-sma-cross-v1";
 const RSI_REVISION = "builtin-rsi-reversion-v1";
+const RSI_WILDER_LONG_SHORT_REVISION = "builtin-rsi-wilder-long-short-v1";
 const EXPRESSION_REVISION = "builtin-expression-model-v1";
 const COMMAND_REVISION = "builtin-order-command-v1";
 const DEFAULT_COMMAND_SOURCE = `{
@@ -56,6 +57,7 @@ export default function BacktestApp() {
   const [rsiLength, setRsiLength] = useState(14);
   const [rsiOversold, setRsiOversold] = useState(30);
   const [rsiOverbought, setRsiOverbought] = useState(70);
+  const [schemaParameters, setSchemaParameters] = useState<Record<string, string | number | boolean>>({});
   const [strategyRevisionId, setStrategyRevisionId] = useState(SMA_REVISION);
   const [strategySource, setStrategySource] = useState("close - open");
   const [commandSource, setCommandSource] = useState(DEFAULT_COMMAND_SOURCE);
@@ -102,6 +104,14 @@ export default function BacktestApp() {
     () => studies.some((study) => !TERMINAL_STATES.has(study.state)),
     [studies],
   );
+
+  useEffect(() => {
+    if (strategyRevisionId !== RSI_WILDER_LONG_SHORT_REVISION || !selectedStrategy) return;
+    setSchemaParameters(Object.fromEntries(selectedStrategy.parameter_schema.map((field) => [
+      String(field.name),
+      field.default as string | number | boolean,
+    ])));
+  }, [selectedStrategy, strategyRevisionId]);
 
   const refreshRuns = useCallback(async (signal?: AbortSignal) => {
     const next = await defaultBacktestApi.listRuns(signal);
@@ -241,15 +251,20 @@ export default function BacktestApp() {
       start_time_ms: startTimeMs,
       end_time_ms: endTimeMs,
       interval: selectedDataset.interval,
-      warmup_bars: strategyRevisionId === SMA_REVISION ? slow : 0,
+      warmup_bars: strategyRevisionId === SMA_REVISION ? slow
+        : strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION
+          ? Number(schemaParameters.length ?? 24) + 1 : 0,
       parameters: strategyRevisionId === SMA_REVISION
         ? { fast, slow }
         : strategyRevisionId === RSI_REVISION
           ? { length: rsiLength, oversold: rsiOversold, overbought: rsiOverbought }
+          : strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION
+            ? schemaParameters
           : {},
       strategy_source: strategyRevisionId === COMMAND_REVISION ? commandSource
         : strategyRevisionId === EXPRESSION_REVISION ? strategySource : null,
-      output_mode: strategyRevisionId === COMMAND_REVISION ? "ORDER_INTENT" : "TARGET_POSITION",
+      output_mode: selectedStrategy?.output_modes[0]
+        ?? (strategyRevisionId === COMMAND_REVISION ? "ORDER_INTENT" : "TARGET_POSITION"),
       account_model: "LINEAR_PERP_ONE_WAY_V1",
       initial_balance: initialBalance,
       slippage_bps: slippageBps,
@@ -290,7 +305,9 @@ export default function BacktestApp() {
     rsiLength,
     rsiOverbought,
     rsiOversold,
+    schemaParameters,
     selectedDataset,
+    selectedStrategy,
     slow,
     slippageBps,
     snapshot,
@@ -495,6 +512,38 @@ export default function BacktestApp() {
             <label>超卖<input type="number" value={rsiOversold} onChange={(event) => setRsiOversold(Number(event.target.value))} /></label>
             <label>超买<input type="number" value={rsiOverbought} onChange={(event) => setRsiOverbought(Number(event.target.value))} /></label>
           </div>}
+          {strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION && selectedStrategy && (
+            <div className="backtest-form-row three" data-testid="strategy-schema-fields">
+              {selectedStrategy.parameter_schema.map((field) => {
+                const name = String(field.name);
+                const label = String(field.label ?? name);
+                const type = String(field.type ?? "string");
+                const value = schemaParameters[name] ?? (field.default as string | number | boolean);
+                if (type === "enum") {
+                  const options = Array.isArray(field.options) ? field.options : [];
+                  return <label key={name}>{label}<select value={String(value)} onChange={(event) => setSchemaParameters((current) => ({ ...current, [name]: event.target.value }))}>
+                    {options.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}
+                  </select></label>;
+                }
+                if (type === "boolean") {
+                  return <label key={name} className="backtest-checkbox">
+                    <input type="checkbox" checked={Boolean(value)} onChange={(event) => setSchemaParameters((current) => ({ ...current, [name]: event.target.checked }))} />
+                    {label}
+                  </label>;
+                }
+                return <label key={name}>{label}<input
+                  type="number"
+                  min={typeof field.minimum === "number" ? field.minimum : undefined}
+                  max={typeof field.maximum === "number" ? field.maximum : undefined}
+                  value={String(value)}
+                  onChange={(event) => setSchemaParameters((current) => ({
+                    ...current,
+                    [name]: type === "integer" ? Number.parseInt(event.target.value, 10) : Number(event.target.value),
+                  }))}
+                /></label>;
+              })}
+            </div>
+          )}
           {strategyRevisionId === EXPRESSION_REVISION && <label>
             OHLCV 评分表达式
             <textarea value={strategySource} onChange={(event) => setStrategySource(event.target.value)} rows={4} />
@@ -568,6 +617,13 @@ export default function BacktestApp() {
               <div className="backtest-proof">
                 <span>Report hash</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
               </div>
+              {report.strategy && <div className="backtest-strategy-evidence" data-testid="strategy-evidence">
+                <strong>{report.strategy.revision}</strong>
+                <span>指标 {report.strategy.indicatorRevision}</span>
+                <span>参数 {report.strategy.length} / {report.strategy.oversold} / {report.strategy.overbought}</span>
+                <span>{report.strategy.triggerMode} · warmup {report.strategy.warmupRowsObserved}/{report.strategy.warmupRequirementRows}</span>
+                <span>Reason {JSON.stringify(report.strategy.reasonCodes ?? {})}</span>
+              </div>}
               <div className="backtest-report-columns">
                 <div><h3>适合解释</h3>{report.suitable_for.map((item) => <p key={item}>✓ {item}</p>)}</div>
                 <div><h3>不能解释</h3>{report.not_suitable_for.map((item) => <p key={item}>× {item}</p>)}</div>

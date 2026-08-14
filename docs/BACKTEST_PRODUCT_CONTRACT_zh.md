@@ -199,6 +199,35 @@ DRAFT -> VALIDATING -> QUEUED -> PREPARING -> RUNNING
 
 运行中改其中任一项 **必须** 失败，而不是生成“差不多”的新身份。
 
+### 8.3 指标与策略修订不可变
+
+指标算法也是策略身份的一部分。公式、初始化、缺失值、除零、warmup、价格字段、触发方式或
+目标方向任一语义发生变化时，必须创建新的 `strategy_revision_id`；不得在旧 revision 名下重算
+历史 Run。旧 Provider、旧报告读取和旧结果 hash 必须保持兼容。
+
+`builtin-rsi-wilder-long-short-v1` 冻结如下：
+
+- 输入时钟为 `BAR_CLOSE`，required feature 仅为已经完结 K 线的 `close`；不得隐式使用 mark、
+  未完结 K 线或成交价；缺 bar、缺 close、非有限或非正 close 必须失败关闭，不插值、不联网补数；
+- `length=N` 时，第一个 RSI 使用前 `N+1` 个 close 产生的 `N` 个变化量。初始平均涨幅和平均跌幅
+  分别为这 `N` 个正变化和负变化绝对值的算术平均；之后使用 Wilder RMA：
+  `avg_t = (avg_(t-1) * (N-1) + value_t) / N`；
+- `avg_loss=0, avg_gain>0` 时 RSI 为 `100`；`avg_gain=0, avg_loss>0` 时为 `0`；二者均为
+  `0` 时 RSI 为 `50`。计算使用 Decimal 权威值，不提前量化；
+- warmup requirement 为 `N+1` 行。第一笔有效 RSI 之前禁止输出，包括用户显式配置的 Host warmup
+  不足时；Host warmup 行只更新状态，永不产生可成交输出；
+- `LEVEL_TARGET_V1` 在每个有效决策点按 `RSI <= oversold` 输出 `LONG`、按
+  `RSI >= overbought` 输出 `SHORT`，中性区无新信号并保持此前方向目标；
+- `CROSS_TARGET` 表示仅在 RSI 从阈值外穿入阈值区时产生新信号，属于不同策略语义，必须使用新的
+  revision，不能作为本 revision 的运行参数切换；
+- `+1 -> -1` 或 `-1 -> +1` 的数量差额由 Host 使用当时账户权威仓位计算；相同目标不得重复下单。
+  若订单被全部或部分拒绝，Provider 不假定成交，下一次 LEVEL 信号仍由 Host 根据实际账户仓位重算。
+
+本 revision 输出 `SIGNAL`，参数固定 schema 为 `length`、`oversold`、`overbought`、
+单选值 `trigger_mode=LEVEL_TARGET_V1` 和只用于诊断的 `debug_trace`。默认值为
+`24/30/70/LEVEL_TARGET_V1/false`；单选 trigger 字段用于让 UI/API/报告显式展示冻结语义，
+不能借此静默切换算法。
+
 ---
 
 ## 9. Phase 1 数据接口

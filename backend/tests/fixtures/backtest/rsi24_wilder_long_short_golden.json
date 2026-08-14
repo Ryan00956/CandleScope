@@ -1,0 +1,661 @@
+{
+    "schemaVersion": "candlescope.backtest-rsi24-golden/1",
+    "reference": "TradingView Pine ta.rsi(close, 24) Wilder RMA semantics; independently recomputed in test",
+    "closes": [
+        "124",
+        "123",
+        "122",
+        "121",
+        "120",
+        "119",
+        "118",
+        "117",
+        "116",
+        "115",
+        "114",
+        "113",
+        "112",
+        "111",
+        "110",
+        "109",
+        "108",
+        "107",
+        "106",
+        "105",
+        "104",
+        "103",
+        "102",
+        "101",
+        "100",
+        "101",
+        "102",
+        "103",
+        "104",
+        "105",
+        "106",
+        "107",
+        "108",
+        "109",
+        "110",
+        "111",
+        "112",
+        "113",
+        "114",
+        "115",
+        "116",
+        "117",
+        "118",
+        "119",
+        "120",
+        "121",
+        "122",
+        "123",
+        "124",
+        "125",
+        "126",
+        "127",
+        "128",
+        "129",
+        "130",
+        "131",
+        "132",
+        "133",
+        "134",
+        "135"
+    ],
+    "rsi": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "0",
+        "4.16666666666666666666666668",
+        "8.15972222222222222222222220",
+        "11.98640046296296296296296293",
+        "15.65363377700617283950617287",
+        "19.16806570296424897119341563",
+        "22.53606296534073859739368997",
+        "25.76372700845154115583561959",
+        "28.85690504976606027434246874",
+        "31.82120067269247442957819922",
+        "34.66198397799695466167910757",
+        "37.38440131224708155077581141",
+        "39.99338459090345315282681930",
+        "42.49366023294914260479236849",
+        "44.88975772324292832959268649",
+        "47.18601781810780631585965790",
+        "49.38660040901998105269883881",
+        "51.49549205864414850883638720",
+        "53.51651322286730898763487106",
+        "55.45332517191450444648341809",
+        "57.30943662308473342787994235",
+        "59.08821009712286953505161142",
+        "60.79286800974274997109112761",
+        "62.42649850933680205562899730",
+        "63.99206107144776863664445574",
+        "65.49239186013744494345093675",
+        "66.93020886596505140414048104",
+        "68.30811682988317426230129434",
+        "69.62861196197137533470540708",
+        "70.89408646355590136242601512",
+        "72.10683286090773880565826449",
+        "73.26904815836991635542250347",
+        "74.38283781843783650727989915",
+        "75.45021957600292665280990335",
+        "76.47312709366947137560949071",
+        "77.45341346476657673495909526"
+    ],
+    "target_signals": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "1",
+        "1",
+        "1",
+        "1",
+        "1",
+        "1",
+        "1",
+        "1",
+        "1",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "-1",
+        "-1",
+        "-1",
+        "-1",
+        "-1",
+        "-1",
+        "-1"
+    ],
+    "reason_codes": {
+        "RSI_LEVEL_LONG": 9,
+        "RSI_LEVEL_SHORT": 7
+    },
+    "strategy_report": {
+        "debugTrace": false,
+        "indicatorRevision": "wilder-rsi-close-v1",
+        "length": 24,
+        "observedRows": 60,
+        "overbought": "70",
+        "oversold": "30",
+        "reasonCodes": {
+            "RSI_LEVEL_LONG": 9,
+            "RSI_LEVEL_SHORT": 7
+        },
+        "requiredFeatures": [
+            "close"
+        ],
+        "revision": "builtin-rsi-wilder-long-short-v1",
+        "signalClock": "BAR_CLOSE",
+        "triggerMode": "LEVEL_TARGET_V1",
+        "warmupRequirementRows": 25,
+        "warmupRowsObserved": 0
+    },
+    "orders": [
+        {
+            "activated": false,
+            "eligible_after_sequence": 26,
+            "fill_price": "101",
+            "fill_sequence": 26,
+            "limit_price": null,
+            "oco_group": null,
+            "order_id": "ord-1",
+            "qty": "1",
+            "reduce_only": false,
+            "side": "BUY",
+            "status": "FILLED",
+            "stop_price": null,
+            "type": "MARKET"
+        },
+        {
+            "activated": false,
+            "eligible_after_sequence": 55,
+            "fill_price": "130",
+            "fill_sequence": 55,
+            "limit_price": null,
+            "oco_group": null,
+            "order_id": "ord-2",
+            "qty": "2",
+            "reduce_only": false,
+            "side": "SELL",
+            "status": "FILLED",
+            "stop_price": null,
+            "type": "MARKET"
+        }
+    ],
+    "fills": [
+        {
+            "action": "OPEN_LONG",
+            "event_time_ms": 1560000,
+            "fee": "0",
+            "order_id": "ord-1",
+            "position_after": "1",
+            "position_before": "0",
+            "price": "101",
+            "qty": "1",
+            "reason": "NEXT_BAR_OPEN",
+            "sequence": 26,
+            "side": "BUY"
+        },
+        {
+            "action": "REVERSE_TO_SHORT",
+            "event_time_ms": 3300000,
+            "fee": "0",
+            "order_id": "ord-2",
+            "position_after": "-1",
+            "position_before": "1",
+            "price": "130",
+            "qty": "2",
+            "reason": "NEXT_BAR_OPEN",
+            "sequence": 55,
+            "side": "SELL"
+        }
+    ],
+    "trades": [
+        {
+            "duration_ms": "1740000",
+            "entry_order_id": "ord-1",
+            "entry_price": "101",
+            "entry_sequence": "26",
+            "entry_time_ms": "1560000",
+            "exit_order_id": "ord-2",
+            "exit_price": "130",
+            "exit_sequence": "55",
+            "exit_time_ms": "3300000",
+            "fees": "0",
+            "gross_pnl": "29",
+            "net_pnl": "29",
+            "qty": "1",
+            "side": "LONG",
+            "trade_id": "trade-1"
+        }
+    ],
+    "equity_curve": [
+        {
+            "equity": "10000",
+            "event_time_ms": 60000,
+            "position_qty": "0",
+            "sequence": 1
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 120000,
+            "position_qty": "0",
+            "sequence": 2
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 180000,
+            "position_qty": "0",
+            "sequence": 3
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 240000,
+            "position_qty": "0",
+            "sequence": 4
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 300000,
+            "position_qty": "0",
+            "sequence": 5
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 360000,
+            "position_qty": "0",
+            "sequence": 6
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 420000,
+            "position_qty": "0",
+            "sequence": 7
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 480000,
+            "position_qty": "0",
+            "sequence": 8
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 540000,
+            "position_qty": "0",
+            "sequence": 9
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 600000,
+            "position_qty": "0",
+            "sequence": 10
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 660000,
+            "position_qty": "0",
+            "sequence": 11
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 720000,
+            "position_qty": "0",
+            "sequence": 12
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 780000,
+            "position_qty": "0",
+            "sequence": 13
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 840000,
+            "position_qty": "0",
+            "sequence": 14
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 900000,
+            "position_qty": "0",
+            "sequence": 15
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 960000,
+            "position_qty": "0",
+            "sequence": 16
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1020000,
+            "position_qty": "0",
+            "sequence": 17
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1080000,
+            "position_qty": "0",
+            "sequence": 18
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1140000,
+            "position_qty": "0",
+            "sequence": 19
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1200000,
+            "position_qty": "0",
+            "sequence": 20
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1260000,
+            "position_qty": "0",
+            "sequence": 21
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1320000,
+            "position_qty": "0",
+            "sequence": 22
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1380000,
+            "position_qty": "0",
+            "sequence": 23
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1440000,
+            "position_qty": "0",
+            "sequence": 24
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1500000,
+            "position_qty": "0",
+            "sequence": 25
+        },
+        {
+            "equity": "10000",
+            "event_time_ms": 1560000,
+            "position_qty": "1",
+            "sequence": 26
+        },
+        {
+            "equity": "10001",
+            "event_time_ms": 1620000,
+            "position_qty": "1",
+            "sequence": 27
+        },
+        {
+            "equity": "10002",
+            "event_time_ms": 1680000,
+            "position_qty": "1",
+            "sequence": 28
+        },
+        {
+            "equity": "10003",
+            "event_time_ms": 1740000,
+            "position_qty": "1",
+            "sequence": 29
+        },
+        {
+            "equity": "10004",
+            "event_time_ms": 1800000,
+            "position_qty": "1",
+            "sequence": 30
+        },
+        {
+            "equity": "10005",
+            "event_time_ms": 1860000,
+            "position_qty": "1",
+            "sequence": 31
+        },
+        {
+            "equity": "10006",
+            "event_time_ms": 1920000,
+            "position_qty": "1",
+            "sequence": 32
+        },
+        {
+            "equity": "10007",
+            "event_time_ms": 1980000,
+            "position_qty": "1",
+            "sequence": 33
+        },
+        {
+            "equity": "10008",
+            "event_time_ms": 2040000,
+            "position_qty": "1",
+            "sequence": 34
+        },
+        {
+            "equity": "10009",
+            "event_time_ms": 2100000,
+            "position_qty": "1",
+            "sequence": 35
+        },
+        {
+            "equity": "10010",
+            "event_time_ms": 2160000,
+            "position_qty": "1",
+            "sequence": 36
+        },
+        {
+            "equity": "10011",
+            "event_time_ms": 2220000,
+            "position_qty": "1",
+            "sequence": 37
+        },
+        {
+            "equity": "10012",
+            "event_time_ms": 2280000,
+            "position_qty": "1",
+            "sequence": 38
+        },
+        {
+            "equity": "10013",
+            "event_time_ms": 2340000,
+            "position_qty": "1",
+            "sequence": 39
+        },
+        {
+            "equity": "10014",
+            "event_time_ms": 2400000,
+            "position_qty": "1",
+            "sequence": 40
+        },
+        {
+            "equity": "10015",
+            "event_time_ms": 2460000,
+            "position_qty": "1",
+            "sequence": 41
+        },
+        {
+            "equity": "10016",
+            "event_time_ms": 2520000,
+            "position_qty": "1",
+            "sequence": 42
+        },
+        {
+            "equity": "10017",
+            "event_time_ms": 2580000,
+            "position_qty": "1",
+            "sequence": 43
+        },
+        {
+            "equity": "10018",
+            "event_time_ms": 2640000,
+            "position_qty": "1",
+            "sequence": 44
+        },
+        {
+            "equity": "10019",
+            "event_time_ms": 2700000,
+            "position_qty": "1",
+            "sequence": 45
+        },
+        {
+            "equity": "10020",
+            "event_time_ms": 2760000,
+            "position_qty": "1",
+            "sequence": 46
+        },
+        {
+            "equity": "10021",
+            "event_time_ms": 2820000,
+            "position_qty": "1",
+            "sequence": 47
+        },
+        {
+            "equity": "10022",
+            "event_time_ms": 2880000,
+            "position_qty": "1",
+            "sequence": 48
+        },
+        {
+            "equity": "10023",
+            "event_time_ms": 2940000,
+            "position_qty": "1",
+            "sequence": 49
+        },
+        {
+            "equity": "10024",
+            "event_time_ms": 3000000,
+            "position_qty": "1",
+            "sequence": 50
+        },
+        {
+            "equity": "10025",
+            "event_time_ms": 3060000,
+            "position_qty": "1",
+            "sequence": 51
+        },
+        {
+            "equity": "10026",
+            "event_time_ms": 3120000,
+            "position_qty": "1",
+            "sequence": 52
+        },
+        {
+            "equity": "10027",
+            "event_time_ms": 3180000,
+            "position_qty": "1",
+            "sequence": 53
+        },
+        {
+            "equity": "10028",
+            "event_time_ms": 3240000,
+            "position_qty": "1",
+            "sequence": 54
+        },
+        {
+            "equity": "10029",
+            "event_time_ms": 3300000,
+            "position_qty": "-1",
+            "sequence": 55
+        },
+        {
+            "equity": "10028",
+            "event_time_ms": 3360000,
+            "position_qty": "-1",
+            "sequence": 56
+        },
+        {
+            "equity": "10027",
+            "event_time_ms": 3420000,
+            "position_qty": "-1",
+            "sequence": 57
+        },
+        {
+            "equity": "10026",
+            "event_time_ms": 3480000,
+            "position_qty": "-1",
+            "sequence": 58
+        },
+        {
+            "equity": "10025",
+            "event_time_ms": 3540000,
+            "position_qty": "-1",
+            "sequence": 59
+        },
+        {
+            "equity": "10024",
+            "event_time_ms": 3600000,
+            "position_qty": "-1",
+            "sequence": 60
+        }
+    ],
+    "hashes": {
+        "decision_hash": "4a30b0f06e51ac24948ed2d1b263b0d740036ce2d5083226c28d86900a0e7964",
+        "fill_hash": "ef8ed60c27f094c78f9b432deb6d2a0f570432e612826a81f7ecd486103fe843",
+        "ledger_hash": "ca00e5aa262a64704e4f31b9b19f79af85348b892f89c51da27a11f8283a7351",
+        "report_hash": "sha256:eb2909f10c8b2c0c6b7cbf867a3cb5d8040f5f4849096324d0e709649d9378a1"
+    }
+}

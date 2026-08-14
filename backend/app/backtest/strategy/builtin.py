@@ -18,6 +18,7 @@ from .protocol import (
 
 BUILTIN_SMA_REVISION = "builtin-sma-cross-v1"
 BUILTIN_RSI_REVISION = "builtin-rsi-reversion-v1"
+BUILTIN_RSI_WILDER_LONG_SHORT_REVISION = "builtin-rsi-wilder-long-short-v1"
 BUILTIN_EXPRESSION_REVISION = "builtin-expression-model-v1"
 BUILTIN_ORDER_COMMAND_REVISION = "builtin-order-command-v1"
 
@@ -301,6 +302,291 @@ class BuiltinRsiReversionProvider:
         self._closes.append(close)
 
 
+class BuiltinRsiWilderLongShortProvider:
+    """Frozen close-only Wilder RSI LEVEL_TARGET strategy revision."""
+
+    _TRACE_LIMIT = 10_000
+
+    def __init__(self) -> None:
+        self._length = 24
+        self._oversold = Decimal("30")
+        self._overbought = Decimal("70")
+        self._trigger_mode = "LEVEL_TARGET_V1"
+        self._debug_trace_enabled = False
+        self._last_close: Decimal | None = None
+        self._seed_count = 0
+        self._seed_gain = Decimal("0")
+        self._seed_loss = Decimal("0")
+        self._avg_gain: Decimal | None = None
+        self._avg_loss: Decimal | None = None
+        self._last_rsi: Decimal | None = None
+        self._target_direction = "FLAT"
+        self._observed_rows = 0
+        self._warmup_rows = 0
+        self._reason_counts: dict[str, int] = {}
+        self._debug_trace: list[dict[str, object]] = []
+        self._prepared = False
+
+    def describe(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            input_modes=("BAR_CLOSE",),
+            output_modes=("SIGNAL",),
+            reproducibility=("DETERMINISTIC",),
+            signal_clock="BAR_CLOSE",
+            required_features=("close",),
+            warmup_requirement={
+                "kind": "PARAMETER_PLUS_ROWS",
+                "parameter": "length",
+                "offset": 1,
+                "minimum": 3,
+            },
+        )
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "revision": BUILTIN_RSI_WILDER_LONG_SHORT_REVISION,
+            "indicatorRevision": "wilder-rsi-close-v1",
+            "length": self._length,
+            "oversold": str(self._oversold),
+            "overbought": str(self._overbought),
+            "triggerMode": self._trigger_mode,
+            "debugTrace": self._debug_trace_enabled,
+        }
+
+    def report_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            **self.identity(),
+            "signalClock": "BAR_CLOSE",
+            "requiredFeatures": ["close"],
+            "warmupRequirementRows": self._length + 1,
+            "warmupRowsObserved": self._warmup_rows,
+            "observedRows": self._observed_rows,
+            "reasonCodes": dict(sorted(self._reason_counts.items())),
+        }
+        if self._debug_trace_enabled:
+            metadata["decisionDebugTrace"] = [dict(item) for item in self._debug_trace]
+        return metadata
+
+    def prepare(self, context: dict[str, Any]) -> None:
+        parameters = context.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "parameters must be an object"
+            )
+        roles = tuple(str(value) for value in (context.get("roles") or ()))
+        if roles and roles != ("BARS",):
+            raise StrategyProviderError(
+                "FIDELITY_UNSUPPORTED",
+                "this revision requires completed BAR_CLOSE input; dual-clock execution is not M1",
+            )
+        try:
+            length = int(parameters.get("length", 24))
+            oversold = Decimal(str(parameters.get("oversold", "30")))
+            overbought = Decimal(str(parameters.get("overbought", "70")))
+        except (TypeError, ValueError) as exc:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "invalid Wilder RSI parameters"
+            ) from exc
+        trigger_mode = str(parameters.get("trigger_mode", "LEVEL_TARGET_V1"))
+        debug_trace = parameters.get("debug_trace", False)
+        if not isinstance(debug_trace, bool):
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "debug_trace must be boolean"
+            )
+        if (
+            length < 2
+            or length > 5_000
+            or not oversold.is_finite()
+            or not overbought.is_finite()
+            or not (Decimal("0") < oversold < overbought < Decimal("100"))
+        ):
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION",
+                "Wilder RSI requires 2 <= length <= 5000 and 0 < oversold < overbought < 100",
+            )
+        if trigger_mode != "LEVEL_TARGET_V1":
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION",
+                "this immutable revision supports only LEVEL_TARGET_V1",
+            )
+        self._length = length
+        self._oversold = oversold
+        self._overbought = overbought
+        self._trigger_mode = trigger_mode
+        self._debug_trace_enabled = debug_trace
+        self._reset_runtime_state()
+        self._prepared = True
+
+    def warmup(self, frame: ObservationFrame) -> StrategyOutput | None:
+        self._warmup_rows += 1
+        self._update(frame)
+        return None
+
+    def step(self, frame: ObservationFrame) -> StrategyOutput | None:
+        rsi = self._update(frame)
+        if rsi is None:
+            return None
+        direction: str | None = None
+        reason: str | None = None
+        if rsi <= self._oversold:
+            direction, reason = "LONG", "RSI_LEVEL_LONG"
+        elif rsi >= self._overbought:
+            direction, reason = "SHORT", "RSI_LEVEL_SHORT"
+        if direction is not None and reason is not None:
+            self._target_direction = direction
+            self._reason_counts[reason] = self._reason_counts.get(reason, 0) + 1
+        self._record_trace(frame, rsi=rsi, direction=direction, reason=reason)
+        if direction is None or reason is None:
+            return None
+        payload = {
+            "direction": direction,
+            "normalizedTarget": "1" if direction == "LONG" else "-1",
+            "reasonCode": reason,
+            "rsi": str(rsi),
+        }
+        return StrategyOutput(
+            sequence=frame.sequence,
+            kind="SIGNAL",
+            payload=payload,
+            state_hash=canonical_hash(self.snapshot()),
+            output_hash=canonical_hash(
+                {"sequence": frame.sequence, "kind": "SIGNAL", "payload": payload}
+            ),
+        )
+
+    def on_execution_report(self, report: dict[str, Any]) -> None:
+        if "accepted" not in report:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "execution report must declare accepted"
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "length": self._length,
+            "oversold": str(self._oversold),
+            "overbought": str(self._overbought),
+            "trigger_mode": self._trigger_mode,
+            "debug_trace_enabled": self._debug_trace_enabled,
+            "last_close": None if self._last_close is None else str(self._last_close),
+            "seed_count": self._seed_count,
+            "seed_gain": str(self._seed_gain),
+            "seed_loss": str(self._seed_loss),
+            "avg_gain": None if self._avg_gain is None else str(self._avg_gain),
+            "avg_loss": None if self._avg_loss is None else str(self._avg_loss),
+            "last_rsi": None if self._last_rsi is None else str(self._last_rsi),
+            "target_direction": self._target_direction,
+            "observed_rows": self._observed_rows,
+            "warmup_rows": self._warmup_rows,
+            "reason_counts": dict(sorted(self._reason_counts.items())),
+            "debug_trace": [dict(item) for item in self._debug_trace],
+        }
+
+    def restore(self, payload: dict[str, Any]) -> None:
+        self._length = int(payload["length"])
+        self._oversold = Decimal(str(payload["oversold"]))
+        self._overbought = Decimal(str(payload["overbought"]))
+        self._trigger_mode = str(payload["trigger_mode"])
+        self._debug_trace_enabled = bool(payload["debug_trace_enabled"])
+        self._last_close = _optional_decimal_value(payload.get("last_close"))
+        self._seed_count = int(payload["seed_count"])
+        self._seed_gain = Decimal(str(payload["seed_gain"]))
+        self._seed_loss = Decimal(str(payload["seed_loss"]))
+        self._avg_gain = _optional_decimal_value(payload.get("avg_gain"))
+        self._avg_loss = _optional_decimal_value(payload.get("avg_loss"))
+        self._last_rsi = _optional_decimal_value(payload.get("last_rsi"))
+        self._target_direction = str(payload["target_direction"])
+        self._observed_rows = int(payload["observed_rows"])
+        self._warmup_rows = int(payload["warmup_rows"])
+        self._reason_counts = {
+            str(key): int(value) for key, value in dict(payload["reason_counts"]).items()
+        }
+        self._debug_trace = [dict(item) for item in list(payload["debug_trace"])]
+        self._prepared = True
+
+    def close(self) -> str:
+        return canonical_hash(self.snapshot())
+
+    def _reset_runtime_state(self) -> None:
+        self._last_close = None
+        self._seed_count = 0
+        self._seed_gain = Decimal("0")
+        self._seed_loss = Decimal("0")
+        self._avg_gain = None
+        self._avg_loss = None
+        self._last_rsi = None
+        self._target_direction = "FLAT"
+        self._observed_rows = 0
+        self._warmup_rows = 0
+        self._reason_counts = {}
+        self._debug_trace = []
+
+    def _update(self, frame: ObservationFrame) -> Decimal | None:
+        if not self._prepared or frame.bar is None or "close" not in frame.bar:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "prepared completed BAR close is required"
+            )
+        try:
+            close = Decimal(str(frame.bar["close"]))
+        except (ValueError, TypeError) as exc:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "bar close must be Decimal-compatible"
+            ) from exc
+        if not close.is_finite() or close <= 0:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION", "bar close must be finite and positive"
+            )
+        self._observed_rows += 1
+        if self._last_close is None:
+            self._last_close = close
+            self._last_rsi = None
+            return None
+        change = close - self._last_close
+        gain = max(change, Decimal("0"))
+        loss = max(-change, Decimal("0"))
+        self._last_close = close
+        if self._avg_gain is None or self._avg_loss is None:
+            self._seed_count += 1
+            self._seed_gain += gain
+            self._seed_loss += loss
+            if self._seed_count < self._length:
+                self._last_rsi = None
+                return None
+            divisor = Decimal(self._length)
+            self._avg_gain = self._seed_gain / divisor
+            self._avg_loss = self._seed_loss / divisor
+        else:
+            length = Decimal(self._length)
+            self._avg_gain = (self._avg_gain * (length - 1) + gain) / length
+            self._avg_loss = (self._avg_loss * (length - 1) + loss) / length
+        self._last_rsi = _wilder_rsi(self._avg_gain, self._avg_loss)
+        return self._last_rsi
+
+    def _record_trace(
+        self,
+        frame: ObservationFrame,
+        *,
+        rsi: Decimal,
+        direction: str | None,
+        reason: str | None,
+    ) -> None:
+        if not self._debug_trace_enabled:
+            return
+        if len(self._debug_trace) >= self._TRACE_LIMIT:
+            raise StrategyProviderError(
+                "BUDGET_EXCEEDED", "Wilder RSI debug trace exceeds 10000 decisions"
+            )
+        self._debug_trace.append(
+            {
+                "sequence": frame.sequence,
+                "eventTimeMs": frame.event_time_ms,
+                "rsi": str(rsi),
+                "signal": direction,
+                "targetAfter": self._target_direction,
+                "reasonCode": reason,
+            }
+        )
+
+
 class BuiltinExpressionModelProvider:
     """Restricted local score expression for indicator/model-driven signals."""
 
@@ -550,6 +836,7 @@ def build_builtin_provider(strategy_revision_id: str) -> StrategyProvider:
     factories = {
         BUILTIN_SMA_REVISION: BuiltinSmaCrossProvider,
         BUILTIN_RSI_REVISION: BuiltinRsiReversionProvider,
+        BUILTIN_RSI_WILDER_LONG_SHORT_REVISION: BuiltinRsiWilderLongShortProvider,
         BUILTIN_EXPRESSION_REVISION: BuiltinExpressionModelProvider,
         BUILTIN_ORDER_COMMAND_REVISION: BuiltinOrderCommandProvider,
     }
@@ -564,6 +851,21 @@ def build_builtin_provider(strategy_revision_id: str) -> StrategyProvider:
 
 def _mean(values: list[Decimal]) -> Decimal:
     return sum(values, Decimal("0")) / Decimal(len(values))
+
+
+def _optional_decimal_value(value: object) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
+
+
+def _wilder_rsi(avg_gain: Decimal, avg_loss: Decimal) -> Decimal:
+    if avg_gain == 0 and avg_loss == 0:
+        return Decimal("50")
+    if avg_loss == 0:
+        return Decimal("100")
+    if avg_gain == 0:
+        return Decimal("0")
+    relative_strength = avg_gain / avg_loss
+    return Decimal("100") - Decimal("100") / (Decimal("1") + relative_strength)
 
 
 def _compile_expression(source: str) -> Any:

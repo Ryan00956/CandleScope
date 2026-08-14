@@ -97,6 +97,9 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         "trades": trades,
         "contract_coverage": payload.get("contract_coverage") or {},
     }
+    strategy_metadata = payload.get("strategy_metadata")
+    if isinstance(strategy_metadata, Mapping) and strategy_metadata:
+        report["strategy"] = copy.deepcopy(dict(strategy_metadata))
     return seal_report(report)
 
 

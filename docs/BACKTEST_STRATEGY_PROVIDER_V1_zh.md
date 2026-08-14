@@ -18,6 +18,17 @@
 
 只允许 `SIGNAL`、`TARGET_POSITION`、`ORDER_INTENT`。warmup 不得产生可成交输出。
 
+## 可执行能力描述
+
+`describe.capabilities` 除输入/输出/state/reproducibility/snapshot 能力外，必须明确：
+
+- `signalClock`：策略何时允许形成决策，例如 `BAR_CLOSE`；
+- `requiredFeatures`：每次调用必需的特征名，Host 缺少任一项即失败关闭；
+- `warmupRequirement`：静态行数或由参数决定的 warmup 公式。
+
+这些字段只描述 Provider 需要什么，不授权 Provider 拉取数据。改变 signal clock、required feature
+语义或 warmup 算法时必须发布新的策略 revision；Host 不得用不兼容事件时钟调用 Provider。
+
 ## 失败关闭
 
 未知字段、NaN、重复 key、乱序 sequence、watermark 回退、超时、崩溃、越权写 Host 状态，一律失败。无 snapshot 的 Provider 崩溃后只能整 Run 失败。

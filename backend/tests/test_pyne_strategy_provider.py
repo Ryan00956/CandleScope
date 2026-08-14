@@ -64,7 +64,7 @@ def _payload() -> dict[str, object]:
         "fidelity_mode": "BAR_APPROX",
         "start_time_ms": 1,
         "end_time_ms": 2,
-        "source": SMA_CROSS_SOURCE,
+        "strategy_source": SMA_CROSS_SOURCE,
         "parameters": {"fast": 3, "slow": 5},
     }
 

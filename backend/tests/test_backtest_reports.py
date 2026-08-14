@@ -24,6 +24,7 @@ def test_bar_report_always_labels_approximate_and_lists_limits() -> None:
          "report_hash": "sha256:dd"},
     )
     assert report["report_label"] == "APPROXIMATE"
+    assert "strategy" not in report
     assert "queue-exact fills" in report["not_suitable_for"]
     bundle = export_bundle({"run_id": "bt_1", "fidelity_mode": "BAR_APPROX", "source_event_kind": "BAR"}, report)
     assert bundle["manifest"]["reportLabel"] == "APPROXIMATE"

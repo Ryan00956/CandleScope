@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M1",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T01:20:00+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "fc4b3ea7c38147e1c389c132ab960079e878bf51",
+  "plannedCommitMessage": "backtest: complete M1 standard strategy semantics",
+  "contract": {
+    "strategyRevision": "builtin-rsi-wilder-long-short-v1",
+    "indicatorRevision": "wilder-rsi-close-v1",
+    "signalClock": "BAR_CLOSE",
+    "requiredFeatures": ["close"],
+    "outputMode": "SIGNAL",
+    "triggerMode": "LEVEL_TARGET_V1",
+    "warmupRequirement": "length + 1 rows",
+    "zeroGainAndLossRsi": "50",
+    "oldRevisionUnchanged": "builtin-rsi-reversion-v1",
+    "dualClockExcludedUntil": "M2"
+  },
+  "goldenFixture": {
+    "path": "backend/tests/fixtures/backtest/rsi24_wilder_long_short_golden.json",
+    "sha256": "c0d062b0aecd7ae4b70d19be2cd397e89bb64d3edb4258553ee48c441db7b9bf",
+    "rows": 60,
+    "independentReference": "Pine ta.rsi(close, 24) Wilder recurrence independently implemented in the focused test",
+    "decisionHash": "4a30b0f06e51ac24948ed2d1b263b0d740036ce2d5083226c28d86900a0e7964",
+    "fillHash": "ef8ed60c27f094c78f9b432deb6d2a0f570432e612826a81f7ecd486103fe843",
+    "ledgerHash": "ca00e5aa262a64704e4f31b9b19f79af85348b892f89c51da27a11f8283a7351",
+    "reportHash": "sha256:eb2909f10c8b2c0c6b7cbf867a3cb5d8040f5f4849096324d0e709649d9378a1",
+    "orders": 2,
+    "fills": 2,
+    "roundTripTrades": 1,
+    "reversalAction": "REVERSE_TO_SHORT"
+  },
+  "validation": {
+    "m1Focused": {"result": "PASS", "tests": 9},
+    "backendBacktestRegression": {"result": "PASS", "tests": 144, "warnings": 6},
+    "pluginSdkAndPyneCompatibility": {"result": "PASS", "tests": 21},
+    "pythonRuffTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendBacktestTests": {"result": "PASS", "tests": 8},
+    "frontendBuild": "PASS",
+    "gitDiffCheck": "PASS",
+    "databaseQuickCheck": "ok",
+    "foreignKeyViolations": 0
+  },
+  "compatibility": {
+    "oldRsiOutputHashesFrozen": true,
+    "oldRsiCloseHashFrozen": true,
+    "legacyReportWithoutOptionalStrategyFieldReadable": true,
+    "legacyReportHashVerified": true,
+    "reportSchema": "candlescope.backtest-report/1",
+    "databaseSchemaChanged": false,
+    "executionModelChanged": false,
+    "accountModelChanged": false,
+    "plannerSignalHashDriftAvoided": true
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15186/backtest.html",
+    "runtimeMode": "LOCAL_OFFLINE",
+    "apiBase": "http://127.0.0.1:18093/api/v1/backtests",
+    "runId": "bt_1c1881be52c24a1bbb83bf19e3d52dd3",
+    "datasetRows": 60,
+    "requestRevision": "builtin-rsi-wilder-long-short-v1",
+    "requestParameters": {
+      "length": 24,
+      "oversold": 30,
+      "overbought": 70,
+      "trigger_mode": "LEVEL_TARGET_V1",
+      "debug_trace": false
+    },
+    "requestWarmupBars": 25,
+    "requestOutputMode": "SIGNAL",
+    "reportRevisionMatched": true,
+    "reportParametersMatched": true,
+    "reportWarmupRowsObserved": 25,
+    "fillCount": 2,
+    "roundTripTradeCount": 1,
+    "reversalAction": "REVERSE_TO_SHORT",
+    "finalEquity": "10023",
+    "decisionHash": "9ba3a10c5d44d29322c933332945f1179f39c6d3bd3ef38ed2d56cafacc038b7",
+    "fillHash": "6c19d37f63d9d3d84f1c1c41ddd0ebb8ea0fbcd07d0e236443ee67646b099ba4",
+    "ledgerHash": "198448b3a2f7dc20da180c6ba34612a2a7dd150cdaf8fb0a5ca643535b05d44d",
+    "reportHash": "sha256:94cbf82ef0b97cf2644425047ac853e08b02dd87ede0a4b8ba5644f3eb70a49e",
+    "reportHashRecomputed": true,
+    "exportManifestMatched": true,
+    "chartOpenAndReverseMarkersVisible": true,
+    "equityCurveVisible": true,
+    "consoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "unexpectedHttpResponses": 0,
+    "strictModeLifecycleAbortedRequests": 4,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshots": [
+      {"path": "output/playwright/backtest-m1-20260815/m1-rsi-schema-report-chart.png", "sha256": "cba95a2068306104b021d675e1adeb8e1514068a722d777b2f8d3890a4c9f59e"},
+      {"path": "output/playwright/backtest-m1-20260815/m1-rsi-chart.png", "sha256": "71de5be8a00592b47f55c60cdc7a7fd28a6709ec1fde92cdb52d2d2b933cb842"},
+      {"path": "output/playwright/backtest-m1-20260815/m1-rsi-equity.png", "sha256": "80f3b9633fd88de2f91e2f78d2ebb88ca202e57d6519817d90d1a6e0d53999c2"}
+    ],
+    "download": {
+      "path": ".playwright-cli/bt-1c1881be52c24a1bbb83bf19e3d52dd3-backtest.json",
+      "sha256": "8906f32ab8768b7b02f9ee66cff72386fa3dc7bf08accbe0d4d27042b5d647e0"
+    }
+  },
+  "defectsCaught": [
+    "isolated Provider metadata was read only after close terminated the child process, leaving the public report without strategy evidence",
+    "attaching reasonCode to generic SIGNAL intents would have changed historical SIGNAL decision hashes and was removed"
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M1",
+  "soakGate": "NOT_REQUIRED_IN_M1",
+  "rollback": "revert the single M1 local commit; no database migration or stored-report rewrite is required",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M1_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "M2 dual-clock K-line signal plus aggTrade execution is not implemented",
+    "BAR_APPROX remains approximate and cannot claim intrabar or queue truth",
+    "debug trace is opt-in and fails closed after its explicit 10000-decision budget",
+    "performance and soak release gates belong to M10"
+  ]
+}

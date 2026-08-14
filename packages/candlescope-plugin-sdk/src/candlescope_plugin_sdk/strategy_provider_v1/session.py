@@ -65,6 +65,9 @@ class StrategyProviderSession:
                 "stateModes": list(capabilities.state_modes),
                 "reproducibility": list(capabilities.reproducibility),
                 "snapshotRestore": capabilities.snapshot_restore,
+                "signalClock": capabilities.signal_clock,
+                "requiredFeatures": list(capabilities.required_features),
+                "warmupRequirement": dict(capabilities.warmup_requirement),
             },
         }
 

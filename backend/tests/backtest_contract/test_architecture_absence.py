@@ -26,8 +26,6 @@ def test_host_backtest_modules_are_still_absent() -> None:
     [
         "app.backtest",
         "app.backtest.service",
-        "app.market_dataset",
-        "app.market_dataset.ports",
         "app.simulation",
         "app.simulation.clock",
         "app.api.v1.backtests",

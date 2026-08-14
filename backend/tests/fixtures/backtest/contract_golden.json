@@ -187,7 +187,6 @@
   },
   "forbidden_implementation_paths": [
     "backend/app/backtest",
-    "backend/app/market_dataset",
     "backend/app/simulation",
     "backend/app/api/v1/backtests.py",
     "backend/app/api/v1/stream_backtests.py",

@@ -1072,6 +1072,65 @@ class LocalDatasetService:
             )
         return manifest, [self._wire_bar(row) for row in selected]
 
+    def load_canonical_bars(
+        self,
+        dataset_id: str,
+        *,
+        data_epoch: str,
+        interval: str | None = None,
+        max_rows: int = 200_000,
+    ) -> tuple[dict[str, Any], list[dict[str, str | int | None]]]:
+        """Load one revision as Decimal-safe strings for immutable snapshots."""
+        if max_rows < 1:
+            raise ValueError("max_rows must be positive")
+        manifest, revision_dir = self._validated_revision_dir(
+            dataset_id,
+            data_epoch,
+        )
+        plan = self.resolve_interval(manifest, interval or manifest["interval"])
+        if plan.derived:
+            selected = self._read_derived_rows(
+                revision_dir,
+                plan=plan,
+                fetch_limit=max_rows + 1,
+            )
+            selected.reverse()
+        else:
+            db_path = revision_dir / "bars.sqlite"
+            uri = f"file:{db_path.as_posix()}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True)
+            try:
+                connection.row_factory = sqlite3.Row
+                selected = connection.execute(
+                    "SELECT * FROM bars ORDER BY open_time_ms ASC LIMIT ?",
+                    (max_rows + 1,),
+                ).fetchall()
+            except sqlite3.DatabaseError as exc:
+                raise LocalDatasetError(
+                    "Dataset bars are unreadable", code="dataset_corrupt"
+                ) from exc
+            finally:
+                connection.close()
+        if len(selected) > max_rows:
+            raise LocalDatasetError(
+                f"Snapshot currently supports at most {max_rows} bars",
+                code="BUDGET_EXCEEDED",
+            )
+        canonical: list[dict[str, str | int | None]] = []
+        for row in selected:
+            canonical.append(
+                {
+                    "open_time_ms": int(row["open_time_ms"]),
+                    "close_time_ms": int(row["close_time_ms"]),
+                    "open": str(row["open"]),
+                    "high": str(row["high"]),
+                    "low": str(row["low"]),
+                    "close": str(row["close"]),
+                    "volume": None if row["volume"] is None else str(row["volume"]),
+                }
+            )
+        return manifest, canonical
+
     @staticmethod
     def resolve_interval(
         manifest: dict[str, Any],

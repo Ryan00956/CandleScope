@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "candlescope.backtest-release/1",
+  "kind": "phase13_gate",
+  "parent": "15bff68975bbe42bee573ffcd92338c20b258965",
+  "branch": "codex/backtest-foundation",
+  "createdAt": "2026-08-14T00:00:00Z",
+  "flags": {
+    "BACKTEST_ENABLED": "0",
+    "VITE_BACKTEST_ENTRY_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0"
+  },
+  "databaseSchema": "backtest.schema.v1",
+  "engineVersion": "backtest.engine.control-plane.v1",
+  "providerProtocol": "strategy-provider/1",
+  "reportSchema": "candlescope.backtest-report/1",
+  "automated": {
+    "command": "python -m pytest tests/test_backtest_release_gate.py tests/backtest_contract tests/test_backtest_control_plane.py tests/test_backtest_study.py tests/test_trade_tape.py tests/test_external_model_adapters.py tests/test_pine_strategy_adapter.py tests/test_contract_accounting.py tests/test_multi_market.py tests/test_book_assisted.py tests/test_simulation_kernel.py tests/test_backtest_reports.py -q",
+    "result": "74 passed"
+  },
+  "notRunHere": [
+    "1h soak",
+    "4h soak",
+    "browser acceptance",
+    "million-event trade soak",
+    "detached exact revert drill"
+  ],
+  "releaseDecision": "IMPLEMENTED_DEFAULT_OFF_NOT_PUSHED"
+}

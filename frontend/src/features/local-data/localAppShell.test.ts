@@ -18,6 +18,8 @@ test("local analysis reuses shared chart controls, settings, export, and indicat
   assert.match(source, /useChartSettingsRuntime\(\)/);
   assert.match(source, /usePriceScalePrefs/);
   assert.match(source, /saveVisibleRangeForInterval/);
+  assert.match(source, /<LocalIntervalSelector/);
+  assert.match(source, /interval=\{selectedInterval \?\? selected\.interval\}/);
   assert.doesNotMatch(source, /LocalIndicatorPanel/);
   assert.doesNotMatch(source, /LOCAL_STATIC_INDICATOR_CATALOG/);
 });

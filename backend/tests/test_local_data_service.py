@@ -100,21 +100,92 @@ def test_import_rejects_duplicates_without_publishing(tmp_path: Path) -> None:
     assert service.list_datasets() == []
 
 
-def test_query_rejects_interval_not_present_in_dataset(tmp_path: Path) -> None:
+def _interval_csv(*, rows: int = 12, missing: set[int] | None = None) -> str:
+    content = ["time,open,high,low,close,volume"]
+    for index in range(rows):
+        if index in (missing or set()):
+            continue
+        timestamp = 1_704_067_200_000 + index * 15 * 60_000
+        content.append(
+            f"{timestamp},{100 + index},{102 + index},{99 + index},"
+            f"{101 + index},{10 + index}"
+        )
+    return "\n".join(content) + "\n"
+
+
+def test_query_resamples_complete_integer_multiple_intervals(tmp_path: Path) -> None:
     service = LocalDatasetService(tmp_path / "local-data")
     manifest = service.import_csv(
-        _write_csv(tmp_path / "bars.csv"),
+        _write_csv(tmp_path / "bars.csv", _interval_csv()),
         LocalImportOptions(
             name="BTC sample",
             symbol="BTC-USDT",
-            interval="1m",
+            interval="15m",
             timestamp_unit="ms",
         ),
     )
 
+    thirty = service.query(manifest["dataset_id"], interval="30m", limit=10)
+    assert thirty["derived"] is True
+    assert thirty["source_interval"] == "15m"
+    assert thirty["aggregation_factor"] == 2
+    assert thirty["count"] == 6
+    assert thirty["data"][0] == {
+        "time": 1_704_067_200,
+        "open": 100.0,
+        "high": 103.0,
+        "low": 99.0,
+        "close": 102.0,
+        "volume": 21.0,
+        "is_closed": True,
+        "quote_volume": None,
+        "taker_buy_base": None,
+        "taker_buy_quote": None,
+        "trades": None,
+    }
+    assert service.query(manifest["dataset_id"], interval="1h", limit=10)[
+        "count"
+    ] == 3
+
+    ninety = service.query(manifest["dataset_id"], interval="90m", limit=1)
+    assert ninety["count"] == 1
+    assert ninety["has_more"] is True
+    assert ninety["data"][0]["time"] == 1_704_072_600
+    older = service.query(
+        manifest["dataset_id"],
+        interval="90m",
+        limit=1,
+        before_ms=ninety["next_before_ms"],
+    )
+    assert older["data"][0]["time"] == 1_704_067_200
+    assert older["has_more"] is False
+
     with pytest.raises(LocalDatasetError) as error:
-        service.query(manifest["dataset_id"], interval="5m", limit=10)
-    assert error.value.code == "interval_not_available"
+        service.query(manifest["dataset_id"], interval="89m", limit=10)
+    assert error.value.code == "interval_not_composable"
+    assert "not an integer multiple" in str(error.value)
+
+
+def test_resampling_omits_incomplete_gap_buckets(tmp_path: Path) -> None:
+    service = LocalDatasetService(tmp_path / "local-data")
+    manifest = service.import_csv(
+        _write_csv(tmp_path / "bars.csv", _interval_csv(rows=8, missing={3})),
+        LocalImportOptions(
+            name="BTC with one missing component",
+            symbol="BTC-USDT",
+            interval="15m",
+            timestamp_unit="ms",
+        ),
+    )
+
+    hourly = service.query(manifest["dataset_id"], interval="1h", limit=10)
+
+    assert [row["time"] for row in hourly["data"]] == [1_704_070_800]
+    assert hourly["resampling"] == {
+        "policy": "complete_buckets_only",
+        "incomplete_buckets_omitted": True,
+    }
+    assert hourly["verified_contiguous"] is False
 
 
 def test_import_accepts_tradingview_column_case_and_session_phase(
@@ -141,6 +212,9 @@ def test_import_accepts_tradingview_column_case_and_session_phase(
     assert manifest["alignment"] == "fixed_epoch"
     assert manifest["alignment_offset_ms"] == 3_600_000
     assert manifest["excluded_range_count"] == 1
+    with pytest.raises(LocalDatasetError) as error:
+        service.query(manifest["dataset_id"], interval="4h", limit=10)
+    assert error.value.code == "interval_alignment_incompatible"
     revision = manifest["data_epoch"].removeprefix("sha256:")
     receipt = json.loads(
         (

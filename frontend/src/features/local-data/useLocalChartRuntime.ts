@@ -4,6 +4,7 @@ import type { FeedResult, AppliedKlineResult } from "../market-data/klineContrac
 import type { EpochSeconds, MarketSeries } from "../market-data/marketDataTypes.js";
 import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
+import { floorIntervalTime } from "../../utils/intervalTimeline.js";
 import { LocalKlineApi } from "./localDataApi.js";
 import type { LocalDatasetManifest } from "./localDataTypes.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
@@ -50,7 +51,10 @@ export function buildLocalChartDataMeta(
   };
 }
 
-export function useLocalChartRuntime(manifest: LocalDatasetManifest): LocalChartRuntime {
+export function useLocalChartRuntime(
+  manifest: LocalDatasetManifest,
+  interval: string = manifest.interval,
+): LocalChartRuntime {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -60,12 +64,12 @@ export function useLocalChartRuntime(manifest: LocalDatasetManifest): LocalChart
     exchange: "local",
     marketType: manifest.dataset_id,
     symbol: manifest.symbol,
-    interval: manifest.interval,
-  }), [manifest.dataset_id, manifest.interval, manifest.symbol]);
+    interval,
+  }), [interval, manifest.dataset_id, manifest.symbol]);
   const seriesStore = useMemo(() => new SeriesWindowStore({
-    intervalSeconds: parseIntervalSeconds(manifest.interval),
-    seriesKey: `local:${manifest.dataset_id}:${manifest.data_epoch}`,
-  }), [manifest.data_epoch, manifest.dataset_id, manifest.interval]);
+    intervalSeconds: parseIntervalSeconds(interval),
+    seriesKey: `local:${manifest.dataset_id}:${manifest.data_epoch}:${interval}`,
+  }), [interval, manifest.data_epoch, manifest.dataset_id]);
   const feed = useMemo(() => new SeriesDataFeed({
     api: new LocalKlineApi(manifest.dataset_id),
     getActiveSeries: () => series,
@@ -132,9 +136,9 @@ export function useLocalChartRuntime(manifest: LocalDatasetManifest): LocalChart
 
   const focusTime = useCallback(async (time: number): Promise<boolean> => {
     if (!Number.isFinite(time) || time <= 0) return false;
-    const target = time as EpochSeconds;
+    const target = (floorIntervalTime(interval, time) ?? time) as EpochSeconds;
     if (seriesStore.hasTime(target)) return true;
-    const intervalSeconds = parseIntervalSeconds(manifest.interval) ?? 60;
+    const intervalSeconds = parseIntervalSeconds(interval) ?? 60;
     const radius = Math.max(intervalSeconds * 120, 3_600);
     setLoadingMore(true);
     setError(null);
@@ -159,7 +163,7 @@ export function useLocalChartRuntime(manifest: LocalDatasetManifest): LocalChart
     } finally {
       setLoadingMore(false);
     }
-  }, [feed, manifest.interval, series, seriesStore]);
+  }, [feed, interval, series, seriesStore]);
 
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
   return {

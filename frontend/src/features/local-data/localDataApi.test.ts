@@ -29,6 +29,8 @@ function manifest(): LocalDatasetManifest {
     source: "local_dataset",
     symbol: "BTC-USDT",
     interval: "1m",
+    alignment: "fixed_epoch",
+    alignment_offset_ms: 0,
     volume_available: true,
     timezone: "UTC",
     timestamp_semantics: "bar_open",
@@ -215,6 +217,7 @@ test("local indicator compute sends identities and params without browser OHLCV"
       source: "local_dataset",
       dataset_id: manifest().dataset_id,
       data_epoch: manifest().data_epoch,
+      interval: "5m",
       ok: true,
       results: [{
         clientId: "local-ma-one",
@@ -238,10 +241,11 @@ test("local indicator compute sends identities and params without browser OHLCV"
     jobKey: "ma-job-one",
     name: "MA",
     params: { period: 3, source: "close" },
-  }]);
+  }], "5m");
 
   assert.equal(Object.hasOwn(requestBody, "ohlcv"), false);
   assert.equal(requestBody.data_epoch, manifest().data_epoch);
+  assert.equal(requestBody.interval, "5m");
   assert.deepEqual(requestBody.requests, [{
     clientId: "local-ma-one",
     jobKey: "ma-job-one",

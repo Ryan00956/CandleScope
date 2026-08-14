@@ -17,6 +17,7 @@ from app.api.v1.indicators import _spec_to_preset
 from app.core.config import LOCAL_DATA_MAX_UPLOAD_BYTES, RUNTIME_MODE
 from app.indicator import registry
 from app.local_data import (
+    MAX_LOCAL_RESAMPLE_FACTOR,
     LocalDatasetError,
     LocalDatasetService,
     LocalImportJobManager,
@@ -48,6 +49,7 @@ class LocalIndicatorComputeItem(BaseModel):
 class LocalIndicatorComputeBatchRequest(BaseModel):
     schemaVersion: Literal[1] = 1
     data_epoch: str = Field(min_length=8, max_length=80)
+    interval: str | None = Field(default=None, min_length=2, max_length=32)
     requests: list[LocalIndicatorComputeItem] = Field(min_length=1, max_length=32)
 
 
@@ -146,6 +148,13 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "realtime": False,
         "backfill": False,
         "gaps_are_terminal": True,
+        "resampling": {
+            "enabled": True,
+            "alignment": "fixed_epoch",
+            "rule": "target_must_be_integer_multiple_of_source",
+            "complete_buckets_only": True,
+            "max_aggregation_factor": MAX_LOCAL_RESAMPLE_FACTOR,
+        },
         "static_indicators": sorted(LOCAL_INDICATOR_NAMES),
         "static_indicator_max_bars": MAX_LOCAL_INDICATOR_BARS,
         "max_upload_bytes": LOCAL_DATA_MAX_UPLOAD_BYTES,
@@ -322,9 +331,15 @@ async def compute_local_indicators(
 
     def _compute() -> dict[str, Any]:
         request_payload = [item.model_dump() for item in body.requests]
+        manifest = service.get_manifest(dataset_id)
+        plan = service.resolve_interval(
+            manifest,
+            body.interval or manifest["interval"],
+        )
+        effective_interval = plan.target.canonical
         cache_key = hashlib.sha256(
             json.dumps(
-                request_payload,
+                {"interval": effective_interval, "requests": request_payload},
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -341,16 +356,21 @@ async def compute_local_indicators(
             dataset_id,
             data_epoch=body.data_epoch,
             max_rows=MAX_LOCAL_INDICATOR_BARS,
+            interval=effective_interval,
         )
         result = compute_local_indicator_batch(
             dataset_id=dataset_id,
             data_epoch=body.data_epoch,
             symbol=manifest["symbol"],
-            interval=manifest["interval"],
+            interval=effective_interval,
             volume_available=bool(manifest.get("volume_available")),
             rows=rows,
             requests=request_payload,
         )
+        result["interval"] = effective_interval
+        result["source_interval"] = manifest["interval"]
+        result["derived"] = plan.derived
+        result["aggregation_factor"] = plan.factor
         result["cache"] = "miss"
         service.write_analysis_cache(
             dataset_id,

@@ -436,6 +436,7 @@ export interface LocalIndicatorComputeJob {
 export async function computeLocalIndicatorBatch(
   manifest: LocalDatasetManifest,
   jobs: readonly LocalIndicatorComputeJob[],
+  interval: string = manifest.interval,
   signal?: AbortSignal,
 ): Promise<IndicatorComputeBatchResponse> {
   if (jobs.length < 1 || jobs.length > 32) {
@@ -449,6 +450,7 @@ export async function computeLocalIndicatorBatch(
       body: JSON.stringify({
         schemaVersion: 1,
         data_epoch: manifest.data_epoch,
+        interval,
         requests: jobs,
       }),
       ...(signal === undefined ? {} : { signal }),
@@ -457,7 +459,8 @@ export async function computeLocalIndicatorBatch(
   if (!isJsonRecord(payload)
     || payload.source !== "local_dataset"
     || payload.dataset_id !== manifest.dataset_id
-    || payload.data_epoch !== manifest.data_epoch) {
+    || payload.data_epoch !== manifest.data_epoch
+    || payload.interval !== interval) {
     throw new TypeError("Local indicator response identity is invalid");
   }
   const parsed = parseIndicatorComputeBatchResponse(payload);

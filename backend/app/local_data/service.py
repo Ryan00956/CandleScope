@@ -23,6 +23,11 @@ from app.data_engine.interval_policy import (
     IntervalSpec,
     parse_interval_spec,
 )
+from app.local_data.resampling import (
+    LocalResamplePlan,
+    LocalResamplingError,
+    resolve_local_resample_plan,
+)
 
 
 DATASET_ID_RE = re.compile(r"^local-[0-9a-f]{32}$")
@@ -1022,6 +1027,7 @@ class LocalDatasetService:
         *,
         data_epoch: str,
         max_rows: int,
+        interval: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Load all rows from exactly one immutable revision for static analysis."""
         if max_rows < 1:
@@ -1030,6 +1036,20 @@ class LocalDatasetService:
             dataset_id,
             data_epoch,
         )
+        plan = self.resolve_interval(manifest, interval or manifest["interval"])
+        if plan.derived:
+            selected = self._read_derived_rows(
+                revision_dir,
+                plan=plan,
+                fetch_limit=max_rows + 1,
+            )
+            if len(selected) > max_rows:
+                raise LocalDatasetError(
+                    f"Static indicators currently support at most {max_rows} bars",
+                    code="indicator_dataset_too_large",
+                )
+            selected.reverse()
+            return manifest, [self._wire_bar(row) for row in selected]
         db_path = revision_dir / "bars.sqlite"
         uri = f"file:{db_path.as_posix()}?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
@@ -1052,6 +1072,140 @@ class LocalDatasetService:
             )
         return manifest, [self._wire_bar(row) for row in selected]
 
+    @staticmethod
+    def resolve_interval(
+        manifest: dict[str, Any],
+        interval: str,
+    ) -> LocalResamplePlan:
+        alignment_offset = manifest.get("alignment_offset_ms")
+        if alignment_offset is None:
+            source = parse_interval_spec(str(manifest.get("interval", "")))
+            first_open_ms = manifest.get("first_open_ms")
+            alignment_offset = (
+                int(first_open_ms) % source.nominal_ms
+                if source is not None and first_open_ms is not None
+                else -1
+            )
+        try:
+            return resolve_local_resample_plan(
+                str(manifest["interval"]),
+                interval,
+                alignment_offset_ms=int(alignment_offset),
+            )
+        except LocalResamplingError as exc:
+            raise LocalDatasetError(str(exc), code=exc.code) from exc
+
+    @staticmethod
+    def _read_derived_rows(
+        revision_dir: Path,
+        *,
+        plan: LocalResamplePlan,
+        fetch_limit: int,
+        before_ms: int | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> list[sqlite3.Row]:
+        """Aggregate only complete target buckets from one immutable revision."""
+        if not plan.derived:
+            raise ValueError("A derived resample plan is required")
+        clauses: list[str] = []
+        parameters: dict[str, int] = {
+            "source_ms": plan.source.nominal_ms,
+            "target_ms": plan.target.nominal_ms,
+            "last_component_offset_ms": (
+                plan.target.nominal_ms - plan.source.nominal_ms
+            ),
+            "factor": plan.factor,
+            "fetch_limit": max(1, int(fetch_limit)),
+        }
+        if before_ms is not None:
+            clauses.append("bucket_open_ms < :before_ms")
+            parameters["before_ms"] = int(before_ms)
+        if start_ms is not None:
+            clauses.append("bucket_open_ms >= :start_ms")
+            parameters["start_ms"] = int(start_ms)
+        if end_ms is not None:
+            clauses.append("bucket_open_ms <= :end_ms")
+            parameters["end_ms"] = int(end_ms)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        bucket = "((open_time_ms / :target_ms) * :target_ms)"
+        statement = f"""
+            WITH grouped AS (
+                SELECT
+                    {bucket} AS bucket_open_ms,
+                    MAX(CASE WHEN open_time_ms = {bucket} THEN open END) AS open,
+                    MAX(CASE
+                        WHEN open_time_ms = {bucket} + :last_component_offset_ms
+                        THEN close
+                    END) AS close,
+                    MAX(CAST(high AS REAL)) AS high,
+                    MIN(CAST(low AS REAL)) AS low,
+                    CASE
+                        WHEN COUNT(volume) = COUNT(*)
+                        THEN ROUND(SUM(CAST(volume AS REAL)), 8)
+                        ELSE NULL
+                    END AS volume,
+                    CASE
+                        WHEN COUNT(quote_volume) = COUNT(*)
+                        THEN ROUND(SUM(CAST(quote_volume AS REAL)), 8)
+                        ELSE NULL
+                    END AS quote_volume,
+                    CASE
+                        WHEN COUNT(trades) = COUNT(*) THEN SUM(trades)
+                        ELSE NULL
+                    END AS trades,
+                    CASE
+                        WHEN COUNT(taker_buy_base) = COUNT(*)
+                        THEN ROUND(SUM(CAST(taker_buy_base AS REAL)), 8)
+                        ELSE NULL
+                    END AS taker_buy_base,
+                    CASE
+                        WHEN COUNT(taker_buy_quote) = COUNT(*)
+                        THEN ROUND(SUM(CAST(taker_buy_quote AS REAL)), 8)
+                        ELSE NULL
+                    END AS taker_buy_quote,
+                    MIN(is_closed) AS is_closed
+                FROM bars
+                GROUP BY {bucket}
+                HAVING COUNT(*) = :factor
+                    AND MIN(open_time_ms) = {bucket}
+                    AND MAX(open_time_ms) = {bucket} + :last_component_offset_ms
+                    AND SUM(CASE
+                        WHEN close_time_ms = open_time_ms + :source_ms - 1 THEN 0
+                        ELSE 1
+                    END) = 0
+            )
+            SELECT
+                bucket_open_ms AS open_time_ms,
+                bucket_open_ms + :target_ms - 1 AS close_time_ms,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                quote_volume,
+                trades,
+                taker_buy_base,
+                taker_buy_quote,
+                is_closed
+            FROM grouped
+            {where}
+            ORDER BY bucket_open_ms DESC
+            LIMIT :fetch_limit
+        """
+        db_path = revision_dir / "bars.sqlite"
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            connection.row_factory = sqlite3.Row
+            return connection.execute(statement, parameters).fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise LocalDatasetError(
+                "Dataset bars are unreadable", code="dataset_corrupt"
+            ) from exc
+        finally:
+            connection.close()
+
     def query(
         self,
         dataset_id: str,
@@ -1063,18 +1217,18 @@ class LocalDatasetService:
         end_ms: int | None = None,
     ) -> dict[str, Any]:
         manifest = self.get_manifest(dataset_id)
-        requested = parse_interval_spec(interval)
-        stored = parse_interval_spec(manifest["interval"])
-        if (
-            requested is None
-            or stored is None
-            or requested.signature != stored.signature
-        ):
-            raise LocalDatasetError(
-                f"Dataset contains only interval {manifest['interval']}",
-                code="interval_not_available",
-            )
+        plan = self.resolve_interval(manifest, interval)
         limit = max(1, min(int(limit), 5_000))
+        if plan.derived:
+            return self._query_derived(
+                dataset_id,
+                manifest=manifest,
+                plan=plan,
+                limit=limit,
+                before_ms=before_ms,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
         clauses: list[str] = []
         parameters: list[int] = []
         if before_ms is not None:
@@ -1111,7 +1265,10 @@ class LocalDatasetService:
             "dataset_id": dataset_id,
             "data_epoch": manifest["data_epoch"],
             "symbol": manifest["symbol"],
-            "interval": manifest["interval"],
+            "interval": plan.target.canonical,
+            "source_interval": manifest["interval"],
+            "derived": False,
+            "aggregation_factor": 1,
             "volume_available": manifest["volume_available"],
             "data": rows,
             "count": len(rows),
@@ -1132,6 +1289,79 @@ class LocalDatasetService:
             "verified_contiguous": True,
             "excluded_ranges": [dict(gap) for gap in gaps],
             "missing_ranges": [],
+        }
+
+    def _query_derived(
+        self,
+        dataset_id: str,
+        *,
+        manifest: dict[str, Any],
+        plan: LocalResamplePlan,
+        limit: int,
+        before_ms: int | None,
+        start_ms: int | None,
+        end_ms: int | None,
+    ) -> dict[str, Any]:
+        revision_dir = self._revision_dir(dataset_id)
+        selected = self._read_derived_rows(
+            revision_dir,
+            plan=plan,
+            fetch_limit=limit + 1,
+            before_ms=before_ms,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        has_more = len(selected) > limit
+        selected = selected[:limit]
+        selected.reverse()
+        rows = [self._wire_bar(row) for row in selected]
+        earliest_selected = selected[0]["open_time_ms"] if selected else None
+        db_path = revision_dir / "bars.sqlite"
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            connection.row_factory = sqlite3.Row
+            gaps = connection.execute(
+                "SELECT * FROM excluded_ranges ORDER BY start_ms ASC"
+            ).fetchall()
+        finally:
+            connection.close()
+        return {
+            "source": "local_dataset",
+            "dataset_id": dataset_id,
+            "data_epoch": manifest["data_epoch"],
+            "symbol": manifest["symbol"],
+            "interval": plan.target.canonical,
+            "source_interval": plan.source.canonical,
+            "derived": True,
+            "aggregation_factor": plan.factor,
+            "data": rows,
+            "count": len(rows),
+            "all_rows_final": all(row["is_closed"] for row in rows),
+            "complete": True,
+            "retryable": False,
+            "renderable": bool(rows),
+            "has_more": has_more,
+            "truncated": has_more,
+            "next_end_ms": earliest_selected - 1
+            if has_more and earliest_selected is not None
+            else None,
+            "next_before_ms": earliest_selected if has_more else None,
+            "history_state": "ready" if has_more else "exhausted",
+            "terminal_reason": None if has_more else "dataset_boundary",
+            "earliest_available_ms": (
+                earliest_selected
+                if not has_more and earliest_selected is not None
+                else plan.target.floor_ms(manifest["first_open_ms"])
+            ),
+            "availability_revision": manifest["data_epoch"],
+            "verified_contiguous": not gaps,
+            "excluded_ranges": [dict(gap) for gap in gaps],
+            "missing_ranges": [],
+            "resampling": {
+                "policy": "complete_buckets_only",
+                "incomplete_buckets_omitted": True,
+            },
         }
 
     def resolve_event_times(

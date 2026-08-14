@@ -51,6 +51,7 @@ import {
   restoreLocalProjectState,
 } from "./localProjectState.js";
 import LocalAnalysisPanel from "./LocalAnalysisPanel.js";
+import LocalIntervalSelector from "./LocalIntervalSelector.js";
 import { createLocalAnalysisMarkerSource } from "./localAnalysisMarkerSource.js";
 import {
   EMPTY_LOCAL_ANALYSIS_SNAPSHOT,
@@ -81,6 +82,7 @@ import {
   createLocalIndicatorCatalog,
   resolveLocalIndicatorSupport,
 } from "./localIndicatorCatalog.js";
+import { resolveLocalIntervalSupport } from "./localIntervalPolicy.js";
 
 
 function formatRows(rows: number): string {
@@ -477,6 +479,7 @@ function LocalDatasetManagement({
 
 function LocalChart({
   manifest,
+  interval,
   runtime,
   dataMeta,
   eventStore,
@@ -498,6 +501,7 @@ function LocalChart({
   onCrosshairMove,
 }: {
   manifest: LocalDatasetManifest;
+  interval: string;
   runtime: ReturnType<typeof useLocalChartRuntime>;
   dataMeta: ReturnType<typeof buildLocalChartDataMeta>;
   eventStore: LocalAnalysisEventStore;
@@ -522,7 +526,8 @@ function LocalChart({
   const markerSource = useMemo(() => createLocalAnalysisMarkerSource({
     eventStore,
     seriesStore: runtime.seriesStore,
-  }), [eventStore, runtime.seriesStore]);
+    interval,
+  }), [eventStore, interval, runtime.seriesStore]);
   const [navigationTarget, setNavigationTarget] = useState<LocalAnalysisFocusRequest | null>(null);
 
   useEffect(() => {
@@ -548,7 +553,7 @@ function LocalChart({
           seriesStore={runtime.seriesStore}
           symbol={manifest.symbol}
           drawingKeyBase={`local:${manifest.dataset_id}:${manifest.data_epoch}`}
-          interval={manifest.interval}
+          interval={interval}
           loading={runtime.loading || runtime.loadingMore}
           dataMeta={dataMeta}
           onCrosshairMove={onCrosshairMove}
@@ -556,7 +561,7 @@ function LocalChart({
           onNeedMoreLeft={runtime.loadMoreLeft}
           canLoadMoreLeft={runtime.hasMoreLeft}
           canRestoreLatestWindow={false}
-          datasetKey={`local:${manifest.dataset_id}:${manifest.data_epoch}`}
+          datasetKey={`local:${manifest.dataset_id}:${manifest.data_epoch}:${interval}`}
           upColor={settings.upColor}
           downColor={settings.downColor}
           chartType={settings.chartType}
@@ -617,6 +622,7 @@ function LocalChart({
 
 function LocalDatasetWorkspace({
   manifest,
+  interval,
   indicatorPresets,
   eventStore,
   focusRequest,
@@ -639,6 +645,7 @@ function LocalDatasetWorkspace({
   resolvedTheme,
 }: {
   manifest: LocalDatasetManifest;
+  interval: string;
   indicatorPresets: readonly IndicatorPreset[];
   eventStore: LocalAnalysisEventStore;
   focusRequest: LocalAnalysisFocusRequest | null;
@@ -661,7 +668,7 @@ function LocalDatasetWorkspace({
   resolvedTheme: string;
 }) {
   const chartSurface = useChartSurfaceRuntime();
-  const chartRuntime = useLocalChartRuntime(manifest);
+  const chartRuntime = useLocalChartRuntime(manifest, interval);
   const subscribeSeries = useCallback(
     (listener: () => void) => chartRuntime.seriesStore.subscribe(listener),
     [chartRuntime.seriesStore],
@@ -691,6 +698,7 @@ function LocalDatasetWorkspace({
   ]);
   const indicators = useLocalIndicatorRuntime({
     manifest,
+    interval,
     bars,
     chartDataMeta: dataMeta,
     seriesVersion,
@@ -708,7 +716,7 @@ function LocalDatasetWorkspace({
       exchange: "local",
       marketType: manifest.dataset_id,
       symbol: manifest.symbol,
-      interval: manifest.interval,
+      interval,
     },
     resolvedTheme,
     chartSurfaceActions: chartSurface.actions,
@@ -723,20 +731,20 @@ function LocalDatasetWorkspace({
   );
   const savedVisibleRange = useMemo(() => getVisibleRangeForInterval(
     manifest.symbol,
-    manifest.interval,
+    interval,
     manifest.dataset_id,
     "local",
-  ), [manifest.dataset_id, manifest.interval, manifest.symbol]);
+  ), [interval, manifest.dataset_id, manifest.symbol]);
   const handleVisibleRangeChange = useCallback((range: unknown) => {
     saveVisibleRangeForInterval(
       manifest.symbol,
-      manifest.interval,
+      interval,
       range,
       manifest.dataset_id,
       "local",
       dataMeta,
     );
-  }, [dataMeta, manifest.dataset_id, manifest.interval, manifest.symbol]);
+  }, [dataMeta, interval, manifest.dataset_id, manifest.symbol]);
   const [drawingInteractionReady, setDrawingInteractionReady] = useState(false);
   const drawingTool = drawingToolWhenInteractionReady(
     drawings.view.drawingTool,
@@ -808,6 +816,7 @@ function LocalDatasetWorkspace({
         chart={(
           <LocalChart
             manifest={manifest}
+            interval={interval}
             runtime={chartRuntime}
             dataMeta={dataMeta}
             eventStore={eventStore}
@@ -865,8 +874,10 @@ function LocalDatasetWorkspace({
           manifest,
         )}
         modeNotice={{
-          label: "本地 CSV",
-          description: "共享指标 Runtime，只计算当前不可变 dataEpoch；不联网、不回填。",
+          label: interval === manifest.interval ? "本地 CSV" : `本地派生 ${interval}`,
+          description: interval === manifest.interval
+            ? "共享指标 Runtime，只计算当前不可变 dataEpoch；不联网、不回填。"
+            : `指标基于完整的 ${interval} 派生 K 线计算；源周期 ${manifest.interval}，不联网、不插值。`,
         }}
       />
     </>
@@ -901,6 +912,10 @@ export default function LocalApp() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [lastCrosshair, setLastCrosshair] = useState<MainSeriesCrosshairValue | null>(null);
   const [focusRequest, setFocusRequest] = useState<LocalAnalysisFocusRequest | null>(null);
+  const [intervalSelection, setIntervalSelection] = useState<{
+    scope: string;
+    value: string;
+  } | null>(null);
 
   const refresh = useCallback(async (preferredId?: string) => {
     const loaded = await listLocalDatasets();
@@ -934,6 +949,53 @@ export default function LocalApp() {
     () => datasets.find((dataset) => dataset.dataset_id === selectedId) ?? null,
     [datasets, selectedId],
   );
+  const intervalScope = selected === null
+    ? null
+    : `${selected.dataset_id}:${selected.data_epoch}`;
+  const selectedInterval = useMemo(() => {
+    if (selected === null) return null;
+    if (intervalSelection?.scope !== intervalScope) return selected.interval;
+    const support = resolveLocalIntervalSupport(selected, intervalSelection.value);
+    return support.supported ? support.target : selected.interval;
+  }, [intervalScope, intervalSelection, selected]);
+
+  useEffect(() => {
+    if (selected === null || intervalScope === null) {
+      setIntervalSelection(null);
+      return;
+    }
+    const storageKey = `candlescope:local-interval:v1:${intervalScope}`;
+    let value = selected.interval;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      if (stored !== null) {
+        const support = resolveLocalIntervalSupport(selected, stored);
+        if (support.supported) value = support.target;
+      }
+    } catch {
+      // Storage availability must not block local chart access.
+    }
+    setIntervalSelection({ scope: intervalScope, value });
+  }, [intervalScope, selected]);
+
+  const handleIntervalSelect = useCallback((value: string) => {
+    if (selected === null || intervalScope === null) return;
+    const support = resolveLocalIntervalSupport(selected, value);
+    if (!support.supported) {
+      setError(support.message);
+      return;
+    }
+    setIntervalSelection({ scope: intervalScope, value: support.target });
+    setError(null);
+    try {
+      window.localStorage.setItem(
+        `candlescope:local-interval:v1:${intervalScope}`,
+        support.target,
+      );
+    } catch {
+      // The selection still works for this session when persistence is unavailable.
+    }
+  }, [intervalScope, selected]);
   const analysisStore = useMemo(() => selected === null ? null : new LocalAnalysisEventStore({
     datasetId: selected.dataset_id,
     dataEpoch: selected.data_epoch,
@@ -956,6 +1018,11 @@ export default function LocalApp() {
     setIndicatorPanelOpen(false);
     setActiveIndicatorCount(0);
   }, [selected?.data_epoch, selected?.dataset_id]);
+
+  useEffect(() => {
+    setLastCrosshair(null);
+    setFocusRequest(null);
+  }, [selectedInterval]);
 
   const focusAnalysisEvent = useCallback((event: LocalAnalysisEvent) => {
     setFocusRequest((current) => ({
@@ -1071,9 +1138,19 @@ export default function LocalApp() {
         />
       )}
       intervalSelector={(
-        <div className="local-dataset-truthbar">
-          <span>{selected ? `${selected.interval} · ${selected.timezone} · ${formatRows(selected.rows)} bars · ${selected.volume_available ? "OHLCV" : "OHLC-only / 成交量不可用"}` : "等待本地数据"}</span>
-          <span>{selected ? `dataEpoch ${selected.data_epoch.slice(7, 19)}` : "source: local_dataset"}</span>
+        <div className="local-interval-strip">
+          {selected !== null && selectedInterval !== null && (
+            <LocalIntervalSelector
+              key={intervalScope}
+              manifest={selected}
+              interval={selectedInterval}
+              onSelect={handleIntervalSelect}
+            />
+          )}
+          <div className="local-dataset-truthbar">
+            <span>{selected ? `${selectedInterval}${selectedInterval === selected.interval ? " 源数据" : ` · 由 ${selected.interval} 完整聚合`} · ${selected.timezone} · ${formatRows(selected.rows)} source bars · ${selected.volume_available ? "OHLCV" : "OHLC-only / 成交量不可用"}` : "等待本地数据"}</span>
+            <span>{selected ? `dataEpoch ${selected.data_epoch.slice(7, 19)}` : "source: local_dataset"}</span>
+          </div>
         </div>
       )}
       workspace={(
@@ -1081,6 +1158,7 @@ export default function LocalApp() {
           <LocalDatasetWorkspace
             key={selected.data_epoch}
             manifest={selected}
+            interval={selectedInterval ?? selected.interval}
             indicatorPresets={indicatorPresets}
             eventStore={analysisStore}
             focusRequest={focusRequest}

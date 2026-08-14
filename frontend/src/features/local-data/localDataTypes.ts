@@ -6,6 +6,8 @@ export interface LocalDatasetManifest {
   source: "local_dataset";
   symbol: string;
   interval: string;
+  alignment?: "fixed_epoch" | "weekly_monday" | "calendar_month";
+  alignment_offset_ms?: number;
   volume_available: boolean;
   timezone: string;
   timestamp_semantics: "bar_open";

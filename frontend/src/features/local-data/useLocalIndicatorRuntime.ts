@@ -19,6 +19,7 @@ import type { LocalDatasetManifest } from "./localDataTypes.js";
 
 export interface UseLocalIndicatorRuntimeOptions {
   manifest: LocalDatasetManifest;
+  interval: string;
   bars: KlineBar[];
   chartDataMeta: ChartDataCommitMeta;
   seriesVersion: number;
@@ -33,6 +34,7 @@ export interface UseLocalIndicatorRuntimeOptions {
  */
 export function useLocalIndicatorRuntime({
   manifest,
+  interval,
   bars,
   chartDataMeta,
   seriesVersion,
@@ -58,8 +60,8 @@ export function useLocalIndicatorRuntime({
         params: job.request.params ?? {},
       };
     });
-    return computeLocalIndicatorBatch(manifest, requests, signal);
-  }, [manifest]);
+    return computeLocalIndicatorBatch(manifest, requests, interval, signal);
+  }, [interval, manifest]);
   const latestTime = bars.at(-1)?.time ?? null;
 
   return useProvidedBarsIndicatorRuntime({
@@ -68,14 +70,14 @@ export function useLocalIndicatorRuntime({
     candleUpColor,
     computeBatch,
     chartDataMeta,
-    datasetKey: `local:${manifest.dataset_id}:${manifest.data_epoch}`,
+    datasetKey: `local:${manifest.dataset_id}:${manifest.data_epoch}:${interval}`,
     exchange: "local",
-    interval: manifest.interval,
+    interval,
     marketType: manifest.dataset_id,
     persistence,
     seriesReady: seriesVersion,
     sourceOrdinal: seriesVersion,
-    sourceScopeKey: `${manifest.dataset_id}:${manifest.data_epoch}`,
+    sourceScopeKey: `${manifest.dataset_id}:${manifest.data_epoch}:${interval}`,
     symbol: manifest.symbol,
     visibleThroughSeconds: latestTime,
   });

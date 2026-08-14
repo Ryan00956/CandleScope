@@ -80,3 +80,27 @@ test("marker subscribers observe both event edits and loaded-axis changes", () =
   assert.equal(notifications, 2);
   unsubscribe();
 });
+
+test("source-period events project onto their containing derived candle", () => {
+  const seriesStore = new SeriesWindowStore({ intervalSeconds: 1800 });
+  seriesStore.replace([{ time: 0, open: 1, high: 2, low: 1, close: 2 }]);
+  const eventStore = new LocalAnalysisEventStore({
+    datasetId: "dataset-1",
+    dataEpoch: "sha256:abc",
+  }, { storage: new MemoryStorage(), idFactory: () => "event-derived" });
+  eventStore.create({
+    time: 900,
+    price: 2,
+    kind: "note",
+    label: "15m source event",
+    note: "",
+    color: "#f59e0b",
+  });
+  const source = createLocalAnalysisMarkerSource({
+    eventStore,
+    seriesStore,
+    interval: "30m",
+  });
+
+  assert.equal(source.getSnapshot().markers[0]?.time, 0);
+});

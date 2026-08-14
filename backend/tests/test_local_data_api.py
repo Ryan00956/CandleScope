@@ -54,6 +54,69 @@ def test_import_list_and_query_local_csv(tmp_path: Path, monkeypatch) -> None:
     assert latest.json()["source"] == "local_dataset"
 
 
+def test_local_api_resamples_15m_for_chart_and_indicators(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    rows = ["time,open,high,low,close,volume"]
+    for index in range(12):
+        timestamp = 1_704_067_200 + index * 15 * 60
+        rows.append(
+            f"{timestamp},{100 + index},{102 + index},{99 + index},"
+            f"{101 + index},{10 + index}"
+        )
+    imported = client.post(
+        "/api/v1/local/imports/csv",
+        params={
+            "name": "15m source",
+            "symbol": "BTCUSDT",
+            "interval": "15m",
+            "timestamp_unit": "s",
+        },
+        content="\n".join(rows) + "\n",
+        headers={"content-type": "text/csv"},
+    ).json()
+
+    ninety = client.get(
+        f"/api/v1/local/datasets/{imported['dataset_id']}/klines/latest",
+        params={"interval": "90m", "limit": 10},
+    )
+    assert ninety.status_code == 200, ninety.text
+    assert ninety.json()["aggregation_factor"] == 6
+    assert [row["close"] for row in ninety.json()["data"]] == [106.0, 112.0]
+
+    indicators = client.post(
+        f"/api/v1/local/datasets/{imported['dataset_id']}/indicators/compute/batch",
+        json={
+            "schemaVersion": 1,
+            "data_epoch": imported["data_epoch"],
+            "interval": "90m",
+            "requests": [
+                {
+                    "jobKey": "ma-2-90m",
+                    "clientId": "local-ma-90m",
+                    "name": "MA",
+                    "params": {"period": 2, "source": "close"},
+                }
+            ],
+        },
+    )
+    assert indicators.status_code == 200, indicators.text
+    assert indicators.json()["interval"] == "90m"
+    assert indicators.json()["derived"] is True
+    assert indicators.json()["results"][0]["payload"]["lines"][0]["data"][-1][
+        "value"
+    ] == 109.0
+
+    unsupported = client.get(
+        f"/api/v1/local/datasets/{imported['dataset_id']}/klines/latest",
+        params={"interval": "89m", "limit": 10},
+    )
+    assert unsupported.status_code == 422
+    assert unsupported.json()["detail"]["code"] == "interval_not_composable"
+    assert "not an integer multiple" in unsupported.json()["detail"]["message"]
+
+
 def test_event_time_resolution_endpoint_preserves_input_order(
     tmp_path: Path, monkeypatch
 ) -> None:

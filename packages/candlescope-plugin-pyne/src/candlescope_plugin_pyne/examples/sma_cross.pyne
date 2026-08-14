@@ -1,0 +1,9 @@
+// candlescope.strategy-example:sma_cross
+// Frozen BAR-close example. Host maps the last signal to TARGET_POSITION.
+indicator("SMA Cross Strategy", overlay=true)
+fast_len = input.int(3, "fast")
+slow_len = input.int(5, "slow")
+fast = ta.sma(close, fast_len)
+slow = ta.sma(close, slow_len)
+long_signal = ta.crossover(fast, slow)
+flat_signal = ta.crossunder(fast, slow)

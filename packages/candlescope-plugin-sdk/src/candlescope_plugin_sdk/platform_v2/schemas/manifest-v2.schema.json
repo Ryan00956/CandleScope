@@ -227,7 +227,8 @@
               "onView",
               "onSchedule",
               "onMarketSubscription",
-              "onStartup"
+              "onStartup",
+              "onBacktestRun"
             ]
           }
         }

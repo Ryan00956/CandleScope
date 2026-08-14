@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Mapping
 
 from app.core.config import BacktestSettings
+
+from app.market_dataset.snapshot import MarketEvent
+from app.simulation import SimulationKernel
 
 from .errors import BacktestError
 from .identity import canonical_json, config_hash, parse_parameters, sha256_hex
@@ -16,6 +20,9 @@ from .models import (
     transition,
 )
 from .repository import BacktestRepository
+from .strategy.host_adapter import StrategyHostAdapter
+from .strategy.protocol import StrategyProviderSession
+from .strategy.pyne_adapter import PyneHostPlanner
 
 FIDELITY_MATRIX = {
     "BAR_APPROX": ("BAR", "APPROXIMATE"),
@@ -177,6 +184,84 @@ class BacktestService:
         }
         self.repository.insert_study(record)
         return record
+
+    def execute_bar_run(
+        self,
+        run_id: str,
+        *,
+        events: tuple[MarketEvent, ...],
+        provider: object,
+        now_ms: int | None = None,
+        warmup_events: int = 0,
+    ) -> dict[str, object]:
+        """Run a queued BAR backtest through the reference kernel. No live I/O."""
+        if not self.settings.bar_effective:
+            raise BacktestError("FLAG_DISABLED", "BAR backtests are disabled")
+        record = self.get_run(run_id)
+        current = RunState(record["state"])
+        if record["fidelity_mode"] != "BAR_APPROX":
+            raise BacktestError("FIDELITY_UNSUPPORTED", "execute_bar_run only supports BAR_APPROX")
+        stamp = now_ms or _now_ms()
+        for next_state in (RunState.PREPARING, RunState.RUNNING):
+            current = transition(current, next_state)
+            self.repository.update_run_state(run_id, state=current.value, updated_at_ms=stamp)
+        session = StrategyProviderSession(provider, run_id=run_id)  # type: ignore[arg-type]
+        adapter = StrategyHostAdapter(session)
+        planner = PyneHostPlanner()
+        try:
+            config = json.loads(str(record["config_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            config = {}
+        adapter.start(
+            {
+                "roles": ["BARS"],
+                "source": config.get("source"),
+                "parameters": config.get("parameters") or {},
+                "seed": config.get("seed"),
+                "outputMode": config.get("outputMode") or "TARGET_POSITION",
+            }
+        )
+
+        def strategy(visible: tuple[MarketEvent, ...], event: MarketEvent) -> list[dict]:
+            phase = "WARMUP" if event.sequence <= warmup_events else "EVALUATION"
+            wire = adapter.observe(
+                sequence=event.sequence,
+                event_time_ms=event.event_time_ms,
+                watermark_ms=event.event_time_ms,
+                phase=phase,
+                market={"venue": "local", "symbol": str(record["dataset_id"])},
+                bar=dict(event.payload),
+            )
+            if wire is None:
+                return []
+            return planner.plan(wire)
+
+        result = SimulationKernel().run(events, strategy, warmup_events=warmup_events)
+        current = transition(RunState.RUNNING, RunState.COMPLETING)
+        current = transition(current, RunState.COMPLETED)
+        self.repository.update_run_state(run_id, state=current.value, updated_at_ms=stamp)
+        self._audit(
+            run_id,
+            "complete",
+            {
+                "decision_hash": result.decision_hash,
+                "fill_hash": result.fill_hash,
+                "ledger_hash": result.ledger_hash,
+                "report_hash": result.report_hash,
+                "ambiguity_count": result.ambiguity_count,
+                "provider_identity": getattr(provider, "identity", lambda: {})(),
+            },
+        )
+        completed = self.get_run(run_id)
+        completed["result"] = {
+            "decision_hash": result.decision_hash,
+            "fill_hash": result.fill_hash,
+            "ledger_hash": result.ledger_hash,
+            "report_hash": result.report_hash,
+            "ambiguity_count": result.ambiguity_count,
+            "fills": result.fills,
+        }
+        return completed
 
     def get_study(self, study_id: str) -> dict[str, object]:
         record = self.repository.get_study(study_id)

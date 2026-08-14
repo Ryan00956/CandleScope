@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "backtest.pyne-strategy.v1",
+  "example": "sma_cross",
+  "sourceMarker": "candlescope.strategy-example:sma_cross",
+  "parameters": {"fast": 3, "slow": 5},
+  "outputMode": "TARGET_POSITION",
+  "closes": ["10", "10", "10", "10", "10", "20", "20"],
+  "firstSignalIndex": 6,
+  "firstSignal": {
+    "kind": "TARGET_POSITION",
+    "targetExposure": "1",
+    "reasonCode": "sma_cross_up"
+  },
+  "hostFill": {
+    "reason": "NEXT_BAR_OPEN",
+    "sequence": 7
+  }
+}

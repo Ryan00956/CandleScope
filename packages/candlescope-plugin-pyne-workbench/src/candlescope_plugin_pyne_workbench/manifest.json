@@ -17,6 +17,12 @@
         "pythonModule": "candlescope_plugin_pyne_workbench.plugin",
         "resourceProfile": "standard",
         "activationEvents": ["onCommand", "onView"]
+      },
+      {
+        "id": "pyne-workbench",
+        "pythonModule": "candlescope_plugin_pyne_workbench.strategy_entrypoint",
+        "resourceProfile": "standard",
+        "activationEvents": ["onBacktestRun"]
       }
     ]
   },
@@ -136,6 +142,20 @@
       }
     },
     {
+      "id": "pyne-strategy",
+      "kind": "strategy-provider/1",
+      "title": "Pyne backtest strategy provider",
+      "entrypoint": "pyne-workbench",
+      "configuration": {
+        "inputModes": ["BAR_CLOSE"],
+        "outputModes": ["SIGNAL", "TARGET_POSITION"],
+        "stateModes": ["SESSION_STATEFUL"],
+        "reproducibility": ["DETERMINISTIC", "SEEDED"],
+        "snapshotRestore": true,
+        "maxBatchObservations": 1
+      }
+    },
+    {
       "id": "workbench-view",
       "kind": "view/1",
       "title": "Pyne Workbench",
@@ -201,7 +221,15 @@
         }
       }
     ],
-    "optional": []
+    "optional": [
+      {
+        "id": "backtest.observations.consume",
+        "scope": {
+          "roles": ["BARS"],
+          "maxSymbols": 1
+        }
+      }
+    ]
   },
   "probes": []
 }

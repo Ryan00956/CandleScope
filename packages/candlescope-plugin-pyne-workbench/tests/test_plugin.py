@@ -71,7 +71,9 @@ def test_manifest_is_independent_v2_plugin_with_bounded_capabilities() -> None:
         "command/1",
         "view/1",
         "chart-layer/2",
+        "strategy-provider/1",
     }
+    assert "pyne-workbench" in {item.id for item in manifest.backend_entrypoints}
     assert [item.id for item in manifest.permissions.required] == [
         "chart.context.read",
         "market.bars.read",

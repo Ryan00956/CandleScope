@@ -75,6 +75,7 @@ ACTIVATION_EVENTS = frozenset(
         "onSchedule",
         "onMarketSubscription",
         "onStartup",
+        "onBacktestRun",
     }
 )
 RESOURCE_PROFILES = frozenset({"minimal", "standard", "service"})

@@ -25,7 +25,9 @@ class StrategyHostAdapter:
 
     def start(self, input_plan: dict[str, Any]) -> dict[str, Any]:
         described = self.session.describe()
-        self.session.prepare({"runId": self.session.run_id, "inputPlan": input_plan})
+        self.session.prepare(
+            {"runId": self.session.run_id, "inputPlan": input_plan, **input_plan}
+        )
         return described
 
     def observe(

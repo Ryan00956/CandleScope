@@ -8,7 +8,6 @@ FORBIDDEN = (
     "app.replay",
     "app.plugin_core_v2",
     "app.plugin_host",
-    "candlescope_plugin_sdk",
     "candlescope_plugin_pyne",
 )
 

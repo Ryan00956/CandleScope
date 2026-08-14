@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M0",
+  "phaseState": "VALIDATED_DIRTY_WORKSPACE",
+  "recordedAt": "2026-08-15T00:31:00+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineHead": "4d7e6f06ee28f338b616b28476864e4ab4523c1e",
+  "mainHead": "5df19ae76686977f324644e9e62a63b73cf6a743",
+  "aheadBehindMain": {
+    "ahead": 20,
+    "behind": 0
+  },
+  "workspaceOwnership": {
+    "modifiedTrackedFiles": 61,
+    "untrackedFilesBeforeEvidence": 23,
+    "classification": "BACKTEST_BASELINE_AND_REQUIRED_HOST_SEAMS",
+    "crossWorktreeMutationDetected": false,
+    "unrelatedUserChangeIncluded": false
+  },
+  "validation": {
+    "backendM0Gate": {
+      "result": "PASS",
+      "tests": 128,
+      "warnings": 6
+    },
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendBacktestTests": {
+      "result": "PASS",
+      "tests": 8
+    },
+    "frontendBuild": "PASS",
+    "pluginSdkManifestCompatibility": {
+      "result": "PASS",
+      "tests": 8
+    },
+    "gitDiffCheck": "PASS"
+  },
+  "publicApiSmoke": {
+    "result": "PASS",
+    "baseUrl": "http://127.0.0.1:18092/api/v1/backtests",
+    "runtimeMode": "LOCAL_OFFLINE",
+    "runId": "bt_2135ff56c65c4699a75d757949222959",
+    "fidelityMode": "BAR_APPROX",
+    "snapshotRows": 20,
+    "reportHash": "sha256:536b678fe001acc78acc800402215508bcbd1756377d9cc0c2987367bec1805f",
+    "exportHashMatched": true,
+    "networkFallbackObserved": false
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15185/backtest.html",
+    "runId": "bt_05d77a9da1b34b6f939c57e474cdc6d5",
+    "fidelityMode": "BAR_APPROX",
+    "takerFeeBps": "5",
+    "feesPaid": "0.1550055",
+    "fillCount": 3,
+    "roundTripTradeCount": 1,
+    "reportHash": "sha256:32c003c0745b7bef325432864ec5a1d96c04ab501e1b8d3287d9c9f3e8fc7c17",
+    "reportHashRecomputed": true,
+    "chartMarkersVisible": true,
+    "equityCurveVisible": true,
+    "downloadVerified": true,
+    "consoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "unexpectedHttpResponses": 0,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshot": "output/playwright/backtest-m0-20260814/m0-chart-equity.png",
+    "screenshotSha256": "5eeead11fe8cb3a41dac3bc09a2d74b45661f2d9ec11b30bd73b1f5f3ff05dca",
+    "download": "output/playwright/backtest-m0-20260814/.playwright-cli/bt-05d77a9da1b34b6f939c57e474cdc6d5-backtest.json",
+    "downloadSha256": "7e97b572b8776d07f620c5c0804bd3da44cf665ee43dbefebca2acf2e83d087b"
+  },
+  "database": {
+    "schemaVersion": 2,
+    "quickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "runs": 3,
+    "reports": 3
+  },
+  "defaultFlags": {
+    "BACKTEST_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0",
+    "BACKTEST_ONLINE_LEARNING_ENABLED": "0",
+    "BACKTEST_MULTI_MARKET_ENABLED": "0",
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": "0",
+    "VITE_BACKTEST_ENTRY_ENABLED": "0"
+  },
+  "legacyPerformanceArtifacts": {
+    "docs/evidence/backtest-soak-million-trade-20260814.json": "PRIVATE_KERNEL_SQLITE_MICROBENCHMARK_NOT_RELEASE_EVIDENCE",
+    "docs/evidence/backtest-soak-1h-20260814.json": "PRIVATE_KERNEL_SQLITE_MICROBENCHMARK_NOT_RELEASE_EVIDENCE"
+  },
+  "defectsCaught": [
+    "public smoke expected an obsolete five-column CSV header while the frozen export wire has eleven auditable columns",
+    "the backtest root expanded beyond the fixed app viewport and clipped the chart and equity sections instead of scrolling"
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M0",
+  "soakGate": "NOT_REQUIRED_IN_M0",
+  "releaseEligible": false,
+  "releaseDecision": "M0_BASELINE_ONLY_DEFAULT_OFF",
+  "knownLimitations": [
+    "M1 through M10 are not implemented by this evidence",
+    "the current RSI provider is not the M1 Wilder long-short revision",
+    "dirty-workspace browser and API smoke are development evidence, not release evidence",
+    "no merge, push, production enablement, or worktree deletion is authorized"
+  ]
+}

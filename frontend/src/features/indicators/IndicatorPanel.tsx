@@ -127,6 +127,9 @@ interface CustomIndicatorDraft extends IndicatorDefinition {
 }
 
 export interface IndicatorPanelProps {
+  staticCatalog?: import("./useIndicatorCatalogRuntime.js").StaticIndicatorCatalog;
+  allowCustomIndicators?: boolean;
+  customIndicatorsUnavailableReason?: string;
   allowedScriptLanguages?: readonly string[];
   allowedSecurityModes?: readonly string[];
   isOpen: boolean;
@@ -282,6 +285,9 @@ function marketStudyMatchesSearch(
 }
 
 export default function IndicatorPanel({
+  staticCatalog,
+  allowCustomIndicators = true,
+  customIndicatorsUnavailableReason,
   allowedScriptLanguages,
   allowedSecurityModes,
   isOpen,
@@ -311,7 +317,10 @@ export default function IndicatorPanel({
     presetsLoading,
     resolvePresetForChart,
     saveCustomIndicator,
-  } = useIndicatorCatalogRuntime({ isOpen });
+  } = useIndicatorCatalogRuntime({
+    isOpen,
+    ...(staticCatalog === undefined ? {} : { staticCatalog }),
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [editingIndicator, setEditingIndicator] = useState<IndicatorEditorSource | null>(null);
   const activeMarketStudies = marketStudies.filter((study) => study.added);
@@ -737,13 +746,22 @@ plot(ma, "MA", color=line_color)
               >
                 已添加 {activeItemCount > 0 && `(${activeItemCount})`}
               </button>
-              <button
-                className="indicator-tab indicator-tab-create"
-                onClick={handleCreateCustom}
-                title="创建自定义指标"
-              >
-                + 自定义
-              </button>
+              {allowCustomIndicators ? (
+                <button
+                  className="indicator-tab indicator-tab-create"
+                  onClick={handleCreateCustom}
+                  title="创建自定义指标"
+                >
+                  + 自定义
+                </button>
+              ) : (
+                <span
+                  className="indicator-tab indicator-tab-create"
+                  title={customIndicatorsUnavailableReason}
+                >
+                  仅内置
+                </span>
+              )}
             </div>
 
             {/* Content */}
@@ -822,7 +840,7 @@ plot(ma, "MA", color=line_color)
                               >
                                 {isActive(preset.id) ? "✓" : "+"}
                               </button>
-                              {!isBuiltinIndicator(preset) && (
+                              {allowCustomIndicators && !isBuiltinIndicator(preset) && (
                                 <button
                                   className="indicator-preset-delete-btn"
                                   onClick={() => handleDeleteCustomPreset(preset)}

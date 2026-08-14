@@ -112,6 +112,7 @@ class Order:
     status: str = "OPEN"
     fill_price: Decimal | None = None
     fill_sequence: int | None = None
+    activated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,8 +258,16 @@ class ReferenceBarKernel:
         ]
         if not open_orders:
             return
-        stop_hits = [order for order in open_orders if self._stop_hit(order, bar)]
-        target_hits = [order for order in open_orders if self._limit_hit(order, bar)]
+        stop_hits = [
+            order
+            for order in open_orders
+            if order.type == "STOP" and self._stop_hit(order, bar)
+        ]
+        target_hits = [
+            order
+            for order in open_orders
+            if order.type == "LIMIT" and self._limit_hit(order, bar)
+        ]
         if stop_hits and target_hits:
             self.ambiguity_count += 1
             for order in stop_hits:
@@ -269,9 +278,15 @@ class ReferenceBarKernel:
                 continue
             if order.type == "MARKET":
                 self._fill(order, bar, self._market_price(order, bar), "NEXT_BAR_OPEN")
-            elif order.type in {"LIMIT", "STOP_LIMIT"} and self._limit_hit(order, bar):
+            elif order.type == "LIMIT" and self._limit_hit(order, bar):
                 assert order.limit_price is not None
                 self._fill(order, bar, order.limit_price, "LIMIT_THROUGH")
+            elif order.type == "STOP_LIMIT":
+                if not order.activated and self._stop_hit(order, bar):
+                    order.activated = True
+                if order.activated and self._limit_hit(order, bar):
+                    assert order.limit_price is not None
+                    self._fill(order, bar, order.limit_price, "LIMIT_THROUGH")
             elif order.type == "STOP" and self._stop_hit(order, bar):
                 self._fill(order, bar, self._stop_fill_price(order, bar), "STOP_TRIGGER")
 
@@ -285,8 +300,8 @@ class ReferenceBarKernel:
         if order.limit_price is None:
             return False
         if order.side == "BUY":
-            return bar.high >= order.limit_price
-        return bar.low <= order.limit_price
+            return bar.low <= order.limit_price
+        return bar.high >= order.limit_price
 
     def _stop_hit(self, order: Order, bar: Bar) -> bool:
         if order.stop_price is None:

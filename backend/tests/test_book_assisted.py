@@ -69,3 +69,59 @@ def test_book_assisted_market_uses_visible_touch_not_queue() -> None:
     )
     assert report["report_label"] == "BOOK_ASSISTED"
     assert "queue-exact" in " ".join(report["not_suitable_for"])
+
+
+def test_book_assisted_limit_uses_opposite_touch() -> None:
+    events = (
+        _book(1, 1000, snapshot=True),
+        _trade(2, 1100),
+        _trade(3, 1200, price="99"),
+    )
+
+    def buy_limit(visible, event):
+        if event.sequence == 2:
+            return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "100"}]
+        return []
+
+    missed = BookAssistedKernel().run(events[:2] + (_trade(3, 1200, price="100"),), buy_limit)
+    assert missed.fills == []
+
+    events_through = (
+        _book(1, 1000, snapshot=True),
+        _trade(2, 1100),
+        MarketEvent(
+            sequence=3,
+            event_time_ms=1150,
+            role="ORDER_BOOK",
+            payload={"book_sequence": 2, "snapshot": False, "reset": False, "bid": "98", "ask": "99"},
+        ),
+        _trade(4, 1200, price="99"),
+    )
+
+    def buy_after_first(visible, event):
+        if event.sequence == 2:
+            return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "100"}]
+        return []
+
+    filled = BookAssistedKernel().run(events_through, buy_after_first)
+    assert filled.fills[0]["reason"] == "BOOK_CONSERVATIVE_LIMIT"
+    assert str(filled.fills[0]["price"]) == "100"
+    assert str(filled.fills[0]["qty"]) == "1"
+
+
+def test_book_report_ledger_uses_fill_notional() -> None:
+    events = (
+        _book(1, 1000, snapshot=True),
+        _trade(2, 1100),
+        _trade(3, 1200),
+    )
+
+    def buy_first(visible, event):
+        if event.sequence == 2:
+            return [{"side": "BUY", "type": "MARKET", "qty": "1"}]
+        return []
+
+    result = BookAssistedKernel().run(events, buy_first)
+    assert result.ledger_hash
+    assert result.report_hash
+    assert result.fills[0]["price"] * result.fills[0]["qty"] != result.ledger_hash

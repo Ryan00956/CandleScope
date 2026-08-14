@@ -528,16 +528,16 @@ function LocalChart({
     seriesStore: runtime.seriesStore,
     interval,
   }), [eventStore, interval, runtime.seriesStore]);
-  const [navigationTarget, setNavigationTarget] = useState<LocalAnalysisFocusRequest | null>(null);
-
   useEffect(() => {
     if (focusRequest === null) return undefined;
     let active = true;
     void focusTime(focusRequest.time).then((available) => {
-      if (active && available) setNavigationTarget(focusRequest);
+      if (active && available) {
+        chartSurfaceRef.current?.setLinkedVisibleTimeAnchor(focusRequest.time);
+      }
     });
     return () => { active = false; };
-  }, [focusRequest, focusTime]);
+  }, [chartSurfaceRef, focusRequest, focusTime]);
 
   return (
     <>
@@ -557,7 +557,6 @@ function LocalChart({
           loading={runtime.loading || runtime.loadingMore}
           dataMeta={dataMeta}
           onCrosshairMove={onCrosshairMove}
-          navigationTarget={navigationTarget}
           onNeedMoreLeft={runtime.loadMoreLeft}
           canLoadMoreLeft={runtime.hasMoreLeft}
           canRestoreLatestWindow={false}

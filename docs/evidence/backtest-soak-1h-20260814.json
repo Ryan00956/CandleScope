@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "candlescope.backtest-soak/1",
+  "kind": "1h",
+  "commit": "4d7e6f06ee28f338b616b28476864e4ab4523c1e",
+  "createdAt": "2026-08-14T06:22:43.113033+00:00",
+  "durationSeconds": 3600.141,
+  "requestedDurationSeconds": 3600,
+  "cycles": 6410,
+  "events": 320500000,
+  "fillCount": 91571496,
+  "openOrdersPeak": 6,
+  "workingOrdersEnd": 6,
+  "sqliteWrites": 108970,
+  "feeTotal": "934029.2424",
+  "positionQty": "-91571328",
+  "emptyPath": false,
+  "decimalLedger": true,
+  "hashProbeEqual": true,
+  "ok": true,
+  "sha256": "2c03ce174707a6a887b50e4b0124b0b30ca4947ae489d96036f21354d9679a7c"
+}

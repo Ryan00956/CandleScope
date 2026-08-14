@@ -82,6 +82,29 @@ def test_restore_equivalence_via_snapshot_hash() -> None:
     assert replay().ledger_hash() == replay().ledger_hash()
 
 
+def test_close_and_flip_realize_pnl_and_reset_entry() -> None:
+    closed = ContractAccount()
+    closed.apply_fill(side="BUY", price=Decimal("100"), qty=Decimal("1"))
+    closed.apply_fill(side="SELL", price=Decimal("110"), qty=Decimal("1"))
+    assert closed.position_qty == 0
+    assert closed.entry_price is None
+    assert closed.quote_balance == Decimal("10010")
+
+    flipped = ContractAccount()
+    flipped.apply_fill(side="BUY", price=Decimal("100"), qty=Decimal("1"))
+    flipped.apply_fill(side="SELL", price=Decimal("110"), qty=Decimal("2"))
+    assert flipped.position_qty == Decimal("-1")
+    assert flipped.entry_price == Decimal("110")
+    assert flipped.quote_balance == Decimal("10010")
+
+    reduced = ContractAccount()
+    reduced.apply_fill(side="BUY", price=Decimal("100"), qty=Decimal("2"))
+    reduced.apply_fill(side="SELL", price=Decimal("110"), qty=Decimal("1"))
+    assert reduced.position_qty == Decimal("1")
+    assert reduced.entry_price == Decimal("100")
+    assert reduced.quote_balance == Decimal("10010")
+
+
 def test_aux_adapter_and_report_include_coverage() -> None:
     snapshot = ContractAuxSnapshotProvider(
         (

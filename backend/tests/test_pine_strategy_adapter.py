@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.backtest.strategy.pine_adapter import (
@@ -59,3 +62,20 @@ def test_supported_subset_is_deterministic_and_not_tv_equivalent() -> None:
 
 def test_pine_indicator_runtime_contract_is_unchanged() -> None:
     assert PROTOCOL_V1 == "candlescope.script-runtime/1"
+
+
+def test_public_long_flat_golden_corpus() -> None:
+    golden = json.loads(
+        (
+            Path(__file__).resolve().parent / "fixtures" / "backtest" / "pine_long_flat_golden.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert golden["tradingViewEquivalent"] is False
+    session = StrategyProviderSession(PineStrategyProvider(), run_id="bt_pine")
+    session.prepare({"inputPlan": {"roles": ["BARS"]}, "source": PINE_LONG_FLAT_SOURCE})
+    for case in golden["cases"]:
+        output = session.step(_frame(int(case["sequence"]), str(case["close"])))
+        assert output is not None
+        assert output.payload["targetExposure"] == case["targetExposure"]
+        assert output.payload["matrixVersion"] == golden["matrixVersion"]
+    assert session.provider.identity()["tradingViewEquivalent"] is False

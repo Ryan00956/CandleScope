@@ -76,7 +76,7 @@ class OnnxStrategyProvider:
     def _infer(self, frame: ObservationFrame) -> str:
         artifact = self._require()
         assert_no_lookahead(frame, artifact)
-        values = artifact.feature_schema.ordered_values(frame.features)
+        artifact.feature_schema.ordered_values(frame.features)
         self._seen.append(frame.sequence)
         if classify_device(artifact) == "RECORDED_OUTPUT_ONLY":
             recorded = json.loads(self._payload.decode("utf-8"))

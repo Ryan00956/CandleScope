@@ -1,0 +1,9 @@
+{
+  "matrixVersion": "pine.strategy.backtest.v1",
+  "tradingViewEquivalent": false,
+  "sourceMarker": "candlescope.pine-strategy-example:long_flat",
+  "cases": [
+    {"sequence": 1, "close": "101", "targetExposure": "1"},
+    {"sequence": 2, "close": "99", "targetExposure": "0"}
+  ]
+}

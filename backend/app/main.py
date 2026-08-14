@@ -53,6 +53,7 @@ from app.core.config import (
     LIQUIDATION_ROLLUP_BACKEND,
     BACKTEST_SETTINGS,
     LOCAL_DATA_DIR,
+    REPLAY_AGG_TRADE_ARCHIVE_DIR,
     RUNTIME_MODE,
     SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS,
     SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS,
@@ -134,10 +135,11 @@ else:
     app.include_router(price_ws_router, prefix="/api/v1")
     app.include_router(replay_router, prefix="/api/v1")
     app.include_router(create_core_plugin_router())
-    if BACKTEST_SETTINGS.enabled:
-        from app.api.v1.backtests import router as backtests_router
 
-        app.include_router(backtests_router, prefix="/api/v1")
+if BACKTEST_SETTINGS.enabled:
+    from app.api.v1.backtests import router as backtests_router
+
+    app.include_router(backtests_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -255,24 +257,40 @@ async def startup_event() -> None:
     app.state.runtime_mode = RUNTIME_MODE
 
     if RUNTIME_MODE == "LOCAL_OFFLINE":
+        local_runtime = None
+        backtest_runtime = None
         from app.local_data.runtime import LocalOfflineRuntime
 
-        local_runtime = LocalOfflineRuntime(LOCAL_DATA_DIR)
-        local_runtime.start()
-        app.state.local_offline_runtime = local_runtime
-        app.state.local_data_service = local_runtime.service
-        app.state.local_import_jobs = local_runtime.jobs
-        app.state.data_manager = None
+        try:
+            local_runtime = LocalOfflineRuntime(LOCAL_DATA_DIR)
+            local_runtime.start()
+            app.state.local_offline_runtime = local_runtime
+            app.state.local_data_service = local_runtime.service
+            app.state.local_import_jobs = local_runtime.jobs
+            app.state.data_manager = None
+            if BACKTEST_SETTINGS.enabled:
+                from app.backtest.runtime import BacktestRuntime
+
+                backtest_runtime = BacktestRuntime.start(
+                    BACKTEST_SETTINGS,
+                    local_data_dir=LOCAL_DATA_DIR,
+                )
+                app.state.backtest_runtime = backtest_runtime
+                app.state.backtest_service = backtest_runtime.service
+                logger.info(
+                    "Started LOCAL_OFFLINE backtest runtime at %s",
+                    BACKTEST_SETTINGS.db_path,
+                )
+        except BaseException:
+            if backtest_runtime is not None:
+                backtest_runtime.shutdown()
+            if local_runtime is not None:
+                local_runtime.shutdown()
+            await lag_monitor.stop()
+            raise
         logger.info("Started LOCAL_OFFLINE runtime at %s", LOCAL_DATA_DIR)
         print("[startup] LOCAL_OFFLINE runtime [ok]")
         return
-
-    if BACKTEST_SETTINGS.enabled:
-        from app.backtest.service import BacktestService
-
-        backtest_service = BacktestService.start(BACKTEST_SETTINGS)
-        app.state.backtest_service = backtest_service
-        logger.info("Started backtest control plane at %s", BACKTEST_SETTINGS.db_path)
 
     # 1. Initialize SQLite storage
     init_klines_storage()
@@ -312,6 +330,20 @@ async def startup_event() -> None:
     indicator_runtime_service = None
     plugin_platform_v2 = None
     try:
+        if BACKTEST_SETTINGS.enabled:
+            from app.backtest.runtime import BacktestRuntime
+
+            backtest_runtime = BacktestRuntime.start(
+                BACKTEST_SETTINGS,
+                local_data_dir=LOCAL_DATA_DIR,
+                trade_archive_dir=REPLAY_AGG_TRADE_ARCHIVE_DIR,
+            )
+            app.state.backtest_runtime = backtest_runtime
+            app.state.backtest_service = backtest_runtime.service
+            logger.info(
+                "Started backtest runtime at %s",
+                BACKTEST_SETTINGS.db_path,
+            )
         first_party_bootstrap = await asyncio.to_thread(
             ensure_first_party_plugins_from_environment,
             host_name=APP_NAME,
@@ -354,6 +386,9 @@ async def startup_event() -> None:
             await indicator_runtime_service.stop()
         if plugin_runtime_host is not None:
             await plugin_runtime_host.stop()
+        backtest_runtime = getattr(app.state, "backtest_runtime", None)
+        if backtest_runtime is not None:
+            backtest_runtime.shutdown()
         await lag_monitor.stop()
         raise
     app.state.plugin_runtime_host = plugin_runtime_host
@@ -410,6 +445,9 @@ async def startup_event() -> None:
         replay_runtime = getattr(app.state, "replay_runtime", None)
         if replay_runtime is not None:
             await replay_runtime.shutdown()
+        backtest_runtime = getattr(app.state, "backtest_runtime", None)
+        if backtest_runtime is not None:
+            backtest_runtime.shutdown()
         await indicator_runtime_service.stop()
         await plugin_runtime_host.stop()
         await lag_monitor.stop()
@@ -484,6 +522,13 @@ async def shutdown_event() -> None:
     """Application shutdown handler."""
     local_runtime = getattr(app.state, "local_offline_runtime", None)
     if local_runtime is not None:
+        backtest_runtime = getattr(app.state, "backtest_runtime", None)
+        if backtest_runtime is not None:
+            backtest_runtime.shutdown()
+        else:
+            backtest_service = getattr(app.state, "backtest_service", None)
+            if backtest_service is not None:
+                backtest_service.shutdown()
         local_runtime.shutdown()
         lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
         if lag_monitor is not None:
@@ -491,9 +536,13 @@ async def shutdown_event() -> None:
         print("[shutdown] LOCAL_OFFLINE runtime shut down [ok]")
         return
 
-    backtest_service = getattr(app.state, "backtest_service", None)
-    if backtest_service is not None:
-        backtest_service.shutdown()
+    backtest_runtime = getattr(app.state, "backtest_runtime", None)
+    if backtest_runtime is not None:
+        backtest_runtime.shutdown()
+    else:
+        backtest_service = getattr(app.state, "backtest_service", None)
+        if backtest_service is not None:
+            backtest_service.shutdown()
 
     symbol_catalog_task = getattr(app.state, "symbol_catalog_refresh_task", None)
     if symbol_catalog_task is not None and not symbol_catalog_task.done():

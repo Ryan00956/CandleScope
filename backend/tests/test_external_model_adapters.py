@@ -128,7 +128,9 @@ def test_gpu_deterministic_request_downgrades_to_recorded_outputs() -> None:
 def test_python_sidecar_rejects_network_and_runs_offline(tmp_path: Path) -> None:
     with pytest.raises(StrategyProviderError, match="cannot import"):
         assert_wheel_is_offline("import socket\n")
-    source = "def predict(close):\n    return close - 100\n"
+    with pytest.raises(StrategyProviderError, match="cannot import"):
+        assert_wheel_is_offline("from http.client import HTTPSConnection\n")
+    source = "def predict(close):\n    return close - 50\n"
     payload = source.encode()
     artifact = _artifact("PYTHON_WHEEL", payload, model_artifact_id="wheel-1")
     registry = ArtifactRegistry()
@@ -139,6 +141,7 @@ def test_python_sidecar_rejects_network_and_runs_offline(tmp_path: Path) -> None
     output = session.step(_frame(1, "101"))
     assert output is not None
     assert output.payload["direction"] == "LONG"
+    assert output.payload["score"] == "51.0"
 
 
 def test_grpc_adapter_defaults_off_and_rejects_unknown_host() -> None:

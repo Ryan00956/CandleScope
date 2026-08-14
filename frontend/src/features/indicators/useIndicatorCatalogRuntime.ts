@@ -24,6 +24,12 @@ export type CatalogCustomIndicator = CustomIndicatorRecord
   };
 
 export type CatalogIndicator = IndicatorPreset | CatalogCustomIndicator | IndicatorDefinition;
+export interface StaticIndicatorCatalog {
+  presets: readonly IndicatorPreset[];
+  resolvePresetForChart(
+    preset: CatalogIndicator,
+  ): IndicatorDefinition | Promise<IndicatorDefinition>;
+}
 type CatalogFallback = Partial<CustomIndicatorRecord>
   & Partial<Pick<IndicatorDefinition, "category" | "paneTarget">>;
 
@@ -87,6 +93,7 @@ function isCustomPreset(preset: CatalogIndicator): preset is CatalogCustomIndica
 
 export interface UseIndicatorCatalogRuntimeOptions {
   isOpen: boolean;
+  staticCatalog?: StaticIndicatorCatalog;
 }
 
 export interface IndicatorCatalogRuntime {
@@ -195,9 +202,10 @@ export function shouldShowIndicatorCatalogLoading(
 
 export function useIndicatorCatalogRuntime({
   isOpen,
+  staticCatalog,
 }: UseIndicatorCatalogRuntimeOptions): IndicatorCatalogRuntime {
   const [presets, setPresets] = useState<IndicatorPreset[]>(() => (
-    indicatorCatalogStore.getSnapshot()?.presets || []
+    staticCatalog ? [...staticCatalog.presets] : indicatorCatalogStore.getSnapshot()?.presets || []
   ));
   const [customIndicators, setCustomIndicators] = useState<CatalogCustomIndicator[]>(() => (
     indicatorCatalogStore.getSnapshot()?.customIndicators || []
@@ -205,6 +213,9 @@ export function useIndicatorCatalogRuntime({
   const [presetsLoading, setPresetsLoading] = useState(false);
 
   useEffect(() => {
+    if (staticCatalog) {
+      return undefined;
+    }
     const cached = indicatorCatalogStore.getSnapshot();
     if (!shouldLoadIndicatorCatalog(isOpen, cached)) {
       return undefined;
@@ -235,15 +246,18 @@ export function useIndicatorCatalogRuntime({
       // still consume it.  This only prevents a closed panel from updating.
       active = false;
     };
-  }, [isOpen]);
+  }, [isOpen, staticCatalog]);
 
   const resolvePresetForChart = useCallback(async (preset: CatalogIndicator) => {
+    if (staticCatalog) {
+      return await staticCatalog.resolvePresetForChart(preset);
+    }
     if (isCustomPreset(preset)) {
       return buildCustomIndicatorForChart(preset);
     }
     const fullPreset = await fetchPreset(preset.id);
     return buildBuiltinIndicatorForChart(fullPreset);
-  }, []);
+  }, [staticCatalog]);
 
   const removeCustomIndicator = useCallback((id: string) => {
     const remove = (current: CatalogCustomIndicator[]) => (
@@ -277,28 +291,30 @@ export function useIndicatorCatalogRuntime({
   }, []);
 
   const deleteCustomIndicator = useCallback(async (id: string) => {
+    if (staticCatalog) throw new Error("static indicator catalog is read-only");
     await deleteCustomIndicatorRequest(id);
     removeCustomIndicator(id);
-  }, [removeCustomIndicator]);
+  }, [removeCustomIndicator, staticCatalog]);
 
   const saveCustomIndicator = useCallback(async (draft: CustomIndicatorSaveInput) => {
+    if (staticCatalog) throw new Error("static indicator catalog is read-only");
     const saved = await saveCustomIndicatorRequest(draft);
     upsertCustomIndicator(saved, draft);
     return saved;
-  }, [upsertCustomIndicator]);
+  }, [staticCatalog, upsertCustomIndicator]);
 
   // Read a completed shared request synchronously during render.  This avoids
   // a close/reopen frame that briefly shows a spinner for catalog data already
   // in memory, while local state remains the source during the first request.
-  const cached = indicatorCatalogStore.getSnapshot();
-  const resolvedPresets = cached?.presets || presets;
-  const resolvedCustomIndicators = cached?.customIndicators || customIndicators;
+  const cached = staticCatalog ? null : indicatorCatalogStore.getSnapshot();
+  const resolvedPresets = staticCatalog ? [...staticCatalog.presets] : cached?.presets || presets;
+  const resolvedCustomIndicators = staticCatalog ? [] : cached?.customIndicators || customIndicators;
 
   return {
     customIndicators: resolvedCustomIndicators,
     deleteCustomIndicator,
     presets: resolvedPresets,
-    presetsLoading: cached ? false : presetsLoading,
+    presetsLoading: staticCatalog || cached ? false : presetsLoading,
     removeCustomIndicator,
     resolvePresetForChart,
     saveCustomIndicator,

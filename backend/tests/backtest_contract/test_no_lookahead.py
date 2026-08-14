@@ -47,6 +47,34 @@ def test_warmup_outputs_are_not_tradable() -> None:
     assert [fill["sequence"] for fill in live["fills"]] == [2, 3, 4]
 
 
+def test_training_artifact_cannot_see_past_its_horizon() -> None:
+    from app.backtest.strategy.artifacts import FeatureSchema, ModelArtifact
+    from app.backtest.strategy.external import assert_no_lookahead
+    from app.backtest.strategy.protocol import ObservationFrame, StrategyProviderError, canonical_hash
+
+    artifact = ModelArtifact(
+        model_artifact_id="feat-1",
+        format="ONNX",
+        artifact_hash="sha256:" + "ab" * 32,
+        feature_schema=FeatureSchema(version="feat/1", names=("close",)),
+        max_visible_time_ms=1_000,
+        reproducibility_class="DETERMINISTIC",
+    )
+    frame = ObservationFrame(
+        run_id="bt",
+        sequence=2,
+        event_time_ms=2_000,
+        watermark_ms=2_000,
+        phase="EVALUATION",
+        market={"venue": "local", "symbol": "BTC-USDT"},
+        input_hash=canonical_hash({"close": "1"}),
+        bar={"close": "1"},
+        features={"close": "1"},
+    )
+    with pytest.raises(StrategyProviderError, match="LOOKAHEAD_VIOLATION"):
+        assert_no_lookahead(frame, artifact)
+
+
 def test_existing_orders_match_before_new_decision() -> None:
     bars = sample_bars()
 

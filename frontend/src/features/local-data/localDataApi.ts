@@ -478,10 +478,25 @@ export async function computeLocalIndicatorBatch(
 }
 
 function toKlineFetchResult(payload: unknown, operation: string): KlineFetchResult {
-  const result: TransportKlineResponse = parseKlineResponse(payload, operation);
+  const volumeUnavailable = isJsonRecord(payload)
+    && payload.source === "local_dataset"
+    && payload.volume_available === false;
+  const normalizedPayload = volumeUnavailable && Array.isArray(payload.data)
+    ? {
+        ...payload,
+        data: (payload.data as unknown[]).map((row: unknown): unknown => (
+          isJsonRecord(row) && row.volume === null ? { ...row, volume: 0 } : row
+        )),
+      }
+    : payload;
+  const result: TransportKlineResponse = parseKlineResponse(normalizedPayload, operation);
   const data: KlineBar[] = result.data.map((row) => {
     const time = toEpochSeconds(row.time);
     if (time === null) throw new TypeError(`${operation} returned an invalid bar time`);
+    if (volumeUnavailable) {
+      const { volume: _volume, ...withoutVolume } = row;
+      return { ...withoutVolume, time };
+    }
     return { ...row, time };
   });
   return { ...result, data } as KlineFetchResult;

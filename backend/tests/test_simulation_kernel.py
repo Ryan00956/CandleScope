@@ -54,6 +54,29 @@ def test_same_inputs_are_deterministic() -> None:
     assert first.report_hash == second.report_hash
 
 
+def test_limit_requires_bar_to_trade_through_price() -> None:
+    def buy_above_next_bar(visible, event):
+        if event.sequence == 1:
+            return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "103"}]
+        return []
+
+    def sell_never_reached(visible, event):
+        if event.sequence == 1:
+            return [{"side": "SELL", "type": "LIMIT", "qty": "1", "limit_price": "200"}]
+        return []
+
+    def buy_after_last_touch(visible, event):
+        if event.sequence == 3:
+            return [{"side": "BUY", "type": "LIMIT", "qty": "1", "limit_price": "100"}]
+        return []
+
+    through = SimulationKernel().run(_events(), buy_above_next_bar)
+    assert through.fills[0]["sequence"] == 3
+    assert str(through.fills[0]["price"]) == "103"
+    assert SimulationKernel().run(_events(), sell_never_reached).fills == []
+    assert SimulationKernel().run(_events(), buy_after_last_touch).fills == []
+
+
 def test_same_bar_stop_and_target_is_worst_case() -> None:
     def bracket(visible, event):
         if event.sequence != 2:

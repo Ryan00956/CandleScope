@@ -332,6 +332,10 @@ class BacktestSettings:
     def trade_tape_effective(self) -> bool:
         return self.enabled and self.trade_tape_enabled
 
+    @property
+    def book_assisted_effective(self) -> bool:
+        return self.enabled and self.book_assisted_enabled
+
 
 def _bounded_backtest_int(environment: Mapping[str, str], name: str) -> int:
     safe_upper_bound = _BACKTEST_BUDGETS[name]

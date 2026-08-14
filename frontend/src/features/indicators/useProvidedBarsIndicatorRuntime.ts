@@ -15,6 +15,7 @@ import type {
   ActiveIndicatorPersistence,
 } from "./activeIndicatorStore.js";
 import { useIndicatorComputeController } from "./indicatorComputeController.js";
+import type { IndicatorComputeBatchExecutor } from "./indicatorComputeController.js";
 import { resolveLocalIndicatorExecution } from "./indicatorComputeJobRuntime.js";
 import {
   createIndicatorOutputState,
@@ -52,6 +53,7 @@ export interface UseProvidedBarsIndicatorRuntimeOptions {
   candleUpColor?: string;
   chartDataMeta?: ChartDataCommitMeta | null;
   datasetKey: string;
+  computeBatch?: IndicatorComputeBatchExecutor;
   exchange: string;
   interval: string;
   marketType: string;
@@ -313,6 +315,7 @@ export function useProvidedBarsIndicatorRuntime({
   candleUpColor = "#22c55e",
   chartDataMeta = null,
   datasetKey,
+  computeBatch,
   exchange,
   interval,
   marketType,
@@ -399,6 +402,7 @@ export function useProvidedBarsIndicatorRuntime({
     chartDataMetaRef,
     chartDataRef: barsRef,
     datasetKey,
+    ...(computeBatch === undefined ? {} : { computeBatch }),
     exchange,
     forceHostedSubscriptions: () => undefined,
     historyLimit: MAX_SERIES_BARS,

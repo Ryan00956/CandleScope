@@ -160,6 +160,81 @@ def test_open_order_workload_is_not_an_empty_path() -> None:
     assert result.fills[0]["reason"] == "PRINT_THROUGH"
 
 
+def test_partial_print_leaves_residual_quantity_open() -> None:
+    kernel = TradeSimulationKernel()
+    kernel._enqueue({"side": "BUY", "type": "MARKET", "qty": "10"}, current_sequence=0)
+    result = kernel.run((_trade(1, price="100", qty="1"),), lambda *args: [])
+    assert len(result.fills) == 1
+    assert str(result.fills[0]["qty"]) == "1"
+    assert kernel.orders[0].status == "PARTIAL"
+    assert str(kernel.orders[0].qty) == "9"
+    assert str(kernel.position_qty) == "1"
+    assert str(kernel.projected_position_qty) == "10"
+
+
+def test_trade_oco_fill_cancels_sibling_before_later_print() -> None:
+    events = (
+        _trade(1, price="100", qty="10"),
+        _trade(2, price="110", qty="10"),
+        _trade(3, price="90", qty="10"),
+    )
+
+    def brackets(_visible, event):
+        if event.sequence == 1:
+            return [
+                {"side": "SELL", "type": "LIMIT", "qty": "1", "limit_price": "110"},
+                {"side": "SELL", "type": "STOP", "qty": "1", "stop_price": "90"},
+            ]
+        return []
+
+    kernel = TradeSimulationKernel()
+    result = kernel.run(events, brackets)
+    assert len(result.fills) == 1
+    assert str(kernel.position_qty) == "-1"
+    assert {order.status for order in kernel.orders} == {"FILLED", "CANCELLED_OCO"}
+
+
+def test_trade_kernel_reports_accept_reject_and_fill_truth() -> None:
+    reports: list[dict] = []
+    kernel = TradeSimulationKernel(execution_reporter=reports.append)
+    kernel._enqueue_many(
+        [
+            {"side": "BUY", "type": "MARKET", "qty": "1"},
+            {"side": "BUY", "type": "UNKNOWN", "qty": "1"},
+        ],
+        current_sequence=0,
+    )
+    kernel.run((_trade(1),), lambda *_args: [])
+    assert [report["accepted"] for report in reports] == [True, False, True]
+    assert reports[-1]["fill"]["side"] == "BUY"
+
+
+def test_stop_limit_fills_only_after_stop_then_limit() -> None:
+    events = (
+        _trade(1, price="100"),
+        _trade(2, price="111"),
+        _trade(3, price="109"),
+    )
+
+    def place(visible, event):
+        if event.sequence == 1:
+            return [
+                {
+                    "side": "BUY",
+                    "type": "STOP_LIMIT",
+                    "qty": "1",
+                    "stop_price": "110",
+                    "limit_price": "109",
+                }
+            ]
+        return []
+
+    result = TradeSimulationKernel().run(events, place)
+    assert len(result.fills) == 1
+    assert result.fills[0]["sequence"] == 3
+    assert str(result.fills[0]["price"]) == "109"
+
+
 def test_derived_bar_is_observation_only() -> None:
     feature = derived_bar_feature((_trade(1, price="10"), _trade(2, price="12")))
     assert feature is not None
@@ -262,3 +337,60 @@ def test_service_trade_run_requires_trade_flag(tmp_path: Path) -> None:
     assert completed["report"]["report_label"] == "TRADE_SEQUENCE"
     assert completed["report"]["source_event_kind"] == "RAW_TRADE"
     opened.shutdown()
+
+
+class _TapeProvider:
+    def __init__(self) -> None:
+        self.frames = []
+
+    def describe(self):
+        return ProviderCapabilities(input_modes=("BAR_CLOSE", "TRADE_EVENT"))
+
+    def prepare(self, context):
+        return None
+
+    def warmup(self, frame):
+        self.frames.append(frame)
+        return None
+
+    def step(self, frame):
+        self.frames.append(frame)
+        return None
+
+    def on_execution_report(self, report):
+        return None
+
+    def snapshot(self):
+        return {}
+
+    def restore(self, payload):
+        return None
+
+    def close(self):
+        return "sha256:close"
+
+
+def test_service_trade_run_passes_tape_and_derived_bar(tmp_path: Path) -> None:
+    service = BacktestService.start(
+        load_backtest_settings(
+            {"BACKTEST_ENABLED": "1", "BACKTEST_TRADE_TAPE_ENABLED": "1"},
+            data_dir=tmp_path,
+            klines_db_path=tmp_path / "candlescope.db",
+            replay_db_path=tmp_path / "replay.db",
+        ),
+        now_ms=1,
+    )
+    created = service.create_run(_payload(), idempotency_key="tape-frame", now_ms=2)
+    provider = _TapeProvider()
+    service.execute_trade_run(
+        created["run_id"],
+        events=(_trade(1, price="101"), _trade(2, price="102")),
+        provider=provider,
+        now_ms=3,
+    )
+    assert provider.frames
+    assert provider.frames[0].trade is not None
+    assert provider.frames[0].trade["price"] == "101"
+    assert provider.frames[0].bar is not None
+    assert provider.frames[0].bar["close"] == "101"
+    service.shutdown()

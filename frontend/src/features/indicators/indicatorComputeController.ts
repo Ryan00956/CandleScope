@@ -38,9 +38,15 @@ import type {
   IndicatorComputeRequest,
   IndicatorComputeBatchItem,
   IndicatorComputeBatchJob,
+  IndicatorComputeBatchResponse,
   IndicatorDefinition,
   IndicatorOutputAction,
 } from "./indicatorTypes.js";
+
+export type IndicatorComputeBatchExecutor = (options: {
+  jobs: IndicatorComputeBatchJob[];
+  signal?: AbortSignal;
+}) => Promise<IndicatorComputeBatchResponse>;
 
 export interface UseIndicatorComputeControllerOptions {
   activeIndicators: IndicatorDefinition[];
@@ -55,6 +61,7 @@ export interface UseIndicatorComputeControllerOptions {
   chartDataRef: MutableRefObject<KlineBar[]>;
   datasetKey: string;
   exchange: string;
+  computeBatch?: IndicatorComputeBatchExecutor;
   forceHostedSubscriptions(): void;
   historyLimit?: number;
   interval: string;
@@ -134,6 +141,7 @@ export function useIndicatorComputeController({
   chartDataRef,
   datasetKey,
   exchange,
+  computeBatch = computeIndicatorBatch,
   forceHostedSubscriptions,
   historyLimit,
   interval,
@@ -301,7 +309,7 @@ export function useIndicatorComputeController({
           });
           try {
             const responses = await Promise.all(
-              chunks.map((chunk) => computeIndicatorBatch({ jobs: chunk, signal })),
+              chunks.map((chunk) => computeBatch({ jobs: chunk, signal })),
             );
             return responses.flatMap((response) => response.results);
           } finally {
@@ -495,6 +503,7 @@ export function useIndicatorComputeController({
     candleDownColorRef,
     candleUpColorRef,
     chartDataRef,
+    computeBatch,
     historyLimit,
     jobCoordinator,
     outputDispatch,

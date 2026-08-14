@@ -7,6 +7,7 @@ import "@fontsource/inter/latin-600.css";
 import "@fontsource/inter/latin-700.css";
 import BacktestApp from "./features/backtest/BacktestApp.js";
 import "./index.css";
+import "./features/backtest/backtest.css";
 
 const root = document.getElementById("root");
 if (!(root instanceof HTMLElement)) throw new Error("Backtest document root is missing");

@@ -10,7 +10,7 @@ from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
 from app.market_dataset.trades import assert_trade_stream
 from app.market_dataset.snapshot import sha256_hex
 from app.simulation.kernel import SimulationResult
-from app.simulation.trade_kernel import TradeSimulationKernel
+from app.simulation.trade_kernel import TradeSimulationKernel, _print_crosses_limit
 
 BOOK_FILL_POLICY = "BOOK_ASSISTED_CONSERVATIVE_V1"
 StrategyFn = Callable[[tuple[MarketEvent, ...], MarketEvent], list[dict]]
@@ -38,6 +38,8 @@ def assert_book_chain(events: tuple[MarketEvent, ...]) -> None:
 @dataclass(slots=True)
 class BookAssistedKernel(TradeSimulationKernel):
     fill_policy: str = BOOK_FILL_POLICY
+    last_bid: Decimal | None = None
+    last_ask: Decimal | None = None
 
     def run(
         self,
@@ -52,26 +54,37 @@ class BookAssistedKernel(TradeSimulationKernel):
         visible: list[MarketEvent] = []
         trade_index = 0
         for event in events:
-            if event.role == "TRADES":
-                self._match(event)
-                visible.append(event)
-                intents = strategy(tuple(visible), event) if trade_index >= warmup_events else []
-                self.decisions.append(
-                    {
-                        "sequence": event.sequence,
-                        "watermark_ms": event.event_time_ms,
-                        "intents": intents,
-                        "book_assisted": True,
-                    }
-                )
-                for intent in intents:
-                    self._enqueue(intent, current_sequence=event.sequence)
-                trade_index += 1
+            if event.role == "ORDER_BOOK":
+                self._apply_book(event)
+                continue
+            if event.role != "TRADES":
+                continue
+            self._match(event)
+            visible.append(event)
+            intents = strategy(tuple(visible), event)
+            if trade_index < warmup_events:
+                intents = []
+            self.decisions.append(
+                {
+                    "sequence": event.sequence,
+                    "watermark_ms": event.event_time_ms,
+                    "intents": intents,
+                    "book_assisted": True,
+                }
+            )
+            for intent in intents:
+                self._enqueue(intent, current_sequence=event.sequence)
+            trade_index += 1
         result = self.result()
         fills = result.fills
         ledger = {
             "fill_count": len(fills),
-            "notional": result.ledger_hash,
+            "notional": str(
+                sum(
+                    (Decimal(str(fill["price"])) * Decimal(str(fill["qty"])) for fill in fills),
+                    Decimal("0"),
+                )
+            ),
             "ambiguity_count": result.ambiguity_count,
         }
         return SimulationResult(
@@ -92,26 +105,57 @@ class BookAssistedKernel(TradeSimulationKernel):
             fills=fills,
         )
 
+    def _apply_book(self, event: MarketEvent) -> None:
+        payload = event.payload
+        if payload.get("bid") is None or payload.get("ask") is None:
+            raise MarketDatasetError("book event missing bid/ask", code="DATA_QUALITY_FAILED")
+        bid = Decimal(str(payload["bid"]))
+        ask = Decimal(str(payload["ask"]))
+        if ask < bid:
+            raise MarketDatasetError("crossed book is not usable", code="DATA_QUALITY_FAILED")
+        self.last_bid = bid
+        self.last_ask = ask
+
     def _match(self, event: MarketEvent) -> None:
         if event.role == "ORDER_BOOK":
+            self._apply_book(event)
             return
         if event.role != "TRADES":
             raise MarketDatasetError("book-assisted kernel expected a trade print", code="FIDELITY_UNSUPPORTED")
-        bid = Decimal(str(event.payload.get("bid") or event.payload["price"]))
-        ask = Decimal(str(event.payload.get("ask") or event.payload["price"]))
-        if ask < bid:
-            raise MarketDatasetError("crossed book is not usable", code="DATA_QUALITY_FAILED")
+        if self.last_bid is None or self.last_ask is None:
+            raise MarketDatasetError("trade arrived before a usable book", code="DATA_QUALITY_FAILED")
+        bid = self.last_bid
+        ask = self.last_ask
+        print_price = Decimal(str(event.payload["price"]))
+        remaining = Decimal(str(event.payload.get("qty") or "0"))
         open_orders = [
             order
             for order in self.orders
-            if order.status == "OPEN" and order.eligible_after_sequence <= event.sequence
+            if order.status in {"OPEN", "PARTIAL"}
+            and order.eligible_after_sequence <= event.sequence
         ]
         for order in open_orders:
+            if remaining <= 0:
+                break
             if order.type == "MARKET":
                 price = ask if order.side == "BUY" else bid
-                self._fill(order, event.sequence, price, order.qty, "BOOK_ASSISTED_PRINT")
+                fill_qty = min(order.qty, remaining)
+                self._fill(order, event.sequence, price, fill_qty, "BOOK_ASSISTED_PRINT")
+                remaining -= fill_qty
             elif order.type == "LIMIT" and order.limit_price is not None:
-                if order.side == "BUY" and bid <= order.limit_price:
-                    self._fill(order, event.sequence, order.limit_price, order.qty, "BOOK_CONSERVATIVE_LIMIT")
-                elif order.side == "SELL" and ask >= order.limit_price:
-                    self._fill(order, event.sequence, order.limit_price, order.qty, "BOOK_CONSERVATIVE_LIMIT")
+                opposite = ask if order.side == "BUY" else bid
+                crossed = (
+                    opposite <= order.limit_price
+                    if order.side == "BUY"
+                    else opposite >= order.limit_price
+                )
+                if crossed and _print_crosses_limit(order, print_price):
+                    fill_qty = min(order.qty, remaining)
+                    self._fill(
+                        order,
+                        event.sequence,
+                        order.limit_price,
+                        fill_qty,
+                        "BOOK_CONSERVATIVE_LIMIT",
+                    )
+                    remaining -= fill_qty

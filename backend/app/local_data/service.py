@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.data_engine.interval_policy import (
@@ -1163,107 +1163,80 @@ class LocalDatasetService:
         before_ms: int | None = None,
         start_ms: int | None = None,
         end_ms: int | None = None,
-    ) -> list[sqlite3.Row]:
+    ) -> list[dict[str, Any]]:
         """Aggregate only complete target buckets from one immutable revision."""
         if not plan.derived:
             raise ValueError("A derived resample plan is required")
-        clauses: list[str] = []
-        parameters: dict[str, int] = {
-            "source_ms": plan.source.nominal_ms,
-            "target_ms": plan.target.nominal_ms,
-            "last_component_offset_ms": (
-                plan.target.nominal_ms - plan.source.nominal_ms
-            ),
-            "factor": plan.factor,
-            "fetch_limit": max(1, int(fetch_limit)),
-        }
-        if before_ms is not None:
-            clauses.append("bucket_open_ms < :before_ms")
-            parameters["before_ms"] = int(before_ms)
-        if start_ms is not None:
-            clauses.append("bucket_open_ms >= :start_ms")
-            parameters["start_ms"] = int(start_ms)
-        if end_ms is not None:
-            clauses.append("bucket_open_ms <= :end_ms")
-            parameters["end_ms"] = int(end_ms)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        bucket = "((open_time_ms / :target_ms) * :target_ms)"
-        statement = f"""
-            WITH grouped AS (
-                SELECT
-                    {bucket} AS bucket_open_ms,
-                    MAX(CASE WHEN open_time_ms = {bucket} THEN open END) AS open,
-                    MAX(CASE
-                        WHEN open_time_ms = {bucket} + :last_component_offset_ms
-                        THEN close
-                    END) AS close,
-                    MAX(CAST(high AS REAL)) AS high,
-                    MIN(CAST(low AS REAL)) AS low,
-                    CASE
-                        WHEN COUNT(volume) = COUNT(*)
-                        THEN ROUND(SUM(CAST(volume AS REAL)), 8)
-                        ELSE NULL
-                    END AS volume,
-                    CASE
-                        WHEN COUNT(quote_volume) = COUNT(*)
-                        THEN ROUND(SUM(CAST(quote_volume AS REAL)), 8)
-                        ELSE NULL
-                    END AS quote_volume,
-                    CASE
-                        WHEN COUNT(trades) = COUNT(*) THEN SUM(trades)
-                        ELSE NULL
-                    END AS trades,
-                    CASE
-                        WHEN COUNT(taker_buy_base) = COUNT(*)
-                        THEN ROUND(SUM(CAST(taker_buy_base AS REAL)), 8)
-                        ELSE NULL
-                    END AS taker_buy_base,
-                    CASE
-                        WHEN COUNT(taker_buy_quote) = COUNT(*)
-                        THEN ROUND(SUM(CAST(taker_buy_quote AS REAL)), 8)
-                        ELSE NULL
-                    END AS taker_buy_quote,
-                    MIN(is_closed) AS is_closed
-                FROM bars
-                GROUP BY {bucket}
-                HAVING COUNT(*) = :factor
-                    AND MIN(open_time_ms) = {bucket}
-                    AND MAX(open_time_ms) = {bucket} + :last_component_offset_ms
-                    AND SUM(CASE
-                        WHEN close_time_ms = open_time_ms + :source_ms - 1 THEN 0
-                        ELSE 1
-                    END) = 0
-            )
-            SELECT
-                bucket_open_ms AS open_time_ms,
-                bucket_open_ms + :target_ms - 1 AS close_time_ms,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                quote_volume,
-                trades,
-                taker_buy_base,
-                taker_buy_quote,
-                is_closed
-            FROM grouped
-            {where}
-            ORDER BY bucket_open_ms DESC
-            LIMIT :fetch_limit
-        """
+        source_ms = plan.source.nominal_ms
+        target_ms = plan.target.nominal_ms
+        last_component_offset_ms = target_ms - source_ms
+        factor = plan.factor
         db_path = revision_dir / "bars.sqlite"
         uri = f"file:{db_path.as_posix()}?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
         try:
             connection.row_factory = sqlite3.Row
-            return connection.execute(statement, parameters).fetchall()
+            source_rows = connection.execute(
+                "SELECT * FROM bars ORDER BY open_time_ms ASC"
+            ).fetchall()
         except sqlite3.DatabaseError as exc:
             raise LocalDatasetError(
                 "Dataset bars are unreadable", code="dataset_corrupt"
             ) from exc
         finally:
             connection.close()
+        grouped: dict[int, list[sqlite3.Row]] = {}
+        for row in source_rows:
+            bucket = (int(row["open_time_ms"]) // target_ms) * target_ms
+            grouped.setdefault(bucket, []).append(row)
+        derived: list[dict[str, Any]] = []
+        for bucket, members in grouped.items():
+            if before_ms is not None and bucket >= int(before_ms):
+                continue
+            if start_ms is not None and bucket < int(start_ms):
+                continue
+            if end_ms is not None and bucket > int(end_ms):
+                continue
+            if len(members) != factor:
+                continue
+            opens = [int(item["open_time_ms"]) for item in members]
+            if min(opens) != bucket or max(opens) != bucket + last_component_offset_ms:
+                continue
+            if any(
+                int(item["close_time_ms"]) != int(item["open_time_ms"]) + source_ms - 1
+                for item in members
+            ):
+                continue
+            first = next(item for item in members if int(item["open_time_ms"]) == bucket)
+            last = next(
+                item
+                for item in members
+                if int(item["open_time_ms"]) == bucket + last_component_offset_ms
+            )
+            derived.append(
+                {
+                    "open_time_ms": bucket,
+                    "close_time_ms": bucket + target_ms - 1,
+                    "open": first["open"],
+                    "high": _decimal_text(max(Decimal(str(item["high"])) for item in members)),
+                    "low": _decimal_text(min(Decimal(str(item["low"])) for item in members)),
+                    "close": last["close"],
+                    "volume": _sum_optional_decimals(item["volume"] for item in members),
+                    "quote_volume": _sum_optional_decimals(
+                        item["quote_volume"] for item in members
+                    ),
+                    "trades": _sum_optional_ints(item["trades"] for item in members),
+                    "taker_buy_base": _sum_optional_decimals(
+                        item["taker_buy_base"] for item in members
+                    ),
+                    "taker_buy_quote": _sum_optional_decimals(
+                        item["taker_buy_quote"] for item in members
+                    ),
+                    "is_closed": min(int(item["is_closed"]) for item in members),
+                }
+            )
+        derived.sort(key=lambda item: int(item["open_time_ms"]), reverse=True)
+        return derived[: max(1, int(fetch_limit))]
 
     def query(
         self,
@@ -1345,7 +1318,7 @@ class LocalDatasetService:
             "terminal_reason": None if has_more else "dataset_boundary",
             "earliest_available_ms": manifest["first_open_ms"],
             "availability_revision": manifest["data_epoch"],
-            "verified_contiguous": True,
+            "verified_contiguous": not gaps,
             "excluded_ranges": [dict(gap) for gap in gaps],
             "missing_ranges": [],
         }
@@ -1726,7 +1699,7 @@ class LocalDatasetService:
         return not path.is_absolute() and ".." not in path.parts
 
     @staticmethod
-    def _wire_bar(row: sqlite3.Row) -> dict[str, Any]:
+    def _wire_bar(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
         result = {
             "time": row["open_time_ms"] // 1000,
             "open": float(row["open"]),
@@ -1748,3 +1721,28 @@ class LocalDatasetService:
             "datasets": len(self.list_datasets()),
             "immutable_revisions": True,
         }
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _sum_optional_decimals(values: Iterable[object]) -> str | None:
+    total = Decimal("0")
+    for value in values:
+        if value is None:
+            return None
+        total += Decimal(str(value))
+    return _decimal_text(total)
+
+
+def _sum_optional_ints(values: Iterable[object]) -> int | None:
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += int(value)
+    return total

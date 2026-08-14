@@ -30,6 +30,7 @@ def config_hash(identity: RunIdentity) -> str:
             "warmup_bars": identity.warmup_bars,
             "parameters_json": identity.parameters_json,
             "account_model": identity.account_model,
+            "execution_json": identity.execution_json,
             "engine_version": identity.engine_version,
         }
     )

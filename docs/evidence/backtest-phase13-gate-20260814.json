@@ -1,9 +1,11 @@
 {
-  "schemaVersion": "candlescope.backtest-release/1",
-  "kind": "phase13_gate",
-  "parent": "15bff68975bbe42bee573ffcd92338c20b258965",
+  "schemaVersion": "candlescope.backtest-validation-audit/1",
+  "kind": "phase13_gate_reassessment",
+  "baselineHead": "4d7e6f06ee28f338b616b28476864e4ab4523c1e",
   "branch": "codex/backtest-foundation",
-  "createdAt": "2026-08-14T00:00:00Z",
+  "recordedAt": "2026-08-14T09:15:04Z",
+  "workspaceState": "DIRTY_IMPLEMENTATION",
+  "releaseEligible": false,
   "flags": {
     "BACKTEST_ENABLED": "0",
     "VITE_BACKTEST_ENTRY_ENABLED": "0",
@@ -13,20 +15,48 @@
     "BACKTEST_STUDY_ENABLED": "0",
     "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0"
   },
-  "databaseSchema": "backtest.schema.v1",
-  "engineVersion": "backtest.engine.control-plane.v1",
-  "providerProtocol": "strategy-provider/1",
-  "reportSchema": "candlescope.backtest-report/1",
-  "automated": {
-    "command": "python -m pytest tests/test_backtest_release_gate.py tests/backtest_contract tests/test_backtest_control_plane.py tests/test_backtest_study.py tests/test_trade_tape.py tests/test_external_model_adapters.py tests/test_pine_strategy_adapter.py tests/test_contract_accounting.py tests/test_multi_market.py tests/test_book_assisted.py tests/test_simulation_kernel.py tests/test_backtest_reports.py -q",
-    "result": "74 passed"
-  },
-  "notRunHere": [
-    "1h soak",
-    "4h soak",
-    "browser acceptance",
-    "million-event trade soak",
-    "detached exact revert drill"
+  "invalidatedClaims": [
+    "the historical 74-pass count does not cover the current workspace",
+    "the historical million-event and one-hour files bypass the product service and worker path",
+    "a dirty-workspace browser smoke is not release-candidate browser evidence"
   ],
-  "releaseDecision": "IMPLEMENTED_DEFAULT_OFF_NOT_PUSHED"
+  "workspaceSmoke": {
+    "api": "LOCAL_OFFLINE public dataset preview -> queued Run -> worker -> report -> export hash verification passed on the current workspace",
+    "browser": "real browser Run creation, completed report, and verified bundle download passed",
+    "study": "two public-API trials completed through the durable background worker and compare returned ready=true",
+    "artifactRoot": "output/playwright/backtest-final-smoke",
+    "browserArtifactRoot": "output/playwright/backtest-fix"
+  },
+  "workspaceValidation": {
+    "backendBacktestAndAdjacent": "148 passed",
+    "generationFencing": "stale checkpoint, stale state transition, lease expiry and durable resume regressions passed",
+    "pluginSdk": "98 passed",
+    "frontendBacktest": "8 passed",
+    "frontendFullSerial": "3249 passed",
+    "frontendDesktop": "34 passed",
+    "frontendLint": "passed",
+    "frontendTypecheck": "passed",
+    "frontendBuildWithEntry": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "legacySoaks": {
+    "millionTrade": {
+      "path": "docs/evidence/backtest-soak-million-trade-20260814.json",
+      "classification": "PRIVATE_KERNEL_SQLITE_MICROBENCHMARK",
+      "releaseEligible": false
+    },
+    "oneHour": {
+      "path": "docs/evidence/backtest-soak-1h-20260814.json",
+      "classification": "PRIVATE_KERNEL_SQLITE_MICROBENCHMARK",
+      "releaseEligible": false
+    }
+  },
+  "remainingReleaseGates": [
+    "clean release-candidate SHA",
+    "full automated validation recorded against that SHA",
+    "one-hour public-path soak",
+    "release-candidate browser acceptance",
+    "detached exact-revert rollback drill"
+  ],
+  "releaseDecision": "NOT_A_RELEASE_CANDIDATE_DEFAULT_OFF"
 }

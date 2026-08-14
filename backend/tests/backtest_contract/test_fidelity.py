@@ -80,6 +80,18 @@ def test_same_bar_stop_and_target_counts_as_worst_case_ambiguity() -> None:
     assert result["fills"][0]["sequence"] == 3
 
 
+def test_limit_does_not_fill_when_bar_never_reaches_price() -> None:
+    bars = sample_bars()
+
+    def sell_never_reached(view: BoundedBarView) -> list[dict]:
+        if view[-1].sequence != 1:
+            return []
+        return [{"side": "SELL", "type": "LIMIT", "qty": "1", "limit_price": "200"}]
+
+    result = ReferenceBarKernel().run(bars, sell_never_reached)
+    assert result["fills"] == []
+
+
 def test_identity_cannot_silently_degrade_fidelity() -> None:
     with pytest.raises(ContractError, match="FIDELITY_MISLABEL"):
         assert_fidelity_claim(

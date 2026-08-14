@@ -36,3 +36,25 @@ Required later families, from the execution document:
 
 Empty-path benchmarks must not replace workloads that contain open orders,
 SQLite writes, or Decimal ledger rows.
+
+## Product-path smoke / soak commands
+
+```powershell
+Set-Location H:\program\CandleScope-backtest-foundation\frontend
+$env:BACKTEST_BASE_URL='http://127.0.0.1:8000/api/v1/backtests'
+npm run smoke:backtest
+npm run soak:backtest
+```
+
+`smoke:backtest` and `soak:backtest` use the public API and durable worker, then
+verify the stored report/export hashes. A target runtime with at least one
+immutable local dataset is required.
+
+Historical files on this branch:
+
+- `docs/evidence/backtest-soak-million-trade-20260814.json`
+- `docs/evidence/backtest-soak-1h-20260814.json`
+
+Those files came from `backend/scripts/soak_backtest.py`, which bypasses the
+public service/worker/report path. They are lower-level kernel/SQLite
+microbenchmarks and are not release evidence.

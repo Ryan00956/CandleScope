@@ -12,6 +12,9 @@ import type { UseSettingsRuntimeOptions } from './useSettingsRuntime.js';
 
 export interface SettingsModalProps extends UseSettingsRuntimeOptions {
     plugins?: PluginPlatformRuntime;
+    allowedCategories?: readonly SettingsCategory[];
+    backendFeaturesEnabled?: boolean;
+    dataWorkbenchEnabled?: boolean;
     onClose(): void;
 }
 
@@ -19,6 +22,9 @@ export default function SettingsModal({
     isOpen,
     onClose,
     plugins,
+    allowedCategories = SETTINGS_CATEGORIES.map((category) => category.key),
+    backendFeaturesEnabled = true,
+    dataWorkbenchEnabled = true,
     settings,
     onUpdate,
     currentSymbol = '',
@@ -46,7 +52,14 @@ export default function SettingsModal({
     if (!isOpen) return null;
 
     const panelModel = buildSettingsPanelViewModel({ view, actions });
-    const activeCatObj = resolveSettingsTab(activeCategory);
+    const visibleCategories = SETTINGS_CATEGORIES.filter((category) => (
+      allowedCategories.includes(category.key)
+      && (backendFeaturesEnabled || category.key === "appearance" || category.key === "about")
+    ));
+    const resolvedActiveCategory = visibleCategories.some(
+      (category) => category.key === activeCategory,
+    ) ? activeCategory : visibleCategories[0]?.key ?? "appearance";
+    const activeCatObj = resolveSettingsTab(resolvedActiveCategory);
 
     return (
       <>
@@ -56,7 +69,7 @@ export default function SettingsModal({
                 <nav className="st-sidebar">
                     <div className="st-sidebar-title">设置</div>
                     <div className="st-sidebar-nav">
-                        {SETTINGS_CATEGORIES.map(cat => (
+                        {visibleCategories.map(cat => (
                             <button
                                 key={cat.key}
                                 className={`st-nav-item ${activeCategory === cat.key ? 'active' : ''}`}
@@ -85,8 +98,10 @@ export default function SettingsModal({
                     </div>
                     <div className="st-content-body">
                         <SettingsPanelHost
-                            activeCategory={activeCategory}
-                            onOpenDataWorkbench={() => setDataWorkbenchOpen(true)}
+                            activeCategory={resolvedActiveCategory}
+                            onOpenDataWorkbench={() => {
+                              if (dataWorkbenchEnabled) setDataWorkbenchOpen(true);
+                            }}
                             panelModel={panelModel}
                             plugins={plugins}
                         />
@@ -95,13 +110,13 @@ export default function SettingsModal({
             </div>
             <SettingsModalStyles />
         </div>
-        <DataWorkbenchModal
+        {dataWorkbenchEnabled && <DataWorkbenchModal
             currentExchange={currentExchange}
             currentMarketType={currentMarketType}
             currentSymbol={currentSymbol}
             isOpen={dataWorkbenchOpen}
             onClose={() => setDataWorkbenchOpen(false)}
-        />
+        />}
       </>
     );
 }

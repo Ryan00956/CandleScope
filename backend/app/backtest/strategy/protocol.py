@@ -166,10 +166,16 @@ class StrategyProviderSession:
         }
 
     def restore(self, payload: dict[str, Any]) -> None:
-        self.generation = int(payload["generation"])
-        self.last_sequence = int(payload["lastSequence"])
-        self.watermark_ms = int(payload["watermarkMs"])
-        self.provider.restore(dict(payload["provider"]))
+        try:
+            self.generation = int(payload["generation"])
+            self.last_sequence = int(payload["lastSequence"])
+            self.watermark_ms = int(payload["watermarkMs"])
+            self.provider.restore(dict(payload["provider"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION",
+                "snapshot incompatible",
+            ) from exc
         self.prepared = True
         self.closed = False
 

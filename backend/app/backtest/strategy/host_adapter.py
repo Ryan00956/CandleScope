@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import time
+import queue
+import threading
 from typing import Any
 
 from .protocol import (
@@ -40,6 +41,7 @@ class StrategyHostAdapter:
         market: dict[str, str],
         bar: dict[str, Any] | None,
         features: dict[str, Any] | None = None,
+        trade: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if event_time_ms > watermark_ms:
             raise StrategyProviderError("LOOKAHEAD_VIOLATION", "host refused future bar")
@@ -51,19 +53,43 @@ class StrategyHostAdapter:
             phase=phase,
             market=market,
             input_hash=canonical_hash(
-                {"sequence": sequence, "watermark": watermark_ms, "bar": bar, "features": features}
+                {
+                    "sequence": sequence,
+                    "watermark": watermark_ms,
+                    "bar": bar,
+                    "trade": trade,
+                    "features": features,
+                }
             ),
             bar=bar,
+            trade=trade,
             features=features or {},
         )
-        started = time.monotonic()
-        if phase == "WARMUP":
-            self.session.warmup(frame)
-            output = None
-        else:
-            output = self.session.step(frame)
-        if time.monotonic() - started > self.step_timeout_s:
+        completed: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                if phase == "WARMUP":
+                    self.session.warmup(frame)
+                    completed.put((True, None))
+                else:
+                    completed.put((True, self.session.step(frame)))
+            except BaseException as exc:
+                completed.put((False, exc))
+
+        thread = threading.Thread(
+            target=invoke,
+            name=f"strategy-step-{self.session.run_id}-{sequence}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            ok, value = completed.get(timeout=self.step_timeout_s)
+        except queue.Empty:
             raise StrategyProviderError("PROVIDER_TIMEOUT", "provider step exceeded budget")
+        if not ok:
+            raise value
+        output = value
         return None if output is None else output.to_wire()
 
     def reject_host_write(self, attempt: str) -> None:

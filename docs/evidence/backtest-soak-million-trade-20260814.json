@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "candlescope.backtest-soak/1",
+  "kind": "million-trade",
+  "commit": "4d7e6f06ee28f338b616b28476864e4ab4523c1e",
+  "createdAt": "2026-08-14T05:22:31.334467+00:00",
+  "durationSeconds": 10.984,
+  "events": 1000000,
+  "fillCount": 285782,
+  "sqliteFillRows": 285782,
+  "ledgerFillCount": 285782,
+  "openOrdersPeak": 6,
+  "workingOrdersEnd": 6,
+  "sqliteWrites": 321,
+  "feeTotal": "2914.9596",
+  "positionQty": "-285614",
+  "notional": "29149596",
+  "emptyPath": false,
+  "decimalLedger": true,
+  "hashProbeEqual": true,
+  "ok": true,
+  "sha256": "a4c64eda057c04c74d477e1abb60ed7a50761695dd0a89557bf1d8ea25cd0cdf"
+}

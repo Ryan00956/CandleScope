@@ -18,6 +18,7 @@ import type {
 
 export interface UseExportRuntimeOptions {
   session: ChartSessionRuntime | null | undefined;
+  metadata?: ExportMetadata;
   resolvedTheme: string;
   chartSurfaceActions: ChartSurfaceActions | null | undefined;
   pageExportRef: MutableRefObject<HTMLElement | null>;
@@ -62,6 +63,7 @@ export function sameDrawingExportTarget(
 
 export function useExportRuntime({
   session,
+  metadata: metadataOverride,
   resolvedTheme,
   chartSurfaceActions,
   pageExportRef,
@@ -82,7 +84,9 @@ export function useExportRuntime({
     ...(sessionView?.symbol === undefined ? {} : { symbol: sessionView.symbol }),
     ...(sessionView?.interval === undefined ? {} : { interval: sessionView.interval }),
     theme: resolvedTheme,
+    ...metadataOverride,
   }), [
+    metadataOverride,
     resolvedTheme,
     sessionView?.exchange,
     sessionView?.interval,

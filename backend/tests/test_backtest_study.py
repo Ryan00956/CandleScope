@@ -104,3 +104,127 @@ def test_study_start_cancel_and_repeatable_plan(tmp_path: Path) -> None:
     with pytest.raises(BacktestError, match="cancelled"):
         service.start_study(created["study_id"])
     service.shutdown()
+
+
+def test_cancelled_study_does_not_plan_new_trials(tmp_path: Path) -> None:
+    settings = load_backtest_settings(
+        {"BACKTEST_ENABLED": "1", "BACKTEST_STUDY_ENABLED": "1"},
+        data_dir=tmp_path,
+        klines_db_path=tmp_path / "candlescope.db",
+        replay_db_path=tmp_path / "replay.db",
+    )
+    service = BacktestService.start(settings, now_ms=1)
+    created = service.create_study(
+        {
+            "name": "wf",
+            "hypothesis": "sma",
+            "strategy_revision_id": "rev-1",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "train_ms": 400,
+            "test_ms": 100,
+            "parameter_space": {"fast": [3, 5]},
+        },
+        now_ms=2,
+    )
+    service.cancel_study(created["study_id"])
+    with pytest.raises(BacktestError, match="cancelled"):
+        service.start_study(created["study_id"])
+    assert service.repository.list_trials(created["study_id"]) == []
+    service.shutdown()
+
+
+def test_concurrent_study_budget_and_cascade_cancel(tmp_path: Path) -> None:
+    settings = load_backtest_settings(
+        {
+            "BACKTEST_ENABLED": "1",
+            "BACKTEST_BAR_ENABLED": "1",
+            "BACKTEST_STUDY_ENABLED": "1",
+            "BACKTEST_MAX_CONCURRENT_STUDIES": "1",
+        },
+        data_dir=tmp_path,
+        klines_db_path=tmp_path / "candlescope.db",
+        replay_db_path=tmp_path / "replay.db",
+    )
+    service = BacktestService.start(settings, now_ms=1)
+    base = {
+        "name": "wf",
+        "hypothesis": "sma",
+        "strategy_revision_id": "rev-1",
+        "dataset_id": "ds",
+        "data_epoch": "sha256:" + "ab" * 32,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "train_ms": 400,
+        "test_ms": 100,
+        "step_ms": 100,
+        "parameter_space": {"fast": [3, 5]},
+        "max_trials": 2,
+    }
+    first = service.create_study(base, now_ms=2)
+    second = service.create_study({**base, "name": "wf-2"}, now_ms=3)
+    service.start_study(str(first["study_id"]))
+    with pytest.raises(BacktestError, match="concurrent Study ceiling"):
+        service.start_study(str(second["study_id"]))
+    service.materialize_study_runs(
+        str(first["study_id"]),
+        preview_snapshot=lambda **_: {"snapshot_hash": "sha256:" + "cd" * 32},
+    )
+    cancelled = service.cancel_study(str(first["study_id"]))
+    assert cancelled["state"] == "CANCELLED"
+    assert {trial["state"] for trial in cancelled["trials"]} == {"CANCELLED"}
+    assert {
+        service.get_run(str(trial["run_id"]))["state"]
+        for trial in cancelled["trials"]
+    } == {"CANCELLED"}
+    service.shutdown()
+
+
+def test_cancel_race_during_materialization_cannot_leave_orphan_run(
+    tmp_path: Path,
+) -> None:
+    settings = load_backtest_settings(
+        {
+            "BACKTEST_ENABLED": "1",
+            "BACKTEST_BAR_ENABLED": "1",
+            "BACKTEST_STUDY_ENABLED": "1",
+        },
+        data_dir=tmp_path,
+        klines_db_path=tmp_path / "candlescope.db",
+        replay_db_path=tmp_path / "replay.db",
+    )
+    service = BacktestService.start(settings, now_ms=1)
+    study = service.create_study(
+        {
+            "name": "cancel-race",
+            "hypothesis": "no orphan trial run",
+            "strategy_revision_id": "rev-1",
+            "dataset_id": "ds",
+            "data_epoch": "sha256:" + "ab" * 32,
+            "start_ms": 0,
+            "end_ms": 1000,
+            "train_ms": 400,
+            "test_ms": 100,
+            "step_ms": 100,
+            "parameter_space": {"fast": [3]},
+            "max_trials": 1,
+        },
+        now_ms=2,
+    )
+    study_id = str(study["study_id"])
+    service.start_study(study_id)
+
+    def cancel_then_preview(**_values: object) -> dict[str, str]:
+        service.cancel_study(study_id)
+        return {"snapshot_hash": "sha256:" + "cd" * 32}
+
+    materialized = service.materialize_study_runs(
+        study_id,
+        preview_snapshot=cancel_then_preview,
+    )
+    assert materialized["state"] == "CANCELLED"
+    assert {trial["state"] for trial in materialized["trials"]} == {"CANCELLED"}
+    runs = service.list_runs()
+    assert runs
+    assert {run["state"] for run in runs} == {"CANCELLED"}
+    service.shutdown()

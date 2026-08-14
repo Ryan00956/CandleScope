@@ -66,6 +66,7 @@ class RunIdentity:
     warmup_bars: int
     parameters_json: str
     account_model: str
+    execution_json: str = "{}"
     engine_version: str = ENGINE_VERSION
 
 

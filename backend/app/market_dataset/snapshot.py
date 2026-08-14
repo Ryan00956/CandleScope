@@ -65,5 +65,11 @@ class MarketDatasetSnapshot:
             raise MarketDatasetError("snapshot is closed", code="DATA_QUALITY_FAILED")
         yield from self._events
 
+    @property
+    def events(self) -> tuple[MarketEvent, ...]:
+        if self._closed:
+            raise MarketDatasetError("snapshot is closed", code="DATA_QUALITY_FAILED")
+        return self._events
+
     def close(self) -> None:
         self._closed = True

@@ -26,7 +26,7 @@ class LocalOfflineProfileMiddleware:
             "/docs",
             "/redoc",
             "/openapi.json",
-        } or path.startswith("/api/v1/local")
+        } or path.startswith(("/api/v1/local", "/api/v1/backtests"))
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if not self.enabled or self._allowed(scope.get("path", "")):

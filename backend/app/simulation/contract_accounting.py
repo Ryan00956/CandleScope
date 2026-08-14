@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent, sha256_hex
 
@@ -46,7 +46,10 @@ class ContractAccount:
     maintenance_rate: Decimal = Decimal("0.005")
     require_mark: bool = True
     require_funding: bool = True
+    liquidation_enabled: bool = True
     funding_paid: Decimal = Decimal("0")
+    fees_paid: Decimal = Decimal("0")
+    taker_fee_bps: Decimal = Decimal("0")
     seen_funding_periods: set[str] = field(default_factory=set)
     liquidated: bool = False
     journal: list[dict[str, str]] = field(default_factory=list)
@@ -61,7 +64,14 @@ class ContractAccount:
         elif event.role == "FUNDING":
             self._apply_funding(event)
 
-    def apply_fill(self, *, side: str, price: Decimal, qty: Decimal) -> None:
+    def apply_fill(
+        self,
+        *,
+        side: str,
+        price: Decimal,
+        qty: Decimal,
+        fee: Decimal | None = None,
+    ) -> None:
         signed = qty if side == "BUY" else -qty
         if self.position_qty == 0:
             self.position_qty = signed
@@ -74,9 +84,26 @@ class ContractAccount:
             )
             self.position_qty += signed
         else:
+            assert self.entry_price is not None
+            closed = min(abs(self.position_qty), qty)
+            if self.position_qty > 0:
+                realized = (price - self.entry_price) * closed * self.multiplier
+            else:
+                realized = (self.entry_price - price) * closed * self.multiplier
+            self.quote_balance += realized
+            self.journal.append({"kind": "REALIZED", "amount": str(realized)})
+            prior_sign = 1 if self.position_qty > 0 else -1
             self.position_qty += signed
             if self.position_qty == 0:
                 self.entry_price = None
+            elif (1 if self.position_qty > 0 else -1) != prior_sign:
+                self.entry_price = price
+        charged = fee if fee is not None else (price * qty * self.taker_fee_bps / Decimal("10000"))
+        if charged:
+            charged = abs(charged)
+            self.quote_balance -= charged
+            self.fees_paid += charged
+            self.journal.append({"kind": "FEE", "amount": str(charged)})
         self._check_liquidation(int(0))
 
     def unrealized(self) -> Decimal:
@@ -95,10 +122,33 @@ class ContractAccount:
             "entry_price": None if self.entry_price is None else str(self.entry_price),
             "mark": None if self.mark is None else str(self.mark),
             "funding_paid": str(self.funding_paid),
+            "funding_event_count": len(self.seen_funding_periods),
+            "seen_funding_periods": sorted(self.seen_funding_periods),
+            "fees_paid": str(self.fees_paid),
             "rule_version": self.rule_version,
             "liquidated": self.liquidated,
+            "liquidation_enabled": self.liquidation_enabled,
             "journal": list(self.journal),
         }
+
+    def restore(self, payload: Mapping[str, Any]) -> None:
+        self.quote_balance = Decimal(str(payload["quote_balance"]))
+        self.position_qty = Decimal(str(payload["position_qty"]))
+        self.entry_price = (
+            None
+            if payload.get("entry_price") is None
+            else Decimal(str(payload["entry_price"]))
+        )
+        self.mark = None if payload.get("mark") is None else Decimal(str(payload["mark"]))
+        self.funding_paid = Decimal(str(payload.get("funding_paid") or "0"))
+        self.seen_funding_periods = {
+            str(value) for value in payload.get("seen_funding_periods") or []
+        }
+        self.fees_paid = Decimal(str(payload.get("fees_paid") or "0"))
+        self.rule_version = payload.get("rule_version")
+        self.liquidated = bool(payload.get("liquidated") or False)
+        self.liquidation_enabled = bool(payload.get("liquidation_enabled", True))
+        self.journal = [dict(item) for item in payload.get("journal") or []]
 
     def ledger_hash(self) -> str:
         return sha256_hex(self.snapshot())
@@ -154,6 +204,8 @@ class ContractAccount:
         return self.mark
 
     def _check_liquidation(self, event_time_ms: int) -> None:
+        if not self.liquidation_enabled:
+            return
         if self.position_qty == 0 or self.mark is None:
             return
         equity = self.equity()

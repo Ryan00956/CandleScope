@@ -47,3 +47,41 @@ with TestClient(app) as client:
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_main_local_profile_can_start_opt_in_backtest_runtime(
+    tmp_path: Path,
+) -> None:
+    script = """
+from fastapi.testclient import TestClient
+from app.main import app
+
+with TestClient(app) as client:
+    capabilities = client.get("/api/v1/backtests/capabilities")
+    assert capabilities.status_code == 200, capabilities.text
+    assert capabilities.json()["flags"]["BACKTEST_ENABLED"] is True
+    assert hasattr(app.state, "local_offline_runtime")
+    assert hasattr(app.state, "backtest_runtime")
+    assert not hasattr(app.state, "plugin_runtime_host")
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CANDLESCOPE_RUNTIME_MODE": "LOCAL_OFFLINE",
+            "CANDLE_DATA_DIR": str(tmp_path / "runtime-data"),
+            "CANDLESCOPE_LOCAL_DATA_DIR": str(tmp_path / "local-data"),
+            "BACKTEST_DB_PATH": str(tmp_path / "backtest.db"),
+            "BACKTEST_ENABLED": "1",
+            "BACKTEST_BAR_ENABLED": "1",
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

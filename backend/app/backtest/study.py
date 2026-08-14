@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import itertools
+import json
 import random
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 from app.backtest.errors import BacktestError
-from app.backtest.identity import canonical_json, sha256_hex
+from app.backtest.identity import sha256_hex
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,10 @@ def plan_trials(
 
 
 def comparable_identity(run: Mapping[str, Any]) -> tuple[str, ...]:
+    try:
+        config = json.loads(str(run.get("config_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        config = {}
     return (
         str(run.get("fidelity_mode") or ""),
         str(run.get("source_event_kind") or ""),
@@ -135,6 +140,12 @@ def comparable_identity(run: Mapping[str, Any]) -> tuple[str, ...]:
         str(run.get("data_epoch") or ""),
         str(run.get("engine_version") or ""),
         str(run.get("strategy_revision_id") or ""),
+        str(config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
+        str(config.get("initial_balance") or "10000"),
+        str(config.get("slippage_bps") or "1"),
+        str(config.get("taker_fee_bps") or "0"),
+        str(config.get("gap_policy") or "REJECT"),
+        str(config.get("interval") or ""),
     )
 
 

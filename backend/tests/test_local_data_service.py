@@ -65,6 +65,7 @@ def test_import_publishes_immutable_revision_and_terminal_gap(tmp_path: Path) ->
     assert page["retryable"] is False
     assert page["missing_ranges"] == []
     assert page["excluded_ranges"][0]["reason"] == "source_gap"
+    assert page["verified_contiguous"] is False
 
     older = service.query(
         dataset_id,
@@ -186,6 +187,33 @@ def test_resampling_omits_incomplete_gap_buckets(tmp_path: Path) -> None:
         "incomplete_buckets_omitted": True,
     }
     assert hourly["verified_contiguous"] is False
+
+
+def test_canonical_derived_bars_keep_decimal_text(tmp_path: Path) -> None:
+    service = LocalDatasetService(tmp_path / "local-data")
+    manifest = service.import_csv(
+        _write_csv(
+            tmp_path / "precise.csv",
+            "time,open,high,low,close,volume\n"
+            "1704067200000,100.1,102.25,99.5,101.0,1.25\n"
+            "1704068100000,101.0,103.75,100.25,102.5,2.5\n",
+        ),
+        LocalImportOptions(
+            name="precise",
+            symbol="BTC-USDT",
+            interval="15m",
+            timestamp_unit="ms",
+        ),
+    )
+    _manifest, bars = service.load_canonical_bars(
+        manifest["dataset_id"],
+        data_epoch=manifest["data_epoch"],
+        interval="30m",
+    )
+    assert bars[0]["high"] == "103.75"
+    assert bars[0]["low"] == "99.5"
+    assert bars[0]["volume"] == "3.75"
+    assert "." not in str(bars[0]["high"]) or "e" not in str(bars[0]["high"]).lower()
 
 
 def test_import_accepts_tradingview_column_case_and_session_phase(

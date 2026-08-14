@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.data_engine.interval_policy import parse_interval_spec
 from app.local_data.service import LocalDatasetError, LocalDatasetService
 from app.market_dataset.models import DatasetRef
 from app.market_dataset.snapshot import (
@@ -25,8 +26,9 @@ UNMODELED_RULES = {
 class LocalBarSnapshotProvider:
     """Read-only adapter from an immutable local BAR revision."""
 
-    def __init__(self, service: LocalDatasetService) -> None:
+    def __init__(self, service: LocalDatasetService, *, max_rows: int = 200_000) -> None:
         self._service = service
+        self._max_rows = int(max_rows)
 
     def open(self, ref: DatasetRef) -> MarketDatasetSnapshot:
         requested = tuple(ref.roles) or ("BARS", "INSTRUMENT_RULES")
@@ -40,7 +42,7 @@ class LocalBarSnapshotProvider:
             manifest, bars = self._service.load_canonical_bars(
                 ref.dataset_id,
                 data_epoch=ref.data_epoch,
-                max_rows=200_000,
+                max_rows=self._max_rows,
                 interval=ref.interval,
             )
         except LocalDatasetError as exc:
@@ -52,14 +54,24 @@ class LocalBarSnapshotProvider:
             )
 
         selected: list[MarketEvent] = []
-        for index, row in enumerate(bars, start=1):
+        interval = parse_interval_spec(str(ref.interval or manifest["interval"]))
+        if interval is None:
+            raise MarketDatasetError("invalid BAR interval", code="DATA_QUALITY_FAILED")
+        sequence = 0
+        previous_open_ms: int | None = None
+        for row in bars:
             open_ms = int(row["open_time_ms"])
             close_ms = int(row["close_time_ms"])
             if close_ms < ref.start_time_ms or open_ms > ref.end_time_ms:
                 continue
+            sequence += (
+                1
+                if previous_open_ms is None or interval.is_successor(previous_open_ms, open_ms)
+                else 2
+            )
             selected.append(
                 MarketEvent(
-                    sequence=index,
+                    sequence=sequence,
                     event_time_ms=close_ms,
                     role="BARS",
                     payload={
@@ -73,6 +85,7 @@ class LocalBarSnapshotProvider:
                     },
                 )
             )
+            previous_open_ms = open_ms
 
         quality = self._quality(ref, manifest)
         rules_hash = sha256_hex(UNMODELED_RULES)

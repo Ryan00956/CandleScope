@@ -65,11 +65,14 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 
 - 单市场、单账户、线性永续、单向持仓的冻结账户模型；
 - `BAR_APPROX` 回测，Pyne 策略适配器，参数化运行；
+- `AGG_TRADE_TAPE` 只读本地校验归档回测；缺数据必须失败，不得用 K 线伪造成交；
+- 统一 `SIGNAL` / `TARGET_POSITION` / `ORDER_INTENT` 输出接口，以及开多、平多、开空、平空命令脚本适配器；
 - 经账户模型批准的 Market / Limit / Stop / Stop-Limit；
 - 手续费、滑点、最小价格步长、最小数量和名义价值约束；
-- 可恢复后台 Run、订单/成交/账本、权益曲线和可信度报告；
+- 可恢复后台 Run、订单/成交/账本、FIFO 完整交易、K 线开平仓标记、权益曲线和可信度报告；
 - 数据、策略、配置、输出的哈希和版本链；
 - 独立回测工作台，不复用回放业务 store；
+- `LOCAL_OFFLINE` 下可使用本地不可变数据集，且仍受相同的默认关闭 flags、资源门禁和网络隔离约束；
 - 明确的样本内/样本外区间和基础 Study 比较。
 
 ### 4.2 第一版明确不做
@@ -96,7 +99,7 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 | 市场类型 | 线性永续（USDT 结算） |
 | 持仓模式 | `ONE_WAY` |
 | 保证金模式 | `CROSS` |
-| 资金费 | `OFF`（BAR MVP）；后续 Phase 才能打开历史资金费 |
+| 资金费 | 默认 `OFF`；可显式启用 `FIXED_INTERVAL_V1` 研究场景。它不是历史资金费，必须在报告中标明 |
 | 计价与数量 | `Decimal` 字符串；禁止二进制浮点作为权威值 |
 | 未实现盈亏标记 | BAR MVP 使用 bar close；后续可升级为 mark，但必须改身份 |
 | 爆仓 / 保险基金 / ADL | 第一版不建模；报告必须写 `UNMODELED` |
@@ -141,7 +144,7 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 | 订单 | 成交规则 |
 | --- | --- |
 | 市价单 | 下一根 bar 的 open 加减冻结滑点 |
-| 限价单 | 下一根及后续 bar 穿价才可能成交：买需 `high >= limit`，卖需 `low <= limit`；成交价取 limit |
+| 限价单 | 下一根及后续 bar 穿价才可能成交：买需 `low <= limit`，卖需 `high >= limit`；成交价取 limit |
 | 止损单 | 下一根及后续 bar 触发：多头止损需 `low <= stop`，空头止损需 `high >= stop` |
 | 止盈/止损同一 bar 都可达 | 默认 `WORST_CASE`：对持仓更不利的一侧先成交，并增加 `ambiguity_count` |
 | gap 穿越 | 按 Run 冻结的 `gap_policy`：`REJECT`、`PAUSE` 或研究者明确批准的 `SKIP_WITH_WARNING` |
@@ -235,6 +238,8 @@ Phase 1 **必须** 实现只读 `MarketDatasetSnapshotProvider`，且不得被�
 Host 方法顺序：`describe` → `prepare` → `warmup` → 重复 `step` / `onExecutionReport` → `snapshot` / `restore` → `close`。
 
 输出只允许：`SIGNAL`、`TARGET_POSITION`、`ORDER_INTENT`。
+
+公开工作台内置 SMA、RSI、受限 OHLCV 表达式模型和统一订单命令脚本；它们都通过同一 Provider/Host 订单意图边界执行。命令脚本支持 `OPEN_LONG`、`CLOSE_LONG`、`OPEN_SHORT`、`CLOSE_SHORT`，平仓命令必须转为 `reduce_only`，不得意外反向开仓。
 
 Provider **不得**：
 

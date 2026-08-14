@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 
 export interface MarketTopBarFrameProps {
-  readonly source?: "live" | "replay";
+  readonly source?: "live" | "replay" | "local";
   readonly className?: string;
   readonly brandIcon?: ReactNode;
   readonly brandText?: ReactNode;

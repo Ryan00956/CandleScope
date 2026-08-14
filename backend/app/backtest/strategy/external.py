@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
 
 from app.backtest.strategy.artifacts import ModelArtifact
 from app.backtest.strategy.protocol import (

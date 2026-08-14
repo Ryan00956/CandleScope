@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from app.backtest.strategy.host_adapter import StrategyHostAdapter
+from app.backtest.strategy.builtin import BuiltinOrderCommandProvider
+from app.backtest.strategy.pyne_adapter import PyneHostPlanner
 from app.backtest.strategy.protocol import (
     CONTRIBUTION_KIND,
     CrashProvider,
@@ -101,3 +104,54 @@ def test_host_adapter_rejects_provider_writes() -> None:
     assert output["kind"] == "SIGNAL"
     with pytest.raises(StrategyProviderError, match="PROVIDER_UNAUTHORIZED_WRITE"):
         adapter.reject_host_write("orders")
+
+
+def test_host_adapter_timeout_returns_without_waiting_for_provider_completion() -> None:
+    class SlowProvider(DeterministicFakeProvider):
+        def step(self, frame):
+            time.sleep(0.2)
+            return super().step(frame)
+
+    session = StrategyProviderSession(SlowProvider(), run_id="bt_test")
+    adapter = StrategyHostAdapter(session, step_timeout_s=0.01)
+    adapter.start({"roles": ["BARS"]})
+    started = time.monotonic()
+    with pytest.raises(StrategyProviderError, match="PROVIDER_TIMEOUT"):
+        adapter.observe(
+            sequence=1,
+            event_time_ms=1000,
+            watermark_ms=1000,
+            phase="EVALUATION",
+            market={"venue": "local", "symbol": "BTC-USDT"},
+            bar={"close": "101"},
+        )
+    assert time.monotonic() - started < 0.1
+
+
+def test_unified_command_script_emits_open_and_close_order_intents() -> None:
+    provider = BuiltinOrderCommandProvider()
+    provider.prepare(
+        {
+            "source": json.dumps(
+                {
+                    "commands": [
+                        {"sequence": 2, "action": "OPEN_LONG", "qty": "1"},
+                        {"sequence": 4, "action": "CLOSE_LONG", "qty": "1"},
+                    ]
+                }
+            )
+        }
+    )
+    assert provider.step(_frame(1)) is None
+    opened = provider.step(_frame(2))
+    closed = provider.step(_frame(4))
+    planner = PyneHostPlanner()
+    assert planner.plan(opened)[0] == {
+        "side": "BUY",
+        "type": "MARKET",
+        "qty": "1",
+        "reduce_only": False,
+        "reason": "OPEN_LONG",
+    }
+    assert planner.plan(closed)[0]["reduce_only"] is True
+    assert planner.plan(closed)[0]["side"] == "SELL"

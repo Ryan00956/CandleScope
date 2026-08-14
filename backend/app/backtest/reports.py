@@ -75,6 +75,7 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
             "live trading approval",
         ],
         "fills": fills,
+        "contract_coverage": payload.get("contract_coverage") or {},
     }
 
 

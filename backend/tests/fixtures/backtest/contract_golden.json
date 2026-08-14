@@ -186,9 +186,7 @@
     "BACKTEST_MAX_RUN_SECONDS": 14400
   },
   "forbidden_implementation_paths": [
-    "backend/app/backtest",
     "backend/app/simulation",
-    "backend/app/api/v1/backtests.py",
     "backend/app/api/v1/stream_backtests.py",
     "frontend/src/features/backtest"
   ]

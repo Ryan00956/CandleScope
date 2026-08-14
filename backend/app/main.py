@@ -51,6 +51,7 @@ from app.core.config import (
     EVENT_LOOP_LAG_INTERVAL_SECONDS,
     LIQUIDATION_DB_PATH,
     LIQUIDATION_ROLLUP_BACKEND,
+    BACKTEST_SETTINGS,
     LOCAL_DATA_DIR,
     RUNTIME_MODE,
     SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS,
@@ -133,6 +134,10 @@ else:
     app.include_router(price_ws_router, prefix="/api/v1")
     app.include_router(replay_router, prefix="/api/v1")
     app.include_router(create_core_plugin_router())
+    if BACKTEST_SETTINGS.enabled:
+        from app.api.v1.backtests import router as backtests_router
+
+        app.include_router(backtests_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -261,6 +266,13 @@ async def startup_event() -> None:
         logger.info("Started LOCAL_OFFLINE runtime at %s", LOCAL_DATA_DIR)
         print("[startup] LOCAL_OFFLINE runtime [ok]")
         return
+
+    if BACKTEST_SETTINGS.enabled:
+        from app.backtest.service import BacktestService
+
+        backtest_service = BacktestService.start(BACKTEST_SETTINGS)
+        app.state.backtest_service = backtest_service
+        logger.info("Started backtest control plane at %s", BACKTEST_SETTINGS.db_path)
 
     # 1. Initialize SQLite storage
     init_klines_storage()
@@ -478,6 +490,10 @@ async def shutdown_event() -> None:
             await lag_monitor.stop()
         print("[shutdown] LOCAL_OFFLINE runtime shut down [ok]")
         return
+
+    backtest_service = getattr(app.state, "backtest_service", None)
+    if backtest_service is not None:
+        backtest_service.shutdown()
 
     symbol_catalog_task = getattr(app.state, "symbol_catalog_refresh_task", None)
     if symbol_catalog_task is not None and not symbol_catalog_task.done():

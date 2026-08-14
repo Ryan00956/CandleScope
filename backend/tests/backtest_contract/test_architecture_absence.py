@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
@@ -24,11 +23,8 @@ def test_host_backtest_modules_are_still_absent() -> None:
 @pytest.mark.parametrize(
     "module_name",
     [
-        "app.backtest",
-        "app.backtest.service",
         "app.simulation",
         "app.simulation.clock",
-        "app.api.v1.backtests",
         "app.api.v1.stream_backtests",
     ],
 )
@@ -37,16 +33,16 @@ def test_production_imports_fail_closed_until_later_phases(module_name: str) -> 
         __import__(module_name)
 
 
-def test_main_does_not_register_backtest_routes() -> None:
+def test_main_registers_backtest_routes_only_behind_the_master_flag() -> None:
     main_text = (BACKEND_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "backtests" not in main_text
+    assert "if BACKTEST_SETTINGS.enabled:" in main_text
     assert "stream_backtests" not in main_text
-    tree = ast.parse(main_text)
-    imported = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imported.append(node.module)
-    assert all("backtest" not in module for module in imported)
+    from app.main import app
+
+    assert not any(
+        getattr(route, "path", "").startswith("/api/v1/backtests")
+        for route in app.routes
+    )
 
 
 def test_frontend_has_no_backtest_store_or_entry() -> None:

@@ -7,11 +7,18 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
 from app.core.config import BacktestSettings
+from app.data_engine.interval_policy import parse_interval_spec
 
 from app.backtest.reports import REPORT_SCHEMA, build_report
 from app.backtest.strategy.protocol import StrategyProviderError
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
-from app.simulation import SimulationKernel, TradeSimulationKernel
+from app.simulation import DualClockSimulationKernel, SimulationKernel, TradeSimulationKernel
+from app.simulation.trade_bar_builder import (
+    BAR_BUILDER_REVISION,
+    BAR_TIMEZONE,
+    EXECUTION_CLOCK,
+    SIGNAL_CLOCK,
+)
 
 from .errors import BacktestError
 from .identity import canonical_json, config_hash, parse_parameters, sha256_hex
@@ -41,6 +48,7 @@ FIDELITY_MATRIX = {
     "BAR_APPROX": ("BAR", "APPROXIMATE"),
     "TRADE_TAPE": ("RAW_TRADE", "TRADE_SEQUENCE"),
     "AGG_TRADE_TAPE": ("AGG_TRADE", "AGGREGATED_TRADE_SEQUENCE"),
+    "AGG_TRADE_EXECUTION": ("AGG_TRADE", "AGGREGATED_TRADE_SEQUENCE"),
     "BOOK_ASSISTED": ("TRADE_AND_L2", "BOOK_ASSISTED"),
     "QUEUE_EXACT": ("ORDER_LEVEL", "ORDER_LEVEL_REQUIRED"),
 }
@@ -89,6 +97,7 @@ class BacktestService:
             fidelity_modes.append("BAR_APPROX")
         if self.settings.trade_tape_effective:
             fidelity_modes.append("AGG_TRADE_TAPE")
+            fidelity_modes.append("AGG_TRADE_EXECUTION")
         if self.settings.book_assisted_effective:
             fidelity_modes.append("BOOK_ASSISTED")
         return {
@@ -111,13 +120,24 @@ class BacktestService:
         identity = self._identity_from_payload(payload)
         self._assert_flags(identity.fidelity_mode)
         self._assert_active_budget()
-        return {
+        result: dict[str, object] = {
             "ok": True,
             "config_hash": config_hash(identity),
             "fidelity_mode": identity.fidelity_mode,
             "source_event_kind": identity.source_event_kind,
             "engine_version": identity.engine_version,
         }
+        if identity.fidelity_mode == "AGG_TRADE_EXECUTION":
+            result.update(
+                {
+                    "signal_clock": identity.signal_clock,
+                    "signal_interval": identity.signal_interval,
+                    "execution_clock": identity.execution_clock,
+                    "bar_builder": identity.bar_builder,
+                    "timezone": identity.timezone,
+                }
+            )
+        return result
 
     def create_run(
         self,
@@ -137,6 +157,17 @@ class BacktestService:
         stamp = now_ms or _now_ms()
         digest = config_hash(identity)
         run_id = f"bt_{uuid.uuid4().hex}"
+        stored_payload = dict(payload)
+        if identity.fidelity_mode == "AGG_TRADE_EXECUTION":
+            stored_payload.update(
+                {
+                    "signal_clock": identity.signal_clock,
+                    "signal_interval": identity.signal_interval,
+                    "execution_clock": identity.execution_clock,
+                    "bar_builder": identity.bar_builder,
+                    "timezone": identity.timezone,
+                }
+            )
         record = {
             "run_id": run_id,
             "study_id": payload.get("study_id"),
@@ -148,7 +179,7 @@ class BacktestService:
             "dataset_id": identity.dataset_id,
             "data_epoch": identity.data_epoch,
             "snapshot_hash": identity.snapshot_hash,
-            "config_json": canonical_json(payload),
+            "config_json": canonical_json(stored_payload),
             "config_hash": digest,
             "engine_version": identity.engine_version,
             "generation": 1,
@@ -791,6 +822,199 @@ class BacktestService:
             },
         )
 
+    def execute_dual_clock_run(
+        self,
+        run_id: str,
+        *,
+        events: tuple[MarketEvent, ...],
+        provider: object,
+        now_ms: int | None = None,
+        warmup_events: int | None = None,
+        snapshot_evidence: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Run completed-bar strategy signals against subsequent aggTrade prints."""
+        if not self.settings.trade_tape_effective:
+            raise BacktestError("FLAG_DISABLED", "TRADE_TAPE backtests are disabled")
+        record = self.get_run(run_id)
+        current = RunState(record["state"])
+        if record["fidelity_mode"] != "AGG_TRADE_EXECUTION":
+            raise BacktestError(
+                "FIDELITY_UNSUPPORTED",
+                "execute_dual_clock_run only supports AGG_TRADE_EXECUTION",
+            )
+        stamp = now_ms or _now_ms()
+        warmup_events = self._resolve_warmup(record, warmup_events)
+        expected_generation = int(record["generation"])
+        for next_state in (RunState.PREPARING, RunState.RUNNING):
+            current = self._transition_run(
+                run_id,
+                current,
+                next_state,
+                stamp=stamp,
+                expected_generation=expected_generation,
+            )
+        session: StrategyProviderSession | None = None
+        deadline = time.monotonic() + self.settings.max_run_seconds
+        try:
+            session = StrategyProviderSession(provider, run_id=run_id)  # type: ignore[arg-type]
+            adapter = StrategyHostAdapter(
+                session,
+                step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
+            )
+            planner = PyneHostPlanner()
+            try:
+                config = json.loads(str(record["config_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                config = {}
+            adapter.start(
+                {
+                    "roles": ["BARS"],
+                    "source": config.get("strategy_source"),
+                    "parameters": config.get("parameters") or {},
+                    "seed": config.get("seed"),
+                    "outputMode": config.get("output_mode") or "TARGET_POSITION",
+                    "signalClock": SIGNAL_CLOCK,
+                    "executionClock": EXECUTION_CLOCK,
+                }
+            )
+            event_bytes = len(
+                canonical_json(
+                    [
+                        {
+                            "sequence": event.sequence,
+                            "event_time_ms": event.event_time_ms,
+                            "role": event.role,
+                            "payload": dict(event.payload),
+                        }
+                        for event in events
+                    ]
+                ).encode("utf-8")
+            )
+            if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
+                raise BacktestError(
+                    "BUDGET_EXCEEDED",
+                    "aggregate-trade snapshot exceeds worker memory ceiling",
+                )
+            kernel = DualClockSimulationKernel(
+                signal_interval=str(config["signal_interval"]),
+                gap_policy="REJECT",
+                max_events=self.settings.max_trade_events,
+                checkpoint_event_interval=self.settings.checkpoint_event_interval,
+                slippage_bps=_config_decimal(config, "slippage_bps", "1"),
+                taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
+                maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
+                funding_rate=_config_decimal(config, "funding_rate", "0"),
+                funding_interval_ms=int(config.get("funding_interval_hours") or 8) * 3_600_000,
+                initial_balance=_config_decimal(config, "initial_balance", "10000"),
+                execution_reporter=self._execution_reporter(session),
+            )
+            resume_sequence = 0
+            checkpoint = self.repository.latest_checkpoint(run_id)
+            if checkpoint is not None:
+                payload = self._verified_checkpoint_payload(record, checkpoint)
+                kernel.restore(payload["engine"])
+                session.restore(payload["provider"])
+                session.generation = int(record["generation"])
+                planner.restore(payload.get("planner") or {})
+                resume_sequence = int(payload["sequence"])
+
+            def strategy(_visible: tuple[MarketEvent, ...], bar: MarketEvent) -> list[dict]:
+                if bar.sequence % 256 == 1:
+                    self._assert_execution_control(
+                        run_id,
+                        deadline=deadline,
+                        expected_generation=expected_generation,
+                    )
+                phase = "WARMUP" if bar.sequence <= warmup_events else "EVALUATION"
+                bar_payload = dict(bar.payload)
+                self._assert_frame_inputs(provider, bar=bar_payload, trade=None)
+                wire = adapter.observe(
+                    sequence=bar.sequence,
+                    event_time_ms=bar.event_time_ms,
+                    watermark_ms=bar.event_time_ms,
+                    phase=phase,
+                    market={"venue": "local", "symbol": str(record["dataset_id"])},
+                    bar=bar_payload,
+                    features=self._observation_features(provider, bar=bar_payload, trade=None),
+                )
+                if wire is None:
+                    return []
+                return planner.plan(wire, current_position=kernel.projected_position_qty)
+
+            remaining_events = tuple(event for event in events if event.sequence > resume_sequence)
+
+            def checkpoint_after(event: MarketEvent) -> None:
+                self._save_dual_clock_checkpoint(
+                    record,
+                    sequence=event.sequence,
+                    kernel=kernel,
+                    session=session,
+                    planner=planner,
+                    event_bytes=event_bytes,
+                )
+
+            result = kernel.run(
+                remaining_events,
+                strategy,
+                warmup_events=0,
+                finalize=True,
+                checkpoint_callback=checkpoint_after,
+            )
+            self._assert_execution_control(
+                run_id,
+                deadline=deadline,
+                expected_generation=expected_generation,
+            )
+            self._assert_provider_state_budget(session.snapshot())
+            strategy_metadata = _provider_report_metadata(provider)
+            provider_close_hash = session.close()
+        except Exception as exc:
+            normalized = self._normalize_execution_error(exc)
+            self._close_failed_session(session)
+            self._mark_failed(
+                run_id,
+                stamp,
+                normalized,
+                expected_generation=expected_generation,
+            )
+            raise normalized from (None if normalized is exc else exc)
+        except BaseException:
+            self._close_failed_session(session)
+            raise
+        return self._persist_completed_run(
+            run_id,
+            result=result,
+            provider=provider,
+            provider_close_hash=provider_close_hash,
+            stamp=stamp,
+            expected_generation=expected_generation,
+            result_overrides={
+                "report_label": "AGGREGATED_TRADE_SEQUENCE",
+                "strategy_metadata": strategy_metadata,
+                "signal_event_count": kernel.builder.signal_count,
+                "execution_event_count": kernel.execution_event_count,
+                "data_quality": dict((snapshot_evidence or {}).get("quality") or {}),
+                "contract_coverage": kernel.account.coverage(),
+                "fill_model": {
+                    "name": "TRADE_NEXT_PRINT_CONSERVATIVE_V1",
+                    "signal_clock": SIGNAL_CLOCK,
+                    "execution_clock": EXECUTION_CLOCK,
+                    "bar_builder": BAR_BUILDER_REVISION,
+                    "signal_interval": kernel.signal_interval,
+                    "timezone": BAR_TIMEZONE,
+                    "source_honesty": "aggTrade is aggregated; raw trades and queue position are unmodeled",
+                    "slippage_bps": str(kernel.execution.slippage_bps),
+                    "taker_fee_bps": str(kernel.execution.taker_fee_bps),
+                    "maker_fee_bps": str(kernel.execution.maker_fee_bps),
+                    "funding_rate": str(kernel.execution.funding_rate),
+                    "funding_interval_hours": kernel.execution.funding_interval_ms // 3_600_000,
+                    "funding_model": (
+                        "OFF" if kernel.execution.funding_rate == 0 else "FIXED_INTERVAL_V1"
+                    ),
+                },
+            },
+        )
+
     def execute_trade_run(
         self,
         run_id: str,
@@ -1042,7 +1266,7 @@ class BacktestService:
         if fidelity_mode == "BAR_APPROX" and not self.settings.bar_enabled:
             raise BacktestError("FLAG_DISABLED", "BACKTEST_BAR_ENABLED is 0")
         if (
-            fidelity_mode in {"TRADE_TAPE", "AGG_TRADE_TAPE"}
+            fidelity_mode in {"TRADE_TAPE", "AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}
             and not self.settings.trade_tape_enabled
         ):
             raise BacktestError("FLAG_DISABLED", "BACKTEST_TRADE_TAPE_ENABLED is 0")
@@ -1194,7 +1418,11 @@ class BacktestService:
                 probe = descriptor.factory()
                 probe.prepare(
                     {
-                        "roles": ["BARS" if fidelity == "BAR_APPROX" else "TRADES"],
+                        "roles": [
+                            "BARS"
+                            if fidelity in {"BAR_APPROX", "AGG_TRADE_EXECUTION"}
+                            else "TRADES"
+                        ],
                         "source": strategy_source,
                         "parameters": json.loads(parameters_json),
                         "outputMode": output_mode,
@@ -1205,6 +1433,57 @@ class BacktestService:
                 raise BacktestError(exc.code, str(exc)) from exc
         for name in ("price_tick", "qty_step", "min_notional"):
             _config_optional_decimal(payload, name)
+        signal_identity: dict[str, str | None] = {
+            "signal_clock": None,
+            "signal_interval": None,
+            "execution_clock": None,
+            "bar_builder": None,
+            "timezone": None,
+        }
+        if fidelity == "AGG_TRADE_EXECUTION":
+            interval = parse_interval_spec(
+                str(payload.get("signal_interval") or payload.get("interval") or "")
+            )
+            if interval is None:
+                raise BacktestError("SCHEMA_UNKNOWN_FIELD", "invalid signal_interval")
+            expected_identity = {
+                "signal_clock": SIGNAL_CLOCK,
+                "execution_clock": EXECUTION_CLOCK,
+                "bar_builder": BAR_BUILDER_REVISION,
+                "timezone": BAR_TIMEZONE,
+            }
+            for name, expected in expected_identity.items():
+                requested = str(payload.get(name) or expected)
+                if requested != expected:
+                    raise BacktestError(
+                        "FIDELITY_UNSUPPORTED",
+                        f"AGG_TRADE_EXECUTION requires {name}={expected}",
+                    )
+                signal_identity[name] = expected
+            signal_identity["signal_interval"] = interval.canonical
+            if str(payload.get("gap_policy") or "REJECT") != "REJECT":
+                raise BacktestError(
+                    "FIDELITY_UNSUPPORTED",
+                    "AGG_TRADE_EXECUTION M2 requires gap_policy=REJECT",
+                )
+        execution_config = {
+            "strategy_source": strategy_source,
+            "output_mode": output_mode,
+            "initial_balance": str(_config_decimal(payload, "initial_balance", "10000")),
+            "slippage_bps": str(_config_decimal(payload, "slippage_bps", "1")),
+            "taker_fee_bps": str(_config_decimal(payload, "taker_fee_bps", "0")),
+            "maker_fee_bps": str(_config_decimal(payload, "maker_fee_bps", "0")),
+            "funding_rate": str(funding_rate),
+            "funding_interval_hours": funding_interval_hours,
+            "price_tick": payload.get("price_tick"),
+            "qty_step": payload.get("qty_step"),
+            "min_notional": payload.get("min_notional"),
+            "gap_policy": str(payload.get("gap_policy") or "REJECT"),
+            "exchange": str(payload.get("exchange") or "binance"),
+            "market_type": str(payload.get("market_type") or "usdm"),
+        }
+        if fidelity == "AGG_TRADE_EXECUTION":
+            execution_config.update(signal_identity)
         return RunIdentity(
             strategy_revision_id=str(payload["strategy_revision_id"]),
             dataset_id=str(payload["dataset_id"]),
@@ -1217,24 +1496,8 @@ class BacktestService:
             warmup_bars=warmup_bars,
             parameters_json=parameters_json,
             account_model=str(payload.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
-            execution_json=canonical_json(
-                {
-                    "strategy_source": strategy_source,
-                    "output_mode": output_mode,
-                    "initial_balance": str(_config_decimal(payload, "initial_balance", "10000")),
-                    "slippage_bps": str(_config_decimal(payload, "slippage_bps", "1")),
-                    "taker_fee_bps": str(_config_decimal(payload, "taker_fee_bps", "0")),
-                    "maker_fee_bps": str(_config_decimal(payload, "maker_fee_bps", "0")),
-                    "funding_rate": str(funding_rate),
-                    "funding_interval_hours": funding_interval_hours,
-                    "price_tick": payload.get("price_tick"),
-                    "qty_step": payload.get("qty_step"),
-                    "min_notional": payload.get("min_notional"),
-                    "gap_policy": str(payload.get("gap_policy") or "REJECT"),
-                    "exchange": str(payload.get("exchange") or "binance"),
-                    "market_type": str(payload.get("market_type") or "usdm"),
-                }
-            ),
+            execution_json=canonical_json(execution_config),
+            **signal_identity,
         )
 
     def _audit(self, run_id: str, action: str, details: Mapping[str, object]) -> None:
@@ -1307,6 +1570,53 @@ class BacktestService:
             raise BacktestError(
                 "BUDGET_EXCEEDED",
                 "backtest execution state exceeds worker memory ceiling",
+            )
+        saved = self.repository.save_checkpoint(
+            {
+                "run_id": str(record["run_id"]),
+                "sequence": int(sequence),
+                "generation": int(record["generation"]),
+                "payload_json": payload_json,
+                "state_hash": "sha256:" + sha256_hex(payload),
+                "created_at_ms": _now_ms(),
+            }
+        )
+        if not saved:
+            raise BacktestError(
+                "IDENTITY_MUTATION",
+                "stale worker generation cannot publish a checkpoint",
+            )
+
+    def _save_dual_clock_checkpoint(
+        self,
+        record: Mapping[str, object],
+        *,
+        sequence: int,
+        kernel: DualClockSimulationKernel,
+        session: StrategyProviderSession,
+        planner: PyneHostPlanner,
+        event_bytes: int,
+    ) -> None:
+        provider = session.snapshot()
+        self._assert_provider_state_budget(provider)
+        payload = {
+            "schemaVersion": "candlescope.backtest-checkpoint/1",
+            "run_id": record["run_id"],
+            "config_hash": record["config_hash"],
+            "snapshot_hash": record["snapshot_hash"],
+            "sequence": int(sequence),
+            "observed": kernel.builder.signal_count,
+            "engine": kernel.snapshot(),
+            "provider": provider,
+            "planner": planner.snapshot(),
+        }
+        payload_json = canonical_json(payload)
+        if event_bytes + len(payload_json.encode("utf-8")) > (
+            self.settings.worker_memory_mb * 1024 * 1024
+        ):
+            raise BacktestError(
+                "BUDGET_EXCEEDED",
+                "dual-clock execution state exceeds worker memory ceiling",
             )
         saved = self.repository.save_checkpoint(
             {

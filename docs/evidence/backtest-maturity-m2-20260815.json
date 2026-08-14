@@ -1,0 +1,138 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M2",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T02:10:00+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "90213497de0a2825cec4d5cab33be7c4b62fd9d6",
+  "plannedCommitMessage": "backtest: complete M2 dual-clock execution",
+  "contract": {
+    "fidelityMode": "AGG_TRADE_EXECUTION",
+    "sourceEventKind": "AGG_TRADE",
+    "signalClock": "DERIVED_BAR_CLOSE",
+    "signalInterval": "canonical run interval",
+    "executionClock": "NEXT_AGG_TRADE",
+    "barBuilder": "TRADE_DERIVED_COMPLETE_BUCKETS_V1",
+    "timezone": "UTC",
+    "authorityCount": 1,
+    "authoritySource": "the immutable aggTrade snapshot",
+    "tailIncompleteBucketVisible": false,
+    "m2GapPolicy": "REJECT",
+    "reportLabel": "AGGREGATED_TRADE_SEQUENCE"
+  },
+  "goldenFixture": {
+    "path": "backend/tests/fixtures/backtest/dual_clock_boundary_golden.json",
+    "sha256": "cd8561f104127dff53f69f6a348d16425ae62ece6b5b710ff2a9c80bc71fdc90",
+    "sameMillisecondTieBreak": "(trade_time_ms, agg_trade_id)",
+    "firstBoundaryFill": "the lowest agg_trade_id at the boundary",
+    "decisionSequence": "independent signal_sequence starting at 1"
+  },
+  "equivalence": {
+    "result": "PASS",
+    "strategyRevision": "builtin-rsi-wilder-long-short-v1",
+    "barInput": "TradeBarBuilder output from the same aggTrade tuple",
+    "dualClockInput": "the authoritative aggTrade tuple",
+    "rsiAndTargetPathEqual": true,
+    "decisionHashEqual": true,
+    "fillHashDifferenceAllowedOnlyByFillModel": true,
+    "checkpointResumeHashesEqual": ["decision", "fill", "ledger", "report"],
+    "pageAndCheckpointBoundaryIndependent": true,
+    "missingAggTradeIdFailsClosed": true,
+    "barFallbackObserved": false
+  },
+  "validation": {
+    "m2Focused": {"result": "PASS", "tests": 8},
+    "backendBacktestRegression": {"result": "PASS", "tests": 121, "warnings": 6},
+    "providerAndPyneCompatibility": {"result": "PASS", "tests": 16},
+    "pythonRuffTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendBacktestTests": {"result": "PASS", "tests": 8},
+    "frontendBuild": "PASS_WITH_EXISTING_500KB_CHUNK_WARNING",
+    "gitDiffCheck": "PASS",
+    "databaseQuickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "wholeBackendDirectoryAttempt": {
+      "result": "INCONCLUSIVE_TIMEOUT_NOT_USED_AS_GATE",
+      "timeoutSeconds": 304,
+      "failureOutputBeforeTimeout": false,
+      "authoritativeGate": "the scoped backtest, trade-tape, contract, Provider and Pyne regression sets above"
+    }
+  },
+  "compatibility": {
+    "existingAggTradeTapeSemanticsChanged": false,
+    "existingBarApproxSemanticsChanged": false,
+    "oldConfigHashShapeChanged": false,
+    "legacyReportHashShapeChanged": false,
+    "legacyStoredReportsRemainReadable": true,
+    "databaseSchemaChanged": false,
+    "accountModelChanged": false,
+    "strategyRevisionChanged": false,
+    "newIdentityFieldsApplyOnlyToAggTradeExecution": true
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15187/backtest.html",
+    "runtimeMode": "LOCAL_OFFLINE",
+    "apiBase": "http://127.0.0.1:18094/api/v1/backtests",
+    "runId": "bt_aac14bed86d743fab9e82b45d4a56156",
+    "requestRevision": "builtin-rsi-wilder-long-short-v1",
+    "requestWarmupBars": 25,
+    "requestParameters": {
+      "length": 24,
+      "oversold": 30,
+      "overbought": 70,
+      "trigger_mode": "LEVEL_TARGET_V1",
+      "debug_trace": false
+    },
+    "snapshotTradeRows": 120,
+    "completeDerivedBars": 59,
+    "tailIncompleteBucketHidden": true,
+    "signalEventCount": 59,
+    "executionEventCount": 120,
+    "fillCount": 2,
+    "roundTripTradeCount": 1,
+    "firstAction": "OPEN_LONG",
+    "secondAction": "REVERSE_TO_SHORT",
+    "finalEquity": "10021.9641",
+    "decisionHash": "6782dfb11da1111757766f3e9672dd6f177e0e3625b82086a096a34cf9043071",
+    "fillHash": "b748c86eb0f14049cf821104982d39d4431a36b900748073b2b90a3e94137514",
+    "ledgerHash": "27609de27cb34444a4789236dba452a459bff939bb025a0c2babd9e82294b49a",
+    "reportHash": "sha256:06b86941acb4f402ae214470d81ad455fd0a1608a230a2d378e734cd3ba37d09",
+    "reportHashRecomputed": true,
+    "exportManifestMatched": true,
+    "chartUsesServerDerivedBars": true,
+    "chartOpenAndReverseMarkersVisible": true,
+    "equityCurveVisible": true,
+    "consoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "strictModeLifecycleAbortedRequests": 4,
+    "unexpectedFinalHttpResponses": 0,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshots": [
+      {"path": "output/playwright/backtest-m2-20260815/m2-dual-clock-full.png", "sha256": "c676894771d7bb397c8abaa3dbbde53450a1ae2b613b8691041eff2f644233cc"},
+      {"path": "output/playwright/backtest-m2-20260815/m2-dual-clock-report.png", "sha256": "4204c9a4991d576f8d072d9e06dfc8eebae827bbebf743ee1c2673ee9bbcf10a"},
+      {"path": "output/playwright/backtest-m2-20260815/m2-dual-clock-chart-equity.png", "sha256": "c6cfeb3c9aeeecbc7109c057e81df66772b3ce8818fd7cf98af49d26f85306db"}
+    ],
+    "download": {
+      "path": ".playwright-cli/bt-aac14bed86d743fab9e82b45d4a56156-backtest.json",
+      "sha256": "acad7b2f4ba1d9d4ca3abbc9a23a3dbd404c93ef01b5121e5dc472168d32a39d"
+    }
+  },
+  "defectsCaught": [
+    "LOCAL_OFFLINE startup did not pass the configured verified aggTrade archive into BacktestRuntime, so the real browser path could advertise the mode but failed preview; the production wiring and a static regression guard were added",
+    "the first browser fixture was not epoch aligned; it was rejected as unsuitable evidence and replaced by an aligned immutable fixture"
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M2",
+  "soakGate": "NOT_REQUIRED_IN_M2",
+  "rollback": "revert the single M2 local commit; no database migration or stored-report rewrite is required",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M2_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "aggTrade is aggregated and does not provide raw-trade, order-book or queue truth",
+    "M2 rejects empty signal buckets instead of synthesizing closes",
+    "historical mark, funding and instrument-rule roles belong to M3",
+    "performance, soak, recovery and rollback release gates remain scheduled for M10"
+  ]
+}

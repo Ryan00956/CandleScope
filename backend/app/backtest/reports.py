@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from decimal import Decimal
 from typing import Any, Mapping
 
@@ -28,6 +29,7 @@ LABELS = {
     "BAR_APPROX": "APPROXIMATE",
     "TRADE_TAPE": "TRADE_SEQUENCE",
     "AGG_TRADE_TAPE": "AGGREGATED_TRADE_SEQUENCE",
+    "AGG_TRADE_EXECUTION": "AGGREGATED_TRADE_SEQUENCE",
     "BOOK_ASSISTED": "BOOK_ASSISTED",
     "QUEUE_EXACT": "ORDER_LEVEL_REQUIRED",
 }
@@ -42,6 +44,10 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
     winning = sum(Decimal(str(item["net_pnl"])) > 0 for item in trades)
     net_pnl = sum((Decimal(str(item["net_pnl"])) for item in trades), Decimal("0"))
     label = LABELS.get(fidelity) or str(payload.get("report_label") or "")
+    try:
+        config = json.loads(str(run.get("config_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        config = {}
     report = {
         "schemaVersion": REPORT_SCHEMA,
         "runId": run.get("run_id"),
@@ -85,7 +91,11 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         "suitable_for": (
             ["bar-close strategy comparison", "parameter smoke tests"]
             if fidelity == "BAR_APPROX"
-            else ["print-sequence execution", "next-print market fills"]
+            else (
+                ["completed-bar signals", "aggregate-trade next-print execution"]
+                if fidelity == "AGG_TRADE_EXECUTION"
+                else ["print-sequence execution", "next-print market fills"]
+            )
         ),
         "not_suitable_for": [
             "claiming unique intrabar order",
@@ -98,6 +108,22 @@ def build_report(run: Mapping[str, Any], result: Mapping[str, Any] | None = None
         "contract_coverage": payload.get("contract_coverage") or {},
     }
     strategy_metadata = payload.get("strategy_metadata")
+    if fidelity == "AGG_TRADE_EXECUTION":
+        report["identity"].update(
+            {
+                "signal_clock": config.get("signal_clock"),
+                "signal_interval": config.get("signal_interval"),
+                "execution_clock": config.get("execution_clock"),
+                "bar_builder": config.get("bar_builder"),
+                "timezone": config.get("timezone"),
+            }
+        )
+        report["metrics"].update(
+            {
+                "signal_event_count": int(payload.get("signal_event_count") or 0),
+                "execution_event_count": int(payload.get("execution_event_count") or 0),
+            }
+        )
     if isinstance(strategy_metadata, Mapping) and strategy_metadata:
         report["strategy"] = copy.deepcopy(dict(strategy_metadata))
     return seal_report(report)

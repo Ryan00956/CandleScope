@@ -29,6 +29,11 @@ class RunCreateRequest(BaseModel):
     end_time_ms: int
     warmup_bars: int = 0
     interval: str | None = Field(default=None, max_length=16)
+    signal_clock: str | None = Field(default=None, max_length=40)
+    signal_interval: str | None = Field(default=None, max_length=16)
+    execution_clock: str | None = Field(default=None, max_length=40)
+    bar_builder: str | None = Field(default=None, max_length=80)
+    timezone: str | None = Field(default=None, max_length=40)
     parameters: dict[str, Any] = Field(default_factory=dict)
     strategy_source: str | None = Field(default=None, max_length=2_000)
     output_mode: str = Field(default="TARGET_POSITION", max_length=32)

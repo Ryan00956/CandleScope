@@ -418,5 +418,52 @@ def test_runtime_executes_verified_aggregate_trade_snapshot(tmp_path: Path) -> N
         chart = runtime.chart_data(str(created["run_id"]))
         assert len(chart["bars"]) == 24
         assert len(chart["fills"]) == 2
+
+        dual_created = runtime.service.create_run(
+            {
+                "strategy_revision_id": "builtin-order-command-v1",
+                "dataset_id": manifest["dataset_id"],
+                "data_epoch": preview["data_epoch"],
+                "snapshot_hash": preview["snapshot_hash"],
+                "fidelity_mode": "AGG_TRADE_EXECUTION",
+                "source_event_kind": "AGG_TRADE",
+                "start_time_ms": start_ms,
+                "end_time_ms": start_ms + 23_000,
+                "interval": "5s",
+                "signal_clock": "DERIVED_BAR_CLOSE",
+                "signal_interval": "1s",
+                "execution_clock": "NEXT_AGG_TRADE",
+                "bar_builder": "TRADE_DERIVED_COMPLETE_BUCKETS_V1",
+                "timezone": "UTC",
+                "exchange": "binance",
+                "market_type": "usdm",
+                "strategy_source": json.dumps(
+                    {
+                        "commands": [
+                            {"sequence": 2, "action": "OPEN_LONG", "qty": "1"},
+                            {"sequence": 10, "action": "CLOSE_LONG", "qty": "1"},
+                        ]
+                    }
+                ),
+                "output_mode": "ORDER_INTENT",
+            },
+            idempotency_key="runtime-dual-clock-e2e",
+        )
+        deadline = time.monotonic() + 8
+        dual_record = dual_created
+        while time.monotonic() < deadline:
+            dual_record = runtime.service.get_run(str(dual_created["run_id"]))
+            if dual_record["state"] in {"COMPLETED", "FAILED"}:
+                break
+            time.sleep(0.05)
+        assert dual_record["state"] == "COMPLETED", dual_record
+        dual_report = runtime.service.get_report(str(dual_created["run_id"]))
+        assert dual_report["identity"]["signal_interval"] == "1s"
+        assert dual_report["metrics"]["signal_event_count"] == 23
+        assert dual_report["metrics"]["execution_event_count"] == 24
+        dual_chart = runtime.chart_data(str(dual_created["run_id"]))
+        assert dual_chart["interval"] == "1s"
+        assert len(dual_chart["bars"]) == 23
+        assert len(dual_chart["fills"]) == 2
     finally:
         runtime.shutdown()

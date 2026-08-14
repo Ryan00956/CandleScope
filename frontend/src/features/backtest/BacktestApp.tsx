@@ -22,6 +22,7 @@ const RSI_REVISION = "builtin-rsi-reversion-v1";
 const RSI_WILDER_LONG_SHORT_REVISION = "builtin-rsi-wilder-long-short-v1";
 const EXPRESSION_REVISION = "builtin-expression-model-v1";
 const COMMAND_REVISION = "builtin-order-command-v1";
+const DUAL_CLOCK_MODE = "AGG_TRADE_EXECUTION";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -251,6 +252,11 @@ export default function BacktestApp() {
       start_time_ms: startTimeMs,
       end_time_ms: endTimeMs,
       interval: selectedDataset.interval,
+      signal_clock: fidelityMode === DUAL_CLOCK_MODE ? "DERIVED_BAR_CLOSE" : null,
+      signal_interval: fidelityMode === DUAL_CLOCK_MODE ? selectedDataset.interval : null,
+      execution_clock: fidelityMode === DUAL_CLOCK_MODE ? "NEXT_AGG_TRADE" : null,
+      bar_builder: fidelityMode === DUAL_CLOCK_MODE ? "TRADE_DERIVED_COMPLETE_BUCKETS_V1" : null,
+      timezone: fidelityMode === DUAL_CLOCK_MODE ? "UTC" : null,
       warmup_bars: strategyRevisionId === SMA_REVISION ? slow
         : strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION
           ? Number(schemaParameters.length ?? 24) + 1 : 0,
@@ -476,7 +482,11 @@ export default function BacktestApp() {
               回测粒度
               <select value={fidelityMode} onChange={(event) => setFidelityMode(event.target.value)}>
                 {(capabilities?.fidelity_modes ?? ["BAR_APPROX"]).map((mode) => (
-                  <option key={mode} value={mode}>{mode === "BAR_APPROX" ? "按 K 线（近似）" : "按成交（aggTrade）"}</option>
+                  <option key={mode} value={mode}>{mode === "BAR_APPROX"
+                    ? "按 K 线（近似）"
+                    : mode === DUAL_CLOCK_MODE
+                      ? "K 线信号 + 后续 aggTrade 执行"
+                      : "按成交（aggTrade）"}</option>
                 ))}
               </select>
             </label>
@@ -490,10 +500,18 @@ export default function BacktestApp() {
             </label>
           </div>
           {selectedStrategy && <p className="backtest-strategy-help">{selectedStrategy.description}</p>}
-          {fidelityMode === "AGG_TRADE_TAPE" && (
+          {fidelityMode !== "BAR_APPROX" && (
             <div className="backtest-form-row">
               <label>交易所<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
               <label>市场类型<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
+            </div>
+          )}
+          {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
+            <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
+              <strong>信号周期 {selectedDataset.interval} · UTC</strong>
+              <span>信号源 DERIVED_BAR_CLOSE</span>
+              <span>执行源 NEXT_AGG_TRADE（聚合成交，不代表 raw trade 或队列真相）</span>
+              <span>TRADE_DERIVED_COMPLETE_BUCKETS_V1 · 尾部未完结桶不可见</span>
             </div>
           )}
           <div className="backtest-form-row">
@@ -614,6 +632,12 @@ export default function BacktestApp() {
                 <div><span>完整交易</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
                 <div><span>最终权益</span><strong>{report.account?.equity ?? "—"}</strong></div>
               </div>
+              {report.fidelity_mode === DUAL_CLOCK_MODE && <div className="backtest-strategy-evidence" data-testid="dual-clock-report">
+                <strong>信号周期 {report.identity?.signal_interval} · {report.identity?.timezone}</strong>
+                <span>{report.identity?.signal_clock} → {report.identity?.execution_clock}</span>
+                <span>信号事件 {report.metrics.signal_event_count} · 执行事件 {report.metrics.execution_event_count}</span>
+                <span>{report.identity?.bar_builder} · aggTrade 非 raw trade / queue exact</span>
+              </div>}
               <div className="backtest-proof">
                 <span>Report hash</span><code title={report.hashes.report ?? ""}>{report.hashes.report}</code>
               </div>

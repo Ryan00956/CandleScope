@@ -66,6 +66,7 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 - 单市场、单账户、线性永续、单向持仓的冻结账户模型；
 - `BAR_APPROX` 回测，Pyne 策略适配器，参数化运行；
 - `AGG_TRADE_TAPE` 只读本地校验归档回测；缺数据必须失败，不得用 K 线伪造成交；
+- `AGG_TRADE_EXECUTION` 双时钟回测：策略只看同一 aggTrade 归档派生的完整 K 线，订单只在边界后的 aggTrade 上执行；
 - 统一 `SIGNAL` / `TARGET_POSITION` / `ORDER_INTENT` 输出接口，以及开多、平多、开空、平空命令脚本适配器；
 - 经账户模型批准的 Market / Limit / Stop / Stop-Limit；
 - 手续费、滑点、最小价格步长、最小数量和名义价值约束；
@@ -120,6 +121,7 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 | `BAR_APPROX` | 完结 OHLCV | `BAR` | `APPROXIMATE` | K 线内部唯一顺序、精确止损/限价先后 |
 | `TRADE_TAPE` | raw trade | `RAW_TRADE` | `TRADE_SEQUENCE` | 盘口深度、未成交挂单队列 |
 | `AGG_TRADE_TAPE` | 聚合成交 | `AGG_TRADE` | `AGGREGATED_TRADE_SEQUENCE` | raw trade、单笔微观顺序、队列 |
+| `AGG_TRADE_EXECUTION` | 聚合成交派生的完整 K 线 + 同源聚合成交 | `AGG_TRADE` | `AGGREGATED_TRADE_SEQUENCE` | raw trade、尾部未完结 K 线、单笔微观顺序、队列 |
 | `BOOK_ASSISTED` | trade + 连续 L2 | `TRADE_AND_L2` | `BOOK_ASSISTED` | 自己的真实队列位置 |
 | `QUEUE_EXACT` | 逐委托、撤单、撮合与优先级 | `ORDER_LEVEL` | `ORDER_LEVEL_REQUIRED` | 数据之外的隐藏流动性 |
 
@@ -131,7 +133,18 @@ CandleScope **必须**同时保留两个不同产品，不得合并成同一个�
 - 普通 L2 **不得** 标成 `QUEUE_EXACT`。
 - 缺少逐笔委托/撤单/撮合数据时，`QUEUE_EXACT` **必须** 拒绝启动。
 - 同一 Run **不得** 混合 BAR 与成交模式。
+- `AGG_TRADE_EXECUTION` 只有 aggTrade 一个权威源；派生 K 线不是第二份外部数据，不能混入独立 K 线快照。
 - 失败后 **不得** 静默退化到更粗模式。
+
+### 6.1 `AGG_TRADE_EXECUTION` 双时钟冻结语义
+
+- `signal_clock=DERIVED_BAR_CLOSE`、`execution_clock=NEXT_AGG_TRADE`；
+- `bar_builder=TRADE_DERIVED_COMPLETE_BUCKETS_V1`、`timezone=UTC`，`signal_interval` 为 canonical interval；
+- aggTrade 按 `(trade_time_ms, agg_trade_id)` 的稳定顺序消费；遇到桶边界时，先关闭只含边界以前成交的 bar 并调用 Provider，再让当前边界成交撮合新订单；
+- 派生 bar 使用从 1 递增的独立 `signal_sequence`。decision hash 使用该序列，fill hash 使用 aggTrade execution sequence；
+- 空桶按冻结 gap policy 处理；M2 仅接受 `REJECT`。不得复制上一 close，不得联网补数，不得降级为 BAR；
+- 数据尾部的形成中桶不向 Provider 和 chart API 公开；只有后续成交证明桶已关闭后才输出；
+- checkpoint 必须同时保存形成中 bar、Provider、planner、订单、账户和 aggTrade cursor；报告记录 signal/execution event count。
 
 ---
 
@@ -191,6 +204,7 @@ DRAFT -> VALIDATING -> QUEUED -> PREPARING -> RUNNING
 - `strategy_revision_id`、可选 `model_artifact_id`；
 - `dataset_snapshot_hashes`；
 - `fidelity_mode` 与 `source_event_kind`；
+- 双时钟模式的 `signal_clock`、`signal_interval`、`execution_clock`、`bar_builder` 与 `timezone`；
 - 起止时间、warmup 区间、评估区间；
 - 参数 canonical JSON/hash；
 - 账户、费用、滑点、fill、风险配置及 hash；

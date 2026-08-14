@@ -68,6 +68,11 @@ class RunIdentity:
     account_model: str
     execution_json: str = "{}"
     engine_version: str = ENGINE_VERSION
+    signal_clock: str | None = None
+    signal_interval: str | None = None
+    execution_clock: str | None = None
+    bar_builder: str | None = None
+    timezone: str | None = None
 
 
 @dataclass(slots=True)

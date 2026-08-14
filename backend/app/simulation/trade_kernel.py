@@ -111,6 +111,17 @@ class TradeSimulationKernel:
             "orders": [asdict(order) for order in self.orders],
             "fills": [asdict(fill) for fill in self.fills],
             "decisions": list(self.decisions),
+            "rejected": list(self.rejected),
+            "last_event": (
+                None
+                if self._last_event is None
+                else {
+                    "sequence": self._last_event.sequence,
+                    "event_time_ms": self._last_event.event_time_ms,
+                    "role": self._last_event.role,
+                    "payload": dict(self._last_event.payload),
+                }
+            ),
         }
 
     def restore(self, payload: Mapping[str, Any]) -> None:
@@ -179,6 +190,18 @@ class TradeSimulationKernel:
             for item in payload["fills"]  # type: ignore[union-attr]
         ]
         self.decisions = list(payload["decisions"])  # type: ignore[arg-type]
+        self.rejected = list(payload.get("rejected") or [])  # type: ignore[arg-type]
+        last_event = payload.get("last_event")
+        self._last_event = (
+            None
+            if not isinstance(last_event, Mapping)
+            else MarketEvent(
+                sequence=int(last_event["sequence"]),
+                event_time_ms=int(last_event["event_time_ms"]),
+                role=str(last_event["role"]),
+                payload=dict(last_event["payload"]),  # type: ignore[arg-type]
+            )
+        )
 
     def run(
         self,

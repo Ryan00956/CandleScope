@@ -384,6 +384,7 @@ Run 启动前必须完成：
 | `BAR_APPROX` | 完结 OHLCV | bar-close 策略、低频近似 | K 线内部唯一顺序、精确止损/限价先后 | `APPROXIMATE` |
 | `TRADE_TAPE` | raw trade | 实际成交打印顺序、下一打印机会 | 盘口深度、未成交挂单队列 | `TRADE_SEQUENCE` |
 | `AGG_TRADE_TAPE` | 聚合成交 | 聚合打印序列 | raw trade、单笔微观顺序、队列 | `AGGREGATED_TRADE_SEQUENCE` |
+| `AGG_TRADE_EXECUTION` | 同源 aggTrade 派生完整 K 线并按后续 aggTrade 执行 | K 线策略决策与聚合打印执行 | raw trade、尾部形成中 K 线、单笔微观顺序、队列 | `AGGREGATED_TRADE_SEQUENCE` |
 | `BOOK_ASSISTED` | trade + 连续 L2 | spread、可见深度和冲击近似 | 自己的真实队列位置 | `BOOK_ASSISTED` |
 | `QUEUE_EXACT` | 逐委托、撤单、撮合与优先级 | 队列级历史仿真 | 数据之外的隐藏流动性 | `ORDER_LEVEL_REQUIRED` |
 
@@ -630,6 +631,12 @@ position/account delta、ledger tail hash 和 warning。Provider 不能把“意
 
 第 3 步在策略决策之前，因此旧挂单可以被当前事件成交；第 9 步确保新订单不能反向使用已经
 观察到的事件成交。
+
+`AGG_TRADE_EXECUTION` 使用专用边界顺序，不复用上述“每笔成交后调用 Provider”的顺序：先由
+`TRADE_DERIVED_COMPLETE_BUCKETS_V1` 在边界前关闭完整桶，以独立 `signal_sequence` 生成
+`DERIVED_BAR_CLOSE`，Provider/Planner 入队后，再以当前第一笔边界 aggTrade 撮合。形成中尾桶
+不可见；空桶在 M2 失败关闭；checkpoint 同时包含 bar builder 与 aggTrade cursor。该模式仍只有
+aggTrade 一个权威市场源，报告标签固定为 `AGGREGATED_TRADE_SEQUENCE`。
 
 ### 10.2 BAR_APPROX
 

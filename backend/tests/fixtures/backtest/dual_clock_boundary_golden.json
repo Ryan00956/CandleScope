@@ -1,0 +1,15 @@
+{
+  "interval": "1m",
+  "trades": [
+    {"sequence": 1, "event_time_ms": 59999, "agg_trade_id": 10, "price": "100", "qty": "1"},
+    {"sequence": 2, "event_time_ms": 60000, "agg_trade_id": 11, "price": "101", "qty": "0.5"},
+    {"sequence": 3, "event_time_ms": 60000, "agg_trade_id": 12, "price": "102", "qty": "0.5"}
+  ],
+  "expected": {
+    "signal_sequence": 1,
+    "signal_time_ms": 59999,
+    "first_eligible_agg_trade_id": 11,
+    "first_fill_sequence": 2,
+    "first_fill_price": "101"
+  }
+}

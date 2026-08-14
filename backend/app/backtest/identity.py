@@ -17,8 +17,7 @@ def sha256_hex(value: object) -> str:
 
 
 def config_hash(identity: RunIdentity) -> str:
-    return "sha256:" + sha256_hex(
-        {
+    payload = {
             "strategy_revision_id": identity.strategy_revision_id,
             "dataset_id": identity.dataset_id,
             "data_epoch": identity.data_epoch,
@@ -32,8 +31,18 @@ def config_hash(identity: RunIdentity) -> str:
             "account_model": identity.account_model,
             "execution_json": identity.execution_json,
             "engine_version": identity.engine_version,
-        }
-    )
+    }
+    if identity.fidelity_mode == "AGG_TRADE_EXECUTION":
+        payload.update(
+            {
+                "signal_clock": identity.signal_clock,
+                "signal_interval": identity.signal_interval,
+                "execution_clock": identity.execution_clock,
+                "bar_builder": identity.bar_builder,
+                "timezone": identity.timezone,
+            }
+        )
+    return "sha256:" + sha256_hex(payload)
 
 
 def parse_parameters(raw: str | Mapping[str, object]) -> str:

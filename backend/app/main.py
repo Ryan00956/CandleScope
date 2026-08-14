@@ -274,6 +274,7 @@ async def startup_event() -> None:
                 backtest_runtime = BacktestRuntime.start(
                     BACKTEST_SETTINGS,
                     local_data_dir=LOCAL_DATA_DIR,
+                    trade_archive_dir=REPLAY_AGG_TRADE_ARCHIVE_DIR,
                 )
                 app.state.backtest_runtime = backtest_runtime
                 app.state.backtest_service = backtest_runtime.service

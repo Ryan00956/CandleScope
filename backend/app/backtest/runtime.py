@@ -27,6 +27,7 @@ from app.market_dataset.snapshot import (
     MarketEvent,
     sha256_hex,
 )
+from app.simulation.trade_bar_builder import derive_complete_trade_bars
 
 from .errors import BacktestError
 from .service import BacktestService
@@ -134,7 +135,7 @@ class BacktestRuntime:
         exchange: str = "binance",
         market_type: str = "usdm",
     ) -> dict[str, Any]:
-        if fidelity_mode == "AGG_TRADE_TAPE":
+        if fidelity_mode in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
             manifest = self._manifest(dataset_id)
             dataset = self._freeze_trade_dataset(
                 exchange=exchange,
@@ -176,7 +177,12 @@ class BacktestRuntime:
         if record["state"] != "COMPLETED":
             raise BacktestError("IDENTITY_MUTATION", "backtest chart is not ready")
         config = json.loads(str(record["config_json"]))
-        interval = str(config.get("interval") or self._manifest(str(record["dataset_id"]))["interval"])
+        interval = str(
+            config.get("signal_interval")
+            if record["fidelity_mode"] == "AGG_TRADE_EXECUTION"
+            else config.get("interval")
+            or self._manifest(str(record["dataset_id"]))["interval"]
+        )
         if record["fidelity_mode"] == "BAR_APPROX":
             ref = self._dataset_ref(
                 dataset_id=record["dataset_id"],
@@ -194,7 +200,7 @@ class BacktestRuntime:
                 bars = [_bar_wire(event) for event in snapshot.events]
             finally:
                 snapshot.close()
-        elif record["fidelity_mode"] == "AGG_TRADE_TAPE":
+        elif record["fidelity_mode"] in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
             manifest = self._manifest(str(record["dataset_id"]))
             dataset = self._freeze_trade_dataset(
                 exchange=str(config.get("exchange") or "binance"),
@@ -212,7 +218,10 @@ class BacktestRuntime:
                 )
             except MarketDatasetError as exc:
                 raise BacktestError(exc.code, exc.message) from exc
-            bars = _aggregate_trade_bars(events, interval)
+            if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
+                bars = [_bar_wire(event) for event in derive_complete_trade_bars(events, interval)]
+            else:
+                bars = _aggregate_trade_bars(events, interval)
         else:
             raise BacktestError("FIDELITY_UNSUPPORTED", "chart source is unsupported")
         truncated = len(bars) > max_bars
@@ -464,7 +473,7 @@ class BacktestWorker:
                         },
                     },
                 )
-            elif record["fidelity_mode"] == "AGG_TRADE_TAPE":
+            elif record["fidelity_mode"] in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
                 if self.trade_archive is None:
                     raise MarketDatasetError(
                         "local verified aggregate-trade archive is not configured",
@@ -483,21 +492,30 @@ class BacktestWorker:
                     dataset,
                     max_events=self.settings.max_trade_events,
                 )
-                service.execute_trade_run(
-                    run_id,
-                    events=events,
-                    provider=provider,
-                    snapshot_evidence={
-                        "quality": {
-                            "status": "accepted",
-                            "source_event_kind": "AGG_TRADE",
-                            "completeness": dataset.completeness,
-                            "source_quality": dataset.source_quality,
-                            "gap_count": 0,
-                            "row_count": dataset.row_count,
-                        }
-                    },
-                )
+                evidence = {
+                    "quality": {
+                        "status": "accepted",
+                        "source_event_kind": "AGG_TRADE",
+                        "completeness": dataset.completeness,
+                        "source_quality": dataset.source_quality,
+                        "gap_count": 0,
+                        "row_count": dataset.row_count,
+                    }
+                }
+                if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
+                    service.execute_dual_clock_run(
+                        run_id,
+                        events=events,
+                        provider=provider,
+                        snapshot_evidence=evidence,
+                    )
+                else:
+                    service.execute_trade_run(
+                        run_id,
+                        events=events,
+                        provider=provider,
+                        snapshot_evidence=evidence,
+                    )
             else:
                 raise MarketDatasetError(
                     f"standalone worker cannot execute {record['fidelity_mode']}",
@@ -616,7 +634,7 @@ def _trade_preview_wire(
             "gap_count": 0,
         },
         "role_hashes": {"TRADES": digest},
-        "fidelity_capabilities": ["AGG_TRADE_TAPE"],
+        "fidelity_capabilities": ["AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"],
         "identity": dataset.to_dict(),
     }
 

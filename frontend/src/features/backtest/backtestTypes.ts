@@ -28,6 +28,8 @@ export interface BacktestReport {
     winning_trade_count: number;
     win_rate: string;
     realized_net_pnl: string;
+    signal_event_count?: number;
+    execution_event_count?: number;
   };
   account?: Record<string, string | boolean | null>;
   ledger?: Record<string, unknown>;
@@ -52,6 +54,13 @@ export interface BacktestReport {
     warmupRowsObserved?: number;
     reasonCodes?: Record<string, number>;
     decisionDebugTrace?: Array<Record<string, unknown>>;
+  };
+  identity?: {
+    signal_clock?: string | null;
+    signal_interval?: string | null;
+    execution_clock?: string | null;
+    bar_builder?: string | null;
+    timezone?: string | null;
   };
 }
 

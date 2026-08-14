@@ -20,6 +20,10 @@ from app.data_engine.storage.raw_trade_archive import (
 from app.data_engine.interval_policy import parse_interval_spec
 from app.local_data.service import LocalDatasetError, LocalDatasetService
 from app.market_dataset.adapters.local_bar import LocalBarSnapshotProvider
+from app.market_dataset.adapters.contract_aux import (
+    AUX_ROLES,
+    ContractAuxSnapshotProvider,
+)
 from app.market_dataset.models import DatasetRef
 from app.market_dataset.snapshot import (
     MarketDatasetError,
@@ -35,6 +39,13 @@ from .strategy.isolated import IsolatedStrategyProvider
 from .strategy.registry import build_default_strategy_registry
 
 logger = logging.getLogger("candlescope.backtest")
+HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1"
+HISTORICAL_CONTRACT_ROLES = (
+    "BARS",
+    "MARK_INDEX",
+    "FUNDING",
+    "INSTRUMENT_RULES",
+)
 
 
 class BacktestRuntime:
@@ -119,6 +130,7 @@ class BacktestRuntime:
                     "first_open_ms": manifest.get("first_open_ms"),
                     "last_close_ms": last_close_ms,
                     "strategy_revisions": self.service.strategy_registry.revision_ids(),
+                    "contract_history": manifest.get("contract_history"),
                 }
             )
         return datasets
@@ -134,6 +146,7 @@ class BacktestRuntime:
         fidelity_mode: str = "BAR_APPROX",
         exchange: str = "binance",
         market_type: str = "usdm",
+        contract_data_mode: str = "LEGACY_FIXED_V1",
     ) -> dict[str, Any]:
         if fidelity_mode in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
             manifest = self._manifest(dataset_id)
@@ -149,7 +162,43 @@ class BacktestRuntime:
                     "DATA_SNAPSHOT_MISMATCH",
                     "catalog or aggregate-trade data epoch changed",
                 )
-            return _trade_preview_wire(dataset, dataset_id=dataset_id)
+            preview = _trade_preview_wire(dataset, dataset_id=dataset_id)
+            if contract_data_mode == HISTORICAL_CONTRACT_MODE:
+                try:
+                    aux = self._open_contract_snapshot(
+                        dataset_id=dataset_id,
+                        data_epoch=str(manifest["data_epoch"]),
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=str(manifest["symbol"]),
+                        start_time_ms=start_time_ms,
+                        end_time_ms=end_time_ms,
+                        allow_incomplete=True,
+                    )
+                except MarketDatasetError as exc:
+                    preview["quality"]["contract_data"] = {
+                        "status": "missing"
+                        if exc.code == "DATA_ROLE_MISSING"
+                        else "partial",
+                        "required_roles": list(AUX_ROLES),
+                        "role_status": {
+                            role: {"status": "missing"} for role in AUX_ROLES
+                        },
+                        "error_code": exc.code,
+                    }
+                else:
+                    preview["quality"]["contract_data"] = {
+                        "status": aux.quality["status"],
+                        "required_roles": list(AUX_ROLES),
+                        "role_status": aux.quality["roles"],
+                        "bundle_hash": aux.snapshot_hash,
+                    }
+                    preview["role_hashes"].update(aux.role_hashes)
+                    preview["snapshot_hash"] = _trade_snapshot_hash(
+                        dataset, contract_bundle_hash=aux.snapshot_hash
+                    )
+                    aux.close()
+            return preview
         if fidelity_mode != "BAR_APPROX":
             raise BacktestError(
                 "FIDELITY_UNSUPPORTED",
@@ -162,9 +211,17 @@ class BacktestRuntime:
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             interval=interval,
+            exchange=exchange,
+            market_type=market_type,
+            contract_data_mode=contract_data_mode,
         )
         try:
-            snapshot = self.snapshots.open(ref)
+            snapshot = self.snapshots.open(
+                ref,
+                allow_incomplete_contract=(
+                    contract_data_mode == HISTORICAL_CONTRACT_MODE
+                ),
+            )
         except MarketDatasetError as exc:
             raise BacktestError(exc.code, exc.message) from exc
         try:
@@ -191,13 +248,20 @@ class BacktestRuntime:
                 start_time_ms=config["start_time_ms"],
                 end_time_ms=config["end_time_ms"],
                 interval=interval,
+                contract_data_mode=config.get("contract_data_mode"),
+                exchange=str(config.get("exchange") or "binance"),
+                market_type=str(config.get("market_type") or "usdm"),
             )
             try:
                 snapshot = self.snapshots.open(ref)
             except MarketDatasetError as exc:
                 raise BacktestError(exc.code, exc.message) from exc
             try:
-                bars = [_bar_wire(event) for event in snapshot.events]
+                bars = [
+                    _bar_wire(event)
+                    for event in snapshot.events
+                    if event.role == "BARS"
+                ]
             finally:
                 snapshot.close()
         elif record["fidelity_mode"] in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
@@ -209,8 +273,25 @@ class BacktestRuntime:
                 start_time_ms=int(config["start_time_ms"]),
                 end_time_ms=int(config["end_time_ms"]),
             )
+            contract_snapshot: MarketDatasetSnapshot | None = None
             try:
-                _assert_trade_identity(dataset, record)
+                contract_bundle_hash: str | None = None
+                if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE:
+                    contract_snapshot = self._open_contract_snapshot(
+                        dataset_id=str(record["dataset_id"]),
+                        data_epoch=str(record["data_epoch"]),
+                        exchange=str(config.get("exchange") or "binance"),
+                        market_type=str(config.get("market_type") or "usdm"),
+                        symbol=str(manifest["symbol"]),
+                        start_time_ms=int(config["start_time_ms"]),
+                        end_time_ms=int(config["end_time_ms"]),
+                    )
+                    contract_bundle_hash = contract_snapshot.snapshot_hash
+                _assert_trade_identity(
+                    dataset,
+                    record,
+                    contract_bundle_hash=contract_bundle_hash,
+                )
                 events = _read_trade_events(
                     self._require_trade_archive(),
                     dataset,
@@ -218,8 +299,14 @@ class BacktestRuntime:
                 )
             except MarketDatasetError as exc:
                 raise BacktestError(exc.code, exc.message) from exc
+            finally:
+                if contract_snapshot is not None:
+                    contract_snapshot.close()
             if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
-                bars = [_bar_wire(event) for event in derive_complete_trade_bars(events, interval)]
+                bars = [
+                    _bar_wire(event)
+                    for event in derive_complete_trade_bars(events, interval)
+                ]
             else:
                 bars = _aggregate_trade_bars(events, interval)
         else:
@@ -269,16 +356,61 @@ class BacktestRuntime:
             dataset_id=str(values["dataset_id"]),
             data_epoch=str(values["data_epoch"]),
             snapshot_hash=str(values.get("snapshot_hash") or ""),
-            venue="local",
-            market_type="linear_perpetual",
+            venue=str(values.get("exchange") or "local"),
+            market_type=str(values.get("market_type") or "linear_perpetual"),
             symbol=str(manifest["symbol"]),
             start_time_ms=int(values["start_time_ms"]),
             end_time_ms=int(values["end_time_ms"]),
-            roles=("BARS", "INSTRUMENT_RULES"),
+            roles=(
+                HISTORICAL_CONTRACT_ROLES
+                if values.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
+                else ("BARS",)
+            ),
             interval=str(values.get("interval") or manifest["interval"]),
             calendar_id="UTC_FIXED",
             source="local_immutable",
             retention_policy="user_local",
+        )
+
+    def _open_contract_snapshot(
+        self,
+        *,
+        dataset_id: str,
+        data_epoch: str,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        allow_incomplete: bool = False,
+    ) -> MarketDatasetSnapshot:
+        path = (
+            Path(self.local_data.root)
+            / dataset_id
+            / data_epoch.removeprefix("sha256:")
+            / "contract-history.json"
+        )
+        if not path.exists():
+            raise MarketDatasetError(
+                "historical contract roles are missing", code="DATA_ROLE_MISSING"
+            )
+        return ContractAuxSnapshotProvider(path).open(
+            DatasetRef(
+                dataset_id=dataset_id,
+                data_epoch=data_epoch,
+                snapshot_hash="",
+                venue=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                roles=AUX_ROLES,
+                interval=None,
+                calendar_id="UTC_FIXED",
+                source="local_immutable",
+                retention_policy="user_local",
+            ),
+            allow_incomplete=allow_incomplete,
         )
 
     def materialize_study(self, study_id: str) -> dict[str, Any]:
@@ -377,7 +509,9 @@ class BacktestWorker:
             except BacktestError as exc:
                 if exc.code == "BUDGET_EXCEEDED":
                     return
-                logger.warning("Backtest Study %s failed to materialize: %s", study_id, exc)
+                logger.warning(
+                    "Backtest Study %s failed to materialize: %s", study_id, exc
+                )
                 service.repository.update_study_state(study_id, "FAILED")
             except Exception:
                 logger.exception(
@@ -393,18 +527,27 @@ class BacktestWorker:
                 dataset_id=str(values["dataset_id"]),
                 data_epoch=str(values["data_epoch"]),
                 snapshot_hash="",
-                venue="local",
-                market_type="linear_perpetual",
+                venue=str(values.get("exchange") or "binance"),
+                market_type=str(values.get("market_type") or "usdm"),
                 symbol=str(manifest["symbol"]),
                 start_time_ms=int(values["start_time_ms"]),
                 end_time_ms=int(values["end_time_ms"]),
-                roles=("BARS", "INSTRUMENT_RULES"),
+                roles=(
+                    HISTORICAL_CONTRACT_ROLES
+                    if values.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
+                    else ("BARS",)
+                ),
                 interval=str(values.get("interval") or manifest["interval"]),
                 calendar_id="UTC_FIXED",
                 source="local_immutable",
                 retention_policy="user_local",
             )
-            snapshot = self.snapshots.open(ref)
+            snapshot = self.snapshots.open(
+                ref,
+                allow_incomplete_contract=(
+                    values.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
+                ),
+            )
         except (LocalDatasetError, MarketDatasetError) as exc:
             code = getattr(exc, "code", "DATA_QUALITY_FAILED")
             raise BacktestError(str(code), str(exc)) from exc
@@ -422,6 +565,7 @@ class BacktestWorker:
     ) -> None:
         run_id = str(record["run_id"])
         snapshot: MarketDatasetSnapshot | None = None
+        contract_snapshot: MarketDatasetSnapshot | None = None
         heartbeat_stop = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat,
@@ -442,35 +586,44 @@ class BacktestWorker:
                     dataset_id=str(record["dataset_id"]),
                     data_epoch=str(record["data_epoch"]),
                     snapshot_hash=str(record["snapshot_hash"]),
-                    venue="local",
-                    market_type="linear_perpetual",
+                    venue=str(config.get("exchange") or "binance"),
+                    market_type=str(config.get("market_type") or "usdm"),
                     symbol=str(manifest["symbol"]),
                     start_time_ms=int(config["start_time_ms"]),
                     end_time_ms=int(config["end_time_ms"]),
-                    roles=("BARS", "INSTRUMENT_RULES"),
+                    roles=(
+                        HISTORICAL_CONTRACT_ROLES
+                        if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
+                        else ("BARS",)
+                    ),
                     interval=str(config.get("interval") or manifest["interval"]),
                     calendar_id="UTC_FIXED",
                     source="local_immutable",
                     retention_policy="user_local",
                 )
                 snapshot = self.snapshots.open(ref)
-                if not snapshot.row_count:
+                market_events = _bar_execution_events(
+                    snapshot.events,
+                    interval_name=str(config.get("interval") or manifest["interval"]),
+                )
+                if not market_events:
                     raise MarketDatasetError(
                         "selected snapshot contains no complete bars",
                         code="DATA_QUALITY_FAILED",
                     )
                 service.execute_bar_run(
                     run_id,
-                    events=snapshot.events,
+                    events=market_events,
                     provider=provider,
                     snapshot_evidence={
                         "quality": snapshot.quality,
-                        "contract_coverage": {
-                            "rule_version": "UNMODELED",
-                            "funding_events": "FIXED_MODEL_IF_CONFIGURED",
-                            "mark_available": False,
-                            "fallback": "bar_close_mark",
-                        },
+                        "contract_coverage": snapshot.quality.get(
+                            "contract_data",
+                            {
+                                "status": "not_required",
+                                "model": "LEGACY_FIXED_V1",
+                            },
+                        ),
                     },
                 )
             elif record["fidelity_mode"] in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
@@ -486,7 +639,23 @@ class BacktestWorker:
                     start_time_ms=int(config["start_time_ms"]),
                     end_time_ms=int(config["end_time_ms"]),
                 )
-                _assert_trade_identity(dataset, record)
+                contract_bundle_hash: str | None = None
+                if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE:
+                    contract_snapshot = self._open_contract_snapshot(
+                        dataset_id=str(record["dataset_id"]),
+                        data_epoch=str(manifest["data_epoch"]),
+                        exchange=str(config.get("exchange") or "binance"),
+                        market_type=str(config.get("market_type") or "usdm"),
+                        symbol=str(manifest["symbol"]),
+                        start_time_ms=int(config["start_time_ms"]),
+                        end_time_ms=int(config["end_time_ms"]),
+                    )
+                    contract_bundle_hash = contract_snapshot.snapshot_hash
+                _assert_trade_identity(
+                    dataset,
+                    record,
+                    contract_bundle_hash=contract_bundle_hash,
+                )
                 events = _read_trade_events(
                     self.trade_archive,
                     dataset,
@@ -502,6 +671,14 @@ class BacktestWorker:
                         "row_count": dataset.row_count,
                     }
                 }
+                if contract_snapshot is not None:
+                    evidence["quality"]["contract_data"] = {
+                        "status": "complete",
+                        "role_status": contract_snapshot.quality["roles"],
+                        "bundle_hash": contract_snapshot.snapshot_hash,
+                    }
+                    contract_snapshot.close()
+                    contract_snapshot = None
                 if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
                     service.execute_dual_clock_run(
                         run_id,
@@ -546,6 +723,8 @@ class BacktestWorker:
             heartbeat.join(timeout=2)
             if snapshot is not None:
                 snapshot.close()
+            if contract_snapshot is not None:
+                contract_snapshot.close()
             service.repository.release_lease(run_id, owner=owner)
             study_id = record.get("study_id")
             if study_id:
@@ -588,12 +767,16 @@ class BacktestWorker:
 
 
 def _snapshot_wire(snapshot: MarketDatasetSnapshot) -> dict[str, Any]:
+    market_row_count = sum(
+        1 for event in snapshot.events if event.role in {"BARS", "TRADES"}
+    )
     return {
         "data_epoch": snapshot.ref_identity.get("data_epoch"),
         "snapshot_hash": snapshot.snapshot_hash,
         "coverage_start_ms": snapshot.coverage_start_ms,
         "coverage_end_ms": snapshot.coverage_end_ms,
         "row_count": snapshot.row_count,
+        "market_row_count": market_row_count,
         "first_sequence": snapshot.first_sequence,
         "last_sequence": snapshot.last_sequence,
         "quality": snapshot.quality,
@@ -603,12 +786,64 @@ def _snapshot_wire(snapshot: MarketDatasetSnapshot) -> dict[str, Any]:
     }
 
 
+def _bar_execution_events(
+    events: tuple[MarketEvent, ...],
+    *,
+    interval_name: str,
+) -> tuple[MarketEvent, ...]:
+    """Project combined contract snapshots onto the BAR execution clock.
+
+    The combined snapshot sequence is authoritative for deterministic cross-role
+    ordering.  The BAR kernel has its own sequence contract where a skipped
+    number represents an actual missing interval, so auxiliary roles must not
+    create artificial gaps and real BAR gaps must remain visible.
+    """
+
+    interval = parse_interval_spec(interval_name)
+    if interval is None:
+        raise MarketDatasetError("invalid BAR interval", code="DATA_QUALITY_FAILED")
+    result: list[MarketEvent] = []
+    previous_open_ms: int | None = None
+    sequence = 0
+    for event in events:
+        if event.role != "BARS":
+            continue
+        open_time_ms = int(event.payload["open_time_ms"])
+        sequence += (
+            1
+            if previous_open_ms is None
+            or interval.is_successor(previous_open_ms, open_time_ms)
+            else 2
+        )
+        result.append(
+            MarketEvent(
+                sequence=sequence,
+                event_time_ms=event.event_time_ms,
+                role=event.role,
+                payload=event.payload,
+            )
+        )
+        previous_open_ms = open_time_ms
+    return tuple(result)
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _trade_snapshot_hash(dataset: RawAggTradeDatasetRef) -> str:
-    return f"sha256:{sha256_hex(dataset.to_dict())}"
+def _trade_snapshot_hash(
+    dataset: RawAggTradeDatasetRef,
+    *,
+    contract_bundle_hash: str | None = None,
+) -> str:
+    payload: object = dataset.to_dict()
+    if contract_bundle_hash is not None:
+        payload = {
+            "schema_version": "backtest.trade-contract-snapshot.v1",
+            "trade_dataset": dataset.to_dict(),
+            "contract_bundle_hash": contract_bundle_hash,
+        }
+    return f"sha256:{sha256_hex(payload)}"
 
 
 def _trade_preview_wire(
@@ -642,13 +877,17 @@ def _trade_preview_wire(
 def _assert_trade_identity(
     dataset: RawAggTradeDatasetRef,
     record: Mapping[str, object],
+    *,
+    contract_bundle_hash: str | None = None,
 ) -> None:
     if dataset.data_epoch != str(record["data_epoch"]):
         raise MarketDatasetError(
             "aggregate-trade data epoch changed",
             code="DATA_SNAPSHOT_MISMATCH",
         )
-    if _trade_snapshot_hash(dataset) != str(record["snapshot_hash"]):
+    if _trade_snapshot_hash(dataset, contract_bundle_hash=contract_bundle_hash) != str(
+        record["snapshot_hash"]
+    ):
         raise MarketDatasetError(
             "aggregate-trade snapshot manifest changed",
             code="DATA_SNAPSHOT_MISMATCH",
@@ -739,7 +978,9 @@ def _aggregate_trade_bars(
 ) -> list[dict[str, object]]:
     spec = parse_interval_spec(interval)
     if spec is None:
-        raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"invalid chart interval {interval}")
+        raise BacktestError(
+            "SCHEMA_UNKNOWN_FIELD", f"invalid chart interval {interval}"
+        )
     bars: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     current_open_ms: int | None = None

@@ -50,6 +50,7 @@ class RunCreateRequest(BaseModel):
     min_notional: str | None = Field(default=None, max_length=64)
     gap_policy: str = "REJECT"
     account_model: str = "LINEAR_PERP_ONE_WAY_V1"
+    contract_data_mode: str = Field(default="LEGACY_FIXED_V1", max_length=40)
     study_id: str | None = None
 
 
@@ -89,6 +90,21 @@ class SnapshotPreviewRequest(BaseModel):
     fidelity_mode: str = "BAR_APPROX"
     exchange: str = Field(default="binance", min_length=1, max_length=40)
     market_type: str = Field(default="usdm", min_length=1, max_length=40)
+    contract_data_mode: str = Field(default="LEGACY_FIXED_V1", max_length=40)
+
+
+def _require_contract_snapshot(
+    preview: dict[str, Any], contract_data_mode: str
+) -> None:
+    if contract_data_mode != "HISTORICAL_CONTRACT_V1":
+        return
+    contract = preview.get("quality", {}).get("contract_data", {})
+    if contract.get("status") != "complete":
+        raise BacktestError(
+            "DATA_ROLE_COVERAGE_MISSING",
+            "historical contract roles must be complete before Run",
+            details={"contract_data": contract},
+        )
 
 
 def _service(request: Request) -> BacktestService:
@@ -113,7 +129,9 @@ def _optional_runtime(request: Request) -> BacktestRuntime | None:
 def _error(exc: BacktestError) -> JSONResponse:
     return JSONResponse(
         status_code=400,
-        content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+        content={
+            "error": {"code": exc.code, "message": exc.message, "details": exc.details}
+        },
     )
 
 
@@ -159,7 +177,9 @@ def validate_run(request: Request, payload: RunCreateRequest) -> dict[str, Any]:
                 fidelity_mode=payload.fidelity_mode,
                 exchange=payload.exchange,
                 market_type=payload.market_type,
+                contract_data_mode=payload.contract_data_mode,
             )
+            _require_contract_snapshot(preview, payload.contract_data_mode)
             if (
                 preview["snapshot_hash"] != payload.snapshot_hash
                 or preview.get("data_epoch") != payload.data_epoch
@@ -192,7 +212,9 @@ def create_run(
                 fidelity_mode=payload.fidelity_mode,
                 exchange=payload.exchange,
                 market_type=payload.market_type,
+                contract_data_mode=payload.contract_data_mode,
             )
+            _require_contract_snapshot(preview, payload.contract_data_mode)
             if (
                 preview["snapshot_hash"] != payload.snapshot_hash
                 or preview.get("data_epoch") != payload.data_epoch

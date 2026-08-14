@@ -23,6 +23,7 @@ const RSI_WILDER_LONG_SHORT_REVISION = "builtin-rsi-wilder-long-short-v1";
 const EXPRESSION_REVISION = "builtin-expression-model-v1";
 const COMMAND_REVISION = "builtin-order-command-v1";
 const DUAL_CLOCK_MODE = "AGG_TRADE_EXECUTION";
+const HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -71,6 +72,7 @@ export default function BacktestApp() {
   const [makerFeeBps, setMakerFeeBps] = useState("0");
   const [fundingRate, setFundingRate] = useState("0");
   const [fundingIntervalHours, setFundingIntervalHours] = useState(8);
+  const [historicalContractData, setHistoricalContractData] = useState(false);
   const [snapshot, setSnapshot] = useState<BacktestSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
@@ -105,6 +107,12 @@ export default function BacktestApp() {
     () => studies.some((study) => !TERMINAL_STATES.has(study.state)),
     [studies],
   );
+  const contractData = snapshot?.quality.contract_data as {
+    status?: string;
+    role_status?: Record<string, { status?: string; row_count?: number }>;
+  } | undefined;
+  const historicalContractComplete = !historicalContractData
+    || contractData?.status === "complete";
 
   useEffect(() => {
     if (strategyRevisionId !== RSI_WILDER_LONG_SHORT_REVISION || !selectedStrategy) return;
@@ -186,6 +194,8 @@ export default function BacktestApp() {
         fidelity_mode: fidelityMode,
         exchange,
         market_type: marketType,
+        contract_data_mode: historicalContractData
+          ? HISTORICAL_CONTRACT_MODE : "LEGACY_FIXED_V1",
       }, controller.signal).then(setSnapshot).catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(errorMessage(reason));
       });
@@ -194,7 +204,7 @@ export default function BacktestApp() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [endTimeMs, exchange, fidelityMode, marketType, selectedDataset, startTimeMs]);
+  }, [endTimeMs, exchange, fidelityMode, historicalContractData, marketType, selectedDataset, startTimeMs]);
 
   useEffect(() => {
     setReport(null);
@@ -272,6 +282,8 @@ export default function BacktestApp() {
       output_mode: selectedStrategy?.output_modes[0]
         ?? (strategyRevisionId === COMMAND_REVISION ? "ORDER_INTENT" : "TARGET_POSITION"),
       account_model: "LINEAR_PERP_ONE_WAY_V1",
+      contract_data_mode: historicalContractData
+        ? HISTORICAL_CONTRACT_MODE : "LEGACY_FIXED_V1",
       initial_balance: initialBalance,
       slippage_bps: slippageBps,
       taker_fee_bps: takerFeeBps,
@@ -304,6 +316,7 @@ export default function BacktestApp() {
     fidelityMode,
     fundingIntervalHours,
     fundingRate,
+    historicalContractData,
     initialBalance,
     makerFeeBps,
     marketType,
@@ -506,6 +519,14 @@ export default function BacktestApp() {
               <label>市场类型<input value={marketType} onChange={(event) => setMarketType(event.target.value)} /></label>
             </div>
           )}
+          <label className="backtest-checkbox">
+            <input
+              type="checkbox"
+              checked={historicalContractData}
+              onChange={(event) => setHistoricalContractData(event.target.checked)}
+            />
+            要求历史 mark / index / funding / rules 完整覆盖（M3）
+          </label>
           {fidelityMode === DUAL_CLOCK_MODE && selectedDataset && (
             <div className="backtest-strategy-evidence" data-testid="dual-clock-identity">
               <strong>信号周期 {selectedDataset.interval} · UTC</strong>
@@ -581,13 +602,27 @@ export default function BacktestApp() {
             <label>资金费周期（小时）<input type="number" min="1" max="168" value={fundingIntervalHours} onChange={(event) => setFundingIntervalHours(Number(event.target.value))} /></label>
           </div>
           <div className="backtest-snapshot">
-            <span className={snapshot ? "ready" : "pending"}>{snapshot ? "已验证" : "验证中"}</span>
+            <span className={snapshot && historicalContractComplete ? "ready" : "pending"}>
+              {snapshot ? (historicalContractComplete ? "已验证" : "合约数据未完整") : "验证中"}
+            </span>
             <div>
-              <strong>{snapshot?.row_count.toLocaleString() ?? "—"} {fidelityMode === "BAR_APPROX" ? "bars" : "trades"}</strong>
+              <strong>{(snapshot?.market_row_count ?? snapshot?.row_count)?.toLocaleString() ?? "—"} {fidelityMode === "BAR_APPROX" ? "bars" : "trades"}</strong>
               <small>{hashLabel(snapshot?.snapshot_hash)}</small>
             </div>
           </div>
-          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || (strategyRevisionId === SMA_REVISION && fast >= slow)}>
+          {historicalContractData && (
+            <div className="backtest-strategy-evidence" data-testid="contract-role-status">
+              {(["MARK_INDEX", "FUNDING", "INSTRUMENT_RULES"] as const).map((role) => (
+                <span key={role}>
+                  {role}: {contractData?.role_status?.[role]?.status ?? "missing"}
+                  {contractData?.role_status?.[role]?.row_count !== undefined
+                    ? ` · ${contractData.role_status[role].row_count} rows` : ""}
+                </span>
+              ))}
+              <small>仅使用已导入本地包；不会联网补取。</small>
+            </div>
+          )}
+          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || (strategyRevisionId === SMA_REVISION && fast >= slow)}>
             {loading ? "处理中…" : "验证并启动后台 Run"}
           </button>
         </form>

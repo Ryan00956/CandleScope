@@ -6,6 +6,10 @@ from pathlib import Path
 from app.data_engine.interval_policy import parse_interval_spec
 from app.local_data.service import LocalDatasetError, LocalDatasetService
 from app.market_dataset.models import DatasetRef
+from app.market_dataset.adapters.contract_aux import (
+    AUX_ROLES,
+    ContractAuxSnapshotProvider,
+)
 from app.market_dataset.snapshot import (
     MarketDatasetError,
     MarketDatasetSnapshot,
@@ -13,7 +17,7 @@ from app.market_dataset.snapshot import (
     sha256_hex,
 )
 
-LOCAL_BAR_ROLES = frozenset({"BARS", "INSTRUMENT_RULES"})
+LOCAL_BAR_ROLES = frozenset({"BARS", *AUX_ROLES})
 UNMODELED_RULES = {
     "price_tick": "UNMODELED",
     "qty_step": "UNMODELED",
@@ -26,12 +30,19 @@ UNMODELED_RULES = {
 class LocalBarSnapshotProvider:
     """Read-only adapter from an immutable local BAR revision."""
 
-    def __init__(self, service: LocalDatasetService, *, max_rows: int = 200_000) -> None:
+    def __init__(
+        self, service: LocalDatasetService, *, max_rows: int = 200_000
+    ) -> None:
         self._service = service
         self._max_rows = int(max_rows)
 
-    def open(self, ref: DatasetRef) -> MarketDatasetSnapshot:
-        requested = tuple(ref.roles) or ("BARS", "INSTRUMENT_RULES")
+    def open(
+        self,
+        ref: DatasetRef,
+        *,
+        allow_incomplete_contract: bool = False,
+    ) -> MarketDatasetSnapshot:
+        requested = tuple(ref.roles) or ("BARS",)
         unknown = [role for role in requested if role not in LOCAL_BAR_ROLES]
         if unknown:
             raise MarketDatasetError(
@@ -66,7 +77,8 @@ class LocalBarSnapshotProvider:
                 continue
             sequence += (
                 1
-                if previous_open_ms is None or interval.is_successor(previous_open_ms, open_ms)
+                if previous_open_ms is None
+                or interval.is_successor(previous_open_ms, open_ms)
                 else 2
             )
             selected.append(
@@ -88,11 +100,111 @@ class LocalBarSnapshotProvider:
             previous_open_ms = open_ms
 
         quality = self._quality(ref, manifest)
-        rules_hash = sha256_hex(UNMODELED_RULES)
         bars_hash = sha256_hex([event.payload for event in selected])
         role_hashes = {"BARS": f"sha256:{bars_hash}"}
-        if "INSTRUMENT_RULES" in requested:
-            role_hashes["INSTRUMENT_RULES"] = f"sha256:{rules_hash}"
+        contract_events: tuple[MarketEvent, ...] = ()
+        contract_roles = tuple(role for role in requested if role in AUX_ROLES)
+        contract_path = (
+            Path(self._service.root)
+            / ref.dataset_id
+            / ref.data_epoch.removeprefix("sha256:")
+            / "contract-history.json"
+        )
+        legacy_rules = (
+            contract_roles == ("INSTRUMENT_RULES",) and not contract_path.exists()
+        )
+        if legacy_rules:
+            role_hashes["INSTRUMENT_RULES"] = f"sha256:{sha256_hex(UNMODELED_RULES)}"
+            quality["contract_data"] = {
+                "status": "not_required",
+                "required_roles": [],
+                "role_status": {"INSTRUMENT_RULES": {"status": "legacy_unmodeled"}},
+            }
+        elif contract_roles and contract_path.exists():
+            aux_ref = DatasetRef(
+                dataset_id=ref.dataset_id,
+                data_epoch=ref.data_epoch,
+                snapshot_hash="",
+                venue=ref.venue,
+                market_type=ref.market_type,
+                symbol=ref.symbol,
+                start_time_ms=ref.start_time_ms,
+                end_time_ms=ref.end_time_ms,
+                roles=contract_roles,
+                interval=None,
+                calendar_id=ref.calendar_id,
+                source=ref.source,
+                retention_policy=ref.retention_policy,
+            )
+            try:
+                aux = ContractAuxSnapshotProvider(contract_path).open(
+                    aux_ref,
+                    allow_incomplete=allow_incomplete_contract,
+                )
+            except MarketDatasetError:
+                if not allow_incomplete_contract:
+                    raise
+                quality["contract_data"] = {
+                    "status": "partial",
+                    "required_roles": list(AUX_ROLES),
+                    "role_status": {role: {"status": "partial"} for role in AUX_ROLES},
+                }
+            else:
+                contract_events = aux.events
+                role_hashes.update(aux.role_hashes)
+                quality["contract_data"] = {
+                    "status": aux.quality["status"],
+                    "required_roles": list(AUX_ROLES),
+                    "role_status": aux.quality["roles"],
+                    "missing_intervals": aux.quality["missing_intervals"],
+                    "bundle_hash": aux.snapshot_hash,
+                }
+        elif contract_roles:
+            quality["contract_data"] = {
+                "status": "missing",
+                "required_roles": list(AUX_ROLES),
+                "role_status": {
+                    role: {
+                        "status": "missing",
+                        "missing_intervals": [
+                            {"start_ms": ref.start_time_ms, "end_ms": ref.end_time_ms}
+                        ],
+                    }
+                    for role in AUX_ROLES
+                },
+            }
+            if not allow_incomplete_contract:
+                raise MarketDatasetError(
+                    "historical contract roles are missing",
+                    code="DATA_ROLE_MISSING",
+                )
+        else:
+            quality["contract_data"] = {
+                "status": "not_required",
+                "required_roles": [],
+                "role_status": {},
+            }
+        market_events = tuple(selected)
+        if contract_events:
+            combined = [*contract_events, *market_events]
+            combined.sort(
+                key=lambda event: (
+                    event.event_time_ms,
+                    {
+                        "INSTRUMENT_RULES": 10,
+                        "MARK_INDEX": 20,
+                        "FUNDING": 30,
+                        "BARS": 40,
+                    }.get(event.role, 99),
+                    event.sequence,
+                )
+            )
+            events = tuple(
+                MarketEvent(index, event.event_time_ms, event.role, event.payload)
+                for index, event in enumerate(combined, start=1)
+            )
+        else:
+            events = market_events
         snapshot_hash = sha256_hex(
             {
                 "dataset_id": ref.dataset_id,
@@ -121,9 +233,13 @@ class LocalBarSnapshotProvider:
                 "symbol": ref.symbol,
                 "interval": ref.interval or manifest["interval"],
             },
-            coverage_start_ms=selected[0].payload["open_time_ms"] if selected else ref.start_time_ms,
-            coverage_end_ms=selected[-1].payload["close_time_ms"] if selected else ref.end_time_ms,
-            events=tuple(selected),
+            coverage_start_ms=selected[0].payload["open_time_ms"]
+            if selected
+            else ref.start_time_ms,
+            coverage_end_ms=selected[-1].payload["close_time_ms"]
+            if selected
+            else ref.end_time_ms,
+            events=events,
             role_hashes=role_hashes,
             quality=quality,
             provenance={
@@ -139,7 +255,9 @@ class LocalBarSnapshotProvider:
 
     def _quality(self, ref: DatasetRef, manifest: dict) -> dict:
         revision = ref.data_epoch.removeprefix("sha256:")
-        path = Path(self._service.root) / ref.dataset_id / revision / "quality-report.json"
+        path = (
+            Path(self._service.root) / ref.dataset_id / revision / "quality-report.json"
+        )
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

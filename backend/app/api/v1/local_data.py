@@ -141,7 +141,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
     return {
         "runtime_mode": "LOCAL_OFFLINE",
         "network_policy": "loopback_only",
-        "import_formats": ["csv"],
+        "import_formats": ["csv", "contract-history-v1"],
         "ohlc_only": True,
         "missing_volume_semantics": "unavailable_never_zero",
         "timestamp_units": ["auto", "s", "ms", "iso"],
@@ -256,6 +256,29 @@ async def revision_quality(
         )
     except LocalDatasetError as exc:
         raise _translate_error(exc) from exc
+
+
+@router.post("/datasets/{dataset_id}/contract-history", status_code=201)
+async def import_contract_history(
+    dataset_id: str,
+    request: Request,
+    data_epoch: str,
+) -> dict[str, Any]:
+    """Import an explicit offline bundle; this endpoint never fetches a URL."""
+    service = _service(request)
+    upload_path = service.new_upload_path()
+    try:
+        await _receive_upload(request, upload_path, empty_label="Contract history JSON")
+        return await asyncio.to_thread(
+            service.import_contract_history,
+            upload_path,
+            dataset_id=dataset_id,
+            data_epoch=data_epoch,
+        )
+    except LocalDatasetError as exc:
+        raise _translate_error(exc) from exc
+    finally:
+        upload_path.unlink(missing_ok=True)
 
 
 @router.post("/datasets/{dataset_id}/revisions/activate")

@@ -28,6 +28,11 @@ from app.local_data.resampling import (
     LocalResamplingError,
     resolve_local_resample_plan,
 )
+from app.market_dataset.adapters.contract_aux import (
+    load_contract_history,
+    write_contract_history,
+)
+from app.market_dataset.snapshot import MarketDatasetError, canonical_json
 
 
 DATASET_ID_RE = re.compile(r"^local-[0-9a-f]{32}$")
@@ -165,6 +170,86 @@ class LocalDatasetService:
             staging = None
             self._report_progress(progress, "completed", len(bars), len(bars))
             return published
+        finally:
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging)
+
+    def import_contract_history(
+        self,
+        bundle_path: Path,
+        *,
+        dataset_id: str,
+        data_epoch: str,
+    ) -> dict[str, Any]:
+        """Attach verified contract history as a new immutable dataset revision."""
+        self.start()
+        current, source_revision = self._validated_revision_dir(dataset_id, data_epoch)
+        try:
+            descriptor = load_contract_history(Path(bundle_path))
+        except MarketDatasetError as exc:
+            raise LocalDatasetError(str(exc), code=exc.code) from exc
+        if descriptor.identity["symbol"] != current["symbol"]:
+            raise LocalDatasetError(
+                "Contract history symbol does not match the dataset",
+                code="dataset_identity_mismatch",
+            )
+        epoch_hex = hashlib.sha256(
+            canonical_json(
+                {
+                    "schema_version": "candlescope.local.contract-revision.v1",
+                    "parent_data_epoch": data_epoch,
+                    "contract_bundle_hash": descriptor.bundle_hash,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        staging: Path | None = (
+            self.root / ".staging" / f"{dataset_id}-contract-{uuid.uuid4().hex}"
+        )
+        try:
+            shutil.copytree(source_revision, staging)
+            for name in ("contract-history.json", "contract-history.manifest.json"):
+                (staging / name).unlink(missing_ok=True)
+            temporary_bundle = staging / ".contract-history"
+            write_contract_history(descriptor, temporary_bundle)
+            for name in ("contract-history.json", "contract-history.manifest.json"):
+                os.replace(temporary_bundle / name, staging / name)
+            temporary_bundle.rmdir()
+            manifest = json.loads(
+                (staging / "manifest.json").read_text(encoding="utf-8")
+            )
+            manifest.update(
+                {
+                    "data_epoch": f"sha256:{epoch_hex}",
+                    "parent_data_epoch": data_epoch,
+                    "contract_history": {
+                        "schema_version": descriptor.manifest["schema_version"],
+                        "bundle_hash": descriptor.bundle_hash,
+                        "role_hashes": dict(descriptor.role_hashes),
+                        "roles": list(descriptor.role_hashes),
+                    },
+                    "imported_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self._write_json(staging / "manifest.json", manifest)
+            quality = json.loads(
+                (staging / "quality-report.json").read_text(encoding="utf-8")
+            )
+            quality["contract_history"] = descriptor.manifest
+            self._write_json(staging / "quality-report.json", quality)
+            receipt = json.loads(
+                (staging / "import-receipt.json").read_text(encoding="utf-8")
+            )
+            receipt["contract_history"] = {
+                "importer": "candlescope.contract-history.v1",
+                "source_path": str(Path(bundle_path).resolve()),
+                "bundle_hash": descriptor.bundle_hash,
+            }
+            self._write_json(staging / "import-receipt.json", receipt)
+            published = self._publish(staging, dataset_id, epoch_hex, manifest)
+            staging = None
+            return published
+        except MarketDatasetError as exc:
+            raise LocalDatasetError(str(exc), code=exc.code) from exc
         finally:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)
@@ -1207,7 +1292,9 @@ class LocalDatasetService:
                 for item in members
             ):
                 continue
-            first = next(item for item in members if int(item["open_time_ms"]) == bucket)
+            first = next(
+                item for item in members if int(item["open_time_ms"]) == bucket
+            )
             last = next(
                 item
                 for item in members
@@ -1218,10 +1305,16 @@ class LocalDatasetService:
                     "open_time_ms": bucket,
                     "close_time_ms": bucket + target_ms - 1,
                     "open": first["open"],
-                    "high": _decimal_text(max(Decimal(str(item["high"])) for item in members)),
-                    "low": _decimal_text(min(Decimal(str(item["low"])) for item in members)),
+                    "high": _decimal_text(
+                        max(Decimal(str(item["high"])) for item in members)
+                    ),
+                    "low": _decimal_text(
+                        min(Decimal(str(item["low"])) for item in members)
+                    ),
                     "close": last["close"],
-                    "volume": _sum_optional_decimals(item["volume"] for item in members),
+                    "volume": _sum_optional_decimals(
+                        item["volume"] for item in members
+                    ),
                     "quote_volume": _sum_optional_decimals(
                         item["quote_volume"] for item in members
                     ),
@@ -1679,6 +1772,24 @@ class LocalDatasetService:
             db_path = revision_dir / "bars.sqlite"
             if self._file_sha256(db_path) != manifest["sqlite_sha256"]:
                 raise LocalDatasetError("Project package dataset checksum mismatch")
+            contract_history = manifest.get("contract_history")
+            if contract_history is not None:
+                if not isinstance(contract_history, dict):
+                    raise LocalDatasetError(
+                        "Project package contract history manifest is invalid"
+                    )
+                try:
+                    descriptor = load_contract_history(
+                        revision_dir / "contract-history.json"
+                    )
+                except MarketDatasetError as exc:
+                    raise LocalDatasetError(
+                        "Project package contract history validation failed"
+                    ) from exc
+                if descriptor.bundle_hash != contract_history.get("bundle_hash"):
+                    raise LocalDatasetError(
+                        "Project package contract history checksum mismatch"
+                    )
             connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
             try:
                 check = connection.execute("PRAGMA quick_check").fetchone()

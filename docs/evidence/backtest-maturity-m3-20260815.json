@@ -1,0 +1,226 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-evidence/1",
+  "phase": "M3",
+  "phaseState": "VALIDATED_READY_FOR_LOCAL_COMMIT",
+  "recordedAt": "2026-08-15T03:12:44+08:00",
+  "branch": "codex/backtest-foundation",
+  "baselineCommit": "2aecd9d13818266d98085a3dc51e81da9193841a",
+  "plannedCommitMessage": "backtest: complete M3 historical contract data roles",
+  "contract": {
+    "identity": "HISTORICAL_CONTRACT_V1",
+    "bundleSchema": "candlescope.contract-history.v1",
+    "manifestSchema": "candlescope.contract-history.manifest.v1",
+    "requiredMarketRole": "BARS or AGG_TRADE",
+    "requiredAuxiliaryRoles": [
+      "MARK_INDEX",
+      "FUNDING",
+      "INSTRUMENT_RULES"
+    ],
+    "sameTimestampOrder": [
+      "INSTRUMENT_RULES",
+      "MARK_INDEX",
+      "FUNDING",
+      "market event"
+    ],
+    "authority": "immutable local snapshot",
+    "networkCompletion": "FORBIDDEN",
+    "legacyIdentity": "LEGACY_FIXED_V1_UNCHANGED",
+    "accountConsumption": "M3 binds and reports facts; LINEAR_PERP_ONE_WAY_V2 consumption starts in M4"
+  },
+  "realSevenDayDataset": {
+    "result": "PASS_WITH_EXPLICIT_RULES_FIDELITY_LABEL",
+    "exchange": "binance",
+    "marketType": "usdm",
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "startTimeMs": 1784851200000,
+    "endTimeMs": 1785455999999,
+    "durationDays": 7,
+    "datasetId": "local-d72350505a6f4f88bac35f318d846a51",
+    "baseDataEpoch": "sha256:c6e8bcb4042b73e74c6438fadc847e19fcac0adaaf877fa936866e86405594bb",
+    "historicalDataEpoch": "sha256:876a0d20885c2f454bd3483079ba2c4dd18d210d002a066ced23e8a2b8d4a272",
+    "snapshotHash": "sha256:40829ec71efe0e5eec24c730a5e15c9b6b5740cb4c7e360fb5e5137c13ac5966",
+    "bundleHash": "sha256:c5c79eb9238add45c4c18610f351ec0635cde0d34a684695b79d22e179a0a6d9",
+    "rowCounts": {
+      "BARS": 10080,
+      "MARK_INDEX": 10080,
+      "FUNDING": 21,
+      "INSTRUMENT_RULES": 1
+    },
+    "roleHashes": {
+      "BARS": "sha256:276a5669325cd4487cb421f09575b1994e416653cd87fad8ddf4527290475c68",
+      "MARK_INDEX": "sha256:42e3b64fa9e6e8baeec0b35c48d9ec807a31ab2a14f4db0b6c9d1be91c21f360",
+      "FUNDING": "sha256:a4e033d289d5d41bca7b3019814cc44fc4d549ae7d7b2babee1896d375543ffa",
+      "INSTRUMENT_RULES": "sha256:496c757a8f6ae5467ce1ef7821bffae6e161407f4a833d171f5b821bba466811"
+    },
+    "quality": {
+      "allRequiredRolesComplete": true,
+      "gapCount": 0,
+      "duplicateCount": 0,
+      "outOfOrderCount": 0,
+      "repeatIterationEqual": true,
+      "snapshotHashRecomputedEqual": true,
+      "offlineSocketForbiddenReplayEqual": true,
+      "officialArchiveChecksumsVerified": "22/22"
+    },
+    "marketProvenance": "Binance public-data K-line, mark/index and funding files with official checksum receipts",
+    "rulesFidelity": "MIXED_PINNED_PUBLIC_RECEIPTS_NOT_EXCHANGE_SIGNED_HISTORICAL_RULE_ARCHIVE",
+    "rulesLimitation": "The rule row is pinned from a current official exchangeInfo receipt plus a dated secondary maintenance-tier receipt; it is not represented as an exchange-signed historical rule archive."
+  },
+  "artifacts": [
+    {
+      "path": "output/backtest-m3-real-source-20260815/source-receipt.json",
+      "sha256": "fff2e966c03028e994efdea492430088219458429d7f4158fa3cb8d5b93a3f3b"
+    },
+    {
+      "path": "output/backtest-m3-real-source-20260815/contract-history.json",
+      "sha256": "2c44ac8e9ac449549ecf1b5300bcc1a71ec8a247ec85750842b82a724193edd3"
+    },
+    {
+      "path": "output/backtest-m3-real-source-20260815/contract-history.manifest.json",
+      "sha256": "3b7d27d1347b0f30ada981b94ee2de3b43af81d21cc8a4703f6df2b0cfc42c0f"
+    },
+    {
+      "path": "output/backtest-m3-runtime-20260815/real-window-validation.json",
+      "sha256": "bfc4a19110836dd3ff9b1ceaa181e027bc23dc6e933fccdc18fb14552a6ca011"
+    }
+  ],
+  "validation": {
+    "m3Focused": {
+      "result": "PASS",
+      "tests": 8
+    },
+    "backendBacktestAndLocalDataRegression": {
+      "result": "PASS",
+      "tests": 137,
+      "warnings": 6
+    },
+    "defaultFlagsAndReleaseManifest": {
+      "result": "PASS",
+      "tests": 10,
+      "warnings": 6
+    },
+    "pythonRuffTouchedFiles": "PASS",
+    "pythonFormatTouchedFiles": "PASS",
+    "frontendTypecheck": "PASS",
+    "frontendLint": "PASS",
+    "frontendFullTests": "PASS",
+    "frontendBacktestFocusedTests": {
+      "result": "PASS",
+      "tests": 8
+    },
+    "frontendBuild": "PASS_WITH_EXISTING_500KB_CHUNK_WARNING",
+    "gitDiffCheck": "PASS",
+    "backtestDatabaseQuickCheck": "ok",
+    "datasetDatabaseQuickCheck": "ok",
+    "foreignKeyViolations": 0,
+    "evidenceHashEntriesVerified": 11
+  },
+  "dataQualityGates": {
+    "markIndexTimeMonotonic": true,
+    "fundingPeriodUnique": true,
+    "fundingSettlementExplicit": true,
+    "fundingRateLegal": true,
+    "fundingSettlementToleranceMs": 1000,
+    "coverageAndFirstLastEventAreDistinct": true,
+    "rulesNoOverlapOrBacktrack": true,
+    "multiplierTickStepMinNotionalValidated": true,
+    "maintenanceTiersContinuousAndNonOverlapping": true,
+    "allRolesCoverRequestedWindow": true,
+    "deletedRowStrictPreviewFailure": "DATA_SNAPSHOT_MISMATCH",
+    "deletedRowRunGateFailure": "DATA_ROLE_COVERAGE_MISSING",
+    "missingRoleValidateHttpStatus": 400,
+    "missingRoleCreateHttpStatus": 400,
+    "missingRoleCreateProducedRun": false
+  },
+  "browserAcceptance": {
+    "result": "PASS",
+    "url": "http://127.0.0.1:15188/backtest.html",
+    "apiBase": "http://127.0.0.1:18095/api/v1/backtests",
+    "runtimeMode": "LOCAL_OFFLINE",
+    "runId": "bt_3007aaf4a4694fb88285e7f7685ef846",
+    "runState": "COMPLETED",
+    "configHash": "sha256:94013db94f23d1d47c221071c0360aae42431a810929f7b3f01132bde6f1ad1c",
+    "snapshotHash": "sha256:40829ec71efe0e5eec24c730a5e15c9b6b5740cb4c7e360fb5e5137c13ac5966",
+    "reportHash": "sha256:f5656cb6706539372c9977c3dc58c314da431535ef12eb574469cfb8128a438c",
+    "marketRowsShown": 10080,
+    "fillCount": 2256,
+    "roundTripTradeCount": 1128,
+    "allAuxiliaryRolesShownComplete": true,
+    "offlineDisclosureShown": true,
+    "reportLoaded": true,
+    "chartOpenCloseMarkersVisible": true,
+    "equityCurveVisible": true,
+    "missingRolesShown": [
+      "MARK_INDEX",
+      "FUNDING",
+      "INSTRUMENT_RULES"
+    ],
+    "missingRolesRunButtonDisabled": true,
+    "finalConsoleErrors": 0,
+    "knownConsoleWarnings": 2,
+    "networkScope": "LOOPBACK_ONLY",
+    "screenshots": [
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/final-complete-report.png",
+        "sha256": "67aa566d3f63b04a76c0723d44a03c35703e9e0cae45d9c00ff71fb2d3f26682"
+      },
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/final-chart.png",
+        "sha256": "7972c29407d97807afc2713473574864b66e112d817e54bce214cd1f77e5636f"
+      },
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/missing-roles-statuses.png",
+        "sha256": "0d2888023b9cd02a5769481656cf6e49eb07d9f2cc80fc17635e2e8657e4afc6"
+      }
+    ],
+    "logs": [
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/backend.stdout.log",
+        "sha256": "d941cc6f0ef5d1efcbc758d21952dd0aeabf91e2e9023ffb4036018f61289903"
+      },
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/backend.stderr.log",
+        "sha256": "eab4071a584dd0edabf14d21a06363259e18294f230a718f140dd4bead57e801"
+      },
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/frontend.stdout.log",
+        "sha256": "7ce3471ce6012dee1e5417dc0014f060da5b0607c0ea55b0c2294a275b2be15c"
+      },
+      {
+        "path": "output/backtest-m3-runtime-20260815/browser/frontend.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "compatibility": {
+    "databaseSchemaChanged": false,
+    "oldDatasetRevisionsRemainReadable": true,
+    "projectPackageRevalidatesHistoricalBundle": true,
+    "legacyBarSnapshotIdentityChanged": false,
+    "legacyConfigHashShapeChanged": false,
+    "legacyStoredReportsRemainReadable": true,
+    "oldAccountModelChanged": false,
+    "newIdentityOnlyWhenHistoricalModeSelected": true,
+    "currentRevisionRestoredAfterFailureGate": "sha256:876a0d20885c2f454bd3483079ba2c4dd18d210d002a066ced23e8a2b8d4a272"
+  },
+  "defectsCaught": [
+    "Manifest review found first_event_ms and last_event_ms were aliases of coverage boundaries; they are now independently derived from real events and the real package, Run and evidence were regenerated.",
+    "Combined cross-role snapshot sequence numbers created artificial BAR gaps after the worker filtered auxiliary events; BAR execution now derives its own continuous clock while preserving real missing intervals.",
+    "The chart endpoint initially reopened a historical Run as BARS-only and rejected the combined snapshot hash; contract mode, venue and market type now propagate through chart replay.",
+    "Combined preview row_count was presented as bars; the API now exposes market_row_count so the UI reports 10080 bars instead of total cross-role events."
+  ],
+  "performanceGate": "NOT_REQUIRED_IN_M3",
+  "soakGate": "NOT_REQUIRED_IN_M3",
+  "migration": "No database migration. Historical contract attachment creates a new immutable local dataset revision whose parent remains intact.",
+  "rollback": "Revert the single M3 local commit. Existing LEGACY_FIXED_V1 runs and reports require no rewrite; historical revisions remain inert when production flags are off.",
+  "defaultFlagsRemainOff": true,
+  "releaseEligible": false,
+  "releaseDecision": "M3_COMPLETE_DEFAULT_OFF_NO_MERGE_NO_PUSH",
+  "knownLimitations": [
+    "M3 binds, validates and reports historical contract facts but LINEAR_PERP_ONE_WAY_V1 does not consume mark, funding or rules for accounting; that belongs to M4.",
+    "The seven-day rules row has an explicit mixed pinned-receipt fidelity label and is not claimed to be an exchange-signed historical rules archive.",
+    "aggTrade remains aggregated trade data and is not raw trade, order-book or queue truth.",
+    "Performance, soak, recovery and rollback release gates remain scheduled for later mandatory stages."
+  ]
+}

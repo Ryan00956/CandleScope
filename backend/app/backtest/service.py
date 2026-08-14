@@ -12,7 +12,11 @@ from app.data_engine.interval_policy import parse_interval_spec
 from app.backtest.reports import REPORT_SCHEMA, build_report
 from app.backtest.strategy.protocol import StrategyProviderError
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
-from app.simulation import DualClockSimulationKernel, SimulationKernel, TradeSimulationKernel
+from app.simulation import (
+    DualClockSimulationKernel,
+    SimulationKernel,
+    TradeSimulationKernel,
+)
 from app.simulation.trade_bar_builder import (
     BAR_BUILDER_REVISION,
     BAR_TIMEZONE,
@@ -271,7 +275,10 @@ class BacktestService:
         record = self.get_run(run_id)
         if RunState(record["state"]) is not RunState.QUEUED:
             return record
-        if expected_generation is not None and int(record["generation"]) != expected_generation:
+        if (
+            expected_generation is not None
+            and int(record["generation"]) != expected_generation
+        ):
             return record
         stamp = now_ms or _now_ms()
         preparing = transition(RunState.QUEUED, RunState.PREPARING)
@@ -378,7 +385,9 @@ class BacktestService:
             raise BacktestError("DATA_QUALITY_FAILED", "end_ms must be after start_ms")
         if self.enforce_registered_revisions:
             try:
-                self.strategy_registry.require(str(payload.get("strategy_revision_id") or ""))
+                self.strategy_registry.require(
+                    str(payload.get("strategy_revision_id") or "")
+                )
             except StrategyProviderError as exc:
                 raise BacktestError(exc.code, str(exc)) from exc
         stamp = now_ms or _now_ms()
@@ -523,7 +532,9 @@ class BacktestService:
                 data_epoch=str(config["data_epoch"]),
                 start_time_ms=split.start_ms,
                 end_time_ms=split.end_ms - 1,
-                interval=(None if config.get("interval") is None else str(config["interval"])),
+                interval=(
+                    None if config.get("interval") is None else str(config["interval"])
+                ),
             )
             payload = {
                 "strategy_revision_id": record["strategy_revision_id"],
@@ -702,7 +713,8 @@ class BacktestService:
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
                 funding_rate=_config_decimal(config, "funding_rate", "0"),
-                funding_interval_ms=int(config.get("funding_interval_hours") or 8) * 3_600_000,
+                funding_interval_ms=int(config.get("funding_interval_hours") or 8)
+                * 3_600_000,
                 initial_balance=_config_decimal(config, "initial_balance", "10000"),
                 price_tick=_config_optional_decimal(config, "price_tick"),
                 qty_step=_config_optional_decimal(config, "qty_step"),
@@ -807,7 +819,8 @@ class BacktestService:
                 "strategy_metadata": strategy_metadata,
                 "contract_coverage": dict(
                     (snapshot_evidence or {}).get("contract_coverage") or {}
-                ) | kernel.account.coverage(),
+                )
+                | kernel.account.coverage(),
                 "fill_model": {
                     "name": "BAR_NEXT_BAR_WORST_CASE_V1",
                     "slippage_bps": str(kernel.slippage_bps),
@@ -815,7 +828,9 @@ class BacktestService:
                     "maker_fee_bps": str(kernel.maker_fee_bps),
                     "funding_rate": str(kernel.funding_rate),
                     "funding_interval_hours": kernel.funding_interval_ms // 3_600_000,
-                    "funding_model": "OFF" if kernel.funding_rate == 0 else "FIXED_INTERVAL_V1",
+                    "funding_model": "OFF"
+                    if kernel.funding_rate == 0
+                    else "FIXED_INTERVAL_V1",
                     "gap_policy": kernel.gap_policy,
                     "order_closeout": "CANCEL_OPEN_AT_END",
                 },
@@ -904,7 +919,8 @@ class BacktestService:
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
                 funding_rate=_config_decimal(config, "funding_rate", "0"),
-                funding_interval_ms=int(config.get("funding_interval_hours") or 8) * 3_600_000,
+                funding_interval_ms=int(config.get("funding_interval_hours") or 8)
+                * 3_600_000,
                 initial_balance=_config_decimal(config, "initial_balance", "10000"),
                 execution_reporter=self._execution_reporter(session),
             )
@@ -918,7 +934,9 @@ class BacktestService:
                 planner.restore(payload.get("planner") or {})
                 resume_sequence = int(payload["sequence"])
 
-            def strategy(_visible: tuple[MarketEvent, ...], bar: MarketEvent) -> list[dict]:
+            def strategy(
+                _visible: tuple[MarketEvent, ...], bar: MarketEvent
+            ) -> list[dict]:
                 if bar.sequence % 256 == 1:
                     self._assert_execution_control(
                         run_id,
@@ -935,13 +953,19 @@ class BacktestService:
                     phase=phase,
                     market={"venue": "local", "symbol": str(record["dataset_id"])},
                     bar=bar_payload,
-                    features=self._observation_features(provider, bar=bar_payload, trade=None),
+                    features=self._observation_features(
+                        provider, bar=bar_payload, trade=None
+                    ),
                 )
                 if wire is None:
                     return []
-                return planner.plan(wire, current_position=kernel.projected_position_qty)
+                return planner.plan(
+                    wire, current_position=kernel.projected_position_qty
+                )
 
-            remaining_events = tuple(event for event in events if event.sequence > resume_sequence)
+            remaining_events = tuple(
+                event for event in events if event.sequence > resume_sequence
+            )
 
             def checkpoint_after(event: MarketEvent) -> None:
                 self._save_dual_clock_checkpoint(
@@ -1007,9 +1031,12 @@ class BacktestService:
                     "taker_fee_bps": str(kernel.execution.taker_fee_bps),
                     "maker_fee_bps": str(kernel.execution.maker_fee_bps),
                     "funding_rate": str(kernel.execution.funding_rate),
-                    "funding_interval_hours": kernel.execution.funding_interval_ms // 3_600_000,
+                    "funding_interval_hours": kernel.execution.funding_interval_ms
+                    // 3_600_000,
                     "funding_model": (
-                        "OFF" if kernel.execution.funding_rate == 0 else "FIXED_INTERVAL_V1"
+                        "OFF"
+                        if kernel.execution.funding_rate == 0
+                        else "FIXED_INTERVAL_V1"
                     ),
                 },
             },
@@ -1131,7 +1158,8 @@ class BacktestService:
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
                 funding_rate=_config_decimal(config, "funding_rate", "0"),
-                funding_interval_ms=int(config.get("funding_interval_hours") or 8) * 3_600_000,
+                funding_interval_ms=int(config.get("funding_interval_hours") or 8)
+                * 3_600_000,
                 initial_balance=_config_decimal(config, "initial_balance", "10000"),
                 execution_reporter=self._execution_reporter(session),
             )
@@ -1186,7 +1214,9 @@ class BacktestService:
                     "maker_fee_bps": str(kernel.maker_fee_bps),
                     "funding_rate": str(kernel.funding_rate),
                     "funding_interval_hours": kernel.funding_interval_ms // 3_600_000,
-                    "funding_model": "OFF" if kernel.funding_rate == 0 else "FIXED_INTERVAL_V1",
+                    "funding_model": "OFF"
+                    if kernel.funding_rate == 0
+                    else "FIXED_INTERVAL_V1",
                 },
             },
         )
@@ -1373,6 +1403,12 @@ class BacktestService:
             "SKIP_WITH_WARNING",
         }:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", "unknown gap_policy")
+        contract_data_mode = str(payload.get("contract_data_mode") or "LEGACY_FIXED_V1")
+        if contract_data_mode not in {
+            "LEGACY_FIXED_V1",
+            "HISTORICAL_CONTRACT_V1",
+        }:
+            raise BacktestError("FIDELITY_UNSUPPORTED", "unknown contract_data_mode")
         for name, default, strictly_positive in (
             ("initial_balance", "10000", True),
             ("slippage_bps", "1", False),
@@ -1383,22 +1419,32 @@ class BacktestService:
             if strictly_positive and value <= 0:
                 raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"{name} must be positive")
             if not strictly_positive and value < 0:
-                raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"{name} cannot be negative")
+                raise BacktestError(
+                    "SCHEMA_UNKNOWN_FIELD", f"{name} cannot be negative"
+                )
         funding_rate = _config_decimal(payload, "funding_rate", "0")
         if abs(funding_rate) > Decimal("1"):
-            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "funding_rate must be between -1 and 1")
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "funding_rate must be between -1 and 1"
+            )
         try:
             funding_interval_hours = int(payload.get("funding_interval_hours") or 8)
         except (TypeError, ValueError) as exc:
-            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "invalid funding_interval_hours") from exc
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "invalid funding_interval_hours"
+            ) from exc
         if funding_interval_hours < 1 or funding_interval_hours > 168:
-            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "funding_interval_hours must be 1..168")
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "funding_interval_hours must be 1..168"
+            )
         output_mode = str(payload.get("output_mode") or "TARGET_POSITION")
         if output_mode not in {"SIGNAL", "TARGET_POSITION", "ORDER_INTENT"}:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", "unsupported output_mode")
         strategy_source = payload.get("strategy_source")
         if strategy_source is not None and len(str(strategy_source)) > 2_000:
-            raise BacktestError("BUDGET_EXCEEDED", "strategy_source exceeds 2000 characters")
+            raise BacktestError(
+                "BUDGET_EXCEEDED", "strategy_source exceeds 2000 characters"
+            )
         if self.enforce_registered_revisions:
             try:
                 descriptor = self.strategy_registry.require(
@@ -1469,7 +1515,9 @@ class BacktestService:
         execution_config = {
             "strategy_source": strategy_source,
             "output_mode": output_mode,
-            "initial_balance": str(_config_decimal(payload, "initial_balance", "10000")),
+            "initial_balance": str(
+                _config_decimal(payload, "initial_balance", "10000")
+            ),
             "slippage_bps": str(_config_decimal(payload, "slippage_bps", "1")),
             "taker_fee_bps": str(_config_decimal(payload, "taker_fee_bps", "0")),
             "maker_fee_bps": str(_config_decimal(payload, "maker_fee_bps", "0")),
@@ -1484,6 +1532,8 @@ class BacktestService:
         }
         if fidelity == "AGG_TRADE_EXECUTION":
             execution_config.update(signal_identity)
+        if contract_data_mode == "HISTORICAL_CONTRACT_V1":
+            execution_config["contract_data_mode"] = contract_data_mode
         return RunIdentity(
             strategy_revision_id=str(payload["strategy_revision_id"]),
             dataset_id=str(payload["dataset_id"]),
@@ -1652,7 +1702,9 @@ class BacktestService:
         try:
             payload = json.loads(str(checkpoint["payload_json"]))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise BacktestError("CHECKPOINT_CORRUPT", "checkpoint payload is invalid") from exc
+            raise BacktestError(
+                "CHECKPOINT_CORRUPT", "checkpoint payload is invalid"
+            ) from exc
         expected = "sha256:" + sha256_hex(payload)
         if str(checkpoint.get("state_hash") or "") != expected:
             raise BacktestError("CHECKPOINT_CORRUPT", "checkpoint hash mismatch")

@@ -62,6 +62,10 @@ export interface BacktestDataset {
   first_open_ms: number | null;
   last_close_ms: number | null;
   strategy_revisions: string[];
+  contract_history?: {
+    bundle_hash: string;
+    roles: string[];
+  };
 }
 
 export interface SnapshotPreviewRequest {
@@ -73,6 +77,7 @@ export interface SnapshotPreviewRequest {
   fidelity_mode?: string;
   exchange?: string;
   market_type?: string;
+  contract_data_mode?: string;
 }
 
 export interface BacktestSnapshot {
@@ -81,7 +86,9 @@ export interface BacktestSnapshot {
   coverage_start_ms: number;
   coverage_end_ms: number;
   row_count: number;
+  market_row_count?: number;
   quality: Record<string, unknown>;
+  role_hashes?: Record<string, string>;
   fidelity_capabilities: string[];
 }
 

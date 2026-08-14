@@ -1,0 +1,68 @@
+{
+  "schema_version": "candlescope.backtest-maturity-evidence/1",
+  "stage": "M7",
+  "date": "2026-08-15",
+  "status": "PASS",
+  "branch": "codex/backtest-foundation",
+  "parent_commit": "8526ff2bb24348e6c9b8abd7729fd25e9b9c68ba",
+  "identities": {
+    "report_schema": "candlescope.backtest-report/2",
+    "metrics_version": "BACKTEST_METRICS_V2",
+    "equity_sampling": "UTC_DAILY_CLOSE_V1",
+    "benchmark_model": "BUY_HOLD_SAME_WINDOW_COSTS_V1",
+    "annualization_days": 365
+  },
+  "tests": {
+    "focused": {"passed": 10, "failed": 0},
+    "backend_related": {"passed": 171, "failed": 0, "deselected": 3595, "warnings": 6},
+    "frontend": {"passed": 3249, "failed": 0},
+    "typecheck": "PASS",
+    "lint": "PASS",
+    "build": "PASS",
+    "diff_check": "PASS"
+  },
+  "browser": {
+    "run_id": "bt_056706de89b6451c970654744c38d191",
+    "state": "COMPLETED",
+    "report_hash": "sha256:656a4ea6315d60936d625802ed2e8c3ef4c04cac15a5f29aadb09e406f202a1d",
+    "report_hash_recomputed": true,
+    "metrics_hash": "sha256:bf23c69915ed0de2a46a5182b302cd3fdcf7aec72acede68d4b97e4c6cf8fb3e",
+    "fill_count": 3,
+    "closed_trade_count": 1,
+    "open_position_excluded": true,
+    "daily_equity_points": 40,
+    "monthly_cells": 2,
+    "average_mae": "-0.0286685617152570457239990287",
+    "average_mfe": "0.180834297522628689512001181",
+    "slippage_cost": "0.0357",
+    "reconciliation_passed": true,
+    "json_csv_same_report_hash": true,
+    "download_sha256": "62fa0355b1bb22558384aa986556a5dce71a719b29152cdfe0bdb0ac6f9ed9f1",
+    "console_errors": 0,
+    "known_console_warnings": 2,
+    "proxy_status": 200
+  },
+  "storage": {
+    "sqlite_quick_check": "ok",
+    "foreign_key_violations": 0,
+    "database_sha256": "27633f8887c3b6f93cfc06c6f77ddec11aa6334ecafed2019f70e6889715bef5"
+  },
+  "artifacts": {
+    "golden_fixture_sha256": "87c8384d6026185a09a571a03837f3c12e74a0c0f80bcba4728e351380a5eb0e",
+    "fixture_manifest_sha256": "ceb02783711429af1ab55ecd015fa394ca97ff37ba540b6b208ab4c365129d6b",
+    "metrics_report_screenshot_sha256": "d09bdbf8ff6f6a980ded667103c2987a1fa2d7ba345f749f6a015ec5b035ac24",
+    "chart_screenshot_sha256": "e4badc99f2dfe807d3997104831d6d089f63454a6ed13e6e9915ed16bad1df5e",
+    "full_page_screenshot_sha256": "aa715cf53abd60f3fac3b920881d567642d0594c3812b9485ca3d55199c8a5b9"
+  },
+  "compatibility": {
+    "report_v1_readable": true,
+    "report_v1_hash_stable": true,
+    "old_runs_mutated": false
+  },
+  "performance_gate": "NOT_REQUIRED_BY_M7",
+  "soak_gate": "NOT_REQUIRED_BY_M7",
+  "production_flags_default_off": true,
+  "merge": false,
+  "push": false,
+  "production_enabled": false
+}

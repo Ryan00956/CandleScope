@@ -8,6 +8,12 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from app.backtest.identity import sha256_hex
+from app.backtest.metrics_v2 import (
+    METRICS_VERSION,
+    REPORT_SCHEMA_V2,
+    build_metrics_v2,
+    enrich_trades_v2,
+)
 
 REPORT_SCHEMA = "candlescope.backtest-report/1"
 
@@ -55,8 +61,15 @@ def build_report(
         or config.get("account_model")
         or "LINEAR_PERP_ONE_WAY_V1"
     )
+    report_schema = (
+        REPORT_SCHEMA_V2
+        if config.get("metrics_version") == METRICS_VERSION
+        else REPORT_SCHEMA
+    )
+    if report_schema == REPORT_SCHEMA_V2:
+        trades = enrich_trades_v2(trades, payload.get("metrics_market_context") or {})
     report = {
-        "schemaVersion": REPORT_SCHEMA,
+        "schemaVersion": report_schema,
         "runId": run.get("run_id"),
         "state": run.get("state"),
         "fidelity_mode": fidelity,
@@ -190,6 +203,30 @@ def build_report(
         )
     if isinstance(strategy_metadata, Mapping) and strategy_metadata:
         report["strategy"] = copy.deepcopy(dict(strategy_metadata))
+    if report_schema == REPORT_SCHEMA_V2:
+        report["identity"].update(
+            {
+                "report_schema": REPORT_SCHEMA_V2,
+                "metrics_version": config.get("metrics_version"),
+                "equity_sampling": config.get("equity_sampling"),
+                "annualization_days": config.get("annualization_days"),
+                "risk_free_rate_annual": config.get("risk_free_rate_annual"),
+                "benchmark_model": config.get("benchmark_model"),
+                "sample_role": config.get("sample_role"),
+            }
+        )
+        report["performance"] = build_metrics_v2(
+            run=run,
+            config=config,
+            payload=payload,
+            trades=trades,
+        )
+        report["credibility"] = {
+            "level": "RESEARCH_ONLY",
+            "sample_role": config.get("sample_role"),
+            "profit_guarantee": False,
+            "open_positions_excluded_from_trade_metrics": True,
+        }
     return seal_report(report)
 
 
@@ -215,7 +252,10 @@ def verify_report_hash(report: Mapping[str, Any]) -> bool:
 def export_bundle(
     run: Mapping[str, Any], result: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
-    if result is not None and result.get("schemaVersion") == REPORT_SCHEMA:
+    if result is not None and result.get("schemaVersion") in {
+        REPORT_SCHEMA,
+        REPORT_SCHEMA_V2,
+    }:
         report = copy.deepcopy(dict(result))
         if not verify_report_hash(report):
             raise ValueError("stored backtest report hash is invalid")
@@ -223,17 +263,23 @@ def export_bundle(
         report = build_report(run, result)
     if report.get("runId") != run.get("run_id"):
         raise ValueError("backtest report is not bound to the requested run")
-    return {
+    bundle = {
         "manifest": {
             "schemaVersion": "candlescope.backtest-export/1",
             "runId": report["runId"],
-            "reportSchema": REPORT_SCHEMA,
+            "reportSchema": report["schemaVersion"],
             "reportHash": report["hashes"]["report"],
             "reportLabel": report["report_label"],
         },
         "report": report,
         "csv": _fills_csv(report["fills"]),
     }
+    if report["schemaVersion"] == REPORT_SCHEMA_V2:
+        bundle["manifest"]["artifacts"] = {
+            "json": {"reportHash": report["hashes"]["report"]},
+            "csv": {"reportHash": report["hashes"]["report"]},
+        }
+    return bundle
 
 
 def _fills_csv(fills: list[Mapping[str, Any]]) -> str:

@@ -39,6 +39,7 @@ class DualClockSimulationKernel:
     latency_events: int = 0
     order_end_policy: str = "CANCEL_AT_END"
     equity_curve_event_interval: int = 1
+    equity_curve_mode: str | None = None
     execution_reporter: Callable[[dict], None] | None = field(default=None, repr=False)
     execution: TradeSimulationKernel = field(init=False)
     builder: TradeBarBuilder = field(init=False)
@@ -69,6 +70,7 @@ class DualClockSimulationKernel:
             latency_events=self.latency_events,
             order_end_policy=self.order_end_policy,
             equity_curve_event_interval=self.equity_curve_event_interval,
+            equity_curve_mode=self.equity_curve_mode,
             execution_reporter=self.execution_reporter,
         )
 
@@ -206,7 +208,9 @@ class DualClockSimulationKernel:
                     else self.execution.account.equity()
                 ),
             }
-            if (
+            if self.equity_curve_mode == "UTC_DAILY_CLOSE_V1":
+                self.execution._record_equity_point(curve_point)
+            elif (
                 self.execution_model_revision is None
                 or self.execution_event_count == 0
                 or (self.execution_event_count + 1) % self.equity_curve_event_interval

@@ -28,6 +28,7 @@ const ACCOUNT_V2 = "LINEAR_PERP_ONE_WAY_V2";
 const HOST_POLICY_REVISION = "HOST_SIZING_RISK_V1";
 const EXECUTION_REALISM_V2 = "EXECUTION_REALISM_V2";
 const BAR_PATH_SCENARIO = "OHLC_WORST_CASE_STOP_FIRST_V1";
+const METRICS_V2 = "BACKTEST_METRICS_V2";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -47,6 +48,11 @@ function hashLabel(value: string | null | undefined): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function metricLabel(metric: { value: string | null; reason: string | null } | undefined): string {
+  if (!metric) return "—";
+  return metric.value ?? `— (${metric.reason ?? "NOT_APPLICABLE"})`;
 }
 
 export default function BacktestApp() {
@@ -100,6 +106,15 @@ export default function BacktestApp() {
   const [latencyMs, setLatencyMs] = useState(0);
   const [latencyEvents, setLatencyEvents] = useState(0);
   const [orderEndPolicy, setOrderEndPolicy] = useState("CANCEL_AT_END");
+  const [metricsV2, setMetricsV2] = useState(false);
+  const [riskFreeRateAnnual, setRiskFreeRateAnnual] = useState("0");
+  const [sampleRole, setSampleRole] = useState("IN_SAMPLE");
+  const [tradeSideFilter, setTradeSideFilter] = useState("ALL");
+  const [tradeOutcomeFilter, setTradeOutcomeFilter] = useState("ALL");
+  const [tradeReasonFilter, setTradeReasonFilter] = useState("");
+  const [tradeFromDate, setTradeFromDate] = useState("");
+  const [tradeToDate, setTradeToDate] = useState("");
+  const [focusedTradeId, setFocusedTradeId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<BacktestSnapshot | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
@@ -142,6 +157,21 @@ export default function BacktestApp() {
   const contractModeEnabled = historicalContractData || accountModel === ACCOUNT_V2;
   const historicalContractComplete = !contractModeEnabled
     || contractData?.status === "complete";
+  const filteredTrades = useMemo(() => (report?.trades ?? []).filter((trade) => {
+    const pnl = Number(trade.net_pnl);
+    const entry = Number(trade.entry_time_ms);
+    const from = tradeFromDate ? new Date(`${tradeFromDate}T00:00:00Z`).getTime() : null;
+    const to = tradeToDate ? new Date(`${tradeToDate}T23:59:59.999Z`).getTime() : null;
+    return (tradeSideFilter === "ALL" || trade.side === tradeSideFilter)
+      && (tradeOutcomeFilter === "ALL" || (tradeOutcomeFilter === "WIN" ? pnl > 0 : pnl < 0))
+      && (!tradeReasonFilter || `${trade.entry_reason ?? ""} ${trade.exit_reason ?? ""}`.toLowerCase().includes(tradeReasonFilter.toLowerCase()))
+      && (from === null || entry >= from)
+      && (to === null || entry <= to);
+  }), [report, tradeFromDate, tradeOutcomeFilter, tradeReasonFilter, tradeSideFilter, tradeToDate]);
+  const focusedTrade = useMemo(
+    () => (report?.trades ?? []).find((trade) => trade.trade_id === focusedTradeId) ?? null,
+    [focusedTradeId, report],
+  );
 
   useEffect(() => {
     if (strategyRevisionId !== RSI_WILDER_LONG_SHORT_REVISION || !selectedStrategy) return;
@@ -345,6 +375,9 @@ export default function BacktestApp() {
       order_end_policy: executionRealismV2 ? orderEndPolicy : "CANCEL_AT_END",
       bar_path_scenario: executionRealismV2 && fidelityMode === "BAR_APPROX"
         ? BAR_PATH_SCENARIO : null,
+      metrics_version: metricsV2 ? METRICS_V2 : null,
+      risk_free_rate_annual: metricsV2 ? riskFreeRateAnnual : "0",
+      sample_role: metricsV2 ? sampleRole : "IN_SAMPLE",
       exchange,
       market_type: marketType,
       gap_policy: "REJECT",
@@ -395,6 +428,9 @@ export default function BacktestApp() {
     marketType,
     orderEndPolicy,
     participationRate,
+    metricsV2,
+    riskFreeRateAnnual,
+    sampleRole,
     refreshRuns,
     rsiLength,
     rsiOverbought,
@@ -725,6 +761,38 @@ export default function BacktestApp() {
                 : "aggTrade 是聚合成交；不声称 raw trade、盘口深度或 queue exact。"}</small>
             </div>
           </div>
+          <label className="backtest-checkbox" data-testid="metrics-v2-toggle">
+            <input
+              type="checkbox"
+              checked={metricsV2}
+              onChange={(event) => {
+                const checked = event.target.checked;
+                setMetricsV2(checked);
+                if (checked) {
+                  setExecutionRealismV2(true);
+                  setAccountModel(ACCOUNT_V2);
+                  setHistoricalContractData(true);
+                }
+              }}
+            />
+            启用报告与绩效指标 V2（默认关闭，要求账户与成交 V2）
+          </label>
+          <div className="backtest-form-row" data-testid="metrics-v2-config">
+            <label>年化无风险利率
+              <input value={riskFreeRateAnnual} disabled={!metricsV2} onChange={(event) => setRiskFreeRateAnnual(event.target.value)} />
+            </label>
+            <label>样本角色
+              <select value={sampleRole} disabled={!metricsV2} onChange={(event) => setSampleRole(event.target.value)}>
+                <option value="IN_SAMPLE">样本内</option>
+                <option value="VALIDATION">验证集</option>
+                <option value="OUT_OF_SAMPLE">样本外</option>
+              </select>
+            </label>
+          </div>
+          {metricsV2 && <div className="backtest-strategy-evidence">
+            <strong>{METRICS_V2} · UTC 日收盘采样 · 365 天年化</strong>
+            <small>少于 30 个日收益、少于 365 天、零波动或零交易时显示 null + reason，不伪造 0 或无穷大。</small>
+          </div>}
           <div className="backtest-strategy-evidence" data-testid="host-policy-config">
             <strong>{HOST_POLICY_REVISION} · Host 拥有数量与风控真相</strong>
             <small>SIGNAL 经 sizing 变为绝对目标数量；TARGET_POSITION 与 ORDER_INTENT 保留原有绝对数量语义，但同样不能绕过风控。</small>
@@ -824,6 +892,50 @@ export default function BacktestApp() {
                 <div><span>完整交易</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
                 <div><span>最终权益</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
               </div>
+              {report.performance && <div data-testid="metrics-v2-report">
+                <div className="backtest-strategy-evidence">
+                  <strong>{report.performance.metrics_version} · {report.credibility?.level} · {report.credibility?.sample_role}</strong>
+                  <span>总收益 {metricLabel(report.performance.returns.total_return)} · 超额收益 {metricLabel(report.performance.returns.excess_return)}</span>
+                  <span>最大回撤 {metricLabel(report.performance.risk.max_drawdown)} · Sharpe {metricLabel(report.performance.risk.sharpe)}</span>
+                  <span>Metrics hash {hashLabel(report.performance.metrics_hash)} · 对账 {report.performance.reconciliation.passed ? "PASS" : "FAIL"}</span>
+                  <small>账户指标使用 mark-to-market 权益；开放仓位不计入完整交易指标。研究等级不是盈利保证。</small>
+                </div>
+                <h3 className="backtest-table-title">收益与风险</h3>
+                <div className="backtest-metric-sections">
+                  <div><span>净盈亏</span><strong>{metricLabel(report.performance.returns.net_pnl)}</strong></div>
+                  <div><span>年化收益</span><strong>{metricLabel(report.performance.returns.annualized_return)}</strong></div>
+                  <div><span>波动率</span><strong>{metricLabel(report.performance.risk.volatility)}</strong></div>
+                  <div><span>Sortino</span><strong>{metricLabel(report.performance.risk.sortino)}</strong></div>
+                  <div><span>Calmar</span><strong>{metricLabel(report.performance.risk.calmar)}</strong></div>
+                  <div><span>回撤时长 ms</span><strong>{metricLabel(report.performance.risk.drawdown_duration_ms)}</strong></div>
+                </div>
+                <h3 className="backtest-table-title">交易与成本</h3>
+                <div className="backtest-metric-sections">
+                  <div><span>胜率</span><strong>{metricLabel(report.performance.trading.win_rate)}</strong></div>
+                  <div><span>Profit factor</span><strong>{metricLabel(report.performance.trading.profit_factor)}</strong></div>
+                  <div><span>期望</span><strong>{metricLabel(report.performance.trading.expectancy)}</strong></div>
+                  <div><span>平均 MAE / MFE</span><strong>{metricLabel(report.performance.trading.average_mae)} / {metricLabel(report.performance.trading.average_mfe)}</strong></div>
+                  <div><span>费用 / 资金费</span><strong>{metricLabel(report.performance.execution.fees)} / {metricLabel(report.performance.execution.funding)}</strong></div>
+                  <div><span>滑点 / 换手</span><strong>{metricLabel(report.performance.execution.slippage)} / {metricLabel(report.performance.execution.turnover)}</strong></div>
+                </div>
+                <h3 className="backtest-table-title">数据质量与可信度</h3>
+                <div className="backtest-metric-sections" data-testid="metrics-v2-quality">
+                  <div><span>缺口 / 重复</span><strong>{String(report.performance.quality.gap_count ?? 0)} / {String(report.performance.quality.duplicate_count ?? 0)}</strong></div>
+                  <div><span>警告 / 路径歧义</span><strong>{String(report.performance.quality.warning_count ?? 0)} / {String(report.performance.quality.ambiguity_count ?? 0)}</strong></div>
+                  <div><span>拒单 / 部分成交</span><strong>{String(report.performance.execution.rejected_order_count ?? 0)} / {String(report.performance.execution.partial_order_count ?? 0)}</strong></div>
+                  <div><span>未成交订单</span><strong>{String(report.performance.execution.unfilled_order_count ?? 0)}</strong></div>
+                  <div><span>样本角色</span><strong>{String(report.performance.quality.sample_role ?? "—")}</strong></div>
+                  <div><span>指标警告</span><strong>{(report.performance.quality.metric_warnings as string[] | undefined)?.join(", ") || "无"}</strong></div>
+                </div>
+                <h3 className="backtest-table-title">月度收益（报告字段）</h3>
+                <div className="backtest-monthly-heatmap">
+                  {report.performance.monthly_returns.map((item) => <div
+                    key={item.month}
+                    className={Number(item.value) >= 0 ? "positive" : "negative"}
+                    title={item.reason ?? item.value ?? ""}
+                  ><span>{item.month}</span><strong>{item.value ?? "—"}</strong></div>)}
+                </div>
+              </div>}
               {report.account_model === ACCOUNT_V2 && <div className="backtest-strategy-evidence" data-testid="account-v2-report">
                 <strong>{report.account_model} · {report.funding_mode}</strong>
                 <span>钱包 {String(report.account?.wallet_balance ?? "—")} · 未实现 {String(report.account?.unrealized_pnl ?? "—")} · 权益 {String(report.account?.equity ?? "—")}</span>
@@ -931,18 +1043,34 @@ export default function BacktestApp() {
                 </div>
               </>}
               <h3 className="backtest-table-title">每一笔完整交易（FIFO 配对）</h3>
+              {report.performance && <div className="backtest-trade-filters" data-testid="trade-filters">
+                <select aria-label="交易方向" value={tradeSideFilter} onChange={(event) => setTradeSideFilter(event.target.value)}>
+                  <option value="ALL">全部方向</option><option value="LONG">多</option><option value="SHORT">空</option>
+                </select>
+                <select aria-label="交易结果" value={tradeOutcomeFilter} onChange={(event) => setTradeOutcomeFilter(event.target.value)}>
+                  <option value="ALL">全部结果</option><option value="WIN">盈利</option><option value="LOSS">亏损</option>
+                </select>
+                <input aria-label="起始日期" type="date" value={tradeFromDate} onChange={(event) => setTradeFromDate(event.target.value)} />
+                <input aria-label="结束日期" type="date" value={tradeToDate} onChange={(event) => setTradeToDate(event.target.value)} />
+                <input aria-label="原因筛选" placeholder="reason" value={tradeReasonFilter} onChange={(event) => setTradeReasonFilter(event.target.value)} />
+              </div>}
               <div className="backtest-table-wrap">
                 <table>
-                  <thead><tr><th>交易</th><th>方向</th><th>开仓时间</th><th>平仓时间</th><th>开仓价</th><th>平仓价</th><th>净盈亏</th></tr></thead>
-                  <tbody>{(report.trades ?? []).map((trade) => (
-                    <tr key={trade.trade_id}>
+                  <thead><tr><th>交易</th><th>方向</th><th>开仓时间</th><th>平仓时间</th><th>开仓价</th><th>平仓价</th><th>MAE</th><th>MFE</th><th>原因</th><th>净盈亏</th></tr></thead>
+                  <tbody>{(report.performance ? filteredTrades : report.trades ?? []).map((trade) => (
+                    <tr key={trade.trade_id} className={trade.trade_id === focusedTradeId ? "selected" : ""} onClick={() => setFocusedTradeId(trade.trade_id ?? null)}>
                       <td>{trade.trade_id}</td><td>{trade.side}</td>
                       <td>{timestampLabel(Number(trade.entry_time_ms))}</td><td>{timestampLabel(Number(trade.exit_time_ms))}</td>
-                      <td>{trade.entry_price}</td><td>{trade.exit_price}</td><td>{trade.net_pnl}</td>
+                      <td>{trade.entry_price}</td><td>{trade.exit_price}</td><td>{trade.mae || "—"}</td><td>{trade.mfe || "—"}</td>
+                      <td>{trade.entry_reason || "—"} → {trade.exit_reason || "—"}</td><td>{trade.net_pnl}</td>
                     </tr>
                   ))}</tbody>
                 </table>
               </div>
+              {focusedTrade && <div className="backtest-strategy-evidence" data-testid="focused-trade">
+                <strong>{focusedTrade.trade_id} 已定位到入场 K 线</strong>
+                <span>入场 {focusedTrade.entry_price} · MAE {focusedTrade.mae || "—"} · MFE {focusedTrade.mfe || "—"} · 退出 {focusedTrade.exit_price}</span>
+              </div>}
             </>
           ) : (
             <p className="backtest-empty">
@@ -955,9 +1083,9 @@ export default function BacktestApp() {
           <div className="backtest-section-title"><span>04</span><h2>K 线开平仓与账户资金曲线</h2></div>
           {chart ? (
             <>
-              <BacktestResultChart chart={chart} />
+              <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
               <h3 className="backtest-table-title">账户权益</h3>
-              <EquityCurve data={chart.equity_curve} />
+              <EquityCurve data={report?.performance?.equity_daily ?? chart.equity_curve} drawdown={report?.performance?.drawdown_daily} />
             </>
           ) : <p className="backtest-empty">选择一个已完成 Run 查看开平仓标记和资金曲线。</p>}
         </section>

@@ -78,6 +78,7 @@ class TradeSimulationKernel:
     fee_total: Decimal = Decimal("0")
     equity_curve: list[dict] = field(default_factory=list)
     equity_curve_event_interval: int = 1
+    equity_curve_mode: str | None = None
     execution_reporter: Callable[[dict], None] | None = field(
         default=None,
         repr=False,
@@ -165,6 +166,7 @@ class TradeSimulationKernel:
                     "decision_chain_hash": self._decision_chain_hash,
                     "decision_count": self._decision_count,
                     "equity_curve_event_interval": self.equity_curve_event_interval,
+                    "equity_curve_mode": self.equity_curve_mode,
                 }
                 if self.execution_model_revision == EXECUTION_REALISM_V2
                 else {}
@@ -214,6 +216,10 @@ class TradeSimulationKernel:
         }
 
     def restore(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("equity_curve_mode") != self.equity_curve_mode:
+            raise MarketDatasetError(
+                "equity curve checkpoint identity changed", code="CHECKPOINT_CORRUPT"
+            )
         if payload.get("execution_model_revision") != self.execution_model_revision:
             raise MarketDatasetError(
                 "execution model checkpoint identity changed",
@@ -424,7 +430,9 @@ class TradeSimulationKernel:
                         "available_balance": str(self.account.available_balance()),
                     }
                 )
-            if (
+            if self.equity_curve_mode == "UTC_DAILY_CLOSE_V1":
+                self._record_equity_point(curve_point)
+            elif (
                 self.execution_model_revision != EXECUTION_REALISM_V2
                 or self._market_event_count == 1
                 or self._market_event_count % self.equity_curve_event_interval == 0
@@ -464,6 +472,17 @@ class TradeSimulationKernel:
                     "available_balance": str(self.account.available_balance()),
                 }
             )
+        self._record_equity_point(point)
+
+    def _record_equity_point(self, point: dict) -> None:
+        if (
+            self.equity_curve_mode == "UTC_DAILY_CLOSE_V1"
+            and self.equity_curve
+            and int(self.equity_curve[-1]["event_time_ms"]) // 86_400_000
+            == int(point["event_time_ms"]) // 86_400_000
+        ):
+            self.equity_curve[-1] = point
+            return
         self.equity_curve.append(point)
 
     def finalize_orders(self) -> None:

@@ -277,6 +277,20 @@ BAR 的 `OHLC_WORST_CASE_STOP_FIRST_V1` 是保守假设而不是历史事实；a
 重放、拥有独立 matrix hash，且不进入主 Run config hash。V2 决策链和每 100 事件权益采样属于
 该版本身份。所有生产 flags 继续默认关闭。
 
+### 8.6 报告与绩效指标 V2 身份
+
+M7 新增 `candlescope.backtest-report/2` 与 `BACKTEST_METRICS_V2`，冻结公式、采样、空值及
+对账语义见 `docs/adr/ADR-BACKTEST-010-report-metrics-v2.md`。该身份只允许搭配
+`LINEAR_PERP_ONE_WAY_V2 + EXECUTION_REALISM_V2`；Run 必须同时冻结 UTC 日收盘权益采样、
+365 天年化、年化无风险利率、同 snapshot/窗口/成本 benchmark 和样本角色。旧 `/1` 报告继续
+只读可打开，禁止重新计算或覆盖旧 hash。
+
+账户收益与风险使用含开放仓位的 mark-to-market equity；FIFO 完整交易指标不得把开放仓位、
+部分成交或残单伪装成完整交易。短样本、零交易、零波动、非正权益和不可用 benchmark 必须返回
+`null + reason`。报告封存前必须以 Decimal 逐项完成 realized、fees、funding、final equity
+对账；任一不相等即失败关闭。JSON 与 CSV 导出 manifest 必须绑定同一个已封存 report hash，
+浏览器只渲染报告字段，不自行定义绩效公式。生产 flags 和报告 V2 开关继续默认关闭。
+
 ---
 
 ## 9. Phase 1 数据接口

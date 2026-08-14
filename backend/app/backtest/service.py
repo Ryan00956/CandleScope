@@ -9,7 +9,8 @@ from typing import Any, Callable, Mapping
 from app.core.config import BacktestSettings
 from app.data_engine.interval_policy import parse_interval_spec
 
-from app.backtest.reports import REPORT_SCHEMA, build_report
+from app.backtest.metrics_v2 import build_market_context, parse_metrics_identity
+from app.backtest.reports import build_report
 from app.backtest.strategy.protocol import StrategyProviderError
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
 from app.simulation import (
@@ -223,6 +224,22 @@ class BacktestService:
                         "bar_path_scenario",
                         "tif_supported",
                         "equity_curve_event_interval",
+                    )
+                }
+            )
+        if normalized_execution.get("metrics_version"):
+            stored_payload.update(
+                {
+                    name: normalized_execution.get(name)
+                    for name in (
+                        "report_schema",
+                        "metrics_version",
+                        "equity_sampling",
+                        "equity_curve_mode",
+                        "annualization_days",
+                        "risk_free_rate_annual",
+                        "benchmark_model",
+                        "sample_role",
                     )
                 }
             )
@@ -859,6 +876,9 @@ class BacktestService:
                 checkpoint_callback=checkpoint_after,
             )
             cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
+            metrics_market_context = _metrics_market_context(
+                config, events, result.fills
+            )
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -917,6 +937,7 @@ class BacktestService:
                     **_execution_fill_model(config),
                 },
                 "cost_sensitivity": cost_sensitivity,
+                "metrics_market_context": metrics_market_context,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -1077,6 +1098,9 @@ class BacktestService:
                 checkpoint_callback=checkpoint_after,
             )
             cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
+            metrics_market_context = _metrics_market_context(
+                config, events, result.fills
+            )
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -1143,6 +1167,7 @@ class BacktestService:
                     ),
                 },
                 "cost_sensitivity": cost_sensitivity,
+                "metrics_market_context": metrics_market_context,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -1287,6 +1312,9 @@ class BacktestService:
                 finalize=True,
             )
             cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
+            metrics_market_context = _metrics_market_context(
+                config, events, result.fills
+            )
             self._assert_execution_control(
                 run_id,
                 deadline=deadline,
@@ -1346,6 +1374,7 @@ class BacktestService:
                     **_execution_fill_model(config),
                 },
                 "cost_sensitivity": cost_sensitivity,
+                "metrics_market_context": metrics_market_context,
             }
             | _policy_result_overrides(planner, result),
         )
@@ -1668,6 +1697,18 @@ class BacktestService:
             execution_realism = parse_execution_realism(payload, fidelity_mode=fidelity)
         except MarketDatasetError as exc:
             raise BacktestError(exc.code, str(exc)) from exc
+        try:
+            metrics_identity = parse_metrics_identity(payload)
+        except ValueError as exc:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", str(exc)) from exc
+        if metrics_identity and (
+            account_model != "LINEAR_PERP_ONE_WAY_V2"
+            or execution_realism.revision != EXECUTION_REALISM_V2
+        ):
+            raise BacktestError(
+                "FIDELITY_UNSUPPORTED",
+                "BACKTEST_METRICS_V2 requires LINEAR_PERP_ONE_WAY_V2 and EXECUTION_REALISM_V2",
+            )
         execution_config = {
             "strategy_source": strategy_source,
             "output_mode": output_mode,
@@ -1700,6 +1741,7 @@ class BacktestService:
         if contract_data_mode == "HISTORICAL_CONTRACT_V1":
             execution_config["contract_data_mode"] = contract_data_mode
         execution_config.update(execution_realism.identity(fidelity_mode=fidelity))
+        execution_config.update(metrics_identity)
         return RunIdentity(
             strategy_revision_id=str(payload["strategy_revision_id"]),
             dataset_id=str(payload["dataset_id"]),
@@ -1961,7 +2003,7 @@ class BacktestService:
             self.repository.finalize_run(
                 run_id=run_id,
                 expected_generation=expected_generation,
-                report_schema=REPORT_SCHEMA,
+                report_schema=str(report["schemaVersion"]),
                 report_json=report_json,
                 report_hash=report_hash,
                 generated_at_ms=stamp,
@@ -2150,6 +2192,11 @@ def _execution_kernel_kwargs(config: Mapping[str, object]) -> dict[str, object]:
         "equity_curve_event_interval": int(
             config.get("equity_curve_event_interval") or 100
         ),
+        "equity_curve_mode": (
+            str(config["equity_curve_mode"])
+            if config.get("equity_curve_mode") is not None
+            else None
+        ),
         **(
             {"bar_path_scenario": str(config["bar_path_scenario"])}
             if config.get("bar_path_scenario") is not None
@@ -2173,6 +2220,16 @@ def _execution_fill_model(config: Mapping[str, object]) -> dict[str, object]:
             config.get("equity_curve_event_interval") or 100
         ),
     }
+
+
+def _metrics_market_context(
+    config: Mapping[str, object],
+    events: tuple[MarketEvent, ...],
+    fills: list[Mapping[str, object]],
+) -> dict[str, object]:
+    if config.get("metrics_version") is None:
+        return {}
+    return build_market_context(events, fills)
 
 
 def _planning_context(kernel: Any, event: MarketEvent) -> PlanningContext:

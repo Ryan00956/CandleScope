@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "candlescope.backtest-report/2",
+  "reportHash": "sha256:58ff5a4d88934b9d7c1bd49042e1dcce283574a2aa329d6f99afde0c6edc5367",
+  "identity": {
+    "strategy_revision_id": "fixture-v1",
+    "dataset_id": "fixture",
+    "data_epoch": "epoch-2024",
+    "snapshot_hash": "sha256:snapshot",
+    "config_hash": "sha256:config",
+    "engine_version": "fixture",
+    "account_model": "LINEAR_PERP_ONE_WAY_V2",
+    "execution_model_revision": "EXECUTION_REALISM_V2",
+    "fill_policy": "BAR_VOLUME_PARTICIPATION_WORST_CASE_V2",
+    "bar_path_scenario": null,
+    "order_end_policy": null,
+    "report_schema": "candlescope.backtest-report/2",
+    "metrics_version": "BACKTEST_METRICS_V2",
+    "equity_sampling": "UTC_DAILY_CLOSE_V1",
+    "annualization_days": 365,
+    "risk_free_rate_annual": "0",
+    "benchmark_model": "BUY_HOLD_SAME_WINDOW_COSTS_V1",
+    "sample_role": "OUT_OF_SAMPLE"
+  },
+  "credibility": {
+    "level": "RESEARCH_ONLY",
+    "sample_role": "OUT_OF_SAMPLE",
+    "profit_guarantee": false,
+    "open_positions_excluded_from_trade_metrics": true
+  },
+  "returns": {
+    "total_return": {"value": "0", "reason": null},
+    "annualized_return": {"value": null, "reason": "WINDOW_SHORTER_THAN_365_DAYS"},
+    "realized_pnl": {"value": "0", "reason": null},
+    "unrealized_pnl": {"value": "0", "reason": null},
+    "net_pnl": {"value": "0", "reason": null},
+    "benchmark_return": {"value": "0.1", "reason": null},
+    "excess_return": {"value": "-0.1", "reason": null}
+  },
+  "risk": {
+    "max_drawdown": {"value": "0.0004997501249375312343828086", "reason": null},
+    "drawdown_duration_ms": {"value": "86400000", "reason": null},
+    "volatility": {"value": null, "reason": "FEWER_THAN_30_DAILY_RETURNS"},
+    "downside_volatility": {"value": null, "reason": "FEWER_THAN_30_DAILY_RETURNS"},
+    "sharpe": {"value": null, "reason": "FEWER_THAN_30_DAILY_RETURNS"},
+    "sortino": {"value": null, "reason": "FEWER_THAN_30_DAILY_RETURNS"},
+    "calmar": {"value": null, "reason": "ANNUALIZATION_UNAVAILABLE"},
+    "max_single_trade_loss": {"value": null, "reason": "NO_LOSING_TRADES"},
+    "max_consecutive_losses": {"value": null, "reason": "NO_CLOSED_TRADES"}
+  },
+  "trading": {
+    "trade_count": 0,
+    "winning_trade_count": 0,
+    "win_rate": {"value": null, "reason": "NO_CLOSED_TRADES"},
+    "gross_profit": {"value": "0", "reason": null},
+    "gross_loss": {"value": "0", "reason": null},
+    "profit_factor": {"value": null, "reason": "NO_GROSS_LOSS"},
+    "expectancy": {"value": null, "reason": "NO_CLOSED_TRADES"},
+    "payoff_ratio": {"value": null, "reason": "WIN_OR_LOSS_SAMPLE_MISSING"},
+    "average_holding_ms": {"value": null, "reason": "NO_CLOSED_TRADES"},
+    "median_holding_ms": {"value": null, "reason": "NO_CLOSED_TRADES"},
+    "average_mae": {"value": null, "reason": "INCOMPLETE_TRADE_EXCURSION_TRACE"},
+    "average_mfe": {"value": null, "reason": "INCOMPLETE_TRADE_EXCURSION_TRACE"},
+    "max_single_trade_loss": {"value": null, "reason": "NO_LOSING_TRADES"},
+    "max_consecutive_losses": {"value": null, "reason": "NO_CLOSED_TRADES"},
+    "long": {"trade_count": 0, "net_pnl": "0", "win_rate": {"value": null, "reason": "NO_CLOSED_TRADES"}},
+    "short": {"trade_count": 0, "net_pnl": "0", "win_rate": {"value": null, "reason": "NO_CLOSED_TRADES"}}
+  },
+  "execution": {
+    "fill_count": 0,
+    "order_count": 0,
+    "rejected_order_count": 0,
+    "partial_order_count": 0,
+    "unfilled_order_count": 0,
+    "fees": {"value": "0", "reason": null},
+    "funding": {"value": "0", "reason": null},
+    "slippage": {"value": "0", "reason": null},
+    "turnover": {"value": "0E+1", "reason": null},
+    "exposure_time": {"value": "0", "reason": null}
+  },
+  "monthly_returns": [
+    {"month": "2024-01", "value": "-0.0004997501249375312343828086", "reason": null}
+  ],
+  "reconciliation": {
+    "passed": true,
+    "checks": {
+      "closed_trade_gross_equals_realized": true,
+      "fill_fees_equal_account_fees": true,
+      "funding_events_equal_account_funding": true,
+      "final_equity_equals_wallet_plus_unrealized": true
+    },
+    "values": {
+      "closed_trade_gross_pnl": "0",
+      "account_realized_pnl": "0",
+      "fill_fees": "0",
+      "account_fees": "0",
+      "funding_event_sum": "0",
+      "account_funding": "0",
+      "final_equity": "10000",
+      "wallet_plus_unrealized": "10000"
+    }
+  },
+  "metricsHash": "sha256:59b9aba4fbb852673416378c8a5da218e535af7257088aec869f2626b5bce4f8"
+}

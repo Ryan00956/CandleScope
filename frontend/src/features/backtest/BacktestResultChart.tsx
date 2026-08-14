@@ -77,7 +77,13 @@ function markerSource(
   };
 }
 
-export function EquityCurve({ data }: { data: BacktestChartData["equity_curve"] }) {
+export function EquityCurve({
+  data,
+  drawdown = [],
+}: {
+  data: BacktestChartData["equity_curve"];
+  drawdown?: Array<Record<string, string | number>> | undefined;
+}) {
   const points = useMemo(() => {
     const values = data
       .map((item) => Number(item.equity))
@@ -92,6 +98,16 @@ export function EquityCurve({ data }: { data: BacktestChartData["equity_curve"] 
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     }).join(" ");
   }, [data]);
+  const drawdownPoints = useMemo(() => {
+    const values = drawdown.map((item) => Number(item.drawdown));
+    if (values.length < 2 || values.some((value) => !Number.isFinite(value))) return "";
+    const low = Math.min(...values, -0.000001);
+    return values.map((value, index) => {
+      const x = (index / (values.length - 1)) * 1000;
+      const y = 105 + (Math.abs(value) / Math.abs(low)) * 85;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join(" ");
+  }, [drawdown]);
   if (!points) return <p className="backtest-empty">权益曲线数据不足。</p>;
   return (
     <svg className="backtest-equity-svg" viewBox="0 0 1000 210" preserveAspectRatio="none" aria-label="账户资金曲线">
@@ -103,11 +119,12 @@ export function EquityCurve({ data }: { data: BacktestChartData["equity_curve"] 
       </defs>
       <polyline points={`0,210 ${points} 1000,210`} fill="url(#backtest-equity-fill)" stroke="none" />
       <polyline points={points} fill="none" stroke="#22d3ee" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+      {drawdownPoints && <polyline points={drawdownPoints} fill="none" stroke="#f97316" strokeWidth="2" vectorEffect="non-scaling-stroke" />}
     </svg>
   );
 }
 
-export default function BacktestResultChart({ chart }: { chart: BacktestChartData }) {
+export default function BacktestResultChart({ chart, focusTimeMs }: { chart: BacktestChartData; focusTimeMs?: number | null }) {
   const store = useMemo(() => {
     const next = new SeriesWindowStore({
       maxBars: 50_000,
@@ -121,13 +138,14 @@ export default function BacktestResultChart({ chart }: { chart: BacktestChartDat
   }, [chart.bars, chart.interval, chart.run_id]);
   const markers = useMemo(() => markerSource(chart, store), [chart, store]);
   const initialRange = useMemo(() => {
-    const rightmostTime = chart.bars.at(-1)?.time;
+    const focused = focusTimeMs == null ? null : floorIntervalTime(chart.interval, focusTimeMs / 1000);
+    const rightmostTime = focused ?? chart.bars.at(-1)?.time;
     return {
       barSpacing: Math.max(4, Math.min(40, 1_000 / Math.max(24, chart.bars.length))),
       rightOffset: 2,
       ...(rightmostTime === undefined ? {} : { rightmostTime }),
     };
-  }, [chart.bars]);
+  }, [chart.bars, chart.interval, focusTimeMs]);
 
   return (
     <div className="backtest-result-chart">

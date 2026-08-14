@@ -90,6 +90,48 @@ export interface BacktestReport {
     fill_policy?: string | null;
     bar_path_scenario?: string | null;
     order_end_policy?: string | null;
+    report_schema?: string | null;
+    metrics_version?: string | null;
+    equity_sampling?: string | null;
+    annualization_days?: number | null;
+    risk_free_rate_annual?: string | null;
+    benchmark_model?: string | null;
+    sample_role?: string | null;
+  };
+  credibility?: {
+    level: string;
+    sample_role: string;
+    profit_guarantee: boolean;
+    open_positions_excluded_from_trade_metrics: boolean;
+  };
+  performance?: {
+    metrics_version: string;
+    metrics_hash: string;
+    returns: Record<string, MetricValue>;
+    risk: Record<string, MetricValue>;
+    trading: Record<string, unknown> & {
+      trade_count: number;
+      win_rate: MetricValue;
+      profit_factor: MetricValue;
+      expectancy: MetricValue;
+      average_mae: MetricValue;
+      average_mfe: MetricValue;
+    };
+    execution: Record<string, unknown> & {
+      fees: MetricValue;
+      funding: MetricValue;
+      slippage: MetricValue;
+      turnover: MetricValue;
+      exposure_time: MetricValue;
+      rejected_order_count: number;
+      partial_order_count: number;
+      unfilled_order_count: number;
+    };
+    quality: Record<string, unknown>;
+    reconciliation: { passed: boolean; checks: Record<string, boolean> };
+    equity_daily: Array<Record<string, string | number>>;
+    drawdown_daily: Array<Record<string, string | number>>;
+    monthly_returns: Array<{ month: string; value: string | null; reason: string | null }>;
   };
   account_model?: string;
   funding_mode?: string;
@@ -104,6 +146,11 @@ export interface BacktestReport {
     stop_reasons?: Record<string, number>;
     cooldown_until_sequence?: number;
   };
+}
+
+export interface MetricValue {
+  value: string | null;
+  reason: string | null;
 }
 
 export interface BacktestChartBar {

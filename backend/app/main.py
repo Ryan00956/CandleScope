@@ -46,26 +46,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from app.api.v1.alerts import router as alerts_router
-from app.api.v1.indicators import router as indicators_router  # indicator engine v2
-from app.api.v1.exchanges import router as exchanges_router
-from app.api.v1.full_order_book import router as full_order_book_router
-from app.api.v1.klines import router as klines_router
-from app.api.v1.liquidations import router as liquidations_router
-from app.api.v1.market import router as market_router
-from app.api.v1.order_book import router as order_book_router
-from app.api.v1.replay import router as replay_router
-from app.api.v1.trade_flow import router as trade_flow_router
-from app.api.v1.settings import router as settings_router
-from app.api.v1.stream import router as stream_router
-from app.api.v1.subscriptions import router as subscriptions_router
-from app.api.v1.subscriptions import price_ws_router
-from app.api.v1.symbols import router as symbols_router
 from app.core.config import (
     CORS_ORIGINS,
     EVENT_LOOP_LAG_INTERVAL_SECONDS,
     LIQUIDATION_DB_PATH,
     LIQUIDATION_ROLLUP_BACKEND,
+    LOCAL_DATA_DIR,
+    RUNTIME_MODE,
     SYMBOL_CATALOG_FOREGROUND_DWELL_SECONDS,
     SYMBOL_CATALOG_FOREGROUND_RECHECK_SECONDS,
     TRADE_FLOW_DB_PATH,
@@ -73,14 +60,34 @@ from app.core.config import (
 )
 from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
-from app.data_engine.data_manager.capacity import build_capacity_snapshot
-from app.plugin_core_v2 import create_core_plugin_router
-from app.data_engine.storage import (
-    init_klines_storage,
-    init_liquidation_storage,
-    init_market_metrics_storage,
-    init_trade_flow_storage,
-)
+from app.local_data.runtime import LocalOfflineProfileMiddleware
+
+if RUNTIME_MODE == "LIVE":
+    from app.api.v1.alerts import router as alerts_router
+    from app.api.v1.exchanges import router as exchanges_router
+    from app.api.v1.full_order_book import router as full_order_book_router
+    from app.api.v1.indicators import router as indicators_router
+    from app.api.v1.klines import router as klines_router
+    from app.api.v1.liquidations import router as liquidations_router
+    from app.api.v1.market import router as market_router
+    from app.api.v1.order_book import router as order_book_router
+    from app.api.v1.replay import router as replay_router
+    from app.api.v1.settings import router as settings_router
+    from app.api.v1.stream import router as stream_router
+    from app.api.v1.subscriptions import price_ws_router
+    from app.api.v1.subscriptions import router as subscriptions_router
+    from app.api.v1.symbols import router as symbols_router
+    from app.api.v1.trade_flow import router as trade_flow_router
+    from app.data_engine.data_manager.capacity import build_capacity_snapshot
+    from app.plugin_core_v2 import create_core_plugin_router
+    from app.data_engine.storage import (
+        init_klines_storage,
+        init_liquidation_storage,
+        init_market_metrics_storage,
+        init_trade_flow_storage,
+    )
+else:
+    from app.api.v1.local_data import router as local_data_router
 
 logger = logging.getLogger("candlescope")
 
@@ -106,23 +113,26 @@ app.add_middleware(
     minimum_size=1024,
     compresslevel=5,
 )
-
-app.include_router(klines_router, prefix="/api/v1")
-app.include_router(market_router, prefix="/api/v1")
-app.include_router(trade_flow_router, prefix="/api/v1")
-app.include_router(liquidations_router, prefix="/api/v1")
-app.include_router(order_book_router, prefix="/api/v1")
-app.include_router(full_order_book_router, prefix="/api/v1")
-app.include_router(stream_router, prefix="/api/v1")
-app.include_router(indicators_router, prefix="/api/v1")
-app.include_router(alerts_router, prefix="/api/v1")
-app.include_router(settings_router, prefix="/api/v1")
-app.include_router(exchanges_router, prefix="/api/v1")
-app.include_router(symbols_router, prefix="/api/v1")
-app.include_router(subscriptions_router, prefix="/api/v1")
-app.include_router(price_ws_router, prefix="/api/v1")
-app.include_router(replay_router, prefix="/api/v1")
-app.include_router(create_core_plugin_router())
+if RUNTIME_MODE == "LOCAL_OFFLINE":
+    app.add_middleware(LocalOfflineProfileMiddleware, enabled=True)
+    app.include_router(local_data_router, prefix="/api/v1")
+else:
+    app.include_router(klines_router, prefix="/api/v1")
+    app.include_router(market_router, prefix="/api/v1")
+    app.include_router(trade_flow_router, prefix="/api/v1")
+    app.include_router(liquidations_router, prefix="/api/v1")
+    app.include_router(order_book_router, prefix="/api/v1")
+    app.include_router(full_order_book_router, prefix="/api/v1")
+    app.include_router(stream_router, prefix="/api/v1")
+    app.include_router(indicators_router, prefix="/api/v1")
+    app.include_router(alerts_router, prefix="/api/v1")
+    app.include_router(settings_router, prefix="/api/v1")
+    app.include_router(exchanges_router, prefix="/api/v1")
+    app.include_router(symbols_router, prefix="/api/v1")
+    app.include_router(subscriptions_router, prefix="/api/v1")
+    app.include_router(price_ws_router, prefix="/api/v1")
+    app.include_router(replay_router, prefix="/api/v1")
+    app.include_router(create_core_plugin_router())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -237,6 +247,20 @@ async def startup_event() -> None:
     lag_monitor = EventLoopLagMonitor(interval_seconds=EVENT_LOOP_LAG_INTERVAL_SECONDS)
     lag_monitor.start()
     app.state.event_loop_lag_monitor = lag_monitor
+    app.state.runtime_mode = RUNTIME_MODE
+
+    if RUNTIME_MODE == "LOCAL_OFFLINE":
+        from app.local_data.runtime import LocalOfflineRuntime
+
+        local_runtime = LocalOfflineRuntime(LOCAL_DATA_DIR)
+        local_runtime.start()
+        app.state.local_offline_runtime = local_runtime
+        app.state.local_data_service = local_runtime.service
+        app.state.local_import_jobs = local_runtime.jobs
+        app.state.data_manager = None
+        logger.info("Started LOCAL_OFFLINE runtime at %s", LOCAL_DATA_DIR)
+        print("[startup] LOCAL_OFFLINE runtime [ok]")
+        return
 
     # 1. Initialize SQLite storage
     init_klines_storage()
@@ -446,6 +470,15 @@ async def _wait_for_catalog_foreground_quiet() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Application shutdown handler."""
+    local_runtime = getattr(app.state, "local_offline_runtime", None)
+    if local_runtime is not None:
+        local_runtime.shutdown()
+        lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
+        if lag_monitor is not None:
+            await lag_monitor.stop()
+        print("[shutdown] LOCAL_OFFLINE runtime shut down [ok]")
+        return
+
     symbol_catalog_task = getattr(app.state, "symbol_catalog_refresh_task", None)
     if symbol_catalog_task is not None and not symbol_catalog_task.done():
         symbol_catalog_task.cancel()
@@ -553,6 +586,7 @@ async def root() -> dict:
         "name": "CandleScope API",
         "version": APP_VERSION,
         "status": "running",
+        "runtime_mode": RUNTIME_MODE,
         "data_manager": "active" if dm is not None else "not_initialized",
     }
 
@@ -560,7 +594,10 @@ async def root() -> dict:
 @app.get("/health", tags=["system"])
 async def health_check() -> dict:
     dm = getattr(app.state, "data_manager", None)
-    result: dict = {"status": "ok"}
+    result: dict = {"status": "ok", "runtime_mode": RUNTIME_MODE}
+    local_runtime = getattr(app.state, "local_offline_runtime", None)
+    if local_runtime is not None:
+        result["local_offline"] = local_runtime.diagnostics()
     alert_runtime = getattr(app.state, "alert_runtime", None)
     alert_facade = getattr(app.state, "alert_facade", None)
     if alert_runtime is not None:

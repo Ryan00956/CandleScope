@@ -401,14 +401,34 @@ def load_backtest_settings(
     )
 
 
+# Runtime profile. LOCAL_OFFLINE is a process-wide data boundary, not a
+# page-level toggle. Backtest research uses a later LOCAL_RESEARCH profile.
+RUNTIME_MODE = os.getenv("CANDLESCOPE_RUNTIME_MODE", "LIVE").strip().upper()
+if RUNTIME_MODE not in {"LIVE", "LOCAL_OFFLINE"}:
+    raise ValueError(
+        "CANDLESCOPE_RUNTIME_MODE must be either LIVE or LOCAL_OFFLINE"
+    )
+
 # Server
-HOST = os.getenv("CANDLE_HOST", "0.0.0.0")
+HOST = (
+    "127.0.0.1"
+    if RUNTIME_MODE == "LOCAL_OFFLINE"
+    else os.getenv("CANDLE_HOST", "0.0.0.0")
+)
 PORT = int(os.getenv("CANDLE_PORT", "8000"))
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
+LOCAL_DATA_DIR = Path(
+    os.getenv("CANDLESCOPE_LOCAL_DATA_DIR", DATA_DIR / "local-data")
+)
+LOCAL_DATA_MAX_UPLOAD_BYTES = int(
+    os.getenv("CANDLESCOPE_LOCAL_DATA_MAX_UPLOAD_BYTES", str(512 * 1024**2))
+)
+if LOCAL_DATA_MAX_UPLOAD_BYTES < 1:
+    raise ValueError("CANDLESCOPE_LOCAL_DATA_MAX_UPLOAD_BYTES must be positive")
 HISTORY_ARCHIVE_ENABLED = os.getenv("HISTORY_ARCHIVE_ENABLED", "1").strip().lower() in {
     "1",
     "true",

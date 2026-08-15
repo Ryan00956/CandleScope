@@ -1,0 +1,114 @@
+{
+  "schemaVersion": "candlescope.python-first-release/1",
+  "gitSha": "325830e244ef649d317c9f4b5608595375b4bfb9",
+  "gitDirty": false,
+  "branch": "codex/backtest-foundation",
+  "status": "RELEASE_GATES_OPEN",
+  "merged": false,
+  "pushed": false,
+  "productionEnabled": false,
+  "pythonIdentities": {
+    "authorContract": "candlescope.python-strategy/1",
+    "providerProtocol": "strategy-provider/1",
+    "bundleSchema": "candlescope.python-strategy-bundle/1",
+    "runtimeProfile": "python-strategy-runtime/1",
+    "wireTransport": "strict-jsonl/1"
+  },
+  "effectiveFlags": {
+    "BACKTEST_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_MULTI_MARKET_ENABLED": "0",
+    "BACKTEST_ONLINE_LEARNING_ENABLED": "0",
+    "BACKTEST_PYTHON_STRATEGY_ENABLED": "0",
+    "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": "0",
+    "BACKTEST_PYTHON_SCALE_V1_ENABLED": "0"
+  },
+  "datasetSnapshotHashes": [
+    "sha256:77e2b852e645aa4812a2a45b7e937fa65973cd03e2aed125c8b02de797b9b743",
+    "sha256:bb92a8a576bb5a9a28870715526717ac76e5cfa92177abeddba48f23c19005bf"
+  ],
+  "hashes": {
+    "decision": "cfb9445ee26aebfd1bfb791807171144943884d0ceeb51661157051ab9ccf0c6",
+    "fill": "8794741d7f91cf3b92eeb15b8a1bea254411394b3f83c1f83ac8157d85752a2e",
+    "ledger": null,
+    "report": "sha256:396a602e2165bd37cb54090fe496aedb34f782f890b188b7c276ddb8a6de7b09"
+  },
+  "artifactPaths": [
+    {
+      "kind": "n10-gate-module",
+      "path": "backend/app/backtest/python_first_n10.py",
+      "sha256": "0d4ed1e95f35d22d9aa7572160b0363151b77e29972b77de7b02320e92573dbf"
+    },
+    {
+      "kind": "n10-lifecycle",
+      "path": "backend/app/backtest/python_first_lifecycle.py",
+      "sha256": "e498618311940c14ec0a385f83a1d4d71e1ab3501791c63c5fadc8fc0f9a8b26"
+    },
+    {
+      "kind": "n10-verifier",
+      "path": "backend/scripts/verify_backtest_python_first_n10.py",
+      "sha256": "3bfe2b212944d826ba8d5e9fd2c1d2209620828815a5ac885f10bbb2cc8e0912"
+    },
+    {
+      "kind": "n10-soak-script",
+      "path": "backend/scripts/soak_python_first_n10.py",
+      "sha256": "b588a2d0e11aac038269848bcc7b3d7a54b2f191eac71779eda38d0ef85f0bb6"
+    },
+    {
+      "kind": "n10-schema",
+      "path": "docs/perf-baselines/backtest/python-first-n10-release.schema.json",
+      "sha256": "5610ad7269f21a1f7eda1cb4885ed91589362412c98d8c85e2802171ea7d29ea"
+    },
+    {
+      "kind": "n8-1m-bar",
+      "path": "docs/evidence/backtest-python-first-n8-1m-bar-20260815.json",
+      "sha256": "dfe69eb0aa08c17ace68d5f1f82546c55408c4e7f72741da8ebfc3a300091ac2"
+    }
+  ],
+  "gates": {
+    "repositoryRegression": "ENV_RESIDUAL",
+    "pythonSecurityBoundary": "PASS",
+    "browserAcceptance": "PASS",
+    "performanceSoak": "NOT_RERUN",
+    "disabledBoot": "PASS",
+    "defaultProductionFlagsOff": "PASS",
+    "publicApiSmoke": "PASS",
+    "checkpointFaultInjection": "PASS",
+    "exactRevertDetachedWorktree": "PASS",
+    "releaseManifestSha256": "PASS"
+  },
+  "knownLimitations": [
+    "1h public API soak and 4h browser soak were not re-run on this candidate",
+    "full backend suite still has Phase 9 rust lock environment residuals",
+    "Pine/Pyne remain restricted compatibility subsets",
+    "BAR_APPROX is approximate; aggTrade is not raw trade or queue exact",
+    "BACKTEST_MULTI_MARKET_ENABLED stays 0; basket is independent per-symbol only"
+  ],
+  "commands": [
+    {
+      "command": "python -m pytest backend/tests/test_python_first_n10_release.py backend/tests/test_python_first_n10_flags.py",
+      "exitCode": 0,
+      "durationSeconds": 3.55
+    },
+    {
+      "command": "npm run typecheck && npm run lint && npm test && npm run build",
+      "exitCode": 0,
+      "durationSeconds": 276.28
+    },
+    {
+      "command": "python backend/scripts/soak_python_first_n10.py --cycles 3",
+      "exitCode": 0,
+      "durationSeconds": 0.906
+    },
+    {
+      "command": "python -m pytest backend/tests --tb=no",
+      "exitCode": 1,
+      "durationSeconds": 2226.44
+    }
+  ]
+}

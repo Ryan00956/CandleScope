@@ -11,6 +11,7 @@ import pytest
 
 from app.backtest.errors import BacktestError
 from app.backtest.repository import BacktestRepository
+from app.backtest.schema import SCHEMA_VERSION
 from app.backtest.runtime import BacktestRuntime
 from app.backtest.service import BacktestService
 from app.backtest.study_v2 import (
@@ -282,7 +283,7 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         repository.connection.execute(
             "SELECT schema_version FROM backtest_schema_meta"
         ).fetchone()[0]
-        == 5
+        == SCHEMA_VERSION
     )
     assert (
         repository.connection.execute(
@@ -291,6 +292,10 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         == 0
     )
     repository.close()
+
+    from app.backtest.python_bundle_rollback import rollback_python_bundles
+
+    assert rollback_python_bundles(path)["schemaVersion"] == 5
 
     subprocess.run(
         [
@@ -420,7 +425,7 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         still_current.execute(
             "SELECT schema_version FROM backtest_schema_meta"
         ).fetchone()[0]
-        == 5
+        == SCHEMA_VERSION
     )
     still_current.close()
 
@@ -542,9 +547,7 @@ def test_selection_receipt_content_address_is_reused_across_identical_studies(
             **common,
             "study_id": first["study_id"],
             "fold_id": first_fold["fold_id"],
-            "selected_train_trial_id": first_fold["train_trials"][0][
-                "train_trial_id"
-            ],
+            "selected_train_trial_id": first_fold["train_trials"][0]["train_trial_id"],
         }
     )
     service.repository.update_study_state(str(first["study_id"]), "COMPLETED")
@@ -557,17 +560,16 @@ def test_selection_receipt_content_address_is_reused_across_identical_studies(
             **common,
             "study_id": second["study_id"],
             "fold_id": second_fold["fold_id"],
-            "selected_train_trial_id": second_fold["train_trials"][0][
-                "train_trial_id"
-            ],
+            "selected_train_trial_id": second_fold["train_trials"][0]["train_trial_id"],
         }
     )
     assert first_row["receipt_hash"] == second_row["receipt_hash"]
     linked = service.repository.get_selection_receipt(str(second_fold["fold_id"]))
     assert linked is not None and linked["payload_json"] == common["payload_json"]
-    assert service.repository.list_study_folds(str(second["study_id"]))[0][
-        "state"
-    ] == "SELECTED"
+    assert (
+        service.repository.list_study_folds(str(second["study_id"]))[0]["state"]
+        == "SELECTED"
+    )
     service.shutdown()
 
 

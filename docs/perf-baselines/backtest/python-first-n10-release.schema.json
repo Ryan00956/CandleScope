@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "candlescope.python-first-release/1",
+  "title": "CandleScope Python First N10 unmerged release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "gitSha",
+    "gitDirty",
+    "branch",
+    "status",
+    "merged",
+    "pushed",
+    "productionEnabled",
+    "pythonIdentities",
+    "effectiveFlags",
+    "datasetSnapshotHashes",
+    "hashes",
+    "artifactPaths",
+    "gates",
+    "knownLimitations"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "candlescope.python-first-release/1" },
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "gitDirty": { "type": "boolean" },
+    "branch": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "minLength": 1 },
+    "merged": { "const": false },
+    "pushed": { "const": false },
+    "productionEnabled": { "const": false },
+    "pythonIdentities": {
+      "type": "object",
+      "required": [
+        "authorContract",
+        "providerProtocol",
+        "bundleSchema",
+        "runtimeProfile",
+        "wireTransport"
+      ],
+      "additionalProperties": { "type": "string" }
+    },
+    "effectiveFlags": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "enum": ["0", "1"] }
+    },
+    "datasetSnapshotHashes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 8 }
+    },
+    "hashes": {
+      "type": "object",
+      "required": ["decision", "fill", "ledger", "report"],
+      "additionalProperties": { "type": ["string", "null"] }
+    },
+    "artifactPaths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "knownLimitations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "exitCode", "durationSeconds"],
+        "additionalProperties": false,
+        "properties": {
+          "command": { "type": "string" },
+          "exitCode": { "type": "integer" },
+          "durationSeconds": { "type": "number" }
+        }
+      }
+    }
+  }
+}

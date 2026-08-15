@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.backtest.python_first_n10 import enabled_production_flags
 from app.core.config import load_backtest_settings
 
 
@@ -15,6 +16,14 @@ def test_python_and_backtest_production_flags_default_off(tmp_path: Path) -> Non
     assert settings.enabled is False
     assert settings.multi_market_enabled is False
     assert settings.bar_enabled is False
-    flags = Path(__file__).resolve().parents[2] / "frontend" / "src" / "features" / "backtest" / "backtestFlags.ts"
+    assert enabled_production_flags({}) == []
+    flags = (
+        Path(__file__).resolve().parents[2]
+        / "frontend"
+        / "src"
+        / "features"
+        / "backtest"
+        / "backtestFlags.ts"
+    )
     text = flags.read_text(encoding="utf-8")
     assert 'VITE_BACKTEST_PYTHON_STRATEGY_ENABLED ?? "0"' in text

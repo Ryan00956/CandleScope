@@ -426,6 +426,12 @@ def test_schema_v5_to_v4_rollback_uses_consistent_backup_and_preserves_authority
     assert completed["state"] == "COMPLETED"
     service.shutdown()
 
+    from app.backtest.python_bundle_rollback import rollback_python_bundles
+    from app.backtest.schema import SCHEMA_VERSION
+
+    assert SCHEMA_VERSION == 6
+    assert rollback_python_bundles(settings.db_path)["schemaVersion"] == 5
+
     backup = tmp_path / "rollback" / "backtest-v5.db"
     receipt_path = tmp_path / "rollback" / "receipt.json"
     receipt = rollback(settings.db_path, backup, receipt_path)
@@ -435,36 +441,49 @@ def test_schema_v5_to_v4_rollback_uses_consistent_backup_and_preserves_authority
     assert receipt_path.is_file() and backup.is_file()
 
     rolled_back = sqlite3.connect(settings.db_path)
-    assert rolled_back.execute(
-        "SELECT schema_version FROM backtest_schema_meta"
-    ).fetchone()[0] == 4
+    assert (
+        rolled_back.execute(
+            "SELECT schema_version FROM backtest_schema_meta"
+        ).fetchone()[0]
+        == 4
+    )
     assert rolled_back.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 1
-    assert rolled_back.execute("SELECT COUNT(*) FROM backtest_reports").fetchone()[0] == 1
+    assert (
+        rolled_back.execute("SELECT COUNT(*) FROM backtest_reports").fetchone()[0] == 1
+    )
     assert rolled_back.execute("SELECT COUNT(*) FROM backtest_audit").fetchone()[0] > 0
-    assert rolled_back.execute(
-        "SELECT 1 FROM sqlite_master WHERE name='backtest_chart_cache'"
-    ).fetchone() is None
+    assert (
+        rolled_back.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='backtest_chart_cache'"
+        ).fetchone()
+        is None
+    )
     rolled_back.close()
 
     backup_db = sqlite3.connect(backup)
-    assert backup_db.execute(
-        "SELECT schema_version FROM backtest_schema_meta"
-    ).fetchone()[0] == 5
-    assert backup_db.execute("SELECT COUNT(*) FROM backtest_chart_cache").fetchone()[0] == 1
+    assert (
+        backup_db.execute("SELECT schema_version FROM backtest_schema_meta").fetchone()[
+            0
+        ]
+        == 5
+    )
+    assert (
+        backup_db.execute("SELECT COUNT(*) FROM backtest_chart_cache").fetchone()[0]
+        == 1
+    )
     backup_db.close()
 
 
 @pytest.mark.parametrize("mutation", ["truncated", "replaced", "hash_changed"])
 def test_mutated_local_dataset_rejects_checkpoint_resume_and_preserves_audit(
-    tmp_path: Path, mutation: str,
+    tmp_path: Path,
+    mutation: str,
 ) -> None:
     local_root = tmp_path / "local-data"
     csv_path = tmp_path / "bars.csv"
     csv_path.write_text(
         "time,open,high,low,close,volume\n"
-        + "\n".join(
-            f"{index * 60000},100,101,99,100,1" for index in range(8)
-        ),
+        + "\n".join(f"{index * 60000},100,101,99,100,1" for index in range(8)),
         encoding="utf-8",
     )
     manifest = LocalDatasetService(local_root).import_csv(
@@ -537,9 +556,7 @@ def test_mutated_local_dataset_rejects_checkpoint_resume_and_preserves_audit(
         replacement_csv = tmp_path / "replacement.csv"
         replacement_csv.write_text(
             "time,open,high,low,close,volume\n"
-            + "\n".join(
-                f"{index * 60000},200,201,199,200,1" for index in range(8)
-            ),
+            + "\n".join(f"{index * 60000},200,201,199,200,1" for index in range(8)),
             encoding="utf-8",
         )
         replacement = LocalDatasetService(local_root).import_csv(
@@ -568,6 +585,8 @@ def test_mutated_local_dataset_rejects_checkpoint_resume_and_preserves_audit(
     assert failed["state"] == "FAILED"
     assert failed["failure_code"] == "DATA_SNAPSHOT_MISMATCH"
     assert service.repository.latest_checkpoint(str(run["run_id"])) is not None
-    failure_details = json.loads(service.repository.list_audit(str(run["run_id"]))[-1]["details_json"])
+    failure_details = json.loads(
+        service.repository.list_audit(str(run["run_id"]))[-1]["details_json"]
+    )
     assert failure_details["checkpointPreserved"] is True
     runtime.shutdown()

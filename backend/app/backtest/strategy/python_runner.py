@@ -7,11 +7,10 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from candlescope_backtest_sdk import canonical_sha256
+from app.backtest.identity import sha256_hex
 
 SDK_SRC = (
     Path(__file__).resolve().parents[4]
@@ -118,8 +117,6 @@ class IsolatedPythonRunner:
         if os.name != "nt" or self._process is None or self._process.pid is None:
             return
         try:
-            from app.plugin_host.windows_job import WindowsJobController
-
             kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
@@ -129,12 +126,15 @@ class IsolatedPythonRunner:
                 kernel32.AssignProcessToJobObject(job, process)
                 kernel32.CloseHandle(process)
             self._job = job
-            del WindowsJobController
         except Exception:
             self._job = None
 
     def call(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
-        if self._process is None or self._process.stdin is None or self._process.stdout is None:
+        if (
+            self._process is None
+            or self._process.stdin is None
+            or self._process.stdout is None
+        ):
             raise PythonRunnerError("RUNNER_NOT_STARTED", "start the runner first")
         request = json.loads(
             json.dumps(
@@ -173,17 +173,21 @@ class IsolatedPythonRunner:
             payload = json.loads(line)
         except json.JSONDecodeError as exc:
             self.close()
-            raise PythonRunnerError("INVALID_JSON", "worker emitted invalid JSONL") from exc
+            raise PythonRunnerError(
+                "INVALID_JSON", "worker emitted invalid JSONL"
+            ) from exc
         record = {"request": request, "response": payload}
         if self._bound_transcript:
-            self._transcript_chain = canonical_sha256(
+            self._transcript_chain = "sha256:" + sha256_hex(
                 {"previous": self._transcript_chain, "record": record}
             )
             self._transcript = [record]
         else:
             self._transcript.append(record)
         if not payload.get("ok"):
-            raise PythonRunnerError("PROVIDER_PROTOCOL_VIOLATION", str(payload.get("error")))
+            raise PythonRunnerError(
+                "PROVIDER_PROTOCOL_VIOLATION", str(payload.get("error"))
+            )
         return payload.get("result")
 
     def close(self) -> dict[str, Any]:
@@ -227,12 +231,14 @@ class IsolatedPythonRunner:
             "transcriptHash": (
                 self._transcript_chain
                 if self._bound_transcript
-                else canonical_sha256(self._transcript)
+                else "sha256:" + sha256_hex(self._transcript)
             ),
         }
 
 
-def probe_twice(bundle_dir: Path, frames: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+def probe_twice(
+    bundle_dir: Path, frames: list[dict[str, Any]], **kwargs: Any
+) -> dict[str, Any]:
     hashes: list[str] = []
     for _ in range(2):
         runner = IsolatedPythonRunner(bundle_dir, **kwargs)
@@ -253,5 +259,7 @@ def probe_twice(bundle_dir: Path, frames: list[dict[str, Any]], **kwargs: Any) -
             receipt = runner.close()
         hashes.append(str(receipt["transcriptHash"]))
     if hashes[0] != hashes[1]:
-        raise PythonRunnerError("DETERMINISM_PROBE_FAILED", "repeat probe hashes differ")
+        raise PythonRunnerError(
+            "DETERMINISM_PROBE_FAILED", "repeat probe hashes differ"
+        )
     return {"transcriptHash": hashes[0], "repeats": 2}

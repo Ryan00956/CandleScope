@@ -40,12 +40,31 @@ BAR/aggTrade lifecycle、v6→v5→v4 回滚、detached revert、manifest 校验
 
 未把上述残差改写成 0 failed / 0 errors，也未重写冻结 lock。
 
+## 1h soak
+
+`PASS`：`soak_python_first_n10.py --duration-ms 3600000` 跑满 3600.125 s，
+13068 个 Host Python BAR+aggTrade 循环，全部 COMPLETED，decision hash
+`cfb9445e…` 双时钟一致。证据：scratch `n10-1h-soak.json`。
+
+## 4h 浏览器 soak
+
+启动器可用，已在候选上真实启动：Playwright + 本机 Chrome 打开
+`backtest.html`，Python studio 持续存在，console 0。脚本：
+`frontend/scripts/backtest-python-n10-browser-soak.mjs`（`13e8943d`）。
+写盘：scratch `n10-4h-soak.json`（进行中，未到 14400000 ms 不得记 PASS）。
+
 ## 仍未关闭
 
-- 1h Python 公开 API soak（脚本 `backend/scripts/soak_python_first_n10.py --duration-ms 3600000` 已具备，未跑满 3600 s）
-- 4h Python 浏览器/lifecycle soak
-- 完整后端套件 `0 failed / 0 errors`（Phase 9 环境残差仍在）
-- 独立人工 full-feature review（本阶段为自动化审查 + 上述套件，不是第二人签署）
+- 4h Python 浏览器/lifecycle soak 尚未跑满 4 小时
+- 完整后端套件 `0 failed / 0 errors`：Phase 9 rust lock 环境残差（见 hard-stop）
+- 独立人工 full-feature review
+
+### Phase 9 hard-stop（不能安全修到 0/0）
+
+`rustc`/`cargo` 字符串与锁一致。仓库内 `runtime/adapter.exe` 已是
+`sha256:293b93c7…`。本机隔离重编彼此一致，但得到 `sha256:fe1a8f1a…`，
+size 同为 426496。改 lock 会掩盖冻结 supply-chain；本机没有锁机器上的
+MSVC/link.exe。未删测试、未放宽门禁。
 
 ## 回滚
 

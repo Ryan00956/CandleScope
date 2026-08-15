@@ -8,4 +8,5 @@
 step 输出进入 Host planner、execution report 回传 runner、Run 完成并产生 report hash。
 未另建 Python 撮合器。生产 Run 注册仍受默认 flags 关闭。
 
-aggTrade 双时钟使用同一 `BAR_CLOSE` Provider 合同；本提交以 BAR 产品路径取证。
+同一 `BAR_CLOSE` Python SMA fixture 在 `execute_bar_run` 与 `execute_dual_clock_run`
+上跑通，decision hash 一致。未另建 Python 撮合器。

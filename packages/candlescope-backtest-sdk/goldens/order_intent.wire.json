@@ -1,0 +1,12 @@
+{
+  "kind": "ORDER_INTENT",
+  "outputHash": "sha256:d56f902a21fd289061134fcf440c9dcccf29f092e135f976c93d622d4e7c0918",
+  "payload": {
+    "quantity": "1",
+    "side": "BUY",
+    "tif": "GTC",
+    "type": "MARKET"
+  },
+  "schemaVersion": "candlescope.python-strategy-output/1",
+  "sequence": 7
+}

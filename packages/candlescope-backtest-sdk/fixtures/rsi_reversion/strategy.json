@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "RSI Reversion",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["SIGNAL"],
+  "requiredFeatures": ["close"],
+  "warmup": {"kind": "PARAMETER_MAX", "parameters": ["length"]},
+  "parameters": [
+    {"name": "length", "type": "integer", "default": 14, "minimum": 2},
+    {"name": "oversold", "type": "number", "default": 30},
+    {"name": "overbought", "type": "number", "default": 70}
+  ],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

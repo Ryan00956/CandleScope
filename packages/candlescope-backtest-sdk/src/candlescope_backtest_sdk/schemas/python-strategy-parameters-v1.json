@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://candlescope.local/schemas/python-strategy-parameters-v1.json",
+  "title": "CandleScope Python strategy parameter values v1",
+  "type": "object",
+  "additionalProperties": {
+    "type": ["string", "number", "integer", "boolean"]
+  },
+  "maxProperties": 64
+}

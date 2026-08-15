@@ -1,0 +1,12 @@
+{
+  "kind": "SIGNAL",
+  "outputHash": "sha256:7c9e2b1cf6ae8f4fd58debd8ec23a40be96ba3ddf904513ccea34b31dde902ee",
+  "payload": {
+    "confidence": "0",
+    "direction": "LONG",
+    "horizon": "1",
+    "score": "0.25"
+  },
+  "schemaVersion": "candlescope.python-strategy-output/1",
+  "sequence": 7
+}

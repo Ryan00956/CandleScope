@@ -1,0 +1,30 @@
+{
+  "accountView": {
+    "equity": "10000"
+  },
+  "bar": {
+    "close": "2005",
+    "closeTimeMs": 1700000420000,
+    "high": "2010",
+    "low": "1990",
+    "open": "2000",
+    "openTimeMs": 1700000360000,
+    "volume": "12"
+  },
+  "eventTimeMs": 1700000420000,
+  "features": {
+    "close": "2005"
+  },
+  "generation": 1,
+  "inputHash": "sha256:abababababababababababababababababababababababababababababababab",
+  "market": {
+    "symbol": "ETHUSDT",
+    "venue": "BINANCE"
+  },
+  "phase": "STEP",
+  "revisionId": "rev_golden",
+  "runId": "bt_golden",
+  "schemaVersion": "candlescope.python-strategy-observation/1",
+  "sequence": 7,
+  "watermarkMs": 1700000420000
+}

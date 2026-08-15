@@ -20,7 +20,7 @@ def pin_in_repo_plugin_sdk(*extra_paths: str | Path) -> Path:
     tree's schema, not another worktree's drifted or older copy.
     """
 
-    pinned = [SDK_SOURCE, *[Path(path).resolve() for path in extra_paths]]
+    pinned = [SDK_SOURCE, *[Path(path).resolve() for path in extra_paths if path]]
     pinned_set = set(pinned)
     remainder: list[str] = []
     for item in sys.path:

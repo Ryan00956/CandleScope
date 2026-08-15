@@ -1,0 +1,2 @@
+# V1 lock: standard library + candlescope-backtest-sdk only.
+candlescope-backtest-sdk==0.1.0

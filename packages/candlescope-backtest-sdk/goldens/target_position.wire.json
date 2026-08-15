@@ -1,0 +1,9 @@
+{
+  "kind": "TARGET_POSITION",
+  "outputHash": "sha256:70fccb4112bf62b3809c3c34a41adf8242f924c745be143f8494315c6b59d28a",
+  "payload": {
+    "quantity": "1"
+  },
+  "schemaVersion": "candlescope.python-strategy-output/1",
+  "sequence": 7
+}

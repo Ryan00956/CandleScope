@@ -63,6 +63,11 @@ class LocalBarSnapshotProvider:
                 "Dataset symbol does not match DatasetRef",
                 code="DATA_QUALITY_FAILED",
             )
+        if ref.data_epoch and manifest["data_epoch"] != ref.data_epoch:
+            raise MarketDatasetError(
+                "dataset revision drifted during snapshot",
+                code="DATA_SNAPSHOT_MISMATCH",
+            )
 
         selected: list[MarketEvent] = []
         interval = parse_interval_spec(str(ref.interval or manifest["interval"]))

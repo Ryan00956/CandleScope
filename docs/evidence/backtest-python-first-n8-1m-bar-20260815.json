@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "candlescope.backtest-python-scale/1",
+  "bars": 1000000,
+  "state": "COMPLETED",
+  "decisionHash": "sha256:bb92a8a576bb5a9a28870715526717ac76e5cfa92177abeddba48f23c19005bf",
+  "fillHash": "e03a525fa786032373f317a0130515c8685d7fc1c251b92a76242be43540df51",
+  "reportHash": "sha256:49da4b933eb98ad6743f56b3996855818e0db04e8ee6ebf437a243e15094129f",
+  "fillCount": 1,
+  "durationSeconds": 657.4925154999946,
+  "peakMb": null,
+  "checkpointInterval": 10000,
+  "ok": true
+}

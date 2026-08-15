@@ -78,12 +78,15 @@ class PythonHostProvider:
             if os.environ.get("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
                 mode = "SANDBOXED_LOCAL"
             trusted_confirmed = mode == "TRUSTED_LOCAL"
+        from app.backtest.strategy.python_scale import scale_v1_enabled
+
         self.runner = IsolatedPythonRunner(
             bundle_dir,
             entrypoint=entrypoint,
             mode=mode,
             trusted_confirmed=bool(trusted_confirmed),
             step_timeout_s=5.0,
+            bound_transcript=scale_v1_enabled(),
         )
         self.entrypoint = entrypoint
         self.parameters = dict(parameters or {})

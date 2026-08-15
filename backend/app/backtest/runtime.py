@@ -147,6 +147,17 @@ class BacktestRuntime:
                     "last_close_ms": last_close_ms,
                     "strategy_revisions": self.service.strategy_registry.revision_ids(),
                     "contract_history": manifest.get("contract_history"),
+                    "source": manifest.get("source") or "local_dataset",
+                    "checksum": manifest.get("sqlite_sha256") or manifest.get("data_epoch"),
+                    "coverage": {
+                        "rows": manifest.get("rows"),
+                        "first_open_ms": manifest.get("first_open_ms"),
+                        "last_close_ms": last_close_ms,
+                    },
+                    "gap": {
+                        "excluded_range_count": manifest.get("excluded_range_count", 0)
+                    },
+                    "revision": manifest.get("data_epoch"),
                 }
             )
         return datasets

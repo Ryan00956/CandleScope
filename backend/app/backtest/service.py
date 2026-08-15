@@ -7,6 +7,7 @@ import time
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from collections.abc import Iterable, Sequence
 from typing import Any, Callable, Mapping
 
 from app.core.config import BacktestSettings
@@ -188,6 +189,10 @@ class BacktestService:
                 == "1",
                 "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": os.environ.get(
                     "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0"
+                ).strip()
+                == "1",
+                "BACKTEST_PYTHON_SCALE_V1_ENABLED": os.environ.get(
+                    "BACKTEST_PYTHON_SCALE_V1_ENABLED", "0"
                 ).strip()
                 == "1",
             },
@@ -2268,7 +2273,7 @@ class BacktestService:
         self,
         run_id: str,
         *,
-        events: tuple[MarketEvent, ...],
+        events: Iterable[MarketEvent],
         provider: object,
         now_ms: int | None = None,
         warmup_events: int | None = None,
@@ -2319,18 +2324,22 @@ class BacktestService:
                 }
             )
 
-            bar_event_count = sum(event.role == "BARS" for event in events)
-            if bar_event_count > self.settings.max_bar_rows:
-                raise BacktestError(
-                    "BUDGET_EXCEEDED",
-                    "BAR event count exceeds frozen row ceiling",
-                )
-            event_bytes = _event_wire_bytes(events)
-            if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
-                raise BacktestError(
-                    "BUDGET_EXCEEDED",
-                    "BAR snapshot exceeds worker memory ceiling",
-                )
+            materialized = isinstance(events, tuple)
+            if materialized:
+                bar_event_count = sum(event.role == "BARS" for event in events)
+                if bar_event_count > self.settings.max_bar_rows:
+                    raise BacktestError(
+                        "BUDGET_EXCEEDED",
+                        "BAR event count exceeds frozen row ceiling",
+                    )
+                event_bytes = _event_wire_bytes(events)
+                if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
+                    raise BacktestError(
+                        "BUDGET_EXCEEDED",
+                        "BAR snapshot exceeds worker memory ceiling",
+                    )
+            else:
+                event_bytes = 0
 
             observed = 0
             resume_sequence = 0
@@ -2356,6 +2365,12 @@ class BacktestService:
                 **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
+            from app.backtest.strategy.python_scale import scale_v1_enabled
+
+            if scale_v1_enabled():
+                if kernel.equity_curve_event_interval < 10_000:
+                    kernel.equity_curve_event_interval = 10_000
+                kernel.scale_stream_decisions = True
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
@@ -2414,9 +2429,25 @@ class BacktestService:
                     context=_planning_context(kernel, event),
                 )
 
-            remaining_events = tuple(
-                event for event in events if event.sequence > resume_sequence
-            )
+            streamed_last: MarketEvent | None = None
+            streamed_count = 0
+
+            def remaining_events() -> Iterable[MarketEvent]:
+                nonlocal streamed_last, streamed_count
+                seen_bars = 0
+                for event in events:
+                    if event.sequence <= resume_sequence:
+                        continue
+                    if event.role == "BARS":
+                        seen_bars += 1
+                        streamed_count = resume_sequence + seen_bars
+                        if streamed_count > self.settings.max_bar_rows:
+                            raise BacktestError(
+                                "BUDGET_EXCEEDED",
+                                "BAR event count exceeds frozen row ceiling",
+                            )
+                    streamed_last = event
+                    yield event
 
             last_order_count = len(kernel.orders)
             last_fill_count = len(kernel.fills)
@@ -2457,15 +2488,19 @@ class BacktestService:
                     )
 
             result = kernel.run(
-                remaining_events,
+                remaining_events(),
                 strategy,
                 warmup_events=0,
                 finalize=True,
                 checkpoint_callback=checkpoint_after,
             )
-            cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
+            cost_sensitivity = (
+                build_cost_sensitivity_matrix(kernel, events, result)
+                if materialized
+                else None
+            )
             metrics_market_context = _metrics_market_context(
-                config, events, result.fills
+                config, events if materialized else (), result.fills
             )
             self._assert_execution_control(
                 run_id,
@@ -2474,7 +2509,15 @@ class BacktestService:
             )
             self._assert_provider_state_budget(session.snapshot())
             strategy_metadata = _provider_report_metadata(provider)
-            final_sequence = events[-1].sequence if events else resume_sequence
+            final_sequence = (
+                events[-1].sequence
+                if materialized and events
+                else (
+                    streamed_last.sequence
+                    if streamed_last is not None
+                    else resume_sequence
+                )
+            )
             self._save_bar_checkpoint(
                 record,
                 sequence=final_sequence,

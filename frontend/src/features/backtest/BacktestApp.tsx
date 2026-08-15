@@ -901,7 +901,10 @@ export default function BacktestApp() {
           {selectedDataset ? (
             <div className="backtest-dataset-meta">
               <span>{selectedDataset.rows.toLocaleString()} bars</span>
-              <span>epoch {hashLabel(selectedDataset.data_epoch)}</span>
+              <span>source {selectedDataset.source ?? "local_dataset"}</span>
+              <span>checksum {hashLabel(selectedDataset.checksum ?? selectedDataset.data_epoch)}</span>
+              <span>gap {String(selectedDataset.gap?.excluded_range_count ?? 0)}</span>
+              <span>revision {hashLabel(selectedDataset.revision ?? selectedDataset.data_epoch)}</span>
             </div>
           ) : <p className="backtest-empty">没有可用本地数据，请先导入 CSV。</p>}
           <div className="backtest-form-row">

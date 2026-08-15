@@ -102,6 +102,11 @@ export interface BacktestDataset {
   first_open_ms: number | null;
   last_close_ms: number | null;
   strategy_revisions: string[];
+  source?: string;
+  checksum?: string;
+  coverage?: Record<string, unknown>;
+  gap?: Record<string, unknown>;
+  revision?: string;
   contract_history?: {
     bundle_hash: string;
     roles: string[];

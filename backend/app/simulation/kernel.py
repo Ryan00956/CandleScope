@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
+from collections.abc import Iterable
 from typing import Callable, Mapping
 
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent, sha256_hex
@@ -105,6 +106,7 @@ class SimulationKernel:
     equity_curve: list[dict] = field(default_factory=list)
     equity_curve_event_interval: int = 1
     equity_curve_mode: str | None = None
+    scale_stream_decisions: bool = False
     execution_reporter: Callable[[dict], None] | None = field(
         default=None,
         repr=False,
@@ -350,14 +352,13 @@ class SimulationKernel:
 
     def run(
         self,
-        events: tuple[MarketEvent, ...],
+        events: Iterable[MarketEvent],
         strategy: StrategyFn,
         *,
         warmup_events: int = 0,
         finalize: bool = False,
         checkpoint_callback: Callable[[MarketEvent], None] | None = None,
     ) -> SimulationResult:
-        visible: list[MarketEvent] = []
         for event in events:
             if self.paused:
                 break
@@ -389,7 +390,6 @@ class SimulationKernel:
                 self.account.mark = _bar_decimal(event, "close")
             self._apply_funding(market_event)
             self._match(market_event)
-            visible.append(market_event)
             intents = strategy((market_event,), market_event)
             if self._market_event_count <= warmup_events:
                 intents = []
@@ -398,7 +398,10 @@ class SimulationKernel:
                 sequence=market_event.sequence,
                 watermark_ms=market_event.event_time_ms,
             )
-            if self.execution_model_revision == EXECUTION_REALISM_V2:
+            if (
+                self.execution_model_revision == EXECUTION_REALISM_V2
+                or self.scale_stream_decisions
+            ):
                 self._decision_chain_hash = "sha256:" + sha256_hex(
                     {"previous": self._decision_chain_hash, "decision": decision}
                 )
@@ -428,11 +431,14 @@ class SimulationKernel:
                 )
             if self.equity_curve_mode == "UTC_DAILY_CLOSE_V1":
                 self._record_equity_point(curve_point)
-            elif (
-                self.execution_model_revision != EXECUTION_REALISM_V2
-                or self._market_event_count == 1
-                or self._market_event_count % self.equity_curve_event_interval == 0
-            ):
+            elif self.scale_stream_decisions or self.execution_model_revision == EXECUTION_REALISM_V2:
+                if (
+                    self._market_event_count == 1
+                    or self.equity_curve_event_interval <= 1
+                    or self._market_event_count % self.equity_curve_event_interval == 0
+                ):
+                    self.equity_curve.append(curve_point)
+            else:
                 self.equity_curve.append(curve_point)
             if checkpoint_callback is not None:
                 checkpoint_callback(event)
@@ -524,6 +530,7 @@ class SimulationKernel:
             decision_hash=(
                 self._decision_chain_hash
                 if self.execution_model_revision == EXECUTION_REALISM_V2
+                or self.scale_stream_decisions
                 else sha256_hex(self.decisions)
             ),
             fill_hash=sha256_hex(fills),

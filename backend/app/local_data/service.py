@@ -54,6 +54,16 @@ class LocalDatasetError(ValueError):
         self.code = code
 
 
+COLUMN_ALIASES = {
+    "time": ("time", "timestamp", "datetime", "date", "open_time", "open time", "t"),
+    "open": ("open", "o", "Open"),
+    "high": ("high", "h", "High"),
+    "low": ("low", "l", "Low"),
+    "close": ("close", "c", "Close"),
+    "volume": ("volume", "vol", "Volume", "qty"),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class LocalImportOptions:
     name: str
@@ -173,6 +183,81 @@ class LocalDatasetService:
         finally:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)
+
+    def import_parquet(
+        self,
+        parquet_path: Path,
+        options: LocalImportOptions,
+        *,
+        progress: ProgressCallback | None = None,
+        cancelled: CancellationCheck | None = None,
+    ) -> dict[str, Any]:
+        """Stream a local Parquet/Arrow table into the immutable CSV importer."""
+        self.start()
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise LocalDatasetError(
+                "Parquet/Arrow import requires a local pyarrow install",
+                code="FIDELITY_UNSUPPORTED",
+            ) from exc
+        self._raise_if_cancelled(cancelled)
+        staging_csv = self.root / ".uploads" / f"{uuid.uuid4().hex}.csv"
+        try:
+            table_file = pq.ParquetFile(parquet_path)
+            wrote_header = False
+            with staging_csv.open("w", encoding="utf-8", newline="") as handle:
+                writer: csv.DictWriter[str] | None = None
+                for batch in table_file.iter_batches(batch_size=8_192):
+                    self._raise_if_cancelled(cancelled)
+                    frame = batch.to_pydict()
+                    if not frame:
+                        continue
+                    length = len(next(iter(frame.values())))
+                    if writer is None:
+                        writer = csv.DictWriter(handle, fieldnames=list(frame))
+                        writer.writeheader()
+                        wrote_header = True
+                    for index in range(length):
+                        writer.writerow(
+                            {key: "" if values[index] is None else values[index] for key, values in frame.items()}
+                        )
+            if not wrote_header:
+                raise LocalDatasetError("Parquet table contains no rows")
+            return self.import_csv(
+                staging_csv, options, progress=progress, cancelled=cancelled
+            )
+        finally:
+            staging_csv.unlink(missing_ok=True)
+
+    def catalog_entry(self, dataset_id: str) -> dict[str, Any]:
+        manifest = self.get_manifest(dataset_id)
+        quality_path = self._revision_dir(dataset_id) / "quality-report.json"
+        quality = {}
+        if quality_path.is_file():
+            try:
+                quality = json.loads(quality_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                quality = {}
+        return {
+            "dataset_id": manifest["dataset_id"],
+            "source": manifest.get("source") or "local_dataset",
+            "checksum": manifest.get("sqlite_sha256") or manifest["data_epoch"],
+            "coverage": {
+                "rows": manifest.get("rows"),
+                "first_open_ms": manifest.get("first_open_ms"),
+                "last_open_ms": manifest.get("last_open_ms"),
+                "interval": manifest.get("interval"),
+                "timezone": manifest.get("timezone"),
+            },
+            "gap": {
+                "excluded_range_count": manifest.get("excluded_range_count", 0),
+                "status": quality.get("status") or "unknown",
+            },
+            "revision": manifest["data_epoch"],
+            "symbol": manifest.get("symbol"),
+            "name": manifest.get("name"),
+        }
 
     def import_contract_history(
         self,
@@ -479,7 +564,20 @@ class LocalDatasetService:
             elif logical_name in optional_missing:
                 resolved[logical_name] = None
             else:
-                missing.append(requested)
+                alias_hit: str | None = None
+                for alias in COLUMN_ALIASES.get(logical_name, ()):
+                    matches = folded.get(alias.casefold(), [])
+                    if len(matches) == 1:
+                        alias_hit = matches[0]
+                        break
+                    if len(matches) > 1:
+                        raise LocalDatasetError(
+                            f"CSV column is ambiguous ignoring case: {alias}"
+                        )
+                if alias_hit is not None:
+                    resolved[logical_name] = alias_hit
+                else:
+                    missing.append(requested)
 
         if missing:
             raise LocalDatasetError(

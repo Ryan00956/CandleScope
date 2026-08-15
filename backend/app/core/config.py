@@ -337,9 +337,15 @@ class BacktestSettings:
         return self.enabled and self.book_assisted_enabled
 
 
-def _bounded_backtest_int(environment: Mapping[str, str], name: str) -> int:
-    safe_upper_bound = _BACKTEST_BUDGETS[name]
-    raw_value = environment.get(name, str(safe_upper_bound))
+def _bounded_backtest_int(
+    environment: Mapping[str, str],
+    name: str,
+    *,
+    hard_ceiling: int | None = None,
+) -> int:
+    default = _BACKTEST_BUDGETS[name]
+    safe_upper_bound = default if hard_ceiling is None else int(hard_ceiling)
+    raw_value = environment.get(name, str(default))
     try:
         value = int(raw_value)
     except (TypeError, ValueError) as exc:
@@ -367,9 +373,16 @@ def load_backtest_settings(
         raise ValueError("BACKTEST_DB_PATH must not identify KLINES_DB_PATH")
     if _paths_refer_to_same_file(backtest_db_path, replay_db_path):
         raise ValueError("BACKTEST_DB_PATH must not identify REPLAY_DB_PATH")
-    values = {
-        name: _bounded_backtest_int(environment, name) for name in _BACKTEST_BUDGETS
-    }
+    from app.backtest.strategy.python_scale import bar_row_hard_ceiling
+
+    values = {}
+    for name in _BACKTEST_BUDGETS:
+        hard = (
+            bar_row_hard_ceiling(environment)
+            if name == "BACKTEST_MAX_BAR_ROWS"
+            else None
+        )
+        values[name] = _bounded_backtest_int(environment, name, hard_ceiling=hard)
     return BacktestSettings(
         enabled=_strict_replay_bool(environment, "BACKTEST_ENABLED", "0"),
         bar_enabled=_strict_replay_bool(environment, "BACKTEST_BAR_ENABLED", "0"),

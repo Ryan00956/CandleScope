@@ -74,6 +74,7 @@ class IsolatedPythonRunner:
         mode: str = "SANDBOXED_LOCAL",
         trusted_confirmed: bool = False,
         step_timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
+        bound_transcript: bool = False,
     ) -> None:
         if mode == "TRUSTED_LOCAL":
             _require_trusted_local(confirmed=trusted_confirmed)
@@ -89,8 +90,10 @@ class IsolatedPythonRunner:
         self.entrypoint = entrypoint
         self.mode = mode
         self.step_timeout_s = step_timeout_s
+        self._bound_transcript = bool(bound_transcript)
         self._process: subprocess.Popen[str] | None = None
         self._transcript: list[dict[str, Any]] = []
+        self._transcript_chain = "sha256:GENESIS"
         self._job: Any = None
         self._stderr_bytes = 0
 
@@ -171,7 +174,14 @@ class IsolatedPythonRunner:
         except json.JSONDecodeError as exc:
             self.close()
             raise PythonRunnerError("INVALID_JSON", "worker emitted invalid JSONL") from exc
-        self._transcript.append({"request": request, "response": payload})
+        record = {"request": request, "response": payload}
+        if self._bound_transcript:
+            self._transcript_chain = canonical_sha256(
+                {"previous": self._transcript_chain, "record": record}
+            )
+            self._transcript = [record]
+        else:
+            self._transcript.append(record)
         if not payload.get("ok"):
             raise PythonRunnerError("PROVIDER_PROTOCOL_VIOLATION", str(payload.get("error")))
         return payload.get("result")
@@ -214,7 +224,11 @@ class IsolatedPythonRunner:
                 "maxStderrBytes": MAX_STDERR_BYTES,
                 "maxProcesses": MAX_JOB_PROCESSES,
             },
-            "transcriptHash": canonical_sha256(self._transcript),
+            "transcriptHash": (
+                self._transcript_chain
+                if self._bound_transcript
+                else canonical_sha256(self._transcript)
+            ),
         }
 
 

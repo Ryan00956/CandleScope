@@ -184,7 +184,12 @@ def study_v2_identity(config: Mapping[str, Any]) -> dict[str, Any]:
         "annualization_days",
         "risk_free_rate_annual",
     )
-    return {key: config.get(key) for key in keys}
+    identity = {key: config.get(key) for key in keys}
+    # Basket fields are append-only so existing single-dataset receipts stay stable.
+    if config.get("dataset_basket_hash"):
+        identity["basket_protocol_revision"] = config.get("basket_protocol_revision")
+        identity["dataset_basket_hash"] = config.get("dataset_basket_hash")
+    return identity
 
 
 def evaluate_train_candidate(

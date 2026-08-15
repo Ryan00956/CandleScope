@@ -101,6 +101,12 @@ from .strategy.registry import StrategyRevisionRegistry, build_default_strategy_
 from .strategy.builtin import build_builtin_provider
 from .strategy.pine_adapter import PineStrategyProvider
 from .strategy.workspace import compile_revision
+from .strategy.python_basket import (
+    BASKET_PROTOCOL_V1,
+    build_basket_robustness,
+    normalize_basket,
+    plan_independent_runs,
+)
 
 FIDELITY_MATRIX = {
     "BAR_APPROX": ("BAR", "APPROXIMATE"),
@@ -296,7 +302,9 @@ class BacktestService:
         if existing is not None:
             return self._bundle_wire(existing)
         bundle_id = "psb_" + uuid.uuid4().hex
-        store_root = self.settings.db_path.parent / "python-strategy-bundles" / bundle_id
+        store_root = (
+            self.settings.db_path.parent / "python-strategy-bundles" / bundle_id
+        )
         freeze_bundle(inspected, store_root)
         record = {
             "bundle_id": bundle_id,
@@ -343,7 +351,9 @@ class BacktestService:
             raise BacktestError(
                 "PROVIDER_PROTOCOL_VIOLATION", "PYTHON_SOURCE identity must be JSON"
             ) from exc
-        bundle = self.repository.get_strategy_bundle(str(identity.get("bundle_id") or ""))
+        bundle = self.repository.get_strategy_bundle(
+            str(identity.get("bundle_id") or "")
+        )
         if bundle is None:
             raise BacktestError(
                 "SCHEMA_UNKNOWN_FIELD", "python revision is missing its frozen bundle"
@@ -363,12 +373,12 @@ class BacktestService:
                 "SCHEMA_UNKNOWN_FIELD", "select a frozen PYTHON_SOURCE revision"
             )
         identity = json.loads(str(row["source_text"]))
-        bundle = self.repository.get_strategy_bundle(str(identity.get("bundle_id") or ""))
+        bundle = self.repository.get_strategy_bundle(
+            str(identity.get("bundle_id") or "")
+        )
         smoke = self.repository.latest_strategy_smoke(revision_id)
         smoke_details = (
-            json.loads(str(smoke["details_json"]))
-            if smoke is not None
-            else None
+            json.loads(str(smoke["details_json"])) if smoke is not None else None
         )
         return {
             "revisionId": revision_id,
@@ -404,7 +414,9 @@ class BacktestService:
             {
                 "name": manifest.get("name") or bundle_id,
                 "language": "PYTHON_SOURCE",
-                "source_text": json.dumps(identity, sort_keys=True, separators=(",", ":")),
+                "source_text": json.dumps(
+                    identity, sort_keys=True, separators=(",", ":")
+                ),
                 "parameter_schema": manifest.get("parameters") or [],
             },
             now_ms=now_ms,
@@ -508,7 +520,9 @@ class BacktestService:
                         "source": compiled.get("executionSource", row["source_text"]),
                         "parameters": dict(payload.get("parameters") or {}),
                         "outputMode": (
-                            json.loads(str(row["capabilities_json"]))["output_modes"][-1]
+                            json.loads(str(row["capabilities_json"]))["output_modes"][
+                                -1
+                            ]
                         ),
                     }
                 )
@@ -541,7 +555,9 @@ class BacktestService:
             "startTimeMs": start,
             "endTimeMs": end,
             "status": "PASSED",
-            "runtimeMode": runtime_mode if row["base_revision_id"] == "python-source-v1" else None,
+            "runtimeMode": runtime_mode
+            if row["base_revision_id"] == "python-source-v1"
+            else None,
         }
         receipt_hash = "sha256:" + sha256_hex(canonical_json(details))
         self.repository.insert_strategy_smoke(
@@ -1257,7 +1273,9 @@ class BacktestService:
             raise BacktestError("DATA_QUALITY_FAILED", "end_ms must be after start_ms")
         if self.enforce_registered_revisions:
             revision_id = str(payload.get("strategy_revision_id") or "")
-            persisted_study_revision = self.repository.get_strategy_revision(revision_id)
+            persisted_study_revision = self.repository.get_strategy_revision(
+                revision_id
+            )
             if persisted_study_revision is None:
                 try:
                     self.strategy_registry.require(revision_id)
@@ -1444,6 +1462,28 @@ class BacktestService:
             raise BacktestError(
                 "SCHEMA_UNKNOWN_FIELD", "invalid Study V2 constraints"
             ) from exc
+        if normalized.get("dataset_basket") in (None, {}, []):
+            normalized.pop("dataset_basket", None)
+        if self.settings.multi_market_enabled and normalized.get("dataset_basket"):
+            raise BacktestError(
+                "FIDELITY_UNSUPPORTED",
+                "independent dataset basket is not shared-capital multi-market",
+            )
+        if normalized.get("dataset_basket") is not None:
+            basket = normalize_basket(normalized["dataset_basket"])
+            train_ids = {
+                str(member["dataset_id"])
+                for member in basket["members"]
+                if member["role"] == "TRAIN"
+            }
+            if str(payload["dataset_id"]) not in train_ids:
+                raise BacktestError(
+                    "STUDY_SPLIT_LEAK",
+                    "Study V2 dataset_id must be a TRAIN basket member",
+                )
+            normalized["dataset_basket"] = basket
+            normalized["dataset_basket_hash"] = basket["basket_hash"]
+            normalized["basket_protocol_revision"] = BASKET_PROTOCOL_V1
         frozen = {
             **normalized,
             "study_schema": STUDY_SCHEMA_V2,
@@ -2374,9 +2414,10 @@ class BacktestService:
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
-                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
-                    "checkpointMode"
-                ) != "BAR":
+                if (
+                    payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2"
+                    and payload.get("checkpointMode") != "BAR"
+                ):
                     raise BacktestError(
                         "CHECKPOINT_CORRUPT", "checkpoint mode does not match BAR run"
                     )
@@ -2466,11 +2507,9 @@ class BacktestService:
                     fault_point = "after_partial_fill"
                 elif order_count > last_order_count:
                     fault_point = "after_order"
-                if (
-                    interval > 0
-                    and observed > 0
-                    and observed % interval == 0
-                ) or (self._fault_injector is not None and fault_point):
+                if (interval > 0 and observed > 0 and observed % interval == 0) or (
+                    self._fault_injector is not None and fault_point
+                ):
                     self._save_bar_checkpoint(
                         record,
                         sequence=event.sequence,
@@ -2674,9 +2713,10 @@ class BacktestService:
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
-                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
-                    "checkpointMode"
-                ) != "DUAL_CLOCK":
+                if (
+                    payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2"
+                    and payload.get("checkpointMode") != "DUAL_CLOCK"
+                ):
                     raise BacktestError(
                         "CHECKPOINT_CORRUPT",
                         "checkpoint mode does not match dual-clock run",
@@ -3023,9 +3063,10 @@ class BacktestService:
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
-                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
-                    "checkpointMode"
-                ) != "TRADE_TAPE":
+                if (
+                    payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2"
+                    and payload.get("checkpointMode") != "TRADE_TAPE"
+                ):
                     raise BacktestError(
                         "CHECKPOINT_CORRUPT", "checkpoint mode does not match trade run"
                     )
@@ -3081,7 +3122,9 @@ class BacktestService:
             def checkpoint_after(event: MarketEvent) -> None:
                 nonlocal last_order_count, partial_seen
                 order_count = len(kernel.orders)
-                partial_count = sum(order.status == "PARTIAL" for order in kernel.orders)
+                partial_count = sum(
+                    order.status == "PARTIAL" for order in kernel.orders
+                )
                 interval = self.settings.checkpoint_event_interval
                 periodic = interval > 0 and observed > 0 and observed % interval == 0
                 fault_point = None
@@ -3240,6 +3283,7 @@ class BacktestService:
                     "oos_report": (
                         None if oos is None else json.loads(str(oos["report_json"]))
                     ),
+                    "dataset_basket": config.get("dataset_basket"),
                     "trials": [],
                 }
             )
@@ -3257,7 +3301,8 @@ class BacktestService:
         study = self.get_study(study_id)
         if study.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
             oos = study.get("oos_report")
-            return {
+            config = json.loads(str(study["config_json"]))
+            comparison = {
                 "study_id": study_id,
                 "ready": oos is not None,
                 "completed_trial_count": sum(
@@ -3271,6 +3316,18 @@ class BacktestService:
                     "train candidates select once; OOS contains TestRun only"
                 ),
             }
+            if config.get("dataset_basket"):
+                comparison["dataset_basket"] = config["dataset_basket"]
+                comparison["portfolio_sum_forbidden"] = True
+                comparison["multi_market_enabled"] = False
+                comparison["independent_symbol_robustness"] = (
+                    self.evaluate_basket_reports(study_id)
+                )
+                comparison["selection_warning"] = (
+                    "TRAIN symbols/windows select once; independent per-symbol "
+                    "OOS is never summed as a portfolio"
+                )
+            return comparison
         completed: list[dict[str, object]] = []
         runs: list[Mapping[str, object]] = []
         for trial in study.get("trials") or []:  # type: ignore[union-attr]
@@ -3316,6 +3373,141 @@ class BacktestService:
             "comparison": compare_runs(runs),
             "ranking": rank_oos(completed),
         }
+
+    def evaluate_basket_reports(
+        self,
+        study_id: str,
+        member_reports: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, object]:
+        study = self.get_study(study_id)
+        config = json.loads(str(study["config_json"]))
+        basket = config.get("dataset_basket")
+        if not isinstance(basket, Mapping):
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "study has no dataset basket")
+        folds = study.get("folds") or []
+        fold_payload = None
+        if folds:
+            first = folds[0]
+            fold_payload = {
+                "ordinal": int(first["ordinal"]),
+                "train_start_ms": int(first["train_start_ms"]),
+                "train_end_ms": int(first["train_end_ms"]),
+                "test_start_ms": int(first["test_start_ms"]),
+                "test_end_ms": int(first["test_end_ms"]),
+                "purge_ms": int(first.get("purge_ms") or 0),
+                "embargo_ms": int(first.get("embargo_ms") or 0),
+            }
+        reports = (
+            list(member_reports)
+            if member_reports is not None
+            else self._collect_basket_member_reports(study_id, basket)
+        )
+        robustness = build_basket_robustness(
+            basket=basket,
+            identity=study_v2_identity(config),
+            member_reports=reports,
+            seed=int(config.get("seed") or 1),
+            fold_count=len(folds),
+            fold=fold_payload,
+            objective=str(config.get("objective") or "NET_RETURN"),
+            constraints=config.get("constraints") or {},
+        )
+        robustness["plan"] = plan_independent_runs(
+            basket,
+            folds=[
+                {
+                    "ordinal": int(fold["ordinal"]),
+                    "train_start_ms": int(fold["train_start_ms"]),
+                    "train_end_ms": int(fold["train_end_ms"]),
+                    "test_start_ms": int(fold["test_start_ms"]),
+                    "test_end_ms": int(fold["test_end_ms"]),
+                }
+                for fold in folds
+            ],
+            holdout=int(config.get("holdout_ms") or 0) > 0,
+        )
+        return robustness
+
+    def _collect_basket_member_reports(
+        self, study_id: str, basket: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        members = {
+            str(item["dataset_id"]): dict(item) for item in basket.get("members") or []
+        }
+        collected: list[dict[str, Any]] = []
+        for run in self.repository.list_runs():
+            if str(run.get("study_id") or "") != study_id:
+                continue
+            dataset_id = str(run.get("dataset_id") or "")
+            member = members.get(dataset_id)
+            if (
+                member is None
+                or str(run.get("state") or "") != RunState.COMPLETED.value
+            ):
+                continue
+            stored = self.repository.get_report(str(run["run_id"]))
+            if stored is None:
+                continue
+            report = json.loads(str(stored["report_json"]))
+            try:
+                run_config = json.loads(str(run.get("config_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                run_config = {}
+            sample_role = str(run_config.get("sample_role") or "")
+            window_role = "TRAIN" if sample_role == "IN_SAMPLE" else "TEST"
+            if member["role"] == "HOLDOUT" and sample_role == "OUT_OF_SAMPLE":
+                window_role = "HOLDOUT"
+            if window_role == "TRAIN":
+                # Host compare overlay is OOS/robustness. TRAIN selection stays
+                # on the sealed Study V2 receipt and cannot see TEST/HOLDOUT.
+                continue
+            performance = report.get("performance") or {}
+            total_return = (performance.get("returns") or {}).get("total_return")
+            if isinstance(total_return, Mapping):
+                total_return = total_return.get("value")
+            hashes = report.get("hashes") or {}
+            scenarios = (report.get("cost_sensitivity") or {}).get("scenarios") or []
+            plus_25 = next(
+                (
+                    item
+                    for item in scenarios
+                    if str(item.get("name")) == "COSTS_PLUS_25_PERCENT"
+                ),
+                None,
+            )
+            initial = _decimal_or_none(
+                ((report.get("account") or {}).get("initial_balance"))
+            )
+            plus_equity = None
+            if isinstance(plus_25, Mapping):
+                plus_equity = _decimal_or_none(
+                    ((plus_25.get("metrics") or {}).get("final_equity"))
+                )
+            collected.append(
+                {
+                    "dataset_id": dataset_id,
+                    "window_role": window_role,
+                    "role": member["role"],
+                    "run_id": str(run["run_id"]),
+                    "report_hash": str(
+                        hashes.get("report") or stored.get("report_hash") or ""
+                    ),
+                    "report": report,
+                    "test_objective": total_return,
+                    "cost_sensitivity": report.get("cost_sensitivity"),
+                    "fidelity_mode": str(run.get("fidelity_mode") or ""),
+                    "decision_hash": hashes.get("decision"),
+                    "fill_hash": hashes.get("fill"),
+                    "cost_ok_base": _decimal_or_none(total_return) is not None
+                    and _decimal_or_none(total_return) > 0,
+                    "cost_ok_plus_25": (
+                        plus_equity is not None
+                        and initial is not None
+                        and plus_equity > initial
+                    ),
+                }
+            )
+        return collected
 
     def _assert_flags(self, fidelity_mode: str) -> None:
         if not self.settings.enabled:
@@ -3534,7 +3726,10 @@ class BacktestService:
                         requested_mode = str(
                             payload.get("python_runtime_mode") or "SANDBOXED_LOCAL"
                         )
-                        if str(smoke_details.get("runtimeMode") or "") != requested_mode:
+                        if (
+                            str(smoke_details.get("runtimeMode") or "")
+                            != requested_mode
+                        ):
                             raise StrategyProviderError(
                                 "SMOKE_REQUIRED",
                                 "rerun Strategy smoke for the selected python runtime mode",
@@ -3938,9 +4133,7 @@ class BacktestService:
             "strategyExecutionRevision": config.get("strategy_execution_revision"),
         }
 
-    def _maybe_inject_fault(
-        self, point: str, *, run_id: str, sequence: int
-    ) -> None:
+    def _maybe_inject_fault(self, point: str, *, run_id: str, sequence: int) -> None:
         if self._fault_injector is None:
             return
         self._fault_injector(
@@ -3974,7 +4167,8 @@ class BacktestService:
             raise BacktestError("CHECKPOINT_CORRUPT", "checkpoint hash mismatch")
         schema = payload.get("schemaVersion")
         if (
-            schema not in {
+            schema
+            not in {
                 "candlescope.backtest-checkpoint/1",
                 "candlescope.backtest-checkpoint/2",
             }
@@ -4490,3 +4684,13 @@ def _event_wire_bytes(events: tuple[MarketEvent, ...]) -> int:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return result if result.is_finite() else None

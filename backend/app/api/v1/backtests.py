@@ -115,6 +115,7 @@ class StudyCreateRequest(BaseModel):
     tie_break: str | None = None
     study_protocol_revision: str | None = None
     selection_protocol_revision: str | None = None
+    dataset_basket: dict[str, Any] | None = None
     warmup_bars: int = 0
     initial_balance: str = Field(default="10000", max_length=64)
     slippage_bps: str = Field(default="1", max_length=64)

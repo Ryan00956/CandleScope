@@ -1612,7 +1612,35 @@ export default function BacktestApp() {
                         </tr>)}</tbody>
                       </table></div>
                     </div>
-                  ) : studyComparison?.ready ? (
+                  ) : null}
+                  {studyComparison?.independent_symbol_robustness ? (
+                    <div data-testid="study-basket-robustness">
+                      <h3 className="backtest-table-title">独立商品稳健性（禁止组合金额加总）</h3>
+                      <div className="backtest-metrics">
+                        <div><span>Verdict</span><strong>{studyComparison.independent_symbol_robustness.verdict?.verdict ?? "—"}</strong></div>
+                        <div><span>只在单市场有效</span><strong>{studyComparison.independent_symbol_robustness.verdict?.single_market_only ? "是" : "否"}</strong></div>
+                        <div><span>参数稳定</span><strong>{studyComparison.independent_symbol_robustness.stability?.stable ? "是" : "否"}</strong></div>
+                        <div><span>组合加总</span><strong>{studyComparison.portfolio_sum_forbidden ? "禁止" : "—"}</strong></div>
+                      </div>
+                      {(studyComparison.independent_symbol_robustness.independent_oos?.members.length ?? 0) > 0 && (
+                        <div className="backtest-table-wrap">
+                          <table>
+                            <thead><tr><th>Symbol</th><th>Regime</th><th>OOS</th><th>Run</th><th>Report</th></tr></thead>
+                            <tbody>{studyComparison.independent_symbol_robustness.independent_oos?.members.map((member) => (
+                              <tr key={member.dataset_id}>
+                                <td>{member.symbol}</td>
+                                <td>{member.regime ?? "—"}</td>
+                                <td>{member.test_objective ?? "—"}</td>
+                                <td>{member.run_id}</td>
+                                <td>{hashLabel(member.report_hash)}</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                  {studyComparison?.ready && !studyComparison.oos_report ? (
                     <div className="backtest-table-wrap">
                       <table>
                         <thead><tr><th>排名</th><th>Split</th><th>参数</th><th>OOS 权益</th></tr></thead>
@@ -1624,7 +1652,10 @@ export default function BacktestApp() {
                         ))}</tbody>
                       </table>
                     </div>
-                  ) : <p className="backtest-empty">后台完成 Train → receipt → 单次 Test 后显示只含 TestRun 的 OOS 曲线。</p>}
+                  ) : null}
+                  {!studyComparison?.ready ? (
+                    <p className="backtest-empty">后台完成 Train → receipt → 单次 Test 后显示只含 TestRun 的 OOS 曲线。</p>
+                  ) : null}
                 </>
               ) : <p className="backtest-empty">选择一个 Study 查看进度。</p>}
             </div>

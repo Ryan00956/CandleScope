@@ -282,6 +282,7 @@ export interface BacktestStudyRecord {
     run_id?: string | null;
   } | null;
   oos_report?: BacktestOosReport | null;
+  dataset_basket?: Record<string, unknown> | null;
 }
 
 export interface BacktestStudyComparison {
@@ -298,6 +299,33 @@ export interface BacktestStudyComparison {
   folds?: BacktestStudyFold[];
   oos_report?: BacktestOosReport | null;
   selection_warning?: string;
+  dataset_basket?: Record<string, unknown> | null;
+  portfolio_sum_forbidden?: boolean;
+  multi_market_enabled?: boolean;
+  independent_symbol_robustness?: {
+    verdict?: {
+      verdict: string;
+      flags: string[];
+      single_market_only: boolean;
+      positive_oos_symbols: string[];
+    };
+    stability?: {
+      stable: boolean;
+      distinct_winner_count: number;
+      selected_params_hash?: string | null;
+    };
+    independent_oos?: {
+      portfolioSumForbidden: boolean;
+      members: Array<{
+        symbol: string;
+        dataset_id: string;
+        run_id: string;
+        report_hash: string;
+        test_objective?: string | null;
+        regime?: string;
+      }>;
+    };
+  } | null;
 }
 
 export const STREAM_EVENTS = [

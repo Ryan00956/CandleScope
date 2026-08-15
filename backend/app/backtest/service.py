@@ -9,7 +9,13 @@ from typing import Any, Callable, Mapping
 from app.core.config import BacktestSettings
 from app.data_engine.interval_policy import parse_interval_spec
 
-from app.backtest.metrics_v2 import build_market_context, parse_metrics_identity
+from app.backtest.metrics_v2 import (
+    BENCHMARK_MODEL,
+    EQUITY_SAMPLING,
+    METRICS_VERSION,
+    build_market_context,
+    parse_metrics_identity,
+)
 from app.backtest.reports import build_report
 from app.backtest.strategy.protocol import StrategyProviderError
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
@@ -50,6 +56,26 @@ from .study import (
     rank_oos,
     split_wire,
     walk_forward_splits,
+)
+from .study_v2 import (
+    HOLDOUT_RECEIPT_SCHEMA,
+    OBJECTIVES,
+    OOS_REPORT_SCHEMA,
+    SELECTION_PROTOCOL_V2,
+    STUDY_PROTOCOL_V2,
+    STUDY_SCHEMA_V2,
+    TIE_BREAK_V1,
+    FoldSpecV2,
+    build_holdout_receipt,
+    build_oos_report,
+    build_selection_receipt,
+    evaluate_train_candidate,
+    sample_candidates_v2,
+    study_v2_identity,
+    verify_oos_report,
+    verify_holdout_receipt,
+    verify_selection_receipt,
+    walk_forward_folds_v2,
 )
 from .strategy.host_adapter import StrategyHostAdapter
 from .strategy.host_policy import (
@@ -451,6 +477,12 @@ class BacktestService:
     ) -> dict[str, object]:
         if not self.settings.enabled or not self.settings.study_enabled:
             raise BacktestError("FLAG_DISABLED", "BACKTEST_STUDY_ENABLED is 0")
+        requested_protocol = str(payload.get("study_protocol_revision") or "")
+        if requested_protocol not in {"", "LEGACY_STUDY_V1", STUDY_PROTOCOL_V2}:
+            raise BacktestError("FIDELITY_UNSUPPORTED", "unknown Study protocol")
+        is_v2 = requested_protocol == STUDY_PROTOCOL_V2
+        if is_v2:
+            payload = self._normalize_study_v2(payload)
         required = ("start_ms", "end_ms", "train_ms", "test_ms")
         missing = [name for name in required if payload.get(name) is None]
         if missing:
@@ -504,7 +536,267 @@ class BacktestService:
                 "IDENTITY_MUTATION",
                 f"study {study_id} cannot start from {status}",
             )
+        config = json.loads(str(record["config_json"]))
+        if config.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
+            return self.ensure_study_v2_plan(study_id)
         return self.ensure_study_trials(study_id)
+
+    def _normalize_study_v2(self, payload: Mapping[str, object]) -> dict[str, object]:
+        normalized = dict(payload)
+        hypothesis = str(payload.get("hypothesis") or "").strip()
+        if not hypothesis:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "Study V2 requires a hypothesis"
+            )
+        required_text = (
+            "strategy_revision_id",
+            "dataset_id",
+            "data_epoch",
+            "dataset_snapshot_hash",
+            "interval",
+        )
+        missing = [
+            name for name in required_text if not str(payload.get(name) or "").strip()
+        ]
+        if missing:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"Study V2 missing {missing}")
+        try:
+            start_ms = int(payload["start_ms"])
+            end_ms = int(payload["end_ms"])
+            train_ms = int(payload["train_ms"])
+            test_ms = int(payload["test_ms"])
+            step_ms = int(payload.get("step_ms") or test_ms)
+            purge_ms = int(payload.get("purge_ms") or 0)
+            embargo_ms = int(payload.get("embargo_ms") or 0)
+            holdout_ms = int(payload.get("holdout_ms") or 0)
+            seed = int(payload.get("seed") or 1)
+            candidate_budget = int(
+                payload.get("candidate_budget") or payload.get("max_trials") or 1
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "invalid Study V2 identity"
+            ) from exc
+        interval = parse_interval_spec(str(payload["interval"]))
+        if interval is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "invalid Study V2 interval")
+        if interval.floor_ms(start_ms) != start_ms:
+            raise BacktestError(
+                "STUDY_SPLIT_LEAK", "Study V2 start must be a bar-open boundary"
+            )
+        if interval.floor_ms(end_ms) == end_ms:
+            end_exclusive_ms = end_ms
+        elif interval.next_ms(interval.floor_ms(end_ms)) == end_ms + 1:
+            end_exclusive_ms = end_ms + 1
+        else:
+            raise BacktestError(
+                "STUDY_SPLIT_LEAK",
+                "Study V2 end must be an exclusive boundary or inclusive bar close",
+            )
+        folds = walk_forward_folds_v2(
+            start_ms=start_ms,
+            end_ms=end_exclusive_ms,
+            train_ms=train_ms,
+            test_ms=test_ms,
+            step_ms=step_ms,
+            purge_ms=purge_ms,
+            embargo_ms=embargo_ms,
+            holdout_ms=holdout_ms,
+        )
+        space = payload.get("parameter_space") or {}
+        if not isinstance(space, Mapping):
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "parameter_space must be an object"
+            )
+        sampler = str(payload.get("sampler") or "grid")
+        candidates = sample_candidates_v2(
+            space, sampler=sampler, seed=seed, candidate_budget=candidate_budget
+        )
+        if self.enforce_registered_revisions:
+            try:
+                descriptor = self.strategy_registry.require(
+                    str(payload["strategy_revision_id"])
+                )
+            except StrategyProviderError as exc:
+                raise BacktestError(exc.code, str(exc)) from exc
+            for candidate in candidates:
+                probe = descriptor.factory()
+                try:
+                    probe.prepare(
+                        {
+                            "roles": ["BARS"],
+                            "parameters": {
+                                **dict(payload.get("parameters") or {}),
+                                **candidate,
+                            },
+                            "outputMode": "SIGNAL",
+                        }
+                    )
+                except StrategyProviderError as exc:
+                    raise BacktestError(exc.code, str(exc)) from exc
+                finally:
+                    probe.close()
+        total_run_budget = len(folds) * (len(candidates) + 1) + int(holdout_ms > 0)
+        requested_total = int(payload.get("total_run_budget") or total_run_budget)
+        if requested_total != total_run_budget:
+            raise BacktestError(
+                "IDENTITY_MUTATION",
+                "total_run_budget must equal the frozen fold/candidate plan",
+            )
+        if total_run_budget > self.settings.max_trials_per_study:
+            raise BacktestError(
+                "BUDGET_EXCEEDED", "Study V2 total runs exceed the frozen ceiling"
+            )
+        objective = str(payload.get("objective") or "SHARPE")
+        if objective not in OBJECTIVES:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", f"unsupported objective {objective}"
+            )
+        constraints = {
+            "min_closed_trades": 1,
+            "max_drawdown": "1",
+            "min_data_coverage": "1",
+            "max_ambiguity_ratio": "0",
+            "max_rejected_ratio": "0",
+            "cost_plus_25_must_be_positive": True,
+            "warn_min_long_trades": 1,
+            "warn_min_short_trades": 1,
+            **dict(payload.get("constraints") or {}),
+        }
+        try:
+            if int(constraints["min_closed_trades"]) < 1:
+                raise ValueError("min_closed_trades")
+            for name in (
+                "max_drawdown",
+                "min_data_coverage",
+                "max_ambiguity_ratio",
+                "max_rejected_ratio",
+            ):
+                value = Decimal(str(constraints[name]))
+                if not value.is_finite() or value < 0 or value > 1:
+                    raise ValueError(name)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "invalid Study V2 constraints"
+            ) from exc
+        frozen = {
+            **normalized,
+            "study_schema": STUDY_SCHEMA_V2,
+            "study_protocol_revision": STUDY_PROTOCOL_V2,
+            "selection_protocol_revision": SELECTION_PROTOCOL_V2,
+            "hypothesis": hypothesis,
+            "start_ms": start_ms,
+            "end_ms": end_exclusive_ms,
+            "window_semantics": "START_INCLUSIVE_END_EXCLUSIVE_V2",
+            "train_ms": train_ms,
+            "test_ms": test_ms,
+            "step_ms": step_ms,
+            "purge_ms": purge_ms,
+            "embargo_ms": embargo_ms,
+            "holdout_ms": holdout_ms,
+            "sampler": sampler,
+            "seed": seed,
+            "candidate_budget": len(candidates),
+            "total_run_budget": total_run_budget,
+            "objective": objective,
+            "constraints": constraints,
+            "tie_break": TIE_BREAK_V1,
+            "account_model": "LINEAR_PERP_ONE_WAY_V2",
+            "contract_data_mode": "HISTORICAL_CONTRACT_V1",
+            "funding_mode": str(payload.get("funding_mode") or "OFF"),
+            "execution_model_revision": EXECUTION_REALISM_V2,
+            "fill_policy": BAR_FILL_POLICY_V2,
+            "participation_rate": str(payload.get("participation_rate") or "0.1"),
+            "latency_ms": 0,
+            "latency_events": 0,
+            "order_end_policy": "CANCEL_AT_END",
+            "bar_path_scenario": "OHLC_WORST_CASE_STOP_FIRST_V1",
+            "metrics_version": METRICS_VERSION,
+            "report_schema": "candlescope.backtest-report/2",
+            "equity_sampling": EQUITY_SAMPLING,
+            "annualization_days": 365,
+            "risk_free_rate_annual": str(payload.get("risk_free_rate_annual") or "0"),
+            "benchmark_model": BENCHMARK_MODEL,
+            "output_mode": "SIGNAL",
+            "gap_policy": "REJECT",
+        }
+        for name, expected in (
+            ("account_model", "LINEAR_PERP_ONE_WAY_V2"),
+            ("contract_data_mode", "HISTORICAL_CONTRACT_V1"),
+            ("selection_protocol_revision", SELECTION_PROTOCOL_V2),
+            ("execution_model_revision", EXECUTION_REALISM_V2),
+            ("metrics_version", METRICS_VERSION),
+            ("tie_break", TIE_BREAK_V1),
+        ):
+            requested = payload.get(name)
+            if requested is not None and str(requested) != expected:
+                raise BacktestError(
+                    "IDENTITY_MUTATION", f"Study V2 requires {name}={expected}"
+                )
+        return frozen
+
+    def ensure_study_v2_plan(self, study_id: str) -> dict[str, object]:
+        record = self.get_study(study_id)
+        if record["state"] != "RUNNING":
+            return record
+        config = json.loads(str(record["config_json"]))
+        folds = walk_forward_folds_v2(
+            start_ms=int(config["start_ms"]),
+            end_ms=int(config["end_ms"]),
+            train_ms=int(config["train_ms"]),
+            test_ms=int(config["test_ms"]),
+            step_ms=int(config["step_ms"]),
+            purge_ms=int(config["purge_ms"]),
+            embargo_ms=int(config["embargo_ms"]),
+            holdout_ms=int(config["holdout_ms"]),
+        )
+        candidates = sample_candidates_v2(
+            config["parameter_space"],
+            sampler=str(config["sampler"]),
+            seed=int(config["seed"]),
+            candidate_budget=int(config["candidate_budget"]),
+        )
+        trial_ordinal = 1
+        for fold in folds:
+            fold_id = f"{study_id}:fold:{fold.ordinal}"
+            self.repository.insert_study_fold(
+                {
+                    "fold_id": fold_id,
+                    "study_id": study_id,
+                    "ordinal": fold.ordinal,
+                    "train_start_ms": fold.train_start_ms,
+                    "train_end_ms": fold.train_end_ms,
+                    "test_start_ms": fold.test_start_ms,
+                    "test_end_ms": fold.test_end_ms,
+                    "purge_ms": fold.purge_ms,
+                    "embargo_ms": fold.embargo_ms,
+                    "state": "PLANNED",
+                }
+            )
+            for candidate_ordinal, params in enumerate(candidates, 1):
+                params_hash = "sha256:" + sha256_hex(params)
+                self.repository.insert_train_trial(
+                    {
+                        "train_trial_id": f"{fold_id}:candidate:{candidate_ordinal}",
+                        "study_id": study_id,
+                        "fold_id": fold_id,
+                        "ordinal": trial_ordinal,
+                        "candidate_ordinal": candidate_ordinal,
+                        "params_json": canonical_json(params),
+                        "params_hash": params_hash,
+                        "state": "PLANNED",
+                    }
+                )
+                trial_ordinal += 1
+        if int(config["holdout_ms"]) > 0:
+            self.repository.insert_holdout(
+                {
+                    "study_id": study_id,
+                    "start_ms": int(config["end_ms"]) - int(config["holdout_ms"]),
+                    "end_ms": int(config["end_ms"]),
+                }
+            )
+        return self.get_study(study_id)
 
     def ensure_study_trials(self, study_id: str) -> dict[str, object]:
         """Idempotently recover the durable trial plan for one RUNNING Study."""
@@ -573,6 +865,13 @@ class BacktestService:
         *,
         preview_snapshot: Callable[..., Mapping[str, object]],
     ) -> dict[str, object]:
+        current = self.get_study(study_id)
+        current_config = json.loads(str(current["config_json"]))
+        if current_config.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
+            return self.materialize_study_v2_runs(
+                study_id,
+                preview_snapshot=preview_snapshot,
+            )
         study = self.ensure_study_trials(study_id)
         if study.get("state") == "CANCELLED" or (
             isinstance(study.get("study"), Mapping)
@@ -666,6 +965,471 @@ class BacktestService:
                 break
         return self.get_study(study_id)
 
+    def materialize_study_v2_runs(
+        self,
+        study_id: str,
+        *,
+        preview_snapshot: Callable[..., Mapping[str, object]],
+    ) -> dict[str, object]:
+        self.ensure_study_v2_plan(study_id)
+        record = self.get_study(study_id)
+        if record["state"] != "RUNNING":
+            return record
+        config = json.loads(str(record["config_json"]))
+        identity = study_v2_identity(config)
+        for fold in self.repository.list_study_folds(study_id):
+            if self.get_study(study_id)["state"] != "RUNNING":
+                break
+            fold_id = str(fold["fold_id"])
+            trials = self.repository.list_train_trials(study_id, fold_id=fold_id)
+            for trial in trials:
+                run_id = trial.get("run_id")
+                if run_id:
+                    run = self.repository.get_run_by_id(str(run_id))
+                    if run is not None and trial["state"] != run["state"]:
+                        self.repository.update_train_trial_for_run(
+                            str(run_id), state=str(run["state"])
+                        )
+                    continue
+                if trial["state"] != "PLANNED":
+                    continue
+                params = {
+                    **dict(config.get("parameters") or {}),
+                    **json.loads(str(trial["params_json"])),
+                }
+                run = self._create_study_v2_child_run(
+                    record,
+                    config,
+                    params=params,
+                    role="TRAIN",
+                    start_ms=int(fold["train_start_ms"]),
+                    end_ms=int(fold["train_end_ms"]),
+                    idempotency_key=f"{study_id}:{fold_id}:train:{trial['params_hash']}",
+                    preview_snapshot=preview_snapshot,
+                )
+                attached = self.repository.attach_train_run(
+                    str(trial["train_trial_id"]), run_id=str(run["run_id"])
+                )
+                if not attached:
+                    latest = next(
+                        item
+                        for item in self.repository.list_train_trials(
+                            study_id, fold_id=fold_id
+                        )
+                        if item["train_trial_id"] == trial["train_trial_id"]
+                    )
+                    if latest.get("run_id") != run["run_id"]:
+                        self._cancel_if_active(str(run["run_id"]))
+            trials = self.repository.list_train_trials(study_id, fold_id=fold_id)
+            states = set()
+            for trial in trials:
+                run_id = trial.get("run_id")
+                run = None if not run_id else self.repository.get_run_by_id(str(run_id))
+                state = str(run["state"] if run is not None else trial["state"])
+                states.add(state)
+                if run_id and trial["state"] != state:
+                    self.repository.update_train_trial_for_run(str(run_id), state=state)
+            if states - {"COMPLETED", "FAILED", "CANCELLED"}:
+                self.repository.update_study_fold_state(fold_id, "TRAINING")
+                continue
+
+            receipt_row = self.repository.get_selection_receipt(fold_id)
+            if receipt_row is None:
+                candidate_rows: list[dict[str, Any]] = []
+                for trial in self.repository.list_train_trials(
+                    study_id, fold_id=fold_id
+                ):
+                    run_id = trial.get("run_id")
+                    run = (
+                        None
+                        if not run_id
+                        else self.repository.get_run_by_id(str(run_id))
+                    )
+                    if run is None or run["state"] != "COMPLETED":
+                        evaluation = {
+                            "eligible": False,
+                            "objective_value": None,
+                            "max_drawdown": None,
+                            "closed_trade_count": 0,
+                            "data_coverage": "0",
+                            "ambiguity_ratio": "0",
+                            "rejected_ratio": "0",
+                            "violations": ["TRAIN_RUN_NOT_COMPLETED"],
+                            "warnings": [],
+                        }
+                    else:
+                        stored_report = self.repository.get_report(str(run_id))
+                        if stored_report is None:
+                            evaluation = {
+                                "eligible": False,
+                                "objective_value": None,
+                                "max_drawdown": None,
+                                "closed_trade_count": 0,
+                                "data_coverage": "0",
+                                "ambiguity_ratio": "0",
+                                "rejected_ratio": "0",
+                                "violations": ["TRAIN_REPORT_MISSING"],
+                                "warnings": [],
+                            }
+                        else:
+                            evaluation = evaluate_train_candidate(
+                                json.loads(str(stored_report["report_json"])),
+                                objective=str(config["objective"]),
+                                constraints=config["constraints"],
+                            )
+                    self.repository.save_train_evaluation(
+                        str(trial["train_trial_id"]),
+                        objective_value=evaluation.get("objective_value"),
+                        eligible=bool(evaluation["eligible"]),
+                        violations_json=canonical_json(evaluation["violations"]),
+                        warnings_json=canonical_json(evaluation["warnings"]),
+                    )
+                    candidate_rows.append(
+                        {
+                            "candidate_ordinal": trial["candidate_ordinal"],
+                            "params": json.loads(str(trial["params_json"])),
+                            "params_hash": trial["params_hash"],
+                            "evaluation": evaluation,
+                            "train_trial_id": trial["train_trial_id"],
+                        }
+                    )
+                fold_spec = FoldSpecV2(
+                    ordinal=int(fold["ordinal"]),
+                    train_start_ms=int(fold["train_start_ms"]),
+                    train_end_ms=int(fold["train_end_ms"]),
+                    test_start_ms=int(fold["test_start_ms"]),
+                    test_end_ms=int(fold["test_end_ms"]),
+                    purge_ms=int(fold["purge_ms"]),
+                    embargo_ms=int(fold["embargo_ms"]),
+                )
+                try:
+                    receipt = build_selection_receipt(
+                        identity=identity,
+                        fold=fold_spec,
+                        candidates=candidate_rows,
+                        objective=str(config["objective"]),
+                        constraints=config["constraints"],
+                    )
+                except BacktestError as exc:
+                    if exc.code == "STUDY_NO_ELIGIBLE_CANDIDATE":
+                        self.repository.update_study_fold_state(fold_id, "FAILED")
+                        self.repository.update_study_state(study_id, "FAILED")
+                    raise
+                selected_ordinal = int(receipt["selected"]["candidate_ordinal"])
+                selected_trial = next(
+                    item
+                    for item in candidate_rows
+                    if int(item["candidate_ordinal"]) == selected_ordinal
+                )
+                receipt_row = self.repository.insert_selection_receipt(
+                    {
+                        "receipt_hash": receipt["hashes"]["receipt"],
+                        "study_id": study_id,
+                        "fold_id": fold_id,
+                        "payload_json": canonical_json(receipt),
+                        "selected_train_trial_id": selected_trial["train_trial_id"],
+                        "selected_params_json": canonical_json(
+                            receipt["selected"]["params"]
+                        ),
+                        "selected_params_hash": receipt["selected"]["params_hash"],
+                        "created_at_ms": _now_ms(),
+                    }
+                )
+                if receipt_row["receipt_hash"] != receipt["hashes"]["receipt"]:
+                    raise BacktestError(
+                        "HASH_MISMATCH",
+                        "fold already has a different selection receipt",
+                    )
+            receipt = json.loads(str(receipt_row["payload_json"]))
+            if not verify_selection_receipt(receipt):
+                raise BacktestError("HASH_MISMATCH", "selection receipt is corrupt")
+
+            fold = next(
+                item
+                for item in self.repository.list_study_folds(study_id)
+                if item["fold_id"] == fold_id
+            )
+            test_run_id = fold.get("test_run_id")
+            if not test_run_id:
+                params = {
+                    **dict(config.get("parameters") or {}),
+                    **dict(receipt["selected"]["params"]),
+                }
+                test_run = self._create_study_v2_child_run(
+                    record,
+                    config,
+                    params=params,
+                    role="TEST",
+                    start_ms=int(fold["test_start_ms"]),
+                    end_ms=int(fold["test_end_ms"]),
+                    idempotency_key=(
+                        f"{study_id}:{fold_id}:test:{receipt['hashes']['receipt']}"
+                    ),
+                    preview_snapshot=preview_snapshot,
+                )
+                attached = self.repository.attach_fold_test_run(
+                    fold_id, run_id=str(test_run["run_id"])
+                )
+                if not attached:
+                    refreshed = next(
+                        item
+                        for item in self.repository.list_study_folds(study_id)
+                        if item["fold_id"] == fold_id
+                    )
+                    if refreshed.get("test_run_id") != test_run["run_id"]:
+                        self._cancel_if_active(str(test_run["run_id"]))
+                test_run_id = test_run["run_id"]
+            test_run = self.repository.get_run_by_id(str(test_run_id))
+            if test_run is None:
+                raise BacktestError("IDENTITY_MUTATION", "fold test run is missing")
+            if test_run["state"] == "COMPLETED":
+                self.repository.update_study_fold_state(fold_id, "COMPLETED")
+            elif test_run["state"] in {"FAILED", "CANCELLED"}:
+                self.repository.update_study_fold_state(fold_id, "FAILED")
+                self.repository.update_study_state(study_id, "FAILED")
+                return self.get_study(study_id)
+            else:
+                self.repository.update_study_fold_state(fold_id, "TEST_RUNNING")
+
+        folds = self.repository.list_study_folds(study_id)
+        if folds and all(fold["state"] == "COMPLETED" for fold in folds):
+            self._seal_study_v2_oos(study_id, config=config, identity=identity)
+            holdout = self.repository.get_holdout(study_id)
+            if holdout is None:
+                self.repository.update_study_state(study_id, "COMPLETED")
+            elif holdout["state"] == "SEALED":
+                self.repository.update_study_state(study_id, "AWAITING_HOLDOUT")
+            elif holdout["state"] in {"REVEALED", "QUEUED", "RUNNING"}:
+                self._materialize_holdout_run(
+                    record,
+                    config,
+                    holdout,
+                    preview_snapshot=preview_snapshot,
+                )
+                holdout = self.repository.get_holdout(study_id)
+                run = (
+                    None
+                    if holdout is None or not holdout.get("run_id")
+                    else self.repository.get_run_by_id(str(holdout["run_id"]))
+                )
+                if run is not None and run["state"] == "COMPLETED":
+                    self.repository.update_holdout_state(study_id, "COMPLETED")
+                    self.repository.update_study_state(study_id, "COMPLETED")
+                elif run is not None and run["state"] in {"FAILED", "CANCELLED"}:
+                    self.repository.update_holdout_state(study_id, str(run["state"]))
+                    self.repository.update_study_state(study_id, "FAILED")
+                elif run is not None:
+                    self.repository.update_holdout_state(study_id, "RUNNING")
+        return self.get_study(study_id)
+
+    def _create_study_v2_child_run(
+        self,
+        study: Mapping[str, object],
+        config: Mapping[str, Any],
+        *,
+        params: Mapping[str, Any],
+        role: str,
+        start_ms: int,
+        end_ms: int,
+        idempotency_key: str,
+        preview_snapshot: Callable[..., Mapping[str, object]],
+    ) -> dict[str, object]:
+        if end_ms <= start_ms:
+            raise BacktestError("STUDY_SPLIT_LEAK", f"empty {role} window")
+        preview = preview_snapshot(
+            dataset_id=str(config["dataset_id"]),
+            data_epoch=str(config["data_epoch"]),
+            start_time_ms=start_ms,
+            end_time_ms=end_ms - 1,
+            interval=str(config["interval"]),
+            contract_data_mode="HISTORICAL_CONTRACT_V1",
+            account_model="LINEAR_PERP_ONE_WAY_V2",
+            funding_mode=str(config.get("funding_mode") or "OFF"),
+        )
+        warmup = max(
+            int(config.get("warmup_bars") or 0),
+            int(params.get("length") or 0) + 1,
+        )
+        payload = {
+            "strategy_revision_id": study["strategy_revision_id"],
+            "dataset_id": config["dataset_id"],
+            "data_epoch": config["data_epoch"],
+            "snapshot_hash": preview["snapshot_hash"],
+            "fidelity_mode": "BAR_APPROX",
+            "start_time_ms": start_ms,
+            "end_time_ms": end_ms - 1,
+            "warmup_bars": warmup,
+            "interval": config["interval"],
+            "parameters": dict(params),
+            "output_mode": "SIGNAL",
+            "initial_balance": config.get("initial_balance", "10000"),
+            "slippage_bps": config.get("slippage_bps", "1"),
+            "taker_fee_bps": config.get("taker_fee_bps", "0"),
+            "maker_fee_bps": config.get("maker_fee_bps", "0"),
+            "gap_policy": "REJECT",
+            "study_id": study["study_id"],
+            "account_model": "LINEAR_PERP_ONE_WAY_V2",
+            "contract_data_mode": "HISTORICAL_CONTRACT_V1",
+            "funding_mode": config.get("funding_mode", "OFF"),
+            "leverage": config.get("leverage", "1"),
+            "execution_model_revision": EXECUTION_REALISM_V2,
+            "participation_rate": config.get("participation_rate", "0.1"),
+            "latency_ms": 0,
+            "latency_events": 0,
+            "order_end_policy": "CANCEL_AT_END",
+            "bar_path_scenario": "OHLC_WORST_CASE_STOP_FIRST_V1",
+            "metrics_version": METRICS_VERSION,
+            "risk_free_rate_annual": config.get("risk_free_rate_annual", "0"),
+            "sample_role": "IN_SAMPLE" if role == "TRAIN" else "OUT_OF_SAMPLE",
+            "sizing_policy": config.get("sizing_policy", "FIXED_QTY_V1"),
+            "fixed_qty": config.get("fixed_qty", "1"),
+            "max_abs_position": config.get("max_abs_position", "100"),
+            "max_notional": config.get("max_notional", "1000000"),
+            "max_leverage": config.get("max_leverage", "20"),
+            "max_risk_per_trade": config.get("max_risk_per_trade", "10000"),
+            "max_active_orders": config.get("max_active_orders", 20),
+            "max_cumulative_fees": config.get("max_cumulative_fees", "10000"),
+            "max_drawdown_stop_pct": config.get("max_drawdown_stop_pct", "50"),
+        }
+        return self.create_run(payload, idempotency_key=idempotency_key)
+
+    def _seal_study_v2_oos(
+        self,
+        study_id: str,
+        *,
+        config: Mapping[str, Any],
+        identity: Mapping[str, Any],
+    ) -> None:
+        existing = self.repository.get_oos_report(study_id)
+        fold_inputs: list[dict[str, Any]] = []
+        for fold in self.repository.list_study_folds(study_id):
+            test_run_id = str(fold.get("test_run_id") or "")
+            stored = self.repository.get_report(test_run_id)
+            receipt_row = self.repository.get_selection_receipt(str(fold["fold_id"]))
+            if stored is None or receipt_row is None:
+                raise BacktestError(
+                    "IDENTITY_MUTATION", "completed fold evidence is missing"
+                )
+            fold_inputs.append(
+                {
+                    "ordinal": fold["ordinal"],
+                    "run_role": "TEST",
+                    "test_run_id": test_run_id,
+                    "report": json.loads(str(stored["report_json"])),
+                    "receipt": json.loads(str(receipt_row["payload_json"])),
+                }
+            )
+        report = build_oos_report(
+            identity=identity,
+            folds=fold_inputs,
+            seed=int(config["seed"]),
+        )
+        if not verify_oos_report(report):
+            raise BacktestError("HASH_MISMATCH", "OOS report hash failed self-check")
+        if existing is not None:
+            if existing["report_hash"] != report["hashes"]["report"]:
+                raise BacktestError("HASH_MISMATCH", "stored OOS report changed")
+            return
+        self.repository.save_oos_report(
+            study_id,
+            report_schema=OOS_REPORT_SCHEMA,
+            report_json=canonical_json(report),
+            report_hash=report["hashes"]["report"],
+            generated_at_ms=_now_ms(),
+        )
+
+    def reveal_study_holdout(self, study_id: str) -> dict[str, object]:
+        study = self.get_study(study_id)
+        config = json.loads(str(study["config_json"]))
+        if config.get("study_protocol_revision") != STUDY_PROTOCOL_V2:
+            raise BacktestError(
+                "FIDELITY_UNSUPPORTED", "legacy Study has no sealed holdout"
+            )
+        if study["state"] not in {"AWAITING_HOLDOUT", "RUNNING", "COMPLETED"}:
+            raise BacktestError("IDENTITY_MUTATION", "holdout cannot be revealed yet")
+        holdout = self.repository.get_holdout(study_id)
+        if holdout is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "Study has no holdout")
+        if holdout.get("reveal_receipt_hash"):
+            return self.get_study(study_id)
+        receipts = [
+            self.repository.get_selection_receipt(str(fold["fold_id"]))
+            for fold in self.repository.list_study_folds(study_id)
+        ]
+        if not receipts or any(item is None for item in receipts):
+            raise BacktestError(
+                "IDENTITY_MUTATION", "all fold selections must be sealed"
+            )
+        counts: dict[str, tuple[int, dict[str, Any]]] = {}
+        for row in receipts:
+            assert row is not None
+            params = json.loads(str(row["selected_params_json"]))
+            params_hash = str(row["selected_params_hash"])
+            count, _ = counts.get(params_hash, (0, params))
+            counts[params_hash] = (count + 1, params)
+        selected_hash, (_, params) = min(
+            counts.items(), key=lambda item: (-item[1][0], item[0])
+        )
+        receipt = build_holdout_receipt(
+            identity=study_v2_identity(config),
+            params=params,
+            start_ms=int(holdout["start_ms"]),
+            end_ms=int(holdout["end_ms"]),
+        )
+        if receipt["params_hash"] != selected_hash:
+            raise BacktestError("HASH_MISMATCH", "holdout parameter mode changed")
+        self.repository.reveal_holdout(
+            study_id,
+            receipt_hash=receipt["hashes"]["receipt"],
+            receipt_json=canonical_json(receipt),
+            params_json=canonical_json(params),
+            revealed_at_ms=_now_ms(),
+        )
+        self.repository.update_study_state(study_id, "RUNNING")
+        return self.get_study(study_id)
+
+    def _materialize_holdout_run(
+        self,
+        study: Mapping[str, object],
+        config: Mapping[str, Any],
+        holdout: Mapping[str, Any],
+        *,
+        preview_snapshot: Callable[..., Mapping[str, object]],
+    ) -> None:
+        if holdout.get("run_id"):
+            return
+        receipt = json.loads(str(holdout["receipt_json"]))
+        if receipt.get(
+            "schemaVersion"
+        ) != HOLDOUT_RECEIPT_SCHEMA or not verify_holdout_receipt(receipt):
+            raise BacktestError("HASH_MISMATCH", "holdout receipt schema mismatch")
+        run = self._create_study_v2_child_run(
+            study,
+            config,
+            params={
+                **dict(config.get("parameters") or {}),
+                **json.loads(str(holdout["params_json"])),
+            },
+            role="HOLDOUT",
+            start_ms=int(holdout["start_ms"]),
+            end_ms=int(holdout["end_ms"]),
+            idempotency_key=(
+                f"{study['study_id']}:holdout:{holdout['reveal_receipt_hash']}"
+            ),
+            preview_snapshot=preview_snapshot,
+        )
+        if not self.repository.attach_holdout_run(
+            str(study["study_id"]), run_id=str(run["run_id"])
+        ):
+            latest = self.repository.get_holdout(str(study["study_id"]))
+            if latest is None or latest.get("run_id") != run["run_id"]:
+                self._cancel_if_active(str(run["run_id"]))
+
+    def _cancel_if_active(self, run_id: str) -> None:
+        run = self.repository.get_run_by_id(run_id)
+        if run is not None and run["state"] not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            self.cancel_run(run_id)
+
     def cancel_study(self, study_id: str) -> dict[str, object]:
         record = self.get_study(study_id)
         if record["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
@@ -676,6 +1440,32 @@ class BacktestService:
                 f"study {study_id} is already terminal ({record['state']})",
             )
         self.repository.update_study_state(study_id, "CANCELLED")
+        config = json.loads(str(record["config_json"]))
+        if config.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
+            for trial in self.repository.list_train_trials(study_id):
+                run_id = trial.get("run_id")
+                if run_id:
+                    self._cancel_if_active(str(run_id))
+                    latest = self.repository.get_run_by_id(str(run_id))
+                    if latest is not None:
+                        self.repository.update_train_trial_for_run(
+                            str(run_id), state=str(latest["state"])
+                        )
+            for fold in self.repository.list_study_folds(study_id):
+                run_id = fold.get("test_run_id")
+                if run_id:
+                    self._cancel_if_active(str(run_id))
+                if fold["state"] != "COMPLETED":
+                    self.repository.update_study_fold_state(
+                        str(fold["fold_id"]), "CANCELLED"
+                    )
+            holdout = self.repository.get_holdout(study_id)
+            if holdout is not None and holdout.get("run_id"):
+                self._cancel_if_active(str(holdout["run_id"]))
+                latest = self.repository.get_run_by_id(str(holdout["run_id"]))
+                if latest is not None and latest["state"] != "COMPLETED":
+                    self.repository.update_holdout_state(study_id, "CANCELLED")
+            return self.get_study(study_id)
         self.repository.cancel_planned_trials(study_id)
         for trial in self.repository.list_trials(study_id):
             run_id = trial.get("run_id")
@@ -1390,18 +2180,68 @@ class BacktestService:
         record = self.repository.get_study(study_id)
         if record is None:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown study {study_id}")
+        config = json.loads(str(record["config_json"]))
+        if config.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
+            folds = self.repository.list_study_folds(study_id)
+            for fold in folds:
+                fold["train_trials"] = self.repository.list_train_trials(
+                    study_id, fold_id=str(fold["fold_id"])
+                )
+                receipt = self.repository.get_selection_receipt(str(fold["fold_id"]))
+                fold["selection_receipt"] = (
+                    None
+                    if receipt is None
+                    else json.loads(str(receipt["payload_json"]))
+                )
+                run_id = fold.get("test_run_id")
+                fold["test_run"] = (
+                    None if not run_id else self.repository.get_run_by_id(str(run_id))
+                )
+            holdout = self.repository.get_holdout(study_id)
+            if holdout is not None and holdout.get("receipt_json"):
+                holdout["receipt"] = json.loads(str(holdout["receipt_json"]))
+            oos = self.repository.get_oos_report(study_id)
+            record.update(
+                {
+                    "study_schema": STUDY_SCHEMA_V2,
+                    "study_protocol_revision": STUDY_PROTOCOL_V2,
+                    "identity": study_v2_identity(config),
+                    "folds": folds,
+                    "holdout": holdout,
+                    "oos_report": (
+                        None if oos is None else json.loads(str(oos["report_json"]))
+                    ),
+                    "trials": [],
+                }
+            )
+            return record
         record["trials"] = self.repository.list_trials(study_id)
         return record
 
     def list_studies(self) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        for record in self.repository.list_studies():
-            record["trials"] = self.repository.list_trials(str(record["study_id"]))
-            result.append(record)
-        return result
+        return [
+            self.get_study(str(record["study_id"]))
+            for record in self.repository.list_studies()
+        ]
 
     def compare_study(self, study_id: str) -> dict[str, object]:
         study = self.get_study(study_id)
+        if study.get("study_protocol_revision") == STUDY_PROTOCOL_V2:
+            oos = study.get("oos_report")
+            return {
+                "study_id": study_id,
+                "ready": oos is not None,
+                "completed_trial_count": sum(
+                    len(fold.get("train_trials") or [])
+                    for fold in study.get("folds") or []  # type: ignore[union-attr]
+                ),
+                "ranking": [],
+                "folds": study.get("folds") or [],
+                "oos_report": oos,
+                "selection_warning": (
+                    "train candidates select once; OOS contains TestRun only"
+                ),
+            }
         completed: list[dict[str, object]] = []
         runs: list[Mapping[str, object]] = []
         for trial in study.get("trials") or []:  # type: ignore[union-attr]

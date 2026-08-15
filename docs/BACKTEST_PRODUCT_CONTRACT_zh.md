@@ -291,6 +291,25 @@ M7 新增 `candlescope.backtest-report/2` 与 `BACKTEST_METRICS_V2`，冻结公�
 对账；任一不相等即失败关闭。JSON 与 CSV 导出 manifest 必须绑定同一个已封存 report hash，
 浏览器只渲染报告字段，不自行定义绩效公式。生产 flags 和报告 V2 开关继续默认关闭。
 
+### 8.7 Study V2 与样本外身份
+
+M8 新增 `BACKTEST_WALK_FORWARD_V2` 与选择协议
+`TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2`；完整冻结语义见
+`docs/adr/ADR-BACKTEST-011-study-v2.md`。旧 Study 未声明新协议时继续按 legacy V1 读取和执行，不能
+静默改变已有 Trial、Run 或报告。
+
+每个 fold 必须按 `TRAIN -> append-only SelectionReceipt -> exactly-one TEST` 执行。选择函数只接受
+TRAIN `/2` 报告；test 和 holdout 数据在 receipt 封存前不可见，也永远不能反向改变选中参数。test
+窗口不得彼此重叠，OOS 报告只允许拼接绑定 receipt 的 TEST Run。无完整交易或违反冻结约束的候选
+没有获胜资格。
+
+所有 V2 窗口的冻结身份是 `START_INCLUSIVE_END_EXCLUSIVE_V2`。API 可以接收精确的 exclusive
+边界或最后一根 bar 的 inclusive close；后者只在创建时规范化，其他未对齐边界必须失败关闭。
+
+可选 holdout 只允许揭示一次，揭示 receipt 与时间窗带独立 hash；holdout 不属于 OOS，也不得参与
+选参。Study V2、selection receipt、OOS 和 holdout reveal 分别使用新 schema/version identity。
+它们是研究证据，不是 paper/live 或生产启用批准。所有相关生产 flags 保持默认关闭。
+
 ---
 
 ## 9. Phase 1 数据接口

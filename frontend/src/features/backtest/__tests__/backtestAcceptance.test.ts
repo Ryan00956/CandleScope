@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
-import type { BacktestApiClient } from "../backtestApi.js";
+import { createBacktestApi, type BacktestApiClient } from "../backtestApi.js";
 import { isBacktestEntryEnabled } from "../backtestFlags.js";
 import { createBacktestStore, reportHidesApproximate } from "../backtestStore.js";
 import type { BacktestReport, BacktestRunRecord } from "../backtestTypes.js";
@@ -99,6 +99,9 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async cancelStudy() {
       throw new Error("unused");
     },
+    async revealStudyHoldout() {
+      throw new Error("unused");
+    },
     async compareStudy() {
       throw new Error("unused");
     },
@@ -155,6 +158,33 @@ test("refresh after disconnect keeps the last known run", () => {
 test("entry stays closed unless the frontend flag is on", () => {
   assert.equal(isBacktestEntryEnabled({ VITE_BACKTEST_ENTRY_ENABLED: "0" }), false);
   assert.equal(isBacktestEntryEnabled({}), false);
+});
+
+test("Study V2 holdout reveal uses the dedicated one-shot endpoint", async () => {
+  const calls: Array<{ url: string; method: string | undefined }> = [];
+  mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), method: init?.method });
+    return new Response(JSON.stringify({
+      study_id: "study/with space",
+      name: "RSI24",
+      hypothesis: "RSI24 persists OOS",
+      state: "RUNNING",
+      strategy_revision_id: "builtin-rsi-wilder-long-short-v1",
+      config_hash: "sha256:study",
+      trials: [],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  try {
+    const study = await createBacktestApi("/api/v1/backtests")
+      .revealStudyHoldout("study/with space");
+    assert.equal(study.study_id, "study/with space");
+    assert.deepEqual(calls, [{
+      url: "/api/v1/backtests/studies/study%2Fwith%20space/reveal-holdout",
+      method: "POST",
+    }]);
+  } finally {
+    mock.restoreAll();
+  }
 });
 
 test("repeated unit workflow of create-to-export stays deterministic", async () => {

@@ -87,23 +87,45 @@ class StudyCreateRequest(BaseModel):
     strategy_revision_id: str = Field(min_length=1, max_length=128)
     dataset_id: str | None = Field(default=None, max_length=80)
     data_epoch: str | None = Field(default=None, max_length=80)
+    dataset_snapshot_hash: str | None = Field(default=None, max_length=80)
     interval: str | None = Field(default=None, max_length=16)
     start_ms: int
     end_ms: int
     train_ms: int
     test_ms: int
     step_ms: int | None = None
+    purge_ms: int = 0
+    embargo_ms: int = 0
+    holdout_ms: int = 0
     parameter_space: dict[str, list[Any]] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     sampler: str = "grid"
     max_trials: int | None = None
     random_count: int | None = None
     seed: int | None = None
+    candidate_budget: int | None = None
+    total_run_budget: int | None = None
+    objective: str = "SHARPE"
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    tie_break: str | None = None
+    study_protocol_revision: str | None = None
+    selection_protocol_revision: str | None = None
     warmup_bars: int = 0
     initial_balance: str = Field(default="10000", max_length=64)
     slippage_bps: str = Field(default="1", max_length=64)
     taker_fee_bps: str = Field(default="0", max_length=64)
+    maker_fee_bps: str = Field(default="0", max_length=64)
     gap_policy: str = "REJECT"
+    account_model: str | None = None
+    contract_data_mode: str | None = None
+    funding_mode: str = "OFF"
+    leverage: str = Field(default="1", max_length=64)
+    execution_model_revision: str | None = None
+    participation_rate: str = Field(default="0.1", max_length=64)
+    metrics_version: str | None = None
+    risk_free_rate_annual: str = Field(default="0", max_length=64)
+    sizing_policy: str = "FIXED_QTY_V1"
+    fixed_qty: str = Field(default="1", max_length=64)
 
 
 class SnapshotPreviewRequest(BaseModel):
@@ -358,5 +380,13 @@ def start_study(request: Request, study_id: str) -> dict[str, Any]:
 def cancel_study(request: Request, study_id: str) -> dict[str, Any]:
     try:
         return _service(request).cancel_study(study_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/studies/{study_id}/reveal-holdout")
+def reveal_study_holdout(request: Request, study_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).reveal_study_holdout(study_id)
     except BacktestError as exc:
         return _error(exc)

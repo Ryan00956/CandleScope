@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS backtest_schema_meta (
@@ -69,6 +69,80 @@ CREATE TABLE IF NOT EXISTS backtest_trials (
     state TEXT NOT NULL,
     UNIQUE (study_id, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS backtest_study_folds (
+    fold_id TEXT PRIMARY KEY,
+    study_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    train_start_ms INTEGER NOT NULL,
+    train_end_ms INTEGER NOT NULL,
+    test_start_ms INTEGER NOT NULL,
+    test_end_ms INTEGER NOT NULL,
+    purge_ms INTEGER NOT NULL,
+    embargo_ms INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    selected_receipt_hash TEXT,
+    test_run_id TEXT,
+    UNIQUE (study_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_train_trials (
+    train_trial_id TEXT PRIMARY KEY,
+    study_id TEXT NOT NULL,
+    fold_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    candidate_ordinal INTEGER NOT NULL,
+    params_json TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    run_id TEXT,
+    state TEXT NOT NULL,
+    objective_value TEXT,
+    eligible INTEGER,
+    violations_json TEXT,
+    warnings_json TEXT,
+    UNIQUE (fold_id, candidate_ordinal),
+    UNIQUE (study_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_selection_receipts (
+    receipt_hash TEXT PRIMARY KEY,
+    study_id TEXT NOT NULL,
+    fold_id TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL,
+    selected_train_trial_id TEXT NOT NULL,
+    selected_params_json TEXT NOT NULL,
+    selected_params_hash TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_study_holdouts (
+    study_id TEXT PRIMARY KEY,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    reveal_receipt_hash TEXT,
+    receipt_json TEXT,
+    params_json TEXT,
+    run_id TEXT,
+    revealed_at_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS backtest_study_oos_reports (
+    study_id TEXT PRIMARY KEY,
+    report_schema TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    report_hash TEXT NOT NULL,
+    generated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_folds_study_state
+    ON backtest_study_folds(study_id, state, ordinal);
+CREATE INDEX IF NOT EXISTS idx_backtest_train_trials_study_state
+    ON backtest_train_trials(study_id, state, ordinal);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_train_trials_run
+    ON backtest_train_trials(run_id) WHERE run_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backtest_folds_test_run
+    ON backtest_study_folds(test_run_id) WHERE test_run_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS backtest_reports (
     run_id TEXT PRIMARY KEY,

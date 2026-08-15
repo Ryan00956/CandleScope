@@ -1,0 +1,76 @@
+{
+  "schema_version": "candlescope.backtest-maturity-evidence/1",
+  "stage": "M8",
+  "date": "2026-08-15",
+  "status": "PASS",
+  "branch": "codex/backtest-foundation",
+  "parent_commit": "acf9a1cd97ae4cb24e14dd2feb96a28dc6135fb4",
+  "identities": {
+    "study_schema": "candlescope.backtest-study/2",
+    "study_protocol": "BACKTEST_WALK_FORWARD_V2",
+    "selection_protocol": "TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2",
+    "selection_receipt_schema": "candlescope.backtest-selection-receipt/1",
+    "oos_schema": "candlescope.backtest-oos-report/1",
+    "holdout_schema": "candlescope.backtest-holdout-reveal/1",
+    "window_semantics": "START_INCLUSIVE_END_EXCLUSIVE_V2"
+  },
+  "tests": {
+    "focused": {"passed": 10, "failed": 0},
+    "legacy_and_v2_study": {"passed": 17, "failed": 0},
+    "backend_related": {"passed": 181, "failed": 0, "deselected": 3595, "warnings": 6},
+    "frontend": {"passed": 3250, "failed": 0},
+    "typecheck": "PASS",
+    "lint": "PASS",
+    "build": "PASS",
+    "diff_check": "PASS"
+  },
+  "browser": {
+    "study_id": "st_5476ea48f3ea4d44b6f68d3ab03ca288",
+    "state": "COMPLETED",
+    "fold_count": 4,
+    "train_trial_count": 16,
+    "selection_receipt_count": 4,
+    "unique_test_run_count": 4,
+    "oos_source": "TEST_RUNS_ONLY_V1",
+    "oos_hash": "sha256:d8ea0b9c007c51f0d1093ba7f01ab3c86383373fa1a70aac55b089c6f6577caa",
+    "oos_hash_recomputed": true,
+    "oos_test_ids_match_folds": true,
+    "holdout_state": "COMPLETED",
+    "holdout_run_id": "bt_9149de1cfc5441b9ab145874f462a211",
+    "holdout_receipt_hash": "sha256:5f40712a39ab19020a086bc8ca4db174dc2d3302402133bb987b3ddbcc80d7de",
+    "holdout_hash_recomputed": true,
+    "console_errors": 0,
+    "known_console_warnings": 2,
+    "proxy_status": 200
+  },
+  "data": {
+    "network": "FORBIDDEN",
+    "rows": 220,
+    "interval": "1d",
+    "data_epoch": "sha256:3ff7ab517618c2f40c480dc8d46d3fe2c289eb727844f86b8e52f8a4b4aada62",
+    "contract_bundle_hash": "sha256:d5c9f3bd88cd5e4dda93c6ef9a5a4f678771ae2cc58134affa4667f88b992a15"
+  },
+  "storage": {
+    "schema_version": 3,
+    "sqlite_quick_check": "ok",
+    "foreign_key_violations": 0,
+    "database_sha256": "6dce4a599261602ccc86801c02911db3488b804aa3b477fa6c692e18e8aa1d0a",
+    "rollback_empty_v2_data": "PASS",
+    "rollback_refuses_existing_v2_data": "PASS"
+  },
+  "artifacts": {
+    "oos_before_holdout_screenshot_sha256": "7782e6a3698fa3c64ed93a73b59d6025b5ac71bc6ce2182feb3275a69a8932d9",
+    "completed_holdout_screenshot_sha256": "9e1d0a44af5a6745a80ca295e4bcb090dab2b7fd8c7154d786fb63b37d6fc8d5"
+  },
+  "compatibility": {
+    "legacy_study_readable": true,
+    "old_reports_mutated": false,
+    "schema_migration_additive": true
+  },
+  "performance_gate": "NOT_REQUIRED_BY_M8",
+  "soak_gate": "NOT_REQUIRED_BY_M8",
+  "production_flags_default_off": true,
+  "merge": false,
+  "push": false,
+  "production_enabled": false
+}

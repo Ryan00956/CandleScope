@@ -53,6 +53,7 @@ export interface BacktestApiClient {
   createStudy(body: Record<string, unknown>, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   startStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   cancelStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
+  revealStudyHoldout(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   compareStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyComparison>;
 }
 
@@ -233,6 +234,14 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
         ),
       );
     },
+    async revealStudyHoldout(studyId, signal) {
+      return readJson(
+        await fetch(
+          `${base}/studies/${encodeURIComponent(studyId)}/reveal-holdout`,
+          requestOptions({ method: "POST" }, signal),
+        ),
+      );
+    },
     async compareStudy(studyId, signal) {
       return readJson(
         await fetch(
@@ -245,7 +254,7 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
 }
 
 const configuredBacktestApiBase = String(
-  import.meta.env.VITE_BACKTEST_API_BASE ?? "",
+  import.meta.env?.VITE_BACKTEST_API_BASE ?? "",
 ).trim().replace(/\/$/, "");
 
 export const defaultBacktestApi = createBacktestApi(

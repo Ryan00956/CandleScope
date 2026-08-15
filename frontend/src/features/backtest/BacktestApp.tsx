@@ -29,6 +29,7 @@ const HOST_POLICY_REVISION = "HOST_SIZING_RISK_V1";
 const EXECUTION_REALISM_V2 = "EXECUTION_REALISM_V2";
 const BAR_PATH_SCENARIO = "OHLC_WORST_CASE_STOP_FIRST_V1";
 const METRICS_V2 = "BACKTEST_METRICS_V2";
+const STUDY_V2 = "BACKTEST_WALK_FORWARD_V2";
 const DEFAULT_COMMAND_SOURCE = `{
   "commands": [
     { "sequence": 5, "action": "OPEN_LONG", "qty": "1", "type": "MARKET" },
@@ -121,6 +122,20 @@ export default function BacktestApp() {
   const [chart, setChart] = useState<BacktestChartData | null>(null);
   const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
   const [studyComparison, setStudyComparison] = useState<BacktestStudyComparison | null>(null);
+  const [studyHypothesis, setStudyHypothesis] = useState("RSI24 超卖做多、超买做空的参数邻域能在样本外保持稳定");
+  const [studyParameterSpace, setStudyParameterSpace] = useState('{"length":[20,24],"oversold":["25","30"],"overbought":["70"]}');
+  const [studyTrainDays, setStudyTrainDays] = useState(110);
+  const [studyTestDays, setStudyTestDays] = useState(20);
+  const [studyStepDays, setStudyStepDays] = useState(20);
+  const [studyPurgeDays, setStudyPurgeDays] = useState(1);
+  const [studyEmbargoDays, setStudyEmbargoDays] = useState(1);
+  const [studyHoldoutDays, setStudyHoldoutDays] = useState(0);
+  const [studyCandidateBudget, setStudyCandidateBudget] = useState(4);
+  const [studySeed, setStudySeed] = useState(24);
+  const [studyObjective, setStudyObjective] = useState("NET_RETURN");
+  const [studyMinTrades, setStudyMinTrades] = useState(1);
+  const [studyMaxDrawdown, setStudyMaxDrawdown] = useState("0.5");
+  const [studyCostGuard, setStudyCostGuard] = useState(false);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -146,7 +161,7 @@ export default function BacktestApp() {
     [selectedStudyId, studies],
   );
   const hasActiveStudy = useMemo(
-    () => studies.some((study) => !TERMINAL_STATES.has(study.state)),
+    () => studies.some((study) => study.state === "RUNNING"),
     [studies],
   );
   const contractData = snapshot?.quality.contract_data as {
@@ -288,7 +303,7 @@ export default function BacktestApp() {
 
   useEffect(() => {
     setStudyComparison(null);
-    if (!selectedStudyId || selectedStudy?.state !== "COMPLETED") return undefined;
+    if (!selectedStudyId || (!selectedStudy?.oos_report && selectedStudy?.state !== "COMPLETED")) return undefined;
     const controller = new AbortController();
     void defaultBacktestApi.compareStudy(selectedStudyId, controller.signal)
       .then(setStudyComparison)
@@ -296,7 +311,7 @@ export default function BacktestApp() {
         if (!controller.signal.aborted) setError(errorMessage(reason));
       });
     return () => controller.abort();
-  }, [selectedStudy?.state, selectedStudyId]);
+  }, [selectedStudy?.oos_report, selectedStudy?.state, selectedStudyId]);
 
   const handleDatasetChange = useCallback((nextId: string) => {
     setDatasetId(nextId);
@@ -466,35 +481,65 @@ export default function BacktestApp() {
 
   const handleCreateStudy = useCallback(async () => {
     if (!selectedDataset || !snapshot) return;
-    const horizon = endTimeMs - startTimeMs;
-    const testMs = Math.max(1, Math.floor(horizon / 4));
-    const trainMs = Math.max(1, horizon - (testMs * 2));
+    let parameterSpace: Record<string, unknown>;
+    try {
+      parameterSpace = JSON.parse(studyParameterSpace) as Record<string, unknown>;
+    } catch {
+      setError("RSI24 参数空间必须是合法 JSON 对象。");
+      return;
+    }
+    const dayMs = 86_400_000;
     setLoading(true);
     setError(null);
     try {
       const created = await defaultBacktestApi.createStudy({
-        name: `SMA walk-forward ${new Date().toLocaleString()}`,
-        hypothesis: "SMA 参数在样本外窗口保持稳定",
-        strategy_revision_id: "builtin-sma-cross-v1",
+        name: `RSI24 Study V2 ${new Date().toLocaleString()}`,
+        hypothesis: studyHypothesis,
+        study_protocol_revision: STUDY_V2,
+        selection_protocol_revision: "TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2",
+        strategy_revision_id: RSI_WILDER_LONG_SHORT_REVISION,
         dataset_id: selectedDataset.dataset_id,
         data_epoch: selectedDataset.data_epoch,
+        dataset_snapshot_hash: snapshot.snapshot_hash,
         interval: selectedDataset.interval,
         start_ms: startTimeMs,
         end_ms: endTimeMs,
-        train_ms: trainMs,
-        test_ms: testMs,
-        step_ms: testMs,
-        parameter_space: {
-          fast: Array.from(new Set([Math.max(1, fast - 1), fast])),
-          slow: Array.from(new Set([slow, slow + 2])),
-        },
-        parameters: {},
+        train_ms: studyTrainDays * dayMs,
+        test_ms: studyTestDays * dayMs,
+        step_ms: studyStepDays * dayMs,
+        purge_ms: studyPurgeDays * dayMs,
+        embargo_ms: studyEmbargoDays * dayMs,
+        holdout_ms: studyHoldoutDays * dayMs,
+        parameter_space: parameterSpace,
+        parameters: { trigger_mode: "LEVEL_TARGET_V1" },
         sampler: "grid",
-        max_trials: 4,
-        warmup_bars: slow + 2,
+        seed: studySeed,
+        candidate_budget: studyCandidateBudget,
+        objective: studyObjective,
+        constraints: {
+          min_closed_trades: studyMinTrades,
+          max_drawdown: studyMaxDrawdown,
+          min_data_coverage: "1",
+          max_ambiguity_ratio: "0",
+          max_rejected_ratio: "0",
+          cost_plus_25_must_be_positive: studyCostGuard,
+          warn_min_long_trades: 1,
+          warn_min_short_trades: 1,
+        },
+        warmup_bars: 29,
         initial_balance: initialBalance,
         slippage_bps: slippageBps,
         taker_fee_bps: takerFeeBps,
+        maker_fee_bps: makerFeeBps,
+        account_model: ACCOUNT_V2,
+        contract_data_mode: HISTORICAL_CONTRACT_MODE,
+        funding_mode: "OFF",
+        execution_model_revision: EXECUTION_REALISM_V2,
+        participation_rate: participationRate,
+        metrics_version: METRICS_V2,
+        risk_free_rate_annual: riskFreeRateAnnual,
+        sizing_policy: "FIXED_QTY_V1",
+        fixed_qty: fixedQty,
         gap_policy: "REJECT",
       });
       await defaultBacktestApi.startStudy(created.study_id);
@@ -508,16 +553,47 @@ export default function BacktestApp() {
     }
   }, [
     endTimeMs,
-    fast,
+    fixedQty,
     initialBalance,
+    makerFeeBps,
+    participationRate,
     refreshWorkspace,
+    riskFreeRateAnnual,
     selectedDataset,
-    slow,
     slippageBps,
     snapshot,
     startTimeMs,
+    studyCandidateBudget,
+    studyCostGuard,
+    studyEmbargoDays,
+    studyHoldoutDays,
+    studyHypothesis,
+    studyMaxDrawdown,
+    studyMinTrades,
+    studyObjective,
+    studyParameterSpace,
+    studyPurgeDays,
+    studySeed,
+    studyStepDays,
+    studyTestDays,
+    studyTrainDays,
     takerFeeBps,
   ]);
+
+  const handleRevealHoldout = useCallback(async () => {
+    if (!selectedStudy) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await defaultBacktestApi.revealStudyHoldout(selectedStudy.study_id);
+      setNotice(`Study ${selectedStudy.study_id} 的 holdout 已冻结并仅揭示一次。`);
+      await refreshWorkspace();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshWorkspace, selectedStudy]);
 
   const handleCancelStudy = useCallback(async () => {
     if (!selectedStudy) return;
@@ -1091,11 +1167,46 @@ export default function BacktestApp() {
         </section>
 
         <section className="backtest-card backtest-studies">
-          <div className="backtest-section-title"><span>05</span><h2>Walk-forward Studies</h2></div>
+          <div className="backtest-section-title"><span>05</span><h2>Study V2 · Train → Select → Test</h2></div>
+          <div className="backtest-strategy-evidence" data-testid="study-v2-contract">
+            <strong>BACKTEST_WALK_FORWARD_V2 · RSI24 参数研究</strong>
+            <span>Test 数据不会参与选择；每个 fold 只有一份 append-only selection receipt 和一次 TestRun。</span>
+            <small>OOS 只拼接 TestRun；回测结果不是实盘批准。BAR 仍不代表唯一 K 线内路径。</small>
+          </div>
+          <div className="backtest-form-row two">
+            <label>研究假设
+              <input aria-label="Study hypothesis" value={studyHypothesis} onChange={(event) => setStudyHypothesis(event.target.value)} />
+            </label>
+            <label>RSI24 参数空间 JSON
+              <input aria-label="Study parameter space" value={studyParameterSpace} onChange={(event) => setStudyParameterSpace(event.target.value)} />
+            </label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>Train 天数<input aria-label="Train days" type="number" min="1" value={studyTrainDays} onChange={(event) => setStudyTrainDays(Number(event.target.value))} /></label>
+            <label>Test 天数<input aria-label="Test days" type="number" min="1" value={studyTestDays} onChange={(event) => setStudyTestDays(Number(event.target.value))} /></label>
+            <label>Step 天数<input aria-label="Step days" type="number" min="1" value={studyStepDays} onChange={(event) => setStudyStepDays(Number(event.target.value))} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>Purge 天数<input aria-label="Purge days" type="number" min="0" value={studyPurgeDays} onChange={(event) => setStudyPurgeDays(Number(event.target.value))} /></label>
+            <label>Embargo 天数<input aria-label="Embargo days" type="number" min="0" value={studyEmbargoDays} onChange={(event) => setStudyEmbargoDays(Number(event.target.value))} /></label>
+            <label>Holdout 天数<input aria-label="Holdout days" type="number" min="0" value={studyHoldoutDays} onChange={(event) => setStudyHoldoutDays(Number(event.target.value))} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>Objective<select aria-label="Study objective" value={studyObjective} onChange={(event) => setStudyObjective(event.target.value)}>
+              <option value="NET_RETURN">NET_RETURN</option><option value="SHARPE">SHARPE</option><option value="CALMAR">CALMAR</option><option value="EXPECTANCY">EXPECTANCY</option>
+            </select></label>
+            <label>Candidate budget<input aria-label="Candidate budget" type="number" min="1" max="64" value={studyCandidateBudget} onChange={(event) => setStudyCandidateBudget(Number(event.target.value))} /></label>
+            <label>Sampler seed<input aria-label="Study seed" type="number" value={studySeed} onChange={(event) => setStudySeed(Number(event.target.value))} /></label>
+          </div>
+          <div className="backtest-form-row three">
+            <label>最小完整交易<input aria-label="Minimum closed trades" type="number" min="1" value={studyMinTrades} onChange={(event) => setStudyMinTrades(Number(event.target.value))} /></label>
+            <label>最大回撤（0..1）<input aria-label="Study maximum drawdown" value={studyMaxDrawdown} onChange={(event) => setStudyMaxDrawdown(event.target.value)} /></label>
+            <label className="backtest-checkbox"><input type="checkbox" checked={studyCostGuard} onChange={(event) => setStudyCostGuard(event.target.checked)} />成本 +25% 后仍为正</label>
+          </div>
           <div className="backtest-study-toolbar">
-            <p>Study 由后台调度器持久化拆分、排队和级联取消；排名只使用 OOS trial。</p>
-            <button type="button" onClick={handleCreateStudy} disabled={loading || !snapshot || fidelityMode !== "BAR_APPROX" || strategyRevisionId !== SMA_REVISION}>
-              创建并启动 Study
+            <p>先冻结 hypothesis、snapshot、fold、预算、objective、constraints 与 tie-break，再交给后台恢复型调度器。</p>
+            <button type="button" onClick={handleCreateStudy} disabled={loading || !snapshot || fidelityMode !== "BAR_APPROX" || !studyHypothesis.trim()}>
+              创建并启动 RSI24 Study V2
             </button>
           </div>
           <div className="backtest-study-grid">
@@ -1109,7 +1220,7 @@ export default function BacktestApp() {
                 >
                   <span className={`backtest-state ${study.state.toLowerCase()}`}>{study.state}</span>
                   <strong>{study.name}</strong>
-                  <small>{study.trials.length} trials · {hashLabel(study.config_hash)}</small>
+                  <small>{study.folds?.length ?? 0} folds · {(study.folds ?? []).reduce((count, fold) => count + fold.train_trials.length, 0) || study.trials.length} train trials · {hashLabel(study.config_hash)}</small>
                 </button>
               ))}
               {studies.length === 0 && <p className="backtest-empty">还没有 Study。</p>}
@@ -1121,9 +1232,56 @@ export default function BacktestApp() {
                     {!TERMINAL_STATES.has(selectedStudy.state) && (
                       <button type="button" onClick={handleCancelStudy} disabled={loading}>取消 Study 和子 Runs</button>
                     )}
-                    <span>{selectedStudy.trials.filter((trial) => TERMINAL_STATES.has(trial.state)).length}/{selectedStudy.trials.length} terminal</span>
+                    {selectedStudy.state === "AWAITING_HOLDOUT" && selectedStudy.holdout?.state === "SEALED" && (
+                      <button type="button" onClick={handleRevealHoldout} disabled={loading}>仅揭示一次 Holdout</button>
+                    )}
+                    <span>{selectedStudy.study_protocol_revision ?? "LEGACY_STUDY_V1"} · {selectedStudy.state}</span>
                   </div>
-                  {studyComparison?.ready ? (
+                  <div className="backtest-strategy-evidence">
+                    <strong>{selectedStudy.hypothesis}</strong>
+                    <span>Train/Test/Holdout 身份已冻结 · config {hashLabel(selectedStudy.config_hash)}</span>
+                  </div>
+                  {(selectedStudy.folds?.length ?? 0) > 0 && <div className="backtest-table-wrap" data-testid="study-v2-folds">
+                    <table>
+                      <thead><tr><th>Fold</th><th>Train</th><th>Test</th><th>状态</th><th>选中参数</th><th>Receipt</th><th>TestRun</th></tr></thead>
+                      <tbody>{selectedStudy.folds?.map((fold) => <tr key={fold.fold_id}>
+                        <td>{fold.ordinal}</td>
+                        <td>{timestampLabel(fold.train_start_ms)} → {timestampLabel(fold.train_end_ms)}<small> purge {fold.purge_ms / 86_400_000}d</small></td>
+                        <td>{timestampLabel(fold.test_start_ms)} → {timestampLabel(fold.test_end_ms)}<small> embargo {fold.embargo_ms / 86_400_000}d</small></td>
+                        <td>{fold.state}</td>
+                        <td>{JSON.stringify(fold.selection_receipt?.selected.params ?? null)}</td>
+                        <td>{hashLabel(fold.selection_receipt?.hashes.receipt ?? null)}</td>
+                        <td>{fold.test_run?.state ?? "—"}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  </div>}
+                  {(selectedStudy.folds?.[0]?.selection_receipt?.candidates.length ?? 0) > 0 && <>
+                    <h3 className="backtest-table-title">TRAIN-only 参数热图数据（不是 OOS 排名）</h3>
+                    <div className="backtest-monthly-heatmap" data-testid="study-train-heatmap">
+                      {selectedStudy.folds?.[0]?.selection_receipt?.candidates.map((candidate) => <div
+                        key={candidate.params_hash}
+                        className={candidate.evaluation.eligible ? "positive" : "negative"}
+                        title={candidate.evaluation.violations.join(", ")}
+                      ><span>{JSON.stringify(candidate.params)}</span><strong>{candidate.evaluation.objective_value ?? "不合格"}</strong></div>)}
+                    </div>
+                  </>}
+                  {studyComparison?.ready && studyComparison.oos_report ? (
+                    <div data-testid="study-v2-oos">
+                      <div className="backtest-metrics">
+                        <div><span>OOS folds</span><strong>{studyComparison.oos_report.summary.fold_count}</strong></div>
+                        <div><span>OOS return</span><strong>{studyComparison.oos_report.summary.total_return}</strong></div>
+                        <div><span>来源</span><strong>{studyComparison.oos_report.sourcePolicy}</strong></div>
+                        <div><span>OOS hash</span><strong>{hashLabel(studyComparison.oos_report.hashes.report)}</strong></div>
+                      </div>
+                      <EquityCurve data={studyComparison.oos_report.equity} />
+                      <div className="backtest-table-wrap"><table>
+                        <thead><tr><th>Fold</th><th>选中参数</th><th>Train objective</th><th>Test objective</th><th>Gap</th><th>Regime</th><th>Benchmark</th></tr></thead>
+                        <tbody>{studyComparison.oos_report.folds.map((fold) => <tr key={fold.ordinal}>
+                          <td>{fold.ordinal}</td><td>{JSON.stringify(fold.selected_params)}</td><td>{fold.train_objective}</td><td>{fold.test_objective ?? "—"}</td><td>{fold.train_test_gap ?? "—"}</td><td>{fold.market_regime}</td><td>{fold.benchmark_return ?? "—"}</td>
+                        </tr>)}</tbody>
+                      </table></div>
+                    </div>
+                  ) : studyComparison?.ready ? (
                     <div className="backtest-table-wrap">
                       <table>
                         <thead><tr><th>排名</th><th>Split</th><th>参数</th><th>OOS 权益</th></tr></thead>
@@ -1135,7 +1293,7 @@ export default function BacktestApp() {
                         ))}</tbody>
                       </table>
                     </div>
-                  ) : <p className="backtest-empty">完成后显示同口径 OOS 排名。</p>}
+                  ) : <p className="backtest-empty">后台完成 Train → receipt → 单次 Test 后显示只含 TestRun 的 OOS 曲线。</p>}
                 </>
               ) : <p className="backtest-empty">选择一个 Study 查看进度。</p>}
             </div>

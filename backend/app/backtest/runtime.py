@@ -41,12 +41,6 @@ from .strategy.registry import build_default_strategy_registry
 
 logger = logging.getLogger("candlescope.backtest")
 HISTORICAL_CONTRACT_MODE = "HISTORICAL_CONTRACT_V1"
-HISTORICAL_CONTRACT_ROLES = (
-    "BARS",
-    "MARK_INDEX",
-    "FUNDING",
-    "INSTRUMENT_RULES",
-)
 
 
 def _required_contract_roles(account_model: str, funding_mode: str) -> tuple[str, ...]:
@@ -583,7 +577,11 @@ class BacktestWorker:
                 start_time_ms=int(values["start_time_ms"]),
                 end_time_ms=int(values["end_time_ms"]),
                 roles=(
-                    HISTORICAL_CONTRACT_ROLES
+                    ("BARS",)
+                    + _required_contract_roles(
+                        str(values.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
+                        str(values.get("funding_mode") or "OFF"),
+                    )
                     if values.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE
                     else ("BARS",)
                 ),
@@ -806,6 +804,10 @@ class BacktestWorker:
                 latest = service.repository.get_run_by_id(run_id)
                 if latest is not None:
                     service.repository.update_trial_for_run(
+                        run_id,
+                        state=str(latest["state"]),
+                    )
+                    service.repository.update_train_trial_for_run(
                         run_id,
                         state=str(latest["state"]),
                     )

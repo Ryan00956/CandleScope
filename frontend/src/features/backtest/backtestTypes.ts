@@ -182,6 +182,85 @@ export interface BacktestTrialRecord {
   state: string;
 }
 
+export interface BacktestTrainTrialRecord {
+  train_trial_id: string;
+  candidate_ordinal: number;
+  params_json: string;
+  params_hash: string;
+  run_id?: string | null;
+  state: string;
+  objective_value?: string | null;
+  eligible?: number | null;
+  violations_json?: string | null;
+  warnings_json?: string | null;
+}
+
+export interface BacktestSelectionReceipt {
+  schemaVersion: string;
+  objective: string;
+  tieBreak: string;
+  selected: {
+    candidate_ordinal: number;
+    params: Record<string, unknown>;
+    params_hash: string;
+    objective_value: string;
+  };
+  candidates: Array<{
+    candidate_ordinal: number;
+    params: Record<string, unknown>;
+    params_hash: string;
+    evaluation: {
+      eligible: boolean;
+      objective_value: string | null;
+      violations: string[];
+      warnings: string[];
+    };
+  }>;
+  hashes: { receipt: string };
+}
+
+export interface BacktestStudyFold {
+  fold_id: string;
+  ordinal: number;
+  train_start_ms: number;
+  train_end_ms: number;
+  test_start_ms: number;
+  test_end_ms: number;
+  purge_ms: number;
+  embargo_ms: number;
+  state: string;
+  test_run_id?: string | null;
+  train_trials: BacktestTrainTrialRecord[];
+  selection_receipt?: BacktestSelectionReceipt | null;
+  test_run?: BacktestRunRecord | null;
+}
+
+export interface BacktestOosReport {
+  schemaVersion: string;
+  sourcePolicy: string;
+  folds: Array<{
+    ordinal: number;
+    receipt_hash: string;
+    selected_params: Record<string, unknown>;
+    test_run_id: string;
+    train_objective: string;
+    test_objective: string | null;
+    train_test_gap: string | null;
+    benchmark_return: string | null;
+    always_flat_return: string;
+    market_regime: string;
+  }>;
+  equity: Array<Record<string, string | number>>;
+  summary: {
+    fold_count: number;
+    initial_equity: string;
+    final_equity: string;
+    total_return: string;
+  };
+  robustness: Record<string, unknown>;
+  hashes: { report: string };
+}
+
 export interface BacktestStudyRecord {
   study_id: string;
   name: string;
@@ -190,6 +269,19 @@ export interface BacktestStudyRecord {
   strategy_revision_id: string;
   config_hash: string;
   trials: BacktestTrialRecord[];
+  config_json?: string;
+  study_schema?: string;
+  study_protocol_revision?: string;
+  identity?: Record<string, unknown>;
+  folds?: BacktestStudyFold[];
+  holdout?: {
+    state: string;
+    start_ms: number;
+    end_ms: number;
+    reveal_receipt_hash?: string | null;
+    run_id?: string | null;
+  } | null;
+  oos_report?: BacktestOosReport | null;
 }
 
 export interface BacktestStudyComparison {
@@ -203,6 +295,9 @@ export interface BacktestStudyComparison {
     oos_score: string | number | null;
     selection_warning: string;
   }>;
+  folds?: BacktestStudyFold[];
+  oos_report?: BacktestOosReport | null;
+  selection_warning?: string;
 }
 
 export const STREAM_EVENTS = [

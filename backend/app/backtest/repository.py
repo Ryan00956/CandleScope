@@ -199,8 +199,7 @@ class BacktestRepository:
             where += " AND generation = ?"
             values.append(expected_generation)
         cursor = self.connection.execute(
-            f"UPDATE backtest_runs SET {', '.join(fields)} "
-            f"WHERE {where}",
+            f"UPDATE backtest_runs SET {', '.join(fields)} WHERE {where}",
             values,
         )
         self.connection.commit()
@@ -469,6 +468,300 @@ class BacktestRepository:
             payload,
         )
         self.connection.commit()
+
+    @_locked
+    def insert_study_fold(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO backtest_study_folds(
+                fold_id, study_id, ordinal, train_start_ms, train_end_ms,
+                test_start_ms, test_end_ms, purge_ms, embargo_ms, state,
+                selected_receipt_hash, test_run_id
+            ) VALUES (
+                :fold_id, :study_id, :ordinal, :train_start_ms, :train_end_ms,
+                :test_start_ms, :test_end_ms, :purge_ms, :embargo_ms, :state,
+                NULL, NULL
+            )
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def list_study_folds(self, study_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM backtest_study_folds WHERE study_id = ? ORDER BY ordinal",
+            (study_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_locked
+    def update_study_fold_state(self, fold_id: str, state: str) -> None:
+        self.connection.execute(
+            "UPDATE backtest_study_folds SET state = ? WHERE fold_id = ?",
+            (state, fold_id),
+        )
+        self.connection.commit()
+
+    @_locked
+    def insert_train_trial(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO backtest_train_trials(
+                train_trial_id, study_id, fold_id, ordinal, candidate_ordinal,
+                params_json, params_hash, run_id, state, objective_value,
+                eligible, violations_json, warnings_json
+            ) VALUES (
+                :train_trial_id, :study_id, :fold_id, :ordinal, :candidate_ordinal,
+                :params_json, :params_hash, NULL, :state, NULL, NULL, NULL, NULL
+            )
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def list_train_trials(
+        self, study_id: str, *, fold_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        if fold_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM backtest_train_trials WHERE study_id = ? ORDER BY ordinal",
+                (study_id,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM backtest_train_trials
+                WHERE study_id = ? AND fold_id = ? ORDER BY candidate_ordinal
+                """,
+                (study_id, fold_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_locked
+    def attach_train_run(self, train_trial_id: str, *, run_id: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE backtest_train_trials SET run_id = ?, state = 'QUEUED'
+            WHERE train_trial_id = ? AND run_id IS NULL AND state = 'PLANNED'
+            """,
+            (run_id, train_trial_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def update_train_trial_for_run(self, run_id: str, *, state: str) -> None:
+        self.connection.execute(
+            "UPDATE backtest_train_trials SET state = ? WHERE run_id = ?",
+            (state, run_id),
+        )
+        self.connection.commit()
+
+    @_locked
+    def save_train_evaluation(
+        self,
+        train_trial_id: str,
+        *,
+        objective_value: str | None,
+        eligible: bool,
+        violations_json: str,
+        warnings_json: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE backtest_train_trials
+            SET objective_value = ?, eligible = ?, violations_json = ?, warnings_json = ?
+            WHERE train_trial_id = ?
+            """,
+            (
+                objective_value,
+                int(eligible),
+                violations_json,
+                warnings_json,
+                train_trial_id,
+            ),
+        )
+        self.connection.commit()
+
+    @_locked
+    def insert_selection_receipt(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        connection = self.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM backtest_selection_receipts WHERE fold_id = ?",
+                (payload["fold_id"],),
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                return dict(existing)
+            connection.execute(
+                """
+                INSERT INTO backtest_selection_receipts(
+                    receipt_hash, study_id, fold_id, payload_json,
+                    selected_train_trial_id, selected_params_json,
+                    selected_params_hash, created_at_ms
+                ) VALUES (
+                    :receipt_hash, :study_id, :fold_id, :payload_json,
+                    :selected_train_trial_id, :selected_params_json,
+                    :selected_params_hash, :created_at_ms
+                )
+                """,
+                payload,
+            )
+            connection.execute(
+                """
+                UPDATE backtest_study_folds
+                SET selected_receipt_hash = ?, state = 'SELECTED'
+                WHERE fold_id = ? AND selected_receipt_hash IS NULL
+                """,
+                (payload["receipt_hash"], payload["fold_id"]),
+            )
+            connection.commit()
+            return dict(
+                connection.execute(
+                    "SELECT * FROM backtest_selection_receipts WHERE fold_id = ?",
+                    (payload["fold_id"],),
+                ).fetchone()
+            )
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_locked
+    def get_selection_receipt(self, fold_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_selection_receipts WHERE fold_id = ?",
+            (fold_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    @_locked
+    def attach_fold_test_run(self, fold_id: str, *, run_id: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE backtest_study_folds SET test_run_id = ?, state = 'TEST_QUEUED'
+            WHERE fold_id = ? AND test_run_id IS NULL AND selected_receipt_hash IS NOT NULL
+            """,
+            (run_id, fold_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def insert_holdout(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO backtest_study_holdouts(
+                study_id, start_ms, end_ms, state, reveal_receipt_hash,
+                receipt_json, params_json, run_id, revealed_at_ms
+            ) VALUES (:study_id, :start_ms, :end_ms, 'SEALED', NULL, NULL, NULL, NULL, NULL)
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def get_holdout(self, study_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_study_holdouts WHERE study_id = ?",
+            (study_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    @_locked
+    def reveal_holdout(
+        self,
+        study_id: str,
+        *,
+        receipt_hash: str,
+        receipt_json: str,
+        params_json: str,
+        revealed_at_ms: int,
+    ) -> dict[str, Any]:
+        connection = self.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM backtest_study_holdouts WHERE study_id = ?",
+                (study_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("holdout does not exist")
+            if row["reveal_receipt_hash"] is None:
+                connection.execute(
+                    """
+                    UPDATE backtest_study_holdouts
+                    SET state = 'REVEALED', reveal_receipt_hash = ?, receipt_json = ?,
+                        params_json = ?, revealed_at_ms = ?
+                    WHERE study_id = ? AND reveal_receipt_hash IS NULL
+                    """,
+                    (receipt_hash, receipt_json, params_json, revealed_at_ms, study_id),
+                )
+            connection.commit()
+            return dict(
+                connection.execute(
+                    "SELECT * FROM backtest_study_holdouts WHERE study_id = ?",
+                    (study_id,),
+                ).fetchone()
+            )
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_locked
+    def attach_holdout_run(self, study_id: str, *, run_id: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE backtest_study_holdouts SET run_id = ?, state = 'QUEUED'
+            WHERE study_id = ? AND run_id IS NULL AND reveal_receipt_hash IS NOT NULL
+            """,
+            (run_id, study_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def update_holdout_state(self, study_id: str, state: str) -> None:
+        self.connection.execute(
+            "UPDATE backtest_study_holdouts SET state = ? WHERE study_id = ?",
+            (state, study_id),
+        )
+        self.connection.commit()
+
+    @_locked
+    def save_oos_report(
+        self,
+        study_id: str,
+        *,
+        report_schema: str,
+        report_json: str,
+        report_hash: str,
+        generated_at_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO backtest_study_oos_reports(
+                study_id, report_schema, report_json, report_hash, generated_at_ms
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(study_id) DO NOTHING
+            """,
+            (study_id, report_schema, report_json, report_hash, generated_at_ms),
+        )
+        self.connection.commit()
+
+    @_locked
+    def get_oos_report(self, study_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_study_oos_reports WHERE study_id = ?",
+            (study_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
 
     @_locked
     def list_trials(self, study_id: str) -> list[dict[str, Any]]:

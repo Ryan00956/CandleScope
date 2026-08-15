@@ -1,6 +1,6 @@
 {
   "schemaVersion": "candlescope.python-first-release/1",
-  "gitSha": "325830e244ef649d317c9f4b5608595375b4bfb9",
+  "gitSha": "13e8943d28973f6caa18f856a57a54498df2d36a",
   "gitDirty": false,
   "branch": "codex/backtest-foundation",
   "status": "RELEASE_GATES_OPEN",
@@ -68,13 +68,18 @@
       "kind": "n8-1m-bar",
       "path": "docs/evidence/backtest-python-first-n8-1m-bar-20260815.json",
       "sha256": "dfe69eb0aa08c17ace68d5f1f82546c55408c4e7f72741da8ebfc3a300091ac2"
+    },
+    {
+      "kind": "n10-4h-browser-soak",
+      "path": "docs/evidence/backtest-python-first-n10-4h-soak-20260815.json",
+      "sha256": "bc7b83956e467e661e6cb128a83338d937f7b94a30ad4da054340db7858ea763"
     }
   ],
   "gates": {
     "repositoryRegression": "ENV_RESIDUAL",
     "pythonSecurityBoundary": "PASS",
     "browserAcceptance": "PASS",
-    "performanceSoak": "NOT_RERUN",
+    "performanceSoak": "PASS",
     "disabledBoot": "PASS",
     "defaultProductionFlagsOff": "PASS",
     "publicApiSmoke": "PASS",
@@ -83,7 +88,6 @@
     "releaseManifestSha256": "PASS"
   },
   "knownLimitations": [
-    "1h public API soak and 4h browser soak were not re-run on this candidate",
     "full backend suite still has Phase 9 rust lock environment residuals",
     "Pine/Pyne remain restricted compatibility subsets",
     "BAR_APPROX is approximate; aggTrade is not raw trade or queue exact",
@@ -101,9 +105,14 @@
       "durationSeconds": 276.28
     },
     {
-      "command": "python backend/scripts/soak_python_first_n10.py --cycles 3",
+      "command": "python backend/scripts/soak_python_first_n10.py --duration-ms 3600000 --cycles 100000",
       "exitCode": 0,
-      "durationSeconds": 0.906
+      "durationSeconds": 3600.125
+    },
+    {
+      "command": "node frontend/scripts/backtest-python-n10-browser-soak.mjs --duration-ms 14400000 --port 15184",
+      "exitCode": 0,
+      "durationSeconds": 14400.015
     },
     {
       "command": "python -m pytest backend/tests --tb=no",

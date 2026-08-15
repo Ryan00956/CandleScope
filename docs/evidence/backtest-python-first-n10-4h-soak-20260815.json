@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "candlescope.python-first-browser-soak/1",
+  "source": "E:/CACHEV~1/Temp/grok-goal-143e1cbcdc1e/implementer/n10-4h-soak.json",
+  "sourceSha256": "9914a324cbb3dd60786c3ecafb377d927390f12b39a83ffc67dc97da60ed09ba",
+  "durationMs": 14400000,
+  "elapsedMs": 14400015,
+  "completed": true,
+  "ok": true,
+  "cycles": 240,
+  "consoleErrors": 0,
+  "studioPresentEveryCycle": true,
+  "disabledAnyCycle": false,
+  "heap": {
+    "firstUsedJSHeapSize": 18925460,
+    "lastUsedJSHeapSize": 26755997,
+    "maxUsedJSHeapSize": 28054615
+  },
+  "url": "http://127.0.0.1:15184/backtest.html",
+  "port": 15184,
+  "candidateSha": "325830e244ef649d317c9f4b5608595375b4bfb9"
+}

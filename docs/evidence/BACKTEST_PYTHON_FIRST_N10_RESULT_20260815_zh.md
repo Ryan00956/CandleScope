@@ -9,17 +9,18 @@
 `merged=false` `pushed=false` `productionEnabled=false`
 
 N10 把门禁落到了 Host 真实路径：默认 flags、disabled boot、runner 隔离、
-BAR/aggTrade lifecycle、v6→v5→v4 回滚、detached revert、manifest 校验。
-1 小时公开 API soak 与 4 小时浏览器 soak **未在本候选上重跑**；完整后端套件
-仍有已分类的 Phase 9 rust lock 环境误差。因此状态是
-`RELEASE_GATES_OPEN`，不是 `VALIDATED_CLEAN_SHA_UNMERGED`。
+BAR/aggTrade lifecycle、v6→v5→v4 回滚、detached revert、manifest 校验、
+1h Host soak 与 4h 浏览器 soak。完整后端套件仍有已分类的 Phase 9 rust lock
+环境误差。因此状态是 `RELEASE_GATES_OPEN`，不是
+`VALIDATED_CLEAN_SHA_UNMERGED`。
 
 ## 已关闭的门禁
 
 | 门禁 | 结果 |
 | --- | --- |
 | Python SDK / contract / bundle / runtime / attack / Host / Studio / templates / basket / scale | PASS（聚焦套件 74 passed；N10 10 passed；SDK 19 passed） |
-| Host BAR + aggTrade lifecycle | PASS；3 循环 soak 0.91 s；decision hash `cfb9445e…` 双时钟一致 |
+| Host BAR + aggTrade lifecycle | PASS；1h soak 3600.125 s / 13068 循环；decision hash `cfb9445e…` 双时钟一致 |
+| 4h Python 浏览器 soak | PASS；14400015 ms / 240 循环；studio 每轮存在；console 0 |
 | Frontend typecheck / lint / tests / build | PASS / PASS / 3267 passed 0 failed / PASS |
 | `git diff --check` | PASS |
 | Disabled boot | PASS：默认进程无 `/api/v1/backtests`；flags=0 时 config 不要求 SDK |
@@ -48,14 +49,15 @@ BAR/aggTrade lifecycle、v6→v5→v4 回滚、detached revert、manifest 校验
 
 ## 4h 浏览器 soak
 
-启动器可用，已在候选上真实启动：Playwright + 本机 Chrome 打开
-`backtest.html`，Python studio 持续存在，console 0。脚本：
-`frontend/scripts/backtest-python-n10-browser-soak.mjs`（`13e8943d`）。
-写盘：scratch `n10-4h-soak.json`（进行中，未到 14400000 ms 不得记 PASS）。
+`PASS`：Playwright + 本机 Chrome 打开 shipped `backtest.html`，跑满
+14400015 ms，240 个 reload 循环，Python studio 每轮存在，console 0，
+heap 18.9 MB → 26.8 MB（峰值 28.1 MB，无单调失控）。
+脚本：`frontend/scripts/backtest-python-n10-browser-soak.mjs`（`13e8943d`）。
+完整样本：scratch `n10-4h-soak.json`（sha256 `9914a324…`）。
+摘要：`docs/evidence/backtest-python-first-n10-4h-soak-20260815.json`。
 
 ## 仍未关闭
 
-- 4h Python 浏览器/lifecycle soak 尚未跑满 4 小时
 - 完整后端套件 `0 failed / 0 errors`：Phase 9 rust lock 环境残差（见 hard-stop）
 - 独立人工 full-feature review
 

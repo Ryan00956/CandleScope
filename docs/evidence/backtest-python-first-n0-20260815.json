@@ -1,0 +1,121 @@
+{
+  "schemaVersion": "candlescope.backtest-python-first-stage/1",
+  "stage": "N0",
+  "status": "CONTRACT_FROZEN",
+  "recordedAt": "2026-08-15T00:00:00+08:00",
+  "implementationStarted": false,
+  "productionCodeDiff": false,
+  "worktree": "H:\\program\\CandleScope-backtest-foundation",
+  "branch": "codex/backtest-foundation",
+  "baselineSha": "2bbc67c84c85568bbdebdbeece2cd7015c150354",
+  "baselineCommit": "backtest: complete M10 release validation",
+  "n1RollbackTarget": {
+    "kind": "independent-revert-of-N1",
+    "productionCodeIdentity": "2bbc67c84c85568bbdebdbeece2cd7015c150354",
+    "note": "N0 is docs-only. Reverting N1 lands on the N0 commit, whose production tree equals the M10 completion SHA."
+  },
+  "main": {
+    "sha": "5df19ae76686977f324644e9e62a63b73cf6a743",
+    "subject": "fix(trade-flow): recover live tape from stale gaps",
+    "ahead": 32,
+    "behind": 0,
+    "merged": false
+  },
+  "remote": {
+    "name": "origin",
+    "url": "git@github.com:helenananaa/CandleScope.git",
+    "upstreamConfigured": false,
+    "pushed": false
+  },
+  "frozenNames": {
+    "authorContract": "candlescope.python-strategy/1",
+    "providerProtocol": "strategy-provider/1",
+    "bundleSchema": "candlescope.python-strategy-bundle/1",
+    "runtimeProfile": "python-strategy-runtime/1",
+    "wireTransport": "strict-jsonl/1"
+  },
+  "reproducibilityClasses": [
+    "DETERMINISTIC_CPU_LOCKED",
+    "SEEDED_CPU_LOCKED",
+    "BEST_EFFORT_LOCAL",
+    "RECORDED_OUTPUT_ONLY"
+  ],
+  "runtimeModes": {
+    "defaultWindows": "SANDBOXED_LOCAL",
+    "explicitLocal": "TRUSTED_LOCAL",
+    "silentDowngradeForbidden": true,
+    "astWhitelistIsNotSecurityBoundary": true
+  },
+  "proposedFlagsDefaultOff": {
+    "BACKTEST_PYTHON_STRATEGY_ENABLED": "0",
+    "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": "0",
+    "VITE_BACKTEST_PYTHON_STRATEGY_ENABLED": "0"
+  },
+  "existingProductionFlagsDefaultOff": {
+    "BACKTEST_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0",
+    "BACKTEST_ONLINE_LEARNING_ENABLED": "0",
+    "BACKTEST_MULTI_MARKET_ENABLED": "0",
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": "0",
+    "VITE_BACKTEST_ENTRY_ENABLED": "0"
+  },
+  "m10": {
+    "candidateSha": "04b55582b2f73ad48b50fca67eb498fc2ce0fae6",
+    "completionSha": "2bbc67c84c85568bbdebdbeece2cd7015c150354",
+    "result": "docs/evidence/BACKTEST_MATURITY_M10_RESULT_20260815_zh.md",
+    "stageJson": "docs/evidence/backtest-maturity-m10-20260815.json",
+    "releaseManifest": "docs/evidence/backtest-maturity-release-20260815.json",
+    "evidenceRoot": "output/backtest-m10-candidate-04b55582",
+    "relatedBackendTests": "200 passed, 3595 deselected",
+    "frontendTests": "3252 passed",
+    "status": "VALIDATED_CLEAN_SHA"
+  },
+  "fullBackendSuiteBaseline": {
+    "result": "3758 passed, 28 failed, 9 errors",
+    "source": "docs/evidence/BACKTEST_MATURITY_M10_RESULT_20260815_zh.md",
+    "rootCauseCommit": "e970558031114f8d47b8f63d99fd49aecd96d0a7",
+    "rootCauseSubject": "feat(pyne): add isolated backtest strategy provider",
+    "rootCause": "illegal onBacktestRun activation event added to frozen Plugin Platform v2 contract",
+    "historicalFixtureHash": "sha256:4524fea17a11506f67d5004f81aa92a359666505d989015c1cf863a036ee99bb",
+    "currentDriftedHash": "sha256:a20c43a5c2f276d794a84e95209764d7d11debdd85b1a5ef8c7e8be5552a33aa",
+    "representativeRedTests": [
+      "backend/tests/test_plugin_platform_multi_runtime_phase0.py::test_phase0_contract_matches_current_v2_and_freezes_future_names",
+      "backend/tests/test_plugin_platform_multi_runtime_phase1.py::test_phase1_contract_rebuilds_exact_v2_and_v3_generations"
+    ],
+    "rewriteHistoricalFixturesForbidden": true
+  },
+  "forbiddenOutOfRepoPaths": [
+    "H:\\program\\pyne-runtime",
+    "H:\\program\\CandleScope-pine-interpreter",
+    "H:\\program\\CandleScope",
+    "H:\\program\\CandleScope-plugin-platform",
+    "H:\\program\\CandleScope-pyne-pack"
+  ],
+  "forbiddenInRepoExpansions": [
+    "packages/candlescope-plugin-pine-compat capability expansion",
+    "packages/candlescope-plugin-pyne capability expansion",
+    "packages/candlescope-plugin-pyne-workbench capability expansion",
+    "packages/candlescope-plugin-sdk activation event expansion"
+  ],
+  "allowedPinePyneTouch": "N1 compatibility restore of the frozen Plugin Platform v2 contract only; no feature expansion",
+  "executionDocLinks": [
+    "docs/BACKTEST_PRODUCT_CONTRACT_zh.md",
+    "docs/BACKTEST_SYSTEM_EXECUTION_zh.md",
+    "docs/BACKTEST_MATURITY_EXECUTION_PLAN_zh.md",
+    "docs/BACKTEST_STRATEGY_PROVIDER_V1_zh.md",
+    "docs/evidence/BACKTEST_MATURITY_M10_RESULT_20260815_zh.md"
+  ],
+  "stageTemplateComplete": true,
+  "documentWrittenAsImplemented": false,
+  "n1AuthorizedBy": "continuous N0-N10 execution objective after this freeze",
+  "delivery": {
+    "merged": false,
+    "pushed": false,
+    "productionEnabled": false,
+    "worktreesDeleted": false
+  }
+}

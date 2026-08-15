@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,6 +22,9 @@ SDK_SRC = (
 WORKER = SDK_SRC / "candlescope_backtest_sdk" / "worker.py"
 DEFAULT_CALL_TIMEOUT_S = 2.0
 DEFAULT_STARTUP_TIMEOUT_S = 5.0
+MAX_MESSAGE_BYTES = 256 * 1024
+MAX_STDERR_BYTES = 64 * 1024
+MAX_JOB_PROCESSES = 2
 
 
 class PythonRunnerError(RuntimeError):
@@ -87,6 +91,8 @@ class IsolatedPythonRunner:
         self.step_timeout_s = step_timeout_s
         self._process: subprocess.Popen[str] | None = None
         self._transcript: list[dict[str, Any]] = []
+        self._job: Any = None
+        self._stderr_bytes = 0
 
     def start(self) -> None:
         environment = {
@@ -103,6 +109,26 @@ class IsolatedPythonRunner:
             env=environment,
             cwd=str(self.bundle_dir),
         )
+        self._attach_job()
+
+    def _attach_job(self) -> None:
+        if os.name != "nt" or self._process is None or self._process.pid is None:
+            return
+        try:
+            from app.plugin_host.windows_job import WindowsJobController
+
+            kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            process = kernel32.OpenProcess(0x1F0FFF, False, int(self._process.pid))
+            if process:
+                kernel32.AssignProcessToJobObject(job, process)
+                kernel32.CloseHandle(process)
+            self._job = job
+            del WindowsJobController
+        except Exception:
+            self._job = None
 
     def call(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
         if self._process is None or self._process.stdin is None or self._process.stdout is None:
@@ -119,18 +145,36 @@ class IsolatedPythonRunner:
         )
         self._process.stdin.write(json.dumps(request) + "\n")
         self._process.stdin.flush()
-        started = time.perf_counter()
-        while time.perf_counter() - started < self.step_timeout_s:
-            line = self._process.stdout.readline()
-            if not line:
-                raise PythonRunnerError("PROVIDER_EOF", "worker closed stdout")
+        box: list[str | None] = []
+
+        def _read() -> None:
+            assert self._process is not None and self._process.stdout is not None
+            box.append(self._process.stdout.readline())
+
+        reader = threading.Thread(target=_read, name="python-runner-read", daemon=True)
+        reader.start()
+        reader.join(self.step_timeout_s)
+        if reader.is_alive():
+            self.close()
+            raise PythonRunnerError(
+                "PROVIDER_TIMEOUT", f"{method} exceeded {self.step_timeout_s}s"
+            )
+        line = box[0] if box else ""
+        if not line:
+            raise PythonRunnerError("PROVIDER_EOF", "worker closed stdout")
+        encoded = line.encode("utf-8")
+        if len(encoded) > MAX_MESSAGE_BYTES:
+            self.close()
+            raise PythonRunnerError("MESSAGE_TOO_LARGE", "worker JSON exceeded budget")
+        try:
             payload = json.loads(line)
-            self._transcript.append({"request": request, "response": payload})
-            if not payload.get("ok"):
-                raise PythonRunnerError("PROVIDER_PROTOCOL_VIOLATION", str(payload.get("error")))
-            return payload.get("result")
-        self.close()
-        raise PythonRunnerError("PROVIDER_TIMEOUT", f"{method} exceeded {self.step_timeout_s}s")
+        except json.JSONDecodeError as exc:
+            self.close()
+            raise PythonRunnerError("INVALID_JSON", "worker emitted invalid JSONL") from exc
+        self._transcript.append({"request": request, "response": payload})
+        if not payload.get("ok"):
+            raise PythonRunnerError("PROVIDER_PROTOCOL_VIOLATION", str(payload.get("error")))
+        return payload.get("result")
 
     def close(self) -> dict[str, Any]:
         process = self._process
@@ -142,8 +186,20 @@ class IsolatedPythonRunner:
                 process.stdin.close()
         except OSError:
             pass
+        if self._job is not None:
+            try:
+                kernel32 = __import__("ctypes").WinDLL("kernel32", use_last_error=True)
+                kernel32.TerminateJobObject(self._job, 1)
+                kernel32.CloseHandle(self._job)
+            except Exception:
+                pass
+            self._job = None
         process.kill()
-        process.wait(timeout=2)
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
         return self.receipt()
 
     def receipt(self) -> dict[str, Any]:
@@ -151,7 +207,13 @@ class IsolatedPythonRunner:
             "mode": self.mode,
             "runtime": str(_real_python()),
             "bundleDir": str(self.bundle_dir),
-            "limits": {"stepTimeoutS": self.step_timeout_s},
+            "profile": self.mode,
+            "limits": {
+                "stepTimeoutS": self.step_timeout_s,
+                "maxMessageBytes": MAX_MESSAGE_BYTES,
+                "maxStderrBytes": MAX_STDERR_BYTES,
+                "maxProcesses": MAX_JOB_PROCESSES,
+            },
             "transcriptHash": canonical_sha256(self._transcript),
         }
 

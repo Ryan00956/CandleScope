@@ -32,14 +32,18 @@ def _load_strategy(bundle_dir: Path, entrypoint: str) -> Any:
     return getattr(module, class_name or "Strategy")()
 
 
+_PROTOCOL = sys.stdout
+
+
 def _write(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    _PROTOCOL.write(json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n")
+    _PROTOCOL.flush()
 
 
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+    sys.stdout = sys.stderr
     strategy = None
     for raw in sys.stdin:
         try:

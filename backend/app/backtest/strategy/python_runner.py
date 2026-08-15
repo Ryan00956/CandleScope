@@ -107,7 +107,16 @@ class IsolatedPythonRunner:
     def call(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
         if self._process is None or self._process.stdin is None or self._process.stdout is None:
             raise PythonRunnerError("RUNNER_NOT_STARTED", "start the runner first")
-        request = {"id": len(self._transcript) + 1, "method": method, "params": dict(params or {})}
+        request = json.loads(
+            json.dumps(
+                {
+                    "id": len(self._transcript) + 1,
+                    "method": method,
+                    "params": dict(params or {}),
+                },
+                default=str,
+            )
+        )
         self._process.stdin.write(json.dumps(request) + "\n")
         self._process.stdin.flush()
         started = time.perf_counter()

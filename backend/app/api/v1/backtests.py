@@ -410,6 +410,14 @@ def cancel_run(request: Request, run_id: str) -> dict[str, Any]:
         return _error(exc)
 
 
+@router.post("/runs/{run_id}/resume")
+def resume_run(request: Request, run_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).resume_failed_run(run_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
 @router.get("/runs/{run_id}/report")
 def get_report(request: Request, run_id: str) -> dict[str, Any]:
     try:

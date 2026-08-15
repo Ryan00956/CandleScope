@@ -87,6 +87,9 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async cancelRun() {
       return run;
     },
+    async resumeRun() {
+      return run;
+    },
     async listStudies() {
       return [];
     },

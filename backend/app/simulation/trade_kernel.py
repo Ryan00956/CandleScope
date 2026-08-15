@@ -187,6 +187,7 @@ class TradeSimulationKernel:
                 else {}
             ),
             "next_order_id": self._next_order_id,
+            "market_event_count": self._market_event_count,
             "ambiguity_count": self.ambiguity_count,
             "source_kind": self.source_kind,
             "position_qty": str(self.position_qty),
@@ -360,6 +361,7 @@ class TradeSimulationKernel:
         *,
         warmup_events: int = 0,
         finalize: bool = False,
+        checkpoint_callback: Callable[[MarketEvent], None] | None = None,
     ) -> SimulationResult:
         market_events = tuple(event for event in events if event.role == "TRADES")
         if len(market_events) > self.max_events:
@@ -371,6 +373,8 @@ class TradeSimulationKernel:
             self._last_event = event
             if event.role in {"INSTRUMENT_RULES", "MARK_INDEX", "FUNDING"}:
                 self.account.apply(event)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(event)
                 continue
             if event.role != "TRADES":
                 raise MarketDatasetError(
@@ -443,6 +447,8 @@ class TradeSimulationKernel:
                 and self._market_event_count % self.checkpoint_event_interval == 0
             ):
                 self.checkpoints.append(self.snapshot())
+            if checkpoint_callback is not None:
+                checkpoint_callback(event)
         self._append_terminal_curve_point()
         if finalize:
             self.finalize_orders()

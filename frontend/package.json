@@ -54,7 +54,7 @@
     "test:replay": "tsx --test \"src/features/replay/**/*.test.{ts,tsx}\" \"src/app/__tests__/marketPageFrame.test.tsx\"",
     "test:backtest": "tsx --test \"src/features/backtest/**/*.test.{ts,tsx}\"",
     "smoke:backtest": "node scripts/backtest-api-smoke.mjs --duration-ms 1 --max-cycles 1",
-    "soak:backtest": "node scripts/backtest-api-smoke.mjs --duration-ms 3600000",
+    "soak:backtest": "node scripts/backtest-m10-api-soak.mjs --duration-ms 3600000 --output ../output/backtest-m10-api-soak.json",
     "check:plugins": "node scripts/check-plugin-platform.mjs",
     "check": "npm run check:architecture && npm run check:plugins && npm run typecheck && npm run lint && npm test && npm run test:desktop && npm run build",
     "desktop:dev": "electron desktop/main.mjs",

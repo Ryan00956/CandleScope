@@ -297,56 +297,29 @@ class BacktestRuntime:
             finally:
                 snapshot.close()
         elif record["fidelity_mode"] in {"AGG_TRADE_TAPE", "AGG_TRADE_EXECUTION"}:
-            manifest = self._manifest(str(record["dataset_id"]))
-            dataset = self._freeze_trade_dataset(
-                exchange=str(config.get("exchange") or "binance"),
-                market_type=str(config.get("market_type") or "usdm"),
-                symbol=str(manifest["symbol"]),
-                start_time_ms=int(config["start_time_ms"]),
-                end_time_ms=int(config["end_time_ms"]),
-            )
-            contract_snapshot: MarketDatasetSnapshot | None = None
-            try:
-                contract_bundle_hash: str | None = None
-                if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE:
-                    contract_snapshot = self._open_contract_snapshot(
-                        dataset_id=str(record["dataset_id"]),
-                        data_epoch=str(record["data_epoch"]),
-                        exchange=str(config.get("exchange") or "binance"),
-                        market_type=str(config.get("market_type") or "usdm"),
-                        symbol=str(manifest["symbol"]),
-                        start_time_ms=int(config["start_time_ms"]),
-                        end_time_ms=int(config["end_time_ms"]),
-                        required_roles=_required_contract_roles(
-                            str(
-                                config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"
-                            ),
-                            str(config.get("funding_mode") or "OFF"),
-                        ),
+            cached = self.service.repository.get_chart_cache(run_id)
+            if cached is not None:
+                try:
+                    cached_bars = json.loads(str(cached["bars_json"]))
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise BacktestError(
+                        "CHART_CACHE_CORRUPT", "derived chart cache is invalid"
+                    ) from exc
+                if (
+                    cached.get("cache_schema") != "BACKTEST_CHART_CACHE_V1"
+                    or str(cached.get("interval")) != interval
+                    or not isinstance(cached_bars, list)
+                    or len(cached_bars) != int(cached.get("bar_count") or -1)
+                    or str(cached.get("bars_hash"))
+                    != "sha256:" + sha256_hex(str(cached["bars_json"]))
+                ):
+                    raise BacktestError(
+                        "CHART_CACHE_CORRUPT",
+                        "derived chart cache identity or hash changed",
                     )
-                    contract_bundle_hash = contract_snapshot.snapshot_hash
-                _assert_trade_identity(
-                    dataset,
-                    record,
-                    contract_bundle_hash=contract_bundle_hash,
-                )
-                events = _read_trade_events(
-                    self._require_trade_archive(),
-                    dataset,
-                    max_events=self.settings.max_trade_events,
-                )
-            except MarketDatasetError as exc:
-                raise BacktestError(exc.code, exc.message) from exc
-            finally:
-                if contract_snapshot is not None:
-                    contract_snapshot.close()
-            if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
-                bars = [
-                    _bar_wire(event)
-                    for event in derive_complete_trade_bars(events, interval)
-                ]
+                bars = cached_bars
             else:
-                bars = _aggregate_trade_bars(events, interval)
+                bars = self._legacy_trade_chart_bars(record, config, interval)
         else:
             raise BacktestError("FIDELITY_UNSUPPORTED", "chart source is unsupported")
         truncated = len(bars) > max_bars
@@ -363,6 +336,61 @@ class BacktestRuntime:
             "equity_curve": list(report.get("equity_curve") or [])[-max_bars:],
             "truncated": truncated,
         }
+
+    def _legacy_trade_chart_bars(
+        self,
+        record: Mapping[str, object],
+        config: Mapping[str, object],
+        interval: str,
+    ) -> list[dict[str, object]]:
+        """Compatibility path for completed pre-v5 Runs without a chart cache."""
+        manifest = self._manifest(str(record["dataset_id"]))
+        dataset = self._freeze_trade_dataset(
+            exchange=str(config.get("exchange") or "binance"),
+            market_type=str(config.get("market_type") or "usdm"),
+            symbol=str(manifest["symbol"]),
+            start_time_ms=int(config["start_time_ms"]),
+            end_time_ms=int(config["end_time_ms"]),
+        )
+        contract_snapshot: MarketDatasetSnapshot | None = None
+        try:
+            contract_bundle_hash: str | None = None
+            if config.get("contract_data_mode") == HISTORICAL_CONTRACT_MODE:
+                contract_snapshot = self._open_contract_snapshot(
+                    dataset_id=str(record["dataset_id"]),
+                    data_epoch=str(record["data_epoch"]),
+                    exchange=str(config.get("exchange") or "binance"),
+                    market_type=str(config.get("market_type") or "usdm"),
+                    symbol=str(manifest["symbol"]),
+                    start_time_ms=int(config["start_time_ms"]),
+                    end_time_ms=int(config["end_time_ms"]),
+                    required_roles=_required_contract_roles(
+                        str(config.get("account_model") or "LINEAR_PERP_ONE_WAY_V1"),
+                        str(config.get("funding_mode") or "OFF"),
+                    ),
+                )
+                contract_bundle_hash = contract_snapshot.snapshot_hash
+            _assert_trade_identity(
+                dataset,
+                record,
+                contract_bundle_hash=contract_bundle_hash,
+            )
+            events = _read_trade_events(
+                self._require_trade_archive(),
+                dataset,
+                max_events=self.settings.max_trade_events,
+            )
+        except MarketDatasetError as exc:
+            raise BacktestError(exc.code, exc.message) from exc
+        finally:
+            if contract_snapshot is not None:
+                contract_snapshot.close()
+        if record["fidelity_mode"] == "AGG_TRADE_EXECUTION":
+            return [
+                _bar_wire(event)
+                for event in derive_complete_trade_bars(events, interval)
+            ]
+        return _aggregate_trade_bars(events, interval)
 
     def _manifest(self, dataset_id: str) -> dict[str, Any]:
         try:

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "candlescope.backtest-release/2",
+  "title": "CandleScope mature backtest release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "gitSha",
+    "gitDirty",
+    "branch",
+    "runtimeProfile",
+    "effectiveFlags",
+    "datasetSnapshotHashes",
+    "strategyRevision",
+    "accountModel",
+    "fillModel",
+    "reportSchema",
+    "commands",
+    "hashes",
+    "browserConsoleErrors",
+    "artifactPaths",
+    "gates",
+    "optionalM11"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "candlescope.backtest-release/2" },
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "gitDirty": { "const": false },
+    "branch": { "type": "string", "minLength": 1 },
+    "runtimeProfile": { "type": "string", "minLength": 1 },
+    "effectiveFlags": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "enum": ["0", "1"] }
+    },
+    "datasetSnapshotHashes": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+    },
+    "strategyRevision": { "type": "string", "minLength": 1 },
+    "accountModel": { "type": "string", "minLength": 1 },
+    "fillModel": { "type": "string", "minLength": 1 },
+    "reportSchema": { "type": "string", "minLength": 1 },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "exitCode", "durationSeconds"],
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "exitCode": { "const": 0 },
+          "durationSeconds": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "fill", "ledger", "report"],
+      "properties": {
+        "decision": { "type": "string", "minLength": 32 },
+        "fill": { "type": "string", "minLength": 32 },
+        "ledger": { "type": "string", "minLength": 32 },
+        "report": { "type": "string", "minLength": 32 }
+      }
+    },
+    "browserConsoleErrors": { "const": 0 },
+    "artifactPaths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": { "const": "PASS" },
+      "required": [
+        "independentReview",
+        "backendRelatedTests",
+        "frontendTypecheckLintTestBuild",
+        "publicApiSmoke",
+        "publicApiSoak1h",
+        "browserLifecycleSoak4h",
+        "realAggTradePerformance",
+        "checkpointFaultInjection",
+        "exactRevertDetachedWorktree",
+        "rollbackHealth",
+        "defaultProductionFlagsOff"
+      ]
+    },
+    "optionalM11": { "const": "NOT_APPLICABLE_OPTIONAL_DEFAULT_OFF" }
+  }
+}

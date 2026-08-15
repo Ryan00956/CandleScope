@@ -282,7 +282,7 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         repository.connection.execute(
             "SELECT schema_version FROM backtest_schema_meta"
         ).fetchone()[0]
-        == 4
+        == 5
     )
     assert (
         repository.connection.execute(
@@ -291,6 +291,28 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         == 0
     )
     repository.close()
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(
+                Path(__file__).parents[1]
+                / "scripts"
+                / "rollback_backtest_m10_schema.py"
+            ),
+            "--database",
+            str(path),
+            "--backup",
+            str(tmp_path / "backtest-v5.backup.db"),
+            "--receipt",
+            str(tmp_path / "backtest-m10-rollback.json"),
+            "--confirm",
+            "ROLLBACK_M10_SCHEMA_TO_V4",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     subprocess.run(
         [
@@ -393,14 +415,14 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
             text=True,
         )
     assert not refused_backup.exists()
-    still_v3 = sqlite3.connect(path)
+    still_current = sqlite3.connect(path)
     assert (
-        still_v3.execute("SELECT schema_version FROM backtest_schema_meta").fetchone()[
-            0
-        ]
-        == 4
+        still_current.execute(
+            "SELECT schema_version FROM backtest_schema_meta"
+        ).fetchone()[0]
+        == 5
     )
-    still_v3.close()
+    still_current.close()
 
 
 def test_v2_state_machine_recovers_without_duplicate_test_run(tmp_path: Path) -> None:
@@ -486,6 +508,67 @@ def test_v2_state_machine_recovers_without_duplicate_test_run(tmp_path: Path) ->
     assert recovered["state"] == "COMPLETED"
     assert len(restarted.list_runs()) == 3
     restarted.shutdown()
+
+
+def test_selection_receipt_content_address_is_reused_across_identical_studies(
+    tmp_path: Path,
+) -> None:
+    service = BacktestService.start(
+        load_backtest_settings(
+            {
+                "BACKTEST_ENABLED": "1",
+                "BACKTEST_BAR_ENABLED": "1",
+                "BACKTEST_STUDY_ENABLED": "1",
+            },
+            data_dir=tmp_path,
+            klines_db_path=tmp_path / "candlescope.db",
+            replay_db_path=tmp_path / "replay.db",
+        ),
+        now_ms=1,
+    )
+    first = service.start_study(
+        str(service.create_study(_study_payload(), now_ms=2)["study_id"])
+    )
+    first_fold = first["folds"][0]
+    common = {
+        "receipt_hash": "sha256:" + "12" * 32,
+        "payload_json": '{"hashes":{"receipt":"sha256:shared"}}',
+        "selected_params_json": '{"length":24}',
+        "selected_params_hash": "sha256:" + "34" * 32,
+        "created_at_ms": 4,
+    }
+    first_row = service.repository.insert_selection_receipt(
+        {
+            **common,
+            "study_id": first["study_id"],
+            "fold_id": first_fold["fold_id"],
+            "selected_train_trial_id": first_fold["train_trials"][0][
+                "train_trial_id"
+            ],
+        }
+    )
+    service.repository.update_study_state(str(first["study_id"]), "COMPLETED")
+    second = service.start_study(
+        str(service.create_study(_study_payload(), now_ms=5)["study_id"])
+    )
+    second_fold = second["folds"][0]
+    second_row = service.repository.insert_selection_receipt(
+        {
+            **common,
+            "study_id": second["study_id"],
+            "fold_id": second_fold["fold_id"],
+            "selected_train_trial_id": second_fold["train_trials"][0][
+                "train_trial_id"
+            ],
+        }
+    )
+    assert first_row["receipt_hash"] == second_row["receipt_hash"]
+    linked = service.repository.get_selection_receipt(str(second_fold["fold_id"]))
+    assert linked is not None and linked["payload_json"] == common["payload_json"]
+    assert service.repository.list_study_folds(str(second["study_id"]))[0][
+        "state"
+    ] == "SELECTED"
+    service.shutdown()
 
 
 def test_holdout_reveal_is_once_and_reuses_one_run(tmp_path: Path) -> None:

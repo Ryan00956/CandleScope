@@ -143,6 +143,8 @@ class DualClockSimulationKernel:
             if trade.role in {"INSTRUMENT_RULES", "MARK_INDEX", "FUNDING"}:
                 self.execution._last_event = trade
                 self.execution.account.apply(trade)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(trade)
                 continue
             if trade.role != "TRADES":
                 raise MarketDatasetError(
@@ -219,11 +221,7 @@ class DualClockSimulationKernel:
                 self.execution.equity_curve.append(curve_point)
             self.execution_event_count += 1
             self._last_source_sequence = source_sequence
-            if (
-                checkpoint_callback is not None
-                and self.checkpoint_event_interval > 0
-                and self.execution_event_count % self.checkpoint_event_interval == 0
-            ):
+            if checkpoint_callback is not None:
                 checkpoint_callback(trade)
         self.execution._append_terminal_curve_point()
         if finalize:

@@ -160,6 +160,35 @@ def test_http_control_plane_when_enabled(tmp_path: Path) -> None:
     assert listed.json()["runs"][0]["run_id"] == run_id
     cancelled = client.post(f"/api/v1/backtests/runs/{run_id}/cancel")
     assert cancelled.json()["state"] == "CANCELLED"
+    recoverable = service.create_run(
+        _payload(), idempotency_key="http-recoverable", now_ms=2
+    )
+    with pytest.raises(Exception, match="PROVIDER_CRASH"):
+        service.execute_bar_run(
+            str(recoverable["run_id"]),
+            events=(
+                MarketEvent(
+                    sequence=1,
+                    event_time_ms=1,
+                    role="BARS",
+                    payload={
+                        "open": "100",
+                        "high": "101",
+                        "low": "99",
+                        "close": "100",
+                        "volume": "1",
+                    },
+                ),
+            ),
+            provider=CrashProvider(),
+            now_ms=3,
+        )
+    resumed = client.post(
+        f"/api/v1/backtests/runs/{recoverable['run_id']}/resume"
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["state"] == "QUEUED"
+    assert resumed.json()["generation"] == 2
     study = client.post(
         "/api/v1/backtests/studies",
         json={
@@ -208,6 +237,11 @@ def test_provider_crash_marks_run_failed(tmp_path: Path) -> None:
     failed = service.get_run(created["run_id"])
     assert failed["state"] == "FAILED"
     assert failed["failure_code"] == "PROVIDER_CRASH_UNRECOVERABLE"
+    checkpoint = service.repository.latest_checkpoint(str(created["run_id"]))
+    assert checkpoint is not None and checkpoint["sequence"] == 0
+    audit = service.repository.list_audit(str(created["run_id"]))[-1]
+    assert audit["action"] == "fail"
+    assert '"checkpointPreserved":true' in str(audit["details_json"])
     service.shutdown()
 
 

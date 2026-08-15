@@ -1104,6 +1104,19 @@ class LocalDatasetService:
             raise LocalDatasetError(
                 "Dataset revision not found", code="dataset_corrupt"
             )
+        bars_path = revision_dir / "bars.sqlite"
+        try:
+            actual_sqlite_hash = self._file_sha256(bars_path)
+        except OSError as exc:
+            raise LocalDatasetError(
+                "Dataset revision payload is unreadable",
+                code="DATA_SNAPSHOT_MISMATCH",
+            ) from exc
+        if actual_sqlite_hash != manifest.get("sqlite_sha256"):
+            raise LocalDatasetError(
+                "Dataset revision payload hash changed",
+                code="DATA_SNAPSHOT_MISMATCH",
+            )
         return manifest, revision_dir
 
     def load_revision_bars(

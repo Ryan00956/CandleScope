@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "candlescope.backtest-m10-thresholds/1",
+  "frozenAt": "2026-08-15T04:05:00+08:00",
+  "memoryAuthority": "PROCESS_RSS_BYTES",
+  "notes": [
+    "Thresholds were frozen after the first controlled public-API baselines.",
+    "Private bytes are informational; RSS is the release gate used by prior backtest evidence.",
+    "Failures caused by environmental contention remain failures and do not authorize threshold changes."
+  ],
+  "scenarios": {
+    "bar200k": {
+      "maxDurationSeconds": 300,
+      "maxPeakRssBytes": 2147483648,
+      "maxReportBytes": 16777216,
+      "maxChartFetchSeconds": 5,
+      "exactInputRows": 200000,
+      "minFillCount": 2
+    },
+    "agg1m": {
+      "maxDurationSeconds": 300,
+      "maxPeakRssBytes": 2147483648,
+      "maxReportBytes": 16777216,
+      "maxChartFetchSeconds": 2,
+      "exactInputRows": 999997,
+      "minFillCount": 1
+    },
+    "agg2m": {
+      "maxDurationSeconds": 360,
+      "maxPeakRssBytes": 2147483648,
+      "maxReportBytes": 16777216,
+      "maxChartFetchSeconds": 2,
+      "exactInputRows": 2000000,
+      "minFillCount": 1
+    },
+    "partial": {
+      "maxDurationSeconds": 60,
+      "maxPeakRssBytes": 2147483648,
+      "minReportBytes": 12582912,
+      "maxReportBytes": 16777216,
+      "maxChartFetchSeconds": 2,
+      "exactFillCount": 18000
+    },
+    "concurrent4": {
+      "maxDurationSeconds": 120,
+      "maxPeakRssBytes": 2147483648,
+      "exactMaxSimultaneousActive": 4,
+      "exactRunCount": 4
+    },
+    "study64": {
+      "maxDurationSeconds": 120,
+      "maxPeakRssBytes": 2147483648,
+      "exactTotalRunCount": 64
+    }
+  }
+}

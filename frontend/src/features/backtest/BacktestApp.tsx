@@ -614,6 +614,20 @@ export default function BacktestApp() {
     }
   }, [refreshRuns, selectedRun]);
 
+  const handleResume = useCallback(async () => {
+    if (!selectedRun) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await defaultBacktestApi.resumeRun(selectedRun.run_id);
+      await refreshRuns();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshRuns, selectedRun]);
+
   const handleCreateStudy = useCallback(async () => {
     if (!selectedDataset || !snapshot) return;
     let parameterSpace: Record<string, unknown>;
@@ -1116,6 +1130,9 @@ export default function BacktestApp() {
                 <button type="button" onClick={handleExport}>导出验证包</button>
               )}
               {selectedRun.state === "FAILED" && <span>失败码：{selectedRun.failure_code ?? "UNKNOWN"}</span>}
+              {selectedRun.state === "FAILED" && ["PROVIDER_TIMEOUT", "PROVIDER_CRASH_UNRECOVERABLE", "BACKTEST_STORAGE_TRANSIENT"].includes(selectedRun.failure_code ?? "") && (
+                <button type="button" onClick={handleResume} disabled={loading}>从安全 checkpoint 恢复</button>
+              )}
             </div>
           )}
         </section>

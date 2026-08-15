@@ -744,6 +744,31 @@ class BacktestRepository:
             if existing is not None:
                 connection.commit()
                 return dict(existing)
+            content_match = connection.execute(
+                "SELECT * FROM backtest_selection_receipts WHERE receipt_hash = ?",
+                (payload["receipt_hash"],),
+            ).fetchone()
+            if content_match is not None:
+                if (
+                    str(content_match["payload_json"]) != str(payload["payload_json"])
+                    or str(content_match["selected_params_json"])
+                    != str(payload["selected_params_json"])
+                    or str(content_match["selected_params_hash"])
+                    != str(payload["selected_params_hash"])
+                ):
+                    raise RuntimeError(
+                        "selection receipt hash collides with different immutable content"
+                    )
+                connection.execute(
+                    """
+                    UPDATE backtest_study_folds
+                    SET selected_receipt_hash = ?, state = 'SELECTED'
+                    WHERE fold_id = ? AND selected_receipt_hash IS NULL
+                    """,
+                    (payload["receipt_hash"], payload["fold_id"]),
+                )
+                connection.commit()
+                return dict(content_match)
             connection.execute(
                 """
                 INSERT INTO backtest_selection_receipts(
@@ -783,6 +808,17 @@ class BacktestRepository:
             "SELECT * FROM backtest_selection_receipts WHERE fold_id = ?",
             (fold_id,),
         ).fetchone()
+        if row is None:
+            row = self.connection.execute(
+                """
+                SELECT receipts.*
+                FROM backtest_study_folds AS folds
+                JOIN backtest_selection_receipts AS receipts
+                  ON receipts.receipt_hash = folds.selected_receipt_hash
+                WHERE folds.fold_id = ?
+                """,
+                (fold_id,),
+            ).fetchone()
         return None if row is None else dict(row)
 
     @_locked
@@ -1026,6 +1062,7 @@ class BacktestRepository:
         audit_details_json: str,
         updated_at_ms: int,
         signal_trace_rows: list[dict[str, Any]] | None = None,
+        chart_cache: dict[str, Any] | None = None,
     ) -> None:
         """Atomically persist the immutable report, completion audit, and state."""
         connection = self.connection
@@ -1083,6 +1120,31 @@ class BacktestRepository:
                         trace_row["row_hash"],
                     ),
                 )
+            if chart_cache is not None:
+                connection.execute(
+                    """
+                    INSERT INTO backtest_chart_cache(
+                        run_id, cache_schema, interval, bars_json,
+                        bar_count, bars_hash, generated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        cache_schema = excluded.cache_schema,
+                        interval = excluded.interval,
+                        bars_json = excluded.bars_json,
+                        bar_count = excluded.bar_count,
+                        bars_hash = excluded.bars_hash,
+                        generated_at_ms = excluded.generated_at_ms
+                    """,
+                    (
+                        run_id,
+                        chart_cache["cache_schema"],
+                        chart_cache["interval"],
+                        chart_cache["bars_json"],
+                        chart_cache["bar_count"],
+                        chart_cache["bars_hash"],
+                        chart_cache["generated_at_ms"],
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO backtest_audit(
@@ -1124,6 +1186,13 @@ class BacktestRepository:
         return dict(row) if row is not None else None
 
     @_locked
+    def get_chart_cache(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_chart_cache WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    @_locked
     def next_audit_ordinal(self, run_id: str) -> int:
         row = self.connection.execute(
             "SELECT COALESCE(MAX(ordinal), 0) AS max_ordinal FROM backtest_audit WHERE run_id = ?",
@@ -1150,3 +1219,11 @@ class BacktestRepository:
             (run_id, ordinal, action, actor, details_json, chain_hash),
         )
         self.connection.commit()
+
+    @_locked
+    def list_audit(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM backtest_audit WHERE run_id = ? ORDER BY ordinal ASC",
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]

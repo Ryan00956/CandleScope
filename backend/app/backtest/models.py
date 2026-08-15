@@ -40,7 +40,9 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.CANCELLING: frozenset({RunState.CANCELLED, RunState.FAILED}),
     RunState.COMPLETED: frozenset(),
     RunState.CANCELLED: frozenset(),
-    RunState.FAILED: frozenset(),
+    # Recovery is an explicit, fenced operation guarded by BacktestService;
+    # ordinary callers cannot use this transition to retry from scratch.
+    RunState.FAILED: frozenset({RunState.QUEUED}),
 }
 
 

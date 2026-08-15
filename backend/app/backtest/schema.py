@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS backtest_schema_meta (
@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS backtest_reports (
     report_schema TEXT NOT NULL,
     report_json TEXT NOT NULL,
     report_hash TEXT,
+    generated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_chart_cache (
+    run_id TEXT PRIMARY KEY,
+    cache_schema TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    bars_json TEXT NOT NULL,
+    bar_count INTEGER NOT NULL,
+    bars_hash TEXT NOT NULL,
     generated_at_ms INTEGER NOT NULL
 );
 

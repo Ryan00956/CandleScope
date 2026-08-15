@@ -67,6 +67,7 @@ export interface BacktestApiClient {
   getChart(runId: string, signal?: AbortSignal): Promise<BacktestChartData>;
   exportRun(runId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   cancelRun(runId: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
+  resumeRun(runId: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
   listStudies(signal?: AbortSignal): Promise<BacktestStudyRecord[]>;
   createStudy(body: Record<string, unknown>, signal?: AbortSignal): Promise<BacktestStudyRecord>;
   startStudy(studyId: string, signal?: AbortSignal): Promise<BacktestStudyRecord>;
@@ -227,6 +228,14 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
       return readJson(
         await fetch(
           `${base}/runs/${encodeURIComponent(runId)}/cancel`,
+          requestOptions({ method: "POST" }, signal),
+        ),
+      );
+    },
+    async resumeRun(runId, signal) {
+      return readJson(
+        await fetch(
+          `${base}/runs/${encodeURIComponent(runId)}/resume`,
           requestOptions({ method: "POST" }, signal),
         ),
       );

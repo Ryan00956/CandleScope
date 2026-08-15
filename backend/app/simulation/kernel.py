@@ -217,6 +217,7 @@ class SimulationKernel:
             "funding_interval_ms": self.funding_interval_ms,
             "next_funding_time_ms": self._next_funding_time_ms,
             "gap_policy": self.gap_policy,
+            "market_event_count": self._market_event_count,
             "ambiguity_count": self.ambiguity_count,
             "paused": self.paused,
             "fee_total": str(self.fee_total),
@@ -364,6 +365,8 @@ class SimulationKernel:
                 continue
             if event.role in {"INSTRUMENT_RULES", "MARK_INDEX", "FUNDING"}:
                 self.account.apply(event)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(event)
                 continue
             if event.role != "BARS":
                 raise MarketDatasetError(

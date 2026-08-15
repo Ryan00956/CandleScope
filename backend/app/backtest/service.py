@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -29,6 +30,7 @@ from app.simulation.trade_bar_builder import (
     BAR_TIMEZONE,
     EXECUTION_CLOCK,
     SIGNAL_CLOCK,
+    derive_complete_trade_bars,
 )
 from app.simulation.execution_realism import (
     BAR_FILL_POLICY_V2,
@@ -107,11 +109,14 @@ class BacktestService:
         repository: BacktestRepository,
         strategy_registry: StrategyRevisionRegistry | None = None,
         enforce_registered_revisions: bool = False,
+        fault_injector: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.strategy_registry = strategy_registry or build_default_strategy_registry()
         self.enforce_registered_revisions = enforce_registered_revisions
+        # Test-only seam. Production construction never supplies an injector.
+        self._fault_injector = fault_injector
         self._audit_ordinals: dict[str, int] = {}
 
     @classmethod
@@ -122,6 +127,7 @@ class BacktestService:
         now_ms: int | None = None,
         strategy_registry: StrategyRevisionRegistry | None = None,
         enforce_registered_revisions: bool = False,
+        fault_injector: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> BacktestService:
         if not settings.enabled:
             raise BacktestError("FLAG_DISABLED", "BACKTEST_ENABLED is 0")
@@ -132,6 +138,7 @@ class BacktestService:
             repository,
             strategy_registry,
             enforce_registered_revisions,
+            fault_injector,
         )
 
     def shutdown(self) -> None:
@@ -649,6 +656,7 @@ class BacktestService:
         *,
         idempotency_key: str,
         now_ms: int | None = None,
+        enforce_active_budget: bool = True,
     ) -> dict[str, object]:
         if not idempotency_key.strip():
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", "idempotency key is required")
@@ -657,7 +665,8 @@ class BacktestService:
             return existing
         identity = self._identity_from_payload(payload)
         self._assert_flags(identity.fidelity_mode)
-        self._assert_active_budget()
+        if enforce_active_budget:
+            self._assert_active_budget()
         stamp = now_ms or _now_ms()
         digest = config_hash(identity)
         run_id = f"bt_{uuid.uuid4().hex}"
@@ -932,6 +941,63 @@ class BacktestService:
                 {"generation": expected_generation},
             )
         return recovered
+
+    def resume_failed_run(
+        self, run_id: str, *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        """Resume a recoverable Provider/storage failure from a verified V2 checkpoint."""
+        record = self.get_run(run_id)
+        if RunState(record["state"]) != RunState.FAILED:
+            raise BacktestError("RECOVERY_NOT_ALLOWED", "run is not failed")
+        if str(record.get("failure_code") or "") not in {
+            "PROVIDER_TIMEOUT",
+            "PROVIDER_CRASH_UNRECOVERABLE",
+            "BACKTEST_STORAGE_TRANSIENT",
+        }:
+            raise BacktestError(
+                "RECOVERY_NOT_ALLOWED", "failure class is not checkpoint-recoverable"
+            )
+        checkpoint = self.repository.latest_checkpoint(run_id)
+        if checkpoint is None:
+            raise BacktestError(
+                "RECOVERY_NOT_ALLOWED", "no durable checkpoint is available"
+            )
+        payload = self._verified_checkpoint_payload(record, checkpoint)
+        if payload.get("schemaVersion") != "candlescope.backtest-checkpoint/2":
+            raise BacktestError(
+                "RECOVERY_NOT_ALLOWED", "legacy checkpoint has no recovery contract"
+            )
+        if payload.get("providerSnapshotCapable") is not True:
+            raise BacktestError(
+                "RECOVERY_NOT_ALLOWED", "Provider does not declare snapshot/restore"
+            )
+        generation = int(record["generation"])
+        stamp = now_ms or _now_ms()
+        queued = transition(RunState.FAILED, RunState.QUEUED)
+        changed = self.repository.compare_and_set_run_state(
+            run_id,
+            expected_state=RunState.FAILED.value,
+            expected_generation=generation,
+            state=queued.value,
+            updated_at_ms=stamp,
+            generation=generation + 1,
+        )
+        if not changed:
+            raise BacktestError(
+                "IDENTITY_MUTATION", "run changed while recovery was requested"
+            )
+        self._audit(
+            run_id,
+            "resume_from_checkpoint",
+            {
+                "schema": "BACKTEST_RECOVERY_V1",
+                "checkpointSequence": int(checkpoint["sequence"]),
+                "checkpointHash": str(checkpoint["state_hash"]),
+                "fromGeneration": generation,
+                "toGeneration": generation + 1,
+            },
+        )
+        return self.get_run(run_id)
 
     def create_study(
         self, payload: Mapping[str, object], *, now_ms: int | None = None
@@ -1397,6 +1463,7 @@ class BacktestService:
             run = self.create_run(
                 payload,
                 idempotency_key=f"{study_id}:{trial['trial_id']}",
+                enforce_active_budget=False,
             )
             self.repository.attach_trial_run(
                 str(trial["trial_id"]),
@@ -1752,7 +1819,11 @@ class BacktestService:
             "max_cumulative_fees": config.get("max_cumulative_fees", "10000"),
             "max_drawdown_stop_pct": config.get("max_drawdown_stop_pct", "50"),
         }
-        return self.create_run(payload, idempotency_key=idempotency_key)
+        return self.create_run(
+            payload,
+            idempotency_key=idempotency_key,
+            enforce_active_budget=False,
+        )
 
     def _seal_study_v2_oos(
         self,
@@ -2021,19 +2092,7 @@ class BacktestService:
                     "BUDGET_EXCEEDED",
                     "BAR event count exceeds frozen row ceiling",
                 )
-            event_bytes = len(
-                canonical_json(
-                    [
-                        {
-                            "sequence": event.sequence,
-                            "event_time_ms": event.event_time_ms,
-                            "role": event.role,
-                            "payload": dict(event.payload),
-                        }
-                        for event in events
-                    ]
-                ).encode("utf-8")
-            )
+            event_bytes = _event_wire_bytes(events)
             if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
                 raise BacktestError(
                     "BUDGET_EXCEEDED",
@@ -2067,12 +2126,29 @@ class BacktestService:
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
+                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
+                    "checkpointMode"
+                ) != "BAR":
+                    raise BacktestError(
+                        "CHECKPOINT_CORRUPT", "checkpoint mode does not match BAR run"
+                    )
                 kernel.restore(payload["engine"])
                 session.restore(payload["provider"])
                 session.generation = int(record["generation"])
                 planner.restore(payload.get("planner") or {})
                 observed = int(payload["observed"])
                 resume_sequence = int(payload["sequence"])
+
+            if checkpoint is None:
+                self._save_bar_checkpoint(
+                    record,
+                    sequence=0,
+                    observed=0,
+                    kernel=kernel,
+                    session=session,
+                    planner=planner,
+                    event_bytes=event_bytes,
+                )
 
             def strategy(
                 visible: tuple[MarketEvent, ...], event: MarketEvent
@@ -2084,6 +2160,9 @@ class BacktestService:
                         deadline=deadline,
                         expected_generation=expected_generation,
                     )
+                self._maybe_inject_fault(
+                    "before_decision", run_id=run_id, sequence=event.sequence
+                )
                 phase = "WARMUP" if observed < warmup_events else "EVALUATION"
                 observed += 1
                 bar = dict(event.payload)
@@ -2106,9 +2185,28 @@ class BacktestService:
                 event for event in events if event.sequence > resume_sequence
             )
 
+            last_order_count = len(kernel.orders)
+            last_fill_count = len(kernel.fills)
+
             def checkpoint_after(event: MarketEvent) -> None:
+                nonlocal last_order_count, last_fill_count
                 interval = self.settings.checkpoint_event_interval
-                if interval > 0 and observed > 0 and observed % interval == 0:
+                order_count = len(kernel.orders)
+                fill_count = len(kernel.fills)
+                fault_point = None
+                if event.role == "FUNDING":
+                    fault_point = "after_funding"
+                elif fill_count > last_fill_count and any(
+                    order.status == "PARTIAL" for order in kernel.orders
+                ):
+                    fault_point = "after_partial_fill"
+                elif order_count > last_order_count:
+                    fault_point = "after_order"
+                if (
+                    interval > 0
+                    and observed > 0
+                    and observed % interval == 0
+                ) or (self._fault_injector is not None and fault_point):
                     self._save_bar_checkpoint(
                         record,
                         sequence=event.sequence,
@@ -2117,6 +2215,12 @@ class BacktestService:
                         session=session,
                         planner=planner,
                         event_bytes=event_bytes,
+                    )
+                last_order_count = order_count
+                last_fill_count = fill_count
+                if fault_point is not None:
+                    self._maybe_inject_fault(
+                        fault_point, run_id=run_id, sequence=event.sequence
                     )
 
             result = kernel.run(
@@ -2137,6 +2241,19 @@ class BacktestService:
             )
             self._assert_provider_state_budget(session.snapshot())
             strategy_metadata = _provider_report_metadata(provider)
+            final_sequence = events[-1].sequence if events else resume_sequence
+            self._save_bar_checkpoint(
+                record,
+                sequence=final_sequence,
+                observed=observed,
+                kernel=kernel,
+                session=session,
+                planner=planner,
+                event_bytes=event_bytes,
+            )
+            self._maybe_inject_fault(
+                "before_report_seal", run_id=run_id, sequence=final_sequence
+            )
             provider_close_hash = session.close()
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -2250,19 +2367,7 @@ class BacktestService:
                     "executionClock": EXECUTION_CLOCK,
                 }
             )
-            event_bytes = len(
-                canonical_json(
-                    [
-                        {
-                            "sequence": event.sequence,
-                            "event_time_ms": event.event_time_ms,
-                            "role": event.role,
-                            "payload": dict(event.payload),
-                        }
-                        for event in events
-                    ]
-                ).encode("utf-8")
-            )
+            event_bytes = _event_wire_bytes(events)
             if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
                 raise BacktestError(
                     "BUDGET_EXCEEDED",
@@ -2293,11 +2398,28 @@ class BacktestService:
             checkpoint = self.repository.latest_checkpoint(run_id)
             if checkpoint is not None:
                 payload = self._verified_checkpoint_payload(record, checkpoint)
+                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
+                    "checkpointMode"
+                ) != "DUAL_CLOCK":
+                    raise BacktestError(
+                        "CHECKPOINT_CORRUPT",
+                        "checkpoint mode does not match dual-clock run",
+                    )
                 kernel.restore(payload["engine"])
                 session.restore(payload["provider"])
                 session.generation = int(record["generation"])
                 planner.restore(payload.get("planner") or {})
                 resume_sequence = int(payload["sequence"])
+
+            if checkpoint is None:
+                self._save_dual_clock_checkpoint(
+                    record,
+                    sequence=0,
+                    kernel=kernel,
+                    session=session,
+                    planner=planner,
+                    event_bytes=event_bytes,
+                )
 
             def strategy(
                 _visible: tuple[MarketEvent, ...], bar: MarketEvent
@@ -2308,6 +2430,9 @@ class BacktestService:
                         deadline=deadline,
                         expected_generation=expected_generation,
                     )
+                self._maybe_inject_fault(
+                    "before_decision", run_id=run_id, sequence=bar.sequence
+                )
                 phase = "WARMUP" if bar.sequence <= warmup_events else "EVALUATION"
                 bar_payload = dict(bar.payload)
                 self._assert_frame_inputs(provider, bar=bar_payload, trade=None)
@@ -2331,15 +2456,43 @@ class BacktestService:
                 event for event in events if event.sequence > resume_sequence
             )
 
+            last_order_count = len(kernel.execution.orders)
+            last_fill_count = len(kernel.execution.fills)
+
             def checkpoint_after(event: MarketEvent) -> None:
-                self._save_dual_clock_checkpoint(
-                    record,
-                    sequence=event.sequence,
-                    kernel=kernel,
-                    session=session,
-                    planner=planner,
-                    event_bytes=event_bytes,
+                nonlocal last_order_count, last_fill_count
+                order_count = len(kernel.execution.orders)
+                fill_count = len(kernel.execution.fills)
+                fault_point = None
+                if event.role == "FUNDING":
+                    fault_point = "after_funding"
+                elif fill_count > last_fill_count and any(
+                    order.status == "PARTIAL" for order in kernel.execution.orders
+                ):
+                    fault_point = "after_partial_fill"
+                elif order_count > last_order_count:
+                    fault_point = "after_order"
+                interval = self.settings.checkpoint_event_interval
+                periodic = (
+                    interval > 0
+                    and kernel.execution_event_count > 0
+                    and kernel.execution_event_count % interval == 0
                 )
+                if periodic or (self._fault_injector is not None and fault_point):
+                    self._save_dual_clock_checkpoint(
+                        record,
+                        sequence=event.sequence,
+                        kernel=kernel,
+                        session=session,
+                        planner=planner,
+                        event_bytes=event_bytes,
+                    )
+                last_order_count = order_count
+                last_fill_count = fill_count
+                if fault_point is not None:
+                    self._maybe_inject_fault(
+                        fault_point, run_id=run_id, sequence=event.sequence
+                    )
 
             result = kernel.run(
                 remaining_events,
@@ -2359,6 +2512,18 @@ class BacktestService:
             )
             self._assert_provider_state_budget(session.snapshot())
             strategy_metadata = _provider_report_metadata(provider)
+            final_sequence = events[-1].sequence if events else resume_sequence
+            self._save_dual_clock_checkpoint(
+                record,
+                sequence=final_sequence,
+                kernel=kernel,
+                session=session,
+                planner=planner,
+                event_bytes=event_bytes,
+            )
+            self._maybe_inject_fault(
+                "before_report_seal", run_id=run_id, sequence=final_sequence
+            )
             provider_close_hash = session.close()
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -2380,6 +2545,20 @@ class BacktestService:
             provider_close_hash=provider_close_hash,
             stamp=stamp,
             expected_generation=expected_generation,
+            chart_interval=str(config["signal_interval"]),
+            chart_bars=[
+                {
+                    "time": int(bar.payload["open_time_ms"]) // 1000,
+                    "open": float(bar.payload["open"]),
+                    "high": float(bar.payload["high"]),
+                    "low": float(bar.payload["low"]),
+                    "close": float(bar.payload["close"]),
+                    "volume": float(bar.payload["volume"]),
+                }
+                for bar in derive_complete_trade_bars(
+                    events, str(config["signal_interval"])
+                )
+            ],
             result_overrides={
                 "report_label": "AGGREGATED_TRADE_SEQUENCE",
                 "strategy_metadata": strategy_metadata,
@@ -2478,7 +2657,15 @@ class BacktestService:
                 }
             )
 
+            event_bytes = _event_wire_bytes(events)
+            if event_bytes > self.settings.worker_memory_mb * 1024 * 1024:
+                raise BacktestError(
+                    "BUDGET_EXCEEDED",
+                    "trade snapshot exceeds worker memory ceiling",
+                )
+
             observed = 0
+            resume_sequence = 0
             aggregate_open: Decimal | None = None
             aggregate_high: Decimal | None = None
             aggregate_low: Decimal | None = None
@@ -2496,6 +2683,11 @@ class BacktestService:
                         deadline=deadline,
                         expected_generation=expected_generation,
                     )
+                self._maybe_inject_fault(
+                    "before_decision",
+                    run_id=run_id,
+                    sequence=event.sequence,
+                )
                 phase = "WARMUP" if observed < warmup_events else "EVALUATION"
                 observed += 1
                 trade = dict(event.payload)
@@ -2541,11 +2733,7 @@ class BacktestService:
                 leverage=_config_decimal(config, "leverage", "1"),
                 host_policy_revision=config.get("host_policy_revision"),
                 max_events=self.settings.max_trade_events,
-                checkpoint_event_interval=(
-                    0
-                    if config.get("execution_model_revision") == EXECUTION_REALISM_V2
-                    else self.settings.checkpoint_event_interval
-                ),
+                checkpoint_event_interval=self.settings.checkpoint_event_interval,
                 slippage_bps=_config_decimal(config, "slippage_bps", "1"),
                 taker_fee_bps=_config_decimal(config, "taker_fee_bps", "0"),
                 maker_fee_bps=_config_decimal(config, "maker_fee_bps", "0"),
@@ -2556,11 +2744,101 @@ class BacktestService:
                 **_execution_kernel_kwargs(config),
                 execution_reporter=self._execution_reporter(session),
             )
+            checkpoint = self.repository.latest_checkpoint(run_id)
+            if checkpoint is not None:
+                payload = self._verified_checkpoint_payload(record, checkpoint)
+                if payload.get("schemaVersion") == "candlescope.backtest-checkpoint/2" and payload.get(
+                    "checkpointMode"
+                ) != "TRADE_TAPE":
+                    raise BacktestError(
+                        "CHECKPOINT_CORRUPT", "checkpoint mode does not match trade run"
+                    )
+                kernel.restore(payload["engine"])
+                session.restore(payload["provider"])
+                session.generation = int(record["generation"])
+                planner.restore(payload.get("planner") or {})
+                observed = int(payload["observed"])
+                resume_sequence = int(payload["sequence"])
+                aggregate = payload.get("aggregateState") or {}
+                if aggregate:
+                    try:
+                        aggregate_open = Decimal(str(aggregate["open"]))
+                        aggregate_high = Decimal(str(aggregate["high"]))
+                        aggregate_low = Decimal(str(aggregate["low"]))
+                        aggregate_close = Decimal(str(aggregate["close"]))
+                        aggregate_volume = Decimal(str(aggregate["volume"]))
+                    except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                        raise BacktestError(
+                            "CHECKPOINT_CORRUPT",
+                            "trade aggregate observation state is invalid",
+                        ) from exc
+
+            def aggregate_state() -> dict[str, object]:
+                if aggregate_open is None:
+                    return {}
+                return {
+                    "open": str(aggregate_open),
+                    "high": str(aggregate_high),
+                    "low": str(aggregate_low),
+                    "close": str(aggregate_close),
+                    "volume": str(aggregate_volume),
+                }
+
+            if checkpoint is None:
+                self._save_trade_checkpoint(
+                    record,
+                    sequence=0,
+                    observed=0,
+                    aggregate_state={},
+                    kernel=kernel,
+                    session=session,
+                    planner=planner,
+                    event_bytes=event_bytes,
+                )
+
+            remaining_events = tuple(
+                event for event in events if event.sequence > resume_sequence
+            )
+            last_order_count = len(kernel.orders)
+            partial_seen = sum(order.status == "PARTIAL" for order in kernel.orders)
+
+            def checkpoint_after(event: MarketEvent) -> None:
+                nonlocal last_order_count, partial_seen
+                order_count = len(kernel.orders)
+                partial_count = sum(order.status == "PARTIAL" for order in kernel.orders)
+                interval = self.settings.checkpoint_event_interval
+                periodic = interval > 0 and observed > 0 and observed % interval == 0
+                fault_point = None
+                if event.role == "FUNDING":
+                    fault_point = "after_funding"
+                elif partial_count > partial_seen:
+                    fault_point = "after_partial_fill"
+                elif order_count > last_order_count:
+                    fault_point = "after_order"
+                if periodic or (self._fault_injector is not None and fault_point):
+                    self._save_trade_checkpoint(
+                        record,
+                        sequence=event.sequence,
+                        observed=observed,
+                        aggregate_state=aggregate_state(),
+                        kernel=kernel,
+                        session=session,
+                        planner=planner,
+                        event_bytes=event_bytes,
+                    )
+                last_order_count = order_count
+                partial_seen = partial_count
+                if fault_point is not None:
+                    self._maybe_inject_fault(
+                        fault_point, run_id=run_id, sequence=event.sequence
+                    )
+
             result = kernel.run(
-                events,
+                remaining_events,
                 strategy,
-                warmup_events=warmup_events,
+                warmup_events=0,
                 finalize=True,
+                checkpoint_callback=checkpoint_after,
             )
             cost_sensitivity = build_cost_sensitivity_matrix(kernel, events, result)
             metrics_market_context = _metrics_market_context(
@@ -2573,6 +2851,20 @@ class BacktestService:
             )
             self._assert_provider_state_budget(session.snapshot())
             strategy_metadata = _provider_report_metadata(provider)
+            final_sequence = events[-1].sequence if events else resume_sequence
+            self._save_trade_checkpoint(
+                record,
+                sequence=final_sequence,
+                observed=observed,
+                aggregate_state=aggregate_state(),
+                kernel=kernel,
+                session=session,
+                planner=planner,
+                event_bytes=event_bytes,
+            )
+            self._maybe_inject_fault(
+                "before_report_seal", run_id=run_id, sequence=final_sequence
+            )
             provider_close_hash = session.close()
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -3176,14 +3468,19 @@ class BacktestService:
         provider = session.snapshot()
         self._assert_provider_state_budget(provider)
         payload = {
-            "schemaVersion": "candlescope.backtest-checkpoint/1",
+            "schemaVersion": "candlescope.backtest-checkpoint/2",
+            "checkpointMode": "BAR",
             "run_id": record["run_id"],
             "config_hash": record["config_hash"],
             "snapshot_hash": record["snapshot_hash"],
+            "inputIdentity": self._checkpoint_input_identity(record),
             "sequence": int(sequence),
             "observed": int(observed),
             "engine": kernel.snapshot(),
             "provider": provider,
+            "providerSnapshotCapable": bool(
+                session.describe()["capabilities"]["snapshotRestore"]
+            ),
             "planner": planner.snapshot(),
         }
         payload_json = canonical_json(payload)
@@ -3223,14 +3520,19 @@ class BacktestService:
         provider = session.snapshot()
         self._assert_provider_state_budget(provider)
         payload = {
-            "schemaVersion": "candlescope.backtest-checkpoint/1",
+            "schemaVersion": "candlescope.backtest-checkpoint/2",
+            "checkpointMode": "DUAL_CLOCK",
             "run_id": record["run_id"],
             "config_hash": record["config_hash"],
             "snapshot_hash": record["snapshot_hash"],
+            "inputIdentity": self._checkpoint_input_identity(record),
             "sequence": int(sequence),
             "observed": kernel.builder.signal_count,
             "engine": kernel.snapshot(),
             "provider": provider,
+            "providerSnapshotCapable": bool(
+                session.describe()["capabilities"]["snapshotRestore"]
+            ),
             "planner": planner.snapshot(),
         }
         payload_json = canonical_json(payload)
@@ -3257,6 +3559,93 @@ class BacktestService:
                 "stale worker generation cannot publish a checkpoint",
             )
 
+    def _save_trade_checkpoint(
+        self,
+        record: Mapping[str, object],
+        *,
+        sequence: int,
+        observed: int,
+        aggregate_state: Mapping[str, object],
+        kernel: TradeSimulationKernel,
+        session: StrategyProviderSession,
+        planner: PyneHostPlanner,
+        event_bytes: int,
+    ) -> None:
+        provider = session.snapshot()
+        self._assert_provider_state_budget(provider)
+        payload = {
+            "schemaVersion": "candlescope.backtest-checkpoint/2",
+            "checkpointMode": "TRADE_TAPE",
+            "run_id": record["run_id"],
+            "config_hash": record["config_hash"],
+            "snapshot_hash": record["snapshot_hash"],
+            "inputIdentity": self._checkpoint_input_identity(record),
+            "sequence": int(sequence),
+            "observed": int(observed),
+            "aggregateState": dict(aggregate_state),
+            "engine": kernel.snapshot(),
+            "provider": provider,
+            "providerSnapshotCapable": bool(
+                session.describe()["capabilities"]["snapshotRestore"]
+            ),
+            "planner": planner.snapshot(),
+        }
+        payload_json = canonical_json(payload)
+        if event_bytes + len(payload_json.encode("utf-8")) > (
+            self.settings.worker_memory_mb * 1024 * 1024
+        ):
+            raise BacktestError(
+                "BUDGET_EXCEEDED",
+                "trade execution state exceeds worker memory ceiling",
+            )
+        saved = self.repository.save_checkpoint(
+            {
+                "run_id": str(record["run_id"]),
+                "sequence": int(sequence),
+                "generation": int(record["generation"]),
+                "payload_json": payload_json,
+                "state_hash": "sha256:" + sha256_hex(payload),
+                "created_at_ms": _now_ms(),
+            }
+        )
+        if not saved:
+            raise BacktestError(
+                "IDENTITY_MUTATION",
+                "stale worker generation cannot publish a checkpoint",
+            )
+
+    @staticmethod
+    def _checkpoint_input_identity(record: Mapping[str, object]) -> dict[str, object]:
+        try:
+            config = json.loads(str(record.get("config_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BacktestError(
+                "CHECKPOINT_CORRUPT", "run configuration cannot be verified"
+            ) from exc
+        return {
+            "strategyRevisionId": record.get("strategy_revision_id"),
+            "datasetId": record.get("dataset_id"),
+            "dataEpoch": record.get("data_epoch"),
+            "snapshotHash": record.get("snapshot_hash"),
+            "fidelityMode": record.get("fidelity_mode"),
+            "sourceEventKind": record.get("source_event_kind"),
+            "accountModel": config.get("account_model"),
+            "contractDataMode": config.get("contract_data_mode"),
+            "executionModelRevision": config.get("execution_model_revision"),
+            "fillPolicy": config.get("fill_policy"),
+            "strategyExecutionRevision": config.get("strategy_execution_revision"),
+        }
+
+    def _maybe_inject_fault(
+        self, point: str, *, run_id: str, sequence: int
+    ) -> None:
+        if self._fault_injector is None:
+            return
+        self._fault_injector(
+            point,
+            {"runId": run_id, "sequence": int(sequence), "schema": "BACKTEST_FAULT_V1"},
+        )
+
     def _assert_provider_state_budget(self, snapshot: Mapping[str, object]) -> None:
         provider_bytes = len(
             canonical_json(snapshot.get("provider") or {}).encode("utf-8")
@@ -3281,17 +3670,29 @@ class BacktestService:
         expected = "sha256:" + sha256_hex(payload)
         if str(checkpoint.get("state_hash") or "") != expected:
             raise BacktestError("CHECKPOINT_CORRUPT", "checkpoint hash mismatch")
+        schema = payload.get("schemaVersion")
         if (
-            payload.get("schemaVersion") != "candlescope.backtest-checkpoint/1"
+            schema not in {
+                "candlescope.backtest-checkpoint/1",
+                "candlescope.backtest-checkpoint/2",
+            }
             or payload.get("run_id") != record.get("run_id")
             or payload.get("config_hash") != record.get("config_hash")
             or payload.get("snapshot_hash") != record.get("snapshot_hash")
-            or int(payload.get("sequence") or -1) != int(checkpoint["sequence"])
+            or payload.get("sequence") is None
+            or int(payload["sequence"]) != int(checkpoint["sequence"])
             or int(checkpoint.get("generation") or 0) > int(record["generation"])
         ):
             raise BacktestError(
                 "CHECKPOINT_CORRUPT",
                 "checkpoint identity does not match the run",
+            )
+        if schema == "candlescope.backtest-checkpoint/2" and payload.get(
+            "inputIdentity"
+        ) != self._checkpoint_input_identity(record):
+            raise BacktestError(
+                "CHECKPOINT_CORRUPT",
+                "checkpoint immutable input identity does not match the run",
             )
         if not isinstance(payload.get("engine"), dict) or not isinstance(
             payload.get("provider"), dict
@@ -3309,6 +3710,8 @@ class BacktestService:
         stamp: int,
         expected_generation: int,
         result_overrides: Mapping[str, object] | None = None,
+        chart_interval: str | None = None,
+        chart_bars: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         current = transition(RunState.RUNNING, RunState.COMPLETING)
         completing_won = self.repository.compare_and_set_run_state(
@@ -3410,6 +3813,13 @@ class BacktestService:
                 audit_details_json=canonical_json(audit_details),
                 updated_at_ms=stamp,
                 signal_trace_rows=signal_trace_rows,
+                chart_cache=(
+                    None
+                    if chart_interval is None or chart_bars is None
+                    else self._chart_cache_record(
+                        chart_interval, chart_bars, generated_at_ms=stamp
+                    )
+                ),
             )
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)
@@ -3428,9 +3838,39 @@ class BacktestService:
         completed["report"] = report
         return completed
 
+    def _chart_cache_record(
+        self,
+        interval: str,
+        bars: list[dict[str, object]],
+        *,
+        generated_at_ms: int,
+    ) -> dict[str, object]:
+        if len(bars) > 50_000:
+            raise BacktestError(
+                "BUDGET_EXCEEDED", "derived chart cache exceeds bounded bar ceiling"
+            )
+        bars_json = canonical_json(bars)
+        if len(bars_json.encode("utf-8")) > self.settings.max_report_bytes:
+            raise BacktestError(
+                "BUDGET_EXCEEDED", "derived chart cache exceeds frozen byte ceiling"
+            )
+        return {
+            "cache_schema": "BACKTEST_CHART_CACHE_V1",
+            "interval": interval,
+            "bars_json": bars_json,
+            "bar_count": len(bars),
+            "bars_hash": "sha256:" + sha256_hex(bars_json),
+            "generated_at_ms": generated_at_ms,
+        }
+
     def _normalize_execution_error(self, exc: Exception) -> Exception:
         if isinstance(exc, (BacktestError, StrategyProviderError, MarketDatasetError)):
             return exc
+        if isinstance(exc, sqlite3.Error):
+            return BacktestError(
+                "BACKTEST_STORAGE_TRANSIENT",
+                f"durable backtest storage failed ({type(exc).__name__})",
+            )
         return StrategyProviderError(
             "PROVIDER_CRASH_UNRECOVERABLE",
             f"provider execution failed ({type(exc).__name__})",
@@ -3471,8 +3911,33 @@ class BacktestService:
             failure_code=code,
         )
         if changed:
-            self.repository.delete_checkpoints(run_id)
-            self._audit(run_id, "fail", {"code": code, "message": str(exc)})
+            checkpoint = self.repository.latest_checkpoint(run_id)
+            preserve = code in {
+                "PROVIDER_TIMEOUT",
+                "PROVIDER_CRASH_UNRECOVERABLE",
+                "CHECKPOINT_CORRUPT",
+                "DATASET_IDENTITY_CHANGED",
+                "DATA_SNAPSHOT_MISMATCH",
+                "DATA_GAP_REJECTED",
+                "BACKTEST_STORAGE_TRANSIENT",
+            }
+            if not preserve:
+                self.repository.delete_checkpoints(run_id)
+            self._audit(
+                run_id,
+                "fail",
+                {
+                    "code": code,
+                    "message": str(exc),
+                    "checkpointPreserved": bool(preserve and checkpoint is not None),
+                    "checkpointSequence": (
+                        None if checkpoint is None else int(checkpoint["sequence"])
+                    ),
+                    "checkpointHash": (
+                        None if checkpoint is None else str(checkpoint["state_hash"])
+                    ),
+                },
+            )
 
     def _transition_run(
         self,
@@ -3700,6 +4165,25 @@ def _config_optional_decimal(config: Mapping[str, object], name: str) -> Decimal
     if value <= 0:
         raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"{name} must be positive")
     return value
+
+
+def _event_wire_bytes(events: tuple[MarketEvent, ...]) -> int:
+    """Count exact canonical list bytes without materializing a second event corpus."""
+    total = 2
+    for index, event in enumerate(events):
+        if index:
+            total += 1
+        total += len(
+            canonical_json(
+                {
+                    "sequence": event.sequence,
+                    "event_time_ms": event.event_time_ms,
+                    "role": event.role,
+                    "payload": dict(event.payload),
+                }
+            ).encode("utf-8")
+        )
+    return total
 
 
 def _now_ms() -> int:

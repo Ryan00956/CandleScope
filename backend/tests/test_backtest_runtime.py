@@ -5,6 +5,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from app.backtest.errors import BacktestError
 from app.backtest.runtime import BacktestRuntime
 from app.core.config import load_backtest_settings
 from app.data_engine.storage.raw_trade_archive import (
@@ -462,8 +465,21 @@ def test_runtime_executes_verified_aggregate_trade_snapshot(tmp_path: Path) -> N
         assert dual_report["metrics"]["signal_event_count"] == 23
         assert dual_report["metrics"]["execution_event_count"] == 24
         dual_chart = runtime.chart_data(str(dual_created["run_id"]))
+        dual_cache = runtime.service.repository.get_chart_cache(
+            str(dual_created["run_id"])
+        )
+        assert dual_cache is not None
+        assert dual_cache["cache_schema"] == "BACKTEST_CHART_CACHE_V1"
+        assert dual_cache["bar_count"] == 23
         assert dual_chart["interval"] == "1s"
         assert len(dual_chart["bars"]) == 23
         assert len(dual_chart["fills"]) == 2
+        runtime.service.repository.connection.execute(
+            "UPDATE backtest_chart_cache SET bars_json = '[]' WHERE run_id = ?",
+            (str(dual_created["run_id"]),),
+        )
+        runtime.service.repository.connection.commit()
+        with pytest.raises(BacktestError, match="CHART_CACHE_CORRUPT"):
+            runtime.chart_data(str(dual_created["run_id"]))
     finally:
         runtime.shutdown()

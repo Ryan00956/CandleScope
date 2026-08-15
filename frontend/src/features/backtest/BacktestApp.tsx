@@ -7,7 +7,11 @@ import type {
   BacktestSnapshot,
 } from "./backtestApi.js";
 import BacktestResultChart, { EquityCurve } from "./BacktestResultChart.js";
-import { isBacktestEntryEnabled } from "./backtestFlags.js";
+import {
+  PYTHON_HOST_OWNS_COPY,
+  isBacktestEntryEnabled,
+  isPythonStrategyEntryEnabled,
+} from "./backtestFlags.js";
 import type {
   BacktestReport,
   BacktestChartData,
@@ -852,6 +856,13 @@ export default function BacktestApp() {
             </label>
           </div>
           {selectedStrategy && <p className="backtest-strategy-help">{selectedStrategy.description}</p>}
+          {isPythonStrategyEntryEnabled() && (
+            <div className="backtest-strategy-help" data-testid="python-strategy-studio">
+              <strong>Python</strong>
+              <p>{PYTHON_HOST_OWNS_COPY}</p>
+              <p>从模板创建或导入策略目录/zip，先静态检查再冻结 revision。</p>
+            </div>
+          )}
           <details className="backtest-strategy-workspace" open data-testid="strategy-revision-workspace">
             <summary>StrategyRevision V2 · 创建 / 静态检查 / 编译 / smoke</summary>
             <div className="backtest-form-row three">

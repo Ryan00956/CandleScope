@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS backtest_schema_meta (
@@ -160,6 +160,64 @@ CREATE TABLE IF NOT EXISTS backtest_audit (
     details_json TEXT NOT NULL,
     chain_hash TEXT NOT NULL,
     PRIMARY KEY (run_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_strategy_revisions (
+    revision_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    name TEXT NOT NULL,
+    language TEXT NOT NULL,
+    base_revision_id TEXT NOT NULL,
+    source_text TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    compiled_json TEXT NOT NULL,
+    compiled_hash TEXT NOT NULL,
+    dependency_hash TEXT NOT NULL,
+    runtime_revision TEXT NOT NULL,
+    parameter_schema_json TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL,
+    archived_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_strategy_smokes (
+    receipt_hash TEXT PRIMARY KEY,
+    revision_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    start_time_ms INTEGER NOT NULL,
+    end_time_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_strategy_smokes_revision
+    ON backtest_strategy_smokes(revision_id, created_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS backtest_signal_trace (
+    run_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    event_time_ms INTEGER,
+    payload_json TEXT NOT NULL,
+    row_hash TEXT NOT NULL,
+    PRIMARY KEY (run_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_signal_trace_run
+    ON backtest_signal_trace(run_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS backtest_review_bridges (
+    bridge_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    dataset_ref_json TEXT NOT NULL,
+    window_json TEXT NOT NULL,
+    strategy_projection_json TEXT NOT NULL,
+    training_run_id TEXT,
+    state TEXT NOT NULL,
+    reveal_json TEXT,
+    created_at_ms INTEGER NOT NULL
 );
 """
 

@@ -282,7 +282,7 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         repository.connection.execute(
             "SELECT schema_version FROM backtest_schema_meta"
         ).fetchone()[0]
-        == 3
+        == 4
     )
     assert (
         repository.connection.execute(
@@ -291,6 +291,24 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         == 0
     )
     repository.close()
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(
+                Path(__file__).parents[1] / "scripts" / "rollback_backtest_m9_schema.py"
+            ),
+            "--database",
+            str(path),
+            "--backup",
+            str(tmp_path / "backtest-v4.backup.db"),
+            "--confirm",
+            "ROLLBACK_M9_SCHEMA_TO_V3",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     backup = tmp_path / "backtest-v3.backup.db"
     subprocess.run(
@@ -380,7 +398,7 @@ def test_schema_v3_additive_migration_and_v2_plan_are_idempotent(
         still_v3.execute("SELECT schema_version FROM backtest_schema_meta").fetchone()[
             0
         ]
-        == 3
+        == 4
     )
     still_v3.close()
 

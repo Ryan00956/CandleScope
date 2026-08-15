@@ -122,9 +122,14 @@ class IsolatedStrategyProvider:
 
 def _provider_process_main(connection: Any, revision_id: str) -> None:
     from app.backtest.strategy.registry import build_default_strategy_registry
+    from app.backtest.strategy.pine_adapter import PineStrategyProvider
 
     try:
-        provider = build_default_strategy_registry().build(revision_id)
+        provider = (
+            PineStrategyProvider()
+            if revision_id == "pine-long-flat-v1"
+            else build_default_strategy_registry().build(revision_id)
+        )
         while True:
             operation, payload = connection.recv()
             try:
@@ -146,7 +151,10 @@ def _provider_process_main(connection: Any, revision_id: str) -> None:
                 connection.send(
                     (
                         "error",
-                        ("PROVIDER_CRASH_UNRECOVERABLE", f"{type(exc).__name__}: {exc}"),
+                        (
+                            "PROVIDER_CRASH_UNRECOVERABLE",
+                            f"{type(exc).__name__}: {exc}",
+                        ),
                     )
                 )
     except (EOFError, BrokenPipeError, OSError):

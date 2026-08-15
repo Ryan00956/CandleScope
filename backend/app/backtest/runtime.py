@@ -360,7 +360,7 @@ class BacktestRuntime:
             "bars": bars,
             "fills": report.get("fills") or [],
             "rejected_orders": report.get("rejected_orders") or [],
-            "equity_curve": report.get("equity_curve") or [],
+            "equity_curve": list(report.get("equity_curve") or [])[-max_bars:],
             "truncated": truncated,
         }
 
@@ -626,7 +626,10 @@ class BacktestWorker:
             config = json.loads(str(record["config_json"]))
             manifest = self.local_data.get_manifest(str(record["dataset_id"]))
             provider = IsolatedStrategyProvider(
-                str(record["strategy_revision_id"]),
+                str(
+                    config.get("strategy_execution_revision")
+                    or record["strategy_revision_id"]
+                ),
                 step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
             )
             if record["fidelity_mode"] == "BAR_APPROX":

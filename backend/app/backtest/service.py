@@ -86,6 +86,9 @@ from .strategy.host_policy import (
 from .strategy.protocol import StrategyProviderSession
 from .strategy.pyne_adapter import PyneHostPlanner
 from .strategy.registry import StrategyRevisionRegistry, build_default_strategy_registry
+from .strategy.builtin import build_builtin_provider
+from .strategy.pine_adapter import PineStrategyProvider
+from .strategy.workspace import compile_revision
 
 FIDELITY_MATRIX = {
     "BAR_APPROX": ("BAR", "APPROXIMATE"),
@@ -162,11 +165,460 @@ class BacktestService:
                 "BACKTEST_BAR_ENABLED": self.settings.bar_enabled,
                 "BACKTEST_TRADE_TAPE_ENABLED": self.settings.trade_tape_enabled,
                 "BACKTEST_STUDY_ENABLED": self.settings.study_enabled,
+                "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": self.settings.replay_review_bridge_enabled,
             },
             "fidelity_modes": fidelity_modes,
             "strategy_revisions": self.strategy_registry.revision_ids(),
-            "strategies": self.strategy_registry.descriptors(),
+            "strategies": self.strategy_registry.descriptors()
+            + [
+                self._revision_wire(item)
+                for item in self.repository.list_strategy_revisions()
+            ],
         }
+
+    def _revision_wire(self, row: Mapping[str, object]) -> dict[str, object]:
+        capabilities = json.loads(str(row["capabilities_json"]))
+        return {
+            "revision_id": row["revision_id"],
+            "provider_kind": row["language"],
+            "label": row["name"],
+            "description": f"不可变 {row['schema_version']} · {row['compiled_hash']}",
+            "input_modes": capabilities["input_modes"],
+            "output_modes": capabilities["output_modes"],
+            "signal_clock": capabilities["signal_clock"],
+            "required_features": [],
+            "warmup_requirement": {},
+            "parameter_schema": json.loads(str(row["parameter_schema_json"])),
+            "accepts_source": False,
+            "unsupported": capabilities["unsupported"],
+            "source_hash": row["source_hash"],
+            "compiled_hash": row["compiled_hash"],
+            "runtime_revision": row["runtime_revision"],
+            "archived_at_ms": row["archived_at_ms"],
+        }
+
+    def create_strategy_revision(
+        self, payload: Mapping[str, object], *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        stamp = now_ms or _now_ms()
+        try:
+            record = compile_revision(payload, now_ms=stamp)
+        except StrategyProviderError as exc:
+            raise BacktestError(
+                exc.code,
+                str(exc),
+                details={"next_step": "fix the located source error and compile again"},
+            ) from exc
+        self.repository.insert_strategy_revision(record)
+        return {
+            **self._revision_wire(record),
+            "schema_version": record["schema_version"],
+            "base_revision_id": record["base_revision_id"],
+            "diagnostics": record["diagnostics"],
+        }
+
+    def copy_strategy_revision(
+        self, revision_id: str, *, name: str, now_ms: int | None = None
+    ) -> dict[str, object]:
+        source = self.repository.get_strategy_revision(revision_id)
+        if source is None:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", f"unknown strategy revision {revision_id}"
+            )
+        return self.create_strategy_revision(
+            {
+                "name": name,
+                "language": source["language"],
+                "base_revision_id": source["base_revision_id"],
+                "source_text": source["source_text"],
+                "parameter_schema": json.loads(str(source["parameter_schema_json"])),
+            },
+            now_ms=now_ms,
+        )
+
+    def archive_strategy_revision(
+        self, revision_id: str, *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        stamp = now_ms or _now_ms()
+        if not self.repository.archive_strategy_revision(revision_id, stamp):
+            raise BacktestError(
+                "IDENTITY_MUTATION", "revision is unknown or already archived"
+            )
+        row = self.repository.get_strategy_revision(revision_id)
+        assert row is not None
+        return self._revision_wire(row)
+
+    def smoke_strategy_revision(
+        self,
+        revision_id: str,
+        payload: Mapping[str, object],
+        *,
+        now_ms: int | None = None,
+    ) -> dict[str, object]:
+        row = self.repository.get_strategy_revision(revision_id)
+        if row is None or row["archived_at_ms"] is not None:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "select an active compiled revision first"
+            )
+        start, end = (
+            int(payload.get("start_time_ms") or 0),
+            int(payload.get("end_time_ms") or 0),
+        )
+        if end <= start or end - start > 7 * 86_400_000:
+            raise BacktestError(
+                "BUDGET_EXCEEDED",
+                "smoke window must be positive and no longer than 7 days",
+            )
+        provider = (
+            PineStrategyProvider()
+            if row["base_revision_id"] == "pine-long-flat-v1"
+            else build_builtin_provider(str(row["base_revision_id"]))
+        )
+        try:
+            compiled = json.loads(str(row["compiled_json"]))
+            provider.prepare(
+                {
+                    "roles": ["BARS"],
+                    "source": compiled.get("executionSource", row["source_text"]),
+                    "parameters": dict(payload.get("parameters") or {}),
+                    "outputMode": (
+                        json.loads(str(row["capabilities_json"]))["output_modes"][-1]
+                    ),
+                }
+            )
+        except StrategyProviderError as exc:
+            raise BacktestError(
+                exc.code,
+                str(exc),
+                details={"next_step": "correct parameters/source and rerun smoke"},
+            ) from exc
+        finally:
+            provider.close()
+        stamp = now_ms or _now_ms()
+        details = {
+            "schema": "STRATEGY_SMOKE_V1",
+            "revisionId": revision_id,
+            "datasetId": str(payload.get("dataset_id") or ""),
+            "snapshotHash": str(payload.get("snapshot_hash") or ""),
+            "startTimeMs": start,
+            "endTimeMs": end,
+            "status": "PASSED",
+        }
+        receipt_hash = "sha256:" + sha256_hex(canonical_json(details))
+        self.repository.insert_strategy_smoke(
+            {
+                "receipt_hash": receipt_hash,
+                "revision_id": revision_id,
+                "dataset_id": details["datasetId"],
+                "snapshot_hash": details["snapshotHash"],
+                "start_time_ms": start,
+                "end_time_ms": end,
+                "status": "PASSED",
+                "details_json": canonical_json(details),
+                "created_at_ms": stamp,
+            }
+        )
+        return {**details, "receiptHash": receipt_hash}
+
+    def get_signal_trace(
+        self, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict[str, object]:
+        self.get_run(run_id)
+        bounded = min(500, max(1, int(limit)))
+        rows = self.repository.list_signal_trace(
+            run_id, after=max(0, int(after)), limit=bounded + 1
+        )
+        page = rows[:bounded]
+        return {
+            "schema": "SIGNAL_TRACE_V1",
+            "runId": run_id,
+            "items": page,
+            "nextAfter": page[-1]["ordinal"] if len(rows) > bounded and page else None,
+            "limit": bounded,
+        }
+
+    def compare_run_pair(
+        self, left_run_id: str, right_run_id: str
+    ) -> dict[str, object]:
+        left_run, right_run = self.get_run(left_run_id), self.get_run(right_run_id)
+        left_report, right_report = self.repository.get_reports_for_compare(
+            left_run_id, right_run_id
+        )
+        if left_report is None or right_report is None:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "both Runs must be completed before comparison"
+            )
+        left_config, right_config = (
+            json.loads(str(left_run["config_json"])),
+            json.loads(str(right_run["config_json"])),
+        )
+        identity_fields = (
+            "dataset_id",
+            "data_epoch",
+            "snapshot_hash",
+            "account_model",
+            "contract_data_mode",
+            "metrics_version",
+        )
+        mismatches = [
+            name
+            for name in identity_fields
+            if (
+                left_run.get(name, left_config.get(name))
+                != right_run.get(name, right_config.get(name))
+            )
+        ]
+        compatible = (
+            not mismatches and left_run["fidelity_mode"] == right_run["fidelity_mode"]
+        )
+        hashes_left, hashes_right = (
+            left_report.get("hashes", {}),
+            right_report.get("hashes", {}),
+        )
+        explanation = None
+        if hashes_left.get("decision") == hashes_right.get(
+            "decision"
+        ) and hashes_left.get("fill") != hashes_right.get("fill"):
+            explanation = "决策相同但成交 hash 不同：执行时钟、延迟、滑点或费用精度改变了成交；不得把近似成交视为逐笔精确。"
+        params_left, params_right = (
+            left_config.get("parameters", {}),
+            right_config.get("parameters", {}),
+        )
+        parameter_diff = {
+            key: {"left": params_left.get(key), "right": params_right.get(key)}
+            for key in sorted(set(params_left) | set(params_right))
+            if params_left.get(key) != params_right.get(key)
+        }
+        left_performance = dict(left_report.get("performance") or {})
+        right_performance = dict(right_report.get("performance") or {})
+
+        def metric_value(
+            container: Mapping[str, object], section: str, key: str
+        ) -> object:
+            raw = (container.get(section) or {}).get(key)  # type: ignore[union-attr]
+            return raw.get("value") if isinstance(raw, Mapping) else raw
+
+        def decimal_diff(left: object, right: object) -> dict[str, object]:
+            result: dict[str, object] = {"left": left, "right": right, "delta": None}
+            if left is not None and right is not None:
+                try:
+                    result["delta"] = str(Decimal(str(right)) - Decimal(str(left)))
+                except InvalidOperation:
+                    pass
+            return result
+
+        trade_diff = {
+            "tradeCount": decimal_diff(
+                metric_value(left_performance, "trading", "trade_count")
+                or left_report.get("metrics", {}).get("trade_count"),
+                metric_value(right_performance, "trading", "trade_count")
+                or right_report.get("metrics", {}).get("trade_count"),
+            ),
+            "netPnl": decimal_diff(
+                metric_value(left_performance, "returns", "net_pnl")
+                or left_report.get("metrics", {}).get("realized_net_pnl"),
+                metric_value(right_performance, "returns", "net_pnl")
+                or right_report.get("metrics", {}).get("realized_net_pnl"),
+            ),
+        }
+        cost_diff = {
+            key: decimal_diff(
+                metric_value(left_performance, "execution", key),
+                metric_value(right_performance, "execution", key),
+            )
+            for key in ("fees", "funding", "slippage")
+        }
+        return {
+            "schema": "RUN_COMPARE_V2",
+            "directComparisonAllowed": compatible,
+            "incompatibleFields": mismatches
+            + (
+                []
+                if left_run["fidelity_mode"] == right_run["fidelity_mode"]
+                else ["fidelity_mode"]
+            ),
+            "precisionExplanation": explanation,
+            "parameterDiff": parameter_diff,
+            "tradeDiff": trade_diff,
+            "costDiff": cost_diff,
+            "left": {
+                "runId": left_run_id,
+                "hashes": hashes_left,
+                "equity": left_report.get("equity_curve", []),
+                "equityDaily": left_performance.get("equity_daily", []),
+                "drawdownDaily": left_performance.get("drawdown_daily", []),
+                "metrics": left_report.get("metrics", {}),
+            },
+            "right": {
+                "runId": right_run_id,
+                "hashes": hashes_right,
+                "equity": right_report.get("equity_curve", []),
+                "equityDaily": right_performance.get("equity_daily", []),
+                "drawdownDaily": right_performance.get("drawdown_daily", []),
+                "metrics": right_report.get("metrics", {}),
+            },
+        }
+
+    def clone_run_parameter(
+        self, run_id: str, *, parameter: str, value: object, idempotency_key: str
+    ) -> dict[str, object]:
+        origin = self.get_run(run_id)
+        config = json.loads(str(origin["config_json"]))
+        parameters = dict(config.get("parameters") or {})
+        if parameter not in parameters:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD",
+                "clone parameter must already exist in the frozen Run",
+            )
+        if parameters[parameter] == value:
+            raise BacktestError(
+                "IDENTITY_MUTATION", "clone must change exactly one parameter"
+            )
+        parameters[parameter] = value
+        config["parameters"] = parameters
+        config.pop("study_id", None)
+        return self.create_run(config, idempotency_key=idempotency_key)
+
+    def create_review_bridge(
+        self, run_id: str, payload: Mapping[str, object], *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        if not self.settings.replay_review_bridge_enabled:
+            raise BacktestError(
+                "FLAG_DISABLED",
+                "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED is 0; enable it explicitly for research review",
+            )
+        run = self.get_run(run_id)
+        if run["state"] != "COMPLETED":
+            raise BacktestError(
+                "IDENTITY_MUTATION",
+                "complete the source Run before creating a review bridge",
+            )
+        start, end = (
+            int(payload.get("start_time_ms") or 0),
+            int(payload.get("end_time_ms") or 0),
+        )
+        config = json.loads(str(run["config_json"]))
+        if (
+            start < int(config["start_time_ms"])
+            or end > int(config["end_time_ms"])
+            or end <= start
+        ):
+            raise BacktestError(
+                "DATA_QUALITY_FAILED",
+                "review window must be inside the immutable source Run",
+            )
+        bridge_id, stamp = "btrb_" + uuid.uuid4().hex, now_ms or _now_ms()
+        dataset_ref = {
+            key: run[key] for key in ("dataset_id", "data_epoch", "snapshot_hash")
+        }
+        projection = {
+            "strategy_revision_id": run["strategy_revision_id"],
+            "config_hash": run["config_hash"],
+            "report_hash": self.get_report(run_id)["hashes"]["report"],
+        }
+        self.repository.insert_review_bridge(
+            {
+                "bridge_id": bridge_id,
+                "schema_version": "REPLAY_RESEARCH_BRIDGE_V1",
+                "run_id": run_id,
+                "dataset_ref_json": canonical_json(dataset_ref),
+                "window_json": canonical_json(
+                    {"start_time_ms": start, "end_time_ms": end}
+                ),
+                "strategy_projection_json": canonical_json(projection),
+                "training_run_id": None,
+                "state": "BLINDED",
+                "reveal_json": None,
+                "created_at_ms": stamp,
+            }
+        )
+        return {
+            "bridgeId": bridge_id,
+            "schema": "REPLAY_RESEARCH_BRIDGE_V1",
+            "state": "BLINDED",
+            "datasetRef": dataset_ref,
+            "window": {"start_time_ms": start, "end_time_ms": end},
+            "strategyProjection": None,
+            "isolation": {
+                "shared": ["immutable dataset ref", "read-only projection"],
+                "notShared": ["account", "cursor", "checkpoint", "UI store"],
+            },
+        }
+
+    def bind_review_bridge_training_run(
+        self, bridge_id: str, training_run_id: str
+    ) -> dict[str, object]:
+        self.repository.bind_review_bridge_training_run(bridge_id, training_run_id)
+        return self.get_review_bridge(bridge_id)
+
+    def get_review_bridge(self, bridge_id: str) -> dict[str, object]:
+        row = self.repository.get_review_bridge(bridge_id)
+        if row is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "review bridge does not exist")
+        revealed = str(row["state"]) == "REVEALED"
+        return {
+            "bridgeId": str(row["bridge_id"]),
+            "schema": str(row["schema_version"]),
+            "state": str(row["state"]),
+            "runId": str(row["run_id"]),
+            "trainingRunId": row["training_run_id"],
+            "datasetRef": json.loads(str(row["dataset_ref_json"])),
+            "window": json.loads(str(row["window_json"])),
+            "strategyProjection": (
+                json.loads(str(row["strategy_projection_json"])) if revealed else None
+            ),
+            "comparison": (json.loads(str(row["reveal_json"])) if revealed else None),
+            "isolation": {
+                "shared": ["immutable dataset ref", "read-only projection"],
+                "notShared": ["account", "cursor", "checkpoint", "UI store"],
+            },
+        }
+
+    def reveal_review_bridge(
+        self,
+        bridge_id: str,
+        *,
+        training_run_id: str,
+        training_state: str,
+        human_results: Mapping[str, object],
+        now_ms: int | None = None,
+    ) -> dict[str, object]:
+        row = self.repository.get_review_bridge(bridge_id)
+        if row is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", "review bridge does not exist")
+        if str(row.get("training_run_id") or "") != training_run_id:
+            raise BacktestError(
+                "IDENTITY_MUTATION", "TrainingRun identity does not match bridge"
+            )
+        if str(row["state"]) == "REVEALED":
+            return self.get_review_bridge(bridge_id)
+        if training_state != "ENDED":
+            raise BacktestError(
+                "IDENTITY_MUTATION", "blind review must reach ENDED before reveal"
+            )
+        strategy_projection = json.loads(str(row["strategy_projection_json"]))
+        human_projection = {
+            "schema_version": human_results.get("schema_version"),
+            "summary": human_results.get("summary"),
+            "items": list(human_results.get("items") or []),
+            "returned_count": human_results.get("returned_count"),
+            "truncated": human_results.get("truncated"),
+        }
+        reveal = {
+            "schema": "REPLAY_RESEARCH_REVEAL_V1",
+            "revealedAtMs": now_ms or _now_ms(),
+            "trainingRunId": training_run_id,
+            "strategyOrders": strategy_projection,
+            "humanOrders": human_projection,
+            "humanProjectionHash": "sha256:"
+            + sha256_hex(canonical_json(human_projection)),
+            "precision": "read-only research comparison; accounts and execution state remain independent",
+        }
+        try:
+            self.repository.reveal_review_bridge(bridge_id, canonical_json(reveal))
+        except RuntimeError as exc:
+            raise BacktestError("IDENTITY_MUTATION", str(exc)) from exc
+        return self.get_review_bridge(bridge_id)
 
     def validate_run(self, payload: Mapping[str, object]) -> dict[str, object]:
         identity = self._identity_from_payload(payload)
@@ -211,6 +663,15 @@ class BacktestService:
         run_id = f"bt_{uuid.uuid4().hex}"
         stored_payload = dict(payload)
         normalized_execution = json.loads(identity.execution_json)
+        stored_payload["strategy_source"] = normalized_execution.get("strategy_source")
+        if normalized_execution.get("strategy_execution_revision"):
+            stored_payload["strategy_execution_revision"] = normalized_execution[
+                "strategy_execution_revision"
+            ]
+        if normalized_execution.get("signal_trace_mode"):
+            stored_payload["signal_trace_mode"] = normalized_execution[
+                "signal_trace_mode"
+            ]
         if normalized_execution.get("host_policy_revision"):
             stored_payload.update(
                 {
@@ -2468,21 +2929,73 @@ class BacktestService:
             )
         if self.enforce_registered_revisions:
             try:
-                descriptor = self.strategy_registry.require(
+                persisted_revision = self.repository.get_strategy_revision(
                     str(payload["strategy_revision_id"])
                 )
-                capabilities = descriptor.factory().describe()
+                if persisted_revision is not None:
+                    if persisted_revision["archived_at_ms"] is not None:
+                        raise StrategyProviderError(
+                            "IDENTITY_MUTATION",
+                            "archived strategy revision cannot create a new Run",
+                        )
+                    smoke = self.repository.latest_strategy_smoke(
+                        str(payload["strategy_revision_id"])
+                    )
+                    if smoke is None:
+                        raise StrategyProviderError(
+                            "SMOKE_REQUIRED",
+                            "run the bounded Strategy smoke before creating a Run",
+                        )
+                    if str(smoke["dataset_id"]) != str(payload["dataset_id"]) or str(
+                        smoke["snapshot_hash"]
+                    ) != str(payload["snapshot_hash"]):
+                        raise StrategyProviderError(
+                            "SMOKE_REQUIRED",
+                            "rerun Strategy smoke for the selected immutable dataset snapshot",
+                        )
+                    base_revision = str(persisted_revision["base_revision_id"])
+                    probe = (
+                        PineStrategyProvider()
+                        if base_revision == "pine-long-flat-v1"
+                        else build_builtin_provider(base_revision)
+                    )
+                    capabilities = probe.describe()
+                    compiled_revision = json.loads(
+                        str(persisted_revision["compiled_json"])
+                    )
+                    frozen_source = str(
+                        compiled_revision.get("executionSource")
+                        or persisted_revision["source_text"]
+                    )
+                    if (
+                        strategy_source is not None
+                        and str(strategy_source) != frozen_source
+                    ):
+                        raise StrategyProviderError(
+                            "IDENTITY_MUTATION",
+                            "Run cannot override frozen StrategyRevision source",
+                        )
+                    strategy_source = frozen_source
+                else:
+                    descriptor = self.strategy_registry.require(
+                        str(payload["strategy_revision_id"])
+                    )
+                    capabilities = descriptor.factory().describe()
+                    probe = descriptor.factory()
                 if output_mode not in capabilities.output_modes:
                     raise StrategyProviderError(
                         "PROVIDER_PROTOCOL_VIOLATION",
-                        f"{descriptor.revision_id} cannot output {output_mode}",
+                        f"strategy revision cannot output {output_mode}",
                     )
-                if strategy_source is not None and not descriptor.accepts_source:
+                if (
+                    persisted_revision is None
+                    and strategy_source is not None
+                    and not descriptor.accepts_source
+                ):
                     raise StrategyProviderError(
                         "PROVIDER_PROTOCOL_VIOLATION",
                         f"{descriptor.revision_id} does not accept strategy source",
                     )
-                probe = descriptor.factory()
                 probe.prepare(
                     {
                         "roles": [
@@ -2567,6 +3080,18 @@ class BacktestService:
             "exchange": str(payload.get("exchange") or "binance"),
             "market_type": str(payload.get("market_type") or "usdm"),
         }
+        if "signal_trace_mode" in payload:
+            trace_mode = str(payload.get("signal_trace_mode") or "LEGACY_INLINE_V1")
+            if trace_mode not in {"LEGACY_INLINE_V1", "PAGED_V1"}:
+                raise BacktestError("SCHEMA_UNKNOWN_FIELD", "unknown signal_trace_mode")
+            execution_config["signal_trace_mode"] = trace_mode
+        persisted_execution = self.repository.get_strategy_revision(
+            str(payload["strategy_revision_id"])
+        )
+        if persisted_execution is not None:
+            execution_config["strategy_execution_revision"] = str(
+                persisted_execution["base_revision_id"]
+            )
         if account_model == "LINEAR_PERP_ONE_WAY_V2":
             execution_config.update(
                 {
@@ -2819,6 +3344,39 @@ class BacktestService:
             report_metadata = getattr(provider, "report_metadata", None)
             if "strategy_metadata" not in result_payload and callable(report_metadata):
                 result_payload["strategy_metadata"] = report_metadata()
+            signal_trace_rows: list[dict[str, object]] = []
+            strategy_metadata = result_payload.get("strategy_metadata")
+            completing_config = json.loads(str(completing["config_json"]))
+            if (
+                isinstance(strategy_metadata, dict)
+                and completing_config.get("signal_trace_mode") == "PAGED_V1"
+            ):
+                raw_trace = strategy_metadata.pop("decisionDebugTrace", None)
+                if isinstance(raw_trace, list):
+                    for ordinal, item in enumerate(raw_trace[:10_000], start=1):
+                        if not isinstance(item, Mapping):
+                            continue
+                        payload_json = canonical_json(dict(item))
+                        signal_trace_rows.append(
+                            {
+                                "ordinal": ordinal,
+                                "event_time_ms": item.get("eventTimeMs"),
+                                "payload_json": payload_json,
+                                "row_hash": "sha256:" + sha256_hex(payload_json),
+                            }
+                        )
+                    strategy_metadata["signalTrace"] = {
+                        "schema": "SIGNAL_TRACE_V1",
+                        "count": len(signal_trace_rows),
+                        "hash": "sha256:"
+                        + sha256_hex(
+                            canonical_json(
+                                [row["row_hash"] for row in signal_trace_rows]
+                            )
+                        ),
+                        "paged": True,
+                        "maxRows": 10_000,
+                    }
 
             report_record = dict(completing)
             report_record["state"] = RunState.COMPLETED.value
@@ -2851,6 +3409,7 @@ class BacktestService:
                 audit_actor="host",
                 audit_details_json=canonical_json(audit_details),
                 updated_at_ms=stamp,
+                signal_trace_rows=signal_trace_rows,
             )
         except Exception as exc:
             normalized = self._normalize_execution_error(exc)

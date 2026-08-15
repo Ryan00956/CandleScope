@@ -56,6 +56,23 @@ function metricLabel(metric: { value: string | null; reason: string | null } | u
   return metric.value ?? `— (${metric.reason ?? "NOT_APPLICABLE"})`;
 }
 
+function boundedRows<T>(rows: readonly T[], limit = 1_000): readonly T[] {
+  return rows.length <= limit ? rows : rows.slice(-limit);
+}
+
+function RsiTracePane({ items }: { items: Array<{ payload: Record<string, unknown> }> }) {
+  const values = items.map((item) => Number(item.payload.rsi)).filter(Number.isFinite).slice(-500);
+  if (values.length < 2) return <p className="backtest-empty">启用 debug trace 后显示 RSI pane。</p>;
+  const points = values.map((value, index) => `${(index / (values.length - 1)) * 1000},${100 - value}`).join(" ");
+  return <div className="backtest-rsi-pane" data-testid="rsi-trace-pane">
+    <span>RSI · 当前页最多 500 点</span>
+    <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-label="RSI 指标 pane">
+      <line x1="0" x2="1000" y1="30" y2="30" /><line x1="0" x2="1000" y1="70" y2="70" />
+      <polyline points={points} fill="none" stroke="#a78bfa" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    </svg>
+  </div>;
+}
+
 export default function BacktestApp() {
   const enabled = useMemo(() => isBacktestEntryEnabled(), []);
   const [datasets, setDatasets] = useState<BacktestDataset[]>([]);
@@ -72,6 +89,15 @@ export default function BacktestApp() {
   const [rsiOverbought, setRsiOverbought] = useState(70);
   const [schemaParameters, setSchemaParameters] = useState<Record<string, string | number | boolean>>({});
   const [strategyRevisionId, setStrategyRevisionId] = useState(SMA_REVISION);
+  const [revisionName, setRevisionName] = useState("RSI24 研究版");
+  const [revisionLanguage, setRevisionLanguage] = useState("BUILTIN_TEMPLATE");
+  const [revisionSource, setRevisionSource] = useState("");
+  const [smokePassed, setSmokePassed] = useState(false);
+  const [signalTrace, setSignalTrace] = useState<Array<{ ordinal: number; event_time_ms: number | null; payload: Record<string, unknown> }>>([]);
+  const [compareRunId, setCompareRunId] = useState("");
+  const [runComparison, setRunComparison] = useState<Record<string, unknown> | null>(null);
+  const [cloneParameter, setCloneParameter] = useState("length");
+  const [cloneValue, setCloneValue] = useState("25");
   const [strategySource, setStrategySource] = useState("close - open");
   const [commandSource, setCommandSource] = useState(DEFAULT_COMMAND_SOURCE);
   const [fidelityMode, setFidelityMode] = useState("BAR_APPROX");
@@ -122,6 +148,7 @@ export default function BacktestApp() {
   const [chart, setChart] = useState<BacktestChartData | null>(null);
   const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
   const [studyComparison, setStudyComparison] = useState<BacktestStudyComparison | null>(null);
+  const [reviewBridge, setReviewBridge] = useState<Record<string, unknown> | null>(null);
   const [studyHypothesis, setStudyHypothesis] = useState("RSI24 超卖做多、超买做空的参数邻域能在样本外保持稳定");
   const [studyParameterSpace, setStudyParameterSpace] = useState('{"length":[20,24],"oversold":["25","30"],"overbought":["70"]}');
   const [studyTrainDays, setStudyTrainDays] = useState(110);
@@ -189,12 +216,118 @@ export default function BacktestApp() {
   );
 
   useEffect(() => {
-    if (strategyRevisionId !== RSI_WILDER_LONG_SHORT_REVISION || !selectedStrategy) return;
+    if (!selectedStrategy?.parameter_schema.length) return;
     setSchemaParameters(Object.fromEntries(selectedStrategy.parameter_schema.map((field) => [
       String(field.name),
       field.default as string | number | boolean,
     ])));
   }, [selectedStrategy, strategyRevisionId]);
+
+  useEffect(() => {
+    setSignalTrace([]);
+    if (!selectedRunId || selectedRun?.state !== "COMPLETED") return undefined;
+    const controller = new AbortController();
+    void defaultBacktestApi.getSignalTrace(selectedRunId, 0, 500, controller.signal)
+      .then((page) => setSignalTrace(page.items))
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted && !errorMessage(reason).includes("unknown")) setError(errorMessage(reason));
+      });
+    return () => controller.abort();
+  }, [selectedRun?.state, selectedRunId]);
+
+  const handleCreateRevision = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const revision = await defaultBacktestApi.createStrategyRevision({
+        name: revisionName, language: revisionLanguage,
+        base_revision_id: revisionLanguage === "BUILTIN_TEMPLATE" ? RSI_WILDER_LONG_SHORT_REVISION : null,
+        source_text: revisionSource,
+        parameter_schema: revisionLanguage === "BUILTIN_TEMPLATE" ? [
+          { name: "length", label: "RSI 长度", type: "integer", default: 24, minimum: 2 },
+          { name: "oversold", label: "超卖", type: "number", default: 30 },
+          { name: "overbought", label: "超买", type: "number", default: 70 },
+          { name: "trigger_mode", label: "触发", type: "enum", default: "LEVEL_TARGET_V1", options: ["LEVEL_TARGET_V1"] },
+          { name: "debug_trace", label: "保存分页信号 trace", type: "boolean", default: true },
+        ] : [],
+      });
+      const next = await defaultBacktestApi.capabilities();
+      setCapabilities(next); setStrategyRevisionId(revision.revision_id); setSmokePassed(false);
+      setNotice(`已编译并保存 ${revision.revision_id}；源码、依赖、runtime 与 hash 已冻结。`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [revisionLanguage, revisionName, revisionSource]);
+
+  const handleSmoke = useCallback(async () => {
+    if (!snapshot || !selectedDataset) return;
+    setLoading(true); setError(null);
+    try {
+      const maxWindow = Math.min(endTimeMs, startTimeMs + 7 * 86_400_000);
+      await defaultBacktestApi.smokeStrategyRevision(strategyRevisionId, {
+        dataset_id: selectedDataset.dataset_id, snapshot_hash: snapshot.snapshot_hash,
+        start_time_ms: startTimeMs, end_time_ms: maxWindow, parameters: schemaParameters,
+      });
+      setSmokePassed(true); setNotice("小窗口 smoke 已通过，可以创建长 Run。");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [endTimeMs, schemaParameters, selectedDataset, snapshot, startTimeMs, strategyRevisionId]);
+
+  const handleCompareRuns = useCallback(async () => {
+    if (!selectedRunId || !compareRunId) return;
+    setLoading(true); setError(null);
+    try { setRunComparison(await defaultBacktestApi.compareRuns(selectedRunId, compareRunId)); }
+    catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [compareRunId, selectedRunId]);
+
+  const refreshCapabilities = useCallback(async () => setCapabilities(await defaultBacktestApi.capabilities()), []);
+
+  const handleCopyRevision = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const copied = await defaultBacktestApi.copyStrategyRevision(strategyRevisionId, `${revisionName} 副本`);
+      await refreshCapabilities(); setStrategyRevisionId(copied.revision_id); setSmokePassed(false);
+      setNotice(`已复制为新的不可变 revision ${copied.revision_id}`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [refreshCapabilities, revisionName, strategyRevisionId]);
+
+  const handleArchiveRevision = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      await defaultBacktestApi.archiveStrategyRevision(strategyRevisionId);
+      await refreshCapabilities(); setStrategyRevisionId(RSI_WILDER_LONG_SHORT_REVISION); setSmokePassed(false);
+      setNotice("Revision 已从新建 Run 目录归档；旧 Run 与报告未改变。");
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [refreshCapabilities, strategyRevisionId]);
+
+  const handleCloneRun = useCallback(async () => {
+    if (!selectedRunId) return;
+    const parsed = Number.isFinite(Number(cloneValue)) ? Number(cloneValue) : cloneValue;
+    setLoading(true); setError(null);
+    try {
+      const cloned = await defaultBacktestApi.cloneRun(selectedRunId, cloneParameter, parsed,
+        globalThis.crypto?.randomUUID?.() ?? `clone-${Date.now()}`);
+      setRuns(await defaultBacktestApi.listRuns()); setSelectedRunId(cloned.run_id);
+      setNotice(`已仅修改 ${cloneParameter} 并生成新 Run ${cloned.run_id}`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [cloneParameter, cloneValue, selectedRunId]);
+
+  const handleReviewBridge = useCallback(async () => {
+    if (!selectedRunId) return;
+    setLoading(true); setError(null);
+    try {
+      const bridge = await defaultBacktestApi.createReviewBridge(selectedRunId, startTimeMs, endTimeMs);
+      setReviewBridge(bridge);
+      setNotice(`已创建独立盲态研究 handoff ${String(bridge.bridgeId)}；策略结果仍隐藏。`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [endTimeMs, selectedRunId, startTimeMs]);
+
+  const handleRevealReviewBridge = useCallback(async () => {
+    const bridgeId = String(reviewBridge?.bridgeId ?? "");
+    if (!bridgeId) return;
+    setLoading(true); setError(null);
+    try {
+      const revealed = await defaultBacktestApi.revealReviewBridge(bridgeId);
+      setReviewBridge(revealed);
+      setNotice(`研究 handoff ${bridgeId} 已不可逆揭示，可只读比较人工订单与策略订单。`);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setLoading(false); }
+  }, [reviewBridge]);
 
   const refreshRuns = useCallback(async (signal?: AbortSignal) => {
     const next = await defaultBacktestApi.listRuns(signal);
@@ -315,6 +448,7 @@ export default function BacktestApp() {
 
   const handleDatasetChange = useCallback((nextId: string) => {
     setDatasetId(nextId);
+    setSmokePassed(false);
     const dataset = datasets.find((item) => item.dataset_id === nextId);
     if (dataset) {
       setStartTimeMs(dataset.first_open_ms ?? 0);
@@ -344,13 +478,13 @@ export default function BacktestApp() {
       bar_builder: fidelityMode === DUAL_CLOCK_MODE ? "TRADE_DERIVED_COMPLETE_BUCKETS_V1" : null,
       timezone: fidelityMode === DUAL_CLOCK_MODE ? "UTC" : null,
       warmup_bars: strategyRevisionId === SMA_REVISION ? slow
-        : strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION
+        : selectedStrategy?.parameter_schema.some((field) => String(field.name) === "length")
           ? Number(schemaParameters.length ?? 24) + 1 : 0,
       parameters: strategyRevisionId === SMA_REVISION
         ? { fast, slow }
         : strategyRevisionId === RSI_REVISION
           ? { length: rsiLength, oversold: rsiOversold, overbought: rsiOverbought }
-          : strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION
+          : selectedStrategy?.parameter_schema.length
             ? schemaParameters
           : {},
       strategy_source: strategyRevisionId === COMMAND_REVISION ? commandSource
@@ -396,6 +530,7 @@ export default function BacktestApp() {
       exchange,
       market_type: marketType,
       gap_policy: "REJECT",
+      signal_trace_mode: "PAGED_V1",
     };
     try {
       await defaultBacktestApi.validate(body);
@@ -703,6 +838,33 @@ export default function BacktestApp() {
             </label>
           </div>
           {selectedStrategy && <p className="backtest-strategy-help">{selectedStrategy.description}</p>}
+          <details className="backtest-strategy-workspace" open data-testid="strategy-revision-workspace">
+            <summary>StrategyRevision V2 · 创建 / 静态检查 / 编译 / smoke</summary>
+            <div className="backtest-form-row three">
+              <label>Revision 名称<input value={revisionName} onChange={(event) => setRevisionName(event.target.value)} /></label>
+              <label>受限语言<select value={revisionLanguage} onChange={(event) => setRevisionLanguage(event.target.value)}>
+                <option value="BUILTIN_TEMPLATE">内置 RSI24 模板</option>
+                <option value="PINE_SUBSET">Pine 安全子集</option>
+                <option value="PYNE_ORDER_DSL">Pyne 统一订单 DSL</option>
+                <option value="EXTERNAL_ARTIFACT_REF">冻结外部模型 artifact 引用</option>
+              </select></label>
+              <button type="button" disabled={loading} onClick={() => void handleCreateRevision()}>静态检查、编译并保存</button>
+            </div>
+            {revisionLanguage !== "BUILTIN_TEMPLATE" && <label>源码（不会执行任意代码）
+              <textarea rows={6} value={revisionSource} onChange={(event) => setRevisionSource(event.target.value)} />
+            </label>}
+            {selectedStrategy?.compiled_hash && <div className="backtest-strategy-evidence">
+              <strong>{selectedStrategy.runtime_revision}</strong>
+              <span>source {hashLabel(selectedStrategy.source_hash)} · artifact {hashLabel(selectedStrategy.compiled_hash)}</span>
+              <span>输入 {selectedStrategy.input_modes.join(", ")} · clock {selectedStrategy.signal_clock} · 输出 {selectedStrategy.output_modes.join(", ")}</span>
+              <span>明确不支持：{selectedStrategy.unsupported?.join("；")}</span>
+              <div className="backtest-form-row three">
+                <button type="button" disabled={loading || smokePassed} onClick={() => void handleSmoke()}>{smokePassed ? "smoke 已通过" : "运行 7 天以内 smoke"}</button>
+                <button type="button" disabled={loading} onClick={() => void handleCopyRevision()}>复制 revision</button>
+                <button type="button" disabled={loading} onClick={() => void handleArchiveRevision()}>归档 revision</button>
+              </div>
+            </div>}
+          </details>
           {fidelityMode !== "BAR_APPROX" && (
             <div className="backtest-form-row">
               <label>交易所<input value={exchange} onChange={(event) => setExchange(event.target.value)} /></label>
@@ -758,7 +920,7 @@ export default function BacktestApp() {
             <label>超卖<input type="number" value={rsiOversold} onChange={(event) => setRsiOversold(Number(event.target.value))} /></label>
             <label>超买<input type="number" value={rsiOverbought} onChange={(event) => setRsiOverbought(Number(event.target.value))} /></label>
           </div>}
-          {strategyRevisionId === RSI_WILDER_LONG_SHORT_REVISION && selectedStrategy && (
+          {selectedStrategy && selectedStrategy.parameter_schema.length > 0 && strategyRevisionId !== SMA_REVISION && strategyRevisionId !== RSI_REVISION && (
             <div className="backtest-form-row three" data-testid="strategy-schema-fields">
               {selectedStrategy.parameter_schema.map((field) => {
                 const name = String(field.name);
@@ -923,7 +1085,7 @@ export default function BacktestApp() {
               <small>仅使用已导入本地包；不会联网补取。</small>
             </div>
           )}
-          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || (strategyRevisionId === SMA_REVISION && fast >= slow)}>
+          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow)}>
             {loading ? "处理中…" : "验证并启动后台 Run"}
           </button>
         </form>
@@ -1070,11 +1232,12 @@ export default function BacktestApp() {
                 <div><h3>不能解释</h3>{report.not_suitable_for.map((item) => <p key={item}>× {item}</p>)}</div>
               </div>
               <h3 className="backtest-table-title">逐笔成交</h3>
+              {report.fills.length > 1_000 && <p className="backtest-empty">表格仅渲染最后 1,000 行；完整记录保留在验证包中。</p>}
               <div className="backtest-table-wrap">
                 <table>
                   <thead><tr><th>订单</th><th>时间</th><th>动作</th><th>方向</th><th>价格</th><th>数量</th><th>费用</th><th>原因</th><th>权威源事件</th></tr></thead>
                   <tbody>
-                    {report.fills.map((fill, index) => (
+                    {boundedRows(report.fills).map((fill, index) => (
                       <tr key={`${String(fill.order_id)}-${index}`}>
                         <td>{String(fill.order_id ?? "")}</td><td>{timestampLabel(Number(fill.event_time_ms))}</td>
                         <td>{String(fill.action ?? "")}</td>
@@ -1093,7 +1256,7 @@ export default function BacktestApp() {
                 <div className="backtest-table-wrap" data-testid="order-lifecycle-table">
                   <table>
                     <thead><tr><th>序号</th><th>订单</th><th>状态</th><th>事件</th><th>剩余数量</th><th>原因</th></tr></thead>
-                    <tbody>{report.order_events?.map((item, index) => <tr key={`${String(item.order_id ?? "rejected")}-${index}`}>
+                    <tbody>{boundedRows(report.order_events ?? []).map((item, index) => <tr key={`${String(item.order_id ?? "rejected")}-${index}`}>
                       <td>{String(item.ordinal ?? index + 1)}</td><td>{String(item.order_id ?? "—")}</td>
                       <td>{String(item.state ?? "")}</td><td>{String(item.sequence ?? "")}</td>
                       <td>{String(item.remaining_qty ?? "—")}</td><td>{String(item.reason ?? "")}</td>
@@ -1106,7 +1269,7 @@ export default function BacktestApp() {
                 <div className="backtest-table-wrap" data-testid="risk-rejection-table">
                   <table>
                     <thead><tr><th>时间</th><th>类别</th><th>原因</th><th>规则</th><th>输入快照</th></tr></thead>
-                    <tbody>{report.rejected_orders?.map((rejection, index) => (
+                    <tbody>{boundedRows(report.rejected_orders ?? []).map((rejection, index) => (
                       <tr key={`${String(rejection.sequence ?? "rejected")}-${index}`}>
                         <td>{timestampLabel(Number(rejection.event_time_ms))}</td>
                         <td>{String(rejection.reason ?? "")}</td>
@@ -1133,7 +1296,7 @@ export default function BacktestApp() {
               <div className="backtest-table-wrap">
                 <table>
                   <thead><tr><th>交易</th><th>方向</th><th>开仓时间</th><th>平仓时间</th><th>开仓价</th><th>平仓价</th><th>MAE</th><th>MFE</th><th>原因</th><th>净盈亏</th></tr></thead>
-                  <tbody>{(report.performance ? filteredTrades : report.trades ?? []).map((trade) => (
+                  <tbody>{boundedRows(report.performance ? filteredTrades : report.trades ?? []).map((trade) => (
                     <tr key={trade.trade_id} className={trade.trade_id === focusedTradeId ? "selected" : ""} onClick={() => setFocusedTradeId(trade.trade_id ?? null)}>
                       <td>{trade.trade_id}</td><td>{trade.side}</td>
                       <td>{timestampLabel(Number(trade.entry_time_ms))}</td><td>{timestampLabel(Number(trade.exit_time_ms))}</td>
@@ -1146,6 +1309,9 @@ export default function BacktestApp() {
               {focusedTrade && <div className="backtest-strategy-evidence" data-testid="focused-trade">
                 <strong>{focusedTrade.trade_id} 已定位到入场 K 线</strong>
                 <span>入场 {focusedTrade.entry_price} · MAE {focusedTrade.mae || "—"} · MFE {focusedTrade.mfe || "—"} · 退出 {focusedTrade.exit_price}</span>
+                <span>decision {timestampLabel(Number(focusedTrade.decision_time_ms ?? focusedTrade.entry_time_ms))} → accepted {timestampLabel(Number(focusedTrade.order_accepted_time_ms ?? focusedTrade.entry_time_ms))} → fill {timestampLabel(Number(focusedTrade.entry_time_ms))}</span>
+                <span>执行影响：延迟 {latencyMs} ms / {latencyEvents} events · 滑点 {slippageBps} bps · 手续费 {focusedTrade.fees ?? "—"} · 资金费 {focusedTrade.funding ?? "—"}</span>
+                <small>触发输入只来自当时可见的已完结数据；BAR/aggTrade 均不代表 raw trade、真实盘口或 queue exact。</small>
               </div>}
             </>
           ) : (
@@ -1160,14 +1326,50 @@ export default function BacktestApp() {
           {chart ? (
             <>
               <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
+              <RsiTracePane items={signalTrace} />
               <h3 className="backtest-table-title">账户权益</h3>
               <EquityCurve data={report?.performance?.equity_daily ?? chart.equity_curve} drawdown={report?.performance?.drawdown_daily} />
             </>
           ) : <p className="backtest-empty">选择一个已完成 Run 查看开平仓标记和资金曲线。</p>}
         </section>
 
+        <section className="backtest-card backtest-visuals" data-testid="run-compare-workspace">
+          <div className="backtest-section-title"><span>05</span><h2>Run 对比与执行精度解释</h2></div>
+          <div className="backtest-form-row">
+            <label>对比 Run<select value={compareRunId} onChange={(event) => setCompareRunId(event.target.value)}>
+              <option value="">选择另一个已完成 Run</option>
+              {runs.filter((item) => item.state === "COMPLETED" && item.run_id !== selectedRunId).map((item) => <option key={item.run_id} value={item.run_id}>{item.run_id} · {item.fidelity_mode}</option>)}
+            </select></label>
+            <button type="button" disabled={!compareRunId || loading} onClick={() => void handleCompareRuns()}>检查兼容并对比</button>
+          </div>
+          {runComparison && <div className="backtest-strategy-evidence">
+            <strong>{runComparison.directComparisonAllowed ? "关键身份兼容：允许直接叠加" : "关键身份不兼容：禁止直接叠加"}</strong>
+            <span>差异 {JSON.stringify(runComparison.incompatibleFields ?? [])}</span>
+            <span>参数 {JSON.stringify(runComparison.parameterDiff ?? {})}</span>
+            <span>交易差异 {JSON.stringify(runComparison.tradeDiff ?? {})}</span>
+            <span>成本差异（手续费 / 资金费 / 滑点）{JSON.stringify(runComparison.costDiff ?? {})}</span>
+            <span>净值 / 回撤曲线点：{String(((runComparison.left as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0)} / {String(((runComparison.left as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0)} ↔ {String(((runComparison.right as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0)} / {String(((runComparison.right as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0)}</span>
+            <span>decision / fill：{JSON.stringify((runComparison.left as Record<string, unknown> | undefined)?.hashes ?? {})} ↔ {JSON.stringify((runComparison.right as Record<string, unknown> | undefined)?.hashes ?? {})}</span>
+            <span>{String(runComparison.precisionExplanation ?? "decision/fill hash 共同说明决策与执行差异。")}</span>
+          </div>}
+          {selectedRun?.state === "COMPLETED" && <div className="backtest-form-row three">
+            <label>Clone 单一参数<input value={cloneParameter} onChange={(event) => setCloneParameter(event.target.value)} /></label>
+            <label>新值<input value={cloneValue} onChange={(event) => setCloneValue(event.target.value)} /></label>
+            <button type="button" disabled={loading} onClick={() => void handleCloneRun()}>生成新不可变 Run</button>
+          </div>}
+          <div className="backtest-strategy-evidence">
+            <strong>回放研究桥：{capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED ? "已显式启用" : "默认关闭"}</strong>
+            <span>桥只传不可变数据引用与只读投影；账户、cursor、checkpoint、UI store 永不共享。</span>
+            <small>训练完成前保持盲态；揭盲后才能比较人工订单与策略订单。</small>
+            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && <button type="button" disabled={!selectedRunId || loading} onClick={() => void handleReviewBridge()}>从当前窗口创建独立盲态研究 handoff</button>}
+            {reviewBridge && <span>handoff {String(reviewBridge.bridgeId)} · {String(reviewBridge.state)} · 策略投影 {reviewBridge.strategyProjection ? "已揭示" : "隐藏"}</span>}
+            {capabilities?.flags.BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED && reviewBridge?.state === "BLINDED" && <button type="button" disabled={loading} onClick={() => void handleRevealReviewBridge()}>完成后检查并揭示只读对比</button>}
+            {reviewBridge?.state === "REVEALED" && <small>{JSON.stringify(reviewBridge.comparison ?? {})}</small>}
+          </div>
+        </section>
+
         <section className="backtest-card backtest-studies">
-          <div className="backtest-section-title"><span>05</span><h2>Study V2 · Train → Select → Test</h2></div>
+          <div className="backtest-section-title"><span>06</span><h2>Study V2 · Train → Select → Test</h2></div>
           <div className="backtest-strategy-evidence" data-testid="study-v2-contract">
             <strong>BACKTEST_WALK_FORWARD_V2 · RSI24 参数研究</strong>
             <span>Test 数据不会参与选择；每个 fold 只有一份 append-only selection receipt 和一次 TestRun。</span>

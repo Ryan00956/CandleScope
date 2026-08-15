@@ -82,6 +82,11 @@
 .backtest-proof span { color: var(--text-muted); font-size: 10px; }
 .backtest-proof code { overflow: hidden; color: #67e8f9; font-size: 10px; text-overflow: ellipsis; }
 .backtest-strategy-evidence { display: grid; gap: 5px; margin: 14px 0; padding: 10px; border: 1px solid rgba(103, 232, 249, 0.24); border-radius: 7px; background: rgba(10, 18, 28, 0.58); font-size: 11px; }
+.backtest-strategy-workspace { margin: 12px 0; padding: 10px; border: 1px solid rgba(167, 139, 250, 0.3); border-radius: 8px; }
+.backtest-strategy-workspace summary { cursor: pointer; color: #c4b5fd; font-weight: 700; }
+.backtest-rsi-pane { margin-top: 10px; padding: 8px; color: var(--text-muted); font-size: 11px; border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 7px; }
+.backtest-rsi-pane svg { width: 100%; height: 100px; background: rgba(8, 14, 24, 0.8); }
+.backtest-rsi-pane line { stroke: rgba(148, 163, 184, 0.3); stroke-dasharray: 4 4; }
 .backtest-report-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
 .backtest-report-columns div { padding: 11px; border-radius: 8px; background: var(--bg-primary); }
 .backtest-report-columns h3 { margin-bottom: 7px; font-size: 11px; }

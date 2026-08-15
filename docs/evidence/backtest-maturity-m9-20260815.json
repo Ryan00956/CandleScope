@@ -1,0 +1,69 @@
+{
+  "schema": "candlescope.backtest-maturity-evidence/1",
+  "stage": "M9",
+  "generated_at": "2026-08-15T09:59:02+08:00",
+  "base_commit": "21acca58783c6139233373094fcd96e0e3da2160",
+  "branch": "codex/backtest-foundation",
+  "status": "PASS",
+  "tests": {
+    "backend_focused": {"passed": 19, "failed": 0, "warnings": 6},
+    "backend_backtest_regression": {"passed": 186, "failed": 0, "deselected": 3595, "warnings": 6},
+    "frontend": {"passed": 3252, "failed": 0, "duration_ms": 161346.0305},
+    "typecheck": "PASS",
+    "lint": "PASS",
+    "build": "PASS",
+    "ruff": "PASS",
+    "diff_check": "PASS"
+  },
+  "browser": {
+    "core_path": "PASS",
+    "console_errors": 0,
+    "console_warnings": 0,
+    "latest_additive_reopen": "BLOCKED_BY_BROWSER_URL_POLICY",
+    "latest_additive_coverage": ["backend focused", "frontend contract", "typecheck", "lint", "full frontend", "build"],
+    "screenshots": [
+      {"path": "output/backtest-m9-runtime-20260815/browser/dual-clock-run-compare.png", "sha256": "CB7F872EE0D97A9C84D1CE3862EA4EE4D2CA2668B68866B9418C9085C2C75230"},
+      {"path": "output/backtest-m9-runtime-20260815/browser/study-oos-reload.png", "sha256": "0B583EA5A6CCE18F939A8767BEF5065AD31F39E88AF96E92D7FD12D54BD88E1C"},
+      {"path": "output/backtest-m9-runtime-20260815/browser/final-reload-recovery.png", "sha256": "6505CDB81C4CC0CF04C11B39A60612C0CAF7D45A8FF473C1F3159B64945D4AF9"}
+    ]
+  },
+  "product_identities": {
+    "strategy_revision_id": "srv2_1e34b70c838e4999bc6a7b241b3c33ea",
+    "bar_run_id": "bt_ccefedc7c70e4283bf5956f50be8b16e",
+    "agg_trade_run_id": "bt_bf4afb4feb364fbfb553a44a53e22121",
+    "clone_run_id": "bt_d511965e9aab4e95ad286ba04f59f888",
+    "study_id": "st_36eaabc2d55e48faa095bf4ea22ba4be",
+    "agg_report_hash": "sha256:cf2ae807e4d91e68da5e8b31ba43a10ce86ad87d0311e19c09cc362b9800656e",
+    "signal_trace_hash": "sha256:b982ffad3bf7e0ae6996a7dbfe9fea258e711a0de22c0ad0b12288778e5df906",
+    "oos_report_hash": "sha256:c846e955b990167551f7a394789bfaaf8ad949848ac698dbb84bc34132296137"
+  },
+  "database": {
+    "path": "output/backtest-m9-runtime-20260815/backtest.db",
+    "sha256": "CF70710114D225826BD8A4EEF82EAD27E2E3FD53026FF00FCBFB8F4F2B545396",
+    "schema_version": 4,
+    "quick_check": "ok",
+    "foreign_key_check": [],
+    "counts": {"revisions": 3, "smokes": 2, "signal_trace_rows": 263, "bridges": 0, "runs": 28, "studies": 1}
+  },
+  "rollback": {
+    "empty_v4_to_v3": "PASS",
+    "quick_check": "ok",
+    "m9_tables_remaining": 0,
+    "rolled_back_db_sha256": "D16A2178098F4260CF181FE2F9120C62C27D2B7808D47CA96A601B3A517CA003",
+    "backup_sha256": "36215B4837788C3FB65CD9B6A443D3ACEB31A795395A84EFC6CB6BED07DA9947",
+    "with_data_refusal": "PASS_EXIT_1_NO_BACKUP"
+  },
+  "performance": {"status": "NOT_REQUIRED_BY_M9", "claim": "no private microbenchmark used as product or release evidence"},
+  "default_flags": {
+    "BACKTEST_ENABLED": false,
+    "BACKTEST_BAR_ENABLED": false,
+    "BACKTEST_TRADE_TAPE_ENABLED": false,
+    "BACKTEST_BOOK_ASSISTED_ENABLED": false,
+    "BACKTEST_STUDY_ENABLED": false,
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": false,
+    "BACKTEST_ONLINE_LEARNING_ENABLED": false,
+    "BACKTEST_MULTI_MARKET_ENABLED": false,
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": false
+  },
+  "delivery": {"local_commit": null, "merged": false, "pushed": false, "production_enabled": false}
+}

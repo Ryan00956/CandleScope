@@ -84,8 +84,18 @@ export function EquityCurve({
   data: BacktestChartData["equity_curve"];
   drawdown?: Array<Record<string, string | number>> | undefined;
 }) {
+  const boundedData = useMemo(() => {
+    if (data.length <= 2_000) return data;
+    const step = Math.ceil(data.length / 2_000);
+    return data.filter((_item, index) => index % step === 0 || index === data.length - 1).slice(-2_000);
+  }, [data]);
+  const boundedDrawdown = useMemo(() => {
+    if (drawdown.length <= 2_000) return drawdown;
+    const step = Math.ceil(drawdown.length / 2_000);
+    return drawdown.filter((_item, index) => index % step === 0 || index === drawdown.length - 1).slice(-2_000);
+  }, [drawdown]);
   const points = useMemo(() => {
-    const values = data
+    const values = boundedData
       .map((item) => Number(item.equity))
       .filter((value) => Number.isFinite(value));
     if (values.length < 2) return "";
@@ -97,9 +107,9 @@ export function EquityCurve({
       const y = 190 - ((value - low) / span) * 170;
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     }).join(" ");
-  }, [data]);
+  }, [boundedData]);
   const drawdownPoints = useMemo(() => {
-    const values = drawdown.map((item) => Number(item.drawdown));
+    const values = boundedDrawdown.map((item) => Number(item.drawdown));
     if (values.length < 2 || values.some((value) => !Number.isFinite(value))) return "";
     const low = Math.min(...values, -0.000001);
     return values.map((value, index) => {
@@ -107,7 +117,7 @@ export function EquityCurve({
       const y = 105 + (Math.abs(value) / Math.abs(low)) * 85;
       return `${x.toFixed(2)},${y.toFixed(2)}`;
     }).join(" ");
-  }, [drawdown]);
+  }, [boundedDrawdown]);
   if (!points) return <p className="backtest-empty">权益曲线数据不足。</p>;
   return (
     <svg className="backtest-equity-svg" viewBox="0 0 1000 210" preserveAspectRatio="none" aria-label="账户资金曲线">

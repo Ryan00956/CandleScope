@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -83,6 +84,149 @@ class BacktestRepository:
             "SELECT * FROM backtest_runs ORDER BY created_at_ms DESC"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @_locked
+    def insert_strategy_revision(self, payload: dict[str, Any]) -> None:
+        stored = {key: value for key, value in payload.items() if key != "diagnostics"}
+        columns = ", ".join(stored)
+        placeholders = ", ".join(f":{name}" for name in stored)
+        self.connection.execute(
+            f"INSERT INTO backtest_strategy_revisions({columns}) VALUES ({placeholders})",
+            stored,
+        )
+        self.connection.commit()
+
+    @_locked
+    def get_strategy_revision(self, revision_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_strategy_revisions WHERE revision_id = ?",
+            (revision_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
+    def list_strategy_revisions(
+        self, *, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
+        where = "" if include_archived else " WHERE archived_at_ms IS NULL"
+        rows = self.connection.execute(
+            "SELECT * FROM backtest_strategy_revisions"
+            + where
+            + " ORDER BY created_at_ms DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_locked
+    def archive_strategy_revision(self, revision_id: str, archived_at_ms: int) -> bool:
+        cursor = self.connection.execute(
+            "UPDATE backtest_strategy_revisions SET archived_at_ms = ? WHERE revision_id = ? AND archived_at_ms IS NULL",
+            (archived_at_ms, revision_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def insert_strategy_smoke(self, payload: dict[str, Any]) -> None:
+        columns = ", ".join(payload)
+        placeholders = ", ".join(f":{name}" for name in payload)
+        self.connection.execute(
+            f"INSERT INTO backtest_strategy_smokes({columns}) VALUES ({placeholders})",
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def latest_strategy_smoke(self, revision_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_strategy_smokes WHERE revision_id = ? AND status = 'PASSED' ORDER BY created_at_ms DESC LIMIT 1",
+            (revision_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
+    def list_signal_trace(
+        self, run_id: str, *, after: int, limit: int
+    ) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT ordinal, event_time_ms, payload_json, row_hash FROM backtest_signal_trace WHERE run_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?",
+            (run_id, after, limit),
+        ).fetchall()
+        return [
+            {**dict(row), "payload": json.loads(str(row["payload_json"]))}
+            for row in rows
+        ]
+
+    @_locked
+    def get_reports_for_compare(
+        self, left_run_id: str, right_run_id: str
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        rows = self.connection.execute(
+            "SELECT run_id, report_json FROM backtest_reports WHERE run_id IN (?, ?)",
+            (left_run_id, right_run_id),
+        ).fetchall()
+        found = {
+            str(row["run_id"]): json.loads(str(row["report_json"])) for row in rows
+        }
+        return found.get(left_run_id), found.get(right_run_id)
+
+    @_locked
+    def delete_review_bridge(self, bridge_id: str) -> None:
+        self.connection.execute(
+            "DELETE FROM backtest_review_bridges WHERE bridge_id = ?", (bridge_id,)
+        )
+        self.connection.commit()
+
+    @_locked
+    def insert_review_bridge(self, payload: dict[str, Any]) -> None:
+        columns = ", ".join(payload)
+        placeholders = ", ".join(f":{name}" for name in payload)
+        self.connection.execute(
+            f"INSERT INTO backtest_review_bridges({columns}) VALUES ({placeholders})",
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def bind_review_bridge_training_run(
+        self, bridge_id: str, training_run_id: str
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE backtest_review_bridges
+            SET training_run_id = ?
+            WHERE bridge_id = ? AND state = 'BLINDED' AND training_run_id IS NULL
+            """,
+            (training_run_id, bridge_id),
+        )
+        if cursor.rowcount != 1:
+            self.connection.rollback()
+            raise RuntimeError("review bridge TrainingRun binding is immutable")
+        self.connection.commit()
+
+    @_locked
+    def get_review_bridge(self, bridge_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_review_bridges WHERE bridge_id = ?", (bridge_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    @_locked
+    def reveal_review_bridge(self, bridge_id: str, reveal_json: str) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE backtest_review_bridges
+            SET state = 'REVEALED', reveal_json = ?
+            WHERE bridge_id = ? AND state = 'BLINDED'
+              AND training_run_id IS NOT NULL AND reveal_json IS NULL
+            """,
+            (reveal_json, bridge_id),
+        )
+        if cursor.rowcount != 1:
+            self.connection.rollback()
+            raise RuntimeError(
+                "review bridge reveal is one-shot and requires a bound TrainingRun"
+            )
+        self.connection.commit()
 
     @_locked
     def insert_run(self, payload: dict[str, Any]) -> bool:
@@ -881,6 +1025,7 @@ class BacktestRepository:
         audit_actor: str,
         audit_details_json: str,
         updated_at_ms: int,
+        signal_trace_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         """Atomically persist the immutable report, completion audit, and state."""
         connection = self.connection
@@ -927,6 +1072,17 @@ class BacktestRepository:
                 """,
                 (run_id, report_schema, report_json, report_hash, generated_at_ms),
             )
+            for trace_row in signal_trace_rows or []:
+                connection.execute(
+                    "INSERT INTO backtest_signal_trace(run_id, ordinal, event_time_ms, payload_json, row_hash) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        trace_row["ordinal"],
+                        trace_row.get("event_time_ms"),
+                        trace_row["payload_json"],
+                        trace_row["row_hash"],
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO backtest_audit(

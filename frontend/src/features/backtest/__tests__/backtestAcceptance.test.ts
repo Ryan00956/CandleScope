@@ -105,6 +105,18 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async compareStudy() {
       throw new Error("unused");
     },
+    async createStrategyRevision() { throw new Error("unused"); },
+    async smokeStrategyRevision() { throw new Error("unused"); },
+    async getSignalTrace() {
+      return { schema: "SIGNAL_TRACE_V1", runId: run.run_id, items: [], nextAfter: null, limit: 200 };
+    },
+    async compareRuns() { throw new Error("unused"); },
+    async cloneRun() { throw new Error("unused"); },
+    async copyStrategyRevision() { throw new Error("unused"); },
+    async archiveStrategyRevision() { throw new Error("unused"); },
+    async createReviewBridge() { throw new Error("unused"); },
+    async getReviewBridge() { throw new Error("unused"); },
+    async revealReviewBridge() { throw new Error("unused"); },
   };
 }
 

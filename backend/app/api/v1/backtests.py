@@ -36,6 +36,7 @@ class RunCreateRequest(BaseModel):
     timezone: str | None = Field(default=None, max_length=40)
     parameters: dict[str, Any] = Field(default_factory=dict)
     strategy_source: str | None = Field(default=None, max_length=2_000)
+    signal_trace_mode: str = Field(default="LEGACY_INLINE_V1", max_length=32)
     output_mode: str = Field(default="TARGET_POSITION", max_length=32)
     initial_balance: str = Field(default="10000", max_length=64)
     slippage_bps: str = Field(default="1", max_length=64)
@@ -143,6 +144,41 @@ class SnapshotPreviewRequest(BaseModel):
     funding_mode: str = Field(default="OFF", max_length=32)
 
 
+class StrategyRevisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    language: str
+    base_revision_id: str | None = None
+    source_text: str = Field(default="", max_length=100_000)
+    parameter_schema: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StrategyCopyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+
+
+class StrategySmokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dataset_id: str = Field(min_length=1, max_length=80)
+    snapshot_hash: str = Field(min_length=8, max_length=80)
+    start_time_ms: int
+    end_time_ms: int
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunCloneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    parameter: str = Field(min_length=1, max_length=128)
+    value: Any
+
+
+class ReviewBridgeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_time_ms: int
+    end_time_ms: int
+
+
 def _require_contract_snapshot(
     preview: dict[str, Any], contract_data_mode: str
 ) -> None:
@@ -189,6 +225,61 @@ def _error(exc: BacktestError) -> JSONResponse:
 def capabilities(request: Request) -> dict[str, Any]:
     try:
         return _service(request).capabilities()
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/strategy-revisions")
+def list_strategy_revisions(
+    request: Request, include_archived: bool = False
+) -> dict[str, Any]:
+    service = _service(request)
+    return {
+        "items": [
+            service._revision_wire(item)
+            for item in service.repository.list_strategy_revisions(
+                include_archived=include_archived
+            )
+        ]
+    }
+
+
+@router.post("/strategy-revisions")
+def create_strategy_revision(
+    request: Request, payload: StrategyRevisionRequest
+) -> dict[str, Any]:
+    try:
+        return _service(request).create_strategy_revision(payload.model_dump())
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/strategy-revisions/{revision_id}/copy")
+def copy_strategy_revision(
+    request: Request, revision_id: str, payload: StrategyCopyRequest
+) -> dict[str, Any]:
+    try:
+        return _service(request).copy_strategy_revision(revision_id, name=payload.name)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/strategy-revisions/{revision_id}/archive")
+def archive_strategy_revision(request: Request, revision_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).archive_strategy_revision(revision_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/strategy-revisions/{revision_id}/smoke")
+def smoke_strategy_revision(
+    request: Request, revision_id: str, payload: StrategySmokeRequest
+) -> dict[str, Any]:
+    try:
+        return _service(request).smoke_strategy_revision(
+            revision_id, payload.model_dump()
+        )
     except BacktestError as exc:
         return _error(exc)
 
@@ -293,6 +384,16 @@ def list_runs(request: Request) -> dict[str, Any]:
         return _error(exc)
 
 
+@router.get("/runs/compare/pair")
+def compare_run_pair(
+    request: Request, left_run_id: str, right_run_id: str
+) -> dict[str, Any]:
+    try:
+        return _service(request).compare_run_pair(left_run_id, right_run_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
 @router.get("/runs/{run_id}")
 def get_run(request: Request, run_id: str) -> dict[str, Any]:
     try:
@@ -323,6 +424,154 @@ def get_chart(request: Request, run_id: str) -> dict[str, Any]:
         return _runtime(request).chart_data(run_id)
     except BacktestError as exc:
         return _error(exc)
+
+
+@router.get("/runs/{run_id}/signal-trace")
+def get_signal_trace(
+    request: Request, run_id: str, after: int = 0, limit: int = 200
+) -> dict[str, Any]:
+    try:
+        return _service(request).get_signal_trace(run_id, after=after, limit=limit)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/runs/{run_id}/clone")
+def clone_run(
+    request: Request,
+    run_id: str,
+    payload: RunCloneRequest,
+    x_idempotency_key: str = Header(alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    try:
+        return _service(request).clone_run_parameter(
+            run_id,
+            parameter=payload.parameter,
+            value=payload.value,
+            idempotency_key=x_idempotency_key,
+        )
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/runs/{run_id}/review-bridge")
+async def create_review_bridge(
+    request: Request, run_id: str, payload: ReviewBridgeRequest
+) -> dict[str, Any]:
+    try:
+        bridge = _service(request).create_review_bridge(run_id, payload.model_dump())
+        replay_service = getattr(request.app.state, "replay_service", None)
+        training = getattr(replay_service, "training", None)
+        if training is None:
+            _service(request).repository.delete_review_bridge(str(bridge["bridgeId"]))
+            raise BacktestError(
+                "REPLAY_TRAINING_UNAVAILABLE",
+                "Replay TrainingRun runtime is unavailable; start replay before creating the bridge",
+            )
+        try:
+            from app.replay.training.models import TrainingRunSetupRequest
+
+            window_ms = payload.end_time_ms - payload.start_time_ms
+            setup = TrainingRunSetupRequest.from_dict(
+                {
+                    "protocol": "replay.v3",
+                    "name": f"Backtest blind review {run_id[-8:]}",
+                    "source_kind": "BAR",
+                    "start_mode": "MANUAL",
+                    "settlement_asset": "USDT",
+                    "requested_start_ms": payload.start_time_ms,
+                    "indicator_warmup_bars": 24,
+                    "visible_history_lookback": {
+                        "mode": "DURATION",
+                        "duration_ms": min(window_ms, 86_400_000),
+                    },
+                    "forward_cache_ms": window_ms,
+                    "random_seed": None,
+                    "initial_equity": "10000",
+                    "max_leverage": "3",
+                    "maker_fee_bps": "0",
+                    "taker_fee_bps": "0",
+                    "market_slippage_bps": "0",
+                    "integrity_mode": "CHALLENGE",
+                    "time_disclosure_policy": "HIDE_ALL",
+                    "book_mode": "OFF",
+                    "margin_mode": "CROSS",
+                    "position_mode": "ONE_WAY",
+                    "funding_mode": "OFF",
+                    "account_data_mode": "APPROX_PROXY",
+                    "fixed_funding_rate": None,
+                    "funding_interval_ms": None,
+                    "allow_rule_changes": False,
+                    "allowed_mutations": [],
+                    "market_selection_hint": None,
+                }
+            )
+            training_run = await training.create_empty_run(setup)
+            training_run_id = str(training_run["run_id"])
+            bound = _service(request).bind_review_bridge_training_run(
+                str(bridge["bridgeId"]), training_run_id
+            )
+        except Exception as exc:
+            _service(request).repository.delete_review_bridge(str(bridge["bridgeId"]))
+            raise BacktestError(
+                "REPLAY_TRAINING_UNAVAILABLE",
+                f"TrainingRun creation failed: {type(exc).__name__}",
+            ) from exc
+        return {**bound, "trainingRun": training_run}
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/review-bridges/{bridge_id}")
+def get_review_bridge(request: Request, bridge_id: str) -> dict[str, Any]:
+    try:
+        return _service(request).get_review_bridge(bridge_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/review-bridges/{bridge_id}/reveal")
+async def reveal_review_bridge(request: Request, bridge_id: str) -> dict[str, Any]:
+    try:
+        service = _service(request)
+        bridge = service.get_review_bridge(bridge_id)
+        if bridge["state"] == "REVEALED":
+            return bridge
+        training_run_id = str(bridge.get("trainingRunId") or "")
+        replay_service = getattr(request.app.state, "replay_service", None)
+        training = getattr(replay_service, "training", None)
+        if training is None or not training_run_id:
+            raise BacktestError(
+                "REPLAY_TRAINING_UNAVAILABLE",
+                "bound Replay TrainingRun runtime is unavailable",
+            )
+        training_run = await training.get_run(training_run_id)
+        if str(training_run.get("state")) != "ENDED":
+            raise BacktestError(
+                "IDENTITY_MUTATION",
+                "complete the blind TrainingRun before revealing strategy orders",
+            )
+        human_results = await training.training_results(training_run_id, limit=2_000)
+        if human_results.get("truncated"):
+            raise BacktestError(
+                "BUDGET_EXCEEDED",
+                "blind review has more than 2000 trades; narrow the immutable review window",
+            )
+        return service.reveal_review_bridge(
+            bridge_id,
+            training_run_id=training_run_id,
+            training_state=str(training_run["state"]),
+            human_results=human_results,
+        )
+    except BacktestError as exc:
+        return _error(exc)
+    except Exception as exc:
+        return _error(
+            BacktestError(
+                "REPLAY_TRAINING_UNAVAILABLE",
+                f"TrainingRun reveal failed: {type(exc).__name__}",
+            )
+        )
 
 
 @router.get("/runs/{run_id}/export")

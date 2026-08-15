@@ -32,6 +32,10 @@ CONTRACT_PATH = (
     / "plugin_platform_multi_runtime"
     / "phase1_contract_v1.json"
 )
+HISTORICAL_CONTRACT_PATH = CONTRACT_PATH
+HISTORICAL_CONTRACT_FILE_SHA256 = (
+    "9364ad74467a98ff789d1cf5d4217517c3cb80d05a9b94bc8a0953737a39e8ff"
+)
 V3_SCHEMA_PATH = (
     SDK_SOURCE
     / "candlescope_plugin_sdk"
@@ -48,6 +52,7 @@ OLD_REGISTRY_FIXTURE = (
     / "activation_registry_v2.json"
 )
 CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase1-contract/1"
+HISTORICAL_CONTRACT_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION
 GATE_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase1-gate/1"
 RUNTIME_KINDS = (
     "python-module",
@@ -63,10 +68,12 @@ class Phase1GateError(RuntimeError):
 
 
 def _ensure_import_paths() -> None:
-    for path in (SDK_SOURCE, BACKEND_ROOT):
-        value = str(path)
-        if value not in sys.path:
-            sys.path.insert(0, value)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from plugin_sdk_isolation import pin_in_repo_plugin_sdk
+
+    pin_in_repo_plugin_sdk(BACKEND_ROOT)
 
 
 def _strict_json(path: Path) -> dict[str, Any]:
@@ -211,7 +218,24 @@ def capture_contract() -> dict[str, Any]:
     }
 
 
+def validate_historical_contract_v1() -> dict[str, Any]:
+    """Keep the original Phase 1 fixture byte-stable. Do not rewrite it."""
+
+    raw = HISTORICAL_CONTRACT_PATH.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != HISTORICAL_CONTRACT_FILE_SHA256:
+        raise Phase1GateError(
+            "historical Phase 1 contract v1 was rewritten: "
+            f"expected={HISTORICAL_CONTRACT_FILE_SHA256} current={digest}"
+        )
+    historical = _strict_json(HISTORICAL_CONTRACT_PATH)
+    if historical.get("schemaVersion") != HISTORICAL_CONTRACT_SCHEMA_VERSION:
+        raise Phase1GateError("historical Phase 1 contract lost schemaVersion /1")
+    return historical
+
+
 def validate_contract() -> dict[str, Any]:
+    validate_historical_contract_v1()
     fixture = _strict_json(CONTRACT_PATH)
     current = capture_contract()
     if fixture != current:

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "candlescope.backtest-python-first-stage/1",
+  "stage": "N1",
+  "status": "CONTRACT_RESTORED_THREE_ENVIRONMENT_ERRORS",
+  "parentSha": "68f3df0b5b43d2c2d36b665510ba82ab1b493feb",
+  "onBacktestRunRemoved": true,
+  "historicalFixturesRewritten": false,
+  "phase0Contract": "PASS",
+  "phase1Contract": "PASS",
+  "phase0to9ContractOnly": "17 passed",
+  "fullBackendSuite": {
+    "passed": 3798,
+    "failed": 0,
+    "errors": 3,
+    "classifiedErrors": [
+      "tests/test_plugin_platform_multi_runtime_phase2_gate.py::test_phase2_gate_runs_v2_dual_path_v3_python_and_budgets",
+      "tests/test_plugin_platform_multi_runtime_phase9_gate.py::test_phase9_real_second_project_gate",
+      "tests/test_plugin_platform_multi_runtime_phase9_gate.py::test_phase9_install_check_and_rollback_gate"
+    ]
+  },
+  "productionFlagsDefaultOff": true,
+  "merged": false,
+  "pushed": false
+}

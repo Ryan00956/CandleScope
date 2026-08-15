@@ -20,10 +20,12 @@ SDK_SOURCE = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk" / "src"
 
 
 def ensure_import_paths() -> None:
-    for path in (BACKEND_ROOT, SDK_SOURCE):
-        value = str(path)
-        if value not in sys.path:
-            sys.path.insert(0, value)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from plugin_sdk_isolation import pin_in_repo_plugin_sdk
+
+    pin_in_repo_plugin_sdk(BACKEND_ROOT)
 
 
 def canonical_sha256(value: Any) -> str:

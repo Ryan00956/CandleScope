@@ -63,9 +63,12 @@ class BaselineError(RuntimeError):
 
 
 def _ensure_import_paths() -> None:
-    for path in (str(BACKEND_ROOT), str(SDK_SOURCE)):
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from plugin_sdk_isolation import pin_in_repo_plugin_sdk
+
+    pin_in_repo_plugin_sdk(BACKEND_ROOT)
 
 
 def _sha256_file(path: Path) -> str:

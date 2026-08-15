@@ -39,10 +39,12 @@ class RegistryBuildError(RuntimeError):
 
 
 def _ensure_import_paths() -> None:
-    for path in (SDK_SOURCE, BACKEND_ROOT):
-        value = str(path)
-        if value not in sys.path:
-            sys.path.insert(0, value)
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from plugin_sdk_isolation import pin_in_repo_plugin_sdk
+
+    pin_in_repo_plugin_sdk(BACKEND_ROOT)
 
 
 def _github_api(endpoint: str) -> bytes:

@@ -494,7 +494,6 @@ DRAFT -> VALIDATING -> QUEUED -> PREPARING -> RUNNING
   "id": "pyne-strategy",
   "kind": "strategy-provider/1",
   "entrypoint": "pyne-workbench",
-  "activationEvents": ["onBacktestRun"],
   "capabilities": {
     "inputModes": ["BAR_CLOSE"],
     "outputModes": ["SIGNAL", "TARGET_POSITION"],
@@ -511,6 +510,10 @@ DRAFT -> VALIDATING -> QUEUED -> PREPARING -> RUNNING
   ]
 }
 ```
+
+`strategy-provider/1` 由 Backtest Host 通过内部 registry 加载。它不是 Plugin Platform
+activation event；entrypoint 只能使用既有合法事件（`onCommand` / `onView` /
+`onSchedule` / `onMarketSubscription` / `onStartup`）。
 
 Provider 不申请 `market-data.query` 来任意拉取历史。Host 只按照已批准的 `InputPlan` 推送观察。
 

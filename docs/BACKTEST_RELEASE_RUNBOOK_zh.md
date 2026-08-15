@@ -1,8 +1,9 @@
 # Backtest 发布与回滚手册
 
-状态：功能已在 `codex/backtest-foundation` 的当前工作区实现，并完成真实 API / 浏览器 smoke；
-**尚未形成干净发布候选 SHA，生产 flags 保持 0**。
-本手册不授权 merge、push 或打开入口。
+状态：M10 已在 `codex/backtest-foundation` 形成干净候选
+`04b55582b2f73ad48b50fca67eb498fc2ce0fae6` 与完成提交
+`2bbc67c84c85568bbdebdbeece2cd7015c150354`。生产 flags 保持 0。
+本手册不授权 merge、push 或打开入口。Python First 尚未实现。
 
 ## 运行时紧急停用
 
@@ -57,12 +58,10 @@ export hash 校验。`soak:backtest` 默认持续 1 小时；只有在干净发�
 `BacktestRuntime -> worker -> BacktestService -> report/export` 产品路径。因此只能作为
 低层吞吐微基准，**不得作为 release gate 或产品 soak 证据**。
 
-## 未在本环境执行的项
+## M10 已记录、本轮仍不授权发布的项
 
-- 4h soak
-- 干净发布候选 SHA 上的完整浏览器验收（当前仅完成 dirty-workspace smoke）
-- 真实公开路径 1h soak
-- 独立 detached worktree 的 exact revert 演练
+M10 证据见 `docs/evidence/BACKTEST_MATURITY_M10_RESULT_20260815_zh.md`：1h 公开 API
+soak、4h 浏览器/lifecycle soak、detached exact revert 与 schema rollback 已在候选
+`04b55582` 上取证。该结果不授权 merge、push 或打开生产开关。
 
-这些必须在发布候选 SHA 上另行取证，不能把“工作区已实现/已 smoke”写成
-“发布已通过/已启用/已推送”。
+Python First 的 N10 必须重新取证，不得复用 M10 release manifest。

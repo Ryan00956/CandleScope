@@ -37,7 +37,7 @@ def test_strategy_contribution_is_isolated_from_live_market_reads() -> None:
     assert provider.describe().input_modes == ("BAR_CLOSE",)
 
 
-def test_manifest_bytes_still_parse_with_new_activation_event() -> None:
+def test_manifest_bytes_use_legal_activation_events() -> None:
     from importlib.resources import files
 
     raw = files("candlescope_plugin_pyne_workbench").joinpath("manifest.json").read_bytes()
@@ -47,4 +47,11 @@ def test_manifest_bytes_still_parse_with_new_activation_event() -> None:
         for entry in parsed.backend_entrypoints
         for event in entry.activation_events
     }
-    assert "onBacktestRun" in events
+    assert "onBacktestRun" not in events
+    assert events <= {
+        "onCommand",
+        "onView",
+        "onSchedule",
+        "onMarketSubscription",
+        "onStartup",
+    }

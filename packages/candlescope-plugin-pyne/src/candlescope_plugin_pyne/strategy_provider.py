@@ -337,4 +337,3 @@ def _exposure(position: object) -> str:
     return str(Decimal(str(position)))
 
 
-

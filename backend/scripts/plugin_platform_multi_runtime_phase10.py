@@ -27,9 +27,12 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 SDK_SOURCE = REPOSITORY_ROOT / "packages" / "candlescope-plugin-sdk" / "src"
-for _path in (str(BACKEND_ROOT), str(SDK_SOURCE)):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from plugin_sdk_isolation import pin_in_repo_plugin_sdk
+
+pin_in_repo_plugin_sdk(BACKEND_ROOT)
 
 from app.plugin_installer_v2.bundle import (  # noqa: E402
     VerifiedPlatformBundle,

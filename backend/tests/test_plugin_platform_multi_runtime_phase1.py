@@ -13,6 +13,14 @@ def gate_result() -> dict[str, object]:
     return phase1.run_gate()
 
 
+def test_phase1_historical_v1_fixture_is_not_rewritten() -> None:
+    historical = phase1.validate_historical_contract_v1()
+    assert historical["schemaVersion"] == phase1.HISTORICAL_CONTRACT_SCHEMA_VERSION
+    assert historical["frozenV2"]["manifestSchemaCanonicalSha256"] == (
+        "sha256:16bc9cb9f51b66ad2e717cd74798cd5c2e0b6a7d6d0fc2f442ba60f68cb1b5a5"
+    )
+
+
 def test_phase1_contract_rebuilds_exact_v2_and_v3_generations() -> None:
     contract = phase1.validate_contract()
 

@@ -22,7 +22,7 @@
         "id": "pyne-workbench",
         "pythonModule": "candlescope_plugin_pyne_workbench.strategy_entrypoint",
         "resourceProfile": "standard",
-        "activationEvents": ["onBacktestRun"]
+        "activationEvents": ["onCommand"]
       }
     ]
   },

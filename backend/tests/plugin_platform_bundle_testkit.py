@@ -104,6 +104,10 @@ def build_platform_sdk_wheel(
         if not source.is_file() or source.suffix not in {".py", ".json"}:
             continue
         relative = source.relative_to(SDK_SOURCE).as_posix()
+        if relative == "strategy_provider_v1" or relative.startswith(
+            "strategy_provider_v1/"
+        ):
+            continue
         data = source.read_bytes()
         if relative == "__init__.py":
             data = data.replace(

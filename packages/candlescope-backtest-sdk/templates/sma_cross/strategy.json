@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official SMA Cross",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["TARGET_POSITION"],
+  "requiredFeatures": ["open", "high", "low", "close", "volume"],
+  "warmup": {"kind": "PARAMETER_MAX", "parameters": ["fast", "slow"]},
+  "parameters": [
+    {"name": "fast", "type": "integer", "default": 20, "minimum": 2},
+    {"name": "slow", "type": "integer", "default": 50, "minimum": 3}
+  ],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

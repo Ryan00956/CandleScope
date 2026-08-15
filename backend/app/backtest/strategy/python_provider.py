@@ -52,6 +52,8 @@ def _to_host_output(sequence: int, payload: Mapping[str, Any] | None) -> Strateg
     body = dict(payload.get("payload") or {})
     if kind == "TARGET_POSITION" and "targetExposure" not in body and "quantity" in body:
         body["targetExposure"] = body["quantity"]
+    if kind == "ORDER_INTENT" and "qty" not in body and "quantity" in body:
+        body["qty"] = body["quantity"]
     return StrategyOutput(
         sequence=sequence,
         kind=kind,

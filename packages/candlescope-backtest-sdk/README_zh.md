@@ -5,3 +5,6 @@
 风控、账户、ledger、报告、Study 和审计始终由 CandleScope Host 拥有。
 
 本包不含后端、数据库、网络或 Plugin Platform 客户端。
+
+官方首批模板在 `templates/`。本地 10 分钟路径见
+`docs/BACKTEST_PYTHON_LOCAL_BETA_GUIDE_zh.md`。

@@ -1,0 +1,7 @@
+{
+  "bundle_hash": "sha256:f92aea791177b5bc04a41d4293d6df3ee2039d20dbbd4349bee4b321b91e40eb",
+  "decision_hash": "3a9810f88bab3d45f3e2ce5f0f3aa5764102bbb3e17f51348dacc85eb6607806",
+  "report_hash": "sha256:bfc021022132407d41073baa4b1b8deb718191e382a961755f1674a8d4fca1c9",
+  "state": "COMPLETED",
+  "template": "snapshot_restore"
+}

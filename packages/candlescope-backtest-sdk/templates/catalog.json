@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "candlescope.python-official-templates/1",
+  "signalClock": "BAR_CLOSE",
+  "fidelity": ["BAR_APPROX", "AGG_TRADE_EXECUTION"],
+  "notClaimed": [
+    "live trading approval",
+    "unique intrabar path",
+    "raw trade",
+    "queue exact",
+    "Host order or fill ownership"
+  ],
+  "templates": [
+    "sma_cross",
+    "rsi_wilder_24",
+    "donchian_breakout",
+    "mean_reversion",
+    "buy_and_hold",
+    "always_flat",
+    "order_intents",
+    "snapshot_restore"
+  ]
+}

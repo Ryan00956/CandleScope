@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official Donchian Breakout",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["TARGET_POSITION"],
+  "requiredFeatures": ["high", "low", "close"],
+  "warmup": {"kind": "PARAMETER_MAX", "parameters": ["lookback"]},
+  "parameters": [
+    {"name": "lookback", "type": "integer", "default": 20, "minimum": 2}
+  ],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official Always Flat",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["TARGET_POSITION"],
+  "requiredFeatures": ["close"],
+  "warmup": {"kind": "FIXED_BARS", "bars": 0},
+  "parameters": [],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

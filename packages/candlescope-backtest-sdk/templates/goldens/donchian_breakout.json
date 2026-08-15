@@ -1,0 +1,7 @@
+{
+  "bundle_hash": "sha256:5c53d86e80bd12ea50a83a0f757d48f4a4448d957d1181fd0fedd84ae3377be1",
+  "decision_hash": "ee6679fc5c20cbd32cd7ff795fc92b2f303410ca8e301a572aa774ede8f2f306",
+  "report_hash": "sha256:acf16933b7c4c41c0392d96cc55b12c13b407b5616c265dc9f13924351d81ec1",
+  "state": "COMPLETED",
+  "template": "donchian_breakout"
+}

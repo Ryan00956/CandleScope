@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official Mean Reversion",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["TARGET_POSITION"],
+  "requiredFeatures": ["close"],
+  "warmup": {"kind": "PARAMETER_MAX", "parameters": ["lookback"]},
+  "parameters": [
+    {"name": "lookback", "type": "integer", "default": 20, "minimum": 2},
+    {"name": "band", "type": "number", "default": 1}
+  ],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

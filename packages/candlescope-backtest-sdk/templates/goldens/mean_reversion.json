@@ -1,0 +1,7 @@
+{
+  "bundle_hash": "sha256:f35e3f528d1c0a00f3dbb640d33d34bb0b351ec9a17bb887fdf223ddccaf2010",
+  "decision_hash": "225a60f74525fb75580a667cfb210cfee450c2db2fdf654773511b5e3d7ac49b",
+  "report_hash": "sha256:d7be35c582cfb8c0992cecc642d9aba1d91088ad8bf384c9448795a47735438a",
+  "state": "COMPLETED",
+  "template": "mean_reversion"
+}

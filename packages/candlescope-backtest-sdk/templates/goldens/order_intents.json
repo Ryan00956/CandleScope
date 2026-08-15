@@ -1,0 +1,7 @@
+{
+  "bundle_hash": "sha256:59e7c1d605ae1eed1c4d5b9bf64eeef1b6e395263e9b04c4c363ab3c1b24db69",
+  "decision_hash": "8ccc89cb51edfaaa66a9a4ec8e9a4134cdb70aacc634dbfdf62f2b0b17965057",
+  "report_hash": "sha256:a5e2f327b75919f418a8e52bbf17dc742df32f78fe094605357c644e22113bfe",
+  "state": "COMPLETED",
+  "template": "order_intents"
+}

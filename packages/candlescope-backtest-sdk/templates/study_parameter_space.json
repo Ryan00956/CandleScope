@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "candlescope.python-study-space/1",
+  "template": "rsi_wilder_24",
+  "hypothesis": "Wilder RSI24 超卖做多、超买做空的参数邻域能在样本外保持稳定",
+  "study_protocol_revision": "BACKTEST_WALK_FORWARD_V2",
+  "selection_protocol_revision": "TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2",
+  "parameter_space": {
+    "length": [20, 24],
+    "oversold": [25, 30],
+    "overbought": [70]
+  },
+  "constraints": {
+    "min_closed_trades": 1,
+    "max_drawdown": "0.5"
+  },
+  "notes": [
+    "Study 使用同一 PYTHON_SOURCE revision，不复制 Python Study。",
+    "Test 数据不参与选择；每个 fold 只有一份 selection receipt。",
+    "OOS 只拼接 TestRun；不是实盘批准。"
+  ]
+}

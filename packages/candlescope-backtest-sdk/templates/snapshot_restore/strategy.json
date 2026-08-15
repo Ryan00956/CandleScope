@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official Snapshot Restore",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["TARGET_POSITION"],
+  "requiredFeatures": ["close"],
+  "warmup": {"kind": "PARAMETER_MAX", "parameters": ["fast", "slow"]},
+  "parameters": [
+    {"name": "fast", "type": "integer", "default": 5, "minimum": 2},
+    {"name": "slow", "type": "integer", "default": 10, "minimum": 3}
+  ],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

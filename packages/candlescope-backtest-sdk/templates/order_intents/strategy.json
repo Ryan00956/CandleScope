@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "candlescope.python-strategy-bundle/1",
+  "name": "Official Order Intents",
+  "entrypoint": "strategy:Strategy",
+  "signalClock": "BAR_CLOSE",
+  "outputModes": ["ORDER_INTENT"],
+  "requiredFeatures": ["close"],
+  "warmup": {"kind": "FIXED_BARS", "bars": 0},
+  "parameters": [],
+  "reproducibility": "DETERMINISTIC_CPU_LOCKED"
+}

@@ -1,0 +1,7 @@
+{
+  "bundle_hash": "sha256:c47fe8d1ff4195d7c70d13c9fde43fb6a172b7fca46c86a484253456181e6a91",
+  "decision_hash": "a3f66d4e7675965d08ee556538c198a585189d0b455bf00d5933d5d51829d42b",
+  "report_hash": "sha256:609d3886efa57e5c828028ff0811eb13d65e7dc50d42e1d11e66d890848b648a",
+  "state": "COMPLETED",
+  "template": "always_flat"
+}

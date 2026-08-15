@@ -27,6 +27,7 @@ packages = ["src/candlescope_backtest_sdk"]
 include = [
   "src/candlescope_backtest_sdk",
   "fixtures",
+  "templates",
   "goldens",
   "README.md",
   "README_zh.md",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import os
 from typing import Any
 
 from fastapi import APIRouter, Header, Request
@@ -212,6 +214,15 @@ def _optional_runtime(request: Request) -> BacktestRuntime | None:
     return runtime if isinstance(runtime, BacktestRuntime) else None
 
 
+def _python_strategy_enabled() -> bool:
+    return os.environ.get("BACKTEST_PYTHON_STRATEGY_ENABLED", "0").strip() == "1"
+
+
+def _require_python_strategy() -> None:
+    if not _python_strategy_enabled():
+        raise BacktestError("FLAG_DISABLED", "Python strategy path is default-off")
+
+
 def _error(exc: BacktestError) -> JSONResponse:
     return JSONResponse(
         status_code=400,
@@ -268,6 +279,60 @@ def copy_strategy_revision(
 def archive_strategy_revision(request: Request, revision_id: str) -> dict[str, Any]:
     try:
         return _service(request).archive_strategy_revision(revision_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+class PythonBundleZipRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    zip_base64: str = Field(min_length=8, max_length=2_000_000)
+
+
+class PythonRevisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    bundle_id: str = Field(min_length=1, max_length=80)
+
+
+@router.post("/strategy-bundles/inspect")
+def inspect_python_strategy_bundle(
+    request: Request, payload: PythonBundleZipRequest
+) -> dict[str, Any]:
+    try:
+        _require_python_strategy()
+        zip_bytes = base64.b64decode(payload.zip_base64)
+        return _service(request).inspect_python_strategy_bundle(zip_bytes=zip_bytes)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/strategy-bundles")
+def create_python_strategy_bundle(
+    request: Request, payload: PythonBundleZipRequest
+) -> dict[str, Any]:
+    try:
+        _require_python_strategy()
+        zip_bytes = base64.b64decode(payload.zip_base64)
+        return _service(request).create_python_strategy_bundle(zip_bytes=zip_bytes)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/strategy-bundles/{bundle_id}")
+def get_python_strategy_bundle(request: Request, bundle_id: str) -> dict[str, Any]:
+    try:
+        _require_python_strategy()
+        return _service(request).get_python_strategy_bundle(bundle_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.post("/strategy-revisions/python")
+def create_python_strategy_revision(
+    request: Request, payload: PythonRevisionRequest
+) -> dict[str, Any]:
+    try:
+        _require_python_strategy()
+        return _service(request).create_python_strategy_revision(payload.bundle_id)
     except BacktestError as exc:
         return _error(exc)
 

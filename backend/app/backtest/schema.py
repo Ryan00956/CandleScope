@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS backtest_schema_meta (
@@ -216,6 +216,22 @@ CREATE TABLE IF NOT EXISTS backtest_signal_trace (
 
 CREATE INDEX IF NOT EXISTS idx_backtest_signal_trace_run
     ON backtest_signal_trace(run_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS backtest_strategy_bundles (
+    bundle_id TEXT PRIMARY KEY,
+    bundle_hash TEXT NOT NULL UNIQUE,
+    manifest_hash TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    requirements_lock_hash TEXT NOT NULL,
+    sdk_hash TEXT NOT NULL,
+    capability_hash TEXT NOT NULL,
+    parameter_schema_hash TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    file_count INTEGER NOT NULL,
+    store_path TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS backtest_review_bridges (
     bridge_id TEXT PRIMARY KEY,

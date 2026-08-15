@@ -5,6 +5,7 @@ import sqlite3
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from app.core.config import BacktestSettings
@@ -19,6 +20,11 @@ from app.backtest.metrics_v2 import (
 )
 from app.backtest.reports import build_report
 from app.backtest.strategy.protocol import StrategyProviderError
+from app.backtest.strategy.python_bundle import (
+    freeze_bundle,
+    inspect_directory,
+    inspect_zip,
+)
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
 from app.simulation import (
     DualClockSimulationKernel,
@@ -222,6 +228,125 @@ class BacktestService:
             "schema_version": record["schema_version"],
             "base_revision_id": record["base_revision_id"],
             "diagnostics": record["diagnostics"],
+        }
+
+    def inspect_python_strategy_bundle(
+        self,
+        *,
+        zip_bytes: bytes | None = None,
+        directory: str | None = None,
+    ) -> dict[str, object]:
+        try:
+            inspected = (
+                inspect_zip(zip_bytes)
+                if zip_bytes is not None
+                else inspect_directory(Path(str(directory)))
+            )
+        except StrategyProviderError as exc:
+            raise BacktestError(exc.code, str(exc)) from exc
+        return {
+            "bundle_hash": inspected["bundle_hash"],
+            "manifest_hash": inspected["manifest_hash"],
+            "source_hash": inspected["source_hash"],
+            "requirements_lock_hash": inspected["requirements_lock_hash"],
+            "sdk_hash": inspected["sdk_hash"],
+            "capability_hash": inspected["capability_hash"],
+            "parameter_schema_hash": inspected["parameter_schema_hash"],
+            "manifest": inspected["manifest"],
+            "diagnostics": inspected["diagnostics"],
+            "size_bytes": inspected["size_bytes"],
+            "file_count": inspected["file_count"],
+        }
+
+    def create_python_strategy_bundle(
+        self,
+        *,
+        zip_bytes: bytes | None = None,
+        directory: str | None = None,
+        now_ms: int | None = None,
+    ) -> dict[str, object]:
+        from pathlib import Path
+
+        stamp = now_ms or _now_ms()
+        try:
+            inspected = (
+                inspect_zip(zip_bytes)
+                if zip_bytes is not None
+                else inspect_directory(Path(str(directory)))
+            )
+        except StrategyProviderError as exc:
+            raise BacktestError(exc.code, str(exc)) from exc
+        existing = self.repository.get_strategy_bundle_by_hash(inspected["bundle_hash"])
+        if existing is not None:
+            return self._bundle_wire(existing)
+        bundle_id = "psb_" + uuid.uuid4().hex
+        store_root = self.settings.db_path.parent / "python-strategy-bundles" / bundle_id
+        freeze_bundle(inspected, store_root)
+        record = {
+            "bundle_id": bundle_id,
+            "bundle_hash": inspected["bundle_hash"],
+            "manifest_hash": inspected["manifest_hash"],
+            "source_hash": inspected["source_hash"],
+            "requirements_lock_hash": inspected["requirements_lock_hash"],
+            "sdk_hash": inspected["sdk_hash"],
+            "capability_hash": inspected["capability_hash"],
+            "parameter_schema_hash": inspected["parameter_schema_hash"],
+            "size_bytes": inspected["size_bytes"],
+            "file_count": inspected["file_count"],
+            "store_path": str(store_root),
+            "manifest_json": json.dumps(
+                inspected["manifest"], sort_keys=True, separators=(",", ":")
+            ),
+            "created_at_ms": stamp,
+        }
+        self.repository.insert_strategy_bundle(record)
+        return self._bundle_wire(record)
+
+    def get_python_strategy_bundle(self, bundle_id: str) -> dict[str, object]:
+        row = self.repository.get_strategy_bundle(bundle_id)
+        if row is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown bundle {bundle_id}")
+        return self._bundle_wire(row)
+
+    def create_python_strategy_revision(
+        self, bundle_id: str, *, now_ms: int | None = None
+    ) -> dict[str, object]:
+        bundle = self.repository.get_strategy_bundle(bundle_id)
+        if bundle is None:
+            raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown bundle {bundle_id}")
+        manifest = json.loads(str(bundle["manifest_json"]))
+        identity = {
+            "bundle_id": bundle["bundle_id"],
+            "bundle_hash": bundle["bundle_hash"],
+            "manifest_hash": bundle["manifest_hash"],
+            "source_hash": bundle["source_hash"],
+            "sdk_hash": bundle["sdk_hash"],
+            "entrypoint": manifest.get("entrypoint"),
+            "signalClock": manifest.get("signalClock"),
+        }
+        return self.create_strategy_revision(
+            {
+                "name": manifest.get("name") or bundle_id,
+                "language": "PYTHON_SOURCE",
+                "source_text": json.dumps(identity, sort_keys=True, separators=(",", ":")),
+                "parameter_schema": manifest.get("parameters") or [],
+            },
+            now_ms=now_ms,
+        )
+
+    def _bundle_wire(self, row: Mapping[str, Any]) -> dict[str, object]:
+        return {
+            "bundle_id": row["bundle_id"],
+            "bundle_hash": row["bundle_hash"],
+            "manifest_hash": row["manifest_hash"],
+            "source_hash": row["source_hash"],
+            "requirements_lock_hash": row["requirements_lock_hash"],
+            "sdk_hash": row["sdk_hash"],
+            "capability_hash": row["capability_hash"],
+            "parameter_schema_hash": row["parameter_schema_hash"],
+            "size_bytes": row["size_bytes"],
+            "file_count": row["file_count"],
+            "created_at_ms": row["created_at_ms"],
         }
 
     def copy_strategy_revision(

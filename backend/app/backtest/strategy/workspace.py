@@ -19,7 +19,13 @@ STRATEGY_REVISION_SCHEMA = "STRATEGY_REVISION_V2"
 COMPILE_RECEIPT_SCHEMA = "STRATEGY_COMPILE_RECEIPT_V2"
 RUNTIME_REVISION = "candlescope-strategy-workspace/2"
 LANGUAGES = frozenset(
-    {"BUILTIN_TEMPLATE", "PINE_SUBSET", "PYNE_ORDER_DSL", "EXTERNAL_ARTIFACT_REF"}
+    {
+        "BUILTIN_TEMPLATE",
+        "PINE_SUBSET",
+        "PYNE_ORDER_DSL",
+        "EXTERNAL_ARTIFACT_REF",
+        "PYTHON_SOURCE",
+    }
 )
 
 
@@ -89,6 +95,36 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
             raise StrategyProviderError(
                 exc.code, json.dumps(diagnostics, ensure_ascii=False)
             ) from exc
+    elif language == "PYTHON_SOURCE":
+        try:
+            artifact = json.loads(source)
+        except json.JSONDecodeError as exc:
+            raise StrategyProviderError(
+                "PROVIDER_PROTOCOL_VIOLATION",
+                json.dumps(
+                    [_diagnostic(source, "", "PYTHON_SOURCE identity must be JSON")]
+                ),
+            ) from exc
+        required = {
+            "bundle_id",
+            "bundle_hash",
+            "manifest_hash",
+            "source_hash",
+            "sdk_hash",
+            "entrypoint",
+            "signalClock",
+        }
+        if not isinstance(artifact, dict) or not required.issubset(artifact):
+            raise StrategyProviderError(
+                "SCHEMA_UNKNOWN_FIELD",
+                "PYTHON_SOURCE revision is missing frozen bundle identity",
+            )
+        if artifact.get("signalClock") != "BAR_CLOSE":
+            raise StrategyProviderError(
+                "FIDELITY_UNSUPPORTED",
+                "PYTHON_SOURCE first edition only supports BAR_CLOSE",
+            )
+        base = "python-source-v1"
     else:
         try:
             artifact = json.loads(source)
@@ -151,7 +187,11 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
     }
     compiled_hash = canonical_hash(compiled)
     revision_id = "srv2_" + uuid.uuid4().hex
-    provider = build_builtin_provider(base) if base != "pine-long-flat-v1" else None
+    provider = (
+        None
+        if base in {"pine-long-flat-v1", "python-source-v1"}
+        else build_builtin_provider(base)
+    )
     capabilities = (
         {
             "input_modes": list(provider.describe().input_modes),

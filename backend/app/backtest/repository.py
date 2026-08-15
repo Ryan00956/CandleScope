@@ -126,6 +126,39 @@ class BacktestRepository:
         return cursor.rowcount == 1
 
     @_locked
+    def insert_strategy_bundle(self, payload: dict[str, Any]) -> None:
+        columns = ", ".join(payload)
+        placeholders = ", ".join(f":{name}" for name in payload)
+        self.connection.execute(
+            f"INSERT INTO backtest_strategy_bundles({columns}) VALUES ({placeholders})",
+            payload,
+        )
+        self.connection.commit()
+
+    @_locked
+    def get_strategy_bundle(self, bundle_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_strategy_bundles WHERE bundle_id = ?",
+            (bundle_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
+    def get_strategy_bundle_by_hash(self, bundle_hash: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM backtest_strategy_bundles WHERE bundle_hash = ?",
+            (bundle_hash,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @_locked
+    def count_strategy_bundles(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM backtest_strategy_bundles"
+        ).fetchone()
+        return int(row[0])
+
+    @_locked
     def insert_strategy_smoke(self, payload: dict[str, Any]) -> None:
         columns = ", ".join(payload)
         placeholders = ", ".join(f":{name}" for name in payload)

@@ -4,7 +4,8 @@ import { describe, it } from "node:test";
 import {
   PYTHON_HOST_OWNS_COPY,
   isPythonStrategyEntryEnabled,
-} from "../backtestFlags.ts";
+  isPythonTrustedLocalEnabled,
+} from "../backtestFlags.js";
 
 describe("python strategy studio flag", () => {
   it("defaults off", () => {
@@ -25,5 +26,17 @@ describe("python strategy studio flag", () => {
   it("states Host owns orders fills and reports", () => {
     assert.match(PYTHON_HOST_OWNS_COPY, /Host/);
     assert.match(PYTHON_HOST_OWNS_COPY, /成交/);
+  });
+
+  it("keeps TRUSTED_LOCAL off unless the frontend flag is explicit", () => {
+    assert.equal(isPythonTrustedLocalEnabled({}), false);
+    assert.equal(
+      isPythonTrustedLocalEnabled({ VITE_BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED: "0" }),
+      false,
+    );
+    assert.equal(
+      isPythonTrustedLocalEnabled({ VITE_BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED: "1" }),
+      true,
+    );
   });
 });

@@ -12,6 +12,16 @@ import {
   isBacktestEntryEnabled,
   isPythonStrategyEntryEnabled,
 } from "./backtestFlags.js";
+import PythonStudioPanel from "./PythonStudioPanel.js";
+import {
+  composePythonExport,
+  emptyReportIsHidden,
+  isPythonRevision,
+  persistPythonStudioState,
+  pythonStudyParameterSpace,
+  restorePythonStudioState,
+  type PythonStudioGate,
+} from "./pythonStudio.js";
 import type {
   BacktestReport,
   BacktestChartData,
@@ -79,6 +89,8 @@ function RsiTracePane({ items }: { items: Array<{ payload: Record<string, unknow
 
 export default function BacktestApp() {
   const enabled = useMemo(() => isBacktestEntryEnabled(), []);
+  const pythonEnabled = useMemo(() => isPythonStrategyEntryEnabled(), []);
+  const restoredStudio = useMemo(() => restorePythonStudioState(pythonEnabled), [pythonEnabled]);
   const [datasets, setDatasets] = useState<BacktestDataset[]>([]);
   const [capabilities, setCapabilities] = useState<BacktestCapabilities | null>(null);
   const [runs, setRuns] = useState<BacktestRunRecord[]>([]);
@@ -170,6 +182,8 @@ export default function BacktestApp() {
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pythonGate, setPythonGate] = useState<PythonStudioGate | null>(null);
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
 
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.dataset_id === datasetId) ?? null,
@@ -183,6 +197,7 @@ export default function BacktestApp() {
     () => capabilities?.strategies.find((item) => item.revision_id === strategyRevisionId) ?? null,
     [capabilities, strategyRevisionId],
   );
+  const pythonSelected = isPythonRevision(selectedStrategy);
   const hasActiveRun = useMemo(
     () => runs.some((run) => !TERMINAL_STATES.has(run.state)),
     [runs],
@@ -370,15 +385,30 @@ export default function BacktestApp() {
         setStartTimeMs(first.first_open_ms ?? 0);
         setEndTimeMs(first.last_close_ms ?? 0);
       }
-      setSelectedRunId(nextRuns[0]?.run_id ?? null);
-      setSelectedStudyId(nextStudies[0]?.study_id ?? null);
+      const restoredRevision = restoredStudio?.revisionId
+        && nextCapabilities.strategies.some((item) => item.revision_id === restoredStudio.revisionId)
+        ? restoredStudio.revisionId
+        : null;
+      if (restoredRevision) setStrategyRevisionId(restoredRevision);
+      if (restoredStudio?.smokePassed) setSmokePassed(true);
+      setSelectedRunId(
+        restoredStudio?.runId && nextRuns.some((item) => item.run_id === restoredStudio.runId)
+          ? restoredStudio.runId
+          : nextRuns[0]?.run_id ?? null,
+      );
+      setSelectedStudyId(
+        restoredStudio?.studyId && nextStudies.some((item) => item.study_id === restoredStudio.studyId)
+          ? restoredStudio.studyId
+          : nextStudies[0]?.study_id ?? null,
+      );
+      setWorkspaceHydrated(true);
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(reason));
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [enabled]);
+  }, [enabled, restoredStudio]);
 
   useEffect(() => {
     if (!enabled || (!hasActiveRun && !hasActiveStudy)) return undefined;
@@ -535,6 +565,10 @@ export default function BacktestApp() {
       market_type: marketType,
       gap_policy: "REJECT",
       signal_trace_mode: "PAGED_V1",
+      python_runtime_mode: pythonSelected ? pythonGate?.runtimeMode ?? "SANDBOXED_LOCAL" : undefined,
+      python_trusted_confirmed: pythonSelected
+        ? pythonGate?.runtimeMode === "TRUSTED_LOCAL" && Boolean(pythonGate.trustedConfirmed)
+        : undefined,
     };
     try {
       await defaultBacktestApi.validate(body);
@@ -602,6 +636,8 @@ export default function BacktestApp() {
     strategySource,
     stopDistance,
     takerFeeBps,
+    pythonSelected,
+    pythonGate,
   ]);
 
   const handleCancel = useCallback(async () => {
@@ -650,7 +686,7 @@ export default function BacktestApp() {
         hypothesis: studyHypothesis,
         study_protocol_revision: STUDY_V2,
         selection_protocol_revision: "TRAIN_CONSTRAINT_OBJECTIVE_SELECT_ONCE_V2",
-        strategy_revision_id: RSI_WILDER_LONG_SHORT_REVISION,
+        strategy_revision_id: pythonSelected ? strategyRevisionId : RSI_WILDER_LONG_SHORT_REVISION,
         dataset_id: selectedDataset.dataset_id,
         data_epoch: selectedDataset.data_epoch,
         dataset_snapshot_hash: snapshot.snapshot_hash,
@@ -679,7 +715,9 @@ export default function BacktestApp() {
           warn_min_long_trades: 1,
           warn_min_short_trades: 1,
         },
-        warmup_bars: 29,
+        warmup_bars: pythonSelected
+          ? Number(schemaParameters.length ?? schemaParameters.slow ?? schemaParameters.lookback ?? 20) + 1
+          : 29,
         initial_balance: initialBalance,
         slippage_bps: slippageBps,
         taker_fee_bps: takerFeeBps,
@@ -731,6 +769,9 @@ export default function BacktestApp() {
     studyTestDays,
     studyTrainDays,
     takerFeeBps,
+    pythonSelected,
+    strategyRevisionId,
+    schemaParameters,
   ]);
 
   const handleRevealHoldout = useCallback(async () => {
@@ -766,7 +807,13 @@ export default function BacktestApp() {
     if (!selectedRun) return;
     try {
       const bundle = await defaultBacktestApi.exportRun(selectedRun.run_id);
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      const payload = pythonSelected
+        ? composePythonExport({
+          bundleIdentity: pythonGate?.bundleIdentity ?? null,
+          runExport: bundle,
+        })
+        : bundle;
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
         type: "application/json",
       });
       const href = URL.createObjectURL(blob);
@@ -778,7 +825,31 @@ export default function BacktestApp() {
     } catch (reason) {
       setError(errorMessage(reason));
     }
-  }, [selectedRun]);
+  }, [pythonGate?.bundleIdentity, pythonSelected, selectedRun]);
+
+  useEffect(() => {
+    if (!workspaceHydrated) return;
+    persistPythonStudioState(pythonEnabled, {
+      revisionId: pythonSelected ? strategyRevisionId : restoredStudio?.revisionId ?? null,
+      runId: selectedRunId,
+      studyId: selectedStudyId,
+      bundleId: pythonGate?.bundleIdentity?.bundle_id ?? restoredStudio?.bundleId ?? null,
+      bundleIdentity: pythonGate?.bundleIdentity ?? restoredStudio?.bundleIdentity ?? null,
+      smokePassed: pythonSelected ? smokePassed : Boolean(restoredStudio?.smokePassed),
+      runtimeMode: pythonGate?.runtimeMode ?? restoredStudio?.runtimeMode ?? "SANDBOXED_LOCAL",
+      trustedConfirmed: pythonGate?.trustedConfirmed ?? Boolean(restoredStudio?.trustedConfirmed),
+    });
+  }, [
+    pythonEnabled,
+    pythonGate,
+    pythonSelected,
+    restoredStudio,
+    selectedRunId,
+    selectedStudyId,
+    smokePassed,
+    strategyRevisionId,
+    workspaceHydrated,
+  ]);
 
   if (!enabled) {
     return (
@@ -856,12 +927,30 @@ export default function BacktestApp() {
             </label>
           </div>
           {selectedStrategy && <p className="backtest-strategy-help">{selectedStrategy.description}</p>}
-          {isPythonStrategyEntryEnabled() && (
-            <div className="backtest-strategy-help" data-testid="python-strategy-studio">
-              <strong>Python</strong>
-              <p>{PYTHON_HOST_OWNS_COPY}</p>
-              <p>从模板创建或导入策略目录/zip，先静态检查再冻结 revision。</p>
-            </div>
+          {pythonEnabled && (
+            <PythonStudioPanel
+              api={defaultBacktestApi}
+              loading={loading}
+              snapshot={snapshot}
+              datasetId={datasetId}
+              startTimeMs={startTimeMs}
+              endTimeMs={endTimeMs}
+              schemaParameters={schemaParameters}
+              selectedRevisionId={strategyRevisionId}
+              restored={restoredStudio}
+              onLoading={setLoading}
+              onNotice={setNotice}
+              onError={setError}
+              onRevisionReady={(revision) => {
+                setStrategyRevisionId(revision.revision_id);
+                setSmokePassed(false);
+                if (revision.parameter_schema?.length) {
+                  setStudyParameterSpace(pythonStudyParameterSpace(revision.parameter_schema));
+                }
+                void defaultBacktestApi.capabilities().then(setCapabilities);
+              }}
+              onGateChange={setPythonGate}
+            />
           )}
           <details className="backtest-strategy-workspace" open data-testid="strategy-revision-workspace">
             <summary>StrategyRevision V2 · 创建 / 静态检查 / 编译 / smoke</summary>
@@ -1110,7 +1199,7 @@ export default function BacktestApp() {
               <small>仅使用已导入本地包；不会联网补取。</small>
             </div>
           )}
-          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow)}>
+          <button className="backtest-primary" type="submit" disabled={loading || !snapshot || !historicalContractComplete || Boolean(selectedStrategy?.compiled_hash && !smokePassed) || (strategyRevisionId === SMA_REVISION && fast >= slow) || (pythonSelected && pythonGate !== null && !pythonGate.canCreateRun)}>
             {loading ? "处理中…" : "验证并启动后台 Run"}
           </button>
         </form>
@@ -1150,7 +1239,14 @@ export default function BacktestApp() {
 
         <section className="backtest-card backtest-report">
           <div className="backtest-section-title"><span>03</span><h2>可信度报告</h2></div>
-          {report ? (
+          {pythonSelected && report && (
+            <div className="backtest-strategy-evidence" data-testid="python-host-owns-report">
+              <strong>Python 决策 / Host 订单</strong>
+              <p>{PYTHON_HOST_OWNS_COPY}</p>
+              <small>aggTrade 不是 raw trade；普通 L2 也不是 queue exact。</small>
+            </div>
+          )}
+          {report && !emptyReportIsHidden({ error, report }) ? (
             <>
               <div className="backtest-metrics">
                 <div><span>报告标签</span><strong>{report.report_label}</strong></div>
@@ -1344,7 +1440,9 @@ export default function BacktestApp() {
             </>
           ) : (
             <p className="backtest-empty">
-              {selectedRun?.state === "COMPLETED" ? "正在加载报告…" : "选择一个已完成 Run 查看报告。"}
+              {error
+                ? "连接或报告失败，不会显示空报告。"
+                : selectedRun?.state === "COMPLETED" ? "正在加载报告…" : "选择一个已完成 Run 查看报告。"}
             </p>
           )}
         </section>
@@ -1435,8 +1533,8 @@ export default function BacktestApp() {
           </div>
           <div className="backtest-study-toolbar">
             <p>先冻结 hypothesis、snapshot、fold、预算、objective、constraints 与 tie-break，再交给后台恢复型调度器。</p>
-            <button type="button" onClick={handleCreateStudy} disabled={loading || !snapshot || fidelityMode !== "BAR_APPROX" || !studyHypothesis.trim()}>
-              创建并启动 RSI24 Study V2
+            <button type="button" onClick={handleCreateStudy} disabled={loading || !snapshot || fidelityMode !== "BAR_APPROX" || !studyHypothesis.trim() || (pythonSelected && !smokePassed)}>
+              {pythonSelected ? "创建并启动 Python Study V2" : "创建并启动 RSI24 Study V2"}
             </button>
           </div>
           <div className="backtest-study-grid">

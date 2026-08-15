@@ -81,6 +81,8 @@ class RunCreateRequest(BaseModel):
     account_model: str = "LINEAR_PERP_ONE_WAY_V1"
     contract_data_mode: str = Field(default="LEGACY_FIXED_V1", max_length=40)
     study_id: str | None = None
+    python_runtime_mode: str | None = Field(default=None, max_length=32)
+    python_trusted_confirmed: bool = False
 
 
 class StudyCreateRequest(BaseModel):
@@ -167,6 +169,8 @@ class StrategySmokeRequest(BaseModel):
     start_time_ms: int
     end_time_ms: int
     parameters: dict[str, Any] = Field(default_factory=dict)
+    python_runtime_mode: str | None = Field(default=None, max_length=32)
+    python_trusted_confirmed: bool = False
 
 
 class RunCloneRequest(BaseModel):
@@ -333,6 +337,15 @@ def create_python_strategy_revision(
     try:
         _require_python_strategy()
         return _service(request).create_python_strategy_revision(payload.bundle_id)
+    except BacktestError as exc:
+        return _error(exc)
+
+
+@router.get("/strategy-revisions/{revision_id}/runtime-receipt")
+def get_python_runtime_receipt(request: Request, revision_id: str) -> dict[str, Any]:
+    try:
+        _require_python_strategy()
+        return _service(request).get_python_runtime_receipt(revision_id)
     except BacktestError as exc:
         return _error(exc)
 

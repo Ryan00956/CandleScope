@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -25,6 +26,8 @@ from app.backtest.strategy.python_bundle import (
     inspect_directory,
     inspect_zip,
 )
+from app.backtest.strategy.python_provider import PythonHostProvider
+from app.backtest.strategy.python_runner import PythonRunnerError
 from app.market_dataset.snapshot import MarketDatasetError, MarketEvent
 from app.simulation import (
     DualClockSimulationKernel,
@@ -179,6 +182,14 @@ class BacktestService:
                 "BACKTEST_TRADE_TAPE_ENABLED": self.settings.trade_tape_enabled,
                 "BACKTEST_STUDY_ENABLED": self.settings.study_enabled,
                 "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": self.settings.replay_review_bridge_enabled,
+                "BACKTEST_PYTHON_STRATEGY_ENABLED": os.environ.get(
+                    "BACKTEST_PYTHON_STRATEGY_ENABLED", "0"
+                ).strip()
+                == "1",
+                "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": os.environ.get(
+                    "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0"
+                ).strip()
+                == "1",
             },
             "fidelity_modes": fidelity_modes,
             "strategy_revisions": self.strategy_registry.revision_ids(),
@@ -199,8 +210,8 @@ class BacktestService:
             "input_modes": capabilities["input_modes"],
             "output_modes": capabilities["output_modes"],
             "signal_clock": capabilities["signal_clock"],
-            "required_features": [],
-            "warmup_requirement": {},
+            "required_features": capabilities.get("required_features") or [],
+            "warmup_requirement": capabilities.get("warmup_requirement") or {},
             "parameter_schema": json.loads(str(row["parameter_schema_json"])),
             "accepts_source": False,
             "unsupported": capabilities["unsupported"],
@@ -308,6 +319,63 @@ class BacktestService:
             raise BacktestError("SCHEMA_UNKNOWN_FIELD", f"unknown bundle {bundle_id}")
         return self._bundle_wire(row)
 
+    def build_python_host_provider(
+        self,
+        revision_id: str,
+        *,
+        parameters: Mapping[str, Any] | None = None,
+        mode: str = "SANDBOXED_LOCAL",
+        trusted_confirmed: bool = False,
+    ) -> PythonHostProvider:
+        row = self.repository.get_strategy_revision(revision_id)
+        if row is None or row["base_revision_id"] != "python-source-v1":
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "select a frozen PYTHON_SOURCE revision"
+            )
+        try:
+            identity = json.loads(str(row["source_text"]))
+        except json.JSONDecodeError as exc:
+            raise BacktestError(
+                "PROVIDER_PROTOCOL_VIOLATION", "PYTHON_SOURCE identity must be JSON"
+            ) from exc
+        bundle = self.repository.get_strategy_bundle(str(identity.get("bundle_id") or ""))
+        if bundle is None:
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "python revision is missing its frozen bundle"
+            )
+        return PythonHostProvider(
+            Path(str(bundle["store_path"])),
+            entrypoint=str(identity.get("entrypoint") or "strategy:Strategy"),
+            parameters=dict(parameters or {}),
+            mode=str(mode or "SANDBOXED_LOCAL"),
+            trusted_confirmed=bool(trusted_confirmed),
+        )
+
+    def get_python_runtime_receipt(self, revision_id: str) -> dict[str, object]:
+        row = self.repository.get_strategy_revision(revision_id)
+        if row is None or row["base_revision_id"] != "python-source-v1":
+            raise BacktestError(
+                "SCHEMA_UNKNOWN_FIELD", "select a frozen PYTHON_SOURCE revision"
+            )
+        identity = json.loads(str(row["source_text"]))
+        bundle = self.repository.get_strategy_bundle(str(identity.get("bundle_id") or ""))
+        smoke = self.repository.latest_strategy_smoke(revision_id)
+        smoke_details = (
+            json.loads(str(smoke["details_json"]))
+            if smoke is not None
+            else None
+        )
+        return {
+            "revisionId": revision_id,
+            "bundleId": identity.get("bundle_id"),
+            "bundleHash": identity.get("bundle_hash"),
+            "entrypoint": identity.get("entrypoint"),
+            "signalClock": identity.get("signalClock"),
+            "mode": (smoke_details or {}).get("runtimeMode") or "SANDBOXED_LOCAL",
+            "storePath": None if bundle is None else bundle["store_path"],
+            "smoke": smoke_details,
+        }
+
     def create_python_strategy_revision(
         self, bundle_id: str, *, now_ms: int | None = None
     ) -> dict[str, object]:
@@ -323,6 +391,9 @@ class BacktestService:
             "sdk_hash": bundle["sdk_hash"],
             "entrypoint": manifest.get("entrypoint"),
             "signalClock": manifest.get("signalClock"),
+            "outputModes": manifest.get("outputModes") or ["TARGET_POSITION"],
+            "requiredFeatures": manifest.get("requiredFeatures") or [],
+            "warmup": manifest.get("warmup") or {},
         }
         return self.create_strategy_revision(
             {
@@ -401,23 +472,52 @@ class BacktestService:
                 "BUDGET_EXCEEDED",
                 "smoke window must be positive and no longer than 7 days",
             )
-        provider = (
-            PineStrategyProvider()
-            if row["base_revision_id"] == "pine-long-flat-v1"
-            else build_builtin_provider(str(row["base_revision_id"]))
-        )
+        runtime_mode = str(payload.get("python_runtime_mode") or "SANDBOXED_LOCAL")
+        trusted_confirmed = bool(payload.get("python_trusted_confirmed"))
+        provider: Any = None
         try:
-            compiled = json.loads(str(row["compiled_json"]))
-            provider.prepare(
-                {
-                    "roles": ["BARS"],
-                    "source": compiled.get("executionSource", row["source_text"]),
-                    "parameters": dict(payload.get("parameters") or {}),
-                    "outputMode": (
-                        json.loads(str(row["capabilities_json"]))["output_modes"][-1]
-                    ),
-                }
+            if row["base_revision_id"] == "python-source-v1":
+                provider = self.build_python_host_provider(
+                    revision_id,
+                    parameters=dict(payload.get("parameters") or {}),
+                    mode=runtime_mode,
+                    trusted_confirmed=trusted_confirmed,
+                )
+                provider.prepare(
+                    {
+                        "run_id": "smoke",
+                        "revision_id": revision_id,
+                        "parameters": dict(payload.get("parameters") or {}),
+                    }
+                )
+            else:
+                provider = (
+                    PineStrategyProvider()
+                    if row["base_revision_id"] == "pine-long-flat-v1"
+                    else build_builtin_provider(str(row["base_revision_id"]))
+                )
+                compiled = json.loads(str(row["compiled_json"]))
+                provider.prepare(
+                    {
+                        "roles": ["BARS"],
+                        "source": compiled.get("executionSource", row["source_text"]),
+                        "parameters": dict(payload.get("parameters") or {}),
+                        "outputMode": (
+                            json.loads(str(row["capabilities_json"]))["output_modes"][-1]
+                        ),
+                    }
+                )
+        except PythonRunnerError as exc:
+            next_step = (
+                "SANDBOXED_LOCAL failed closed; confirm TRUSTED_LOCAL permission facts if that flag is enabled"
+                if exc.code == "SANDBOX_UNAVAILABLE"
+                else "fix the source or runtime mode and rerun smoke"
             )
+            raise BacktestError(
+                exc.code,
+                str(exc),
+                details={"next_step": next_step},
+            ) from exc
         except StrategyProviderError as exc:
             raise BacktestError(
                 exc.code,
@@ -425,7 +525,8 @@ class BacktestService:
                 details={"next_step": "correct parameters/source and rerun smoke"},
             ) from exc
         finally:
-            provider.close()
+            if provider is not None:
+                provider.close()
         stamp = now_ms or _now_ms()
         details = {
             "schema": "STRATEGY_SMOKE_V1",
@@ -435,6 +536,7 @@ class BacktestService:
             "startTimeMs": start,
             "endTimeMs": end,
             "status": "PASSED",
+            "runtimeMode": runtime_mode if row["base_revision_id"] == "python-source-v1" else None,
         }
         receipt_hash = "sha256:" + sha256_hex(canonical_json(details))
         self.repository.insert_strategy_smoke(
@@ -1149,12 +1251,18 @@ class BacktestService:
         if end_ms <= start_ms:
             raise BacktestError("DATA_QUALITY_FAILED", "end_ms must be after start_ms")
         if self.enforce_registered_revisions:
-            try:
-                self.strategy_registry.require(
-                    str(payload.get("strategy_revision_id") or "")
+            revision_id = str(payload.get("strategy_revision_id") or "")
+            persisted_study_revision = self.repository.get_strategy_revision(revision_id)
+            if persisted_study_revision is None:
+                try:
+                    self.strategy_registry.require(revision_id)
+                except StrategyProviderError as exc:
+                    raise BacktestError(exc.code, str(exc)) from exc
+            elif persisted_study_revision.get("archived_at_ms") is not None:
+                raise BacktestError(
+                    "IDENTITY_MUTATION",
+                    "archived strategy revision cannot create a new Study",
                 )
-            except StrategyProviderError as exc:
-                raise BacktestError(exc.code, str(exc)) from exc
         stamp = now_ms or _now_ms()
         study_id = f"st_{uuid.uuid4().hex}"
         config = canonical_json(payload)
@@ -3371,12 +3479,6 @@ class BacktestService:
                             "rerun Strategy smoke for the selected immutable dataset snapshot",
                         )
                     base_revision = str(persisted_revision["base_revision_id"])
-                    probe = (
-                        PineStrategyProvider()
-                        if base_revision == "pine-long-flat-v1"
-                        else build_builtin_provider(base_revision)
-                    )
-                    capabilities = probe.describe()
                     compiled_revision = json.loads(
                         str(persisted_revision["compiled_json"])
                     )
@@ -3384,6 +3486,37 @@ class BacktestService:
                         compiled_revision.get("executionSource")
                         or persisted_revision["source_text"]
                     )
+                    if base_revision == "python-source-v1":
+                        smoke_details = json.loads(str(smoke["details_json"]))
+                        requested_mode = str(
+                            payload.get("python_runtime_mode") or "SANDBOXED_LOCAL"
+                        )
+                        if str(smoke_details.get("runtimeMode") or "") != requested_mode:
+                            raise StrategyProviderError(
+                                "SMOKE_REQUIRED",
+                                "rerun Strategy smoke for the selected python runtime mode",
+                            )
+                        persisted_capabilities = json.loads(
+                            str(persisted_revision["capabilities_json"])
+                        )
+                        capabilities = type(
+                            "PersistedCapabilities",
+                            (),
+                            {
+                                "output_modes": tuple(
+                                    persisted_capabilities.get("output_modes")
+                                    or ("TARGET_POSITION",)
+                                )
+                            },
+                        )()
+                        probe = None
+                    else:
+                        probe = (
+                            PineStrategyProvider()
+                            if base_revision == "pine-long-flat-v1"
+                            else build_builtin_provider(base_revision)
+                        )
+                        capabilities = probe.describe()
                     if (
                         strategy_source is not None
                         and str(strategy_source) != frozen_source
@@ -3413,19 +3546,20 @@ class BacktestService:
                         "PROVIDER_PROTOCOL_VIOLATION",
                         f"{descriptor.revision_id} does not accept strategy source",
                     )
-                probe.prepare(
-                    {
-                        "roles": [
-                            "BARS"
-                            if fidelity in {"BAR_APPROX", "AGG_TRADE_EXECUTION"}
-                            else "TRADES"
-                        ],
-                        "source": strategy_source,
-                        "parameters": json.loads(parameters_json),
-                        "outputMode": output_mode,
-                    }
-                )
-                probe.close()
+                if probe is not None:
+                    probe.prepare(
+                        {
+                            "roles": [
+                                "BARS"
+                                if fidelity in {"BAR_APPROX", "AGG_TRADE_EXECUTION"}
+                                else "TRADES"
+                            ],
+                            "source": strategy_source,
+                            "parameters": json.loads(parameters_json),
+                            "outputMode": output_mode,
+                        }
+                    )
+                    probe.close()
             except StrategyProviderError as exc:
                 raise BacktestError(exc.code, str(exc)) from exc
         for name in ("price_tick", "qty_step", "min_notional"):

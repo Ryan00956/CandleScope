@@ -653,13 +653,24 @@ class BacktestWorker:
         try:
             config = json.loads(str(record["config_json"]))
             manifest = self.local_data.get_manifest(str(record["dataset_id"]))
-            provider = IsolatedStrategyProvider(
-                str(
-                    config.get("strategy_execution_revision")
-                    or record["strategy_revision_id"]
-                ),
-                step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
+            persisted = service.repository.get_strategy_revision(
+                str(record["strategy_revision_id"])
             )
+            if persisted is not None and persisted["base_revision_id"] == "python-source-v1":
+                provider = service.build_python_host_provider(
+                    str(record["strategy_revision_id"]),
+                    parameters=dict(config.get("parameters") or {}),
+                    mode=str(config.get("python_runtime_mode") or "SANDBOXED_LOCAL"),
+                    trusted_confirmed=bool(config.get("python_trusted_confirmed")),
+                )
+            else:
+                provider = IsolatedStrategyProvider(
+                    str(
+                        config.get("strategy_execution_revision")
+                        or record["strategy_revision_id"]
+                    ),
+                    step_timeout_s=self.settings.provider_step_timeout_ms / 1000,
+                )
             if record["fidelity_mode"] == "BAR_APPROX":
                 ref = DatasetRef(
                     dataset_id=str(record["dataset_id"]),

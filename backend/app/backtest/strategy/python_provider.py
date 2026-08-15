@@ -68,15 +68,19 @@ class PythonHostProvider:
         *,
         entrypoint: str = "strategy:Strategy",
         parameters: Mapping[str, Any] | None = None,
+        mode: str | None = None,
+        trusted_confirmed: bool | None = None,
     ) -> None:
-        mode = "TRUSTED_LOCAL"
-        if os.environ.get("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
-            mode = "SANDBOXED_LOCAL"
+        if mode is None:
+            mode = "TRUSTED_LOCAL"
+            if os.environ.get("BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED", "0").strip() != "1":
+                mode = "SANDBOXED_LOCAL"
+            trusted_confirmed = mode == "TRUSTED_LOCAL"
         self.runner = IsolatedPythonRunner(
             bundle_dir,
             entrypoint=entrypoint,
             mode=mode,
-            trusted_confirmed=mode == "TRUSTED_LOCAL",
+            trusted_confirmed=bool(trusted_confirmed),
             step_timeout_s=5.0,
         )
         self.entrypoint = entrypoint

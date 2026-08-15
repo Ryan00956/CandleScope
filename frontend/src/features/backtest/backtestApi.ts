@@ -9,6 +9,7 @@ import type {
 export interface BacktestStrategyDescriptor {
   revision_id: string;
   provider_kind: string;
+  language?: string;
   label: string;
   description: string;
   input_modes: string[];
@@ -84,6 +85,11 @@ export interface BacktestApiClient {
   createReviewBridge(runId: string, startTimeMs: number, endTimeMs: number, signal?: AbortSignal): Promise<Record<string, unknown>>;
   getReviewBridge(bridgeId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   revealReviewBridge(bridgeId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  inspectPythonBundle(zipBase64: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  createPythonBundle(zipBase64: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  getPythonBundle(bundleId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  createPythonRevision(bundleId: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
+  getPythonRuntimeReceipt(revisionId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
 }
 
 export interface BacktestDataset {
@@ -328,6 +334,36 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
     },
     async revealReviewBridge(bridgeId, signal) {
       return readJson(await fetch(`${base}/review-bridges/${encodeURIComponent(bridgeId)}/reveal`, requestOptions({ method: "POST" }, signal)));
+    },
+    async inspectPythonBundle(zipBase64, signal) {
+      return readJson(await fetch(`${base}/strategy-bundles/inspect`, requestOptions({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ zip_base64: zipBase64 }),
+      }, signal)));
+    },
+    async createPythonBundle(zipBase64, signal) {
+      return readJson(await fetch(`${base}/strategy-bundles`, requestOptions({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ zip_base64: zipBase64 }),
+      }, signal)));
+    },
+    async getPythonBundle(bundleId, signal) {
+      return readJson(await fetch(`${base}/strategy-bundles/${encodeURIComponent(bundleId)}`, requestOptions({}, signal)));
+    },
+    async createPythonRevision(bundleId, signal) {
+      return readJson(await fetch(`${base}/strategy-revisions/python`, requestOptions({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bundle_id: bundleId }),
+      }, signal)));
+    },
+    async getPythonRuntimeReceipt(revisionId, signal) {
+      return readJson(await fetch(
+        `${base}/strategy-revisions/${encodeURIComponent(revisionId)}/runtime-receipt`,
+        requestOptions({}, signal),
+      ));
     },
   };
 }

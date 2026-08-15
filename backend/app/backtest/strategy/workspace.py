@@ -53,6 +53,9 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
         raise StrategyProviderError("SCHEMA_UNKNOWN_FIELD", "strategy name is required")
     source = str(payload.get("source_text") or "")
     parameters = payload.get("parameter_schema") or []
+    python_output_modes = ["TARGET_POSITION"]
+    python_required_features: list[object] = []
+    python_warmup: dict[str, object] = {}
     if not isinstance(parameters, list):
         raise StrategyProviderError(
             "SCHEMA_UNKNOWN_FIELD", "parameter_schema must be a list"
@@ -124,6 +127,10 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
                 "FIDELITY_UNSUPPORTED",
                 "PYTHON_SOURCE first edition only supports BAR_CLOSE",
             )
+        python_output_modes = list(artifact.get("outputModes") or ["TARGET_POSITION"])
+        python_required_features = list(artifact.get("requiredFeatures") or [])
+        warmup = artifact.get("warmup") or {}
+        python_warmup = warmup if isinstance(warmup, dict) else {}
         base = "python-source-v1"
     else:
         try:
@@ -207,9 +214,19 @@ def compile_revision(payload: Mapping[str, object], *, now_ms: int) -> dict[str,
         if provider is not None
         else {
             "input_modes": ["BAR_CLOSE"],
-            "output_modes": ["TARGET_POSITION"],
-            "signal_clock": "EVENT_TIME",
+            "output_modes": python_output_modes if language == "PYTHON_SOURCE" else ["TARGET_POSITION"],
+            "signal_clock": "BAR_CLOSE" if language == "PYTHON_SOURCE" else "EVENT_TIME",
+            "required_features": python_required_features,
+            "warmup_requirement": python_warmup,
             "unsupported": [
+                "network access",
+                "raw trade",
+                "queue exact",
+                "intrabar unique path",
+                "Host order/fill/report ownership by strategy",
+            ]
+            if language == "PYTHON_SOURCE"
+            else [
                 "TradingView equivalence",
                 "short/pyramiding",
                 "network access",

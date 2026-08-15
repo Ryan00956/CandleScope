@@ -120,6 +120,11 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
     async createReviewBridge() { throw new Error("unused"); },
     async getReviewBridge() { throw new Error("unused"); },
     async revealReviewBridge() { throw new Error("unused"); },
+    async inspectPythonBundle() { throw new Error("unused"); },
+    async createPythonBundle() { throw new Error("unused"); },
+    async getPythonBundle() { throw new Error("unused"); },
+    async createPythonRevision() { throw new Error("unused"); },
+    async getPythonRuntimeReceipt() { throw new Error("unused"); },
   };
 }
 

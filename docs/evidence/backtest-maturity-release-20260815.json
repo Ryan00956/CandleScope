@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "candlescope.backtest-release/2",
+  "gitSha": "04b55582b2f73ad48b50fca67eb498fc2ce0fae6",
+  "gitDirty": false,
+  "branch": "codex/backtest-foundation",
+  "runtimeProfile": "LOCAL_OFFLINE_EXPLICIT_VALIDATION",
+  "effectiveFlags": {
+    "BACKTEST_ENABLED": "0",
+    "BACKTEST_BAR_ENABLED": "0",
+    "BACKTEST_TRADE_TAPE_ENABLED": "0",
+    "BACKTEST_STUDY_ENABLED": "0",
+    "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": "0",
+    "BACKTEST_EXTERNAL_PROVIDER_ENABLED": "0",
+    "BACKTEST_BOOK_ASSISTED_ENABLED": "0",
+    "BACKTEST_MULTI_MARKET_ENABLED": "0",
+    "BACKTEST_ONLINE_LEARNING_ENABLED": "0"
+  },
+  "datasetSnapshotHashes": [
+    "sha256:510d4823be335aebd1f25d4a0128e4079cd0a39f74ee65e69323980da63f38cf",
+    "sha256:47d4aee0b78fa8bd978a33b3347e483c0d0dd6fed82b498984c3b06548ea6888",
+    "sha256:bd8443ffca664096bd82f89d00ba7632a78ad8050f1b37980703f23fbe8a285a",
+    "sha256:a8b0103a8bd43f86a9bdee771d64aa54f0f2d65d7415378a84ec1c0145f9e0f4"
+  ],
+  "strategyRevision": "builtin-rsi-wilder-long-short-v1",
+  "accountModel": "LINEAR_PERP_ONE_WAY_V2",
+  "fillModel": "AGG_TRADE_LATENCY_PARTICIPATION_V2",
+  "reportSchema": "candlescope.backtest-report/1",
+  "commands": [
+    {
+      "command": "python backend/scripts/backtest_m10_product_gate.py --base-url http://127.0.0.1:18083/api/v1/backtests",
+      "exitCode": 0,
+      "durationSeconds": 541.515
+    },
+    {
+      "command": "python -m pytest backend/tests -k backtest -q",
+      "exitCode": 0,
+      "durationSeconds": 18.36
+    },
+    {
+      "command": "python -m pytest backend/tests/test_backtest_recovery_m10.py -q",
+      "exitCode": 0,
+      "durationSeconds": 1.46
+    },
+    {
+      "command": "npm run typecheck && npm run lint && npm test -- --run && npm run build",
+      "exitCode": 0,
+      "durationSeconds": 233.68
+    },
+    {
+      "command": "node frontend/scripts/backtest-m10-api-soak.mjs --duration-ms 3600000",
+      "exitCode": 0,
+      "durationSeconds": 3605.1
+    },
+    {
+      "command": "in-app browser lifecycle soak with long BAR, aggTrade and partial-fill reports",
+      "exitCode": 0,
+      "durationSeconds": 14494.801
+    },
+    {
+      "command": "detached review, exact revert, schema rollback and live/local/replay/plugin health",
+      "exitCode": 0,
+      "durationSeconds": 16.76
+    }
+  ],
+  "hashes": {
+    "decision": "2c7f042176c5de80e71d9ba558950c49c2cb186862d8220c57f19e7c6df21c9e",
+    "fill": "49d353d903bd8b7db8d79ee3f2317ebe9bc1e7ab4fe61bc6f4ed7dbcf9fa7c36",
+    "ledger": "4aeb313417a7c2e3695388155091336246fa47b336476eac1cc3c0e58eb84216",
+    "report": "sha256:eb71ee88e5eb06208be6ebec3572a397f0cf5bd832390e6f60323d43dd22adcc"
+  },
+  "browserConsoleErrors": 0,
+  "artifactPaths": [
+    {"kind": "product-gate", "path": "output/backtest-m10-candidate-04b55582/product-gate.json", "sha256": "13c62eb27797c6059cfc531e60d85d7ae34a0a882ffe36a9cd4cd7b77a62d410"},
+    {"kind": "api-smoke", "path": "output/backtest-m10-candidate-04b55582/api-smoke.json", "sha256": "90171e8f9efdebdf3f660825a0760405d18707a19e54ac08b108234d2396378f"},
+    {"kind": "api-soak-1h", "path": "output/backtest-m10-candidate-04b55582/api-soak-1h.json", "sha256": "8fac46ff0962b7e5a7357d187f8f5035a5705e136eaaa33ae40eba5cb7f97d8b"},
+    {"kind": "browser-lifecycle-soak-4h", "path": "output/backtest-m10-candidate-04b55582/browser-lifecycle-soak-4h.json", "sha256": "89c67681a8c88c236a2ef087891e042e46c8e4983182aceb8fd286ade7357af9"},
+    {"kind": "browser-final-screenshot", "path": "output/backtest-m10-candidate-04b55582/browser-partial-4h-post-reload.png", "sha256": "58306f3dec143c06c7cb3711912ebe38d408f759f3297f487d198f6533b74423"},
+    {"kind": "recovery-fault-junit", "path": "output/backtest-m10-candidate-04b55582/recovery-fault-junit.xml", "sha256": "750fe5582b661df4c97ba1f2dc10125db3cd7a5c168217996018b2e64cec0464"},
+    {"kind": "independent-review", "path": "output/backtest-m10-candidate-04b55582/independent-review.json", "sha256": "6e2c07f164270dd06c74b30c95dc4cdc901b271e5a84e99c395998e14aba477f"},
+    {"kind": "rollback-drill", "path": "output/backtest-m10-candidate-04b55582/rollback-drill.json", "sha256": "b5dfc6cac02beb7ed7de44432c97217b764d0752c1ebbd6ff7b63404e8228001"},
+    {"kind": "real-data-receipt", "path": "output/backtest-m10-candidate-04b55582/real-data-receipt.json", "sha256": "4d83cf93e128bc5d1c0a997cb2d24f45ff992916b4ab82d6ff2fda81237e2701"},
+    {"kind": "backend-related-tests", "path": "output/backtest-m10-candidate-04b55582/pytest-backtest.log", "sha256": "8953c3d938f51bab08bccf460b1956ed6a7d8d0d6e005362f5d28d7861e99924"},
+    {"kind": "frontend-full-tests", "path": "output/backtest-m10-candidate-04b55582/frontend-test-full.log", "sha256": "fbf6112f16521d288c0ace8c2141827199b271fdd5a01ab0b79b5ab019e84050"},
+    {"kind": "frontend-build", "path": "output/backtest-m10-candidate-04b55582/frontend-build.log", "sha256": "1255093395ad19e19606ed3f2a96f4f69be99dae1d5a0d79551018d2abb3ff10"}
+  ],
+  "gates": {
+    "independentReview": "PASS",
+    "backendRelatedTests": "PASS",
+    "frontendTypecheckLintTestBuild": "PASS",
+    "publicApiSmoke": "PASS",
+    "publicApiSoak1h": "PASS",
+    "browserLifecycleSoak4h": "PASS",
+    "realAggTradePerformance": "PASS",
+    "checkpointFaultInjection": "PASS",
+    "exactRevertDetachedWorktree": "PASS",
+    "rollbackHealth": "PASS",
+    "defaultProductionFlagsOff": "PASS"
+  },
+  "optionalM11": "NOT_APPLICABLE_OPTIONAL_DEFAULT_OFF"
+}

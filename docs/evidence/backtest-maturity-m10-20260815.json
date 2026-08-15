@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "candlescope.backtest-maturity-stage/1",
+  "stage": "M10",
+  "status": "VALIDATED_CLEAN_SHA",
+  "baseSha": "eda10edebb0e3628746b00771546502a11659762",
+  "candidateSha": "04b55582b2f73ad48b50fca67eb498fc2ce0fae6",
+  "candidateCommit": "backtest: prepare M10 clean release candidate",
+  "releaseManifest": "docs/evidence/backtest-maturity-release-20260815.json",
+  "evidenceRoot": "output/backtest-m10-candidate-04b55582",
+  "requiredGates": "PASS",
+  "browserLifecycleElapsedMs": 14494801,
+  "apiSoakElapsedMs": 3604433,
+  "apiSoakCycles": 661,
+  "backendRelatedTests": "200 passed, 3595 deselected",
+  "frontendTests": "3252 passed",
+  "productionFlagsDefaultOff": true,
+  "m11": "NOT_APPLICABLE_OPTIONAL_DEFAULT_OFF",
+  "delivery": {
+    "merged": false,
+    "pushed": false,
+    "productionEnabled": false,
+    "worktreesDeleted": false
+  }
+}

@@ -335,5 +335,3 @@ def _exposure(position: object) -> str:
     if text in {"flat", "short", "sell", "0"}:
         return "0"
     return str(Decimal(str(position)))
-
-

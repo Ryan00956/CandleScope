@@ -24,7 +24,7 @@ CONTRACT_PATH = (
     / "tests"
     / "fixtures"
     / "plugin_platform_multi_runtime"
-    / "phase9_contract_v1.json"
+    / "phase9_contract_v2.json"
 )
 ASSESSMENT_PATH = (
     REPOSITORY_ROOT / "docs" / "plugin-adapters" / "aho-corasick-assessment.json"
@@ -37,9 +37,9 @@ SUPPLY_LOCK_PATH = ADAPTER_ROOT / "supply-chain.lock.json"
 TRANSCRIPT_PATH = ADAPTER_ROOT / "conformance" / "control-transcript.json"
 BUILD_REPORT_PATH = ADAPTER_ROOT / "evidence" / "build-report.json"
 GATE_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase9-gate/1"
-CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase9-contract/1"
+CONTRACT_SCHEMA_VERSION = "candlescope.plugin-platform.multi-runtime.phase9-contract/2"
 EXPECTED_BUNDLE_SHA256 = (
-    "sha256:5abcacccf9411550443c24d4b812c653e20bfe5b0176a30a616e006287181f92"
+    "sha256:7c507284903053e9c45e4acb3766e34c101e70d247c62760c071a98ea7b9a67d"
 )
 TEMPLATE_KINDS = [
     "java-library",
@@ -96,6 +96,10 @@ def capture_contract() -> dict[str, Any]:
     return {
         "schemaVersion": CONTRACT_SCHEMA_VERSION,
         "implementedOn": "2026-08-03",
+        "lockMigratedOn": "2026-08-16",
+        "previousContractSha256": (
+            "sha256:e129fc40ee6d4a8eabfb6bb969d6aba226a50bbd10281eefb72c244f2a691df"
+        ),
         "assessment": {
             "schemaVersion": assessment["schemaVersion"],
             "repository": assessment["repository"]["url"],
@@ -146,6 +150,7 @@ def capture_contract() -> dict[str, Any]:
             "runtimeSha256": supply["releaseArtifact"]["sha256"],
             "runtimeSize": supply["releaseArtifact"]["size"],
             "target": supply["target"],
+            "buildPath": supply["buildPath"],
             "rustc": supply["toolchain"]["rustc"],
             "cargo": supply["toolchain"]["cargo"],
             "upstreamCrates": [
@@ -461,6 +466,7 @@ def run_gate() -> dict[str, Any]:
         "build": {
             "networkAccessDuringBuild": rebuild["networkAccessDuringBuild"],
             "reproducibleBuilds": rebuild["reproducibleBuilds"],
+            "buildPath": rebuild["buildPath"],
             "runtimeSha256": rebuild["output"]["sha256"],
             "runtimeSize": rebuild["output"]["size"],
             "compilerLogSha256": _sha256_bytes(rebuild_process.stderr.encode("utf-8")),

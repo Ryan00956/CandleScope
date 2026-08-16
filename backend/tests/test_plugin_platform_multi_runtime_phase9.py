@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -11,10 +12,15 @@ from scripts import plugin_platform_multi_runtime_phase9 as phase9
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
+CURRENT_CONTRACT_SHA256 = (
+    "f893fc4e5d41c393ef5cbbe0494ee98903895f396c4f1830ab6a93355108f192"
+)
 
 
 def test_phase9_contract_fixture_matches_implemented_release() -> None:
     fixture = json.loads(phase9.CONTRACT_PATH.read_text(encoding="utf-8"))
+    portable = phase9.CONTRACT_PATH.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(portable).hexdigest() == CURRENT_CONTRACT_SHA256
     assert phase9.capture_contract() == fixture
     assert fixture["schemaVersion"] == phase9.CONTRACT_SCHEMA_VERSION
     assert fixture["assessment"] == {
@@ -111,3 +117,10 @@ def test_phase9_reference_build_remaps_host_paths_and_ignores_host_flags(
         f"--remap-path-prefix={build_release.cargo_home()}="
         f"{build_release.CANONICAL_CARGO_HOME}"
     ) in encoded
+
+
+def test_phase9_reference_build_uses_a_fixed_cargo_source_identity() -> None:
+    build_release = _build_release_module()
+
+    assert build_release.CANONICAL_BUILD_DRIVE == "Q:"
+    assert build_release.BUILD_PATH_STRATEGY == "windows-subst-drive-v1"

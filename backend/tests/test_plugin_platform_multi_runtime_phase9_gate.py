@@ -21,6 +21,12 @@ def test_phase9_real_second_project_gate(gate_result: dict[str, object]) -> None
     assert isinstance(build, dict)
     assert build["networkAccessDuringBuild"] is False
     assert build["reproducibleBuilds"] == 2
+    assert build["buildPath"] == {
+        "canonicalDrive": "Q:",
+        "remappedCargoHome": "/cargo/home",
+        "remappedRepositoryRoot": "/candlescope/source",
+        "strategy": "windows-subst-drive-v1",
+    }
     assert build["bundleRepeatIdentical"] is True
     assert build["bundleSha256"] == phase9.EXPECTED_BUNDLE_SHA256
 

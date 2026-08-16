@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "candlescope.python-first-release/1",
+  "$id": "candlescope.python-first-release/2",
   "title": "CandleScope Python First N10 unmerged release evidence",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
+    "baseSha",
     "gitSha",
     "gitDirty",
     "branch",
@@ -22,11 +23,18 @@
     "knownLimitations"
   ],
   "properties": {
-    "schemaVersion": { "const": "candlescope.python-first-release/1" },
+    "schemaVersion": { "const": "candlescope.python-first-release/2" },
+    "baseSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
     "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
-    "gitDirty": { "type": "boolean" },
+    "gitDirty": { "const": false },
     "branch": { "type": "string", "minLength": 1 },
-    "status": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": [
+        "RELEASE_GATES_INCOMPLETE",
+        "RELEASE_GATES_OPEN",
+        "VALIDATED_CLEAN_SHA_UNMERGED"
+      ]
+    },
     "merged": { "const": false },
     "pushed": { "const": false },
     "productionEnabled": { "const": false },
@@ -72,8 +80,31 @@
     },
     "gates": {
       "type": "object",
-      "minProperties": 1,
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "additionalProperties": false,
+      "required": [
+        "repositoryRegression",
+        "pythonSecurityBoundary",
+        "browserAcceptance",
+        "performanceSoak",
+        "disabledBoot",
+        "defaultProductionFlagsOff",
+        "publicApiSmoke",
+        "checkpointFaultInjection",
+        "exactRevertDetachedWorktree",
+        "releaseManifestSha256"
+      ],
+      "properties": {
+        "repositoryRegression": { "type": "string", "minLength": 1 },
+        "pythonSecurityBoundary": { "type": "string", "minLength": 1 },
+        "browserAcceptance": { "type": "string", "minLength": 1 },
+        "performanceSoak": { "type": "string", "minLength": 1 },
+        "disabledBoot": { "type": "string", "minLength": 1 },
+        "defaultProductionFlagsOff": { "type": "string", "minLength": 1 },
+        "publicApiSmoke": { "type": "string", "minLength": 1 },
+        "checkpointFaultInjection": { "type": "string", "minLength": 1 },
+        "exactRevertDetachedWorktree": { "type": "string", "minLength": 1 },
+        "releaseManifestSha256": { "type": "string", "minLength": 1 }
+      }
     },
     "knownLimitations": {
       "type": "array",

@@ -161,7 +161,9 @@ def test_n10_manifest_schema_rejects_enabled_flags_and_validated_without_soaks()
             / "python-first-n10-release.schema.json"
         ).read_text(encoding="utf-8")
     )
-    assert schema["$id"] == "candlescope.python-first-release/1"
+    assert schema["$id"] == "candlescope.python-first-release/2"
+    assert "baseSha" in schema["required"]
+    assert schema["properties"]["gitDirty"]["const"] is False
     assert schema["properties"]["merged"]["const"] is False
     assert schema["properties"]["pushed"]["const"] is False
     assert schema["properties"]["productionEnabled"]["const"] is False

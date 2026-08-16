@@ -21,7 +21,7 @@ from app.backtest.strategy.python_scale import (
     OFFICIAL_BAR_CAPACITY,
 )
 
-RELEASE_SCHEMA = "candlescope.python-first-release/1"
+RELEASE_SCHEMA = "candlescope.python-first-release/2"
 VALIDATED_STATUS = "VALIDATED_CLEAN_SHA_UNMERGED"
 PRODUCTION_FLAGS = (
     "BACKTEST_ENABLED",

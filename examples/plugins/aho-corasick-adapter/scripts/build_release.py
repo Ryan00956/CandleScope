@@ -10,8 +10,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 HERE = Path(__file__).resolve().parent
@@ -24,6 +25,8 @@ EXPECTED_RUSTC = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
 EXPECTED_CARGO = "cargo 1.97.1 (c980f4866 2026-06-30)"
 CANONICAL_REPOSITORY_ROOT = "/candlescope/source"
 CANONICAL_CARGO_HOME = "/cargo/home"
+CANONICAL_BUILD_DRIVE = "Q:"
+BUILD_PATH_STRATEGY = "windows-subst-drive-v1"
 
 
 def digest(path: Path) -> tuple[str, int]:
@@ -85,10 +88,17 @@ def verify_registry_cache(lock: dict[str, Any]) -> None:
 
 
 def verify_inputs(lock: dict[str, Any]) -> None:
-    if lock.get("schemaVersion") != "candlescope.aho-corasick-build-lock/1":
+    if lock.get("schemaVersion") != "candlescope.aho-corasick-build-lock/2":
         raise SystemExit("unsupported supply-chain lock schema")
     if lock.get("target") != TARGET or lock.get("networkAccessDuringBuild") is not False:
         raise SystemExit("supply-chain lock target or offline policy changed")
+    if lock.get("buildPath") != {
+        "canonicalDrive": CANONICAL_BUILD_DRIVE,
+        "remappedCargoHome": CANONICAL_CARGO_HOME,
+        "remappedRepositoryRoot": CANONICAL_REPOSITORY_ROOT,
+        "strategy": BUILD_PATH_STRATEGY,
+    }:
+        raise SystemExit("supply-chain lock build-path identity changed")
     if tool_version("rustc") != EXPECTED_RUSTC or tool_version("cargo") != EXPECTED_CARGO:
         raise SystemExit("Rust toolchain is not the reviewed 1.97.1 release")
     for item in lock["inputs"]:
@@ -98,7 +108,7 @@ def verify_inputs(lock: dict[str, Any]) -> None:
     verify_registry_cache(lock)
 
 
-def build_environment() -> dict[str, str]:
+def build_environment(repository_root: Path = REPOSITORY_ROOT) -> dict[str, str]:
     environment = os.environ.copy()
     # Host-provided flags would invalidate the reviewed build. Cargo's encoded
     # form preserves each argument without shell parsing, retains MSVC /Brepro,
@@ -108,7 +118,7 @@ def build_environment() -> dict[str, str]:
     rustflags = [
         "-C",
         "link-arg=/Brepro",
-        f"--remap-path-prefix={REPOSITORY_ROOT}={CANONICAL_REPOSITORY_ROOT}",
+        f"--remap-path-prefix={repository_root}={CANONICAL_REPOSITORY_ROOT}",
         f"--remap-path-prefix={cargo_home()}={CANONICAL_CARGO_HOME}",
     ]
     environment.update(
@@ -122,8 +132,59 @@ def build_environment() -> dict[str, str]:
     return environment
 
 
-def build_once(cargo: str, target_dir: Path) -> Path:
-    environment = build_environment()
+@contextmanager
+def canonical_repository_root() -> Iterator[Path]:
+    if os.name != "nt":
+        raise SystemExit("the reviewed MSVC build requires Windows")
+    subst = shutil.which("subst")
+    if subst is None:
+        raise SystemExit("subst.exe is unavailable")
+    canonical_root = Path(f"{CANONICAL_BUILD_DRIVE}/")
+    query = subprocess.run(
+        [subst, CANONICAL_BUILD_DRIVE],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if query.returncode == 0 or canonical_root.exists():
+        raise SystemExit(f"canonical build drive is already in use: {CANONICAL_BUILD_DRIVE}")
+    mapped = subprocess.run(
+        [subst, CANONICAL_BUILD_DRIVE, str(REPOSITORY_ROOT)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if mapped.returncode != 0:
+        raise SystemExit(f"failed to create canonical build drive: {mapped.stderr.strip()}")
+    try:
+        canonical_adapter = canonical_root / ADAPTER_ROOT.relative_to(REPOSITORY_ROOT)
+        if not canonical_adapter.samefile(ADAPTER_ROOT):
+            raise SystemExit("canonical build drive does not resolve to the reviewed source")
+        yield canonical_root
+    finally:
+        removed = subprocess.run(
+            [subst, CANONICAL_BUILD_DRIVE, "/d"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError(
+                f"failed to remove canonical build drive: {removed.stderr.strip()}"
+            )
+
+
+def build_once(
+    cargo: str,
+    target_dir: Path,
+    *,
+    repository_root: Path = REPOSITORY_ROOT,
+) -> Path:
+    environment = build_environment(repository_root)
+    adapter_root = repository_root / ADAPTER_ROOT.relative_to(REPOSITORY_ROOT)
     subprocess.run(
         [
             cargo,
@@ -136,7 +197,7 @@ def build_once(cargo: str, target_dir: Path) -> Path:
             "--target-dir",
             str(target_dir),
         ],
-        cwd=ADAPTER_ROOT,
+        cwd=adapter_root,
         env=environment,
         check=True,
     )
@@ -167,32 +228,43 @@ def main() -> int:
     cargo = shutil.which("cargo")
     if cargo is None:
         raise SystemExit("cargo is unavailable")
-    with tempfile.TemporaryDirectory(prefix="candlescope-aho-build-a-") as first_value:
-        with tempfile.TemporaryDirectory(prefix="candlescope-aho-build-b-") as second_value:
-            first = build_once(cargo, Path(first_value))
-            second = build_once(cargo, Path(second_value))
-            first_digest = digest(first)
-            second_digest = digest(second)
-            if first_digest != second_digest:
-                raise SystemExit(
-                    "release executable is not byte-reproducible across isolated target dirs: "
-                    f"first={first_digest}, second={second_digest}"
+    with canonical_repository_root() as source_root:
+        with tempfile.TemporaryDirectory(prefix="candlescope-aho-build-a-") as first_value:
+            with tempfile.TemporaryDirectory(prefix="candlescope-aho-build-b-") as second_value:
+                first = build_once(
+                    cargo, Path(first_value), repository_root=source_root
                 )
-            expected = lock["releaseArtifact"]
-            wanted = (str(expected["sha256"]), int(expected["size"]))
-            if first_digest != wanted:
-                raise SystemExit(
-                    f"release executable changed from the reviewed lock: expected={wanted}, "
-                    f"actual={first_digest}"
+                second = build_once(
+                    cargo, Path(second_value), repository_root=source_root
                 )
-            output = arguments.output.expanduser().resolve()
-            publish(first, output)
+                first_digest = digest(first)
+                second_digest = digest(second)
+                if first_digest != second_digest:
+                    raise SystemExit(
+                        "release executable is not byte-reproducible across isolated target dirs: "
+                        f"first={first_digest}, second={second_digest}"
+                    )
+                expected = lock["releaseArtifact"]
+                wanted = (str(expected["sha256"]), int(expected["size"]))
+                if first_digest != wanted:
+                    raise SystemExit(
+                        "release executable changed from the reviewed lock: "
+                        f"expected={wanted}, actual={first_digest}"
+                    )
+                output = arguments.output.expanduser().resolve()
+                publish(first, output)
     report = {
-        "schemaVersion": "candlescope.aho-corasick-build-report/1",
+        "schemaVersion": "candlescope.aho-corasick-build-report/2",
         "networkAccessDuringBuild": False,
         "reproducibleBuilds": 2,
         "sourceDateEpoch": 1767225600,
         "target": TARGET,
+        "buildPath": {
+            "canonicalDrive": CANONICAL_BUILD_DRIVE,
+            "remappedCargoHome": CANONICAL_CARGO_HOME,
+            "remappedRepositoryRoot": CANONICAL_REPOSITORY_ROOT,
+            "strategy": BUILD_PATH_STRATEGY,
+        },
         "toolchain": {"cargo": EXPECTED_CARGO, "rustc": EXPECTED_RUSTC},
         "output": {
             "path": output.name,

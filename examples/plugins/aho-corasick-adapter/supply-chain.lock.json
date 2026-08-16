@@ -19,6 +19,12 @@
       "version": "2.8.3"
     }
   ],
+  "buildPath": {
+    "canonicalDrive": "Q:",
+    "remappedCargoHome": "/cargo/home",
+    "remappedRepositoryRoot": "/candlescope/source",
+    "strategy": "windows-subst-drive-v1"
+  },
   "inputs": [
     {
       "path": ".cargo/config.toml",
@@ -41,8 +47,8 @@
     {
       "path": "scripts/build_release.py",
       "root": "adapter",
-      "sha256": "sha256:70e65b0cc5c271f789a9f11be32c99582da09ece1603f467510e1b5664c995db",
-      "size": 7588
+      "sha256": "sha256:db4b86c3b62d0533f82f62f92644edd10874d2de442a41d67752f74ec8e3675b",
+      "size": 10365
     },
     {
       "path": "src/main.rs",
@@ -72,10 +78,10 @@
   "networkAccessDuringBuild": false,
   "releaseArtifact": {
     "path": "runtime/adapter.exe",
-    "sha256": "sha256:293b93c79129e357570731f53f73978a8089c43a4a0d88189538a08eb37e24c1",
+    "sha256": "sha256:0a2947046d05a9bed34f20adb091b59da9ac491e4a3de414fc204f6132d9061b",
     "size": 426496
   },
-  "schemaVersion": "candlescope.aho-corasick-build-lock/1",
+  "schemaVersion": "candlescope.aho-corasick-build-lock/2",
   "sourceDateEpoch": 1767225600,
   "target": "x86_64-pc-windows-msvc",
   "toolchain": {

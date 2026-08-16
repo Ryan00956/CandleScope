@@ -4,8 +4,8 @@
 
 **不能**报告 `VALIDATED_CLEAN_SHA_UNMERGED`。
 
-干净候选（代码/门禁）：`325830e244ef649d317c9f4b5608595375b4bfb9`  
-分支：`codex/backtest-foundation`  
+干净候选（代码/门禁）：`325830e244ef649d317c9f4b5608595375b4bfb9`
+分支：`codex/backtest-foundation`
 `merged=false` `pushed=false` `productionEnabled=false`
 
 N10 把门禁落到了 Host 真实路径：默认 flags、disabled boot、runner 隔离、

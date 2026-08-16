@@ -49,3 +49,8 @@ packages/candlescope-plugin-sdk-rust-wasm/Cargo.toml text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/LICENSE text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/*.md text eol=lf
 packages/candlescope-plugin-sdk-rust-wasm/src/** text eol=lf
+
+# Python strategy bundles reject CRLF at the runtime boundary. Make every SDK
+# source, schema, fixture, and official template checkout byte-stable on Windows.
+packages/candlescope-backtest-sdk/** text eol=lf
+backend/app/backtest/strategy/python_author_schemas/** text eol=lf

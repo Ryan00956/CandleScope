@@ -50,22 +50,33 @@ def _commit(repository: Path, message: str) -> str:
     return _git(repository, "rev-parse", "HEAD")
 
 
-def _release_repository(tmp_path: Path) -> tuple[Path, Path, str, str]:
+def _release_repository(
+    tmp_path: Path, *, crlf_artifact: bool = False
+) -> tuple[Path, Path, str, str]:
     repository = tmp_path / "repository"
     repository.mkdir()
     _git(repository, "init", "-b", "codex/backtest-foundation")
     _git(repository, "config", "user.name", "CandleScope Tests")
     _git(repository, "config", "user.email", "tests@candlescope.invalid")
-    _git(repository, "config", "core.autocrlf", "false")
+    _git(repository, "config", "core.autocrlf", "true" if crlf_artifact else "false")
 
+    _write(repository / ".gitattributes", "*.txt text\n")
     _write(repository / "README.md", "base\n")
     base = _commit(repository, "base")
     _git(repository, "branch", "main", base)
 
     artifact = repository / "backend" / "candidate.txt"
-    _write(artifact, "candidate artifact\n")
+    if crlf_artifact:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"candidate artifact\r\n")
+    else:
+        _write(artifact, "candidate artifact\n")
     candidate = _commit(repository, "candidate")
-    artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    artifact_sha256 = hashlib.sha256(
+        subprocess.check_output(
+            ["git", "show", f"{candidate}:backend/candidate.txt"], cwd=repository
+        )
+    ).hexdigest()
 
     manifest_path = repository / "docs" / "evidence" / "n10.json"
     manifest = {
@@ -119,6 +130,19 @@ def test_verifier_binds_clean_candidate_and_evidence_only_head(tmp_path: Path) -
     assert result["baseSha"] == base
     assert result["candidateSha"] == candidate
     assert result["postCandidateChangedPaths"] == ["docs/evidence/n10.json"]
+
+
+def test_verifier_uses_canonical_git_bytes_across_eol_conversion(
+    tmp_path: Path,
+) -> None:
+    repository, manifest, _, _ = _release_repository(
+        tmp_path, crlf_artifact=True
+    )
+    artifact = repository / "backend" / "candidate.txt"
+
+    assert _git(repository, "status", "--porcelain") == ""
+    assert artifact.read_bytes().endswith(b"\r\n")
+    assert verify(manifest, SCHEMA, repository)["status"] == "PASS"
 
 
 def test_verifier_rejects_code_after_candidate(tmp_path: Path) -> None:

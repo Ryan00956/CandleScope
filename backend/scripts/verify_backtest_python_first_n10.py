@@ -26,14 +26,6 @@ from app.backtest.python_first_n10 import (  # noqa: E402
 EVIDENCE_PREFIX = "docs/evidence/"
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.check_output(
         ["git", *args], cwd=cwd, text=True, encoding="utf-8"
@@ -196,18 +188,15 @@ def verify(manifest_path: Path, schema_path: Path, repository: Path) -> dict[str
         candidate_bytes = _git_bytes(
             "show", f"{candidate}:{relative}", cwd=repository
         )
+        head_bytes = _git_bytes("show", f"{head}:{relative}", cwd=repository)
         candidate_sha256 = _sha256_bytes(candidate_bytes)
-        current_sha256 = _sha256(path)
-        if (
-            candidate_sha256 != artifact["sha256"]
-            or current_sha256 != artifact["sha256"]
-        ):
+        if candidate_bytes != head_bytes or candidate_sha256 != artifact["sha256"]:
             raise RuntimeError(f"release artifact hash mismatch: {path}")
         artifacts.append(
             {
                 "kind": artifact["kind"],
                 "path": relative,
-                "sha256": current_sha256,
+                "sha256": candidate_sha256,
             }
         )
     return {

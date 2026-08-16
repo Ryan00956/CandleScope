@@ -1,78 +1,88 @@
-# Backtest Python First N10 未合并发布验收（2026-08-15）
+# Backtest Python First N10 未合并发布验收（2026-08-16 收口）
 
 ## 结论
 
-**不能**报告 `VALIDATED_CLEAN_SHA_UNMERGED`。
-
-干净候选（代码/门禁）：`325830e244ef649d317c9f4b5608595375b4bfb9`
-分支：`codex/backtest-foundation`
-`merged=false` `pushed=false` `productionEnabled=false`
-
-N10 把门禁落到了 Host 真实路径：默认 flags、disabled boot、runner 隔离、
-BAR/aggTrade lifecycle、v6→v5→v4 回滚、detached revert、manifest 校验、
-1h Host soak 与 4h 浏览器 soak。完整后端套件仍有已分类的 Phase 9 rust lock
-环境误差。因此状态是 `RELEASE_GATES_OPEN`，不是
+状态已从 `RELEASE_GATES_OPEN` 收口为
 `VALIDATED_CLEAN_SHA_UNMERGED`。
 
-## 已关闭的门禁
+- 基线：`5df19ae76686977f324644e9e62a63b73cf6a743`
+- 干净代码候选：`3e00e08a5d705854d2a15cdb2c0a4aca877b88ff`
+- 分支：`codex/backtest-foundation`
+- `merged=false`、`pushed=false`、`productionEnabled=false`
+- 后端与前端全部回测生产开关保持默认 `0`
 
-| 门禁 | 结果 |
+本次只完成 Python First 与仓库内回测框架的发布收口；没有继续扩展 Pine、
+Pyne，也没有合并主分支、推送远端或启用生产入口。
+
+## 最终门禁
+
+| 门禁 | 最终结果 |
 | --- | --- |
-| Python SDK / contract / bundle / runtime / attack / Host / Studio / templates / basket / scale | PASS（聚焦套件 74 passed；N10 10 passed；SDK 19 passed） |
-| Host BAR + aggTrade lifecycle | PASS；1h soak 3600.125 s / 13068 循环；decision hash `cfb9445e…` 双时钟一致 |
-| 4h Python 浏览器 soak | PASS；14400015 ms / 240 循环；studio 每轮存在；console 0 |
-| Frontend typecheck / lint / tests / build | PASS / PASS / 3267 passed 0 failed / PASS |
-| `git diff --check` | PASS |
-| Disabled boot | PASS：默认进程无 `/api/v1/backtests`；flags=0 时 config 不要求 SDK |
-| Sandbox attack / runner 隔离 | PASS：不导入 service/repository/sqlite3/plugin_host |
-| Checkpoint / fault injection | PASS：`test_backtest_recovery_m10.py` |
-| Schema v6→v5→v4 | PASS：空 bundle 可回滚；有 bundle 行 fail-closed；M10 v5 脚本未放宽 |
-| Detached exact revert | PASS：worktree 回退 N2–N9，保留 N1 插件合同修复；built-in 15 passed |
-| 200k 默认 / 1M 仅 scale flag / 2M aggTrade 上限 | PASS（合同测试 + N8 1M 证据未改写） |
-| 生产 flags | 全部默认 `0`，包括 Python / TRUSTED / SCALE / MULTI_MARKET |
+| 完整后端套件 | PASS：`3865 passed, 0 failed, 0 errors`，7 个弃用类 warning，1860.06 s |
+| 完整前端 `npm run check` | PASS：architecture、plugin architecture、typecheck、lint、3267 tests、34 desktop tests、production build 全部通过 |
+| Python SDK 独立套件 | PASS：19 passed |
+| Rust reference adapter 离线单测 | PASS：3 passed |
+| Phase 9 真实构建/安装/回滚门禁 | PASS：完整后端套件已覆盖；锁定二进制可重复构建 |
+| Python Host BAR + aggTrade lifecycle | PASS：1h soak 3600.125 s / 13068 循环 |
+| Python 浏览器 lifecycle | PASS：4h soak 14400015 ms / 240 reload；console 0 |
+| 百万 K 线 | PASS：1M 仅 scale flag；正式证据由 probe 管理，测试不再改写受控证据 |
+| Checkpoint / fault injection | PASS |
+| v6→v5→v4 schema rollback | PASS |
+| Detached exact revert | PASS：回退 N2–N10 后与 N1 树完全一致；固定健康集 15 passed |
+| `git diff --check main...candidate` | PASS |
+| 发布 manifest 身份、artifact SHA-256 与默认关闭校验 | PASS |
 
-## 完整后端套件
+全量后端结束后工作树仍然干净，关闭了此前百万 K 线测试改写
+`docs/evidence/backtest-python-first-n8-1m-bar-20260815.json` 的副作用。
+`reportHash` 绑定策略 revision 身份；独立新建 revision 时允许不同，但 decision/fill
+结果保持稳定。正式性能证据只能由显式 probe 生成，普通 pytest 不再写入。
 
-`3853 passed, 6 failed, 2 errors`（约 37 min）。事后分类：
+## Phase 9 可重复构建收口
 
-- 2 errors：Phase 9 rust rebuild lock，与 N1 相同环境残差（未改 supply-chain lock）
-- 3 failed（architecture + 2 local-offline）：本阶段已修，隔离复跑 21 passed
-- 3 failed（alerts soak / phase0 baseline / replay golden）：隔离复跑均通过，属全量并行争用，不是产品回归
+此前 2 个 error 不是 Rust 算法或依赖漂移，而是 Cargo/Rust 的本地 path crate
+身份泄漏了 worktree 绝对路径：同一源码在不同 worktree 会产生不同 PE 哈希。
 
-未把上述残差改写成 0 failed / 0 errors，也未重写冻结 lock。
+构建锁迁移到 `candlescope.aho-corasick-build-lock/2`，冻结
+`windows-subst-drive-v1`：在 Windows 上把源码映射到固定 `Q:` 身份，构建完成后
+释放映射；占用或映射失败时 fail-closed。两个不同 worktree 经固定身份构建得到
+同一个二进制：
 
-## 1h soak
+- runtime SHA-256：`0a2947046d05a9bed34f20adb091b59da9ac491e4a3de414fc204f6132d9061b`
+- bundle SHA-256：`7c507284903053e9c45e4acb3766e34c101e70d247c62760c071a98ea7b9a67d`
+- size：426496 bytes
 
-`PASS`：`soak_python_first_n10.py --duration-ms 3600000` 跑满 3600.125 s，
-13068 个 Host Python BAR+aggTrade 循环，全部 COMPLETED，decision hash
-`cfb9445e…` 双时钟一致。证据：scratch `n10-1h-soak.json`。
+历史 `phase9_contract_v1.json` 未改写；新增 v2 合同记录迁移和旧合同哈希。
+没有删除测试、跳过真实构建或放宽 gate。
 
-## 4h 浏览器 soak
+## 长时证据适用性
 
-`PASS`：Playwright + 本机 Chrome 打开 shipped `backtest.html`，跑满
-14400015 ms，240 个 reload 循环，Python studio 每轮存在，console 0，
-heap 18.9 MB → 26.8 MB（峰值 28.1 MB，无单调失控）。
-脚本：`frontend/scripts/backtest-python-n10-browser-soak.mjs`（`13e8943d`）。
-完整样本：scratch `n10-4h-soak.json`（sha256 `9914a324…`）。
-摘要：`docs/evidence/backtest-python-first-n10-4h-soak-20260815.json`。
+1h Host soak 与 4h 浏览器 soak 来自祖先提交 `13e8943d`。最终候选没有修改
+Host lifecycle、soak 脚本或浏览器 soak 脚本；后续改动仅涉及 Phase 9 构建锁、
+N10 发布身份校验、证据、测试副作用和 `backtestFlags.ts` 空白行。最终候选又完整
+通过后端和前端门禁，因此保留这两项长时证据，不伪称在 `3e00e08a` 上重新跑满
+5 小时。
 
-## 仍未关闭
+## 只读复核
 
-- 完整后端套件 `0 failed / 0 errors`：Phase 9 rust lock 环境残差（见 hard-stop）
-- 独立人工 full-feature review
-
-### Phase 9 hard-stop（不能安全修到 0/0）
-
-`rustc`/`cargo` 字符串与锁一致。仓库内 `runtime/adapter.exe` 已是
-`sha256:293b93c7…`。本机隔离重编彼此一致，但得到 `sha256:fe1a8f1a…`，
-size 同为 426496。改 lock 会掩盖冻结 supply-chain；本机没有锁机器上的
-MSVC/link.exe。未删测试、未放宽门禁。
+本次对 `main...3e00e08a` 的默认关闭、Python runner 隔离、artifact 身份、
+candidate→evidence-only 约束、远端/本地主分支包含关系、回滚范围和 Phase 9
+供应链锁做了单独只读复核，未发现新的发布阻断项。这是 Codex 本次内部复核，
+不是第二位人工 reviewer 的签署。
 
 ## 回滚
 
 ```text
-git revert --no-commit 52c108c1..325830e2
+git revert --no-commit 52c108c1..3e00e08a
 ```
 
-保留 N1 插件合同修复。独立 Run/report/bundle 只读保留。禁止 `git reset --hard`。
-关闭全部生产 flags。然后重跑 built-in BAR/aggTrade、local、replay、plugin 健康检查。
+在独立 detached worktree 实际执行后，回滚树与 N1 `52c108c1` 完全一致，
+基础 runtime、release flag、architecture、schema rollback、data-quality 共 15 项
+健康检查全部通过。临时演练 worktree已删除；主工作树未保留回滚改动。
+
+## 保留限制
+
+- Pine/Pyne 仍是受限兼容子集，本次按范围不继续完善。
+- `BAR_APPROX` 仍是近似成交；aggTrade 不是 raw trade，也不提供 queue-exact 语义。
+- `BACKTEST_MULTI_MARKET_ENABLED=0`；basket 仍是逐 symbol 独立账本。
+- 回测结果不能直接触发 paper/live 委托。
+- 当前结论授权的是“干净、未合并候选已验证”，不是合并、推送或生产启用授权。

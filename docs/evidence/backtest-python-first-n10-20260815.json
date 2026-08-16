@@ -1,9 +1,10 @@
 {
-  "schemaVersion": "candlescope.python-first-release/1",
-  "gitSha": "13e8943d28973f6caa18f856a57a54498df2d36a",
+  "schemaVersion": "candlescope.python-first-release/2",
+  "baseSha": "5df19ae76686977f324644e9e62a63b73cf6a743",
+  "gitSha": "3e00e08a5d705854d2a15cdb2c0a4aca877b88ff",
   "gitDirty": false,
   "branch": "codex/backtest-foundation",
-  "status": "RELEASE_GATES_OPEN",
+  "status": "VALIDATED_CLEAN_SHA_UNMERGED",
   "merged": false,
   "pushed": false,
   "productionEnabled": false,
@@ -26,7 +27,10 @@
     "BACKTEST_ONLINE_LEARNING_ENABLED": "0",
     "BACKTEST_PYTHON_STRATEGY_ENABLED": "0",
     "BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": "0",
-    "BACKTEST_PYTHON_SCALE_V1_ENABLED": "0"
+    "BACKTEST_PYTHON_SCALE_V1_ENABLED": "0",
+    "VITE_BACKTEST_ENTRY_ENABLED": "0",
+    "VITE_BACKTEST_PYTHON_STRATEGY_ENABLED": "0",
+    "VITE_BACKTEST_PYTHON_TRUSTED_LOCAL_ENABLED": "0"
   },
   "datasetSnapshotHashes": [
     "sha256:77e2b852e645aa4812a2a45b7e937fa65973cd03e2aed125c8b02de797b9b743",
@@ -42,27 +46,27 @@
     {
       "kind": "n10-gate-module",
       "path": "backend/app/backtest/python_first_n10.py",
-      "sha256": "0d4ed1e95f35d22d9aa7572160b0363151b77e29972b77de7b02320e92573dbf"
+      "sha256": "840e187921eed689cf08655edf66f3e2f5e8f64417eed15473d0e0bce6670240"
     },
     {
       "kind": "n10-lifecycle",
       "path": "backend/app/backtest/python_first_lifecycle.py",
-      "sha256": "e498618311940c14ec0a385f83a1d4d71e1ab3501791c63c5fadc8fc0f9a8b26"
+      "sha256": "2f97a943cb9aa8db04410de7e5d30ddd05c82e5c8b22e6ef2eab621bc48aa012"
     },
     {
       "kind": "n10-verifier",
       "path": "backend/scripts/verify_backtest_python_first_n10.py",
-      "sha256": "3bfe2b212944d826ba8d5e9fd2c1d2209620828815a5ac885f10bbb2cc8e0912"
+      "sha256": "ac9f442c23e969c112b7320c64c70ce9ebbb333aeca0beda68454dd6bad39431"
     },
     {
       "kind": "n10-soak-script",
       "path": "backend/scripts/soak_python_first_n10.py",
-      "sha256": "b588a2d0e11aac038269848bcc7b3d7a54b2f191eac71779eda38d0ef85f0bb6"
+      "sha256": "e891bc8f9b68b952c2b0fa714fbd5ef7a9bb49f93bd14bf31c457429a5fdddd7"
     },
     {
       "kind": "n10-schema",
       "path": "docs/perf-baselines/backtest/python-first-n10-release.schema.json",
-      "sha256": "5610ad7269f21a1f7eda1cb4885ed91589362412c98d8c85e2802171ea7d29ea"
+      "sha256": "65faafb9ad6c43911272ee1b95a9798e4423a46642d8b117efc2a8f2ceb9191d"
     },
     {
       "kind": "n8-1m-bar",
@@ -72,11 +76,11 @@
     {
       "kind": "n10-4h-browser-soak",
       "path": "docs/evidence/backtest-python-first-n10-4h-soak-20260815.json",
-      "sha256": "bc7b83956e467e661e6cb128a83338d937f7b94a30ad4da054340db7858ea763"
+      "sha256": "00417e94dd6422c289a2bfc618bea7122981b44166164064390dad9f3a2b6d58"
     }
   ],
   "gates": {
-    "repositoryRegression": "ENV_RESIDUAL",
+    "repositoryRegression": "PASS",
     "pythonSecurityBoundary": "PASS",
     "browserAcceptance": "PASS",
     "performanceSoak": "PASS",
@@ -88,21 +92,21 @@
     "releaseManifestSha256": "PASS"
   },
   "knownLimitations": [
-    "full backend suite still has Phase 9 rust lock environment residuals",
-    "Pine/Pyne remain restricted compatibility subsets",
+    "Pine/Pyne remain restricted compatibility subsets and are outside this Python-first closeout",
     "BAR_APPROX is approximate; aggTrade is not raw trade or queue exact",
-    "BACKTEST_MULTI_MARKET_ENABLED stays 0; basket is independent per-symbol only"
+    "BACKTEST_MULTI_MARKET_ENABLED stays 0; basket is independent per-symbol only",
+    "backtest outputs cannot directly trigger paper or live orders"
   ],
   "commands": [
     {
-      "command": "python -m pytest backend/tests/test_python_first_n10_release.py backend/tests/test_python_first_n10_flags.py",
+      "command": "python -m pytest -q backend --tb=short",
       "exitCode": 0,
-      "durationSeconds": 3.55
+      "durationSeconds": 1860.06
     },
     {
-      "command": "npm run typecheck && npm run lint && npm test && npm run build",
+      "command": "npm run check",
       "exitCode": 0,
-      "durationSeconds": 276.28
+      "durationSeconds": 229.0
     },
     {
       "command": "python backend/scripts/soak_python_first_n10.py --duration-ms 3600000 --cycles 100000",
@@ -115,9 +119,19 @@
       "durationSeconds": 14400.015
     },
     {
-      "command": "python -m pytest backend/tests --tb=no",
-      "exitCode": 1,
-      "durationSeconds": 2226.44
+      "command": "python -m pytest -q packages/candlescope-backtest-sdk/tests",
+      "exitCode": 0,
+      "durationSeconds": 16.56
+    },
+    {
+      "command": "cargo test --offline --manifest-path examples/plugins/aho-corasick-adapter/Cargo.toml",
+      "exitCode": 0,
+      "durationSeconds": 2.43
+    },
+    {
+      "command": "detached exact revert 52c108c1..3e00e08a and 15-test rollback health set",
+      "exitCode": 0,
+      "durationSeconds": 13.89
     }
   ]
 }

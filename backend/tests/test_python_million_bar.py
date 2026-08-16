@@ -98,6 +98,7 @@ def test_million_bar_python_reference_run(tmp_path: Path, monkeypatch) -> None:
         "checkpointInterval": result["checkpoint_interval"],
         "ok": True,
     }
-    EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
-    EVIDENCE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    assert json.loads(EVIDENCE.read_text(encoding="utf-8"))["bars"] == 1_000_000
+    # Tests must not rewrite the committed release evidence. The official probe
+    # owns evidence collection; this gate validates the live result in memory.
+    assert payload["bars"] == 1_000_000
+    assert payload["ok"] is True

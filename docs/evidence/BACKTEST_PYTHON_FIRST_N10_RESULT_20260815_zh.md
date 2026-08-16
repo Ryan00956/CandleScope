@@ -6,7 +6,7 @@
 `VALIDATED_CLEAN_SHA_UNMERGED`。
 
 - 基线：`5df19ae76686977f324644e9e62a63b73cf6a743`
-- 干净代码候选：`3e00e08a5d705854d2a15cdb2c0a4aca877b88ff`
+- 干净代码候选：`443307d25994ac5d42abf53b16fe63e9f3b7342e`
 - 分支：`codex/backtest-foundation`
 - `merged=false`、`pushed=false`、`productionEnabled=false`
 - 后端与前端全部回测生产开关保持默认 `0`
@@ -18,7 +18,7 @@ Pyne，也没有合并主分支、推送远端或启用生产入口。
 
 | 门禁 | 最终结果 |
 | --- | --- |
-| 完整后端套件 | PASS：`3865 passed, 0 failed, 0 errors`，7 个弃用类 warning，1860.06 s |
+| 完整后端套件 | PASS：`3866 passed, 0 failed, 0 errors`，7 个弃用类 warning，1643.94 s |
 | 完整前端 `npm run check` | PASS：architecture、plugin architecture、typecheck、lint、3267 tests、34 desktop tests、production build 全部通过 |
 | Python SDK 独立套件 | PASS：19 passed |
 | Rust reference adapter 离线单测 | PASS：3 passed |
@@ -36,6 +36,12 @@ Pyne，也没有合并主分支、推送远端或启用生产入口。
 `docs/evidence/backtest-python-first-n8-1m-bar-20260815.json` 的副作用。
 `reportHash` 绑定策略 revision 身份；独立新建 revision 时允许不同，但 decision/fill
 结果保持稳定。正式性能证据只能由显式 probe 生成，普通 pytest 不再写入。
+
+Windows `core.autocrlf=true` 下，工作树字节与规范 Git blob 可能只在 EOL 上不同。
+发布 verifier 因此以 candidate/HEAD Git blob 校验 SHA-256，并由“工作树 clean +
+candidate 后仅允许 evidence 路径”约束当前内容；回归测试覆盖 CRLF 工作树表示。
+同时 `.gitattributes` 将 Python SDK、官方模板和 author schema 强制为 LF，避免
+新 worktree 把严格 bundle 变成不可执行的 CRLF 文件。
 
 ## Phase 9 可重复构建收口
 
@@ -58,13 +64,15 @@ Pyne，也没有合并主分支、推送远端或启用生产入口。
 
 1h Host soak 与 4h 浏览器 soak 来自祖先提交 `13e8943d`。最终候选没有修改
 Host lifecycle、soak 脚本或浏览器 soak 脚本；后续改动仅涉及 Phase 9 构建锁、
-N10 发布身份校验、证据、测试副作用和 `backtestFlags.ts` 空白行。最终候选又完整
-通过后端和前端门禁，因此保留这两项长时证据，不伪称在 `3e00e08a` 上重新跑满
-5 小时。
+N10 发布身份/EOL 校验、证据、测试副作用和 `backtestFlags.ts` 空白行。最终候选
+又完整通过后端门禁，前端 Git subtree 也未变化，因此保留这两项长时证据，不伪称
+在 `443307d2` 上重新跑满
+5 小时。最终候选与完成 `npm run check` 的候选具有完全相同的 frontend Git
+subtree（`592ae8dea50cd20678a4c60de6c75dd8302c1fef`）。
 
 ## 只读复核
 
-本次对 `main...3e00e08a` 的默认关闭、Python runner 隔离、artifact 身份、
+本次对 `main...443307d2` 的默认关闭、Python runner 隔离、artifact 身份、
 candidate→evidence-only 约束、远端/本地主分支包含关系、回滚范围和 Phase 9
 供应链锁做了单独只读复核，未发现新的发布阻断项。这是 Codex 本次内部复核，
 不是第二位人工 reviewer 的签署。
@@ -72,12 +80,12 @@ candidate→evidence-only 约束、远端/本地主分支包含关系、回滚�
 ## 回滚
 
 ```text
-git revert --no-commit 52c108c1..3e00e08a
+git revert --no-commit 52c108c1..443307d2
 ```
 
 在独立 detached worktree 实际执行后，回滚树与 N1 `52c108c1` 完全一致，
 基础 runtime、release flag、architecture、schema rollback、data-quality 共 15 项
-健康检查全部通过。临时演练 worktree已删除；主工作树未保留回滚改动。
+健康检查全部通过。临时演练 worktree 已删除；主工作树未保留回滚改动。
 
 ## 保留限制
 

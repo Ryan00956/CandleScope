@@ -106,7 +106,10 @@ class _FakeProfile:
         self.close_calls += 1
 
     def supports(self, descriptor: StreamDescriptor) -> bool:
-        return descriptor.stream_type == StreamType.AGG_TRADE
+        return descriptor.stream_type in {
+            StreamType.AGG_TRADE,
+            StreamType.LIQUIDATION,
+        }
 
     def create_exchange(
         self,
@@ -149,7 +152,12 @@ class _FakeProfile:
         event: CcxtRawMarketEvent,
         descriptor: StreamDescriptor,
     ) -> bool:
-        return event.channel == "aggTrade" and event.symbol == descriptor.symbol
+        expected_channel = (
+            "forceOrder"
+            if descriptor.stream_type == StreamType.LIQUIDATION
+            else "aggTrade"
+        )
+        return event.channel == expected_channel and event.symbol == descriptor.symbol
 
     def runtime_key(self, config: IngestionConfig) -> tuple[str, ...]:
         del config
@@ -179,6 +187,32 @@ def _agg_event(sequence: int = 10) -> CcxtRawMarketEvent:
             "l": sequence,
             "T": 1_700_000_000_009,
             "m": False,
+        },
+        received_at_ms=1_700_000_000_011,
+    )
+
+
+def _liquidation_descriptor() -> StreamDescriptor:
+    return StreamDescriptor(
+        "BTCUSDT",
+        StreamType.LIQUIDATION,
+        market_type="futures",
+    )
+
+
+def _liquidation_event() -> CcxtRawMarketEvent:
+    return CcxtRawMarketEvent(
+        channel="forceOrder",
+        symbol="BTCUSDT",
+        payload={
+            "e": "forceOrder",
+            "E": 1_700_000_000_010,
+            "o": {
+                "s": "BTCUSDT",
+                "S": "SELL",
+                "p": "64000",
+                "q": "0.1",
+            },
         },
         received_at_ms=1_700_000_000_011,
     )
@@ -369,6 +403,34 @@ def test_runtime_pool_bounds_okx_kline_descriptors_per_shard(monkeypatch) -> Non
     asyncio.run(run())
 
 
+def test_runtime_pool_isolates_sparse_liquidations_from_continuous_streams() -> None:
+    async def run() -> None:
+        pool = CcxtRuntimePool()
+        profile = _FakeProfile()
+        config = IngestionConfig()
+        aggregate = _agg_descriptor()
+        liquidation = _liquidation_descriptor()
+
+        continuous_runtime = await pool.acquire(profile, config, aggregate)
+        sparse_runtime = await pool.acquire(profile, config, liquidation)
+        same_sparse_runtime = await pool.acquire(profile, config, liquidation)
+
+        assert sparse_runtime is same_sparse_runtime
+        assert sparse_runtime is not continuous_runtime
+        assert profile.create_calls == 2
+
+        await sparse_runtime.recycle_websockets()
+        assert sparse_runtime.websocket_generation == 1
+        assert continuous_runtime.websocket_generation == 0
+
+        await pool.release(continuous_runtime, aggregate)
+        await pool.release(sparse_runtime, liquidation)
+        await pool.release(same_sparse_runtime, liquidation)
+        assert pool.snapshot() == {"runtimes": {}}
+
+    asyncio.run(run())
+
+
 def test_runtime_pool_rebuilds_ccxt_caches_when_recycling_websockets() -> None:
     async def run() -> None:
         pool = CcxtRuntimePool()
@@ -435,6 +497,46 @@ def test_provider_session_forwards_raw_payload_without_ccxt_projection() -> None
         await session.stop()
         assert session.health == SessionHealth.DISCONNECTED
         assert profile.exchange.close_calls == 1
+
+    asyncio.run(run())
+
+
+def test_sparse_liquidation_session_does_not_fail_when_market_is_quiet() -> None:
+    async def run() -> None:
+        pool = CcxtRuntimePool()
+        profile = _FakeProfile()
+        session = CcxtProviderSession(
+            config=IngestionConfig(
+                ccxt_stream_enabled=True,
+                ws_stale_timeout=0.02,
+                ws_reconnect_delay_initial=0.001,
+                ws_reconnect_delay_max=0.001,
+            ),
+            descriptor=_liquidation_descriptor(),
+            profile=profile,
+            pool=pool,
+        )
+        messages = []
+
+        async def on_message(message: Any) -> None:
+            messages.append(message)
+
+        session.on_message(on_message)
+        await session.start()
+        await _wait_until(lambda: profile.exchange is not None)
+        assert profile.exchange is not None
+        await profile.exchange.watch_queue.put(_liquidation_event())
+        await _wait_until(lambda: bool(messages))
+
+        await asyncio.sleep(0.08)
+
+        snapshot = session.snapshot()
+        assert snapshot["health"] == SessionHealth.CONNECTED.value
+        assert snapshot["consecutive_failures"] == 0
+        assert snapshot["runtime"]["websocket_generation"] == 0
+        assert snapshot["metrics"]["counters"].get("watch_failures", 0) == 0
+        await session.stop()
+        assert pool.snapshot() == {"runtimes": {}}
 
     asyncio.run(run())
 
@@ -607,6 +709,32 @@ def test_lifecycle_observation_does_not_claim_stream_health() -> None:
 
     assert session.health == SessionHealth.DISCONNECTED
     assert session.snapshot()["last_lifecycle"] == "disconnected"
+
+
+def test_sparse_liquidation_connected_lifecycle_restores_health() -> None:
+    async def run() -> None:
+        session = CcxtProviderSession(
+            config=IngestionConfig(),
+            descriptor=_liquidation_descriptor(),
+            profile=_FakeProfile(),
+            pool=CcxtRuntimePool(),
+        )
+        session._running = True
+        await session._set_health(SessionHealth.UNHEALTHY, "startup failed")
+
+        session._observe_lifecycle(
+            CcxtLifecycleEvent(
+                state="connected",
+                url="wss://example.test/ws",
+                observed_at_ms=1,
+            )
+        )
+        await _wait_until(lambda: session.health == SessionHealth.CONNECTED)
+
+        assert session.snapshot()["last_lifecycle"] == "connected"
+        assert session.snapshot()["metrics"]["counters"]["lifecycle_connected"] == 1
+
+    asyncio.run(run())
 
 
 async def _wait_until(predicate: Any, timeout: float = 1.0) -> None:

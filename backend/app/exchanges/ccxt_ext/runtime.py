@@ -235,10 +235,17 @@ class CcxtRuntimePool:
     ) -> CcxtRuntime:
         base_key = profile.runtime_key(config)
         descriptor_key = _sharded_descriptor_key(profile, descriptor)
+        isolated_partition = _isolated_runtime_partition(descriptor)
         async with self._lock:
             key = base_key
             shard_index: int | None = None
-            if descriptor_key is not None:
+            if isolated_partition is not None:
+                # Sparse event streams have different liveness semantics from
+                # continuously updating market streams.  Keep them off the
+                # shared runtime so a genuine sparse-stream failure cannot
+                # recycle healthy K-line, trade, or full-depth subscriptions.
+                key = (*base_key, *isolated_partition)
+            elif descriptor_key is not None:
                 capacity = _descriptor_shard_capacity()
                 candidates = sorted(
                     (
@@ -395,6 +402,14 @@ def _sharded_descriptor_key(
     ):
         return None
     return descriptor.key
+
+
+def _isolated_runtime_partition(
+    descriptor: StreamDescriptor | None,
+) -> tuple[str, str] | None:
+    if descriptor is None or descriptor.stream_type != StreamType.LIQUIDATION:
+        return None
+    return ("isolated-sparse", descriptor.key)
 
 
 def _descriptor_shard_capacity() -> int:

@@ -149,6 +149,33 @@ class CcxtProviderSession:
     def _observe_lifecycle(self, event: CcxtLifecycleEvent) -> None:
         self._last_lifecycle = event
         self._metrics.inc(f"lifecycle_{event.state}")
+        if (
+            self._descriptor.stream_type == StreamType.LIQUIDATION
+            and event.state == "connected"
+            and self._running
+        ):
+            # A sparse stream may legitimately receive no payload for hours, so
+            # its connection lifecycle is the only prompt evidence that startup
+            # or recovery succeeded.  Continuous streams still require a data
+            # update before they may claim CONNECTED.
+            asyncio.create_task(
+                self._restore_sparse_stream_health(),
+                name=f"ccxt_sparse_health_{self._descriptor.key}",
+            )
+
+    async def _restore_sparse_stream_health(self) -> None:
+        if not self._running:
+            return
+        try:
+            await self._set_health(
+                SessionHealth.CONNECTED,
+                "CCXT sparse stream websocket connected",
+            )
+        except Exception:  # noqa: BLE001 - observer callbacks must not leak tasks
+            logger.exception(
+                "Sparse CCXT health callback failed (%s)",
+                self._descriptor.key,
+            )
 
     async def _watch_loop(self) -> None:
         delay = float(self._cfg.ws_reconnect_delay_initial)
@@ -164,10 +191,19 @@ class CcxtProviderSession:
                 assert self._runtime is not None
                 assert self._ccxt_symbol is not None
                 watch_generation = self._runtime.websocket_generation
-                result = await asyncio.wait_for(
-                    self._runtime.watch(self._descriptor, self._ccxt_symbol),
-                    timeout=float(self._cfg.ws_stale_timeout),
-                )
+                watch = self._runtime.watch(self._descriptor, self._ccxt_symbol)
+                if self._descriptor.stream_type == StreamType.LIQUIDATION:
+                    # Liquidations are sparse by definition.  A quiet market is
+                    # valid and must not recycle the shared exchange runtime as
+                    # if the websocket had gone stale.  CCXT still terminates
+                    # this await on websocket errors/cancellation, which enters
+                    # the normal supervised reconnect path below.
+                    result = await watch
+                else:
+                    result = await asyncio.wait_for(
+                        watch,
+                        timeout=float(self._cfg.ws_stale_timeout),
+                    )
                 if self._result_projector is not None:
                     for event in self._result_projector.project(result):
                         self._enqueue_raw(event)

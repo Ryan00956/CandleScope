@@ -1,0 +1,1915 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>训练存档大厅 · 设计预览</title>
+  <style>
+    :root {
+      --bg-deep: #06090f;
+      --bg-panel: rgba(12, 18, 30, 0.72);
+      --bg-panel-solid: #0c121e;
+      --bg-elevated: #111927;
+      --bg-chip: rgba(255, 255, 255, 0.04);
+      --border: rgba(148, 163, 184, 0.12);
+      --border-strong: rgba(148, 163, 184, 0.22);
+      --text: #e8eef9;
+      --text-muted: #8b9bb4;
+      --text-faint: #5f6f88;
+      --accent: #7c6cff;
+      --accent-2: #22d3ee;
+      --accent-soft: rgba(124, 108, 255, 0.16);
+      --good: #34d399;
+      --good-soft: rgba(52, 211, 153, 0.12);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, 0.12);
+      --danger: #f87171;
+      --danger-soft: rgba(248, 113, 113, 0.12);
+      --info: #60a5fa;
+      --info-soft: rgba(96, 165, 250, 0.12);
+      --ended: #a78bfa;
+      --ended-soft: rgba(167, 139, 250, 0.14);
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+      --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: var(--font);
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 12% -10%, rgba(124, 108, 255, 0.22), transparent 55%),
+        radial-gradient(900px 500px at 88% 0%, rgba(34, 211, 238, 0.12), transparent 50%),
+        radial-gradient(700px 400px at 50% 100%, rgba(52, 211, 153, 0.06), transparent 55%),
+        var(--bg-deep);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ambient chart grid */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.35;
+      background-image:
+        linear-gradient(rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse at 50% 20%, black 20%, transparent 75%);
+    }
+
+    /* decorative candles (pure CSS) */
+    .ambient-candles {
+      position: fixed;
+      inset: auto 0 0 0;
+      height: 220px;
+      pointer-events: none;
+      opacity: 0.18;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 10px;
+      padding: 0 8vw 28px;
+      mask-image: linear-gradient(to top, black, transparent);
+    }
+    .ambient-candles i {
+      display: block;
+      width: 8px;
+      border-radius: 2px;
+      position: relative;
+      background: linear-gradient(to top, #22d3ee, #7c6cff);
+    }
+    .ambient-candles i::before,
+    .ambient-candles i::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      width: 1px;
+      transform: translateX(-50%);
+      background: currentColor;
+      opacity: 0.7;
+    }
+    .ambient-candles i::before { bottom: 100%; height: 12px; }
+    .ambient-candles i::after { top: 100%; height: 10px; }
+    .ambient-candles i:nth-child(odd) { color: #34d399; background: linear-gradient(to top, #059669, #34d399); }
+    .ambient-candles i:nth-child(even) { color: #f87171; background: linear-gradient(to top, #b91c1c, #f87171); }
+
+    .page {
+      position: relative;
+      z-index: 1;
+      width: min(1280px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 28px 0 64px;
+    }
+
+    /* ── Top nav ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(145deg, rgba(124, 108, 255, 0.35), rgba(34, 211, 238, 0.18));
+      border: 1px solid rgba(167, 139, 250, 0.35);
+      box-shadow: 0 10px 30px rgba(124, 108, 255, 0.2);
+      flex-shrink: 0;
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .brand-copy { min-width: 0; }
+    .brand-kicker {
+      display: block;
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.16em;
+      color: #a78bfa;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+    }
+    .brand p {
+      margin: 5px 0 0;
+      color: var(--text-muted);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-chip);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 9px 14px;
+      font: 600 13px/1 var(--font);
+      cursor: pointer;
+      transition: background .15s, border-color .15s, transform .12s, box-shadow .15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(148, 163, 184, 0.35);
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn svg { width: 15px; height: 15px; opacity: 0.9; }
+    .btn-primary {
+      border-color: transparent;
+      background: linear-gradient(135deg, #7c6cff 0%, #5b8cff 55%, #22d3ee 140%);
+      color: white;
+      box-shadow: 0 10px 28px rgba(124, 108, 255, 0.35);
+    }
+    .btn-primary:hover {
+      filter: brightness(1.06);
+      background: linear-gradient(135deg, #7c6cff 0%, #5b8cff 55%, #22d3ee 140%);
+    }
+    .btn-ghost { background: transparent; }
+    .btn-danger {
+      color: #fecaca;
+      border-color: rgba(248, 113, 113, 0.35);
+      background: transparent;
+    }
+    .btn-danger:hover {
+      background: var(--danger-soft);
+      border-color: rgba(248, 113, 113, 0.55);
+    }
+    .btn-sm { padding: 8px 12px; font-size: 12px; border-radius: 10px; }
+    .btn-block { width: 100%; justify-content: center; }
+
+    /* ── Hero stats ── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .stat {
+      position: relative;
+      overflow: hidden;
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      backdrop-filter: blur(14px);
+      box-shadow: var(--shadow);
+    }
+    .stat::after {
+      content: "";
+      position: absolute;
+      right: -20px;
+      top: -20px;
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      opacity: 0.5;
+      background: radial-gradient(circle, var(--glow, rgba(124,108,255,.35)), transparent 70%);
+    }
+    .stat[data-tone="violet"] { --glow: rgba(124, 108, 255, 0.4); }
+    .stat[data-tone="cyan"] { --glow: rgba(34, 211, 238, 0.35); }
+    .stat[data-tone="green"] { --glow: rgba(52, 211, 153, 0.35); }
+    .stat[data-tone="amber"] { --glow: rgba(251, 191, 36, 0.3); }
+    .stat-label {
+      position: relative;
+      z-index: 1;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .stat-value {
+      position: relative;
+      z-index: 1;
+      margin-top: 8px;
+      font: 700 28px/1 var(--mono);
+      letter-spacing: -0.03em;
+    }
+    .stat-hint {
+      position: relative;
+      z-index: 1;
+      margin-top: 7px;
+      color: var(--text-faint);
+      font-size: 11px;
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(10, 15, 26, 0.75);
+      backdrop-filter: blur(12px);
+    }
+    .filters {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .filter-field {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg-chip);
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .filter-field select {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font: 600 12px var(--font);
+      padding-right: 14px;
+      cursor: pointer;
+      outline: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b9bb4' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right center;
+    }
+    .filter-field select option { background: #0f172a; color: #e2e8f0; }
+    .chip-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 999px;
+      padding: 6px 11px;
+      font: 600 12px var(--font);
+      cursor: pointer;
+    }
+    .chip[aria-pressed="true"] {
+      color: #ddd6fe;
+      border-color: rgba(124, 108, 255, 0.45);
+      background: var(--accent-soft);
+    }
+    .toolbar-meta {
+      color: var(--text-faint);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    /* ── Card grid ── */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(165deg, rgba(20, 28, 44, 0.95) 0%, rgba(10, 15, 26, 0.98) 100%);
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.28);
+      overflow: hidden;
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(148, 163, 184, 0.28);
+      box-shadow: 0 22px 60px rgba(0, 0, 0, 0.4);
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: var(--state-color, var(--accent));
+    }
+    .card[data-state="PAUSED"] { --state-color: var(--warn); --state-soft: var(--warn-soft); }
+    .card[data-state="PLAYING"],
+    .card[data-state="ADVANCING"] { --state-color: var(--good); --state-soft: var(--good-soft); }
+    .card[data-state="ENDED"] { --state-color: var(--ended); --state-soft: var(--ended-soft); }
+    .card[data-state="ERROR"] { --state-color: var(--danger); --state-soft: var(--danger-soft); }
+
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 18px 18px 0;
+    }
+    .card-kind {
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.12em;
+      color: var(--text-faint);
+      text-transform: uppercase;
+    }
+    .card-title {
+      margin: 8px 0 0;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 220px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.06em;
+      background: var(--state-soft, var(--accent-soft));
+      color: var(--state-color, var(--accent));
+      border: 1px solid color-mix(in srgb, var(--state-color, var(--accent)) 30%, transparent);
+      flex-shrink: 0;
+    }
+    .badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+    .card[data-state="PLAYING"] .badge::before,
+    .card[data-state="ADVANCING"] .badge::before {
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.85); }
+    }
+
+    .card-hero {
+      padding: 16px 18px 4px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .hero-label {
+      color: var(--text-faint);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .hero-value {
+      margin-top: 6px;
+      font: 700 26px/1 var(--mono);
+      letter-spacing: -0.03em;
+      color: #f8fafc;
+    }
+    .hero-value small {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-left: 4px;
+    }
+    .spark {
+      width: 88px;
+      height: 40px;
+      opacity: 0.9;
+    }
+    .spark path {
+      fill: none;
+      stroke: var(--state-color, var(--accent-2));
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .spark .area {
+      fill: url(#sparkFill);
+      stroke: none;
+      opacity: 0.35;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 14px 18px;
+    }
+    .meta-item {
+      min-width: 0;
+      padding: 10px 11px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .meta-item dt {
+      margin: 0;
+      color: var(--text-faint);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .meta-item dd {
+      margin: 5px 0 0;
+      color: var(--text);
+      font: 600 12px/1.2 var(--mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .symbol-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 0;
+    }
+    .symbol-pill::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 2px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    }
+
+    .card-msg {
+      margin: 0 18px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.08);
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+      min-height: 44px;
+    }
+
+    .card-foot {
+      margin-top: auto;
+      display: flex;
+      gap: 8px;
+      padding: 14px 18px 18px;
+    }
+    .card-foot .btn-primary {
+      flex: 1;
+      border-radius: 12px;
+      justify-content: center;
+    }
+    .card-foot .btn-sm { border-radius: 12px; }
+
+    /* ── Empty / load more ── */
+    .load-more-wrap {
+      display: flex;
+      justify-content: center;
+      margin-top: 22px;
+    }
+
+    .empty {
+      grid-column: 1 / -1;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      gap: 10px;
+      min-height: 320px;
+      border-radius: var(--radius-lg);
+      border: 1px dashed rgba(148, 163, 184, 0.22);
+      background: rgba(10, 15, 26, 0.55);
+      padding: 40px 24px;
+    }
+    .empty-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      background: var(--accent-soft);
+      border: 1px solid rgba(124, 108, 255, 0.3);
+      margin-bottom: 6px;
+    }
+    .empty strong { font-size: 18px; color: #f8fafc; }
+    .empty span { color: var(--text-muted); font-size: 13px; max-width: 360px; }
+
+    /* ── Design note banner ── */
+    .design-banner {
+      margin-bottom: 20px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(34, 211, 238, 0.25);
+      background: linear-gradient(90deg, rgba(34, 211, 238, 0.08), rgba(124, 108, 255, 0.08));
+      color: #a5f3fc;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .design-banner code {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #c4b5fd;
+      background: rgba(0,0,0,.25);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .design-banner .banner-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* ══════════════════════════════════════
+       Create Training · Modal Workbench
+       ══════════════════════════════════════ */
+    .create-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: none;
+      place-items: center;
+      padding: 20px;
+      background: rgba(2, 6, 14, 0.72);
+      backdrop-filter: blur(10px);
+    }
+    .create-overlay.is-open { display: grid; }
+    body.create-open { overflow: hidden; }
+
+    .create-shell {
+      width: min(1180px, 100%);
+      height: min(900px, calc(100vh - 40px));
+      display: grid;
+      grid-template-rows: auto 1fr;
+      border-radius: 22px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      background:
+        radial-gradient(700px 280px at 0% 0%, rgba(124, 108, 255, 0.14), transparent 55%),
+        radial-gradient(500px 240px at 100% 0%, rgba(34, 211, 238, 0.08), transparent 50%),
+        #0a101b;
+      box-shadow: 0 40px 120px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+    }
+
+    .create-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px 24px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .create-top h2 {
+      margin: 4px 0 0;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+    .create-top p {
+      margin: 6px 0 0;
+      color: var(--text-muted);
+      font-size: 13px;
+      max-width: 560px;
+    }
+    .create-steps {
+      display: flex;
+      gap: 6px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .create-step {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--text-faint);
+      font-size: 11px;
+      font-weight: 600;
+      background: transparent;
+      cursor: pointer;
+    }
+    .create-step em {
+      font: 700 10px/1 var(--mono);
+      font-style: normal;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: rgba(255,255,255,0.06);
+      color: var(--text-muted);
+    }
+    .create-step.is-active {
+      color: #e9e5ff;
+      border-color: rgba(124, 108, 255, 0.45);
+      background: var(--accent-soft);
+    }
+    .create-step.is-active em {
+      background: linear-gradient(135deg, #7c6cff, #22d3ee);
+      color: white;
+    }
+    .create-step.is-done {
+      color: var(--good);
+      border-color: rgba(52, 211, 153, 0.3);
+    }
+
+    .create-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      min-height: 0;
+    }
+    .create-main {
+      overflow: auto;
+      padding: 18px 22px 28px;
+      scroll-behavior: smooth;
+    }
+    .create-side {
+      border-left: 1px solid var(--border);
+      background: rgba(6, 10, 18, 0.65);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .create-side-scroll {
+      overflow: auto;
+      padding: 16px;
+      flex: 1;
+      min-height: 0;
+    }
+    .create-side-cta {
+      padding: 14px 16px 18px;
+      border-top: 1px solid var(--border);
+      background: linear-gradient(to top, rgba(6, 10, 18, 0.98), rgba(6, 10, 18, 0.85));
+    }
+
+    /* form sections */
+    .form-section {
+      margin-bottom: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(14, 20, 34, 0.72);
+      overflow: hidden;
+    }
+    .form-section > header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+      background: rgba(255, 255, 255, 0.015);
+    }
+    .form-section > header h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .form-section > header p {
+      margin: 4px 0 0;
+      color: var(--text-faint);
+      font-size: 12px;
+    }
+    .section-tag {
+      flex-shrink: 0;
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.1em;
+      color: #a78bfa;
+      padding: 5px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(167, 139, 250, 0.25);
+      background: rgba(124, 108, 255, 0.08);
+    }
+    .form-section > .section-body {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 14px;
+    }
+    .field-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+    .field.span-2 { grid-column: span 2; }
+    .field.span-3 { grid-column: 1 / -1; }
+    .field > span.label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+    .field > span.hint {
+      color: var(--text-faint);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .field input,
+    .field select,
+    .field textarea {
+      width: 100%;
+      min-height: 40px;
+      padding: 9px 12px;
+      border-radius: 11px;
+      border: 1px solid var(--border-strong);
+      background: rgba(6, 10, 18, 0.75);
+      color: var(--text);
+      font: 500 13px var(--font);
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .field input:focus,
+    .field select:focus {
+      border-color: rgba(124, 108, 255, 0.55);
+      box-shadow: 0 0 0 3px rgba(124, 108, 255, 0.15);
+    }
+    .field input[readonly] {
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .field select option { background: #0f172a; }
+    .inline-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    /* choice cards */
+    .choice-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .choice-row.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .choice {
+      position: relative;
+      text-align: left;
+      padding: 14px 14px 13px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color .15s, background .15s, transform .12s;
+    }
+    .choice:hover {
+      border-color: rgba(148, 163, 184, 0.3);
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .choice[aria-pressed="true"] {
+      border-color: rgba(124, 108, 255, 0.55);
+      background:
+        linear-gradient(160deg, rgba(124, 108, 255, 0.16), rgba(34, 211, 238, 0.05));
+      box-shadow: inset 0 0 0 1px rgba(124, 108, 255, 0.12);
+    }
+    .choice .choice-kicker {
+      display: block;
+      font: 700 10px/1 var(--mono);
+      letter-spacing: 0.1em;
+      color: var(--text-faint);
+      margin-bottom: 7px;
+    }
+    .choice[aria-pressed="true"] .choice-kicker { color: #c4b5fd; }
+    .choice strong {
+      display: block;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+    .choice small {
+      display: block;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .choice .check {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(148, 163, 184, 0.35);
+      display: grid;
+      place-items: center;
+    }
+    .choice[aria-pressed="true"] .check {
+      border-color: transparent;
+      background: linear-gradient(135deg, #7c6cff, #22d3ee);
+    }
+    .choice[aria-pressed="true"] .check::after {
+      content: "";
+      width: 8px;
+      height: 5px;
+      border-left: 2px solid white;
+      border-bottom: 2px solid white;
+      transform: rotate(-45deg) translateY(-1px);
+    }
+
+    .note {
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(15, 23, 42, 0.55);
+      color: var(--text-muted);
+    }
+    .note.warn {
+      border-color: rgba(251, 191, 36, 0.3);
+      background: var(--warn-soft);
+      color: #fde68a;
+    }
+    .note.info {
+      border-color: rgba(96, 165, 250, 0.25);
+      background: var(--info-soft);
+      color: #bfdbfe;
+    }
+    .note.ok {
+      border-color: rgba(52, 211, 153, 0.25);
+      background: var(--good-soft);
+      color: #a7f3d0;
+    }
+
+    .manual-start { display: none; gap: 12px; }
+    .manual-start.is-visible { display: grid; }
+
+    /* mutation chips */
+    .mutation-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .mutation {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      color: var(--text-muted);
+      font: 600 12px var(--mono);
+      cursor: pointer;
+      user-select: none;
+    }
+    .mutation input { display: none; }
+    .mutation:has(input:checked) {
+      color: #ddd6fe;
+      border-color: rgba(124, 108, 255, 0.45);
+      background: var(--accent-soft);
+    }
+    .mutation-grid.is-locked {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+    .mutation-grid.is-locked .mutation {
+      cursor: not-allowed;
+    }
+
+    /* side summary */
+    .summary-card {
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(165deg, rgba(124, 108, 255, 0.12), transparent 45%),
+        rgba(14, 20, 34, 0.9);
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .summary-card h4 {
+      margin: 0 0 12px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .summary-name {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      word-break: break-word;
+    }
+    .summary-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+    }
+    .summary-list > div {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+    }
+    .summary-list dt {
+      margin: 0;
+      color: var(--text-faint);
+    }
+    .summary-list dd {
+      margin: 0;
+      color: var(--text);
+      font: 600 12px var(--mono);
+      text-align: right;
+    }
+
+    .cap-panel {
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(14, 20, 34, 0.7);
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .cap-panel h4 {
+      margin: 0 0 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .cap-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+      font-size: 12px;
+    }
+    .cap-row:last-child { border-bottom: 0; }
+    .cap-row span { color: var(--text-muted); }
+    .cap-row strong {
+      font: 600 11px/1.3 var(--mono);
+      color: var(--text);
+      text-align: right;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font: 700 10px/1 var(--mono);
+    }
+    .pill.ok { color: #6ee7b7; background: var(--good-soft); }
+    .pill.warn { color: #fcd34d; background: var(--warn-soft); }
+    .pill.off { color: #94a3b8; background: rgba(148,163,184,.1); }
+
+    .side-actions {
+      display: grid;
+      gap: 8px;
+    }
+    .side-actions .btn-primary {
+      width: 100%;
+      justify-content: center;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 14px;
+    }
+    .side-actions .btn {
+      width: 100%;
+      justify-content: center;
+      border-radius: 12px;
+    }
+    .atomic-hint {
+      margin-top: 10px;
+      text-align: center;
+      color: var(--text-faint);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 1080px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .create-body { grid-template-columns: 1fr; }
+      .create-side {
+        border-left: 0;
+        border-top: 1px solid var(--border);
+      }
+      .create-shell { height: min(960px, calc(100vh - 24px)); }
+      .choice-row.cols-3 { grid-template-columns: 1fr; }
+      .field-grid.cols-3 { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 720px) {
+      .page { width: min(100% - 20px, 100%); padding-top: 16px; }
+      .topbar, .toolbar { flex-direction: column; align-items: stretch; }
+      .top-actions { justify-content: flex-start; flex-wrap: wrap; }
+      .grid, .stats { grid-template-columns: 1fr; }
+      .brand p { white-space: normal; }
+      .card-title { max-width: 100%; }
+      .field-grid, .field-grid.cols-3, .choice-row { grid-template-columns: 1fr; }
+      .field.span-2, .field.span-3 { grid-column: auto; }
+      .create-overlay { padding: 8px; }
+      .create-shell { height: calc(100vh - 16px); border-radius: 14px; }
+      .create-top { padding: 14px; flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="ambient-candles" aria-hidden="true">
+    <i style="height:42px"></i><i style="height:68px"></i><i style="height:36px"></i>
+    <i style="height:88px"></i><i style="height:54px"></i><i style="height:72px"></i>
+    <i style="height:40px"></i><i style="height:96px"></i><i style="height:58px"></i>
+    <i style="height:34px"></i><i style="height:76px"></i><i style="height:48px"></i>
+    <i style="height:90px"></i><i style="height:52px"></i><i style="height:66px"></i>
+    <i style="height:38px"></i><i style="height:80px"></i><i style="height:44px"></i>
+    <i style="height:70px"></i><i style="height:56px"></i><i style="height:92px"></i>
+    <i style="height:30px"></i><i style="height:62px"></i><i style="height:46px"></i>
+  </div>
+
+  <svg width="0" height="0" aria-hidden="true">
+    <defs>
+      <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+  </svg>
+
+  <div class="page">
+    <div class="design-banner">
+      <span>🎨 <strong>静态设计预览</strong> — 大厅 + 新建训练表单。点「新建训练」打开配置面板。</span>
+      <div class="banner-actions">
+        <button class="btn btn-primary btn-sm" type="button" id="open-create-banner">预览新建训练面板</button>
+        <span style="opacity:.75;font-size:12px;align-self:center">design-previews/training-hub-redesign.html</span>
+      </div>
+    </div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M5 16V8M9 18V6M13 14V10M17 19V5M21 15V9" stroke="url(#g)" stroke-width="2" stroke-linecap="round"/>
+            <defs>
+              <linearGradient id="g" x1="5" y1="5" x2="21" y2="19">
+                <stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#67e8f9"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <span class="brand-kicker">Archive Workbench · replay.v2</span>
+          <h1>训练存档大厅</h1>
+          <p>只读轻量摘要 · 进入训练前不会加载历史数据集</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-ghost" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          刷新
+        </button>
+        <button class="btn" type="button">存储管理</button>
+        <a class="btn" href="#">实时行情 ↗</a>
+        <button class="btn btn-primary" type="button" id="open-create" data-open-create>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
+          新建训练
+        </button>
+      </div>
+    </header>
+
+    <section class="stats" aria-label="存档概览">
+      <article class="stat" data-tone="violet">
+        <div class="stat-label">全部存档</div>
+        <div class="stat-value">12</div>
+        <div class="stat-hint">服务端权威摘要</div>
+      </article>
+      <article class="stat" data-tone="amber">
+        <div class="stat-label">可继续</div>
+        <div class="stat-value">7</div>
+        <div class="stat-hint">PAUSED / READY</div>
+      </article>
+      <article class="stat" data-tone="green">
+        <div class="stat-label">进行中</div>
+        <div class="stat-value">2</div>
+        <div class="stat-hint">PLAYING · ADVANCING</div>
+      </article>
+      <article class="stat" data-tone="cyan">
+        <div class="stat-label">已结束</div>
+        <div class="stat-value">3</div>
+        <div class="stat-hint">含 1 条 ERROR</div>
+      </article>
+    </section>
+
+    <div class="toolbar">
+      <div class="filters" aria-label="存档筛选">
+        <div class="chip-row" role="group" aria-label="快捷状态">
+          <button class="chip" type="button" aria-pressed="true">全部</button>
+          <button class="chip" type="button" aria-pressed="false">暂停中</button>
+          <button class="chip" type="button" aria-pressed="false">进行中</button>
+          <button class="chip" type="button" aria-pressed="false">已结束</button>
+        </div>
+        <label class="filter-field">
+          历史源
+          <select>
+            <option>全部</option>
+            <option>BAR</option>
+            <option>AGG_TRADE</option>
+          </select>
+        </label>
+        <label class="filter-field">
+          兼容性
+          <select>
+            <option>全部</option>
+            <option>READY</option>
+            <option>LEGACY_ADAPTER</option>
+            <option>LEGACY_V1</option>
+            <option>UNAVAILABLE</option>
+          </select>
+        </label>
+      </div>
+      <div class="toolbar-meta">显示 6 / 12 · 轻量列表</div>
+    </div>
+
+    <section class="grid" aria-label="训练存档列表">
+      <!-- Card 1: PAUSED -->
+      <article class="card" data-state="PAUSED">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Training Run</div>
+            <h2 class="card-title">BTC 突破节奏训练</h2>
+          </div>
+          <span class="badge">PAUSED</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value">12,480.50<small>USDT</small></div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 30 L10 28 L20 24 L30 26 L40 18 L50 20 L60 12 L70 14 L88 8 L88 40 L0 40 Z"/>
+            <path d="M0 30 L10 28 L20 24 L30 26 L40 18 L50 20 L60 12 L70 14 L88 8"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">BTCUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>BAR</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#184,220</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>HIDE_YEAR</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>READY</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>CHALLENGE</dd></div>
+        </dl>
+        <p class="card-msg">检查点已写入 · 可从暂停位置继续，不会重新加载整段历史。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button">继续训练</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+
+      <!-- Card 2: PLAYING -->
+      <article class="card" data-state="PLAYING">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Training Run</div>
+            <h2 class="card-title">ETH 趋势回调练习</h2>
+          </div>
+          <span class="badge">PLAYING</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value">9,862.10<small>USDT</small></div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 18 L12 22 L24 16 L36 20 L48 14 L60 18 L72 10 L88 12 L88 40 L0 40 Z"/>
+            <path d="M0 18 L12 22 L24 16 L36 20 L48 14 L60 18 L72 10 L88 12"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">ETHUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>AGG_TRADE</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#52,018</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>HIDE_MONTH</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>READY</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>PRACTICE</dd></div>
+        </dl>
+        <p class="card-msg">会话仍在运行 · 返回大厅前建议先暂停并写入 checkpoint。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button">进入会话</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+
+      <!-- Card 3: ENDED -->
+      <article class="card" data-state="ENDED">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Training Run</div>
+            <h2 class="card-title">SOL 震荡区间复盘</h2>
+          </div>
+          <span class="badge">ENDED</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value">11,205.00<small>USDT</small></div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 28 L14 22 L28 26 L42 14 L56 18 L70 8 L88 10 L88 40 L0 40 Z"/>
+            <path d="M0 28 L14 22 L28 26 L42 14 L56 18 L70 8 L88 10"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">SOLUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>BAR</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#301,004</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>NONE</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>READY</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>CHALLENGE</dd></div>
+        </dl>
+        <p class="card-msg">训练已结束 · 可查看报告或开启 Review 只读复盘。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button">查看报告</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+
+      <!-- Card 4: ERROR -->
+      <article class="card" data-state="ERROR">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Training Run</div>
+            <h2 class="card-title">DOGE 高波动实验</h2>
+          </div>
+          <span class="badge">ERROR</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value" style="color:#fca5a5">—</div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 12 L16 18 L32 10 L48 28 L64 22 L80 34 L88 30 L88 40 L0 40 Z"/>
+            <path d="M0 12 L16 18 L32 10 L48 28 L64 22 L80 34 L88 30"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">DOGEUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>AGG_TRADE</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#9,441</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>HIDE_DAY</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>LEGACY_ADAPTER</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>SANDBOX</dd></div>
+        </dl>
+        <p class="card-msg">SOURCE_UNAVAILABLE · 归档片段缺失，需修复数据或删除后重建。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button" disabled style="opacity:.45;cursor:not-allowed">不可继续</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+
+      <!-- Card 5: ADVANCING -->
+      <article class="card" data-state="ADVANCING">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Training Run</div>
+            <h2 class="card-title">XRP 流动性感知</h2>
+          </div>
+          <span class="badge">ADVANCING</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value">10,040.25<small>USDT</small></div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 24 L14 20 L28 22 L42 16 L56 18 L70 12 L88 14 L88 40 L0 40 Z"/>
+            <path d="M0 24 L14 20 L28 22 L42 16 L56 18 L70 12 L88 14"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">XRPUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>BAR</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#77,503</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>HIDE_HOUR</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>READY</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>PRACTICE</dd></div>
+        </dl>
+        <p class="card-msg">正在快进扫描 · 控制器仍持有会话锁。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button">进入会话</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+
+      <!-- Card 6: LEGACY -->
+      <article class="card" data-state="PAUSED">
+        <header class="card-head">
+          <div>
+            <div class="card-kind">Legacy V1</div>
+            <h2 class="card-title">旧版 BTC 随机窗口</h2>
+          </div>
+          <span class="badge">PAUSED</span>
+        </header>
+        <div class="card-hero">
+          <div>
+            <div class="hero-label">账户权益</div>
+            <div class="hero-value">8,150.00<small>USDT</small></div>
+          </div>
+          <svg class="spark" viewBox="0 0 88 40" aria-hidden="true">
+            <path class="area" d="M0 22 L18 24 L36 18 L54 20 L72 16 L88 18 L88 40 L0 40 Z"/>
+            <path d="M0 22 L18 24 L36 18 L54 20 L72 16 L88 18"/>
+          </svg>
+        </div>
+        <dl class="meta">
+          <div class="meta-item"><dt>商品</dt><dd><span class="symbol-pill">BTCUSDT</span></dd></div>
+          <div class="meta-item"><dt>历史源</dt><dd>BAR</dd></div>
+          <div class="meta-item"><dt>进度</dt><dd>#12,800</dd></div>
+          <div class="meta-item"><dt>时间披露</dt><dd>HIDE_ALL</dd></div>
+          <div class="meta-item"><dt>兼容层</dt><dd>LEGACY_V1</dd></div>
+          <div class="meta-item"><dt>完整度</dt><dd>—</dd></div>
+        </dl>
+        <p class="card-msg">遗留 v1 会话 · 建议建立 v2 包装后再继续训练。</p>
+        <footer class="card-foot">
+          <button class="btn btn-primary btn-sm" type="button">建立 v2 并继续</button>
+          <button class="btn btn-danger btn-sm" type="button">删除</button>
+        </footer>
+      </article>
+    </section>
+
+    <div class="load-more-wrap">
+      <button class="btn" type="button">加载下一页</button>
+    </div>
+
+    <!-- Optional empty-state reference (hidden by default) -->
+    <details style="margin-top:36px;color:var(--text-muted);font-size:13px">
+      <summary style="cursor:pointer;color:var(--text)">展开查看 · 空状态样式</summary>
+      <div class="empty" style="margin-top:12px">
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="1.8">
+            <path d="M4 19V5M8 17V7M12 15V9M16 18V6M20 14V8" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <strong>还没有训练存档</strong>
+        <span>创建第一条服务端权威训练；默认使用盲化随机窗口，历史数据不会在大厅预加载。</span>
+        <button class="btn btn-primary" type="button" style="margin-top:8px" data-open-create>新建第一条训练</button>
+      </div>
+    </details>
+  </div>
+
+  <!-- ═══════════ Create Training Modal ═══════════ -->
+  <div class="create-overlay" id="create-overlay" role="dialog" aria-modal="true" aria-labelledby="create-title" hidden>
+    <div class="create-shell">
+      <header class="create-top">
+        <div>
+          <span class="brand-kicker">ATOMIC CREATE · replay.v2</span>
+          <h2 id="create-title">新建训练</h2>
+          <p>一次事务创建存档、单轨 adapter、规则、账户和初始 checkpoint。大厅本身不会加载历史数据集。</p>
+          <div class="create-steps" role="navigation" aria-label="配置分区">
+            <button type="button" class="create-step is-active" data-scroll-to="sec-market"><em>1</em>市场与起点</button>
+            <button type="button" class="create-step" data-scroll-to="sec-rules"><em>2</em>规则与盲化</button>
+            <button type="button" class="create-step" data-scroll-to="sec-window"><em>3</em>历史窗口</button>
+            <button type="button" class="create-step" data-scroll-to="sec-account"><em>4</em>账户与执行</button>
+          </div>
+        </div>
+        <button class="btn" type="button" id="close-create" aria-label="关闭新建训练">关闭</button>
+      </header>
+
+      <div class="create-body">
+        <div class="create-main" id="create-main">
+
+          <!-- 1. Market & Start -->
+          <section class="form-section" id="sec-market">
+            <header>
+              <div>
+                <h3>市场与起点</h3>
+                <p>先选定商品与历史源；随机窗口默认盲化，不披露历史边界。</p>
+              </div>
+              <span class="section-tag">01</span>
+            </header>
+            <div class="section-body">
+              <div class="field-grid">
+                <label class="field span-2">
+                  <span class="label">存档名称</span>
+                  <input id="field-name" type="text" maxlength="80" value="BTC 突破节奏训练" placeholder="例如：BTC 突破节奏训练" />
+                </label>
+                <label class="field">
+                  <span class="label">商品</span>
+                  <select id="field-symbol">
+                    <option selected>binance · futures · BTCUSDT</option>
+                    <option>binance · futures · ETHUSDT</option>
+                    <option>binance · futures · SOLUSDT</option>
+                    <option>binance · spot · BTCUSDT</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">基础 / 显示周期</span>
+                  <input type="text" value="1m / 1m" readonly />
+                  <span class="hint">由目录选择决定，创建时锁定。</span>
+                </label>
+              </div>
+
+              <div>
+                <div class="field" style="margin-bottom:8px"><span class="label">历史源</span></div>
+                <div class="choice-row" id="source-choices" role="group" aria-label="历史源">
+                  <button type="button" class="choice" data-group="source" data-value="BAR" aria-pressed="true">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">SOURCE</span>
+                    <strong>BAR</strong>
+                    <small>精确 OHLCV 归档，适合大多数节奏训练与 Challenge。</small>
+                  </button>
+                  <button type="button" class="choice" data-group="source" data-value="AGG_TRADE" aria-pressed="false">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">SOURCE</span>
+                    <strong>AGG_TRADE</strong>
+                    <small>成交归档已校验，K 线为近似聚合，更贴近微观结构。</small>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div class="field" style="margin-bottom:8px"><span class="label">开始方式</span></div>
+                <div class="choice-row" id="start-choices" role="group" aria-label="开始方式">
+                  <button type="button" class="choice" data-group="start" data-value="RANDOM" aria-pressed="true">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">START</span>
+                    <strong>随机合格窗口</strong>
+                    <small>盲化抽取；严格 Challenge 的推荐默认。</small>
+                  </button>
+                  <button type="button" class="choice" data-group="start" data-value="MANUAL" aria-pressed="false">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">START</span>
+                    <strong>手动 UTC 时间</strong>
+                    <small>已知起点；即使隐藏显示，也不会拿严格 Challenge 标签。</small>
+                  </button>
+                </div>
+              </div>
+
+              <div class="note ok">128 个合格随机窗口可用 · 盲化目录不会披露历史边界</div>
+
+              <div class="manual-start" id="manual-start">
+                <div class="field-grid">
+                  <label class="field">
+                    <span class="label">开始时间（UTC）</span>
+                    <input type="datetime-local" value="2024-06-15T08:30" />
+                  </label>
+                  <div class="field" style="justify-content:flex-end">
+                    <span class="label">&nbsp;</span>
+                    <button class="btn" type="button">使用最早合格起点</button>
+                  </div>
+                </div>
+                <div class="note warn">手动起点属于已知时间；即使隐藏显示，也不会获得严格 Challenge 结果标签。</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 2. Rules -->
+          <section class="form-section" id="sec-rules">
+            <header>
+              <div>
+                <h3>规则与盲化</h3>
+                <p>完整性模式决定能否改规则；时间披露控制训练中可见的历史时间粒度。</p>
+              </div>
+              <span class="section-tag">02</span>
+            </header>
+            <div class="section-body">
+              <div>
+                <div class="field" style="margin-bottom:8px"><span class="label">完整性模式</span></div>
+                <div class="choice-row cols-3" id="integrity-choices" role="group" aria-label="完整性模式">
+                  <button type="button" class="choice" data-group="integrity" data-value="CHALLENGE" aria-pressed="true">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">MODE</span>
+                    <strong>Challenge</strong>
+                    <small>全部规则锁定，最严格训练标签。</small>
+                  </button>
+                  <button type="button" class="choice" data-group="integrity" data-value="PRACTICE" aria-pressed="false">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">MODE</span>
+                    <strong>Practice</strong>
+                    <small>显式白名单内的变更可审计。</small>
+                  </button>
+                  <button type="button" class="choice" data-group="integrity" data-value="SANDBOX" aria-pressed="false">
+                    <span class="check" aria-hidden="true"></span>
+                    <span class="choice-kicker">MODE</span>
+                    <strong>Sandbox</strong>
+                    <small>全部变更可审计，适合实验。</small>
+                  </button>
+                </div>
+              </div>
+
+              <div class="field-grid">
+                <label class="field span-2">
+                  <span class="label">时间披露策略</span>
+                  <select id="field-disclosure">
+                    <option value="NONE">NONE · 显示历史时间</option>
+                    <option value="HIDE_YEAR" selected>HIDE_YEAR · 隐藏年份</option>
+                    <option value="HIDE_MONTH">HIDE_MONTH · 隐藏年月</option>
+                    <option value="HIDE_DAY">HIDE_DAY · 相对日期</option>
+                    <option value="HIDE_HOUR">HIDE_HOUR · 相对小时</option>
+                    <option value="HIDE_MINUTE">HIDE_MINUTE · 相对分钟</option>
+                    <option value="HIDE_ALL">HIDE_ALL · 完全相对时间</option>
+                  </select>
+                </label>
+              </div>
+
+              <div>
+                <div class="field" style="margin-bottom:8px">
+                  <span class="label">Practice 可审计变更白名单</span>
+                  <span class="hint" id="mutation-hint">Challenge 下全部锁定；切换到 Practice 后可勾选。</span>
+                </div>
+                <div class="mutation-grid is-locked" id="mutation-grid">
+                  <label class="mutation"><input type="checkbox" value="deposit" /> deposit</label>
+                  <label class="mutation"><input type="checkbox" value="withdraw" /> withdraw</label>
+                  <label class="mutation"><input type="checkbox" value="change_fee_policy" /> change_fee_policy</label>
+                  <label class="mutation"><input type="checkbox" value="change_leverage_cap" /> change_leverage_cap</label>
+                  <label class="mutation"><input type="checkbox" value="change_funding_policy" /> change_funding_policy</label>
+                  <label class="mutation"><input type="checkbox" value="reveal_time" /> reveal_time</label>
+                </div>
+                <div class="note" style="margin-top:10px">入金、出金、费率、杠杆上限、Sandbox 固定资金费与不可逆时间揭示均写入审计事件。</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 3. History window -->
+          <section class="form-section" id="sec-window">
+            <header>
+              <div>
+                <h3>历史窗口</h3>
+                <p>控制指标预热、左侧可见历史与前向缓存；不会把全部历史塞进执行快照。</p>
+              </div>
+              <span class="section-tag">03</span>
+            </header>
+            <div class="section-body">
+              <div class="field-grid cols-3">
+                <label class="field">
+                  <span class="label">指标预热 BAR</span>
+                  <input type="number" min="1" value="200" id="field-warmup" />
+                  <span class="hint">只保证指标计算，不决定可向左滚动多远。</span>
+                </label>
+                <label class="field">
+                  <span class="label">前向缓存（ms）</span>
+                  <input type="number" min="1" value="3600000" />
+                </label>
+                <label class="field">
+                  <span class="label">可见历史</span>
+                  <select id="field-visible-mode">
+                    <option value="ALL_AVAILABLE" selected>全部可用（默认，按需加载）</option>
+                    <option value="DURATION">固定时长（兼容旧 Run）</option>
+                  </select>
+                </label>
+              </div>
+              <div class="note info" id="visible-note">
+                像实时行情一样向左按需分页，直到所选连续数据段的最早一根；不会把全部历史塞进执行快照。
+              </div>
+              <div class="field-grid" id="visible-duration" style="display:none">
+                <label class="field">
+                  <span class="label">可见历史时长（ms）</span>
+                  <input type="number" min="60000" step="60000" value="86400000" />
+                  <span class="hint">必须是基础周期的整数倍；该模式会把左侧边界固定在 Run 中。</span>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <!-- 4. Account & execution -->
+          <section class="form-section" id="sec-account">
+            <header>
+              <div>
+                <h3>账户与执行</h3>
+                <p>初始资金、保证金、费率与 fidelity 边界。Exact 能力 fail-closed。</p>
+              </div>
+              <span class="section-tag">04</span>
+            </header>
+            <div class="section-body">
+              <div class="field-grid cols-3">
+                <label class="field">
+                  <span class="label">初始权益</span>
+                  <input inputmode="decimal" value="10000" id="field-equity" />
+                </label>
+                <label class="field">
+                  <span class="label">最大杠杆</span>
+                  <input inputmode="decimal" value="20" id="field-leverage" />
+                </label>
+                <label class="field">
+                  <span class="label">保证金模式</span>
+                  <select id="field-margin">
+                    <option value="CROSS" selected>CROSS · 共享结算权益</option>
+                    <option value="ISOLATED">ISOLATED · 按轨道显式分配</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="field-grid">
+                <label class="field">
+                  <span class="label">账户数据</span>
+                  <select>
+                    <option value="APPROX_PROXY" selected>APPROX_PROXY · 已揭示价格代理</option>
+                    <option value="HISTORICAL_EXACT">HISTORICAL_EXACT · 固定历史 mark/index</option>
+                  </select>
+                  <span class="hint">Exact 必须手动起点，并由服务端返回不可变 archive ref。</span>
+                </label>
+                <label class="field">
+                  <span class="label">资金费模式</span>
+                  <select id="field-funding">
+                    <option value="OFF" selected>OFF</option>
+                    <option value="SANDBOX_FIXED" disabled>SANDBOX_FIXED · 近似练习</option>
+                    <option value="HISTORICAL_EXACT" disabled>HISTORICAL_EXACT · 归档结算</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">历史盘口</span>
+                  <select>
+                    <option value="OFF" selected>OFF · Touch/Tape</option>
+                    <option value="BOOK_ASSISTED_REQUIRED" disabled>BOOK_ASSISTED_REQUIRED · 连续 L2</option>
+                  </select>
+                  <span class="hint">仅当服务端证明 snapshot + ordered deltas 连续且可 pin。</span>
+                </label>
+                <label class="field">
+                  <span class="label">Maker / Taker bps</span>
+                  <span class="inline-2">
+                    <input inputmode="decimal" value="2" aria-label="Maker bps" />
+                    <input inputmode="decimal" value="5" aria-label="Taker bps" />
+                  </span>
+                </label>
+                <label class="field">
+                  <span class="label">市价滑点 bps</span>
+                  <input inputmode="decimal" value="1" />
+                </label>
+              </div>
+
+              <div class="note">
+                Run 固定使用 <strong style="color:var(--text)">TOUCH_OR_TAPE_V2</strong>；BOOK_ASSISTED 只增加连续 L2 门禁与报告区分，持续标注「不含盘口排队」。
+              </div>
+            </div>
+          </section>
+
+        </div>
+
+        <!-- Right rail: live summary -->
+        <aside class="create-side">
+          <div class="create-side-scroll">
+            <div class="summary-card">
+              <h4>配置摘要</h4>
+              <div class="summary-name" id="sum-name">BTC 突破节奏训练</div>
+              <dl class="summary-list">
+                <div><dt>商品</dt><dd id="sum-symbol">BTCUSDT</dd></div>
+                <div><dt>历史源</dt><dd id="sum-source">BAR</dd></div>
+                <div><dt>开始</dt><dd id="sum-start">RANDOM</dd></div>
+                <div><dt>完整性</dt><dd id="sum-integrity">CHALLENGE</dd></div>
+                <div><dt>时间披露</dt><dd id="sum-disclosure">HIDE_YEAR</dd></div>
+                <div><dt>权益 / 杠杆</dt><dd id="sum-account">10,000 · 20×</dd></div>
+                <div><dt>保证金</dt><dd id="sum-margin">CROSS</dd></div>
+              </dl>
+            </div>
+
+            <div class="cap-panel">
+              <h4>按需数据策略</h4>
+              <div class="cap-row"><span>动作</span><strong>PREPARE_ON_CREATE</strong></div>
+              <div class="cap-row"><span>预计范围</span><strong>18.4k rows · 2.1 MiB</strong></div>
+              <div class="cap-row"><span>指标预热</span><strong>200 rows</strong></div>
+              <div class="cap-row"><span>可见历史</span><strong>ALL_AVAILABLE · 按需分页</strong></div>
+              <div class="cap-row"><span>执行快照预算</span><strong><span class="pill ok">通过</span></strong></div>
+              <div class="cap-row"><span>本地 READY</span><strong>4 segments · 12.6 MiB</strong></div>
+              <div class="cap-row"><span>失败策略</span><strong>quarantine</strong></div>
+            </div>
+
+            <div class="cap-panel">
+              <h4>能力边界</h4>
+              <div class="cap-row"><span>历史 L2</span><strong><span class="pill off">OFF</span></strong></div>
+              <div class="cap-row"><span>账户历史</span><strong><span class="pill warn">APPROX</span></strong></div>
+              <div class="cap-row"><span>资金费</span><strong><span class="pill off">OFF</span></strong></div>
+              <div class="cap-row"><span>动态规则</span><strong><span class="pill off">LOCKED</span></strong></div>
+              <div class="cap-row"><span>Queue exact</span><strong>否</strong></div>
+            </div>
+
+            <button class="btn btn-sm" type="button" style="width:100%;justify-content:center">
+              按当前参数校验盘口能力
+            </button>
+          </div>
+
+          <div class="create-side-cta">
+            <div class="side-actions">
+              <button class="btn btn-primary" type="button">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                创建并进入训练
+              </button>
+              <button class="btn" type="button" id="close-create-2">取消</button>
+            </div>
+            <p class="atomic-hint">提交后服务端原子创建 · 历史数据仅在进入会话时按需加载</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Filter chips ──
+    document.querySelectorAll(".chip-row .chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        chip.parentElement.querySelectorAll(".chip").forEach((c) => c.setAttribute("aria-pressed", "false"));
+        chip.setAttribute("aria-pressed", "true");
+      });
+    });
+
+    // ── Create overlay open/close ──
+    const overlay = document.getElementById("create-overlay");
+    function openCreate() {
+      overlay.hidden = false;
+      overlay.classList.add("is-open");
+      document.body.classList.add("create-open");
+    }
+    function closeCreate() {
+      overlay.classList.remove("is-open");
+      overlay.hidden = true;
+      document.body.classList.remove("create-open");
+    }
+    document.querySelectorAll("[data-open-create], #open-create, #open-create-banner").forEach((el) => {
+      el.addEventListener("click", openCreate);
+    });
+    document.getElementById("close-create").addEventListener("click", closeCreate);
+    document.getElementById("close-create-2").addEventListener("click", closeCreate);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeCreate();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && overlay.classList.contains("is-open")) closeCreate();
+    });
+
+    // ── Section nav ──
+    document.querySelectorAll("[data-scroll-to]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".create-step").forEach((s) => s.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        const target = document.getElementById(btn.getAttribute("data-scroll-to"));
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+
+    // ── Exclusive choice groups ──
+    function bindChoices(group, onChange) {
+      document.querySelectorAll(`[data-group="${group}"]`).forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(`[data-group="${group}"]`).forEach((b) => b.setAttribute("aria-pressed", "false"));
+          btn.setAttribute("aria-pressed", "true");
+          onChange?.(btn.dataset.value);
+        });
+      });
+    }
+
+    bindChoices("source", (v) => {
+      document.getElementById("sum-source").textContent = v;
+    });
+
+    bindChoices("start", (v) => {
+      document.getElementById("sum-start").textContent = v;
+      document.getElementById("manual-start").classList.toggle("is-visible", v === "MANUAL");
+    });
+
+    bindChoices("integrity", (v) => {
+      document.getElementById("sum-integrity").textContent = v;
+      const grid = document.getElementById("mutation-grid");
+      const hint = document.getElementById("mutation-hint");
+      const funding = document.getElementById("field-funding");
+      if (v === "PRACTICE") {
+        grid.classList.remove("is-locked");
+        hint.textContent = "勾选后写入审计事件；Challenge 仍全部锁定。";
+        // default practice: deposit + withdraw
+        grid.querySelectorAll("input").forEach((inp) => {
+          inp.checked = inp.value === "deposit" || inp.value === "withdraw";
+        });
+        funding.querySelector('[value="SANDBOX_FIXED"]').disabled = true;
+      } else if (v === "SANDBOX") {
+        grid.classList.remove("is-locked");
+        hint.textContent = "Sandbox 下全部变更可审计。";
+        grid.querySelectorAll("input").forEach((inp) => { inp.checked = true; });
+        funding.querySelector('[value="SANDBOX_FIXED"]').disabled = false;
+      } else {
+        grid.classList.add("is-locked");
+        hint.textContent = "Challenge 下全部锁定；切换到 Practice 后可勾选。";
+        grid.querySelectorAll("input").forEach((inp) => { inp.checked = false; });
+        funding.querySelector('[value="SANDBOX_FIXED"]').disabled = true;
+        if (funding.value === "SANDBOX_FIXED") funding.value = "OFF";
+      }
+    });
+
+    // ── Live summary fields ──
+    document.getElementById("field-name").addEventListener("input", (e) => {
+      document.getElementById("sum-name").textContent = e.target.value || "未命名训练";
+    });
+    document.getElementById("field-symbol").addEventListener("change", (e) => {
+      const parts = e.target.value.split("·").map((s) => s.trim());
+      document.getElementById("sum-symbol").textContent = parts[parts.length - 1] || e.target.value;
+    });
+    document.getElementById("field-disclosure").addEventListener("change", (e) => {
+      document.getElementById("sum-disclosure").textContent = e.target.value;
+    });
+    function refreshAccountSum() {
+      const eq = document.getElementById("field-equity").value || "—";
+      const lev = document.getElementById("field-leverage").value || "—";
+      document.getElementById("sum-account").textContent = `${Number(eq).toLocaleString()} · ${lev}×`;
+      document.getElementById("sum-margin").textContent = document.getElementById("field-margin").value;
+    }
+    ["field-equity", "field-leverage", "field-margin"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", refreshAccountSum);
+      document.getElementById(id).addEventListener("change", refreshAccountSum);
+    });
+
+    document.getElementById("field-visible-mode").addEventListener("change", (e) => {
+      const duration = e.target.value === "DURATION";
+      document.getElementById("visible-duration").style.display = duration ? "grid" : "none";
+      document.getElementById("visible-note").textContent = duration
+        ? "固定时长模式会把左侧边界锁定在 Run 中，适合兼容旧 Run。"
+        : "像实时行情一样向左按需分页，直到所选连续数据段的最早一根；不会把全部历史塞进执行快照。";
+    });
+  </script>
+</body>
+</html>

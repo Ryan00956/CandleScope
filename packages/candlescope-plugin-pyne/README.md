@@ -23,7 +23,7 @@ startup instead of being silently adapted.
 ## Published development bundle
 
 The first public development bundle is
-[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1):
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/helenananaa/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1):
 
 - asset: `candlescope-pyne-0.2.0-cp312-win_amd64.cspkg`;
 - target: Windows AMD64, CPython 3.12;
@@ -95,7 +95,7 @@ New-Item -ItemType Directory -Force $wheelhouse | Out-Null
 python -m build --wheel --outdir $wheelhouse .
 python -m build --wheel --outdir $wheelhouse ..\candlescope-plugin-sdk
 Invoke-WebRequest `
-  -Uri 'https://github.com/Ryan00956/pyne-runtime/releases/download/v0.2.0rc1/pyne_runtime-0.2.0rc1-py3-none-any.whl' `
+  -Uri 'https://github.com/helenananaa/pyne-runtime/releases/download/v0.2.0rc1/pyne_runtime-0.2.0rc1-py3-none-any.whl' `
   -OutFile "$wheelhouse\pyne_runtime-0.2.0rc1-py3-none-any.whl"
 python -m pip download --only-binary=:all: --no-deps `
   --dest $wheelhouse numpy==2.3.3

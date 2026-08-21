@@ -1,7 +1,7 @@
 # CandleScope Pine Compatibility Plugin
 
 This package bridges the independently released
-[`pine-compat-runtime`](https://github.com/Ryan00956/pine-compat-runtime) wheel to
+[`pine-compat-runtime`](https://github.com/helenananaa/pine-compat-runtime) wheel to
 the public `candlescope.script-runtime/1` SDK. It contains adapter code only: no
 Pine engine source snapshot and no imports from CandleScope private backend
 packages.

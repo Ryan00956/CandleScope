@@ -24,9 +24,9 @@
       "source": "github-release",
       "releaseTag": "v0.2.0",
       "releaseCommit": "cec39d807a469ebae199f30bc67a91d7081a3b9f",
-      "manifestUrl": "https://github.com/Ryan00956/pine-compat-runtime/releases/download/v0.2.0/manifest.json",
+      "manifestUrl": "https://github.com/helenananaa/pine-compat-runtime/releases/download/v0.2.0/manifest.json",
       "manifestSha256": "sha256:3fce2cf4aa78ea54b3be805c5417466d9014445c50004317932d044b00f23deb",
-      "releaseUrl": "https://github.com/Ryan00956/pine-compat-runtime/releases/download/v0.2.0/pine_compat_runtime-0.2.0-cp310-abi3-win_amd64.whl",
+      "releaseUrl": "https://github.com/helenananaa/pine-compat-runtime/releases/download/v0.2.0/pine_compat_runtime-0.2.0-cp310-abi3-win_amd64.whl",
       "sha256": "sha256:4f38c25a92261a8594d346c858c43f2a675afaac789bb1f75458c8a568c43c3e",
       "size": 2961677
     }

@@ -610,7 +610,7 @@ offline `.cspkg` installation and protocol probe gate. The 0.2.0 bridge covers
 markers, horizontal lines, fills, and other output through negotiated structured
 Render IR and passes the frozen goldens. The trusted development asset is now
 published as
-[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1).
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/helenananaa/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1).
 The product bootstrap pins its URL, size, platform, and outer SHA-256, while the
 generic community installer remains local-artifact-only. CandleScope no longer
 contains `packages/pyne-runtime` or an in-process Pyne facade.
@@ -650,7 +650,7 @@ Phase 8 adds the independently buildable
 It pins the public `pine-compat-runtime` v0.2.0 Release wheel, contains no Pine
 engine source snapshot or private CandleScope imports, and advertises only its
 closed-bar batch contract. The development bundle is published as
-[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1).
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/helenananaa/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1).
 Unsupported realtime, strategy, `request.*`, import, and native-object features
 remain fail-closed.
 

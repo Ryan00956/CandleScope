@@ -61,7 +61,7 @@ def test_release_lock_tracks_the_exact_public_engine_asset() -> None:
         "sha256:3fce2cf4aa78ea54b3be805c5417466d9014445c50004317932d044b00f23deb"
     )
     assert engine["releaseUrl"].startswith(
-        "https://github.com/Ryan00956/pine-compat-runtime/releases/download/v0.2.0/"
+        "https://github.com/helenananaa/pine-compat-runtime/releases/download/v0.2.0/"
     )
     assert engine["sha256"] == (
         "sha256:4f38c25a92261a8594d346c858c43f2a675afaac789bb1f75458c8a568c43c3e"

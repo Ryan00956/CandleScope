@@ -26,10 +26,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/Ryan00956/CandleScope"
-Repository = "https://github.com/Ryan00956/CandleScope"
-Documentation = "https://github.com/Ryan00956/CandleScope/tree/main/packages/candlescope-plugin-sdk/docs"
-Issues = "https://github.com/Ryan00956/CandleScope/issues"
+Homepage = "https://github.com/helenananaa/CandleScope"
+Repository = "https://github.com/helenananaa/CandleScope"
+Documentation = "https://github.com/helenananaa/CandleScope/tree/main/packages/candlescope-plugin-sdk/docs"
+Issues = "https://github.com/helenananaa/CandleScope/issues"
 
 [project.optional-dependencies]
 dev = [

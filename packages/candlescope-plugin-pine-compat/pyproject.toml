@@ -30,10 +30,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Ryan00956/CandleScope"
-Repository = "https://github.com/Ryan00956/CandleScope"
-Issues = "https://github.com/Ryan00956/CandleScope/issues"
-PineCompatRuntime = "https://github.com/Ryan00956/pine-compat-runtime"
+Homepage = "https://github.com/helenananaa/CandleScope"
+Repository = "https://github.com/helenananaa/CandleScope"
+Issues = "https://github.com/helenananaa/CandleScope/issues"
+PineCompatRuntime = "https://github.com/helenananaa/pine-compat-runtime"
 
 [project.optional-dependencies]
 dev = [

@@ -68,7 +68,7 @@ MANIFEST_SCHEMA = (
 JAVA_RUNTIME_ID = "temurin-26.0.2.10"
 TA4J_SOURCE_COMMIT = "07f6659d915081c2639f59ee82a87c32c9eccf36"
 AHO_SOURCE_COMMIT = "be9ac39a2c2984255433d0b0a4fea28393f785a5"
-SOURCE_REPOSITORY = "https://github.com/Ryan00956/CandleScope"
+SOURCE_REPOSITORY = "https://github.com/helenananaa/CandleScope"
 REFERENCE_ORIGIN = "https://plugins.candlescope.invalid"
 REFERENCE_MARKETPLACE_ID = "candlescope.phase10.reference"
 REFERENCE_INDEX_URL = f"{REFERENCE_ORIGIN}/index-v2.json"
@@ -362,12 +362,12 @@ def _provenance(
         "sourceRepository": SOURCE_REPOSITORY,
         "sourceCommit": source_commit,
         "buildReceiptUrl": (
-            f"https://raw.githubusercontent.com/Ryan00956/CandleScope/"
+            f"https://raw.githubusercontent.com/helenananaa/CandleScope/"
             f"{source_commit}/{commit_path}/{receipt_relative}"
         ),
         "buildReceiptSha256": _sha256_bytes(receipt.read_bytes()),
         "rebuildInstructionsUrl": (
-            f"https://raw.githubusercontent.com/Ryan00956/CandleScope/"
+            f"https://raw.githubusercontent.com/helenananaa/CandleScope/"
             f"{source_commit}/{commit_path}/{rebuild_relative}"
         ),
         "rebuildInstructionsSha256": _sha256_bytes(rebuild.read_bytes()),

@@ -22,7 +22,7 @@
     "pyne-runtime": {
       "version": "0.2.0rc1",
       "source": "github-release",
-      "releaseUrl": "https://github.com/Ryan00956/pyne-runtime/releases/download/v0.2.0rc1/pyne_runtime-0.2.0rc1-py3-none-any.whl",
+      "releaseUrl": "https://github.com/helenananaa/pyne-runtime/releases/download/v0.2.0rc1/pyne_runtime-0.2.0rc1-py3-none-any.whl",
       "sha256": "sha256:53597fd53150c7beecdfd57ecd1c4e5c5ebaa2edf2ae1006e0723ae41467e754"
     },
     "numpy": {

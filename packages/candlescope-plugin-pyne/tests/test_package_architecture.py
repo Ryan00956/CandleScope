@@ -64,7 +64,7 @@ def test_release_lock_tracks_the_exact_external_engine_artifact() -> None:
     pyne = lock["wheels"]["pyne-runtime"]
     assert pyne["version"] == "0.2.0rc1"
     assert pyne["releaseUrl"].startswith(
-        "https://github.com/Ryan00956/pyne-runtime/releases/download/v0.2.0rc1/"
+        "https://github.com/helenananaa/pyne-runtime/releases/download/v0.2.0rc1/"
     )
     assert pyne["sha256"] == (
         "sha256:53597fd53150c7beecdfd57ecd1c4e5c5ebaa2edf2ae1006e0723ae41467e754"

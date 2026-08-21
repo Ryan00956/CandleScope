@@ -329,7 +329,7 @@ runtime 不可用都会 fail closed。Phase 7 新增
 SDK、Pyne Runtime RC wheel 与 NumPy 版本，并已通过真实 `.cspkg` 离线安装和协议探针。
 0.2.0 bridge 通过可协商的结构化 Render IR 覆盖 marker、hline、fill 等输出并通过冻结
 golden。可信开发包已发布为
-[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1)；
+[`candlescope-plugin-pyne-v0.2.0-dev.1`](https://github.com/helenananaa/CandleScope/releases/tag/candlescope-plugin-pyne-v0.2.0-dev.1)；
 产品 bootstrap 固定其 URL、大小、平台和外层 SHA-256，通用社区安装器仍只接受本地
 artifact。CandleScope 已删除 `packages/pyne-runtime` 和 in-process Pyne facade。完整执行记录见
 [`PLUGIN_PLATFORM_V1_EXECUTION_zh.md`](docs/PLUGIN_PLATFORM_V1_EXECUTION_zh.md)。
@@ -351,7 +351,7 @@ Phase 8 新增独立可构建的
 [`candlescope-plugin-pine-compat`](packages/candlescope-plugin-pine-compat/README_zh.md)：
 它固定公开 `pine-compat-runtime` v0.2.0 Release wheel，不包含 Pine 引擎源码快照，也不
 导入 CandleScope 私有模块，只声明闭合 K 线 batch 能力。开发 bundle 已发布为
-[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/Ryan00956/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1)；
+[`candlescope-plugin-pine-compat-v0.2.0-dev.1`](https://github.com/helenananaa/CandleScope/releases/tag/candlescope-plugin-pine-compat-v0.2.0-dev.1)；
 realtime、strategy、`request.*`、import 和原生对象等未公开或无法忠实映射的能力继续
 fail closed。
 

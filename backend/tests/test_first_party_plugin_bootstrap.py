@@ -56,7 +56,7 @@ def _release(
             if pine
             else "candlescope-pyne-test.cspkg"
         ),
-        url="https://github.com/Ryan00956/CandleScope/releases/download/test/test.cspkg",
+        url="https://github.com/helenananaa/CandleScope/releases/download/test/test.cspkg",
         sha256=f"sha256:{hashlib.sha256(payload).hexdigest()}",
         size=len(payload),
         system=platform.system(),

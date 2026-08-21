@@ -1,7 +1,7 @@
 # CandleScope Pine Compatibility 插件
 
 本包把独立发布的
-[`pine-compat-runtime`](https://github.com/Ryan00956/pine-compat-runtime) wheel
+[`pine-compat-runtime`](https://github.com/helenananaa/pine-compat-runtime) wheel
 桥接到公开的 `candlescope.script-runtime/1` SDK。包内只有适配代码，不包含 Pine
 引擎源码快照，也不导入 CandleScope 后端私有模块。
 

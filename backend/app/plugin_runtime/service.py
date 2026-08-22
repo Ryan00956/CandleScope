@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from candlescope_plugin_sdk import (
@@ -15,6 +16,8 @@ from candlescope_plugin_sdk import (
 from .errors import PluginHostError, PluginRequestError
 from .registry import RUNTIME_REGISTRY_SCHEMA_VERSION, RuntimeRegistry
 from .supervisor import STATE_FAILED, STATE_READY, RuntimeSupervisor
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeHostService:
@@ -64,17 +67,15 @@ class RuntimeHostService:
                     await supervisor.start()
                     started.append(supervisor)
                 except PluginHostError as exc:
-                    if supervisor.spec.required:
-                        raise PluginHostError(
-                            code="PLUGIN_REQUIRED_START_FAILED",
-                            message=(
-                                f"required runtime {supervisor.runtime_id!r} "
-                                f"failed to start: {exc.message}"
-                            ),
-                            runtime_id=supervisor.runtime_id,
-                            details={"cause": exc.to_dict()},
-                        ) from exc
-                    # Optional runtimes remain visible as failed diagnostics.
+                    logger.error(
+                        "runtime %s failed to start%s: %s",
+                        supervisor.runtime_id,
+                        " (required)" if supervisor.spec.required else "",
+                        exc.message,
+                    )
+                    # Required and optional runtimes both remain failed
+                    # diagnostics. Script execution stays fail-closed; the
+                    # host process does not abort sibling runtimes.
             self._started = True
         except BaseException:
             for supervisor in reversed(started):

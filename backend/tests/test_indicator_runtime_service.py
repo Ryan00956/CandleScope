@@ -404,25 +404,46 @@ async def test_sidecar_failure_is_public_and_does_not_fallback() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "descriptor, message",
+    "descriptor, cause_code",
     [
-        (_descriptor(languages=("pine",)), "does not declare language"),
+        (_descriptor(languages=("pine",)), "INDICATOR_RUNTIME_LANGUAGE_UNDECLARED"),
         (
             _descriptor(features=(FEATURE_BATCH_EXECUTION_V1,)),
-            "missing required Indicator features",
+            "INDICATOR_RUNTIME_FEATURES_MISSING",
         ),
     ],
 )
-async def test_route_descriptor_mismatch_fails_before_execution(
+async def test_route_descriptor_mismatch_is_unavailable_before_execution(
     descriptor: RuntimeDescriptor,
-    message: str,
+    cause_code: str,
 ) -> None:
-    service = IndicatorRuntimeService(
-        _routes("sidecar"),
-        host=_Host(runtime_descriptor=descriptor),
+    host = _Host(runtime_descriptor=descriptor)
+    service = IndicatorRuntimeService(_routes("sidecar"), host=host)
+    await service.start()
+    snapshot = service.snapshot()
+    assert snapshot["started"] is True
+    assert snapshot["unavailable"] == [
+        {
+            "language": "pyne",
+            "runtimeId": "pyne.runtime",
+            "causeCode": cause_code,
+        }
+    ]
+    catalog = await service.public_catalog()
+    assert catalog["languages"][0]["available"] is False
+    assert catalog["runtimes"] == []
+
+    async def legacy() -> dict[str, Any]:
+        raise AssertionError("sidecar must not invoke legacy")
+
+    payload = await service.execute(
+        _request(),
+        legacy=legacy,
+        adapt_sidecar=lambda result: {"ok": result.ok, "backend": "sidecar"},
     )
-    with pytest.raises(IndicatorRuntimeRoutesError, match=message):
-        await service.start()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RUNTIME_UNAVAILABLE"
+    assert host.requests == []
 
 
 @pytest.mark.anyio
@@ -522,13 +543,23 @@ async def test_public_catalog_sanitizes_plugin_host_start_failure() -> None:
         ),
     )
 
-    with pytest.raises(
-        IndicatorRuntimeRoutesError,
-        match="script runtime catalog is unavailable",
-    ) as captured:
-        await service.public_catalog()
+    catalog = await service.public_catalog()
 
-    assert "private stderr" not in str(captured.value)
+    assert catalog["languages"] == [
+        {
+            "id": "pyne",
+            "name": "pyne",
+            "extensions": [],
+            "aliases": [],
+            "runtimeId": "pyne.runtime",
+            "routeMode": "sidecar",
+            "available": False,
+            "features": [],
+        }
+    ]
+    assert catalog["runtimes"] == []
+    assert "private stderr" not in str(catalog)
+    assert "executable path" not in str(catalog)
 
 
 @pytest.mark.anyio
@@ -562,3 +593,23 @@ def test_product_runtime_service_exposes_no_in_process_language_adapter(
 
     assert service.legacy_languages == frozenset()
     assert service.route_for("pyne").mode == "sidecar"
+
+
+@pytest.mark.anyio
+async def test_missing_plugin_host_starts_degraded_and_keeps_sidecar_fail_closed() -> None:
+    service = IndicatorRuntimeService(_routes("sidecar"), host=None)
+    await service.start()
+    catalog = await service.public_catalog()
+    assert catalog["languages"][0]["available"] is False
+    assert service.snapshot()["unavailable"][0]["causeCode"] == "PLUGIN_HOST_UNAVAILABLE"
+
+    async def legacy() -> dict[str, Any]:
+        raise AssertionError("sidecar must not invoke legacy")
+
+    payload = await service.execute(
+        _request(),
+        legacy=legacy,
+        adapt_sidecar=lambda result: {"ok": True},
+    )
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RUNTIME_UNAVAILABLE"

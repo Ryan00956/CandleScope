@@ -4,7 +4,9 @@ CandleScope backend entrypoint.
 Startup sequence:
   1. Initialize SQLite storage (klines_repo).
   2. Restore the local symbol catalog snapshot.
-  3. Start the opt-in script-runtime plugin host from resolved activation state.
+  3. Start the script-runtime plugin plane as a capability. First-party
+     Pyne/Pine or plugin-host failures degrade that plane and never abort
+     the process.
   4. Start the DataEngine runtime and attach its public handles to
      ``app.state`` for API/WS endpoints.
   5. Refresh exchange metadata asynchronously on a best-effort basis.
@@ -13,6 +15,8 @@ Startup sequence:
 
 When DataManager fails to initialize, the application can still expose
 health endpoints, but data APIs report explicit service-unavailable errors.
+Script-language execution stays fail-closed: unavailable sidecars return
+an explicit capability error and never silently fall back.
 """
 import asyncio
 import logging
@@ -244,6 +248,221 @@ async def _init_replay_runtime() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Plugin plane (capability, not a process prerequisite)
+# ═══════════════════════════════════════════════════════════════
+
+
+def _plugin_plane_issue_from_exception(exc: BaseException) -> tuple[str, str]:
+    from app.indicator.runtime_routes import IndicatorRuntimeRoutesError
+    from app.plugin_runtime.errors import PluginHostError
+
+    if isinstance(exc, PluginHostError):
+        return str(exc.code), str(exc.message)
+    if isinstance(exc, IndicatorRuntimeRoutesError):
+        return (
+            "INDICATOR_RUNTIME_ROUTES_INVALID",
+            "indicator runtime routes are invalid",
+        )
+    return type(exc).__name__, "plugin plane failed during startup"
+
+
+def _mark_plugin_plane_degraded(*, code: str, message: str) -> None:
+    current = getattr(app.state, "plugin_plane", None)
+    if not isinstance(current, dict):
+        current = {"status": "ok", "issues": []}
+    issues = [
+        item
+        for item in list(current.get("issues") or [])
+        if isinstance(item, dict) and item.get("code")
+    ]
+    if not any(item.get("code") == code for item in issues):
+        issues.append({"code": code})
+    app.state.plugin_plane = {
+        "status": "degraded",
+        "reasonCode": current.get("reasonCode") or code,
+        "reason": current.get("reason") or message,
+        "issues": issues[:8],
+    }
+    logger.warning("Plugin plane degraded (%s): %s", code, message)
+
+
+async def _stop_plugin_owner(owner: object | None) -> None:
+    if owner is None:
+        return
+    stop = getattr(owner, "stop", None)
+    if not callable(stop):
+        return
+    try:
+        await stop()
+    except Exception as exc:
+        logger.warning("Plugin plane rollback failed: %s", exc, exc_info=True)
+
+
+async def _start_plugin_plane() -> None:
+    """Start script/plugin runtimes without owning core market availability."""
+    from app.first_party_plugin_bootstrap import (
+        FirstPartyPluginBootstrapError,
+        FirstPartyPluginBootstrapResult,
+        ensure_first_party_plugins_from_environment,
+    )
+    from app.indicator.runtime_routes import IndicatorRuntimeRoutes
+    from app.indicator.runtime_service import (
+        IndicatorRuntimeService,
+        build_indicator_runtime_service_from_environment,
+    )
+    from app.plugin_compat_v1 import V1ScriptRuntimeCompatibilityBridge
+    from app.plugin_core_v2 import (
+        DisabledCorePluginPlatform,
+        build_core_plugin_platform_from_environment,
+        build_management_guard_from_environment,
+    )
+    from app.plugin_core_v2.bootstrap import default_platform_root
+    from app.plugin_runtime import (
+        RuntimeHostService,
+        build_runtime_host_from_environment,
+    )
+
+    app.state.plugin_plane = {"status": "ok", "issues": []}
+    first_party_bootstrap = FirstPartyPluginBootstrapResult(
+        status="skipped",
+        reason="not-started",
+    )
+    plugin_runtime_host: RuntimeHostService | None = None
+    indicator_runtime_service: IndicatorRuntimeService | None = None
+    plugin_platform_v2 = None
+    v1_compatibility = None
+    plugin_platform_v2_guard = None
+
+    try:
+        first_party_bootstrap = await asyncio.to_thread(
+            ensure_first_party_plugins_from_environment,
+            host_name=APP_NAME,
+            host_version=APP_VERSION,
+        )
+    except FirstPartyPluginBootstrapError as exc:
+        first_party_bootstrap = FirstPartyPluginBootstrapResult.unavailable(exc.message)
+        _mark_plugin_plane_degraded(code=exc.code, message=exc.message)
+    except Exception as exc:
+        code, message = _plugin_plane_issue_from_exception(exc)
+        first_party_bootstrap = FirstPartyPluginBootstrapResult.unavailable(message)
+        _mark_plugin_plane_degraded(code=code, message=message)
+
+    try:
+        plugin_runtime_host = build_runtime_host_from_environment(
+            host_name=APP_NAME,
+            host_version=APP_VERSION,
+        )
+        await plugin_runtime_host.start()
+    except Exception as exc:
+        code, message = _plugin_plane_issue_from_exception(exc)
+        _mark_plugin_plane_degraded(code=code, message=message)
+        await _stop_plugin_owner(plugin_runtime_host)
+        plugin_runtime_host = RuntimeHostService.disabled(
+            host_name=APP_NAME,
+            host_version=APP_VERSION,
+        )
+        await plugin_runtime_host.start()
+
+    try:
+        indicator_runtime_service = build_indicator_runtime_service_from_environment(
+            host=plugin_runtime_host,
+        )
+        await indicator_runtime_service.start()
+    except Exception as exc:
+        code, message = _plugin_plane_issue_from_exception(exc)
+        _mark_plugin_plane_degraded(code=code, message=message)
+        await _stop_plugin_owner(indicator_runtime_service)
+        indicator_runtime_service = IndicatorRuntimeService(
+            IndicatorRuntimeRoutes.first_party_sidecar_default(),
+            host=plugin_runtime_host,
+            legacy_languages=frozenset(),
+        )
+        await indicator_runtime_service.start()
+
+    try:
+        plugin_platform_v2 = build_core_plugin_platform_from_environment(
+            host_name=APP_NAME,
+            host_version=PLUGIN_PLATFORM_V2_HOST_VERSION,
+        )
+        v1_compatibility = V1ScriptRuntimeCompatibilityBridge(
+            root=getattr(
+                plugin_platform_v2,
+                "root",
+                default_platform_root(os.environ),
+            ),
+            indicator_source=indicator_runtime_service,
+            runtime_host=plugin_runtime_host,
+        )
+        indicator_runtime_service.bind_catalog_projector(
+            v1_compatibility.project_indicator_catalog
+        )
+        plugin_platform_v2.bind_v1_compatibility(v1_compatibility)
+        plugin_platform_v2_guard = build_management_guard_from_environment(
+            platform=plugin_platform_v2,
+        )
+    except Exception as exc:
+        code, message = _plugin_plane_issue_from_exception(exc)
+        _mark_plugin_plane_degraded(code=code, message=message)
+        await _stop_plugin_owner(plugin_platform_v2)
+        plugin_platform_v2 = DisabledCorePluginPlatform()
+        if v1_compatibility is None:
+            v1_compatibility = V1ScriptRuntimeCompatibilityBridge(
+                root=default_platform_root(os.environ),
+                indicator_source=indicator_runtime_service,
+                runtime_host=plugin_runtime_host,
+            )
+        try:
+            indicator_runtime_service.bind_catalog_projector(
+                v1_compatibility.project_indicator_catalog
+            )
+        except Exception:
+            pass
+        try:
+            plugin_platform_v2.bind_v1_compatibility(v1_compatibility)
+        except Exception:
+            pass
+        plugin_platform_v2_guard = None
+
+    routing_snapshot = indicator_runtime_service.snapshot()
+    if routing_snapshot.get("unavailable"):
+        _mark_plugin_plane_degraded(
+            code="INDICATOR_RUNTIME_UNAVAILABLE",
+            message="one or more script runtimes are unavailable",
+        )
+    host_summary = plugin_runtime_host.health_summary()
+    if host_summary.get("status") == "degraded":
+        _mark_plugin_plane_degraded(
+            code="PLUGIN_RUNTIME_DEGRADED",
+            message="one or more plugin runtimes failed to start",
+        )
+
+    app.state.first_party_plugin_bootstrap = first_party_bootstrap.to_wire()
+    app.state.plugin_runtime_host = plugin_runtime_host
+    app.state.indicator_runtime_service = indicator_runtime_service
+    app.state.plugin_v1_compatibility = v1_compatibility
+    app.state.plugin_platform_v2 = plugin_platform_v2
+    app.state.plugin_platform_v2_management_guard = plugin_platform_v2_guard
+    plugin_summary = plugin_runtime_host.health_summary()
+    plugin_plane = getattr(app.state, "plugin_plane", {"status": "ok"})
+    print(
+        "[startup] Runtime plugin host "
+        f"{plugin_summary['status']} "
+        f"({plugin_summary['ready']}/{plugin_summary['enabled']} ready)"
+    )
+    print(
+        "[startup] First-party plugin bootstrap "
+        f"{first_party_bootstrap.status}"
+        + (
+            f" ({first_party_bootstrap.runtime_id} {first_party_bootstrap.version})"
+            if first_party_bootstrap.runtime_id
+            else ""
+        )
+    )
+    if plugin_plane.get("status") == "degraded":
+        print("[startup] Plugin plane degraded; core market runtime will continue")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Application Lifecycle
 # ═══════════════════════════════════════════════════════════════
 
@@ -310,26 +529,9 @@ async def startup_event() -> None:
     if restored_catalog:
         logger.info("Restored last-known-good symbol catalog snapshot")
 
-    # 3. Ensure the exact first-party runtime pinned by this CandleScope build,
-    # then load resolved activation state and the independent language routing
-    # table. Community runtimes remain explicit local-installer operations.
-    from app.first_party_plugin_bootstrap import (
-        ensure_first_party_plugins_from_environment,
-    )
-    from app.plugin_runtime import build_runtime_host_from_environment
-    from app.plugin_core_v2 import (
-        build_core_plugin_platform_from_environment,
-        build_management_guard_from_environment,
-    )
-    from app.indicator.runtime_service import (
-        build_indicator_runtime_service_from_environment,
-    )
-    from app.plugin_compat_v1 import V1ScriptRuntimeCompatibilityBridge
-    from app.plugin_core_v2.bootstrap import default_platform_root
-
-    plugin_runtime_host = None
-    indicator_runtime_service = None
-    plugin_platform_v2 = None
+    # 3. Start script/plugin runtimes as a capability plane. A missing or
+    # unsupported first-party sidecar degrades Pyne/Pine; it does not abort
+    # DataEngine, alerts, or builtin indicators.
     try:
         if BACKTEST_SETTINGS.enabled:
             from app.backtest.runtime import BacktestRuntime
@@ -345,73 +547,20 @@ async def startup_event() -> None:
                 "Started backtest runtime at %s",
                 BACKTEST_SETTINGS.db_path,
             )
-        first_party_bootstrap = await asyncio.to_thread(
-            ensure_first_party_plugins_from_environment,
-            host_name=APP_NAME,
-            host_version=APP_VERSION,
-        )
-        app.state.first_party_plugin_bootstrap = first_party_bootstrap.to_wire()
-        plugin_runtime_host = build_runtime_host_from_environment(
-            host_name=APP_NAME,
-            host_version=APP_VERSION,
-        )
-        await plugin_runtime_host.start()
-        indicator_runtime_service = build_indicator_runtime_service_from_environment(
-            host=plugin_runtime_host,
-        )
-        await indicator_runtime_service.start()
-        plugin_platform_v2 = build_core_plugin_platform_from_environment(
-            host_name=APP_NAME,
-            host_version=PLUGIN_PLATFORM_V2_HOST_VERSION,
-        )
-        v1_compatibility = V1ScriptRuntimeCompatibilityBridge(
-            root=getattr(
-                plugin_platform_v2,
-                "root",
-                default_platform_root(os.environ),
-            ),
-            indicator_source=indicator_runtime_service,
-            runtime_host=plugin_runtime_host,
-        )
-        indicator_runtime_service.bind_catalog_projector(
-            v1_compatibility.project_indicator_catalog
-        )
-        plugin_platform_v2.bind_v1_compatibility(v1_compatibility)
-        plugin_platform_v2_guard = build_management_guard_from_environment(
-            platform=plugin_platform_v2,
-        )
+        await _start_plugin_plane()
     except BaseException:
-        if plugin_platform_v2 is not None:
-            await plugin_platform_v2.stop()
-        if indicator_runtime_service is not None:
-            await indicator_runtime_service.stop()
-        if plugin_runtime_host is not None:
-            await plugin_runtime_host.stop()
         backtest_runtime = getattr(app.state, "backtest_runtime", None)
         if backtest_runtime is not None:
             backtest_runtime.shutdown()
+        await _stop_plugin_owner(getattr(app.state, "plugin_platform_v2", None))
+        await _stop_plugin_owner(getattr(app.state, "indicator_runtime_service", None))
+        await _stop_plugin_owner(getattr(app.state, "plugin_runtime_host", None))
         await lag_monitor.stop()
         raise
-    app.state.plugin_runtime_host = plugin_runtime_host
-    app.state.indicator_runtime_service = indicator_runtime_service
-    app.state.plugin_v1_compatibility = v1_compatibility
-    app.state.plugin_platform_v2 = plugin_platform_v2
-    app.state.plugin_platform_v2_management_guard = plugin_platform_v2_guard
-    plugin_summary = plugin_runtime_host.health_summary()
-    print(
-        "[startup] Runtime plugin host "
-        f"{plugin_summary['status']} "
-        f"({plugin_summary['ready']}/{plugin_summary['enabled']} ready)"
-    )
-    print(
-        "[startup] First-party plugin bootstrap "
-        f"{first_party_bootstrap.status}"
-        + (
-            f" ({first_party_bootstrap.runtime_id} {first_party_bootstrap.version})"
-            if first_party_bootstrap.runtime_id
-            else ""
-        )
-    )
+
+    plugin_runtime_host = app.state.plugin_runtime_host
+    indicator_runtime_service = app.state.indicator_runtime_service
+    plugin_platform_v2 = app.state.plugin_platform_v2
 
     # 4. Initialize DataManager. FastAPI does not guarantee that the shutdown
     # event runs after a startup exception, so reclaim already-started sidecars
@@ -421,25 +570,47 @@ async def startup_event() -> None:
         await _init_replay_runtime()
         await _init_data_manager()
         data_manager = getattr(app.state, "data_manager", None)
-        if data_manager is not None:
-            from app.plugin_market_v2 import DataManagerConsumerPort
+        try:
+            if data_manager is not None:
+                from app.plugin_market_v2 import DataManagerConsumerPort
 
-            plugin_platform_v2.bind_market_data(DataManagerConsumerPort(data_manager))
-        from app.api.v1.symbols import (
-            evict_exchange_metadata,
-            refresh_exchange_metadata,
-        )
+                plugin_platform_v2.bind_market_data(
+                    DataManagerConsumerPort(data_manager)
+                )
+            from app.api.v1.symbols import (
+                evict_exchange_metadata,
+                refresh_exchange_metadata,
+            )
 
-        plugin_platform_v2.bind_symbol_refresher(
-            refresh_exchange_metadata,
-            evictor=evict_exchange_metadata,
-        )
-        await plugin_platform_v2.start()
+            plugin_platform_v2.bind_symbol_refresher(
+                refresh_exchange_metadata,
+                evictor=evict_exchange_metadata,
+            )
+            await plugin_platform_v2.start()
+            plugin_platform_v2.publish_event(
+                "candlescope.app.ready/1",
+                {"hostVersion": PLUGIN_PLATFORM_V2_HOST_VERSION},
+            )
+        except Exception as exc:
+            code, message = _plugin_plane_issue_from_exception(exc)
+            _mark_plugin_plane_degraded(code=code, message=message)
+            await _stop_plugin_owner(plugin_platform_v2)
+            from app.plugin_core_v2 import DisabledCorePluginPlatform
+
+            plugin_platform_v2 = DisabledCorePluginPlatform()
+            v1_compatibility = getattr(app.state, "plugin_v1_compatibility", None)
+            if v1_compatibility is not None:
+                try:
+                    plugin_platform_v2.bind_v1_compatibility(v1_compatibility)
+                except Exception:
+                    pass
+            app.state.plugin_platform_v2 = plugin_platform_v2
+            print("[startup] Plugin Platform v2 degraded; core market runtime continues")
     except BaseException:
         alert_facade = getattr(app.state, "alert_facade", None)
         if alert_facade is not None:
             await alert_facade.stop()
-        await plugin_platform_v2.stop()
+        await _stop_plugin_owner(plugin_platform_v2)
         data_runtime = getattr(app.state, "data_engine_runtime", None)
         if data_runtime is not None:
             await data_runtime.shutdown()
@@ -449,13 +620,10 @@ async def startup_event() -> None:
         backtest_runtime = getattr(app.state, "backtest_runtime", None)
         if backtest_runtime is not None:
             backtest_runtime.shutdown()
-        await indicator_runtime_service.stop()
-        await plugin_runtime_host.stop()
+        await _stop_plugin_owner(indicator_runtime_service)
+        await _stop_plugin_owner(plugin_runtime_host)
         await lag_monitor.stop()
         raise
-    plugin_platform_v2.publish_event(
-        "candlescope.app.ready/1", {"hostVersion": PLUGIN_PLATFORM_V2_HOST_VERSION}
-    )
 
     from app.api.v1.symbols import configure_exchange_metadata_foreground_probe
 
@@ -680,9 +848,20 @@ async def health_check() -> dict:
             "runtime": {"status": "unavailable", "started": False},
         }
         result["status"] = "degraded"
+    plugin_plane = getattr(app.state, "plugin_plane", None)
+    if isinstance(plugin_plane, dict):
+        result["plugin_plane"] = {
+            key: plugin_plane[key]
+            for key in ("status", "reasonCode", "reason", "issues")
+            if key in plugin_plane
+        }
+        if plugin_plane.get("status") == "degraded":
+            result["status"] = "degraded"
     plugin_runtime_host = getattr(app.state, "plugin_runtime_host", None)
     if plugin_runtime_host is not None:
         result["plugin_runtimes"] = plugin_runtime_host.health_summary()
+        if result["plugin_runtimes"].get("status") == "degraded":
+            result["status"] = "degraded"
     plugin_platform_v2 = getattr(app.state, "plugin_platform_v2", None)
     if plugin_platform_v2 is not None:
         result["plugin_platform_v2"] = plugin_platform_v2.health_summary()
@@ -694,9 +873,18 @@ async def health_check() -> dict:
     if isinstance(first_party_bootstrap, dict):
         result["first_party_plugin_bootstrap"] = {
             key: first_party_bootstrap[key]
-            for key in ("status", "runtimeId", "version", "changed", "downloaded")
+            for key in (
+                "status",
+                "runtimeId",
+                "version",
+                "changed",
+                "downloaded",
+                "reason",
+            )
             if key in first_party_bootstrap
         }
+        if first_party_bootstrap.get("status") == "unavailable":
+            result["status"] = "degraded"
     indicator_runtime_service = getattr(
         app.state,
         "indicator_runtime_service",
@@ -708,7 +896,10 @@ async def health_check() -> dict:
             "started": routing["started"],
             "routes": routing["routes"],
             "counts": routing["counts"],
+            "unavailable": routing.get("unavailable") or [],
         }
+        if result["indicator_runtime_routing"]["unavailable"]:
+            result["status"] = "degraded"
     if dm is not None:
         try:
             result["data_manager"] = dm.health_snapshot()

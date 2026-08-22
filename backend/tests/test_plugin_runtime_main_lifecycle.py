@@ -7,7 +7,10 @@ from typing import Any
 import pytest
 
 from app import main as main_module
-from app.first_party_plugin_bootstrap import FirstPartyPluginBootstrapResult
+from app.first_party_plugin_bootstrap import (
+    FirstPartyPluginBootstrapError,
+    FirstPartyPluginBootstrapResult,
+)
 from app.plugin_runtime import RuntimeHostService
 from app.plugin_runtime.registry import RuntimeRegistry
 
@@ -121,6 +124,7 @@ class _RoutingService:
                     "runtimeId": "candlescope.pyne",
                 }
             ],
+            "unavailable": [],
             "counts": {"sidecar": 0},
         }
 
@@ -156,7 +160,15 @@ def _patch_startup_dependencies(
         main_module.app.state.replay_runtime = None
         main_module.app.state.replay_service = None
 
+    async def _init_alert_delivery() -> None:
+        return None
+
+    async def _init_data_manager() -> None:
+        main_module.app.state.data_manager = None
+
     monkeypatch.setattr(main_module, "_init_replay_runtime", _init_replay_runtime)
+    monkeypatch.setattr(main_module, "_init_alert_delivery", _init_alert_delivery)
+    monkeypatch.setattr(main_module, "_init_data_manager", _init_data_manager)
     monkeypatch.setattr(
         first_party_bootstrap_module,
         "ensure_first_party_plugins_from_environment",
@@ -194,10 +206,6 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
     host = _Host()
     routing = _patch_startup_dependencies(monkeypatch, host, tmp_path / "plugins")
 
-    async def _init_data_manager() -> None:
-        main_module.app.state.data_manager = None
-
-    monkeypatch.setattr(main_module, "_init_data_manager", _init_data_manager)
     await main_module.startup_event()
     try:
         assert host.start_calls == 1
@@ -234,6 +242,7 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
             "changed": False,
             "downloaded": False,
         }
+        assert health["plugin_plane"]["status"] == "ok"
         assert health["indicator_runtime_routing"]["routes"] == [
             {
                 "language": "pyne",
@@ -241,6 +250,7 @@ async def test_application_lifecycle_owns_plugin_host_and_health_summary(
                 "runtimeId": "candlescope.pyne",
             }
         ]
+        assert health["indicator_runtime_routing"]["unavailable"] == []
     finally:
         await main_module.shutdown_event()
     assert host.stop_calls == 1
@@ -271,7 +281,7 @@ async def test_startup_failure_reclaims_started_plugin_host(
 
 
 @pytest.mark.anyio
-async def test_plugin_host_startup_failure_stops_lag_monitor(
+async def test_plugin_host_startup_failure_does_not_abort_core_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -283,16 +293,26 @@ async def test_plugin_host_startup_failure_stops_lag_monitor(
         raise RuntimeError("required plugin failed")
 
     monkeypatch.setattr(host, "start", _fail_start)
-    with pytest.raises(RuntimeError, match="required plugin failed"):
-        await main_module.startup_event()
-
-    assert host.start_calls == 1
-    assert routing.start_calls == 0
-    assert main_module.app.state.event_loop_lag_monitor.stopped is True
+    await main_module.startup_event()
+    try:
+        assert host.start_calls == 1
+        assert host.stop_calls == 1
+        assert routing.start_calls == 1
+        assert main_module.app.state.plugin_runtime_host is not host
+        assert main_module.app.state.plugin_runtime_host.health_summary()["status"] == (
+            "disabled"
+        )
+        health = await main_module.health_check()
+        assert health["status"] == "degraded"
+        assert health["plugin_plane"]["status"] == "degraded"
+        assert health["plugin_plane"]["reasonCode"] == "RuntimeError"
+        assert main_module.app.state.event_loop_lag_monitor.stopped is False
+    finally:
+        await main_module.shutdown_event()
 
 
 @pytest.mark.anyio
-async def test_indicator_routing_startup_failure_reclaims_plugin_host(
+async def test_indicator_routing_startup_failure_does_not_abort_core_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -306,10 +326,58 @@ async def test_indicator_routing_startup_failure_reclaims_plugin_host(
         routing,
     )
 
-    with pytest.raises(RuntimeError, match="indicator routing failed"):
-        await main_module.startup_event()
+    await main_module.startup_event()
+    try:
+        assert routing.start_calls == 1
+        assert routing.stop_calls == 1
+        assert host.start_calls == 1
+        assert host.stop_calls == 0
+        assert main_module.app.state.plugin_runtime_host is host
+        assert main_module.app.state.indicator_runtime_service is not routing
+        health = await main_module.health_check()
+        assert health["status"] == "degraded"
+        assert health["plugin_plane"]["status"] == "degraded"
+        assert main_module.app.state.event_loop_lag_monitor.stopped is False
+    finally:
+        await main_module.shutdown_event()
 
-    assert routing.start_calls == 1
-    assert host.start_calls == 1
-    assert host.stop_calls == 1
-    assert main_module.app.state.event_loop_lag_monitor.stopped is True
+
+@pytest.mark.anyio
+async def test_first_party_bootstrap_failure_does_not_abort_core_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host = _Host()
+    routing = _patch_startup_dependencies(monkeypatch, host, tmp_path / "plugins")
+    import app.first_party_plugin_bootstrap as first_party_bootstrap_module
+
+    def _fail_bootstrap(**_kwargs: object) -> FirstPartyPluginBootstrapResult:
+        raise FirstPartyPluginBootstrapError(
+            "the pinned official plugin bundle does not support this host platform",
+            details={
+                "expected": {"system": "Windows"},
+                "actual": {"system": "Linux"},
+            },
+        )
+
+    monkeypatch.setattr(
+        first_party_bootstrap_module,
+        "ensure_first_party_plugins_from_environment",
+        _fail_bootstrap,
+    )
+    await main_module.startup_event()
+    try:
+        assert host.start_calls == 1
+        assert routing.start_calls == 1
+        health = await main_module.health_check()
+        assert health["status"] == "degraded"
+        assert health["first_party_plugin_bootstrap"]["status"] == "unavailable"
+        assert "does not support this host platform" in health[
+            "first_party_plugin_bootstrap"
+        ]["reason"]
+        assert health["plugin_plane"]["reasonCode"] == (
+            "FIRST_PARTY_PLUGIN_BOOTSTRAP_FAILED"
+        )
+        assert main_module.app.state.event_loop_lag_monitor.stopped is False
+    finally:
+        await main_module.shutdown_event()

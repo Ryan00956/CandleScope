@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from candlescope_plugin_sdk import AnalyzeRequest, MarketContext
 
-from app.plugin_runtime.errors import PluginHostError, PluginRequestError
+from app.plugin_runtime.errors import PluginRequestError
 from app.plugin_runtime.registry import RuntimeProcessSpec, RuntimeRegistry
 from app.plugin_runtime.service import RuntimeHostService
 
@@ -91,18 +91,20 @@ async def test_optional_autostart_failure_degrades_without_aborting_host() -> No
 
 
 @pytest.mark.anyio
-async def test_required_autostart_failure_aborts_and_stops_started_runtimes() -> None:
+async def test_required_autostart_failure_degrades_without_aborting_host() -> None:
     service = _service(
         _spec("fake-runtime", "good"),
         _spec("required-runtime", "crash-start", required=True),
     )
 
-    with pytest.raises(PluginHostError) as captured:
-        await service.start()
+    await service.start()
 
-    assert captured.value.code == "PLUGIN_REQUIRED_START_FAILED"
+    summary = service.health_summary()
+    assert summary["status"] == "degraded"
+    assert summary["failed"] == 1
+    assert summary["ready"] == 1
     states = {item["id"]: item["state"] for item in service.diagnostics()["runtimes"]}
-    assert states["fake-runtime"] == "stopped"
+    assert states["fake-runtime"] == "ready"
     assert states["required-runtime"] == "failed"
     await service.stop()
 

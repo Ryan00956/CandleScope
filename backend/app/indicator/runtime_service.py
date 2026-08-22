@@ -217,6 +217,7 @@ class IndicatorRuntimeService:
         self._start_lock = asyncio.Lock()
         self._started = False
         self._runtime_descriptors: dict[str, RuntimeDescriptor] = {}
+        self._route_failures: dict[str, IndicatorRuntimeFailure] = {}
         self._catalog_projector: CatalogProjector | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._pending_shadow = 0
@@ -245,6 +246,7 @@ class IndicatorRuntimeService:
             if self._started:
                 return
             descriptors: dict[str, RuntimeDescriptor] = {}
+            failures: dict[str, IndicatorRuntimeFailure] = {}
             for route in self.routes.routes:
                 if (
                     route.mode in {ROUTE_MODE_LEGACY, ROUTE_MODE_SHADOW}
@@ -256,33 +258,50 @@ class IndicatorRuntimeService:
                     )
                 if route.mode == ROUTE_MODE_LEGACY:
                     continue
+                runtime_id = route.runtime_id or ""
                 if self.host is None or route.runtime_id is None:
-                    raise IndicatorRuntimeRoutesError(
-                        f"route for {route.language!r} requires an enabled plugin host"
+                    failures[route.language] = IndicatorRuntimeFailure(
+                        runtime_id,
+                        "PLUGIN_HOST_UNAVAILABLE",
                     )
-                descriptor = descriptors.get(route.runtime_id)
-                if descriptor is None:
-                    descriptor = await self.host.descriptor(route.runtime_id)
+                    continue
+                try:
+                    descriptor = descriptors.get(route.runtime_id)
+                    if descriptor is None:
+                        descriptor = await self.host.descriptor(route.runtime_id)
+                    language_ids = {item.id for item in descriptor.languages}
+                    if route.language not in language_ids:
+                        failures[route.language] = IndicatorRuntimeFailure(
+                            route.runtime_id,
+                            "INDICATOR_RUNTIME_LANGUAGE_UNDECLARED",
+                        )
+                        continue
+                    missing_features = sorted(
+                        {
+                            FEATURE_BATCH_EXECUTION_V1,
+                            FEATURE_RENDER_LINE_SERIES_V1,
+                        }
+                        - set(descriptor.features)
+                    )
+                    if missing_features:
+                        failures[route.language] = IndicatorRuntimeFailure(
+                            route.runtime_id,
+                            "INDICATOR_RUNTIME_FEATURES_MISSING",
+                        )
+                        continue
                     descriptors[route.runtime_id] = descriptor
-                language_ids = {item.id for item in descriptor.languages}
-                if route.language not in language_ids:
-                    raise IndicatorRuntimeRoutesError(
-                        f"runtime {route.runtime_id!r} does not declare language "
-                        f"{route.language!r}"
+                except PluginHostError as exc:
+                    failures[route.language] = IndicatorRuntimeFailure.from_exception(
+                        route.runtime_id,
+                        exc,
                     )
-                missing_features = sorted(
-                    {
-                        FEATURE_BATCH_EXECUTION_V1,
-                        FEATURE_RENDER_LINE_SERIES_V1,
-                    }
-                    - set(descriptor.features)
-                )
-                if missing_features:
-                    raise IndicatorRuntimeRoutesError(
-                        f"runtime {route.runtime_id!r} is missing required Indicator "
-                        f"features: {', '.join(missing_features)}"
+                except Exception as exc:
+                    failures[route.language] = IndicatorRuntimeFailure.from_exception(
+                        route.runtime_id,
+                        exc,
                     )
             self._runtime_descriptors = descriptors
+            self._route_failures = failures
             self._started = True
 
     async def stop(self) -> None:
@@ -340,24 +359,39 @@ class IndicatorRuntimeService:
                 )
                 continue
 
-            if self.host is None or route.runtime_id is None:
-                raise IndicatorRuntimeRoutesError(
-                    f"route for {route.language!r} requires an enabled plugin host"
-                )
-            descriptor = self._runtime_descriptors.get(route.runtime_id)
-            if descriptor is None:
-                raise IndicatorRuntimeRoutesError(
-                    f"runtime {route.runtime_id!r} was not validated at startup"
-                )
+            descriptor = (
+                self._runtime_descriptors.get(route.runtime_id)
+                if route.runtime_id is not None
+                else None
+            )
             language = next(
-                (item for item in descriptor.languages if item.id == route.language),
+                (
+                    item
+                    for item in (descriptor.languages if descriptor is not None else ())
+                    if item.id == route.language
+                ),
                 None,
             )
-            if language is None:
-                raise IndicatorRuntimeRoutesError(
-                    f"runtime {route.runtime_id!r} does not declare language "
-                    f"{route.language!r}"
+            if (
+                self._route_failures.get(route.language) is not None
+                or self.host is None
+                or route.runtime_id is None
+                or descriptor is None
+                or language is None
+            ):
+                languages.append(
+                    {
+                        "id": route.language,
+                        "name": route.language,
+                        "extensions": [],
+                        "aliases": [],
+                        "runtimeId": route.runtime_id,
+                        "routeMode": route.mode,
+                        "available": False,
+                        "features": [],
+                    }
                 )
+                continue
             runtimes.setdefault(descriptor.id, descriptor.to_wire())
             languages.append(
                 {
@@ -379,12 +413,7 @@ class IndicatorRuntimeService:
     async def public_catalog(self) -> dict[str, Any]:
         """Project routed script languages through the unified Phase 13 catalog."""
 
-        try:
-            await self.start()
-        except PluginHostError as exc:
-            raise IndicatorRuntimeRoutesError(
-                "script runtime catalog is unavailable"
-            ) from exc
+        await self.start()
         source = self.compatibility_source_catalog()
         if self._catalog_projector is None:
             return source
@@ -557,6 +586,31 @@ class IndicatorRuntimeService:
         record_failure: bool,
     ) -> dict[str, Any]:
         assert route.runtime_id is not None
+        startup_failure = self._route_failures.get(route.language)
+        if startup_failure is not None:
+            if record_failure:
+                self._increment("sidecarErrors")
+                self._append_recent(
+                    {
+                        "at": int(time.time()),
+                        "language": request.language,
+                        "runtimeId": route.runtime_id,
+                        "transport": request.transport,
+                        "mode": route.mode,
+                        "status": "sidecar_error",
+                        "causeCode": startup_failure.cause_code,
+                    }
+                )
+            if route.mode == ROUTE_MODE_SHADOW:
+                return {
+                    "ok": False,
+                    "code": "INDICATOR_RUNTIME_UNAVAILABLE",
+                    "_runtimeCause": startup_failure.cause_code,
+                }
+            payload = adapt_failure(startup_failure)
+            if not isinstance(payload, dict):
+                raise TypeError("failure adapter must return a dict payload")
+            return payload
         try:
             if self.host is None:
                 raise IndicatorRuntimeRoutesError("plugin host is unavailable")
@@ -694,6 +748,14 @@ class IndicatorRuntimeService:
                 else "built-in-default"
             ),
             "routes": [route.to_wire() for route in self.routes.routes],
+            "unavailable": [
+                {
+                    "language": language,
+                    "runtimeId": failure.runtime_id,
+                    "causeCode": failure.cause_code,
+                }
+                for language, failure in self._route_failures.items()
+            ],
             "counts": counts,
             "pendingShadow": pending_shadow,
             "maxPendingShadow": self.max_pending_shadow_tasks,

@@ -124,6 +124,10 @@ class FirstPartyPluginBootstrapResult:
     reason: str | None = None
     plugins: tuple[FirstPartyPluginBootstrapItemResult, ...] = ()
 
+    @classmethod
+    def unavailable(cls, reason: str) -> "FirstPartyPluginBootstrapResult":
+        return cls(status="unavailable", reason=reason)
+
     def to_wire(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "status": self.status,

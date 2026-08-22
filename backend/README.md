@@ -16,32 +16,39 @@
 
 ## Quick Start
 
-CandleScope's default first-party Pyne/Pine bundles require Windows CPython
-3.12. Unsupported interpreters fail fast before the FastAPI application starts.
+The web backend starts on CPython 3.11+. First-party Pyne/Pine bundles remain
+Windows CPython 3.12 only; other hosts degrade that capability and still serve
+K-lines and built-in indicators.
+
+Linux / macOS:
 
 ```bash
-cd backend
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
+./dev-server.sh
 ```
 
-On Windows, `dev-server.ps1` runs the same development server with UTF-8 output
-enabled:
+```bash
+./dev-server.sh --watch
+```
+
+Windows, with UTF-8 output:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\dev-server.ps1
 ```
-
-The Windows entrypoint leaves Uvicorn reload disabled because its Selector
-event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
-For backend development, use the watch mode instead:
 
 ```powershell
 .\dev-server.ps1 -Watch
 ```
 
-It watches Python files below `app`, then gracefully restarts the normal
-single-process server (including sidecar shutdown) after each change.
+The Windows entrypoint leaves Uvicorn reload disabled because its Selector
+event loop cannot launch sidecar subprocesses. Both helper scripts watch Python
+files below `app`, then gracefully restart the single-process server (including
+sidecar shutdown) after each change.
 
 Default API base:
 
@@ -68,8 +75,8 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 1. Start the event-loop lag monitor.
 2. Initialize SQLite K-line storage.
-3. Load runtime activation state and start explicitly configured autostart
-   sidecars; an absent default registry means zero plugins.
+3. Start the script-runtime plugin plane as a capability. Missing first-party
+   sidecars degrade Pyne/Pine and do not abort DataEngine.
 4. Refresh exchange symbol metadata on a best-effort basis.
 5. Start Data Engine through `start_data_engine()`.
 6. Attach stable runtime handles to `app.state`.

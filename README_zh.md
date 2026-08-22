@@ -33,31 +33,51 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的本
 
 ## 快速开始
 
+浏览器里的 Web 前端（Vite + FastAPI）可在 Windows、Linux、macOS 上运行。可选
+Electron 桌面壳目前仍是 Windows only。首方 Pyne/Pine 插件包仍只钉 Windows
+CPython 3.12；其他系统会启动看盘栈，并把这些脚本运行时标为不可用。
+
 环境要求：
 
-- Windows CPython 3.12（首方 Pyne/Pine 插件包的固定运行平台）
+- 建议 CPython 3.12（3.11+ 即可启动 Web 后端）
 - Node.js 20+
 - npm 10+
 
-启动后端：
+### 后端
+
+Linux / macOS：
 
 ```bash
 cd backend
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
+./dev-server.sh
 ```
 
-Windows 下也可以直接用脚本：
+监视 `app` 下的 Python 文件，并在优雅关闭后重启：
+
+```bash
+./dev-server.sh --watch
+```
+
+Windows：
 
 ```powershell
 cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\dev-server.ps1
 ```
 
-Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
-无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。
+```powershell
+.\dev-server.ps1 -Watch
+```
 
-启动前端：
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 sidecar 子进程。两端的辅助脚本都用 watchfiles，而不是 `--reload`。
+
+### 前端
 
 ```bash
 cd frontend
@@ -78,14 +98,8 @@ npm run dev
 | Swagger / OpenAPI | `http://127.0.0.1:18080/docs` |
 | 健康检查 | `http://127.0.0.1:18080/health` |
 
-Linux/WSL 可先创建虚拟环境：
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
+Linux/macOS 上 `/health` 可能报告 `plugin_plane` 为 `degraded`，直到首方脚本包就绪。
+内置指标和实时 K 线不受影响。
 
 ## 项目能力
 
@@ -455,7 +469,8 @@ drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面
 
 - 如果交易所访问需要代理，可在设置面板或 `/api/v1/settings/proxy` 配置。
 - runtime proxy 设置默认持久化到 `backend/data/proxy_settings.json`。
-- Windows 下如果后端启动时打印状态符号导致编码错误，可设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1` 后再启动。
+- Windows 下如果后端启动时打印状态符号导致编码错误，可设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1` 后再启动。Unix 辅助脚本会导出这两个变量。
+- Linux/macOS 本地分析：`./start-local-offline.sh`。Windows：`.\start-local-offline.ps1`。
 - SQLite 数据是本地文件，并已被 git 忽略。
 - Pyne 脚本会按配置的 security mode 在本地隔离 sidecar 中执行。只对完全信任的脚本使用 `unsafe`。
 - 本仓库使用 GNU GPL-3.0 许可证，见 [LICENSE](LICENSE)。

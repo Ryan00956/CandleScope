@@ -32,31 +32,53 @@ Local-first trading chart software built with FastAPI, React, Vite, and Lightwei
 
 ## Quick Start
 
+The live web UI (Vite + FastAPI) runs on Windows, Linux, and macOS. The
+optional Electron desktop shell is Windows-only. First-party Pyne/Pine bundles
+are still Windows CPython 3.12 only; other platforms start the charting stack
+and report those script runtimes as unavailable.
+
 Requirements:
 
-- Windows CPython 3.12 (the pinned platform for first-party Pyne/Pine bundles)
+- CPython 3.12 recommended (3.11+ starts the web backend)
 - Node.js 20+
 - npm 10+
 
-Start the backend:
+### Backend
+
+Linux / macOS:
 
 ```bash
 cd backend
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
+./dev-server.sh
 ```
 
-On Windows, you can use the helper script instead:
+Watch Python files under `app` and restart after a graceful shutdown:
+
+```bash
+./dev-server.sh --watch
+```
+
+Windows:
 
 ```powershell
 cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\dev-server.ps1
 ```
 
-The Windows entrypoint leaves Uvicorn reload disabled because its Selector
-event loop cannot launch the Pyne/Pine sidecar subprocesses CandleScope needs.
+```powershell
+.\dev-server.ps1 -Watch
+```
 
-Start the frontend:
+The Windows entrypoint leaves Uvicorn reload disabled because its Selector
+event loop cannot launch sidecar subprocesses. Both helper scripts use
+watchfiles instead of `--reload`.
+
+### Frontend
 
 ```bash
 cd frontend
@@ -77,14 +99,9 @@ Default URLs:
 | Swagger / OpenAPI | `http://127.0.0.1:18080/docs` |
 | Health | `http://127.0.0.1:18080/health` |
 
-On Linux/WSL, create a virtual environment first if desired:
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
+On Linux/macOS, `/health` may show `plugin_plane` as `degraded` until
+first-party script bundles exist. Built-in indicators and live K-line
+streams continue.
 
 ## What It Does
 
@@ -282,6 +299,20 @@ Set-Location backend
   --archive-dir .\data\replay-dev\replay-history
 ```
 
+On Linux/macOS, use `./.venv/bin/python` and forward slashes:
+
+```bash
+cd backend
+./.venv/bin/python -m pip install -r requirements-parquet.txt
+./.venv/bin/python scripts/import_binance_replay_history.py \
+  --market-type spot \
+  --symbol BTCUSDT \
+  --interval 1m \
+  --start 2017-07-01 \
+  --end 2026-07-30 \
+  --archive-dir ./data/replay-dev/replay-history
+```
+
 The importer verifies Binance checksums, writes content-addressed Parquet
 objects, records gaps as separate continuous segments, and atomically publishes
 an immutable catalog epoch. Random candidates and `ALL_AVAILABLE` history both
@@ -337,6 +368,26 @@ $env:RAW_AGG_TRADE_ARCHIVE_ENABLED = '0'
 Set-Location frontend
 $env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:18082'
 $env:VITE_DEV_PORT = '15175'
+npm run dev
+```
+
+Linux / macOS:
+
+```bash
+# Terminal 1
+cd backend
+export CANDLE_DATA_DIR=./data/replay-dev
+export REPLAY_DB_PATH=./data/replay-dev/replay.db
+export REPLAY_HISTORY_ARCHIVE_DIR=./data/replay-dev/replay-history
+export REPLAY_ENABLED=1
+# Set to 1 only after an exact AGG_TRADE archive passes the audit above.
+export RAW_AGG_TRADE_ARCHIVE_ENABLED=0
+./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 18082
+
+# Terminal 2
+cd frontend
+export VITE_API_PROXY_TARGET=http://127.0.0.1:18082
+export VITE_DEV_PORT=15175
 npm run dev
 ```
 
@@ -756,7 +807,8 @@ under `docs/perf-baselines/`.
 
 - Configure proxy settings in the app settings panel or through `/api/v1/settings/proxy` if your exchange access requires a proxy.
 - Runtime proxy settings are persisted under `backend/data/proxy_settings.json` by default.
-- On Windows, if backend startup fails while printing status symbols, start it with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
+- On Windows, if backend startup fails while printing status symbols, start it with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`. The Unix helpers export those variables.
+- Linux/macOS local analysis: `./start-local-offline.sh`. Windows: `.\start-local-offline.ps1`.
 - SQLite data is local and ignored by git.
 - Pyne scripts execute locally in an isolated sidecar according to the configured security mode. Only use `unsafe` for scripts you trust.
 - This repository is licensed under GNU GPL-3.0. See [LICENSE](LICENSE).

@@ -46,10 +46,10 @@ Phase 10 后，`src/app` 拥有应用组合根和 Shell。Phase 11 后，原先�
 ## 后端连接
 
 前端默认使用同源 `/api/v1`。在 Vite 本地开发时，`vite.config.js` 会把
-`/api` 的 HTTP 和 WebSocket 请求代理到 `http://localhost:8000`。
+`/api` 的 HTTP 和 WebSocket 请求代理到 `http://127.0.0.1:18080`。
 
-这样可以避免一种假故障：页面从 `http://127.0.0.1:5173` 打开，但浏览器
-CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
+这样可以避免一种假故障：页面从 `http://127.0.0.1:15173` 打开，但浏览器
+CORS 阻止访问另一个后端源，导致 K 线 HTTP 请求失败。
 
 只有在后端不能通过 Vite proxy 访问时，才需要设置 `VITE_API_BASE`。
 
@@ -121,7 +121,7 @@ Windows 下如果后端启动日志因为控制台编码失败，可用 UTF-8 �
 ```powershell
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 ## 剩余工作

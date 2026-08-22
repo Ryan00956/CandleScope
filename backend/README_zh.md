@@ -16,30 +16,37 @@
 
 ## 快速启动
 
-CandleScope 默认首方 Pyne/Pine 插件包要求 Windows CPython 3.12。不受支持的
-解释器会在 FastAPI 应用启动前直接报错，不会带着不兼容的运行时继续启动。
+Web 后端在 CPython 3.11+ 上可以启动。首方 Pyne/Pine 插件包仍只支持 Windows
+CPython 3.12；其他系统会把该能力降级，同时继续提供 K 线和内置指标。
+
+Linux / macOS：
 
 ```bash
-cd backend
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
+./dev-server.sh
 ```
 
-Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8 输出：
+```bash
+./dev-server.sh --watch
+```
+
+Windows（启用 UTF-8 输出）：
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\dev-server.ps1
 ```
-
-Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
-无法启动 CandleScope 所需的 Pyne/Pine sidecar 子进程。后端开发可改用监视模式：
 
 ```powershell
 .\dev-server.ps1 -Watch
 ```
 
-它会监视 `app` 下的 Python 文件；每次改动后先优雅关闭当前服务（包括 sidecar），
-再启动新的单进程服务。
+Windows 启动入口默认不启用 Uvicorn 热重载，因为 Selector event loop
+无法启动 sidecar 子进程。两端的辅助脚本都会监视 `app` 下的 Python 文件；
+每次改动后先优雅关闭当前服务（包括 sidecar），再启动新的单进程服务。
 
 默认 API base：
 
@@ -66,8 +73,8 @@ curl http://127.0.0.1:18080/debug/snapshot
 
 1. 启动 event-loop lag 监控。
 2. 初始化 SQLite K 线 storage。
-3. 读取 runtime activation registry 并启动显式配置为 autostart 的 sidecar；默认
-   registry 不存在时是零插件。
+3. 把脚本 runtime 插件平面当作能力启动。缺少首方 sidecar 时降级 Pyne/Pine，
+   不中止 DataEngine。
 4. best-effort 刷新交易所 symbol metadata。
 5. 通过 `start_data_engine()` 启动 Data Engine。
 6. 将稳定 runtime 句柄挂到 `app.state`。

@@ -6,7 +6,9 @@
 
 ## 启动
 
-先准备项目依赖：
+先准备项目依赖。
+
+Windows：
 
 ```powershell
 cd backend
@@ -17,10 +19,28 @@ cd ..\frontend
 npm install
 ```
 
-然后从仓库根目录启动：
+Linux / macOS：
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+cd ../frontend
+npm install
+```
+
+然后从仓库根目录启动。Windows：
 
 ```powershell
 .\start-local-offline.ps1
+```
+
+Linux / macOS：
+
+```bash
+./start-local-offline.sh
 ```
 
 默认页面为 `http://127.0.0.1:15173/local.html`，本地资料库存放在 `backend/data/local-data`。也可以指定独立目录：
@@ -29,13 +49,28 @@ npm install
 .\start-local-offline.ps1 -DataDir "D:\CandleScopeData\local-data"
 ```
 
-手动启动时，必须在启动后端前选定 profile：
+```bash
+./start-local-offline.sh --data-dir "$HOME/CandleScopeData/local-data"
+```
+
+手动启动时，必须在启动后端前选定 profile。
+
+Windows：
 
 ```powershell
 $env:CANDLESCOPE_RUNTIME_MODE = "LOCAL_OFFLINE"
 $env:CANDLESCOPE_LOCAL_DATA_DIR = "D:\CandleScopeData\local-data"
 cd backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 18080
+```
+
+Linux / macOS：
+
+```bash
+export CANDLESCOPE_RUNTIME_MODE=LOCAL_OFFLINE
+export CANDLESCOPE_LOCAL_DATA_DIR="$HOME/CandleScopeData/local-data"
+cd backend
+./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 18080
 ```
 
 受支持的启动脚本和默认配置固定监听 loopback；不要用 Uvicorn CLI 参数把本地 profile 覆盖为 `0.0.0.0`。若要切回直播模式，需要停止进程后以 `LIVE` profile 重新启动，不能在页面中热切换。

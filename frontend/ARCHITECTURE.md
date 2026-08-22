@@ -49,10 +49,10 @@ been folded into their owning features.
 
 The frontend uses same-origin `/api/v1` by default. In Vite development,
 `vite.config.js` proxies `/api` HTTP and WebSocket traffic to
-`http://localhost:8000`.
+`http://127.0.0.1:18080`.
 
-This avoids a class of false frontend failures where `http://127.0.0.1:5173`
-loads the page but browser CORS blocks requests to `http://localhost:8000`.
+This avoids a class of false frontend failures where `http://127.0.0.1:15173`
+loads the page but browser CORS blocks requests to a different backend origin.
 
 Use `VITE_API_BASE` only for deployments where the backend is not reachable
 through the Vite proxy.

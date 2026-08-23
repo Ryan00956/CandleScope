@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { fetchPreset } from "../../services/indicatorApi.js";
 import type { IndicatorDefinition, IndicatorParams } from "./indicatorTypes.js";
@@ -194,8 +194,12 @@ export function useActiveIndicatorStore({
     })
   ));
   const ownedIndicatorsRef = useRef(ownedIndicators);
+  const persistenceRef = useRef(persistence);
   const volInitRef = useRef(false);
   const controlled = persistence?.controlled === true;
+  useLayoutEffect(() => {
+    persistenceRef.current = persistence;
+  }, [persistence]);
   const controlledIndicators = useMemo(() => (
     controlled
       ? (persistence?.load() ?? []).flatMap((indicator) => {
@@ -213,10 +217,10 @@ export function useActiveIndicatorStore({
         setOwnedIndicators(update.indicators);
       }
       if (controlled && update.durableChanged) {
-        persistence?.save(update.indicators.map(stripIndicatorRuntimeFields));
+        persistenceRef.current?.save(update.indicators.map(stripIndicatorRuntimeFields));
       }
     },
-    [controlled, persistence],
+    [controlled],
   );
 
   useEffect(() => {

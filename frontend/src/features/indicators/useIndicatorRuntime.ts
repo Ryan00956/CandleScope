@@ -3044,7 +3044,14 @@ export function useIndicatorRuntime(
     setActiveIndicators((previous) => hydrateIndicatorDefinitionsFromCache(
       previous,
       cachedEntries,
-      { clearMissing: true },
+      {
+        clearMissing: true,
+        reconcileLines: (indicator, lines) => reapplyProvisionalIndicatorPreview(
+          indicator,
+          lines,
+          null,
+        ),
+      },
     ));
   }, [
     activeIndicatorsRef,
@@ -3052,6 +3059,7 @@ export function useIndicatorRuntime(
     indicatorHydrationLifecycleKey,
     indicatorHydrationScheduler,
     outputDispatch,
+    reapplyProvisionalIndicatorPreview,
     setActiveIndicators,
   ]);
 
@@ -3093,7 +3101,14 @@ export function useIndicatorRuntime(
           return hydrateIndicatorDefinitionsFromCache(
             previous,
             cachedEntries,
-            { clearMissing: false },
+            {
+              clearMissing: false,
+              reconcileLines: (indicator, lines) => reapplyProvisionalIndicatorPreview(
+                indicator,
+                lines,
+                null,
+              ),
+            },
           );
         });
         if (indicatorHydrationLifecycleKeyRef.current === identity.lifecycleKey) {
@@ -3110,6 +3125,7 @@ export function useIndicatorRuntime(
     indicatorHydrationLifecycleKeyRef,
     indicatorHydrationScheduler,
     outputDispatch,
+    reapplyProvisionalIndicatorPreview,
     setActiveIndicators,
   ]);
 

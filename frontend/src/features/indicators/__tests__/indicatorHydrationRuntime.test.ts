@@ -247,6 +247,51 @@ test("warm cache lines publish synchronously by stable reference", () => {
   assert.strictEqual(hydrateIndicatorDefinitionsFromCache(hydrated, entries), hydrated);
 });
 
+test("cache hydration can retain a valid provisional realtime tail", () => {
+  const cachedLines = [{
+    outputName: "ma",
+    data: [{ time: 10, value: 100 }],
+  }];
+  const previewPoint = { time: 20, value: 110 };
+  const entries = [structuralMock<IndicatorCacheResult>({
+    indicatorId: "ma",
+    contentVersion: 1,
+    normalized: {
+      lines: cachedLines,
+      markers: [],
+      fills: [],
+      hlines: [],
+      bgcolors: [],
+      barcolors: [],
+      signals: [],
+    },
+    schema: [],
+  })];
+  const current = [{
+    id: "ma",
+    lines: [{
+      outputName: "ma",
+      data: [...cachedLines[0]!.data, previewPoint],
+      renderUpdate: "tail" as const,
+    }],
+    error: null,
+  }];
+
+  const hydrated = hydrateIndicatorDefinitionsFromCache(current, entries, {
+    reconcileLines: (_indicator, lines) => lines.map((line) => ({
+      ...line,
+      data: [...(line.data || []), previewPoint],
+      renderUpdate: "tail" as const,
+    })),
+  });
+
+  assert.deepEqual(hydrated[0]?.lines?.[0]?.data, [
+    { time: 10, value: 100 },
+    previewPoint,
+  ]);
+  assert.equal(hydrated[0]?.lines?.[0]?.renderUpdate, "tail");
+});
+
 test("cache miss clears previous context lines while deferred misses preserve current work", () => {
   const previous = [{
     id: "ma",

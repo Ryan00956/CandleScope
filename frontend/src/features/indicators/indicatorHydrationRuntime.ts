@@ -2,6 +2,7 @@ import { clearIndicatorLineData } from "./indicatorPayloadRuntime.js";
 import type {
   IndicatorCacheResult,
   IndicatorDefinition,
+  IndicatorLine,
 } from "./indicatorTypes.js";
 
 export type IndicatorHydrationContentVersion = number | string;
@@ -60,7 +61,16 @@ export function buildIndicatorHydrationKey({
 export function hydrateIndicatorDefinitionsFromCache(
   indicators: IndicatorDefinition[] = [],
   entries: IndicatorCacheResult[] = [],
-  { clearMissing = true }: { clearMissing?: boolean } = {},
+  {
+    clearMissing = true,
+    reconcileLines,
+  }: {
+    clearMissing?: boolean;
+    reconcileLines?: (
+      indicator: IndicatorDefinition,
+      lines: IndicatorLine[],
+    ) => IndicatorLine[];
+  } = {},
 ): IndicatorDefinition[] {
   const cachedById = new Map(entries.map((entry) => [entry.indicatorId, entry]));
   let changed = false;
@@ -68,15 +78,18 @@ export function hydrateIndicatorDefinitionsFromCache(
     const cached = cachedById.get(indicator.id);
     if (cached) {
       const schema = cached.schema.length > 0 ? cached.schema : indicator.paramSchema;
+      const lines = reconcileLines
+        ? reconcileLines(indicator, cached.normalized.lines)
+        : cached.normalized.lines;
       if (
-        indicator.lines === cached.normalized.lines
+        indicator.lines === lines
         && indicator.error === null
         && indicator.paramSchema === schema
       ) return indicator;
       changed = true;
       return {
         ...indicator,
-        lines: cached.normalized.lines,
+        lines,
         error: null,
         ...(cached.schema.length > 0 ? { paramSchema: cached.schema } : {}),
       };
@@ -87,11 +100,19 @@ export function hydrateIndicatorDefinitionsFromCache(
       (line.data?.length || 0) > 0 || (line.colorData?.length || 0) > 0
     ));
     const preserveError = indicator.executionTarget === "local";
-    if (!hasRuntimeData && (preserveError || indicator.error === null)) return indicator;
+    const clearedLines = hasRuntimeData ? clearIndicatorLineData(lines) : lines;
+    const nextLines = reconcileLines
+      ? reconcileLines(indicator, clearedLines)
+      : clearedLines;
+    if (
+      nextLines === lines
+      && !hasRuntimeData
+      && (preserveError || indicator.error === null)
+    ) return indicator;
     changed = true;
     return {
       ...indicator,
-      lines: hasRuntimeData ? clearIndicatorLineData(lines) : lines,
+      lines: nextLines,
       ...(preserveError ? {} : { error: null }),
     };
   });

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CandleScope Chart-first Strategy Tester · Phase 0 视觉合同</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg-primary: #0a0e17;
+        --bg-secondary: #111827;
+        --bg-tertiary: #1a2332;
+        --bg-hover: #1e293b;
+        --border: #1e293b;
+        --text: #e2e8f0;
+        --secondary: #94a3b8;
+        --muted: #64748b;
+        --blue: #3b82f6;
+        --cyan: #06b6d4;
+        --green: #22c55e;
+        --red: #ef4444;
+        --amber: #f59e0b;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+      body {
+        background: var(--bg-primary);
+        color: var(--text);
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+
+      button, a { font: inherit; }
+      .review-frame { position: relative; width: 1440px; height: 900px; overflow: hidden; background: #07101d; }
+      .source-screen { position: absolute; inset: 0; width: 1440px; height: 900px; object-fit: cover; }
+      .source-run-chart {
+        display: none;
+        position: absolute;
+        left: 40px;
+        top: 83px;
+        width: 1034px;
+        height: 411px;
+        overflow: hidden;
+        background: #0b1220;
+        border-right: 1px solid var(--border);
+      }
+      .source-run-chart img { position: absolute; width: 1119px; height: 699px; left: -41px; top: -34px; }
+      body[data-state="completed"] .source-run-chart { display: block; }
+
+      .strategy-entry {
+        position: absolute;
+        top: 8px;
+        left: 474px;
+        z-index: 4;
+        height: 32px;
+        padding: 0 13px;
+        border: 1px solid rgba(59,130,246,.5);
+        border-radius: 6px;
+        background: rgba(15,23,42,.96);
+        color: #bfdbfe;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .strategy-entry span { margin-left: 7px; color: var(--secondary); font-weight: 500; }
+
+      .review-badge {
+        position: absolute;
+        z-index: 8;
+        top: 8px;
+        right: 12px;
+        padding: 7px 10px;
+        border: 1px solid rgba(6,182,212,.35);
+        border-radius: 6px;
+        background: rgba(10,14,23,.92);
+        color: #67e8f9;
+        font: 600 10px/1.1 "JetBrains Mono", Consolas, monospace;
+        letter-spacing: .06em;
+      }
+
+      .tester {
+        position: absolute;
+        z-index: 5;
+        left: 39px;
+        bottom: 23px;
+        width: 1036px;
+        height: 383px;
+        border: 1px solid #263348;
+        border-radius: 9px 9px 0 0;
+        background: rgba(10,14,23,.985);
+        box-shadow: 0 -18px 48px rgba(0,0,0,.36);
+        overflow: hidden;
+      }
+      .tester-head {
+        height: 51px;
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border);
+        background: #0e1624;
+      }
+      .tester-title { min-width: 178px; }
+      .tester-title strong { display: block; font-size: 13px; }
+      .tester-title span { color: var(--secondary); font-size: 10px; }
+      .tabs { display: flex; align-self: stretch; gap: 4px; }
+      .tab {
+        min-width: 60px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--secondary);
+        font-size: 12px;
+      }
+      .tab.active { border-color: var(--blue); color: #dbeafe; }
+      .head-spacer { flex: 1; }
+      .autosave { color: var(--muted); font-size: 10px; }
+      .run-button {
+        min-width: 82px;
+        height: 32px;
+        border: 0;
+        border-radius: 6px;
+        background: linear-gradient(135deg, #2563eb, #0891b2);
+        color: white;
+        font-weight: 700;
+      }
+      .close-button { border: 0; background: transparent; color: var(--secondary); font-size: 18px; }
+      .panel { display: none; height: 332px; padding: 15px 17px; }
+      body[data-state="first"] .panel-first,
+      body[data-state="completed"] .panel-completed,
+      body[data-state="error"] .panel-error,
+      body[data-state="stale"] .panel-stale { display: block; }
+      body[data-state="first"] .run-button { display: none; }
+
+      .first-copy { display: flex; align-items: end; justify-content: space-between; margin-bottom: 13px; }
+      .eyebrow { margin: 0 0 6px; color: #67e8f9; font: 650 10px/1 "JetBrains Mono", Consolas, monospace; letter-spacing: .1em; }
+      h1, h2, p { margin: 0; }
+      h1 { font-size: 19px; line-height: 1.25; }
+      .lead { margin-top: 5px; color: var(--secondary); font-size: 11px; }
+      .advanced { color: #93c5fd; font-size: 11px; text-decoration: none; }
+      .start-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
+      .start-card {
+        min-height: 143px;
+        padding: 15px;
+        border: 1px solid #263348;
+        border-radius: 8px;
+        background: var(--bg-secondary);
+        color: var(--text);
+        text-align: left;
+      }
+      .start-card:hover { border-color: var(--blue); background: #132036; }
+      .start-card .number { color: #67e8f9; font: 650 10px/1 "JetBrains Mono", Consolas, monospace; }
+      .start-card strong { display: block; margin-top: 24px; font-size: 14px; }
+      .start-card span { display: block; margin-top: 7px; color: var(--secondary); font-size: 10px; line-height: 1.55; }
+      .privacy { margin-top: 11px; color: var(--muted); font-size: 10px; }
+
+      .context-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 38px;
+        padding: 8px 11px;
+        border: 1px solid #263348;
+        border-radius: 7px;
+        background: #101a29;
+        font-size: 11px;
+      }
+      .context-bar .status { color: #86efac; font-weight: 700; }
+      .context-bar .detail { color: var(--secondary); }
+      .context-bar .trust { margin-left: auto; color: #93c5fd; }
+      .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 11px; }
+      .metric { padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-secondary); }
+      .metric span { display: block; color: var(--secondary); font-size: 9px; }
+      .metric strong { display: block; margin-top: 7px; font: 700 17px/1 "JetBrains Mono", Consolas, monospace; }
+      .metric small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; }
+      .metric .negative { color: #fca5a5; }
+      .metric .positive { color: #86efac; }
+      .result-bottom { display: grid; grid-template-columns: 1.4fr 1fr; gap: 9px; margin-top: 10px; }
+      .equity-source, .trade-reason { height: 121px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-secondary); overflow: hidden; }
+      .equity-source { position: relative; }
+      .equity-source img { position: absolute; width: 690px; height: 431px; left: -25px; top: -327px; opacity: .94; }
+      .equity-source .caption { position: absolute; z-index: 2; left: 10px; top: 8px; color: var(--secondary); font-size: 9px; }
+      .trade-reason { padding: 10px 11px; }
+      .trade-reason strong { font-size: 11px; }
+      .trade-reason p { margin-top: 8px; color: var(--secondary); font-size: 10px; line-height: 1.45; }
+      .trade-reason a { display: inline-block; margin-top: 10px; color: #93c5fd; font-size: 10px; text-decoration: none; }
+
+      .editor-layout { display: grid; grid-template-columns: 1.65fr .85fr; height: 100%; gap: 10px; }
+      .editor, .problems { border: 1px solid var(--border); border-radius: 7px; background: #0b1220; overflow: hidden; }
+      .editor-head, .problems-head { padding: 9px 11px; border-bottom: 1px solid var(--border); color: var(--secondary); font-size: 10px; }
+      pre { margin: 0; padding: 10px 0; color: #cbd5e1; font: 11px/1.65 "JetBrains Mono", Consolas, monospace; counter-reset: line; }
+      code span { display: block; padding: 0 12px; }
+      code span::before { display: inline-block; width: 28px; margin-right: 12px; color: #475569; text-align: right; counter-increment: line; content: counter(line); }
+      code .bad-line { background: rgba(239,68,68,.12); text-decoration: underline wavy #ef4444; text-underline-offset: 4px; }
+      .problems-body { padding: 12px; }
+      .problem-count { color: #fca5a5; font-size: 11px; font-weight: 700; }
+      .problem { margin-top: 12px; padding: 10px; border-left: 2px solid var(--red); background: rgba(239,68,68,.08); }
+      .problem strong { display: block; font-size: 11px; }
+      .problem p { margin-top: 6px; color: var(--secondary); font-size: 10px; line-height: 1.5; }
+      .problem a { display: inline-block; margin-top: 8px; color: #93c5fd; font-size: 10px; text-decoration: none; }
+
+      .stale-bar { border-color: rgba(245,158,11,.45); background: rgba(245,158,11,.09); }
+      .stale-bar .status { color: #fde68a; }
+      .stale-note { margin-top: 10px; color: #cbd5e1; font-size: 10px; }
+      .stale-note strong { color: #fde68a; }
+      .stale-metrics { opacity: .72; }
+
+      .state-nav {
+        position: absolute;
+        z-index: 9;
+        left: 1091px;
+        bottom: 34px;
+        width: 324px;
+        padding: 12px;
+        border: 1px solid #263348;
+        border-radius: 8px;
+        background: rgba(10,14,23,.97);
+      }
+      .state-nav strong { display: block; font-size: 11px; }
+      .state-nav p { margin-top: 4px; color: var(--secondary); font-size: 9px; }
+      .state-links { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; }
+      .state-links a { padding: 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--secondary); font-size: 9px; text-align: center; text-decoration: none; }
+      .state-links a.active { border-color: var(--blue); color: #bfdbfe; background: rgba(59,130,246,.1); }
+    </style>
+  </head>
+  <body data-state="first">
+    <main class="review-frame" aria-label="Phase 0 视觉合同稿">
+      <img class="source-screen" src="source-main-1m-1440x900.png" alt="CandleScope 真实 1 分钟主图基线" />
+      <div class="source-run-chart" aria-label="真实回测 Run 图表投影">
+        <img src="source-real-run-chart-1440x900.png" alt="公开 API smoke 生成的真实回测图表与成交标记" />
+      </div>
+
+      <button class="strategy-entry" type="button">策略 <span id="entry-status">未附着</span></button>
+      <div class="review-badge">PHASE 0 视觉合同 · 非生产实现</div>
+
+      <section class="tester" aria-label="图表策略测试器">
+        <header class="tester-head">
+          <div class="tester-title"><strong id="tester-name">策略测试器</strong><span>当前图表 · BTCUSDT · 1m</span></div>
+          <nav class="tabs" aria-label="策略测试器标签">
+            <button class="tab" data-tab="script" type="button">脚本</button>
+            <button class="tab" data-tab="overview" type="button">概览</button>
+            <button class="tab" type="button">交易</button>
+            <button class="tab" type="button">设置</button>
+          </nav>
+          <div class="head-spacer"></div>
+          <span class="autosave" id="autosave">草稿尚未创建</span>
+          <button class="run-button" type="button">运行</button>
+          <button class="close-button" type="button" aria-label="关闭策略测试器">×</button>
+        </header>
+
+        <div class="panel panel-first">
+          <div class="first-copy">
+            <div><p class="eyebrow">开始一个图表脚本快测</p><h1>选择一种开始方式</h1><p class="lead">脚本将绑定当前 BTCUSDT · 1m 图表；选择后才加载编辑器。</p></div>
+            <a class="advanced" href="#">在高级研究中打开</a>
+          </div>
+          <div class="start-grid">
+            <button class="start-card" type="button"><span class="number">01</span><strong>使用策略模板</strong><span>从 SMA、RSI 或 Donchian 策略开始，复制为可编辑草稿。</span></button>
+            <button class="start-card" type="button"><span class="number">02</span><strong>打开最近脚本</strong><span>恢复上次自动保存的脚本与光标位置，不显示内部版本 ID。</span></button>
+            <button class="start-card" type="button"><span class="number">03</span><strong>粘贴已有代码</strong><span>打开已聚焦编辑器并等待你主动粘贴；不会读取系统剪贴板。</span></button>
+          </div>
+          <p class="privacy">普通模式不会要求选择数据集、snapshot、Run 或账户模型。</p>
+        </div>
+
+        <div class="panel panel-completed">
+          <div class="context-bar"><span class="status">已完成</span><strong>BTCUSDT · 1m</strong><span class="detail">全部本地可用数据 · 快速估算 · 已包含费用（测试预设 0 bps）</span><span class="trust">可信度详情</span></div>
+          <div class="metric-grid">
+            <div class="metric"><span>净收益</span><strong class="negative">-38.47 USDT</strong><small class="positive">较上次 +149.99</small></div>
+            <div class="metric"><span>最大回撤</span><strong>-0.38%</strong><small>峰值 10,000 USDT</small></div>
+            <div class="metric"><span>完整交易</span><strong>1</strong><small>2 个成交</small></div>
+            <div class="metric"><span>胜率</span><strong>0%</strong><small>本次样本 12 根 K 线</small></div>
+          </div>
+          <div class="result-bottom">
+            <div class="equity-source"><span class="caption">账户权益 · 真实 smoke Run</span><img src="source-real-run-chart-1440x900.png" alt="真实 smoke Run 账户权益曲线" /></div>
+            <div class="trade-reason"><strong>最近交易 · 平多 42,345.765</strong><p>下一根 K 线开盘执行。策略条件与 Host 执行原因可分别验证。</p><a href="#">查看为什么发生这笔交易</a></div>
+          </div>
+        </div>
+
+        <div class="panel panel-error">
+          <div class="editor-layout">
+            <section class="editor" aria-label="带行内错误的脚本编辑器">
+              <div class="editor-head">SMA Cross · Pyne 策略 · 已自动保存</div>
+              <pre><code><span>strategy("SMA Cross")</span><span>fast = sma(close, 3)</span><span>slow = sma(close, 5)</span><span></span><span>if crossover(fast, slow)</span><span>  target_position(1)</span><span>else if crossunder(fast, slow)</span><span class="bad-line">  target_position(targetQty)</span><span>else</span><span>  target_position(0)</span></code></pre>
+            </section>
+            <aside class="problems" aria-label="脚本问题">
+              <div class="problems-head">问题</div>
+              <div class="problems-body"><span class="problem-count">1 个问题阻止运行</span><div class="problem"><strong>第 8 行，第 19 列</strong><p>找不到变量 `targetQty`。请先定义数量，或改用固定值。</p><a href="#">定位到第 8 行</a></div></div>
+            </aside>
+          </div>
+        </div>
+
+        <div class="panel panel-stale">
+          <div class="context-bar stale-bar"><span class="status">结果已过期</span><strong>上一结果：BTCUSDT · 15m</strong><span class="detail">当前图表为 BTCUSDT · 1m；旧交易标记已隐藏</span><span class="trust">可信度详情</span></div>
+          <p class="stale-note"><strong>需要重新运行。</strong> 汇总仅供回看，不代表当前图表；主操作仍只有右上角“运行”。</p>
+          <div class="metric-grid stale-metrics">
+            <div class="metric"><span>上次净收益</span><strong class="negative">-38.47 USDT</strong><small>BTCUSDT · 15m</small></div>
+            <div class="metric"><span>上次最大回撤</span><strong>-0.38%</strong><small>结果已冻结</small></div>
+            <div class="metric"><span>上次完整交易</span><strong>1</strong><small>不投影到当前图表</small></div>
+            <div class="metric"><span>上次胜率</span><strong>0%</strong><small>等待重新运行</small></div>
+          </div>
+          <div class="trade-reason" style="margin-top:10px;height:103px"><strong>为什么旧标记消失？</strong><p>周期已经从 15m 切换为 1m。只有完整身份匹配的结果才能投影到图表。</p><a href="#">查看过期原因</a></div>
+        </div>
+      </section>
+
+      <aside class="state-nav" aria-label="视觉稿状态切换">
+        <strong>同一视口 · 四个评审状态</strong><p>切换仅用于 Phase 0 产品评审。</p>
+        <div class="state-links"><a data-state-link="first" href="?state=first">首次打开</a><a data-state-link="completed" href="?state=completed">运行完成</a><a data-state-link="error" href="?state=error">脚本出错</a><a data-state-link="stale" href="?state=stale">结果已过期</a></div>
+      </aside>
+    </main>
+    <script>
+      const allowed = new Set(["first", "completed", "error", "stale"]);
+      const requested = new URLSearchParams(location.search).get("state") || "first";
+      const state = allowed.has(requested) ? requested : "first";
+      document.body.dataset.state = state;
+      const labels = {
+        first: ["未附着", "策略测试器", "草稿尚未创建", "script"],
+        completed: ["SMA Cross · 已完成", "SMA Cross", "运行完成 · 报告已冻结", "overview"],
+        error: ["SMA Cross · 出错", "SMA Cross", "草稿已自动保存", "script"],
+        stale: ["SMA Cross · 结果已过期", "SMA Cross", "草稿已自动保存", "overview"],
+      }[state];
+      document.querySelector("#entry-status").textContent = labels[0];
+      document.querySelector("#tester-name").textContent = labels[1];
+      document.querySelector("#autosave").textContent = labels[2];
+      document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === labels[3]));
+      document.querySelectorAll("[data-state-link]").forEach((link) => link.classList.toggle("active", link.dataset.stateLink === state));
+    </script>
+  </body>
+</html>

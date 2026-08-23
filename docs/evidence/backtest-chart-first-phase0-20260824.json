@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase0/1",
+  "generatedAt": "2026-08-24T01:02:38+08:00",
+  "status": "COMPLETE_VISUAL_APPROVED",
+  "identity": {
+    "gitHead": "f8a195e7844f1c8afaa073bea620588a863477e3",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first",
+    "node": "v22.14.0",
+    "npm": "10.9.2",
+    "python": "3.12.7",
+    "viewport": { "width": 1440, "height": 900 }
+  },
+  "scope": {
+    "phase": 0,
+    "productionCodeChanged": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "productionFlagsChanged": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "checks": {
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0, "finalRecheck": "PASS" },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3562, "files": 590, "finalRecheck": "PASS" },
+    "frontendTypecheck": { "result": "PASS", "baselineElapsedMs": 88897, "finalRecheckElapsedSeconds": 26.42 },
+    "frontendBacktest": { "result": "PASS", "tests": 26, "failures": 0, "baselineTapElapsedMs": 1736, "baselineCommandElapsedMs": 2642, "finalRecheckTapElapsedMs": 400 },
+    "backendRelated": { "result": "PASS", "tests": 241, "warnings": 4, "baselinePytestElapsedSeconds": 52.29, "baselineCommandElapsedMs": 56519, "finalRecheckPytestElapsedSeconds": 16.49, "warning": "FastAPI on_event deprecation in app/main.py" }
+  },
+  "browserBaselines": [
+    { "route": "/", "path": "docs/assets/backtest-chart-first-phase0/baseline-main-1440x900.png", "bytes": 84842, "sha256": "ea182049c92ea5bf5510a763dbd9ea1c1e46d9e7eabeb6abeb629dfcfcb6f757", "stableCondition": "connected and 1501 bars" },
+    { "route": "/replay.html", "path": "docs/assets/backtest-chart-first-phase0/baseline-replay-1440x900.png", "bytes": 47930, "sha256": "cfe306164faddb7a85581f21433f7df11318b58d681e10f24882f28aa839ba2a", "stableCondition": "training hub with one readable archive" },
+    { "route": "/backtest.html", "path": "docs/assets/backtest-chart-first-phase0/baseline-backtest-legacy-1440x900.png", "bytes": 46206, "sha256": "192db3764910f4a48d82873ca473a7c93f06b69ea96d260e458e781d8f7bc5f3", "stableCondition": "legacy workbench rendered; target dev runtime had no complete dataset" }
+  ],
+  "productionBuild": {
+    "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+    "viteVersion": "7.3.6",
+    "modules": 628,
+    "viteElapsedSeconds": 6.50,
+    "commandElapsedSeconds": 7.69,
+    "entryChunks": {
+      "live": { "rawKb": 531.72, "gzipKb": 154.30 },
+      "backtest": { "rawKb": 92.05, "gzipKb": 22.16 },
+      "replay": { "rawKb": 293.27, "gzipKb": 78.78 },
+      "sharedIndex": { "rawKb": 783.01, "gzipKb": 233.71 },
+      "sharedCss": { "rawKb": 303.73, "gzipKb": 47.65 }
+    },
+    "warning": "live and shared index chunks exceed 500 kB raw; this is a frozen baseline, not a Phase 0 regression"
+  },
+  "chartReadiness": {
+    "predicate": "logical cells == chart surfaces == ready=true cells",
+    "sameSessionLayoutTransitionMs": { "single": 756, "four": 2413 },
+    "newTabWarmHostMs": { "single": 2573, "four": 1279 },
+    "interpretation": "raw single-run observations only; cache/order differ, so they are not release percentiles"
+  },
+  "klineBatchLease": {
+    "defaultFrontendFlagUnset": { "physicalWebSockets": 0, "logicalClients": 0, "logicalSeries": 0, "logicalSubscriptions": 0 },
+    "explicitFrontendFlagOn": {
+      "single": { "physicalWebSockets": 1, "logicalClients": 1, "logicalSeries": 1, "logicalSubscriptions": 2 },
+      "four": { "physicalWebSockets": 1, "logicalClients": 4, "logicalSeries": 4, "logicalSubscriptions": 8 },
+      "afterClose": { "physicalWebSockets": 0, "logicalClients": 0, "logicalSeries": 0, "logicalSubscriptions": 0 }
+    },
+    "result": "PASS"
+  },
+  "publicApiSmoke": {
+    "result": "PASS",
+    "runtime": "isolated LOCAL_OFFLINE process on 127.0.0.1:18084",
+    "fixture": "backend/tests/fixtures/local_mode_sample.csv",
+    "networkDataPreparation": false,
+    "rows": 12,
+    "runId": "bt_6dc3547ca3dd41939aad5a8e7cd465cb",
+    "reportHash": "sha256:fcf0cb2b37c08b9ded3392fd37c3f47b2863a7f2e674f4fbef35f3234314cdb6",
+    "apiElapsedMs": 424,
+    "commandElapsedMs": 1115,
+    "comparisonBaselineRunId": "bt_bdbd6e50200348d99c01735fce156fb5",
+    "currentCompareSchema": "RUN_COMPARE_V2",
+    "observedComparableNetPnlDelta": "149.991",
+    "note": "RUN_COMPARE_V3 remains a frozen future contract; the existing V2 response is not relabeled"
+  },
+  "visualContract": {
+    "html": { "path": "docs/assets/backtest-chart-first-phase0/chart-first-visual-contract.html", "sha256": "18c1d13f15f57a0eefa51b6588785b0faa9838e4593ab1345f7e654fedc3104b" },
+    "sourceRun": { "path": "docs/assets/backtest-chart-first-phase0/source-real-run-chart-1440x900.png", "sha256": "161a4b7da7652965fe631c6f09c27b9f4cb4a4edc150caa56d6bffa72d288f3e" },
+    "states": [
+      { "name": "first", "path": "docs/assets/backtest-chart-first-phase0/visual-first-1440x900.png", "sha256": "9fc5d711e38a0eef254d33907605d741b08d23d0b864576d22891101e1153653" },
+      { "name": "completed", "path": "docs/assets/backtest-chart-first-phase0/visual-completed-1440x900.png", "sha256": "c426cc09cdc824cafcd896c2798013f3f3fe038accd5c7a7fa915618fd4f5a41" },
+      { "name": "error", "path": "docs/assets/backtest-chart-first-phase0/visual-error-1440x900.png", "sha256": "edb86dec3a7b8fa5ba5a85b2e48b10156ab1d5696226a687d8c1a2d6dd18df5d" },
+      { "name": "stale", "path": "docs/assets/backtest-chart-first-phase0/visual-stale-1440x900.png", "sha256": "abb2e0eb9acfeea5bba2036124ecdb57dce8a88639d46bc58c16091f85a9f988" }
+    ],
+    "dataGrounding": "completed markers, equity and metrics derive from the isolated public API smoke Run",
+    "review": "APPROVED_BY_USER_2026-08-24"
+  },
+  "knownNonPassAttempts": [
+    { "step": "backend test interpreter discovery", "result": "SETUP_FAILURE", "reason": "linked backend .venv was empty; rerun used D:\\anaconda\\python.exe" },
+    { "step": "smoke against existing 18080 dev runtime", "result": "EXPECTED_PRECONDITION_FAILURE", "reason": "runtime had no complete immutable local dataset; no Run was created" }
+  ],
+  "decision": "PHASE0_COMPLETE_READY_FOR_COMMIT"
+}

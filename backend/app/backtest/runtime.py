@@ -35,6 +35,7 @@ from app.simulation.trade_bar_builder import derive_complete_trade_bars
 from app.simulation.contract_accounting import merge_contract_timeline
 
 from .errors import BacktestError
+from .chart_context import ChartBacktestContextResolver
 from .service import BacktestService
 from .strategy.isolated import IsolatedStrategyProvider
 from .strategy.registry import build_default_strategy_registry
@@ -94,6 +95,7 @@ class BacktestRuntime:
             local_data_dir=local_data_dir,
             trade_archive_dir=trade_archive_dir,
         )
+        self.chart_context = ChartBacktestContextResolver(self)
 
     @classmethod
     def start(

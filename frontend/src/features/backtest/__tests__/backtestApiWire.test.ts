@@ -161,6 +161,52 @@ test("wire errors keep backend code and message and fail closed", async () => {
   }
 });
 
+test("chart-context methods use the additive two-stage wire contract", async () => {
+  const calls: CapturedRequest[] = [];
+  mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return Response.json({
+      schema_version: "candlescope.backtest-chart-context/1",
+      status: "NEEDS_DATA",
+      resolution_token: "token",
+      chart_context_hash: "sha256:context",
+      expires_at_ms: 1,
+    });
+  });
+  const api = createBacktestApi("/wire");
+  const signal = new AbortController().signal;
+  const resolveBody = {
+    exchange: "binance",
+    market_type: "futures",
+    symbol: "BTCUSDT",
+    interval: "1h",
+    range_mode: "CUSTOM" as const,
+    start_time_ms: 1,
+    end_time_ms: 2,
+    fidelity_preference: "FAST" as const,
+  };
+  const materializeBody = {
+    resolution_token: "resolution-token",
+    user_confirmed: true,
+    idempotency_key: "chart-materialize-1",
+    expected_dataset_id: "local-1",
+    expected_data_epoch: "sha256:epoch",
+  };
+  try {
+    await api.resolveChartContext(resolveBody, signal);
+    await api.materializeChartContext(materializeBody, signal);
+  } finally {
+    mock.restoreAll();
+  }
+  assert.deepEqual(calls.map((call) => [call.init?.method, call.url]), [
+    ["POST", "/wire/chart-context/resolve"],
+    ["POST", "/wire/chart-context/materialize"],
+  ]);
+  assert.deepEqual(bodyOf(calls[0]!), resolveBody);
+  assert.deepEqual(bodyOf(calls[1]!), materializeBody);
+  assert.ok(calls.every((call) => call.init?.signal === signal));
+});
+
 test("signal trace pagination and Run compare compatibility stay typed", async () => {
   const urls: string[] = [];
   const responses: unknown[] = [

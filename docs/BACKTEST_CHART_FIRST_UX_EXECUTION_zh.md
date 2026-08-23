@@ -1,13 +1,15 @@
 # CandleScope 图表脚本快测与高级策略研究 UX 逐步执行方案
 
-> 状态：`PHASE_1_COMPLETE`
+> 状态：`PHASE_2_COMPLETE`
 >
 > 2026-08-24 Phase 0 自动化、公开 API、浏览器、bundle、单/四图与 lease 基线已通过；
 > 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 1 已提取 typed backtest client、Run
-> 轮询和 marker/equity/摘要/focused trade 纯投影，legacy DOM 与 wire 行为保持不变；没有新增或
-> 开启产品 flags，Phase 2 尚未开始。证据见
+> 轮询和 marker/equity/摘要/focused trade 纯投影，legacy DOM 与 wire 行为保持不变。Phase 2
+> 已实现默认关闭的 chart-context resolve/materialize、版本化 quick presets 和 Host 规范数据冻结；
+> 既有 snapshot/Run 合同不变，Phase 3 前端状态层尚未开始。证据见
 > [Phase 0 结果](evidence/BACKTEST_CHART_FIRST_PHASE0_RESULT_20260824_zh.md) 与
-> [Phase 1 结果](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)。
+> [Phase 1 结果](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)、
+> [Phase 2 结果](evidence/BACKTEST_CHART_FIRST_PHASE2_RESULT_20260824_zh.md)。
 >
 > 文档类型：产品合同 + 仓库级执行计划
 >
@@ -1075,6 +1077,9 @@ backend/tests/test_backtest_run_comparison_v3.py
 单提交 revert，legacy workbench 恢复内联逻辑。
 
 ## Phase 2：实现图表上下文解析与快速预设
+
+实施状态（2026-08-24）：`COMPLETE`。实现与验证证据见
+[Phase 2 结果](evidence/BACKTEST_CHART_FIRST_PHASE2_RESULT_20260824_zh.md)。
 
 ### 目标
 

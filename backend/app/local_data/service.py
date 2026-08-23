@@ -184,6 +184,251 @@ class LocalDatasetService:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)
 
+    def freeze_host_bars(
+        self,
+        rows: Iterable[Mapping[str, Any] | object],
+        *,
+        dataset_id: str,
+        name: str,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        chart_context_hash: str,
+    ) -> dict[str, Any]:
+        """Publish closed Host K-lines through the canonical immutable store.
+
+        This is deliberately a LocalDatasetService operation rather than a
+        chart-context cache. The caller must obtain rows from the Host data
+        facade; this method only validates, hashes, and publishes them.
+        """
+
+        self.start()
+        interval_spec = parse_interval_spec(interval)
+        if interval_spec is None:
+            raise LocalDatasetError(
+                "The requested interval cannot be frozen exactly",
+                code="interval_not_available",
+            )
+        normalized_exchange = str(exchange or "").strip().lower()
+        normalized_market_type = str(market_type or "").strip().lower()
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_exchange or not normalized_market_type or not normalized_symbol:
+            raise LocalDatasetError(
+                "Host market identity is incomplete",
+                code="dataset_identity_mismatch",
+            )
+        if DATASET_ID_RE.fullmatch(dataset_id) is None:
+            raise LocalDatasetError("dataset_id must match local-<32 lowercase hex>")
+        if (self.root / dataset_id).exists():
+            current = self.get_manifest(dataset_id)
+            identity = (
+                str(current.get("exchange") or "").lower(),
+                str(current.get("market_type") or "").lower(),
+                str(current.get("symbol") or "").upper(),
+                str(current.get("interval") or ""),
+            )
+            expected = (
+                normalized_exchange,
+                normalized_market_type,
+                normalized_symbol,
+                interval_spec.canonical,
+            )
+            if identity != expected:
+                raise LocalDatasetError(
+                    "A new revision must keep the Host market identity",
+                    code="dataset_identity_mismatch",
+                )
+
+        bars: list[_NormalizedBar] = []
+        previous_open: int | None = None
+        for source_row, raw in enumerate(rows, start=1):
+            open_time_value = self._host_value(raw, "open_time_ms")
+            if open_time_value is None:
+                time_seconds = self._host_value(raw, "time")
+                if time_seconds is None:
+                    raise LocalDatasetError(
+                        "Host K-line is missing its open time",
+                        code="host_data_invalid",
+                    )
+                open_ms = int(time_seconds) * 1000
+            else:
+                open_ms = int(open_time_value)
+            if interval_spec.floor_ms(open_ms) != open_ms:
+                raise LocalDatasetError(
+                    "Host K-line is not aligned to the requested interval",
+                    code="interval_alignment_incompatible",
+                )
+            if previous_open is not None:
+                if open_ms <= previous_open:
+                    raise LocalDatasetError(
+                        "Host K-lines are duplicated or out of order",
+                        code="host_data_invalid",
+                    )
+                if interval_spec.next_ms(previous_open) != open_ms:
+                    raise LocalDatasetError(
+                        "Host K-line coverage is incomplete",
+                        code="host_coverage_incomplete",
+                    )
+            if not bool(self._host_value(raw, "is_closed", True)):
+                raise LocalDatasetError(
+                    "A forming Host K-line cannot enter an immutable snapshot",
+                    code="host_data_not_final",
+                )
+
+            values = {
+                key: self._host_decimal(raw, key, source_row)
+                for key in ("open", "high", "low", "close")
+            }
+            if values["high"] < max(values["open"], values["close"]):
+                raise LocalDatasetError("Host K-line high is invalid", code="host_data_invalid")
+            if values["low"] > min(values["open"], values["close"]):
+                raise LocalDatasetError("Host K-line low is invalid", code="host_data_invalid")
+            volume_value = self._host_value(raw, "volume", 0)
+            volume = self._host_decimal_value(volume_value, "volume", source_row)
+            if volume < 0:
+                raise LocalDatasetError(
+                    "Host K-line volume is invalid", code="host_data_invalid"
+                )
+            optional_decimals = {
+                key: self._host_optional_decimal(raw, key, source_row)
+                for key in ("quote_volume", "taker_buy_base", "taker_buy_quote")
+            }
+            trades_value = self._host_value(raw, "trades")
+            trades = None if trades_value is None else int(trades_value)
+            if trades is not None and trades < 0:
+                raise LocalDatasetError(
+                    "Host K-line trades is invalid", code="host_data_invalid"
+                )
+            bars.append(
+                _NormalizedBar(
+                    open_time_ms=open_ms,
+                    close_time_ms=interval_spec.next_ms(open_ms) - 1,
+                    open=self._decimal_text(values["open"]),
+                    high=self._decimal_text(values["high"]),
+                    low=self._decimal_text(values["low"]),
+                    close=self._decimal_text(values["close"]),
+                    volume=self._decimal_text(volume),
+                    quote_volume=self._optional_decimal_text(
+                        optional_decimals["quote_volume"]
+                    ),
+                    trades=trades,
+                    taker_buy_base=self._optional_decimal_text(
+                        optional_decimals["taker_buy_base"]
+                    ),
+                    taker_buy_quote=self._optional_decimal_text(
+                        optional_decimals["taker_buy_quote"]
+                    ),
+                    is_closed=True,
+                    source_row=source_row,
+                )
+            )
+            previous_open = open_ms
+        if not bars:
+            raise LocalDatasetError(
+                "Host K-line query returned no closed rows",
+                code="host_coverage_incomplete",
+            )
+
+        base_epoch = self._content_epoch(normalized_symbol, interval_spec, bars, [])
+        epoch_hex = hashlib.sha256(
+            canonical_json(
+                {
+                    "content_epoch": base_epoch,
+                    "exchange": normalized_exchange,
+                    "market_type": normalized_market_type,
+                    "chart_context_hash": chart_context_hash,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        options = LocalImportOptions(
+            name=name.strip() or f"{normalized_symbol} chart snapshot",
+            symbol=normalized_symbol,
+            interval=interval_spec.canonical,
+            dataset_id=dataset_id,
+        )
+        staging: Path | None = (
+            self.root / ".staging" / f"{dataset_id}-{uuid.uuid4().hex}"
+        )
+        staging.mkdir(parents=True)
+        try:
+            manifest = self._write_staging_dataset(
+                staging,
+                dataset_id=dataset_id,
+                epoch_hex=epoch_hex,
+                name=options.name,
+                symbol=normalized_symbol,
+                interval=interval_spec,
+                options=options,
+                bars=bars,
+                excluded_ranges=[],
+                resolved_columns={
+                    "time": "host.open_time_ms",
+                    "open": "host.open",
+                    "high": "host.high",
+                    "low": "host.low",
+                    "close": "host.close",
+                    "volume": "host.volume",
+                    "quote_volume": "host.quote_volume",
+                    "trades": "host.trades",
+                    "taker_buy_base": "host.taker_buy_base",
+                    "taker_buy_quote": "host.taker_buy_quote",
+                },
+                source="host_chart_snapshot",
+                importer="candlescope.host-chart-context.v1",
+                manifest_metadata={
+                    "exchange": normalized_exchange,
+                    "market_type": normalized_market_type,
+                    "chart_context_hash": chart_context_hash,
+                },
+            )
+            published = self._publish(staging, dataset_id, epoch_hex, manifest)
+            staging = None
+            return published
+        finally:
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging)
+
+    @staticmethod
+    def _host_value(raw: Mapping[str, Any] | object, key: str, default: Any = None) -> Any:
+        if isinstance(raw, Mapping):
+            return raw.get(key, default)
+        return getattr(raw, key, default)
+
+    @classmethod
+    def _host_decimal(
+        cls, raw: Mapping[str, Any] | object, key: str, source_row: int
+    ) -> Decimal:
+        return cls._host_decimal_value(cls._host_value(raw, key), key, source_row)
+
+    @staticmethod
+    def _host_decimal_value(value: Any, key: str, source_row: int) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise LocalDatasetError(
+                f"Host row {source_row} has invalid {key}", code="host_data_invalid"
+            ) from exc
+        if not parsed.is_finite():
+            raise LocalDatasetError(
+                f"Host row {source_row} has invalid {key}", code="host_data_invalid"
+            )
+        return parsed
+
+    @classmethod
+    def _host_optional_decimal(
+        cls, raw: Mapping[str, Any] | object, key: str, source_row: int
+    ) -> Decimal | None:
+        value = cls._host_value(raw, key)
+        if value is None:
+            return None
+        parsed = cls._host_decimal_value(value, key, source_row)
+        if parsed < 0:
+            raise LocalDatasetError(
+                f"Host row {source_row} has invalid {key}", code="host_data_invalid"
+            )
+        return parsed
+
     def import_parquet(
         self,
         parquet_path: Path,
@@ -687,6 +932,9 @@ class LocalDatasetService:
         bars: list[_NormalizedBar],
         excluded_ranges: list[dict[str, Any]],
         resolved_columns: dict[str, str | None],
+        source: str = "local_dataset",
+        importer: str = "candlescope.local.csv.v1",
+        manifest_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         db_path = staging / "bars.sqlite"
         connection = sqlite3.connect(db_path)
@@ -762,7 +1010,7 @@ class LocalDatasetService:
             "dataset_id": dataset_id,
             "data_epoch": f"sha256:{epoch_hex}",
             "name": name,
-            "source": "local_dataset",
+            "source": source,
             "symbol": symbol,
             "interval": interval.canonical,
             "volume_available": resolved_columns["volume"] is not None,
@@ -781,6 +1029,7 @@ class LocalDatasetService:
             "excluded_range_count": len(excluded_ranges),
             "sqlite_sha256": sqlite_sha256,
             "imported_at": now,
+            **dict(manifest_metadata or {}),
         }
         quality = {
             "status": "accepted_with_gaps" if excluded_ranges else "accepted",
@@ -795,7 +1044,7 @@ class LocalDatasetService:
             ),
         }
         receipt = {
-            "importer": "candlescope.local.csv.v1",
+            "importer": importer,
             "imported_at": now,
             "columns": {
                 f"{key}_column": value

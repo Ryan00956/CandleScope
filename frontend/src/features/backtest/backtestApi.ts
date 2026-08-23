@@ -43,6 +43,95 @@ export interface BacktestCapabilities {
   funding_modes_v2?: string[];
   host_policy_revision?: string;
   sizing_policies?: string[];
+  chart_context?: {
+    schema_version: "candlescope.backtest-chart-context/1";
+    enabled: boolean;
+    resolve_is_local_only: boolean;
+    materialize_requires_confirmation: boolean;
+  };
+  quick_presets?: BacktestQuickPreset[];
+}
+
+export interface BacktestQuickPreset {
+  id: string;
+  revision: string;
+  label: string;
+  market_types: string[];
+  account_model: string;
+  sizing_policy: string;
+  equity_percent: string;
+  initial_cash: string;
+  leverage: string;
+  fee_source: string;
+  fee_bps: string;
+  slippage_bps: string;
+  execution_model_revision: string;
+  contract_data_mode: string;
+  funding_mode: string;
+}
+
+export type ChartContextStatus =
+  | "READY"
+  | "NEEDS_DATA"
+  | "UNSUPPORTED_INTERVAL"
+  | "UNSUPPORTED_FIDELITY"
+  | "AMBIGUOUS_MARKET"
+  | "UNAVAILABLE";
+
+export interface ChartContextResolveRequest {
+  exchange: string;
+  market_type: string;
+  symbol: string;
+  interval: string;
+  range_mode: "ALL_AVAILABLE" | "VISIBLE" | "CUSTOM";
+  start_time_ms: number | null;
+  end_time_ms: number | null;
+  fidelity_preference: "FAST" | "PRECISE";
+}
+
+export interface ChartContextMaterializeRequest {
+  resolution_token: string;
+  user_confirmed: boolean;
+  idempotency_key: string;
+  expected_dataset_id?: string;
+  expected_data_epoch?: string;
+}
+
+export interface ChartContextResolution {
+  schema_version: "candlescope.backtest-chart-context/1";
+  status: ChartContextStatus;
+  resolution_token: string;
+  chart_context_hash: string;
+  expires_at_ms: number;
+  request: ChartContextResolveRequest;
+  dataset_id: string | null;
+  data_epoch: string | null;
+  snapshot_hash: string | null;
+  coverage: {
+    requested_start_ms: number | null;
+    requested_end_ms: number | null;
+    available_start_ms: number | null;
+    available_end_ms: number | null;
+    row_count: number | null;
+    missing_ranges: Array<Record<string, unknown>>;
+    complete: boolean;
+  };
+  fidelity: {
+    preference: "FAST" | "PRECISE";
+    mode: "BAR_APPROX" | "AGG_TRADE_EXECUTION";
+    capabilities: string[];
+  };
+  quality_warnings: Array<{ code: string; message: string }>;
+  quick_preset_id: string;
+  cost_preset: Record<string, string>;
+  account_execution_preset: Record<string, string>;
+  materialize: {
+    required: boolean;
+    source_interval?: string;
+    estimated_bars?: number | null;
+    estimated_bytes?: number | null;
+    reason?: string;
+  };
 }
 
 export interface BacktestApiClient {
@@ -52,6 +141,14 @@ export interface BacktestApiClient {
     body: SnapshotPreviewRequest,
     signal?: AbortSignal,
   ): Promise<BacktestSnapshot>;
+  resolveChartContext(
+    body: ChartContextResolveRequest,
+    signal?: AbortSignal,
+  ): Promise<ChartContextResolution>;
+  materializeChartContext(
+    body: ChartContextMaterializeRequest,
+    signal?: AbortSignal,
+  ): Promise<ChartContextResolution>;
   listRuns(signal?: AbortSignal): Promise<BacktestRunRecord[]>;
   validate(body: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: boolean }>;
   createRun(
@@ -168,6 +265,24 @@ export function createBacktestApi(base = "/api/v1/backtests"): BacktestApiClient
     async previewSnapshot(body, signal) {
       return readJson(
         await fetch(`${base}/datasets/snapshot`, requestOptions({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }, signal)),
+      );
+    },
+    async resolveChartContext(body, signal) {
+      return readJson(
+        await fetch(`${base}/chart-context/resolve`, requestOptions({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }, signal)),
+      );
+    },
+    async materializeChartContext(body, signal) {
+      return readJson(
+        await fetch(`${base}/chart-context/materialize`, requestOptions({
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),

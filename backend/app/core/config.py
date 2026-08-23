@@ -302,6 +302,7 @@ def load_replay_settings(
 class BacktestSettings:
     enabled: bool
     bar_enabled: bool
+    chart_context_enabled: bool
     trade_tape_enabled: bool
     book_assisted_enabled: bool
     study_enabled: bool
@@ -327,6 +328,10 @@ class BacktestSettings:
     @property
     def bar_effective(self) -> bool:
         return self.enabled and self.bar_enabled
+
+    @property
+    def chart_context_effective(self) -> bool:
+        return self.enabled and self.chart_context_enabled
 
     @property
     def trade_tape_effective(self) -> bool:
@@ -386,6 +391,9 @@ def load_backtest_settings(
     return BacktestSettings(
         enabled=_strict_replay_bool(environment, "BACKTEST_ENABLED", "0"),
         bar_enabled=_strict_replay_bool(environment, "BACKTEST_BAR_ENABLED", "0"),
+        chart_context_enabled=_strict_replay_bool(
+            environment, "BACKTEST_CHART_CONTEXT_ENABLED", "0"
+        ),
         trade_tape_enabled=_strict_replay_bool(
             environment, "BACKTEST_TRADE_TAPE_ENABLED", "0"
         ),

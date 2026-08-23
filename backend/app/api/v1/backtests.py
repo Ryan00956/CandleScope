@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.backtest.errors import BacktestError
 from app.backtest.reports import export_bundle
@@ -149,6 +149,40 @@ class SnapshotPreviewRequest(BaseModel):
     funding_mode: str = Field(default="OFF", max_length=32)
 
 
+class ChartContextResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exchange: str = Field(min_length=1, max_length=40)
+    market_type: str = Field(min_length=1, max_length=40)
+    symbol: str = Field(min_length=1, max_length=80)
+    interval: str = Field(min_length=2, max_length=32)
+    range_mode: Literal["ALL_AVAILABLE", "VISIBLE", "CUSTOM"]
+    start_time_ms: int | None = None
+    end_time_ms: int | None = None
+    fidelity_preference: Literal["FAST", "PRECISE"]
+
+    @model_validator(mode="after")
+    def validate_range(self) -> ChartContextResolveRequest:
+        if self.range_mode != "ALL_AVAILABLE":
+            if self.start_time_ms is None or self.end_time_ms is None:
+                raise ValueError("VISIBLE and CUSTOM ranges require start/end times")
+        if (
+            self.start_time_ms is not None
+            and self.end_time_ms is not None
+            and self.start_time_ms >= self.end_time_ms
+        ):
+            raise ValueError("start_time_ms must be less than end_time_ms")
+        return self
+
+
+class ChartContextMaterializeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolution_token: str = Field(min_length=16, max_length=256)
+    user_confirmed: bool
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    expected_dataset_id: str | None = Field(default=None, max_length=80)
+    expected_data_epoch: str | None = Field(default=None, max_length=80)
+
+
 class StrategyRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
@@ -243,6 +277,58 @@ def capabilities(request: Request) -> dict[str, Any]:
         return _service(request).capabilities()
     except BacktestError as exc:
         return _error(exc)
+
+
+@router.post("/chart-context/resolve", response_model=None)
+def resolve_chart_context(
+    payload: ChartContextResolveRequest, request: Request
+) -> Any:
+    try:
+        runtime = _runtime(request)
+        if not runtime.settings.chart_context_effective:
+            raise BacktestError(
+                "FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0"
+            )
+        return runtime.chart_context.resolve(
+            payload.model_dump(),
+            host_data_manager=getattr(request.app.state, "data_manager", None),
+        )
+    except BacktestError as exc:
+        return _error(exc)
+    except Exception:
+        return _error(
+            BacktestError(
+                "CHART_CONTEXT_FAILED", "chart context resolution failed safely"
+            )
+        )
+
+
+@router.post("/chart-context/materialize", response_model=None)
+async def materialize_chart_context(
+    payload: ChartContextMaterializeRequest, request: Request
+) -> Any:
+    try:
+        runtime = _runtime(request)
+        if not runtime.settings.chart_context_effective:
+            raise BacktestError(
+                "FLAG_DISABLED", "BACKTEST_CHART_CONTEXT_ENABLED is 0"
+            )
+        data_engine_runtime = getattr(request.app.state, "data_engine_runtime", None)
+        return await runtime.chart_context.materialize(
+            **payload.model_dump(),
+            host_data_manager=getattr(request.app.state, "data_manager", None),
+            backfill_coordinator=getattr(
+                data_engine_runtime, "backfill_coordinator", None
+            ),
+        )
+    except BacktestError as exc:
+        return _error(exc)
+    except Exception:
+        return _error(
+            BacktestError(
+                "CHART_CONTEXT_FAILED", "chart context materialization failed safely"
+            )
+        )
 
 
 @router.get("/strategy-revisions")

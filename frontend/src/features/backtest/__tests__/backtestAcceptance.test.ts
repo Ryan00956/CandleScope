@@ -55,6 +55,12 @@ function fakeApi(run: BacktestRunRecord, exported: Record<string, unknown>): Bac
         fidelity_capabilities: ["BAR_APPROX"],
       };
     },
+    async resolveChartContext() {
+      throw new Error("unused");
+    },
+    async materializeChartContext() {
+      throw new Error("unused");
+    },
     async listRuns() {
       return [run];
     },

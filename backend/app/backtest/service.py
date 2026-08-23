@@ -161,6 +161,8 @@ class BacktestService:
         self.repository.close()
 
     def capabilities(self) -> dict[str, object]:
+        from .quick_presets import list_quick_presets
+
         fidelity_modes: list[str] = []
         if self.settings.bar_effective:
             fidelity_modes.append("BAR_APPROX")
@@ -186,6 +188,7 @@ class BacktestService:
             "flags": {
                 "BACKTEST_ENABLED": self.settings.enabled,
                 "BACKTEST_BAR_ENABLED": self.settings.bar_enabled,
+                "BACKTEST_CHART_CONTEXT_ENABLED": self.settings.chart_context_enabled,
                 "BACKTEST_TRADE_TAPE_ENABLED": self.settings.trade_tape_enabled,
                 "BACKTEST_STUDY_ENABLED": self.settings.study_enabled,
                 "BACKTEST_REPLAY_REVIEW_BRIDGE_ENABLED": self.settings.replay_review_bridge_enabled,
@@ -203,6 +206,13 @@ class BacktestService:
                 == "1",
             },
             "fidelity_modes": fidelity_modes,
+            "chart_context": {
+                "schema_version": "candlescope.backtest-chart-context/1",
+                "enabled": self.settings.chart_context_effective,
+                "resolve_is_local_only": True,
+                "materialize_requires_confirmation": True,
+            },
+            "quick_presets": list_quick_presets(),
             "strategy_revisions": self.strategy_registry.revision_ids(),
             "strategies": self.strategy_registry.descriptors()
             + [

@@ -1,0 +1,144 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase2/1",
+  "generatedAt": "2026-08-24T02:15:25+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "905c82b9",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 2,
+    "phase3OrLaterCode": false,
+    "frontendUserInterfaceChanged": false,
+    "defaultFlagEnabled": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "contracts": {
+    "schemaVersion": "candlescope.backtest-chart-context/1",
+    "resolveRoute": "POST /api/v1/backtests/chart-context/resolve",
+    "materializeRoute": "POST /api/v1/backtests/chart-context/materialize",
+    "statuses": [
+      "READY",
+      "NEEDS_DATA",
+      "UNSUPPORTED_INTERVAL",
+      "UNSUPPORTED_FIDELITY",
+      "AMBIGUOUS_MARKET",
+      "UNAVAILABLE"
+    ],
+    "flag": "BACKTEST_CHART_CONTEXT_ENABLED=0",
+    "tokenTtlMs": 300000,
+    "resolveTriggersNetwork": false,
+    "materializeRequiresConfirmation": true,
+    "createsRun": false,
+    "existingSnapshotAndRunContractsChanged": false
+  },
+  "implementation": {
+    "hostDataComponents": [
+      "IntervalResolver",
+      "DataManager.query(auto_backfill=False)",
+      "BackfillCoordinator.request_and_wait",
+      "LocalDatasetService"
+    ],
+    "newDownloader": false,
+    "newCache": false,
+    "newResampler": false,
+    "visibleCandlesAccepted": false,
+    "exactIntegerAggregationOnly": true,
+    "quickPresetIds": [
+      "CRYPTO_PERP_STANDARD_V1",
+      "CRYPTO_SPOT_STANDARD_V1"
+    ]
+  },
+  "checks": {
+    "phase2Targeted": {
+      "result": "PASS",
+      "tests": 19,
+      "failures": 0,
+      "elapsedSeconds": 4.40
+    },
+    "backendRelated": {
+      "result": "PASS_WITH_EXISTING_WARNINGS",
+      "tests": 245,
+      "failures": 0,
+      "warnings": 4,
+      "elapsedSeconds": 20.49
+    },
+    "frontendBacktest": {
+      "result": "PASS",
+      "tests": 39,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 376.4595
+    },
+    "frontendFull": {
+      "result": "PASS",
+      "tests": 3310,
+      "suites": 3,
+      "failures": 0,
+      "elapsedMs": 137143.4653
+    },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3562, "sourceFiles": 592 },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendBuild": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 630,
+      "elapsedSeconds": 6.82,
+      "backtestRawKb": 93.01,
+      "backtestGzipKb": 22.47,
+      "phase1BacktestRawKb": 92.66,
+      "phase1BacktestGzipKb": 22.43
+    },
+    "pythonCompile": { "result": "PASS" },
+    "diffCheck": { "result": "PASS" }
+  },
+  "publicApiSmoke": {
+    "transport": "FastAPI TestClient",
+    "isolatedTemporaryDirectory": true,
+    "networkDataPreparation": false,
+    "sequence": [
+      "resolve:NEEDS_DATA",
+      "materialize:user-confirmation-rejected",
+      "materialize:READY",
+      "runs-validate:ok"
+    ],
+    "defaultOff": "FLAG_DISABLED",
+    "extraField": 422
+  },
+  "browser": {
+    "requiredForPhase": false,
+    "claim": "NO_USER_VISIBLE_PHASE2_UI"
+  },
+  "knownNonPassAttempts": [
+    {
+      "step": "first FastAPI collection",
+      "result": "INVALID_UNION_RESPONSE_MODEL",
+      "resolution": "set response_model=None on additive routes"
+    },
+    {
+      "step": "first exact 1m-to-3m fixture",
+      "result": "FIXTURE_ALIGNMENT_ERROR",
+      "resolution": "align base timestamp to 15-minute epoch; no product relaxation"
+    },
+    {
+      "step": "first related backend regression",
+      "result": "241_PASS_2_IMPORT_FAILURE",
+      "resolution": "supply absolute local plugin SDK PYTHONPATH; final expanded run 245/245"
+    },
+    {
+      "step": "exploratory black check",
+      "result": "NOT_A_CONFIGURED_GATE",
+      "resolution": "do not apply broad mechanical rewrite; configured gates pass"
+    }
+  ],
+  "cleanup": {
+    "taskPortsOpened": [],
+    "taskProcessesRemaining": false
+  },
+  "decision": "PHASE2_COMPLETE_PHASE3_NOT_STARTED"
+}

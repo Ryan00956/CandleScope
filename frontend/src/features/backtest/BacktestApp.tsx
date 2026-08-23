@@ -9,6 +9,11 @@ import type {
   BacktestSnapshot,
 } from "./backtestApi.js";
 import BacktestResultChart, { EquityCurve } from "./BacktestResultChart.js";
+import { isBacktestTerminalState } from "./backtestRunClient.js";
+import {
+  projectBacktestReportSummary,
+  projectFocusedTrade,
+} from "./chart-tester/chartStrategyResultProjection.js";
 import {
   isBacktestEntryEnabled,
   isPythonStrategyEntryEnabled,
@@ -28,11 +33,12 @@ import type {
   BacktestReport,
   BacktestChartData,
   BacktestRunRecord,
+  RunCompareV2,
+  SignalTraceItem,
   BacktestStudyComparison,
   BacktestStudyRecord,
 } from "./backtestTypes.js";
 
-const TERMINAL_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const SMA_REVISION = "builtin-sma-cross-v1";
 const RSI_REVISION = "builtin-rsi-reversion-v1";
 const RSI_WILDER_LONG_SHORT_REVISION = "builtin-rsi-wilder-long-short-v1";
@@ -113,9 +119,9 @@ export default function BacktestApp() {
   const [revisionLanguage, setRevisionLanguage] = useState("BUILTIN_TEMPLATE");
   const [revisionSource, setRevisionSource] = useState("");
   const [smokePassed, setSmokePassed] = useState(false);
-  const [signalTrace, setSignalTrace] = useState<Array<{ ordinal: number; event_time_ms: number | null; payload: Record<string, unknown> }>>([]);
+  const [signalTrace, setSignalTrace] = useState<SignalTraceItem[]>([]);
   const [compareRunId, setCompareRunId] = useState("");
-  const [runComparison, setRunComparison] = useState<Record<string, unknown> | null>(null);
+  const [runComparison, setRunComparison] = useState<RunCompareV2 | null>(null);
   const [cloneParameter, setCloneParameter] = useState("length");
   const [cloneValue, setCloneValue] = useState("25");
   const [strategySource, setStrategySource] = useState("close - open");
@@ -203,7 +209,7 @@ export default function BacktestApp() {
   );
   const pythonSelected = isPythonRevision(selectedStrategy);
   const hasActiveRun = useMemo(
-    () => runs.some((run) => !TERMINAL_STATES.has(run.state)),
+    () => runs.some((run) => !isBacktestTerminalState(run.state)),
     [runs],
   );
   const selectedStudy = useMemo(
@@ -233,8 +239,12 @@ export default function BacktestApp() {
       && (from === null || entry >= from)
       && (to === null || entry <= to);
   }), [report, tradeFromDate, tradeOutcomeFilter, tradeReasonFilter, tradeSideFilter, tradeToDate]);
+  const reportSummary = useMemo(
+    () => report === null ? null : projectBacktestReportSummary(report),
+    [report],
+  );
   const focusedTrade = useMemo(
-    () => (report?.trades ?? []).find((trade) => trade.trade_id === focusedTradeId) ?? null,
+    () => projectFocusedTrade(report?.trades ?? [], focusedTradeId),
     [focusedTradeId, report],
   );
 
@@ -1237,7 +1247,7 @@ export default function BacktestApp() {
           </div>
           {selectedRun && (
             <div className="backtest-run-actions">
-              {!TERMINAL_STATES.has(selectedRun.state) && (
+              {!isBacktestTerminalState(selectedRun.state) && (
                 <button type="button" onClick={handleCancel} disabled={loading}>{t("backtest.cancelRun")}</button>
               )}
               {selectedRun.state === "COMPLETED" && (
@@ -1263,10 +1273,10 @@ export default function BacktestApp() {
           {report && !emptyReportIsHidden({ error, report }) ? (
             <>
               <div className="backtest-metrics">
-                <div><span>{t("backtest.reportLabel")}</span><strong>{report.report_label}</strong></div>
-                <div><span>{t("backtest.fills")}</span><strong>{report.metrics.fill_count}</strong></div>
-                <div><span>{t("backtest.trades")}</span><strong>{report.metrics.trade_count ?? 0}</strong></div>
-                <div><span>{t("backtest.finalEquity")}</span><strong>{String(report.account?.equity ?? "—")}</strong></div>
+                <div><span>{t("backtest.reportLabel")}</span><strong>{reportSummary?.reportLabel}</strong></div>
+                <div><span>{t("backtest.fills")}</span><strong>{reportSummary?.fillCount}</strong></div>
+                <div><span>{t("backtest.trades")}</span><strong>{reportSummary?.tradeCount}</strong></div>
+                <div><span>{t("backtest.finalEquity")}</span><strong>{reportSummary?.finalEquity}</strong></div>
               </div>
               {report.performance && <div data-testid="metrics-v2-report">
                 <div className="backtest-strategy-evidence">
@@ -1449,14 +1459,14 @@ export default function BacktestApp() {
                 </table>
               </div>
               {focusedTrade && <div className="backtest-strategy-evidence" data-testid="focused-trade">
-                <strong>{t("backtest.located", { id: focusedTrade.trade_id ?? "—" })}</strong>
-                <span>{t("backtest.entryExit", { entry: focusedTrade.entry_price ?? "—", mae: focusedTrade.mae || "—", mfe: focusedTrade.mfe || "—", exit: focusedTrade.exit_price ?? "—" })}</span>
+                <strong>{t("backtest.located", { id: focusedTrade.tradeId ?? "—" })}</strong>
+                <span>{t("backtest.entryExit", { entry: focusedTrade.entryPrice, mae: focusedTrade.mae, mfe: focusedTrade.mfe, exit: focusedTrade.exitPrice })}</span>
                 <span>{t("backtest.decisionTrace", {
-                  decision: timestampLabel(Number(focusedTrade.decision_time_ms ?? focusedTrade.entry_time_ms)),
-                  accepted: timestampLabel(Number(focusedTrade.order_accepted_time_ms ?? focusedTrade.entry_time_ms)),
-                  fill: timestampLabel(Number(focusedTrade.entry_time_ms)),
+                  decision: timestampLabel(focusedTrade.decisionTimeMs),
+                  accepted: timestampLabel(focusedTrade.acceptedTimeMs),
+                  fill: timestampLabel(focusedTrade.fillTimeMs),
                 })}</span>
-                <span>{t("backtest.execImpact", { ms: latencyMs, events: latencyEvents, slip: slippageBps, fees: focusedTrade.fees ?? "—", funding: focusedTrade.funding ?? "—" })}</span>
+                <span>{t("backtest.execImpact", { ms: latencyMs, events: latencyEvents, slip: slippageBps, fees: focusedTrade.fees, funding: focusedTrade.funding })}</span>
                 <small>{t("backtest.triggerHint")}</small>
               </div>}
             </>
@@ -1473,7 +1483,7 @@ export default function BacktestApp() {
           <div className="backtest-section-title"><span>04</span><h2>{t("backtest.chartTitle")}</h2></div>
           {chart ? (
             <>
-              <BacktestResultChart chart={chart} focusTimeMs={focusedTrade ? Number(focusedTrade.entry_time_ms) : null} />
+              <BacktestResultChart chart={chart} focusTimeMs={focusedTrade?.chartFocusTimeMs ?? null} />
               <RsiTracePane items={signalTrace} />
               <h3 className="backtest-table-title">{t("backtest.equityTitle")}</h3>
               <EquityCurve data={report?.performance?.equity_daily ?? chart.equity_curve} drawdown={report?.performance?.drawdown_daily} />
@@ -1497,14 +1507,14 @@ export default function BacktestApp() {
             <span>{t("backtest.tradeDiff")} {JSON.stringify(runComparison.tradeDiff ?? {})}</span>
             <span>{t("backtest.costDiff")} {JSON.stringify(runComparison.costDiff ?? {})}</span>
             <span>{t("backtest.curves", {
-              leftEq: String(((runComparison.left as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0),
-              leftDd: String(((runComparison.left as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0),
-              rightEq: String(((runComparison.right as Record<string, unknown> | undefined)?.equityDaily as unknown[] | undefined)?.length ?? 0),
-              rightDd: String(((runComparison.right as Record<string, unknown> | undefined)?.drawdownDaily as unknown[] | undefined)?.length ?? 0),
+              leftEq: String(runComparison.left.equityDaily.length),
+              leftDd: String(runComparison.left.drawdownDaily.length),
+              rightEq: String(runComparison.right.equityDaily.length),
+              rightDd: String(runComparison.right.drawdownDaily.length),
             })}</span>
             <span>{t("backtest.decisionFillHashes", {
-              left: JSON.stringify((runComparison.left as Record<string, unknown> | undefined)?.hashes ?? {}),
-              right: JSON.stringify((runComparison.right as Record<string, unknown> | undefined)?.hashes ?? {}),
+              left: JSON.stringify(runComparison.left.hashes),
+              right: JSON.stringify(runComparison.right.hashes),
             })}</span>
             <span>{String(runComparison.precisionExplanation ?? t("backtest.precision"))}</span>
           </div>}
@@ -1595,7 +1605,7 @@ export default function BacktestApp() {
               {selectedStudy ? (
                 <>
                   <div className="backtest-run-actions">
-                    {!TERMINAL_STATES.has(selectedStudy.state) && (
+                    {!isBacktestTerminalState(selectedStudy.state) && (
                       <button type="button" onClick={handleCancelStudy} disabled={loading}>{t("backtest.cancelStudy")}</button>
                     )}
                     {selectedStudy.state === "AWAITING_HOLDOUT" && selectedStudy.holdout?.state === "SEALED" && (

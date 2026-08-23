@@ -1,11 +1,13 @@
 # CandleScope 图表脚本快测与高级策略研究 UX 逐步执行方案
 
-> 状态：`PHASE_0_COMPLETE_VISUAL_APPROVED`
+> 状态：`PHASE_1_COMPLETE`
 >
 > 2026-08-24 Phase 0 自动化、公开 API、浏览器、bundle、单/四图与 lease 基线已通过；
-> 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 0 已满足退出条件，Phase 1 尚未开始。证据见
+> 四个同视口视觉合同稿已经用户人工产品评审批准。Phase 1 已提取 typed backtest client、Run
+> 轮询和 marker/equity/摘要/focused trade 纯投影，legacy DOM 与 wire 行为保持不变；没有新增或
+> 开启产品 flags，Phase 2 尚未开始。证据见
 > [Phase 0 结果](evidence/BACKTEST_CHART_FIRST_PHASE0_RESULT_20260824_zh.md) 与
-> [机器可读基线](evidence/backtest-chart-first-phase0-20260824.json)。
+> [Phase 1 结果](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)。
 >
 > 文档类型：产品合同 + 仓库级执行计划
 >
@@ -1026,6 +1028,14 @@ backend/tests/test_backtest_run_comparison_v3.py
 纯文档提交可直接 revert，不影响运行时。
 
 ## Phase 1：提取可复用回测客户端与结果投影
+
+实施状态（2026-08-24）：`COMPLETE`。
+
+- 执行计划：[BACKTEST_CHART_FIRST_PHASE1_PLAN_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE1_PLAN_20260824_zh.md)
+- 结果证据：[BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md](evidence/BACKTEST_CHART_FIRST_PHASE1_RESULT_20260824_zh.md)
+- 机器可读证据：[backtest-chart-first-phase1-20260824.json](evidence/backtest-chart-first-phase1-20260824.json)
+- Phase 1 没有用户可见新入口或新 flag；`VITE_CHART_STRATEGY_TESTER_ENABLED=0` 仍按本文档留在
+  Phase 3 实施。
 
 ### 目标
 

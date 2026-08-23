@@ -10,11 +10,32 @@ import { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
 import { floorIntervalTime } from "../../utils/intervalTimeline.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type { BacktestChartData } from "./backtestTypes.js";
+import {
+  boundBacktestProjectionRows,
+  projectBacktestResultMarkers,
+  projectDrawdownPolyline,
+  projectEquityPolyline,
+} from "./chart-tester/chartStrategyResultProjection.js";
 
 function markerSource(
   chart: BacktestChartData,
   store: SeriesWindowStore,
 ): ExternalMarkerSource {
+  const labels = {
+    actions: {
+      OPEN_LONG: t("backtest.openLong"),
+      CLOSE_LONG: t("backtest.closeLong"),
+      OPEN_SHORT: t("backtest.openShort"),
+      CLOSE_SHORT: t("backtest.closeShort"),
+      ADD_LONG: t("backtest.addLong"),
+      ADD_SHORT: t("backtest.addShort"),
+      REDUCE_LONG: t("backtest.reduceLong"),
+      REDUCE_SHORT: t("backtest.reduceShort"),
+      REVERSE_TO_LONG: t("backtest.reverseLong"),
+      REVERSE_TO_SHORT: t("backtest.reverseShort"),
+    },
+    rejection: t("backtest.reject"),
+  };
   let cachedAxisRevision = -1;
   let revision = 0;
   let cached: readonly ExternalSeriesMarker[] = [];
@@ -23,51 +44,10 @@ function markerSource(
       const axisRevision = Number(store.axisRevision);
       if (axisRevision !== cachedAxisRevision) {
         cachedAxisRevision = axisRevision;
-        const fillMarkers = chart.fills.flatMap((fill, index) => {
-          const eventTimeMs = Number(fill.event_time_ms);
-          const displayTime = floorIntervalTime(chart.interval, eventTimeMs / 1000);
-          if (displayTime === null || !store.hasTime(displayTime)) return [];
-          const side = String(fill.side || "").toUpperCase();
-          const action = String(fill.action || side);
-          const actionLabel: Record<string, string> = {
-            OPEN_LONG: t("backtest.openLong"),
-            CLOSE_LONG: t("backtest.closeLong"),
-            OPEN_SHORT: t("backtest.openShort"),
-            CLOSE_SHORT: t("backtest.closeShort"),
-            ADD_LONG: t("backtest.addLong"),
-            ADD_SHORT: t("backtest.addShort"),
-            REDUCE_LONG: t("backtest.reduceLong"),
-            REDUCE_SHORT: t("backtest.reduceShort"),
-            REVERSE_TO_LONG: t("backtest.reverseLong"),
-            REVERSE_TO_SHORT: t("backtest.reverseShort"),
-          };
-          return [{
-            id: `backtest:${String(fill.order_id || index)}:${index}`,
-            time: displayTime,
-            position: side === "BUY" ? "belowBar" : "aboveBar",
-            color: side === "BUY" ? "#22c55e" : "#ef4444",
-            shape: side === "BUY" ? "arrowUp" : "arrowDown",
-            text: `${actionLabel[action] ?? action} ${String(fill.price || "")}`,
-            size: 1.2,
-          } satisfies ExternalSeriesMarker];
+        cached = projectBacktestResultMarkers(chart, {
+          hasTime: (time) => store.hasTime(time),
+          labels,
         });
-        const rejectionMarkers = (chart.rejected_orders ?? []).flatMap((rejection, index) => {
-          const eventTimeMs = Number(rejection.event_time_ms);
-          const displayTime = floorIntervalTime(chart.interval, eventTimeMs / 1000);
-          if (displayTime === null || !store.hasTime(displayTime)) return [];
-          return [{
-            id: `backtest:rejected:${String(rejection.sequence ?? index)}:${index}`,
-            time: displayTime,
-            position: "aboveBar",
-            color: "#f59e0b",
-            shape: "square",
-            // Keep dense rejection periods legible on the K-line. The adjacent
-            // rejection table owns the full reason code and input snapshot.
-            text: t("backtest.reject"),
-            size: 1,
-          } satisfies ExternalSeriesMarker];
-        });
-        cached = [...fillMarkers, ...rejectionMarkers];
         revision += 1;
       }
       return { markers: cached, revision };
@@ -85,40 +65,13 @@ export function EquityCurve({
   data: BacktestChartData["equity_curve"];
   drawdown?: Array<Record<string, string | number>> | undefined;
 }) {
-  const boundedData = useMemo(() => {
-    if (data.length <= 2_000) return data;
-    const step = Math.ceil(data.length / 2_000);
-    return data.filter((_item, index) => index % step === 0 || index === data.length - 1).slice(-2_000);
-  }, [data]);
-  const boundedDrawdown = useMemo(() => {
-    if (drawdown.length <= 2_000) return drawdown;
-    const step = Math.ceil(drawdown.length / 2_000);
-    return drawdown.filter((_item, index) => index % step === 0 || index === drawdown.length - 1).slice(-2_000);
-  }, [drawdown]);
-  const points = useMemo(() => {
-    const values = boundedData
-      .map((item) => Number(item.equity))
-      .filter((value) => Number.isFinite(value));
-    if (values.length < 2) return "";
-    const low = Math.min(...values);
-    const high = Math.max(...values);
-    const span = Math.max(high - low, Math.abs(high) * 0.0001, 1);
-    return values.map((value, index) => {
-      const x = (index / (values.length - 1)) * 1000;
-      const y = 190 - ((value - low) / span) * 170;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    }).join(" ");
-  }, [boundedData]);
-  const drawdownPoints = useMemo(() => {
-    const values = boundedDrawdown.map((item) => Number(item.drawdown));
-    if (values.length < 2 || values.some((value) => !Number.isFinite(value))) return "";
-    const low = Math.min(...values, -0.000001);
-    return values.map((value, index) => {
-      const x = (index / (values.length - 1)) * 1000;
-      const y = 105 + (Math.abs(value) / Math.abs(low)) * 85;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    }).join(" ");
-  }, [boundedDrawdown]);
+  const boundedData = useMemo(() => boundBacktestProjectionRows(data), [data]);
+  const boundedDrawdown = useMemo(() => boundBacktestProjectionRows(drawdown), [drawdown]);
+  const points = useMemo(() => projectEquityPolyline(boundedData), [boundedData]);
+  const drawdownPoints = useMemo(
+    () => projectDrawdownPolyline(boundedDrawdown),
+    [boundedDrawdown],
+  );
   if (!points) return <p className="backtest-empty">{t("backtest.equityEmpty")}</p>;
   return (
     <svg className="backtest-equity-svg" viewBox="0 0 1000 210" preserveAspectRatio="none" aria-label={t("backtest.equityAria")}>

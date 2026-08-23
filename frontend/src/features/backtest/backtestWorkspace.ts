@@ -1,4 +1,5 @@
 import type { BacktestApiClient } from "./backtestApi.js";
+import { pollBacktestRunToTerminal } from "./backtestRunClient.js";
 import { createBacktestStore } from "./backtestStore.js";
 import type { BacktestReport, BacktestRunRecord } from "./backtestTypes.js";
 
@@ -19,7 +20,10 @@ export async function runCreateMonitorExport(options: {
   store.applyRuns([created]);
   store.selectRun(created.run_id);
   store.applyStream({ type: "PROGRESS", sequence: 1 });
-  const run = await options.api.getRun(created.run_id);
+  const run = await pollBacktestRunToTerminal({
+    api: options.api,
+    runId: created.run_id,
+  });
   store.applyRuns([run]);
   const report = await options.api.getReport(created.run_id);
   store.applyReport(report);

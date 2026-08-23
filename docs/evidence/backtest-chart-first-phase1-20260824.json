@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "candlescope.backtest-chart-first.phase1/1",
+  "generatedAt": "2026-08-24T01:46:57+08:00",
+  "status": "COMPLETE_READY_FOR_COMMIT",
+  "identity": {
+    "baseGitHead": "5258f982",
+    "branch": "codex/backtest-chart-first-ux",
+    "worktree": "H:\\program\\CandleScope-backtest-chart-first"
+  },
+  "scope": {
+    "phase": 1,
+    "backendCodeChanged": false,
+    "productFlagsAddedOrEnabled": false,
+    "phase2OrLaterCode": false,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "mainWorktreeUserChangesCopied": false
+  },
+  "implementation": {
+    "backtestApiMethodsWireLocked": 33,
+    "typedContracts": ["SIGNAL_TRACE_V1", "RUN_COMPARE_V2"],
+    "terminalStates": ["COMPLETED", "FAILED", "CANCELLED"],
+    "projections": ["markers", "equity", "drawdown", "report-summary", "focused-trade"]
+  },
+  "checks": {
+    "frontendBacktest": { "result": "PASS", "tests": 38, "suites": 3, "failures": 0, "finalElapsedMs": 449 },
+    "frontendTypecheck": { "result": "PASS" },
+    "frontendArchitecture": { "result": "PASS", "allowlistEntries": 0 },
+    "frontendI18n": { "result": "PASS", "catalogKeys": 3562, "sourceFiles": 592 },
+    "frontendLint": { "result": "PASS", "scope": "full frontend" },
+    "frontendBuild": {
+      "result": "PASS_WITH_EXISTING_CHUNK_WARNING",
+      "modules": 630,
+      "elapsedSeconds": 6.06,
+      "backtestRawKb": 92.66,
+      "backtestGzipKb": 22.43,
+      "baselineBacktestRawKb": 92.05,
+      "baselineBacktestGzipKb": 22.16
+    },
+    "backendRelated": { "result": "PASS", "tests": 241, "warnings": 4, "elapsedSeconds": 18.33 }
+  },
+  "publicApiSmoke": {
+    "runtime": "isolated LOCAL_OFFLINE on 127.0.0.1:18085",
+    "fixture": "backend/tests/fixtures/local_mode_sample.csv",
+    "rows": 12,
+    "networkDataPreparation": false,
+    "runs": [
+      { "runId": "bt_1f27874c47c041b8b7f1a9e71cde6581", "elapsedMs": 390 },
+      { "runId": "bt_4828d9a3d9784acfb1e0320b851e8d82", "elapsedMs": 279 }
+    ],
+    "reportHash": "sha256:66f3058448280731684132055da90551ef55f9b46b1bae7525c5f3dfef6f0063"
+  },
+  "browser": {
+    "legacyBacktest": {
+      "result": "PASS",
+      "reportMetrics": ["APPROXIMATE", "2", "1", "9961.527"],
+      "chartSurfaces": 1,
+      "equityCurves": 1,
+      "errorMessages": 0,
+      "focusedTrade": "PASS",
+      "compatibleRunCompare": "PASS",
+      "uiCreatedRunTerminalState": "COMPLETED"
+    },
+    "liveMainReadOnly": { "result": "PASS", "logicalCells": 1, "chartSurfaces": 1, "readyCells": 1 },
+    "replayShellReadOnly": { "result": "PASS", "protocolError": false }
+  },
+  "knownNonPassAttempts": [
+    { "step": "projection test first run", "result": "TEST_ASSERTION_ERROR", "resolution": "compare array contents; final 38/38" },
+    { "step": "typecheck first run", "result": "INCOMPLETE_TEST_FIXTURE", "resolution": "supply a complete minimal BacktestReport" },
+    { "step": "lint first run", "result": "NON_ERROR_REJECTION", "resolution": "normalize abort reason to Error; full lint passes" },
+    { "step": "main/replay against LOCAL_OFFLINE", "result": "EXPECTED_RUNTIME_403", "resolution": "final read-only smoke used existing LIVE backend" }
+  ],
+  "cleanup": {
+    "browserTabsClosed": true,
+    "taskPortsClosed": [15225, 15226, 15227, 18085],
+    "userBackend18080Status": "ok"
+  },
+  "decision": "PHASE1_COMPLETE_PHASE2_NOT_STARTED"
+}

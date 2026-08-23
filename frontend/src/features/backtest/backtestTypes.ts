@@ -173,6 +173,48 @@ export interface BacktestChartData {
   truncated: boolean;
 }
 
+export interface SignalTraceItem {
+  ordinal: number;
+  event_time_ms: number | null;
+  payload: Record<string, unknown>;
+  row_hash: string;
+}
+
+export interface SignalTracePage {
+  schema: "SIGNAL_TRACE_V1";
+  runId: string;
+  items: SignalTraceItem[];
+  nextAfter: number | null;
+  limit: number;
+}
+
+export interface RunCompareMetricDelta {
+  left: unknown;
+  right: unknown;
+  delta: string | null;
+}
+
+export interface RunCompareSideV2 {
+  runId: string;
+  hashes: Record<string, string | null>;
+  equity: Array<Record<string, string | number>>;
+  equityDaily: Array<Record<string, string | number>>;
+  drawdownDaily: Array<Record<string, string | number>>;
+  metrics: Record<string, unknown>;
+}
+
+export interface RunCompareV2 {
+  schema: "RUN_COMPARE_V2";
+  directComparisonAllowed: boolean;
+  incompatibleFields: string[];
+  precisionExplanation: string | null;
+  parameterDiff: Record<string, { left: unknown; right: unknown }>;
+  tradeDiff: Record<string, RunCompareMetricDelta>;
+  costDiff: Record<string, RunCompareMetricDelta>;
+  left: RunCompareSideV2;
+  right: RunCompareSideV2;
+}
+
 export interface BacktestTrialRecord {
   trial_id: string;
   ordinal: number;

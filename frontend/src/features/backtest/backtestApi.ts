@@ -2,9 +2,13 @@ import type {
   BacktestReport,
   BacktestChartData,
   BacktestRunRecord,
+  RunCompareV2,
+  SignalTracePage,
   BacktestStudyComparison,
   BacktestStudyRecord,
 } from "./backtestTypes.js";
+
+export type { SignalTracePage } from "./backtestTypes.js";
 
 export interface BacktestStrategyDescriptor {
   revision_id: string;
@@ -29,14 +33,6 @@ export interface StrategyRevisionRecord extends BacktestStrategyDescriptor {
   schema_version?: string;
   base_revision_id?: string;
   diagnostics?: Array<Record<string, unknown>>;
-}
-
-export interface SignalTracePage {
-  schema: "SIGNAL_TRACE_V1";
-  runId: string;
-  items: Array<{ ordinal: number; event_time_ms: number | null; payload: Record<string, unknown>; row_hash: string }>;
-  nextAfter: number | null;
-  limit: number;
 }
 
 export interface BacktestCapabilities {
@@ -78,7 +74,7 @@ export interface BacktestApiClient {
   createStrategyRevision(body: Record<string, unknown>, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
   smokeStrategyRevision(revisionId: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>>;
   getSignalTrace(runId: string, after?: number, limit?: number, signal?: AbortSignal): Promise<SignalTracePage>;
-  compareRuns(leftRunId: string, rightRunId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  compareRuns(leftRunId: string, rightRunId: string, signal?: AbortSignal): Promise<RunCompareV2>;
   cloneRun(runId: string, parameter: string, value: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<BacktestRunRecord>;
   copyStrategyRevision(revisionId: string, name: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;
   archiveStrategyRevision(revisionId: string, signal?: AbortSignal): Promise<StrategyRevisionRecord>;

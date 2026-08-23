@@ -140,11 +140,15 @@ export class DesktopWindowManager {
   async getBootstrap(): Promise<DesktopBootstrap> {
     const bridge = globalThis.window?.candlescopeDesktop;
     if (!bridge) return this.bootstrap;
-    this.bootstrapPromise ??= bridge.getBootstrap().then((bootstrap) => {
-      this.bootstrap = bootstrap;
-      return bootstrap;
-    });
-    return this.bootstrapPromise;
+    if (!this.bootstrapPromise) {
+      this.bootstrapPromise = bridge.getBootstrap().then((bootstrap) => {
+        this.bootstrap = bootstrap;
+        return bootstrap;
+      });
+    } else {
+      await this.bootstrapPromise;
+    }
+    return this.bootstrap;
   }
 
   async reconcileWorkspace(

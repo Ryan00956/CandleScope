@@ -2015,7 +2015,12 @@ async function boot() {
       const windowId = registerWorkspaceSender(event.sender);
       return workspaceBus.connect(windowId, raw?.snapshot ?? null);
     } catch (error) {
-      return { ok: false, ready: false, code: error?.code || "WORKSPACE_BUS_CONNECT_REJECTED", message: String(error?.message || error) };
+      return {
+        ...workspaceBus.stateResult(),
+        ok: false,
+        code: error?.code || "WORKSPACE_BUS_CONNECT_REJECTED",
+        message: String(error?.message || error),
+      };
     }
   });
   ipcMain.handle(DESKTOP_IPC.workspaceBusCommit, (event, raw) => {

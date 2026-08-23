@@ -111,6 +111,10 @@ export class WorkspaceBusClient {
   }
 
   async commit(snapshot: ChartWorkspaceLibrarySnapshot): Promise<WorkspaceBusState> {
+    if (!this.state.ready) {
+      const connected = await this.connect(snapshot);
+      if (!connected.ready) throw new Error("WorkspaceBus is not bootstrapped");
+    }
     const bridge = globalThis.window?.candlescopeDesktop;
     if (bridge) {
       const response = await bridge.workspaceBusCommit({

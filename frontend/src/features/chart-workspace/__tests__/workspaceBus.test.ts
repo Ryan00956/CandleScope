@@ -59,6 +59,52 @@ test("native WorkspaceBus forwards exact CAS authority and adopts conflict snaps
   }
 });
 
+test("native WorkspaceBus bootstraps before an early autosave commit", async () => {
+  const originalWindow = globalThis.window;
+  const record = createDefaultChartWorkspaceRecord(1);
+  const snapshot = { activeWorkspaceId: record.id, workspaces: [record] };
+  const calls: string[] = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      candlescopeDesktop: {
+        onWorkspaceBusEvent: () => () => undefined,
+        workspaceBusConnect: async () => {
+          calls.push("connect");
+          return {
+            ok: true,
+            ready: true,
+            sequence: 0,
+            writerWindowId: "main-window",
+            revisions: { [record.id]: 0 },
+            snapshot,
+          };
+        },
+        workspaceBusCommit: async () => {
+          calls.push("commit");
+          return {
+            ok: true,
+            ready: true,
+            sequence: 1,
+            writerWindowId: "main-window",
+            revisions: { [record.id]: 0 },
+            snapshot,
+          };
+        },
+      },
+    },
+  });
+  try {
+    const bus = new WorkspaceBusClient("main-window");
+    const committed = await bus.commit(snapshot);
+    assert.equal(committed.ready, true);
+    assert.deepEqual(calls, ["connect", "commit"]);
+  } finally {
+    if (originalWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
+});
+
 test("WorkspaceBus delivers remote link events without persisting them", async () => {
   const originalWindow = globalThis.window;
   const listeners = new Set<(value: unknown) => void>();

@@ -6,7 +6,7 @@ import {
   WorkspaceBusHub,
 } from "./workspace-bus-hub.mjs";
 
-function snapshot(revision = 0, symbol = "BTCUSDT") {
+function snapshot(revision = 0, symbol = "BTCUSDT", schemaVersion = 7) {
   return {
     activeWorkspaceId: "workspace-default",
     workspaces: [{
@@ -15,7 +15,7 @@ function snapshot(revision = 0, symbol = "BTCUSDT") {
       createdAt: 1,
       updatedAt: revision + 1,
       document: {
-        schemaVersion: 6,
+        schemaVersion,
         revision,
         activeWindowId: "main-window",
         windows: { "main-window": { id: "main-window" } },
@@ -25,6 +25,14 @@ function snapshot(revision = 0, symbol = "BTCUSDT") {
     }],
   };
 }
+
+test("WorkspaceBus accepts current v7 snapshots and the v6 migration boundary", () => {
+  for (const schemaVersion of [6, 7]) {
+    const hub = new WorkspaceBusHub();
+    hub.register("main-window", () => {});
+    assert.equal(hub.connect("main-window", snapshot(0, "BTCUSDT", schemaVersion)).ready, true);
+  }
+});
 
 test("main window bootstraps one authoritative snapshot and secondary receives it", () => {
   const messages = [];
